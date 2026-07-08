@@ -41,239 +41,239 @@ class Meta:
 FIELD_META: dict[str, Meta] = {
     "schema_version": Meta("never", "Settings schema version; managed by fno, not hand-set."),
     # --- config.paths.* (all defaulted; advanced) ---
-    "config.state_dir": Meta("advanced", "Root dir for global fno state.", default_source="default"),
-    "config.plans_dir": Meta("advanced", "Where folder plans are written.", default_source="default"),
-    "config.branch.prefix": Meta("advanced", "Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.", default_source="default"),
-    "config.paths.graph_json": Meta("never", "Override path to the backlog graph.json."),
-    "config.paths.ledger_json": Meta("never", "Override path to ledger.json."),
-    "config.paths.briefs_dir": Meta("never", "Override path to the sidecar briefs dir."),
-    "config.paths.fleet_dir": Meta("never", "Override path to the megatron fleet dir."),
-    "config.paths.postmortems_dir": Meta("never", "Override path to the postmortems dir."),
-    "config.paths.worktrees_base": Meta("never", "Override base dir for worktrees."),
-    "config.paths.memory_dir": Meta("never", "Override path to the memory dir."),
-    "config.paths.hook_logs_dir": Meta("never", "Override path to hook logs."),
-    "config.paths.inbox_dir": Meta("never", "Override path to the cross-project messaging inbox dir."),
-    "config.paths.inbox_path": Meta("never", "Override path to the capture-tier inbox/parking-lot file."),
-    "config.paths.agents_registry_path": Meta("never", "Override path to the agents registry.json."),
-    "config.paths.handoffs_dir": Meta("never", "Override path to the handoffs dir."),
-    "config.paths.retro_pending_dir": Meta("never", "Override path to the retro-pending dir."),
-    "config.paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),
-    "config.paths.loops_paused_json": Meta("never", "Override path to the loops pause-all sentinel."),
-    "config.paths.observer_reports_dir": Meta("never", "Override path to the observer harness digest dir."),
+    "state_dir": Meta("advanced", "Root dir for global fno state.", default_source="default"),
+    "plans_dir": Meta("advanced", "Where folder plans are written.", default_source="default"),
+    "branch.prefix": Meta("advanced", "Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.", default_source="default"),
+    "paths.graph_json": Meta("never", "Override path to the backlog graph.json."),
+    "paths.ledger_json": Meta("never", "Override path to ledger.json."),
+    "paths.briefs_dir": Meta("never", "Override path to the sidecar briefs dir."),
+    "paths.fleet_dir": Meta("never", "Override path to the megatron fleet dir."),
+    "paths.postmortems_dir": Meta("never", "Override path to the postmortems dir."),
+    "paths.worktrees_base": Meta("never", "Override base dir for worktrees."),
+    "paths.memory_dir": Meta("never", "Override path to the memory dir."),
+    "paths.hook_logs_dir": Meta("never", "Override path to hook logs."),
+    "paths.inbox_dir": Meta("never", "Override path to the cross-project messaging inbox dir."),
+    "paths.inbox_path": Meta("never", "Override path to the capture-tier inbox/parking-lot file."),
+    "paths.agents_registry_path": Meta("never", "Override path to the agents registry.json."),
+    "paths.handoffs_dir": Meta("never", "Override path to the handoffs dir."),
+    "paths.retro_pending_dir": Meta("never", "Override path to the retro-pending dir."),
+    "paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),
+    "paths.loops_paused_json": Meta("never", "Override path to the loops pause-all sentinel."),
+    "paths.observer_reports_dir": Meta("never", "Override path to the observer harness digest dir."),
     # --- config.obsidian.* (a real decision) ---
-    "config.obsidian.enabled": Meta(
+    "obsidian.enabled": Meta(
         "always", "Whether this project uses an Obsidian vault for plans/docs.",
         question="Use an Obsidian vault for plans and design docs?",
     ),
-    "config.obsidian.vault": Meta(
+    "obsidian.vault": Meta(
         "always", "Vault area name (NOT a filesystem path).",
         question="Obsidian vault area name?", default_source="auto-detect",
     ),
     # --- config.project.* ---
-    "config.project.id": Meta("advanced", "Project identifier.", default_source="repo-slug"),
-    "config.project.vision": Meta(
+    "project.id": Meta("advanced", "Project identifier.", default_source="repo-slug"),
+    "project.vision": Meta(
         "always", "One-paragraph statement of what this codebase is and why.",
         question="One-line project vision (what is this and why)?",
         default_source="readme",
     ),
     # --- config.blueprint.* ---
-    "config.blueprint.max_prs_per_epic": Meta("advanced", "Cap on group PRs per decomposed epic."),
+    "blueprint.max_prs_per_epic": Meta("advanced", "Cap on group PRs per decomposed epic."),
     # --- config.backlog.* ---
-    "config.backlog.maintain.staleness_days": Meta("advanced", "Age (days) before an idea is flagged stale."),
-    "config.backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),
-    "config.backlog.id_prefix": Meta(
+    "backlog.maintain.staleness_days": Meta("advanced", "Age (days) before an idea is flagged stale."),
+    "backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),
+    "backlog.id_prefix": Meta(
         "always", "Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).",
         question="Backlog node-ID prefix?", default_source="repo-slug",
     ),
-    "config.backlog.id_hex_width": Meta("advanced", "Hex width of minted node IDs (4-8)."),
+    "backlog.id_hex_width": Meta("advanced", "Hex width of minted node IDs (4-8)."),
     # --- config.batch.* ---
-    "config.batch.enabled": Meta("advanced", "Coalesce same-domain nodes into one batch PR (opt-in)."),
-    "config.batch.max_nodes": Meta("advanced", "Nodes per batch before it closes (default 3)."),
-    "config.batch.max_loc": Meta("advanced", "Optional cumulative-diff LOC ceiling for a batch (off by default)."),
+    "batch.enabled": Meta("advanced", "Coalesce same-domain nodes into one batch PR (opt-in)."),
+    "batch.max_nodes": Meta("advanced", "Nodes per batch before it closes (default 3)."),
+    "batch.max_loc": Meta("advanced", "Optional cumulative-diff LOC ceiling for a batch (off by default)."),
     # --- config.post_merge.* ---
-    "config.post_merge.parking_lot_path": Meta(
+    "post_merge.parking_lot_path": Meta(
         "advanced", "Per-repo vault parking-lot path for the post-merge ritual (repo-relative).",
     ),
-    "config.post_merge.enabled": Meta("advanced", "Whether the post-merge ritual runs."),
-    "config.post_merge.self_reap": Meta("never", "Whether a post-merge watcher self-reaps."),
+    "post_merge.enabled": Meta("advanced", "Whether the post-merge ritual runs."),
+    "post_merge.self_reap": Meta("never", "Whether a post-merge watcher self-reaps."),
     # --- config.research.* ---
-    "config.research.output_dir": Meta(
+    "research.output_dir": Meta(
         "advanced",
         "Landing dir for the `fno research` doc deliverable (brief + sources sidecar); "
         "vault area, not repo-relative. Unset => ship fails loud (never guesses).",
     ),
     # --- config.review.* ---
-    "config.review.github_apps": Meta(
+    "review.github_apps": Meta(
         "advanced", "GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots.",
     ),
-    "config.review.required_bots": Meta(
+    "review.required_bots": Meta(
         "never", "Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set.",
     ),
-    "config.review.optional_apps": Meta(
+    "review.optional_apps": Meta(
         "advanced", "Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it.",
     ),
-    "config.review.reviewers": Meta(
+    "review.reviewers": Meta(
         "advanced", "Local-attestation reviewers (sigma | /code-review | declare) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot.",
     ),
-    "config.review.peers": Meta(
+    "review.peers": Meta(
         "advanced", "Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries.",
     ),
-    "config.review.peer_identity": Meta(
+    "review.peer_identity": Meta(
         "advanced", "The distinct machine-account login peers post their review under (must not be the author account).",
     ),
-    "config.review.peer_token_env": Meta(
+    "review.peer_token_env": Meta(
         "advanced", "Env var holding the PAT for peer_identity used to post peer reviews to the PR.",
     ),
-    "config.review.external_reviewers": Meta(
+    "review.external_reviewers": Meta(
         "always", "Which AI reviewers /pr requests a review from (the INVOCATION list).",
         question="Which external reviewer(s) should review your PRs (gemini/codex/none)?",
     ),
-    "config.review.agent_providers": Meta("never", "Per-agent provider routing for the cross-model review panel."),
-    "config.review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
+    "review.agent_providers": Meta("never", "Per-agent provider routing for the cross-model review panel."),
+    "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
     # --- config.target.* ---
-    "config.target.dedupe_dead_duplicates": Meta("never", "Opt-in cleanup of provably-dead duplicate state files."),
-    "config.target.auto_launch_on_blueprint": Meta(
+    "target.dedupe_dead_duplicates": Meta("never", "Opt-in cleanup of provably-dead duplicate state files."),
+    "target.auto_launch_on_blueprint": Meta(
         "advanced", "Auto-launch a bg /target worker when a node reaches ready via /blueprint.",
     ),
-    "config.target.handoff.enabled": Meta("advanced", "Enable target self-handoff at pipeline boundaries."),
-    "config.target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a wave-boundary handoff."),
-    "config.target.handoff.generation_cap": Meta("never", "Max handoff generations before refusing further delegation."),
-    "config.target.blast.enabled": Meta("never", "Enable blast-radius routing."),
-    "config.target.blast.downgrade": Meta("never", "Allow token-saving downgrades in blast routing."),
-    "config.target.blast.reuse_loc_manifest": Meta("never", "Include loc-ratchet globs in the blast map."),
-    "config.target.blast.high_blast_globs": Meta("never", "Per-project high-blast glob extensions."),
-    "config.target.defaults.no_external": Meta("never", "Session-input default: skip external review (size-profile driven)."),
-    "config.target.defaults.no_docs": Meta("never", "Session-input default: skip docs (size-profile driven)."),
-    "config.target.defaults.max_iterations": Meta("advanced", "Session-input default: max pipeline iterations."),
+    "target.handoff.enabled": Meta("advanced", "Enable target self-handoff at pipeline boundaries."),
+    "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a wave-boundary handoff."),
+    "target.handoff.generation_cap": Meta("never", "Max handoff generations before refusing further delegation."),
+    "target.blast.enabled": Meta("never", "Enable blast-radius routing."),
+    "target.blast.downgrade": Meta("never", "Allow token-saving downgrades in blast routing."),
+    "target.blast.reuse_loc_manifest": Meta("never", "Include loc-ratchet globs in the blast map."),
+    "target.blast.high_blast_globs": Meta("never", "Per-project high-blast glob extensions."),
+    "target.defaults.no_external": Meta("never", "Session-input default: skip external review (size-profile driven)."),
+    "target.defaults.no_docs": Meta("never", "Session-input default: skip docs (size-profile driven)."),
+    "target.defaults.max_iterations": Meta("advanced", "Session-input default: max pipeline iterations."),
     # --- config.agents.* ---
-    "config.agents.a2a.auto": Meta("advanced", "Allow agents to auto-open agent-to-agent threads."),
-    "config.agents.a2a.turn_ceiling": Meta("advanced", "Max turns in an agent-to-agent thread."),
-    "config.agents.confirm": Meta("never", "Agent-launch confirmation policy (auto/always/never)."),
-    "config.agents.dead_row_grace": Meta("advanced", "Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).", default_source="default"),
-    "config.agents.max_live": Meta("advanced", "Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).", default_source="default"),
-    "config.agents.min_free_gb": Meta("advanced", "Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).", default_source="default"),
-    "config.agents.worker_qos": Meta("advanced", "Worker CPU/IO priority: utility (background QoS, default) or off.", default_source="default"),
-    "config.agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
-    "config.agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
+    "agents.a2a.auto": Meta("advanced", "Allow agents to auto-open agent-to-agent threads."),
+    "agents.a2a.turn_ceiling": Meta("advanced", "Max turns in an agent-to-agent thread."),
+    "agents.confirm": Meta("never", "Agent-launch confirmation policy (auto/always/never)."),
+    "agents.dead_row_grace": Meta("advanced", "Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).", default_source="default"),
+    "agents.max_live": Meta("advanced", "Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).", default_source="default"),
+    "agents.min_free_gb": Meta("advanced", "Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).", default_source="default"),
+    "agents.worker_qos": Meta("advanced", "Worker CPU/IO priority: utility (background QoS, default) or off.", default_source="default"),
+    "agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
+    "agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.auto_continue.* ---
-    "config.auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
+    "auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
     # --- config.think_spawn.* ---
-    "config.think_spawn.enabled": Meta(
+    "think_spawn.enabled": Meta(
         "advanced", "Born-with-why: spawn/offer a context-carrying /think for a generated idea node."
     ),
-    "config.think_spawn.max_per_run": Meta(
+    "think_spawn.max_per_run": Meta(
         "advanced", "Blast-radius cap on /think spawns per node-generation run."
     ),
-    "config.think_spawn.idle_threshold_s": Meta(
+    "think_spawn.idle_threshold_s": Meta(
         "advanced", "Idle seconds before an attended operator downgrades to away (0 = off)."
     ),
-    "config.think_spawn.on_work_start": Meta(
+    "think_spawn.on_work_start": Meta(
         "advanced", "A2: dispatch a context /think when /target claims a node to work it (default OFF)."
     ),
-    "config.think_spawn.on_retro": Meta(
+    "think_spawn.on_retro": Meta(
         "advanced", "A2: dispatch a context /think when `fno backlog done` closes a node (default OFF)."
     ),
-    "config.think_spawn.daily_cap": Meta(
+    "think_spawn.daily_cap": Meta(
         "advanced", "Per-install per-day ceiling on /think spawns (firehose guard; 0 = off)."
     ),
-    "config.think_spawn.attended": Meta(
+    "think_spawn.attended": Meta(
         "advanced", "Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think)."
     ),
     # --- config.active_backlog.* ---
-    "config.active_backlog.enabled": Meta(
+    "active_backlog.enabled": Meta(
         "advanced",
         "Always-on backlog drain: true (every project) or a per-project map.",
     ),
-    "config.active_backlog.interval": Meta(
+    "active_backlog.interval": Meta(
         "advanced", "Poll-floor cadence for the drain daemon (e.g. 5m, 30s)."
     ),
-    "config.active_backlog.failure_limit": Meta(
+    "active_backlog.failure_limit": Meta(
         "advanced", "Consecutive dispatch failures before a node is parked."
     ),
-    "config.active_backlog.max_concurrent": Meta(
+    "active_backlog.max_concurrent": Meta(
         "never", "In-flight nodes per project per tick (v1 == 1)."
     ),
-    "config.active_backlog.mission": Meta(
+    "active_backlog.mission": Meta(
         "never", "Scope the drain daemon to a single mission's nodes."
     ),
     # --- config.mux.* ---
-    "config.mux.shell_integration": Meta(
+    "mux.shell_integration": Meta(
         "advanced",
         "Auto-inject OSC 133 block markers into mux-spawned shells: "
         "mux-panes (default) | off. Never edits your global shell rc.",
     ),
-    "config.mux.notify_on_blocked": Meta("advanced", "Fire an OS notification when an agent badge enters 'blocked' (default on).", default_source="default"),
-    "config.mux.notify_on_done": Meta("advanced", "Also notify on a terminal 'done' hook transition (default off).", default_source="default"),
-    "config.mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
-    "config.mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
-    "config.mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
+    "mux.notify_on_blocked": Meta("advanced", "Fire an OS notification when an agent badge enters 'blocked' (default on).", default_source="default"),
+    "mux.notify_on_done": Meta("advanced", "Also notify on a terminal 'done' hook transition (default off).", default_source="default"),
+    "mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
+    "mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
+    "mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
     # --- config.loops.* (x-ce71: per-loop level + pause-all substrate) ---
-    "config.loops": Meta(
+    "loops": Meta(
         "advanced",
         "Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report).",
     ),
     # --- config.parallel.* ---
-    "config.parallel.max_lanes": Meta(
+    "parallel.max_lanes": Meta(
         "advanced",
         "Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in).",
     ),
     # --- config.auto_merge.* ---
-    "config.auto_merge.enabled": Meta(
+    "auto_merge.enabled": Meta(
         "always", "Auto-merge a PR once external review passes.",
         question="Auto-merge PRs after external review passes?",
     ),
-    "config.auto_merge.merge_strategy": Meta("advanced", "Merge strategy: merge | squash | rebase."),
-    "config.auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the branch after an auto-merge."),
-    "config.auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
-    "config.auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
-    "config.auto_merge.allowed_invokers": Meta("never", "Who may trigger auto-merge."),
-    "config.auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
+    "auto_merge.merge_strategy": Meta("advanced", "Merge strategy: merge | squash | rebase."),
+    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the branch after an auto-merge."),
+    "auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
+    "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
+    "auto_merge.allowed_invokers": Meta("never", "Who may trigger auto-merge."),
+    "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
     # --- config.pr_watch.* ---
-    "config.pr_watch.enabled": Meta("advanced", "Enable the global PR-state watcher daemon."),
-    "config.pr_watch.interval_seconds": Meta("never", "PR-watcher poll interval (seconds)."),
-    "config.pr_watch.retries": Meta("never", "PR-watcher consecutive-failure park threshold."),
-    "config.pr_watch.max_age_days": Meta("never", "PR-watcher: park PRs older than N days."),
-    "config.pr_watch.model": Meta("never", "Claude model used for headless PR-watcher skill fires."),
+    "pr_watch.enabled": Meta("advanced", "Enable the global PR-state watcher daemon."),
+    "pr_watch.interval_seconds": Meta("never", "PR-watcher poll interval (seconds)."),
+    "pr_watch.retries": Meta("never", "PR-watcher consecutive-failure park threshold."),
+    "pr_watch.max_age_days": Meta("never", "PR-watcher: park PRs older than N days."),
+    "pr_watch.model": Meta("never", "Claude model used for headless PR-watcher skill fires."),
     # --- config.recovery.* ---
-    "config.recovery.enabled": Meta("advanced", "Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick)."),
-    "config.recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be before a resume nudge fires (seconds)."),
-    "config.recovery.max_nudges": Meta("never", "Per-session cap on resume nudges before the watchdog gives up."),
+    "recovery.enabled": Meta("advanced", "Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick)."),
+    "recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be before a resume nudge fires (seconds)."),
+    "recovery.max_nudges": Meta("never", "Per-session cap on resume nudges before the watchdog gives up."),
     # --- config.health_monitor.* ---
-    "config.health_monitor.enabled": Meta("advanced", "Enable backlog health monitoring."),
-    "config.health_monitor.thresholds.idea_pile_depth": Meta("never", "Breach threshold: idea pile depth."),
-    "config.health_monitor.thresholds.stale_ready_days": Meta("never", "Breach threshold: stale-ready age (days)."),
-    "config.health_monitor.thresholds.failure_prone_attempts": Meta("never", "Breach threshold: failure-prone attempts."),
-    "config.health_monitor.thresholds.collision_count": Meta("never", "Breach threshold: collision count."),
-    "config.health_monitor.thresholds.project_cwd_mismatch": Meta("never", "Breach threshold: project/cwd mismatch count."),
-    "config.health_monitor.notifications.surfaces": Meta("never", "Health notification surfaces (terminal/discord/webhook/log_only)."),
-    "config.health_monitor.notifications.discord_channel": Meta("never", "Discord channel for health notifications."),
-    "config.health_monitor.notifications.webhook_url": Meta("never", "Webhook URL for health notifications."),
-    "config.health_monitor.notifications.throttle_minutes": Meta("never", "Health notification throttle (minutes)."),
-    "config.health_monitor.history.enabled": Meta("never", "Append health-history entries."),
-    "config.health_monitor.history.path": Meta("never", "Override health-history path."),
-    "config.health_monitor.history.retain_days": Meta("never", "Health-history retention (days)."),
+    "health_monitor.enabled": Meta("advanced", "Enable backlog health monitoring."),
+    "health_monitor.thresholds.idea_pile_depth": Meta("never", "Breach threshold: idea pile depth."),
+    "health_monitor.thresholds.stale_ready_days": Meta("never", "Breach threshold: stale-ready age (days)."),
+    "health_monitor.thresholds.failure_prone_attempts": Meta("never", "Breach threshold: failure-prone attempts."),
+    "health_monitor.thresholds.collision_count": Meta("never", "Breach threshold: collision count."),
+    "health_monitor.thresholds.project_cwd_mismatch": Meta("never", "Breach threshold: project/cwd mismatch count."),
+    "health_monitor.notifications.surfaces": Meta("never", "Health notification surfaces (terminal/discord/webhook/log_only)."),
+    "health_monitor.notifications.discord_channel": Meta("never", "Discord channel for health notifications."),
+    "health_monitor.notifications.webhook_url": Meta("never", "Webhook URL for health notifications."),
+    "health_monitor.notifications.throttle_minutes": Meta("never", "Health notification throttle (minutes)."),
+    "health_monitor.history.enabled": Meta("never", "Append health-history entries."),
+    "health_monitor.history.path": Meta("never", "Override health-history path."),
+    "health_monitor.history.retain_days": Meta("never", "Health-history retention (days)."),
     # --- config.collision.* ---
-    "config.collision.severity_thresholds.high_count": Meta("never", "Collision scoring: high-severity shared-file count."),
-    "config.collision.severity_thresholds.high_ratio": Meta("never", "Collision scoring: high-severity shared-file ratio."),
-    "config.collision.severity_thresholds.medium_count": Meta("never", "Collision scoring: medium-severity shared-file count."),
-    "config.collision.severity_thresholds.medium_ratio": Meta("never", "Collision scoring: medium-severity shared-file ratio."),
+    "collision.severity_thresholds.high_count": Meta("never", "Collision scoring: high-severity shared-file count."),
+    "collision.severity_thresholds.high_ratio": Meta("never", "Collision scoring: high-severity shared-file ratio."),
+    "collision.severity_thresholds.medium_count": Meta("never", "Collision scoring: medium-severity shared-file count."),
+    "collision.severity_thresholds.medium_ratio": Meta("never", "Collision scoring: medium-severity shared-file ratio."),
     # --- config.work map ---
-    "config.work.workspaces": Meta(
+    "work.workspaces": Meta(
         "advanced", "Workspace -> project topology map (config.work.workspaces.<slug>.projects[]).",
         default_source="auto-detect",
     ),
     # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
-    "config.model_routing.enabled": Meta(
+    "model_routing.enabled": Meta(
         "advanced", "Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) to a secondary provider at spawn.",
         question="Route auxiliary coordination work to a secondary model provider (production stays on Anthropic)?",
     ),
-    "config.model_routing.providers": Meta(
+    "model_routing.providers": Meta(
         "never", "Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in."
     ),
-    "config.model_routing.roles": Meta(
+    "model_routing.roles": Meta(
         "never", "Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7')."
     ),
-    "config.model_routing.extra_env": Meta(
+    "model_routing.extra_env": Meta(
         "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides)."
     ),
 }

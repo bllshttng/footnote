@@ -6,14 +6,13 @@
 #
 # Every key is shown set to its DEFAULT. Copy the keys you want to change
 # into .fno/settings.yaml (project-local) or ~/.fno/settings.yaml (global);
-# anything you omit falls back to these defaults. schema_version is the only
-# top-level key besides `config:` - everything else lives under config:.
+# anything you omit falls back to these defaults. Config keys nest under
+# `config:` (schema_version is the only top-level key); the loader also
+# reads a flat config.toml, but the on-disk settings.yaml stays wrapped.
 #
 # For opinionated starters (recommended values, safe opt-ins on), see
 # docs/settings.global.example.yaml and docs/settings.local.example.yaml.
 
-# Settings schema version; managed by fno, not hand-set.
-schema_version: 1
 config:
   # Root dir for global fno state.
   state_dir: "~/.fno/"
@@ -299,3 +298,5 @@ config:
     hover_focus: true
   # Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report).
   loops: {}
+# Settings schema version; managed by fno, not hand-set.
+schema_version: 1

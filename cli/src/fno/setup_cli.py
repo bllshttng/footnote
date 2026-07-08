@@ -146,11 +146,11 @@ def plan_cmd(
 # wizard asks "global or this project?" for these and routes the write
 # accordingly; everything else is global (the config model is global-first).
 PROJECT_SCOPED_KEYS = (
-    "config.post_merge.parking_lot_path",
-    "config.project.id",
+    "post_merge.parking_lot_path",
+    "project.id",
     # vision describes THIS codebase; writing it global bleeds one repo's vision
     # into every other repo's resolved config.
-    "config.project.vision",
+    "project.vision",
 )
 
 

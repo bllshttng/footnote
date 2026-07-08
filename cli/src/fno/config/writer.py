@@ -83,7 +83,19 @@ def _resolve_parent_block(
 ) -> Optional[tuple[type[BaseModel], str, Any]]:
     """Return ``(parent_block_cls, leaf_field, leaf_annotation)`` for a dotted
     key, or None if the path is unknown or a non-leaf segment is not a model.
+
+    A leading ``config`` segment is dropped: the model is now flat (config
+    fields live at the top level), but callers and settings.yaml still use the
+    ``config.`` prefix. Stripping it here resolves ``config.agents.a2a.auto``
+    against the flat model while file I/O keeps the original prefixed parts.
     """
+    if parts and parts[0] == "config":
+        parts = parts[1:]
+    if not parts:
+        # A bare `config` key (parts == ["config"]) strips to empty; there is no
+        # leaf to resolve. Return None so the caller raises a clean unknown-key
+        # error instead of an IndexError on parts[-1].
+        return None
     cls: type[BaseModel] = SettingsModel
     for part in parts[:-1]:
         fields = getattr(cls, "model_fields", {})
@@ -98,6 +110,15 @@ def _resolve_parent_block(
     if leaf not in fields:
         return None
     return cls, leaf, fields[leaf].annotation
+
+
+def _storage_parts(parts: list[str]) -> list[str]:
+    """The dotted path a key is STORED at in settings.yaml: always under the
+    ``config:`` block. The model is flat, but the on-disk file stays wrapped, so
+    a ``config.``-prefixed key and its bare flat form both map to the same
+    wrapped location (a consistent single-shape file, never a mix)."""
+    flat = parts[1:] if parts and parts[0] == "config" else list(parts)
+    return ["config"] + flat
 
 
 def _coerce(value: str, ann: Any) -> Any:
@@ -155,8 +176,33 @@ def _target_path(scope: str, repo_root: Optional[Path]) -> Path:
             from fno.paths import resolve_repo_root
 
             repo_root = resolve_repo_root()
-        return repo_root / ".fno" / "settings.yaml"
-    return _global_settings_path()
+        target = repo_root / ".fno" / "settings.yaml"
+    else:
+        target = _global_settings_path()
+    _refuse_if_toml_shadows(target)
+    return target
+
+
+def _refuse_if_toml_shadows(target: Path) -> None:
+    """Fail loud if a higher-priority config.toml would shadow a settings.yaml write.
+
+    The loader prefers config.toml over settings.yaml, but this writer only
+    writes YAML. If a config.toml exists at the same location, writing YAML
+    would report success while load_settings() keeps returning the TOML value -
+    a silent no-op. TOML writes land in a later migration stage; until then,
+    refuse rather than mislead (codex P2, PR #255).
+    """
+    if target.name != "settings.yaml":
+        return
+    toml_sibling = target.with_name("config.toml")
+    if toml_sibling.exists():
+        raise ConfigSetError(
+            f"a config.toml exists at {toml_sibling} and takes read priority over "
+            f"settings.yaml, so this write would be silently ignored on the next "
+            f"load. Edit {toml_sibling} directly (TOML writes are not yet "
+            f"supported by `fno config set`).",
+            1,
+        )
 
 
 def _get_nested(d: dict[str, Any], parts: list[str]) -> Optional[dict[str, Any]]:
@@ -374,7 +420,7 @@ def set_config_values(
         parts = key.split(".")
         if _resolve_parent_block(parts) is None:
             raise ConfigSetError(f"unknown config key {key!r}", 1)
-        parts_by_key[key] = parts
+        parts_by_key[key] = _storage_parts(parts)
 
     target = _target_path(scope, repo_root)
     final_values: dict[str, Any] = {}
@@ -469,6 +515,9 @@ def _model_default(parts: list[str]) -> Any:
     """The value ``parts`` reverts to once unset: read off a default-constructed
     ``SettingsModel`` by walking the dotted path. Returns None if not resolvable.
     """
+    if parts and parts[0] == "config":
+        # Flat model: a legacy `config.` prefix resolves against the top level.
+        parts = parts[1:]
     node: Any = SettingsModel()
     for part in parts:
         if isinstance(node, BaseModel) and part in type(node).model_fields:
@@ -498,6 +547,7 @@ def unset_config_value(
         raise ConfigSetError(f"unknown config key {key!r}", 1)
 
     default = _model_default(parts)
+    store_parts = _storage_parts(parts)
     target = _target_path(scope, repo_root)
     real_target = Path(os.path.realpath(target)) if target.is_symlink() else target
 
@@ -511,7 +561,7 @@ def unset_config_value(
     captured: dict[str, Any] = {"was": None, "present": False}
 
     def _mutate(existing: dict[str, Any]) -> dict[str, Any]:
-        new, was, present = _deep_unset(existing, parts)
+        new, was, present = _deep_unset(existing, store_parts)
         captured["was"] = was
         captured["present"] = present
         return new

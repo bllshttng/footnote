@@ -65,7 +65,7 @@ def test_enabling_obsidian_with_vault_succeeds(tmp_path, monkeypatch):
     fields = [
         f
         for f in _always_fields()
-        if f["path"] in ("config.obsidian.enabled", "config.obsidian.vault")
+        if f["path"] in ("obsidian.enabled", "obsidian.vault")
     ]
 
     # The fields are presented enabled-then-vault (schema order). Answer
@@ -80,8 +80,8 @@ def test_enabling_obsidian_with_vault_succeeds(tmp_path, monkeypatch):
         tmp_path, fields, prompt_fn=prompt_seq, scope_fn=lambda k: "global"
     )
     assert set(result["written"]) == {
-        "config.obsidian.enabled",
-        "config.obsidian.vault",
+        "obsidian.enabled",
+        "obsidian.vault",
     }
     data = yaml.safe_load(gpath.read_text())
     assert data["config"]["obsidian"]["enabled"] is True
@@ -91,7 +91,7 @@ def test_enabling_obsidian_with_vault_succeeds(tmp_path, monkeypatch):
 def test_ac4_err_rejected_value_reprompts(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     # Just the id_prefix field, which has a strict validator.
-    field = next(f for f in _always_fields() if f["path"] == "config.backlog.id_prefix")
+    field = next(f for f in _always_fields() if f["path"] == "backlog.id_prefix")
 
     calls = {"n": 0}
 
@@ -105,7 +105,7 @@ def test_ac4_err_rejected_value_reprompts(tmp_path, monkeypatch):
     )
     # It re-prompted rather than aborting, and eventually wrote the valid value.
     assert calls["n"] == 2
-    assert result["written"] == ["config.backlog.id_prefix"]
+    assert result["written"] == ["backlog.id_prefix"]
 
 
 def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
@@ -117,13 +117,13 @@ def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
     # Two fields in the same block (config.backlog): id_prefix then id_hex_width.
     fields = [
         {
-            "path": "config.backlog.id_prefix",
+            "path": "backlog.id_prefix",
             "default": None,
             "tier": "always",
             "question": "prefix?",
         },
         {
-            "path": "config.backlog.id_hex_width",
+            "path": "backlog.id_hex_width",
             "default": 4,
             "tier": "advanced",
             "question": "hex width?",
@@ -145,18 +145,18 @@ def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
         tmp_path, fields, prompt_fn=prompt_fn, scope_fn=lambda k: "global"
     )
     assert set(result["written"]) == {
-        "config.backlog.id_prefix",
-        "config.backlog.id_hex_width",
+        "backlog.id_prefix",
+        "backlog.id_hex_width",
     }
     data = yaml.safe_load(gpath.read_text())
     assert data["config"]["backlog"]["id_prefix"] == "ok"
 
 
 def test_project_vision_is_project_scoped(tmp_path):
-    assert "config.project.vision" in PROJECT_SCOPED_KEYS
+    assert "project.vision" in PROJECT_SCOPED_KEYS
 
     field = {
-        "path": "config.project.vision",
+        "path": "project.vision",
         "default": None,
         "tier": "always",
         "question": "vision?",
@@ -174,7 +174,7 @@ def test_project_vision_is_project_scoped(tmp_path):
         scope_fn=scope_fn,
     )
     # The scope was asked, and vision landed in the PROJECT file, not global.
-    assert asked == ["config.project.vision"]
+    assert asked == ["project.vision"]
     data = yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
     assert (
         data["config"]["project"]["vision"]
@@ -185,7 +185,7 @@ def test_project_vision_is_project_scoped(tmp_path):
 def test_ac4_ui_echoes_scope_and_path(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     field = next(
-        f for f in _always_fields() if f["path"] == "config.auto_merge.enabled"
+        f for f in _always_fields() if f["path"] == "auto_merge.enabled"
     )
     lines: list[str] = []
 
@@ -197,16 +197,16 @@ def test_ac4_ui_echoes_scope_and_path(tmp_path, monkeypatch):
         echo_fn=lines.append,
     )
     blob = "\n".join(lines)
-    assert "config.auto_merge.enabled" in blob
+    assert "auto_merge.enabled" in blob
     assert "global" in blob
 
 
 def test_ac4_edge_project_scoped_key_routes_to_project(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     # config.post_merge.parking_lot_path is project-scoped (advanced tier).
-    assert "config.post_merge.parking_lot_path" in PROJECT_SCOPED_KEYS
+    assert "post_merge.parking_lot_path" in PROJECT_SCOPED_KEYS
     field = {
-        "path": "config.post_merge.parking_lot_path",
+        "path": "post_merge.parking_lot_path",
         "default": None,
         "tier": "advanced",
         "question": "Parking-lot path?",
@@ -225,14 +225,14 @@ def test_ac4_edge_project_scoped_key_routes_to_project(tmp_path, monkeypatch):
         scope_fn=scope_fn,
     )
     # The scope prompt fired for the project-scoped key...
-    assert asked_scope == ["config.post_merge.parking_lot_path"]
+    assert asked_scope == ["post_merge.parking_lot_path"]
     # ...and the value landed in the PROJECT file, not global.
     data = yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
     assert (
         data["config"]["post_merge"]["parking_lot_path"]
         == "internal/x/backlog/parking-lot.md"
     )
-    assert result["written"] == ["config.post_merge.parking_lot_path"]
+    assert result["written"] == ["post_merge.parking_lot_path"]
 
 
 def test_ac4_fr_cancel_midrun_keeps_written_nothing_partial(tmp_path, monkeypatch):

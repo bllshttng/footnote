@@ -102,8 +102,12 @@ def test_candidate_paths_include_canonical_in_worktree(
     from fno.config import _candidate_paths
 
     cands = _candidate_paths()
-    assert cands[0] == worktree / ".fno" / "settings.yaml"
-    assert cands[1] == canonical / ".fno" / "settings.yaml"
+    # config.toml is preferred over settings.yaml at each location, so each dir
+    # contributes its config.toml first, then its settings.yaml.
+    assert cands[0] == worktree / ".fno" / "config.toml"
+    assert cands[1] == worktree / ".fno" / "settings.yaml"
+    assert cands[2] == canonical / ".fno" / "config.toml"
+    assert cands[3] == canonical / ".fno" / "settings.yaml"
 
 
 def test_candidate_paths_dedup_when_canonical_equals_worktree(

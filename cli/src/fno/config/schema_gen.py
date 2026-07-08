@@ -219,8 +219,9 @@ def render_example_yaml() -> str:
         "#",
         "# Every key is shown set to its DEFAULT. Copy the keys you want to change",
         "# into .fno/settings.yaml (project-local) or ~/.fno/settings.yaml (global);",
-        "# anything you omit falls back to these defaults. schema_version is the only",
-        "# top-level key besides `config:` - everything else lives under config:.",
+        "# anything you omit falls back to these defaults. Config keys nest under",
+        "# `config:` (schema_version is the only top-level key); the loader also",
+        "# reads a flat config.toml, but the on-disk settings.yaml stays wrapped.",
         "#",
         "# For opinionated starters (recommended values, safe opt-ins on), see",
         "# docs/settings.global.example.yaml and docs/settings.local.example.yaml.",
@@ -229,6 +230,13 @@ def render_example_yaml() -> str:
     open_segs: list[str] = []  # container segments currently emitted, by depth
     for leaf in iter_leaves():
         segs = leaf.path.split(".")
+        # The example mirrors the on-disk settings.yaml, which stays wrapped in
+        # this stage: every config key nests under `config:`; schema_version is
+        # the lone top-level sibling. (The model itself is flat; only this
+        # copy-paste template re-nests, so shell readers using yq `.config.<key>`
+        # keep working until the later stage flips files + shell to flat.)
+        if segs[0] != "schema_version":
+            segs = ["config"] + segs
         container, key = segs[:-1], segs[-1]
         # Reuse the longest shared prefix; reopen the rest.
         common = 0
