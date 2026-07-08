@@ -116,9 +116,18 @@ git -C "$PREFLIGHT_WT" clean -fdx -e target -e cli/.venv -e .preflight-last-fail
 # --- hermetic env ------------------------------------------------------------
 REAL_HOME="$HOME"
 TMPHOME="$(mktemp -d)"
+# An empty config file pinned via FNO_CONFIG is the load-bearing isolation seam:
+# $FNO_CONFIG, when set, is the config loader's ONLY candidate, so the canonical
+# checkout's .fno/config.toml (which a worktree reaches via the shared
+# git-common-dir, NOT via HOME/cwd) can't leak worktrees_base and friends into
+# the run. Empty file => the SettingsModel defaults, which is exactly what a
+# fresh CI checkout (no committed .fno/config.toml) resolves to. This is what
+# makes the PR-#269 local-only failure class not reproduce here (AC2-HP).
+EMPTY_CONFIG="$TMPHOME/empty-config.toml"
+: > "$EMPTY_CONFIG"
 
 # Runs a command inside the preflight worktree with a scrubbed env: temp HOME,
-# no FNO_* leakage, /dev/null global settings, worktree-pinned PYTHONPATH.
+# no FNO_* leakage, empty pinned config, worktree-pinned PYTHONPATH.
 # Cache dirs are the documented re-export holes so builds stay warm.
 run_hermetic() {
     (
@@ -126,6 +135,7 @@ run_hermetic() {
         local v
         for v in $(compgen -v | grep '^FNO_' || true); do unset "$v"; done
         export HOME="$TMPHOME"
+        export FNO_CONFIG="$EMPTY_CONFIG"
         export FNO_GLOBAL_SETTINGS_PATH=/dev/null
         export FNO_THINK_SPAWN=0
         export PYTHONPATH="$PREFLIGHT_WT/cli/src"
