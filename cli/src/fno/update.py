@@ -7,7 +7,7 @@ Discovers the source via (in priority order):
 3. ``~/.fno/source-path`` cache (written on prior successful install)
 4. Well-known candidate paths (plugin install, common dev locations)
 
-Then execs ``uv tool install --reinstall <source>`` (or ``pip install --user
+Then execs ``uv tool install --reinstall --refresh <source>`` (or ``pip install --user
 --force-reinstall <source>`` if uv is unavailable). Uses ``os.execvp`` so the
 installer replaces this Python process cleanly, avoiding the "binary being
 replaced while it runs" race.
@@ -653,7 +653,11 @@ def update_command(
         _refresh_rust_bins(resolved, force=rust, dry_run=dry_run)
 
     if shutil.which("uv"):
-        cmd = ["uv", "tool", "install", "--reinstall", str(resolved)]
+        # --refresh busts uv's build cache. Without it, a path source at an
+        # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
+        # stale cached wheel that predates newly-added modules, so `fno restart`
+        # etc. crash with ModuleNotFoundError even after `fno update`.
+        cmd = ["uv", "tool", "install", "--reinstall", "--refresh", str(resolved)]
     elif shutil.which("pip"):
         cmd = [
             sys.executable,
