@@ -23,6 +23,38 @@ back and run it before creating the PR. The ship phase itself should NOT
 create missing docs - that would couple concerns and hide bugs in the phase
 resolver.
 
+## Preflight before every push (CI's verdict, earlier)
+
+Distinct from the environment preflight in Step 3g (working-tree / deps / auth
+checks): this is the deterministic **test-parity** runner that reproduces CI's
+smoke + rust legs locally so a green here means a green PR, killing the
+push-wait-red-fix loop where each ~10-minute CI round surfaces one new failure.
+
+**Existence-guarded rule (repo-neutral, no hardcoded repo-root path):**
+
+```bash
+# Before the first PR push, and again before the push you expect to settle
+# green. Skip when FNO_SKIP_PREFLIGHT=1 or the diff is docs-only.
+if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" ]] && [[ -x scripts/ci/preflight.sh ]] \
+   && git diff --name-only origin/main...HEAD | grep -qvE '^(docs/|internal/|.*\.md$)'; then
+  scripts/ci/preflight.sh || { echo "preflight RED - fix before pushing"; exit 1; }
+fi
+```
+
+- **First push / settle-green push:** run `scripts/ci/preflight.sh` (full).
+- **Between fix-loop commits** (external-review fixes, iteration pushes): run
+  `scripts/ci/preflight.sh --retry-failed` for a fast re-check of only the
+  steps that failed last time, then one **full** run before the push you expect
+  to go green (a subset green is not a full green - the runner labels this).
+- The guard is `-x scripts/ci/preflight.sh`, a relative existence check, so
+  this no-ops in any repo that does not ship the script (the self-containment
+  lint forbids repo-root-anchored script refs; the relative form is portable).
+- Escape hatches are explicit and auditable: `FNO_SKIP_PREFLIGHT=1` shows in the
+  transcript, and a docs-only diff (only `docs/`, `internal/`, `*.md`) skips by
+  policy. The script itself never self-skips; the skip decision lives here.
+
+See the repo-root `docs/preflight.md` for the full convention.
+
 ## Link PR→node (right after /pr create, before any merge)
 
 The moment `/pr create` returns the new PR number/URL - for EVERY ship run,

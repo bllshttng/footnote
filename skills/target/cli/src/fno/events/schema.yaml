@@ -1312,6 +1312,19 @@ event_types:
         name:
           type: string
 
+  - name: bg_worker_terminal_stopped
+    description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever (x-fcbf)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        short_id:
+          type: string
+        session_id:
+          type: string
+        reason:
+          type: string
+
   - name: agent_orphan_state_archived
     description: "An orphaned agent's state directory was archived to the orphan archive path before removal."
     sources: [daemon]
