@@ -1046,6 +1046,7 @@ _VAULT_SETTINGS = (
         ("https://github.com/org/footnote", "footnote"),
         ("/srv/git/repo.git", "repo"),
         ("git@github.com:org/footnote.git/", "footnote"),
+        (r"C:\repos\footnote.git", None),  # backslash tail -> reject, fall to basename
         ("", None),
         ("   ", None),
     ],

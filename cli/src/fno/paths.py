@@ -262,7 +262,12 @@ def _remote_url_to_slug(url: str) -> Optional[str]:
     tail = re.split(r"[/:]", url)[-1]
     if tail.endswith(".git"):
         tail = tail[:-4]
-    return tail or None
+    # A Windows-style/local remote (`C:\repos\foo.git`) leaves backslashes in the
+    # tail (the split is `/`-and-`:` only); reject any separator so the slug can
+    # never become a stray `internal/<mangled>/` segment. Fall back to basename.
+    if not tail or "/" in tail or "\\" in tail:
+        return None
+    return tail
 
 
 def _slug_from_git_remote(project_root: Optional[Path]) -> Optional[str]:

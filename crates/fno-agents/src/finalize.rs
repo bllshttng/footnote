@@ -1106,7 +1106,10 @@ fn slug_from_remote_url(url: &str) -> Option<String> {
     }
     let tail = url.rsplit(['/', ':']).next()?;
     let tail = tail.strip_suffix(".git").unwrap_or(tail);
-    if tail.is_empty() || tail == "." || tail == ".." {
+    // A Windows-style/local remote (`C:\repos\foo.git`) leaves backslashes in the
+    // tail; reject any separator so the slug can never become a stray path
+    // segment, matching the Python `_remote_url_to_slug` (paths.py).
+    if tail.is_empty() || tail == "." || tail == ".." || tail.contains(['/', '\\']) {
         return None;
     }
     Some(tail.to_string())
@@ -2114,6 +2117,7 @@ mod tests {
             ("https://github.com/org/footnote", Some("footnote")),
             ("/srv/git/repo.git", Some("repo")),
             ("git@github.com:org/footnote.git/", Some("footnote")),
+            (r"C:\repos\footnote.git", None), // backslash tail -> reject
             ("", None),
             ("   ", None),
         ] {
