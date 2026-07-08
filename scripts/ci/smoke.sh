@@ -231,6 +231,24 @@ fi
 if need_prereq 'cargo'; then command -v cargo >/dev/null 2>&1 || miss cargo "install the Rust toolchain (rustup)"; fi
 
 # ----------------------------------------------------------------------------
+# Faithful-ordering guard for @requires_rust parity tests.
+# The pre-extraction cli-ci restored the cargo cache AFTER the pytest step, so
+# any fno-agents binary a prior run cached was NOT yet on disk when pytest ran -
+# the @requires_rust parity tests (which need a compiled fno-agents binary AND a
+# provider CLI like codex that CI lacks) were therefore SKIPPED. This extraction
+# restores the cache in provisioning (before the script) for build speed, which
+# would un-skip them and fail on "codex CLI not on PATH". Remove any pre-restored
+# binary before pytest runs so the skip fires exactly as before; the dedicated
+# "Build fno-agents debug binary" step recreates it for the later rust steps.
+for i in "${SELECTED[@]}"; do
+    if [[ "${STEP_NAMES[$i]}" == "Pytest (unit + integration)" ]]; then
+        rm -f "$REPO_ROOT"/crates/fno-agents/target/debug/fno-agents \
+              "$REPO_ROOT"/crates/fno-agents/target/release/fno-agents 2>/dev/null || true
+        break
+    fi
+done
+
+# ----------------------------------------------------------------------------
 # Runner
 # ----------------------------------------------------------------------------
 in_ci() { [[ -n "${GITHUB_ACTIONS:-}" ]]; }
