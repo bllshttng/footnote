@@ -121,7 +121,7 @@ def base_check(
     ),
 )
 def sync_canonical(
-    pr_number: int = typer.Option(..., "--pr", help="GitHub PR number of the merged PR"),
+    pr_number: int = typer.Option(..., "--pr-number", help="GitHub PR number of the merged PR"),
 ) -> None:
     from fno.pr import _sync_canonical
 

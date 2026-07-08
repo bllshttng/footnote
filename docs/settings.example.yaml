@@ -91,6 +91,12 @@ config:
     enabled: true
     # Whether a post-merge watcher self-reaps.
     self_reap: false
+    # Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno update && fno restart`). Unset = off.
+    sync_command: null
+    # Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge).
+    sync_paths: []
+    # Let merge-detection auto-dispatch the /fno:pr merged ritual for a newly-merged PR (opt-in; default off).
+    auto_run: false
   research:
     # Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses).
     output_dir: null

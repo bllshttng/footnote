@@ -4638,7 +4638,7 @@ def cmd_reconcile(
                             typer.echo(
                                 f"warning: post-merge ritual dispatch for PR "
                                 f"#{record.pr_number} failed: {_pm.detail}. "
-                                f"Recover with `fno pr sync-canonical --pr "
+                                f"Recover with `fno pr sync-canonical --pr-number "
                                 f"{record.pr_number}` or `/fno:pr merged "
                                 f"{record.pr_number}`.",
                                 err=True,

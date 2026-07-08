@@ -206,7 +206,7 @@ env is never left stale after a merge (the manual `git checkout main && git pull
 && fno update && fno restart` becomes a ritual step). Opt-in and self-deduping:
 
 ```bash
-fno pr sync-canonical --pr "$PR" \
+fno pr sync-canonical --pr-number "$PR" \
   || echo "post-merge: canonical sync returned non-zero (non-fatal) - record in report" >&2
 ```
 
