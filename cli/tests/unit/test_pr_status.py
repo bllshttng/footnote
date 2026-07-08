@@ -7,7 +7,10 @@ not red, and an empty rollup is *unknown* not red.
 """
 from __future__ import annotations
 
-from fno.pr import _status
+import json as _json
+
+from fno.pr import _reviews, _status
+from fno.pr._proc import Result
 
 
 def test_all_pass_is_green():
@@ -118,11 +121,6 @@ def test_run_status_fetch_failure_is_error(monkeypatch, capsys):
 # These exercise read_optional_review_state with a fake `runner` (no gh) plus the
 # run_status integration. "Optional" resolves to the hardcoded bots regardless of
 # config (config read is best-effort and wrapped), so gemini/codex are stable.
-
-import json as _json
-
-from fno.pr import _reviews
-from fno.pr._proc import Result
 
 _URL = "https://github.com/o/r/pull/42"
 
@@ -253,6 +251,15 @@ def test_graphql_errors_envelope_degrades_to_unknown():
         if "graphql" in cmd:
             return Result(0, _json.dumps({"errors": [{"message": "nope"}]}), "")
         return Result(0, _json.dumps({"url": _URL, "reviews": []}), "")
+
+    state = _reviews.read_optional_review_state("42", runner=runner)
+    assert state == {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+
+
+def test_non_object_json_degrades_to_unknown():
+    """US4: a valid-but-non-object JSON body degrades, never AttributeErrors."""
+    def runner(cmd, *, cwd=None, timeout=None, **_):
+        return Result(0, _json.dumps(["not", "an", "object"]), "")
 
     state = _reviews.read_optional_review_state("42", runner=runner)
     assert state == {"optional_reviews": "unknown", "optional_reviews_unresolved": None}

@@ -52,9 +52,10 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
     """The reviewer names that mark a review author as *optional*.
 
     The single source of truth for the optional set: the hardcoded bots plus
-    every `config.review.peers` posting identity (and the shared `peer_identity`).
-    A config that can't be read degrades to just the bots - the optional signal
-    is advisory, so a missing config never hard-fails.
+    `config.review.optional_apps` and every `config.review.peers` posting
+    identity (and the shared `peer_identity`). A config that can't be read
+    degrades to just the bots - the optional signal is advisory, so a missing
+    config never hard-fails.
     """
     names = list(_OPTIONAL_BOTS)
     try:
@@ -63,6 +64,9 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
         from fno.config import load_settings_for_repo
 
         review = load_settings_for_repo(Path(cwd) if cwd else Path.cwd()).review
+        # optional_apps is the config's own honored-if-present optional-bot list;
+        # excluding it would hide a configured optional app's findings.
+        names.extend(review.optional_apps or [])
         if review.peer_identity:
             names.append(review.peer_identity)
         for entry in review.peers or []:
@@ -105,6 +109,8 @@ def _fetch_threads(
             data = json.loads(res.stdout)
         except (json.JSONDecodeError, ValueError):
             return None
+        if not isinstance(data, dict):  # a valid non-object JSON is unavailable
+            return None
         # `gh api graphql` exits 0 on a GraphQL-level error (auth/partial): the
         # body carries `errors` and/or a null pullRequest. Treat as unavailable.
         pr_node = (((data.get("data") or {}).get("repository") or {})).get("pullRequest")
@@ -112,11 +118,11 @@ def _fetch_threads(
             return None
         conn = pr_node.get("reviewThreads") or {}
         for node in conn.get("nodes") or []:
-            if not node:
+            if not isinstance(node, dict):  # GraphQL can return null/odd nodes
                 continue
             cnodes = (node.get("comments") or {}).get("nodes") or []
             author = ""
-            if cnodes and cnodes[0]:
+            if cnodes and isinstance(cnodes[0], dict):
                 author = (cnodes[0].get("author") or {}).get("login") or ""
             threads.append((author, bool(node.get("isResolved"))))
         page = conn.get("pageInfo") or {}
@@ -153,6 +159,8 @@ def read_optional_review_state(
         data = json.loads(res.stdout)
     except (json.JSONDecodeError, ValueError):
         return dict(_UNKNOWN)
+    if not isinstance(data, dict):  # a valid non-object JSON degrades to unknown
+        return dict(_UNKNOWN)
     slug = repo_slug_from_url(data.get("url") or "")
     if not slug:
         return dict(_UNKNOWN)
@@ -164,14 +172,18 @@ def read_optional_review_state(
 
     def _entry(login: str) -> dict:
         key = _strip_bot(login).lower()
-        if key not in by_author:
-            by_author[key] = {"author": _strip_bot(login), "state": None, "inline_count": 0}
-        return by_author[key]
+        entry = by_author.get(key)
+        if entry is None:
+            entry = {"author": _strip_bot(login), "state": None, "inline_count": 0}
+            by_author[key] = entry
+        return entry
 
     # Review-level presence + state (covers a body-only COMMENTED review with no
     # thread, which reviewThreads never returns - the Domain Pitfall).
     for review in data.get("reviews") or []:
-        login = ((review or {}).get("author") or {}).get("login") or ""
+        if not isinstance(review, dict):
+            continue
+        login = (review.get("author") or {}).get("login") or ""
         if not _is_optional(login, names):
             continue
         entry = _entry(login)
