@@ -30,7 +30,12 @@ The default mode `think` takes a **free-text design seed** (or no argument, for 
 - **`what-if`** -> mode is `what-if`. Print `running what-if (scenario stress-test)`. The remaining tokens are what-if's own arguments (`[domain] [depth] [from-scenarios] [failure-modes] "scope" [Iterations: N]`). Go to Step 3.
 - **`panel`** (or the hidden alias **`tank`**) -> mode is `panel`. Print `running panel (multi-persona debate)`. The remaining tokens are panel's own arguments (`[auto] [continue {slug}|list] [deep|shallow] [startup|adversarial] <decision>`). Go to Step 4.
 - **`dispatch`** -> mode is `dispatch`. Print `running dispatch (conversational /think handoff)`. The remaining token is the target node id/slug. Go to Step 5.
-- **a single bare word that is none of the above** -> this is an unknown mode (almost always a typo'd mode keyword, not a one-word design seed). Do NOT default, do NOT guess. Print:
+- **a single bare token that is none of the above AND strict-resolves in the graph** -> mode is `think`, seeded by that node. This is the common node-seed invocation (`/think x-4af4`, `/think 4af4`, `/think dashless-spawn`, `/think next`) that no longer needs the redundant `think` keyword. Resolve it with STRICT resolution (exact id, bare hex, exact slug, or the literal `next` only - never fuzzy):
+  - token is the literal `next` -> `fno backlog next` (already strict by construction).
+  - else -> `fno backlog get --strict "<token>"`.
+
+  If resolution succeeds (exit 0), print `seed: <token> (graph-resolved: "<title>")`, take the node as the design seed, and go to Step 2. If it exits non-zero (no exact match, OR the resolver errored - graph missing/lock contention), surface the resolver's stderr and fall through to the unknown-mode stop below - never guess a seed. Strictness lives in the resolver, NOT in a shape regex here: a slug-shaped typo (`panle` near a `panel-mode` node) is indistinguishable from a real slug by shape, so `--strict` (exact-only, no describe-it) is what separates them - `panle` misses and correctly hits the unknown-mode stop.
+- **a single bare word that is none of the above and does NOT strict-resolve** -> this is an unknown mode (almost always a typo'd mode keyword, not a one-word design seed). Do NOT default, do NOT guess. Print:
 
   ```
   unknown think mode: '<token>'
