@@ -6,7 +6,7 @@ This reference covers config load, codemap, state initialization, input-type det
 
 ## Step 1: Load Workspace Config (MANDATORY)
 
-Check for `settings.yaml` in `.fno/` (project override) or `$HOME/.fno/` (primary). Extracts: `worktree_base`, testing auth shortcuts, project gotchas. Store config path and current project in target-state.md. If not found, cross-project features are disabled.
+Check for `config.toml` in `.fno/` (project override) or `$HOME/.fno/` (primary). Extracts: `worktree_base`, testing auth shortcuts, project gotchas. Store config path and current project in target-state.md. If not found, cross-project features are disabled.
 
 ## Step 1a: Structural Context (AUTO)
 
@@ -38,7 +38,7 @@ CLI flags always take precedence over config values.
 After loading config, resolve the size profile:
 
 1. Check arguments for `-S`, `-M`, or `-L` (mutually exclusive, last wins)
-2. If no size flag: read `default_size` from settings.yaml (`get_config "default_size" "M"`)
+2. If no size flag: read `default_size` from config.toml (`get_config "default_size" "M"`)
 3. Load [size-profiles.md](size-profiles.md) and apply the resolved profile's flag template
 4. Individual CLI flags and config values override profile values (CLI > config > profile > size default)
 
@@ -50,7 +50,7 @@ The size profile sets the base values for all toggles. Individual flags then ove
 
 **Skip flag provenance (ENFORCED):** Flags are set by (in priority order):
 1. CLI flags (`--no-external`, `--no-docs`) and positional modifiers (`adversarial`, `clean`)
-2. Project config (`.fno/settings.yaml`)
+2. Project config (`.fno/config.toml`)
 3. Size profile (from resolved -S/-M/-L)
 
 **FORBIDDEN:** Setting skip flags to `true` based on your own judgment (e.g., "this project doesn't need docs" or "no external review needed"). If no CLI flag, config, or size profile sets it, the phase MUST run.
@@ -177,7 +177,7 @@ Running validation at execution time catches all four cases.
 Read domain from the lookup chain:
 1. `--domain` CLI flag (if provided in arguments)
 2. Plan's `00-INDEX.md` `domain:` field
-3. Settings: `config.default_domain` in settings.yaml
+3. Settings: `config.default_domain` in config.toml
 4. Default: `"code"`
 
 ```bash
@@ -202,7 +202,7 @@ domain_phases:
 
 Phase resolution uses a three-level chain:
 1. **Plan override**: `phases:` section in 00-INDEX.md (highest priority)
-2. **Domain profile**: `domains.{name}.phases.{phase}` in settings.yaml
+2. **Domain profile**: `domains.{name}.phases.{phase}` in config.toml
 3. **Code default**: hardcoded in `_code_default_phase()` in config.sh
 
 For each of the 6 phases (execute, review, validate, ship, external, docs):

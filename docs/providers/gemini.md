@@ -17,7 +17,7 @@ This repository supports Gemini through a two-tier adapter:
 
 Gemini can upgrade beyond stable fallback when all of these are true:
 
-1. `config.gemini_experimental_agents: true` in `.fno/settings.yaml`, or `FNO_GEMINI_EXPERIMENTAL_AGENTS=1`
+1. `config.gemini_experimental_agents: true` in `.fno/config.toml`, or `FNO_GEMINI_EXPERIMENTAL_AGENTS=1`
 2. Generated project agents exist in `.gemini/agents/`
 3. Gemini CLI has experimental agents enabled in its own settings
 

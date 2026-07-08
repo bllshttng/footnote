@@ -70,7 +70,7 @@ The gate reuses the **existing backlog state model** (Locked Decision 3): a `rea
 
 ## Configuration
 
-`config.target.auto_launch_on_blueprint` in `.fno/settings.yaml` (project) or `~/.fno/settings.yaml` (global). Default `false`. Read with the `get_config "target.auto_launch_on_blueprint" "false"` pattern (same shape as `config.target.dedupe_dead_duplicates`). Manual dispatch via `/target bg <node...>` is always available regardless of the flag.
+`config.target.auto_launch_on_blueprint` in `.fno/config.toml` (project) or `~/.fno/config.toml` (global). Default `false`. Read with the `get_config "target.auto_launch_on_blueprint" "false"` pattern (same shape as `config.target.dedupe_dead_duplicates`). Manual dispatch via `/target bg <node...>` is always available regardless of the flag.
 
 ## Deferred: native-plan-mode auto-launch (Task 3.3a)
 

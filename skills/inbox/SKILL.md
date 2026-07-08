@@ -15,12 +15,12 @@ reads it and acts. This skill teaches you the contract.
 ## What this is (post-2026-05 thread-per-file layout)
 
 Each project has an `inbox/` directory whose location is configurable via
-`config.paths.inbox_dir` in settings.yaml. For vault setups Jason's auto-
+`config.paths.inbox_dir` in config.toml. For vault setups Jason's auto-
 migrated `paths.inbox_dir: "{vault}/internal/agents/{project}/inbox"`,
 resolving to `~/your-vault/internal/agents/<project>/inbox/`. Non-vault setups
 default to `~/your-vault/internal/agents/<project>/inbox/` for backward
 compatibility (override via env var `FNO_INBOX_ROOT` in tests, or via
-`config.paths.inbox_dir` in settings.yaml for production). Each
+`config.paths.inbox_dir` in config.toml for production). Each
 conversation is one markdown file in that directory:
 `{YYYY-MM-DD}-{slug}.md`. Replies append to the same file rather than
 creating new ones, so the recipient sees a self-contained thread per
@@ -219,7 +219,7 @@ You do not need to call anything; the detector is structural.
 
 - Do not send `kind: heads-up` for FYI-only updates. The triage costs LLM tokens. Use `fyi`.
 - Do not send `kind: question` for things you can answer yourself with a `/think` pass. A `question` interrupts a human.
-- Do not send to a project that has no `project:` field in its `.fno/settings.yaml`. The recipient will reject it.
+- Do not send to a project that has no `project:` field in its `.fno/config.toml`. The recipient will reject it.
 - Do not put secrets, credentials, or large payloads in the body. Thread files are checked into the your vault.
 - Do not bypass `--reply-to` and use a fresh `send` for replies. Without `--reply-to`, threading breaks and the recipient sees orphan messages instead of a self-contained thread.
 

@@ -4,7 +4,7 @@
 
 ## Phase Invocation Table
 
-Phases resolve from `domain_phases` in settings.yaml (falling back to built-in code domain defaults):
+Phases resolve from `domain_phases` in config.toml (falling back to built-in code domain defaults):
 
 | Phase | Default Skill (code domain) |
 |-------|-------|

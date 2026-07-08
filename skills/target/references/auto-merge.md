@@ -10,7 +10,7 @@ Automatically merge a PR after external review passes. Off by default. Identical
 
 ## Enable via Settings
 
-Add to `.fno/settings.yaml` (project-scoped) or `~/.fno/settings.yaml` (global):
+Add to `.fno/config.toml` (project-scoped) or `~/.fno/config.toml` (global):
 
 ```yaml
 config:
@@ -45,8 +45,8 @@ Pass the positional modifier at invocation time to override settings for that ru
 
 1. CLI positional `no-merge` - false
 2. CLI positional `auto-merge` - true
-3. Local `.fno/settings.yaml` `config.auto_merge.enabled`
-4. Global `~/.fno/settings.yaml` `config.auto_merge.enabled`
+3. Local `.fno/config.toml` `config.auto_merge.enabled`
+4. Global `~/.fno/config.toml` `config.auto_merge.enabled`
 5. Default - false
 
 If both `auto-merge` and `no-merge` appear in the same invocation, `no-merge` wins (safer).

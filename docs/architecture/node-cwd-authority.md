@@ -62,7 +62,7 @@ Threshold lives under `config.health_monitor.thresholds.project_cwd_mismatch`, d
 
 | Scenario | Behavior |
 |---|---|
-| settings.yaml missing/malformed at `get` time | resolver returns None, `_resolved_cwd` falls back to recorded cwd, existing reader warnings on stderr - never worse than pre-fix |
+| config.toml missing/malformed at `get` time | resolver returns None, `_resolved_cwd` falls back to recorded cwd, existing reader warnings on stderr - never worse than pre-fix |
 | Work-map root missing on disk | loud launch failure (`failed <node>` outcome line), operator fixes the work-map |
 | Stale installed fno | jq `// .cwd` fallback = pre-fix behavior |
 | Settings edited mid dispatch loop | each `get` re-reads; a torn read degrades to fallback and self-corrects on the next node |

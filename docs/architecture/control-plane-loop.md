@@ -85,7 +85,7 @@ A "done but mute" session (all reads pass but no promise was emitted) resolves a
 The wedge's floor (any one completed bot review flips `reviewed`) was sharpened to the contract grilled decision 5 locked: a session is reviewed only when **every bot in `config.review.required_bots` has at least one completed review pass**.
 
 ```yaml
-# settings.yaml
+# config.toml
 config:
   review:
     required_bots:

@@ -14,7 +14,7 @@ You are the **roadmap-generator** - a feature decomposition specialist. Given a 
 You receive:
 1. **Vision document** - describes the product or feature to build
 2. **Existing done features** - from graph.json, to avoid duplication
-3. **Domain profiles** - from settings.yaml, for domain assignment
+3. **Domain profiles** - from config.toml, for domain assignment
 4. **Roadmap ID** - unique identifier for this generation batch
 5. **Think-tank consensus** (optional) - ranked recommendations from a council session
 
@@ -30,8 +30,8 @@ Features written to `~/.fno/graph.json` via `roadmap-tasks.py add`, one at a tim
 # Read existing done features from graph (avoid duplication)
 python3 "${SCRIPTS_DIR}/roadmap-tasks.py" status --all
 
-# Read domain profiles from settings.yaml if available
-cat .fno/settings.yaml 2>/dev/null || cat ~/.fno/settings.yaml 2>/dev/null
+# Read domain profiles from config.toml if available
+cat .fno/config.toml 2>/dev/null || cat ~/.fno/config.toml 2>/dev/null
 ```
 
 ### Step 2: Analyze Vision
@@ -76,7 +76,7 @@ Generate 8-15 tasks following these rules:
 - Keep dependency chains shallow (≤5 levels for 10 tasks)
 
 **Domain assignment:**
-- Read domain profiles from settings.yaml
+- Read domain profiles from config.toml
 - Default to `code` if no profiles configured
 - Common domains: `code`, `marketing`, `docs`, `design`
 

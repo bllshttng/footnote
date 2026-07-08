@@ -23,7 +23,7 @@ cli/src/fno/pr/_rebase.py   <- rebase-resolve.sh  (exit-code protocol incl. 42)
 ```
 
 The auto_merge config is read through the new typed `config.auto_merge`
-(`AutoMergeBlock`) instead of re-parsing `settings.yaml` in a subprocess, so the
+(`AutoMergeBlock`) instead of re-parsing `config.toml` in a subprocess, so the
 4-tier precedence + caching live in one place. Validation mirrors the old
 `config.sh` helpers exactly (invalid `merge_strategy` -> `merge`,
 `conflict_resolution` -> `opus`, `remediation` -> `attempt`).

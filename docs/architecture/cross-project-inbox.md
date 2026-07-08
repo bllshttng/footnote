@@ -12,7 +12,7 @@ cross-project peer detection mechanical instead of LLM-judged.
 Skills that prompt for cross-project messaging (`/think`, `/blueprint`, the
 `/target` ship recap) need a way to answer "which peer should hear about
 this?" without burning an LLM call per file. Two opt-in maps in
-`~/.fno/settings.yaml` make the answer mechanical:
+`~/.fno/config.toml` make the answer mechanical:
 
 ```yaml
 config:
@@ -42,7 +42,7 @@ explode into raw glob soup.
 
 `fno.inbox.settings.read_peer_surfaces()` and
 `read_surface_patterns()` return these maps as plain `dict[str, list[str]]`
-values. Both walk up to the nearest `.fno/settings.yaml` (project-
+values. Both walk up to the nearest `.fno/config.toml` (project-
 local override → global), and both return `{}` silently when the block is
 absent. The opt-in default is "no peer messaging", so a workspace without
 this configuration sees no extra prompts and sends no messages.
@@ -113,7 +113,7 @@ entries; only triaged heads-up threads do (via `fno mail triage` ->
                 |     (interrupts mid-feature)       |
 ```
 
-Sender resolution: `resolve_project()` walks up from cwd looking for `.fno/settings.yaml` with a `project:` field. Without that field, every `fno mail` verb errors with the exact fix string `"set 'project:' in .fno/settings.yaml or pass --from"` (the reply/drain verbs keep `--from`; the cursor `unread`/`ack` take `--name`; the send verb `fno mail send` uses `--from-name`).
+Sender resolution: `resolve_project()` walks up from cwd looking for `.fno/config.toml` with a `project:` field. Without that field, every `fno mail` verb errors with the exact fix string `"set 'project:' in .fno/config.toml or pass --from"` (the reply/drain verbs keep `--from`; the cursor `unread`/`ack` take `--name`; the send verb `fno mail send` uses `--from-name`).
 
 ## Three message kinds (post-2026-05)
 

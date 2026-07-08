@@ -58,7 +58,7 @@ Target uses t-shirt sizes to control ceremony level:
 | Medium | `-M` | Uses /do waves. Adds fresh verification, external review, docs. This is the default. |
 | Large | `-L` | Uses /do waves with everything: research phase, adversarial challenge, browser testing, goal verification, clean pass, how-to guide. For critical production features. |
 
-No flag means medium. Set a project default with `default_size: M` in `.fno/settings.yaml`.
+No flag means medium. Set a project default with `default_size: M` in `.fno/config.toml`.
 
 ### Overrides
 
@@ -119,7 +119,7 @@ This is the core innovation. Other tools suggest code. Target ships it.
 
 This creates matching worktrees in each project, dispatches parallel subagents, and creates linked PRs. Projects execute in dependency order (backend first, frontend second).
 
-Requires workspace configuration in `~/.fno/settings.yaml`. Run `/fno:setup` to configure.
+Requires workspace configuration in `~/.fno/config.toml`. Run `/fno:setup` to configure.
 
 ## Resume after interruption
 

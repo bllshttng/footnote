@@ -85,7 +85,7 @@ Status semantics:
 **Opt-in:**
 ```bash
 PREFLIGHT_RUN_TESTS=1 bash run-checks.sh
-# or in .fno/settings.yaml:
+# or in .fno/config.toml:
 # preflight:
 #   test_suite_check: true
 ```

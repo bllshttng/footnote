@@ -5,7 +5,7 @@ Domain profiles define what skill or command runs at each pipeline phase, enabli
 ## Schema
 
 ```yaml
-# ~/.fno/settings.yaml (or .fno/settings.yaml)
+# ~/.fno/config.toml (or .fno/config.toml)
 domains:
   {domain-name}:
     phases:
@@ -121,7 +121,7 @@ Use `allow_claw: false` for domains with real-world consequences (trading, deplo
 Configure automatic model fallback when the primary model hits rate limits or errors:
 
 ```yaml
-# In settings.yaml config section:
+# In config.toml config section:
 config:
   model_fallback:
     chain:

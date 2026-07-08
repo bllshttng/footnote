@@ -51,7 +51,7 @@ The registry on disk is one JSON file at `state_dir() / "agents" / "registry.jso
 }
 ```
 
-`config.paths.agents_registry_path` in `settings.yaml` overrides the default location for users with non-standard `state_dir` setups.
+`config.paths.agents_registry_path` in `config.toml` overrides the default location for users with non-standard `state_dir` setups.
 
 ### Three optional session-id fields
 

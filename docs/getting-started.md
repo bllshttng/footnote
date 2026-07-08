@@ -42,7 +42,7 @@ gh auth status         # authenticated; if not, run: gh auth login
 
 ## Configure your project
 
-Configuration lives in `.fno/settings.yaml` (project-local) layered over `~/.fno/settings.yaml` (global). The global file holds shared defaults; the project file holds only the per-repo deltas. There are two ways to set it up.
+Configuration lives in `.fno/config.toml` (project-local) layered over `~/.fno/config.toml` (global). The global file holds shared defaults; the project file holds only the per-repo deltas. There are two ways to set it up.
 
 **In a Claude Code session (agent-driven):**
 
@@ -73,7 +73,7 @@ fno config doctor                                    # what resolved, and any su
 
 ### The settings you'll touch first
 
-These are real keys in `settings.yaml` (run `fno config get <key>` to read any of them, or `fno config schema --markdown` for the complete reference):
+These are real keys in `config.toml` (run `fno config get <key>` to read any of them, or `fno config schema --markdown` for the complete reference):
 
 | Key | What it does | Default |
 |-----|--------------|---------|

@@ -87,13 +87,10 @@ _get_from_settings() {
         return 1
     fi
 
-    # Simple keys: extract from config: block (indented by 2+ spaces)
+    # Flat config.toml: a top-level `${key} = value` line.
     local value
-    value=$(sed -n '/^config:/,/^[^ ]/{
-        /^  '"${key}"':/p
-    }' "$file" 2>/dev/null \
+    value=$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null \
         | head -1 \
-        | sed "s/^[[:space:]]*${key}:[[:space:]]*//" \
         | tr -d '"' | tr -d "'")
     if [[ -n "$value" ]]; then
         echo "$value"

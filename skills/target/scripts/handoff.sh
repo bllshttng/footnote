@@ -95,7 +95,7 @@ _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 _CONFIG_SH="$_SCRIPT_DIR/lib/config.sh"
 if [ -f "$_CONFIG_SH" ]; then
   # Set LOCAL_SETTINGS relative to FNO_DIR so config works in sandbox
-  LOCAL_SETTINGS="$FNO_DIR/settings.yaml"
+  LOCAL_SETTINGS="$FNO_DIR/config.toml"
   source "$_CONFIG_SH"
   GENERATION_CAP=$(get_config "target.handoff.generation_cap" "4")
   USED_PCT_TRIGGER=$(get_config "target.handoff.used_pct_trigger" "50")

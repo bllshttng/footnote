@@ -5,19 +5,19 @@ Provides awareness of related projects for cross-project coordination.
 ## Workspace Config Location
 
 Check in order:
-1. `.fno/settings.yaml` (current project - rare, for project-specific overrides)
-2. `~/.fno/settings.yaml` (global - primary location)
+1. `.fno/config.toml` (current project - rare, for project-specific overrides)
+2. `~/.fno/config.toml` (global - primary location)
 
 ## Settings Schema
 
-settings.yaml has two top-level sections: `work` (project topology) and `config` (execution defaults). See `workspace/references/config-schema.md` for canonical defaults.
+config.toml has two top-level sections: `work` (project topology) and `config` (execution defaults). See `workspace/references/config-schema.md` for canonical defaults.
 
 ### Schema
 
 Projects are always organized under named workspaces in `work.workspaces.{name}.projects`. Even single-product setups use a workspace - the `/setup` wizard creates one named after your project. This avoids dual-mode branching in skills.
 
 ```yaml
-# ~/.fno/settings.yaml (global)
+# ~/.fno/config.toml (global)
 
 work:
   # Multi-workspace schema: organize projects into logical workspaces
@@ -149,10 +149,10 @@ config:
   profile: balanced                  # quality | balanced | budget
 ```
 
-### Local Override (.fno/settings.yaml)
+### Local Override (.fno/config.toml)
 
 ```yaml
-# .fno/settings.yaml (project-local, overrides global config)
+# .fno/config.toml (project-local, overrides global config)
 config:
   expertise: frontend
   max_iterations: 20
@@ -174,7 +174,7 @@ config:
 
 ## Workspace Auto-Detection
 
-Abilities detects which workspace the current project belongs to by matching `pwd` against project paths in settings.yaml:
+Abilities detects which workspace the current project belongs to by matching `pwd` against project paths in config.toml:
 
 ```
 pwd = ~/code/myplatform/api
@@ -196,7 +196,7 @@ If `pwd` doesn't match any project path, workspace features are disabled and too
 
 ```markdown
 # At start of skill that needs cross-project awareness
-If file exists "~/.fno/settings.yaml":
+If file exists "~/.fno/config.toml":
   Load work config (work.workspaces.{name}.projects)
   Set project_paths variable
   Enable cross-project features
@@ -214,7 +214,7 @@ matched-worktree / linked-PR pipeline.
 
 When analyzing features:
 ```
-1. Load settings.yaml
+1. Load config.toml
 2. Scan ALL project paths for implementations
 3. Create plans that reference correct repos
 4. Tag plans with affected projects
@@ -229,7 +229,7 @@ coordination across repos.
 
 ## Add Project (`--add-project` / `--add-projects`)
 
-Quick commands to register projects in settings.yaml. Also available via `/setup --add-project`.
+Quick commands to register projects in config.toml. Also available via `/setup --add-project`.
 
 ```bash
 /workspace --add-project [path]        # Add single project (default: cwd)
@@ -290,7 +290,7 @@ If `work.workspaces` has only one workspace, auto-select it. If multiple, infer 
 
 ```
 AskUserQuestion: "Which workspace does this project belong to?"
-  Options: [{workspace names from settings.yaml}, "Create new workspace"]
+  Options: [{workspace names from config.toml}, "Create new workspace"]
 ```
 
 **3. Check for duplicates:**
@@ -315,7 +315,7 @@ Confirm?"
 
 If user picks a "Change" option -> ask the specific follow-up, then re-show summary. Most of the time auto-detection is correct and users just pick "Yes".
 
-**5. Write to settings.yaml & confirm:**
+**5. Write to config.toml & confirm:**
 
 Append to the target workspace's projects list and report:
 
@@ -389,11 +389,11 @@ Enter number or name:"
 ```
 AskUserQuestion: "Remove 'notification-service' from workspace 'myplatform'?
 
-  This only removes it from settings.yaml - no files are deleted."
+  This only removes it from config.toml - no files are deleted."
   Options: ["Yes, remove", "Cancel"]
 ```
 
-**3. Remove from settings.yaml & confirm:**
+**3. Remove from config.toml & confirm:**
 
 Remove the project entry from the workspace's projects list. If the workspace has no projects left, remove the workspace too.
 
@@ -433,11 +433,11 @@ AskUserQuestion: "Remove workspace 'side-project' and its 1 project?
   Projects that will be unregistered:
     - app (fullstack)
 
-  This only removes from settings.yaml - no files are deleted."
+  This only removes from config.toml - no files are deleted."
   Options: ["Yes, remove workspace", "Cancel"]
 ```
 
-**3. Remove from settings.yaml & confirm:**
+**3. Remove from config.toml & confirm:**
 
 ```
 Removed workspace 'side-project' (1 project unregistered)
@@ -471,7 +471,7 @@ Detected: Python backend (fastapi, postgres)
 
 4. **Write config:**
 ```yaml
-# .claude/settings.yaml created
+# .claude/config.toml created
 ```
 
 ## Environment Variables
@@ -524,7 +524,7 @@ testing:
 ### Example: Testing User Sign-In Flow
 
 ```typescript
-// Agent reads from settings.yaml:
+// Agent reads from config.toml:
 // testing.frontend.auth.email_otp.test_emails[0]
 // testing.frontend.auth.email_otp.otp_retrieval.playwright
 
@@ -544,7 +544,7 @@ test('user can sign in with email OTP', async ({ page }) => {
 
 ## Key Principles
 
-- **Single source of truth** - settings.yaml defines all projects
+- **Single source of truth** - config.toml defines all projects
 - **Auto-detection** - Infer stack from project files
 - **Consistent naming** - Same branch names across repos
 - **Linked PRs** - Reference related PRs automatically
@@ -559,7 +559,7 @@ test('user can sign in with email OTP', async ({ page }) => {
 - Forget to link PRs
 
 **Always:**
-- Check for settings.yaml first
+- Check for config.toml first
 - Use env_var if defined
 - Match branch names across projects
 - Update all related repos together

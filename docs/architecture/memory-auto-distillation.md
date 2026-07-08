@@ -166,7 +166,7 @@ Three guardrails matter:
 | `scripts/memory/distill-session.sh` | Main orchestrator: resolve memory dir, build prompt, call Haiku, parse YAML, dispatch per candidate |
 | `scripts/memory/write-memory-entry.sh` | Per-candidate writer: dedup check, atomic write, atomic MEMORY.md update |
 | `hooks/target-stop-hook.sh` | COMPLETE-branch invocation (non-blocking) |
-| `.fno/settings.yaml.example` | `config.executors.distill.{max_cost_usd, enabled, memory_dir_override}` |
+| `.fno/config.toml.example` | `config.executors.distill.{max_cost_usd, enabled, memory_dir_override}` |
 | `tests/memory/test_distill_session.sh` | End-to-end with stubbed `claude -p` |
 | `tests/memory/test_dedup.sh` | New / no-op / update three-path coverage |
 | `tests/memory/test_completion_only.sh` | Static-analysis: distill is in COMPLETE, not BLOCKED |

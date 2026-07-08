@@ -56,8 +56,8 @@ git -C ~/.claude/projects/-Users-yourname-yourrepo restore memory/
 
 ## How to disable auto-distillation
 
-Edit `.fno/settings.yaml` (project-local) or
-`~/.fno/settings.yaml` (global):
+Edit `.fno/config.toml` (project-local) or
+`~/.fno/config.toml` (global):
 
 ```yaml
 config:
@@ -74,7 +74,7 @@ short-circuits before the Haiku call.
 Two options:
 
 ```yaml
-# .fno/settings.yaml
+# .fno/config.toml
 config:
   executors:
     distill:

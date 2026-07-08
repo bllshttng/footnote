@@ -212,7 +212,7 @@ a formal seat on the panel as "Domain Expert" by default.
 | standard (default) | 4 + DA | 2 | ~7 min | ~50K |
 | deep | all + DA | 3 | ~12 min | ~80K |
 
-Project default personas (from settings.yaml) and user seat are always included on top.
+Project default personas (from config.toml) and user seat are always included on top.
 
 ### Subcommands and flags
 
@@ -260,13 +260,13 @@ into design or planning:
 
 ### Persona sets
 
-Three built-in sets, plus project defaults from settings.yaml, plus custom inline:
+Three built-in sets, plus project defaults from config.toml, plus custom inline:
 
 - **default** - PM, Designer, Developer, Target User, CEO, Devil's Advocate
 - **startup** - Solo Founder, Target User, Churned User, Competitor, Investor, Devil's Advocate
 - **adversarial** - Skeptical Customer, Regulatory Reviewer, Accessibility Advocate, Scale Pessimist, Budget Hawk, Devil's Advocate
 
-Configure project-specific personas in `.fno/settings.yaml`:
+Configure project-specific personas in `.fno/config.toml`:
 
 ```yaml
 think_tank:

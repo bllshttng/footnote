@@ -30,7 +30,7 @@ Step 5  judgment           read gh pr diff; (a) append dated prose section to pa
 Step 6  report             one block; a Failures line if any verb exited non-zero
 ```
 
-### Config (per repo `.fno/settings.yaml`)
+### Config (per repo `.fno/config.toml`)
 
 ```yaml
 config:

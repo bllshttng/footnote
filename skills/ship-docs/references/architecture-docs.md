@@ -18,9 +18,9 @@ Load the appropriate reference based on doc type:
 
 ## Step 0: Resolve Documentation Root (MANDATORY)
 
-Read documentation paths from settings.yaml:
-1. Check `.fno/settings.yaml` -> `config.docs.architecture_path`
-2. Fall back to `~/.fno/settings.yaml` -> `config.docs.architecture_path`
+Read documentation paths from config.toml:
+1. Check `.fno/config.toml` -> `config.docs.architecture_path`
+2. Fall back to `~/.fno/config.toml` -> `config.docs.architecture_path`
 3. Default: `docs/architecture`
 
 ```bash

@@ -175,7 +175,7 @@ fno backlog triage trend [--days N] [--json]
 ```
 
 Configuration lives under `config.health_monitor` in
-`~/.fno/settings.yaml` (or the project-local override). Defaults
+`~/.fno/config.toml` (or the project-local override). Defaults
 ship as documented in CLAUDE.md > Backlog Health Monitoring; the
 typical hourly invocation is:
 
@@ -193,7 +193,7 @@ Each agent owns a folder at `~/your-vault/internal/agents/{project}/` with `inbo
 as the live inbox inside it. Agents send messages to other agents' inboxes, read
 their own inbox at the top of every megawalk iteration, and ack each message after handling.
 
-Set `project: <name>` in your `.fno/settings.yaml` to identify the
+Set `project: <name>` in your `.fno/config.toml` to identify the
 sender. Without this field, `fno mail` errors with the fix string.
 
 ### Verbs

@@ -39,7 +39,7 @@ Do NOT invoke any implementation skill, write any code, scaffold any project, or
 
 ### 1. Understand Context
 - Check current project state (files, docs, recent commits)
-- Review any existing specs (read plan path: `.claude/settings.json` → `plansDirectory`, or `.fno/settings.yaml` → `config.plans.full_path`)
+- Review any existing specs (read plan path: `.claude/settings.json` → `plansDirectory`, or `.fno/config.toml` → `config.plans.full_path`)
 
 ### 1b. Scope Decomposition Check
 Before diving into design, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
@@ -66,7 +66,7 @@ Step 2 below asks what the USER wants from the design. Both are needed.
 
 ### 1d. Cross-Project Peer Awareness (fires twice)
 
-If `~/.fno/settings.yaml` declares a `config.inbox.peers` map, a
+If `~/.fno/config.toml` declares a `config.inbox.peers` map, a
 single peer-detection check runs at two distinct moments in this flow.
 Both moments share the same anti-patterns and disambiguation rule
 (below). The check is opt-in: with no `peers` block, no `surfaces` map,
@@ -542,7 +542,7 @@ Document any pitfalls that could affect the implementation plan. Examples:
 
 ### 8. Save Design Document
 
-Save to: `{plansDirectory}/YYYY-MM-DD-<feature-name>.md` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/settings.yaml` → `config.plans.full_path`)
+Save to: `{plansDirectory}/YYYY-MM-DD-<feature-name>.md` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/config.toml` → `config.plans.full_path`)
 
 Include:
 1. Overview

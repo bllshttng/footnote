@@ -133,11 +133,9 @@ config_flag_is_true() {
   local key="$2"
   [[ -f "$file" ]] || return 1
   local value
-  value=$(sed -n '/^config:/,/^[^ ]/{
-    /^  '"${key}"':/p
-  }' "$file" 2>/dev/null \
+  # Flat config.toml: a top-level `${key} = value` line.
+  value=$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null \
     | head -1 \
-    | sed "s/^[[:space:]]*${key}:[[:space:]]*//" \
     | tr -d '"' | tr -d "'")
   [[ "$value" == "true" || "$value" == "yes" || "$value" == "1" ]]
 }

@@ -204,11 +204,11 @@ For each major user journey, trace the full path:
 3. Mark each link as connected, stubbed, or broken
 4. If a link is broken, note what task would fix it
 
-### 3b. Goal Progress Cross-Reference (MANDATORY if settings.yaml has goals)
+### 3b. Goal Progress Cross-Reference (MANDATORY if config.toml has goals)
 
 After feature discovery, cross-reference against project goals:
 
-1. Read `project.goals` from settings.yaml (`.fno/settings.yaml` or `~/.fno/settings.yaml`)
+1. Read `project.goals` from config.toml (`.fno/config.toml` or `~/.fno/config.toml`)
 2. Read `~/.fno/ledger.json` entries (if exists)
 3. For each goal, find tasks whose `branch` or `summary` relates to the goal
 4. Produce a progress table:
@@ -229,7 +229,7 @@ Recommendation: G1 has no work yet. Consider prioritizing if open source is a ne
 
 This mapping is approximate — use task summaries and branches to infer goal alignment. Explicit goal tags in ledger.json may be added in a future iteration.
 
-If ledger.json or settings.yaml doesn't exist, note: "Goal progress unavailable — no ledger.json or settings.yaml found"
+If ledger.json or config.toml doesn't exist, note: "Goal progress unavailable — no ledger.json or config.toml found"
 
 If a goal has status `not_started` and zero ledger.json entries, flag it: "⚠️ No work started — consider prioritizing"
 

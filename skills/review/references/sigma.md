@@ -176,9 +176,9 @@ gh pr view --json state,isDraft --jq '{state: .state, isDraft: .isDraft}'
 
 Load [report-template.md](report-template.md) for the structured output format.
 
-#### Goal Relevance (if settings.yaml has goals)
+#### Goal Relevance (if config.toml has goals)
 
-Read `project.goals` from settings.yaml (`.fno/settings.yaml` or `~/.fno/settings.yaml`). For each goal:
+Read `project.goals` from config.toml (`.fno/config.toml` or `~/.fno/config.toml`). For each goal:
 1. Determine if the changes are **Primary** (directly advance), **Secondary** (support), or **Not related**
 2. If changes touch areas outside ALL stated goals, flag as potential scope creep
 3. This is INFORMATIONAL — does not affect the PASS/FAIL verdict
@@ -287,7 +287,7 @@ the six-agent panel output is the proof. The PR description carries the verdict 
 By default every panel agent runs on Claude (via `Task()`). An operator can route
 specific agents to a different coding model (`codex` / `gemini`) for a genuine
 cross-model read by setting `config.review.cross_model` / `config.review.agent_providers`
-in `.fno/settings.yaml` - the SAME config the internal `fno review` panel honors.
+in `.fno/config.toml` - the SAME config the internal `fno review` panel honors.
 When neither is set, this whole section is a no-op and the panel is byte-for-byte
 today's all-Claude run.
 

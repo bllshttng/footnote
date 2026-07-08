@@ -66,7 +66,7 @@ See `skills/do/references/executor-resolution.md` for the full contract.
 ## Inputs
 
 Read your task spec from `.fno/current-PLAN.md`. Read settings from
-`.fno/settings.yaml` (or defaults if absent):
+`.fno/config.toml` (or defaults if absent):
 
 | Key | Default |
 |-----|---------|
@@ -75,19 +75,20 @@ Read your task spec from `.fno/current-PLAN.md`. Read settings from
 | `config.executors.impeccable.max_iterations_per_task` | `8` |
 | `config.executors.impeccable.backlog_filings_per_iteration` | `3` |
 
-Helpers to read these without a YAML parser:
+Helpers to read these from the flat config.toml without a full parser (match
+`key = value` at any table depth; the keys are distinctive enough):
 
 ```bash
-THRESHOLD=$(awk '/^config:/{c=1} c && /critique_(threshold|target):/ {gsub(/[^0-9]/,""); print; exit}' .fno/settings.yaml 2>/dev/null)
+THRESHOLD=$(awk -F= '/^[[:space:]]*critique_(threshold|target)[[:space:]]*=/{gsub(/[^0-9]/,"",$2); print $2; exit}' .fno/config.toml 2>/dev/null)
 THRESHOLD=${THRESHOLD:-35}   # accepts critique_target (canonical, matches orchestrator.py) or critique_threshold (legacy alias)
 
-FLOOR=$(awk '/^config:/{c=1} c && /critique_floor:/ {gsub(/[^0-9]/,""); print; exit}' .fno/settings.yaml 2>/dev/null)
+FLOOR=$(awk -F= '/^[[:space:]]*critique_floor[[:space:]]*=/{gsub(/[^0-9]/,"",$2); print $2; exit}' .fno/config.toml 2>/dev/null)
 FLOOR=${FLOOR:-25}
 
-MAX_ITER=$(awk '/^config:/{c=1} c && /max_iterations_per_task:/ {gsub(/[^0-9]/,""); print; exit}' .fno/settings.yaml 2>/dev/null)
+MAX_ITER=$(awk -F= '/^[[:space:]]*max_iterations_per_task[[:space:]]*=/{gsub(/[^0-9]/,"",$2); print $2; exit}' .fno/config.toml 2>/dev/null)
 MAX_ITER=${MAX_ITER:-8}
 
-MAX_BACKLOG=$(awk '/^config:/{c=1} c && /backlog_filings_per_iteration:/ {gsub(/[^0-9]/,""); print; exit}' .fno/settings.yaml 2>/dev/null)
+MAX_BACKLOG=$(awk -F= '/^[[:space:]]*backlog_filings_per_iteration[[:space:]]*=/{gsub(/[^0-9]/,"",$2); print $2; exit}' .fno/config.toml 2>/dev/null)
 MAX_BACKLOG=${MAX_BACKLOG:-3}
 ```
 

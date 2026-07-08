@@ -97,6 +97,6 @@ work:
 
 - **Absent = disabled**: If `config.linear` is not present, Linear is off. No need for explicit `enabled: false`.
 - **Empty list = skip**: If `config.docs.roles` is `[]`, role-based how-to generation is skipped.
-- **Lookup order**: `.claude/settings.local.json` → `.claude/settings.json` → `.fno/settings.yaml` → `~/.fno/settings.yaml`
+- **Lookup order**: `.claude/settings.local.json` → `.claude/settings.json` → `.fno/config.toml` → `~/.fno/config.toml`
 - **Claude Code settings.json mapping**: `"plansDirectory"` → `plans.focused_path` and `plans.full_path`
 - **Skills reference config keys** using the dotted path (e.g., `config.plans.full_path`), resolved via `get_config "plans.full_path" ""`. No default — unconfigured = ask user.

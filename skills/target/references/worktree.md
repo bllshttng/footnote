@@ -30,7 +30,7 @@ These are real bugs that have shipped and shaped the rules above.
   emitted verbatim by older inline shell, producing a bogus
   `/users/bb16/~/conductor/...` path. The shared module expands a single
   leading tilde via parameter substring before joining.
-- **Hardcoded `.claude/worktrees/` ignored settings.yaml.** Each pipeline
+- **Hardcoded `.claude/worktrees/` ignored config.toml.** Each pipeline
   rolled its own path resolution and the per-project `worktree_base`
   declaration was honored by no one. Always go through the manager.
 - **`pnpm install` reran from scratch on every worktree creation.** ~3 min
@@ -41,7 +41,7 @@ These are real bugs that have shipped and shaped the rules above.
 ## Manual worktree shape (production)
 
 ```bash
-# Create. Manager picks worktree_base from settings.yaml; falls back to
+# Create. Manager picks worktree_base from config.toml; falls back to
 # <repo>/.claude/worktrees. Branch defaults to feature/{slug}.
 RESULT=$(bash scripts/lib/worktree-manager.sh create "$PROJECT" "$SLUG")
 WORKTREE_PATH=$(echo "$RESULT" | python3 -c \
@@ -77,9 +77,9 @@ agent's verdict, not files on disk.
 
 ## Path resolution chain (manual mode)
 
-1. Project-local `<repo>/.fno/settings.yaml` `work.workspaces[].projects[].worktree_base`
-2. Global `~/.fno/settings.yaml` (same key, multi-workspace shape)
-3. Global `~/.fno/settings.yaml` `work.projects[].worktree_base` (legacy flat shape)
+1. Project-local `<repo>/.fno/config.toml` `work.workspaces[].projects[].worktree_base`
+2. Global `~/.fno/config.toml` (same key, multi-workspace shape)
+3. Global `~/.fno/config.toml` `work.projects[].worktree_base` (legacy flat shape)
 4. Back-compat default: `<repo>/.claude/worktrees`
 
 A single leading `~/` in `worktree_base` is expanded to `$HOME` by the

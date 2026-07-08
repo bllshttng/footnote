@@ -65,7 +65,7 @@ Opt-in, default off (Locked Decision 3). `auto_continue_enabled()` resolves, hig
 
 1. `FNO_AUTO_CONTINUE` env override (explicit force on/off; tests + same-process).
 2. campaign-arm marker file `.fno/.auto-continue-armed` (written by `/megawalk auto-continue`).
-3. `config.auto_continue.enabled` in settings.yaml (project-local overrides global via the deep-merge in `load_settings`).
+3. `config.auto_continue.enabled` in config.toml (project-local overrides global via the deep-merge in `load_settings`).
 4. default `False`.
 
 A malformed `config.auto_continue` block (a non-boolean `enabled`, or a scalar where the block should be a mapping) degrades to disabled rather than raising out of the settings load (AC2-ERR), and any settings-read failure in the resolver is swallowed to `False`.

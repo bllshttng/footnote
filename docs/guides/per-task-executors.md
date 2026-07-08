@@ -103,7 +103,7 @@ is backend; declaring `executor: do` keeps it routed to archer.
 ## Disabling inference globally
 
 To turn off surface inference for the project, set in
-`.fno/settings.yaml`:
+`.fno/config.toml`:
 
 ```yaml
 config:

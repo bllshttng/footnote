@@ -26,7 +26,7 @@ The repo root [`README.md`](../README.md) is the quickstart. This index maps the
 ## Configuration
 
 - [path-config.md](path-config.md) - the `config.paths.*` schema, env vars, template variables
-- [configuration-guide.md](configuration-guide.md) - the full `settings.yaml` reference
+- [configuration-guide.md](configuration-guide.md) - the full `config.toml` reference
 - [provider-rotation.md](provider-rotation.md) - provider records, failover, per-agent routing, combos
 
 ## Architecture (how it works)

@@ -10,13 +10,13 @@ Send messages between agents in different projects without losing context across
 
 Onboarding is a single step: set the project name so peers can address you.
 
-**Set the project name.** Edit `<repo>/.fno/settings.yaml` and add (or confirm) `project: <name>` at the top. The name MUST match what peers will use in `fno mail send --to-project <name>` (example known names: `footnote`, `acme-backend`, `acme-web`, `acme-docs`, `acme-blog`, `marketing`). If the field is missing, every `fno mail` verb errors with `set 'project:' in .fno/settings.yaml or pass --from` (recipient verbs keep `--from`; the send verb is `fno mail send --from-name`).
+**Set the project name.** Edit `<repo>/.fno/config.toml` and add (or confirm) `project: <name>` at the top. The name MUST match what peers will use in `fno mail send --to-project <name>` (example known names: `footnote`, `acme-backend`, `acme-web`, `acme-docs`, `acme-blog`, `marketing`). If the field is missing, every `fno mail` verb errors with `set 'project:' in .fno/config.toml or pass --from` (recipient verbs keep `--from`; the send verb is `fno mail send --from-name`).
 
 Once named, peers can `fno mail send --to-project <you>` and you read with `fno mail unread` / drain with `fno mail drain`.
 
 ## Setup (one-time per project)
 
-Each project must declare its identity in `.fno/settings.yaml`:
+Each project must declare its identity in `.fno/config.toml`:
 
 ```yaml
 project: acme-web

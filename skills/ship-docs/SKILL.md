@@ -30,7 +30,7 @@ Load [references/architecture-docs.md](references/architecture-docs.md) for temp
 
 Load [references/how-to-guides.md](references/how-to-guides.md) for templates and process.
 
-Read roles from settings.yaml -> `config.docs.roles`. Generate one guide per affected role.
+Read roles from config.toml -> `config.docs.roles`. Generate one guide per affected role.
 
 ### 4. Parallel Generation
 
@@ -41,11 +41,11 @@ When invoked by target, architecture docs and how-to guides can be generated in 
 Target invokes this skill as the docs phase. It passes:
 - Feature name and description
 - Changed files list
-- Affected user roles (from settings.yaml)
+- Affected user roles (from config.toml)
 
 ## Key Principles
 
-- **Location matters** - Follow configured paths from settings.yaml
+- **Location matters** - Follow configured paths from config.toml
 - **Audience-appropriate** - Developers get architecture, users get how-to
 - **Keep current** - Update existing docs, don't duplicate
 - **Roles from config** - Only generate for configured roles

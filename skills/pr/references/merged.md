@@ -40,7 +40,7 @@ warm-context backfill/handoff slots).
 
 - The PR is already merged (this runs *after* merge, by hand or from the
   Phase 2 watcher).
-- The repo's `.fno/settings.yaml` sets `config.post_merge.parking_lot_path`.
+- The repo's `.fno/config.toml` sets `config.post_merge.parking_lot_path`.
   Without it the skill fails loud (see Step 1). It never guesses a path,
   because the vault-area name does not equal the project name
   (`example-pipeline -> internal/etl/backlog/parking-lot.md`).
@@ -70,16 +70,16 @@ REPO_ROOT="$(git rev-parse --show-toplevel)" || { echo "post-merge: not in a git
 
 # Read config WITHOUT masking a read failure as "unset". `fno config get`
 # prints an empty line for a known-but-unset key (clean exit 0); it exits
-# NON-ZERO only when fno is missing/too old or settings.yaml fails to
+# NON-ZERO only when fno is missing/too old or config.toml fails to
 # validate. Those are NOT "not opted in" - fail loud with the real reason
 # instead of misreporting them as an unset path.
 PM_ERR="$(mktemp)"
 if ! ENABLED="$(fno config get config.post_merge.enabled 2>"$PM_ERR")"; then
-  echo "post-merge: 'fno config get config.post_merge.enabled' failed (fno missing/too old, or settings.yaml invalid):" >&2
+  echo "post-merge: 'fno config get config.post_merge.enabled' failed (fno missing/too old, or config.toml invalid):" >&2
   cat "$PM_ERR" >&2; rm -f "$PM_ERR"; exit 1
 fi
 if ! PARKING_LOT_REL="$(fno config get config.post_merge.parking_lot_path 2>"$PM_ERR")"; then
-  echo "post-merge: 'fno config get config.post_merge.parking_lot_path' failed (fno missing/too old, or settings.yaml invalid):" >&2
+  echo "post-merge: 'fno config get config.post_merge.parking_lot_path' failed (fno missing/too old, or config.toml invalid):" >&2
   cat "$PM_ERR" >&2; rm -f "$PM_ERR"; exit 1
 fi
 rm -f "$PM_ERR"
@@ -91,7 +91,7 @@ fi
 
 if [[ -z "$PARKING_LOT_REL" ]]; then
   echo "post-merge: config.post_merge.parking_lot_path is unset for this repo." >&2
-  echo "Set it in .fno/settings.yaml, e.g.:" >&2
+  echo "Set it in .fno/config.toml, e.g.:" >&2
   echo "  config:" >&2
   echo "    post_merge:" >&2
   echo "      parking_lot_path: internal/<area>/backlog/parking-lot.md   # repo-relative" >&2

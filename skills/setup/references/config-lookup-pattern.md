@@ -10,8 +10,8 @@ Every skill that needs a configurable value must use this pattern.
 Read plan save location (first match wins):
 1. `.claude/settings.local.json` → `"plansDirectory"`
 2. `.claude/settings.json` → `"plansDirectory"`
-3. `.fno/settings.yaml` → `config.plans.focused_path`
-4. `~/.fno/settings.yaml` → `config.plans.focused_path`
+3. `.fno/config.toml` → `config.plans.focused_path`
+4. `~/.fno/config.toml` → `config.plans.focused_path`
 
 No default — if unconfigured, ask the user or suggest `/fno:setup`.
 ```
@@ -21,7 +21,7 @@ No default — if unconfigured, ask the user or suggest `/fno:setup`.
 ```markdown
 ## Step 0: Check if Feature Enabled
 
-Read from settings.yaml:
+Read from config.toml:
 - `config.docs.how_to_guides` — if absent or false, skip this step
 - `config.linear.enabled` — if absent, Linear integration is disabled
 ```
@@ -31,7 +31,7 @@ Read from settings.yaml:
 ```markdown
 ## Step 0: Read Roles
 
-Read from settings.yaml → `config.docs.roles`
+Read from config.toml → `config.docs.roles`
 If absent or empty: skip role-based generation
 ```
 

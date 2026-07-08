@@ -50,7 +50,7 @@ Load [references/test-plan-template.md](references/test-plan-template.md) for th
 
 ### 3. Save Test Plan
 
-Save to: `{config.docs.test_plan_path}/YYYY-MM-DD-<feature>-test-plan.md` (read from settings.yaml, default: `docs/test-plans`)
+Save to: `{config.docs.test_plan_path}/YYYY-MM-DD-<feature>-test-plan.md` (read from config.toml, default: `docs/test-plans`)
 
 ### 4. Execute Testing
 

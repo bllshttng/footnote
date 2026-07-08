@@ -7,16 +7,16 @@ Manual browser testing for visual verification, UX flow testing, and multi-devic
 Before any browser testing, check for project-specific testing context:
 
 ```bash
-# Check for settings.yaml
+# Check for config.toml
 WORKSPACE_CONFIG=""
-if [[ -f ".fno/settings.yaml" ]]; then
-  WORKSPACE_CONFIG=".fno/settings.yaml"  # Project override (rare)
-elif [[ -f "$HOME/.fno/settings.yaml" ]]; then
-  WORKSPACE_CONFIG="$HOME/.fno/settings.yaml"  # Primary location
+if [[ -f ".fno/config.toml" ]]; then
+  WORKSPACE_CONFIG=".fno/config.toml"  # Project override (rare)
+elif [[ -f "$HOME/.fno/config.toml" ]]; then
+  WORKSPACE_CONFIG="$HOME/.fno/config.toml"  # Primary location
 fi
 ```
 
-**If settings.yaml exists, extract testing context:**
+**If config.toml exists, extract testing context:**
 - `testing.{project}.auth` - Available login methods (dev-login, OTP, etc.)
 - `testing.{project}.auth.guardian_otp.test_numbers` - Phone numbers for OTP testing
 - `testing.{project}.auth.guardian_otp.otp_retrieval` - How to get OTP codes

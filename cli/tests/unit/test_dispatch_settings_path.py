@@ -60,8 +60,8 @@ def test_default_settings_path_returns_project_local_when_exists(
     cwd.mkdir()
     abilities_dir = cwd / ".fno"
     abilities_dir.mkdir()
-    local_settings = abilities_dir / "settings.yaml"
-    local_settings.write_text("schema_version: 1\n", encoding="utf-8")
+    local_settings = abilities_dir / "config.toml"
+    local_settings.write_text("schema_version = 1\n", encoding="utf-8")
 
     # Override PWD so _default_settings_path uses our test dir
     monkeypatch.setenv("PWD", str(cwd))
@@ -84,7 +84,7 @@ def test_default_settings_path_falls_back_to_config_file_when_no_local(
 
     # Write a global settings.yaml and point FNO_CONFIG at it
     global_settings = tmp_path / "global-settings.yaml"
-    global_settings.write_text("schema_version: 1\n", encoding="utf-8")
+    global_settings.write_text("schema_version = 1\n", encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(global_settings))
 
     from fno import config as config_mod
@@ -113,9 +113,9 @@ def test_default_settings_path_project_local_returned_even_if_config_file_raises
     """
     cwd = tmp_path / "has-local"
     cwd.mkdir()
-    local_settings = cwd / ".fno" / "settings.yaml"
+    local_settings = cwd / ".fno" / "config.toml"
     local_settings.parent.mkdir()
-    local_settings.write_text("schema_version: 1\n", encoding="utf-8")
+    local_settings.write_text("schema_version = 1\n", encoding="utf-8")
     monkeypatch.setenv("PWD", str(cwd))
 
     # Write a global settings that would fail with glob chars (causes ValidationError)
@@ -149,14 +149,14 @@ def test_default_settings_path_project_local_wins_over_global(
     """
     cwd = tmp_path / "has-local"
     cwd.mkdir()
-    local_settings = cwd / ".fno" / "settings.yaml"
+    local_settings = cwd / ".fno" / "config.toml"
     local_settings.parent.mkdir()
-    local_settings.write_text("schema_version: 1\n", encoding="utf-8")
+    local_settings.write_text("schema_version = 1\n", encoding="utf-8")
     monkeypatch.setenv("PWD", str(cwd))
 
     # Also have a global settings (via FNO_CONFIG)
     global_settings = tmp_path / "global.yaml"
-    global_settings.write_text("schema_version: 1\n", encoding="utf-8")
+    global_settings.write_text("schema_version = 1\n", encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(global_settings))
 
     from fno import config as config_mod

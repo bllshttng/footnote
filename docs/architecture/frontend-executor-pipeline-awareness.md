@@ -90,7 +90,7 @@ guesses aesthetic intent; aesthetic choices stay with the human.
 the band between floor and target produce DONE_WITH_CONCERNS with the critique
 findings written to `deferred_findings`. This reuses the existing
 `approved: false` + `deferred_findings:` gate artifact shape. Both thresholds
-live in `.fno/settings.yaml` under `config.executors.impeccable`.
+live in `.fno/config.toml` under `config.executors.impeccable`.
 
 **Decision 7 - Out-of-scope finding routing.** Each critique or harden finding
 is classified into one of three buckets: `in_diff` (file is in the task's
@@ -183,7 +183,7 @@ score < critique_floor   (default 25/40)  ->  RESULT: FAILED
 DONE_WITH_CONCERNS uses the existing gate artifact shape:
 `approved: false` with the deferred findings list. Operator and the stop hook
 already handle this verdict; no new machinery was needed. Both thresholds are
-configurable per project via `.fno/settings.yaml`.
+configurable per project via `.fno/config.toml`.
 
 ## Audit vs sigma-review boundary
 

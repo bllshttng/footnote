@@ -4,7 +4,7 @@
 
 If the API returns a rate limit or overload error during execution:
 
-1. Read `model_fallback.chain` from settings.yaml (default: `[claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5]`)
+1. Read `model_fallback.chain` from config.toml (default: `[claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5]`)
 2. Read `model_fallback.cooldown_seconds` (default: 60)
 
 Present to user via AskUserQuestion:
@@ -22,4 +22,4 @@ Update `target-state.md` `model_fallback` section with the choice. If user picks
 
 **Note:** In interactive mode, the model switch is advisory - Claude Code itself manages model selection. The tracking helps the user understand what happened and informs the stop hook's status messages.
 
-In autonomous (unattended) mode, there is no AskUserQuestion path - the loop chooses based on `model_fallback.policy` in settings.yaml (`wait_then_switch` is the default).
+In autonomous (unattended) mode, there is no AskUserQuestion path - the loop chooses based on `model_fallback.policy` in config.toml (`wait_then_switch` is the default).
