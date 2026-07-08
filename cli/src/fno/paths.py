@@ -422,6 +422,8 @@ def observer_reports_dir(
     override = settings.config.paths.observer_reports_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
+    if project_id and ("/" in project_id or ".." in project_id):
+        project_id = None  # a caller-supplied id must not escape internal/<project>/
     pid = project_id or settings.config.project.id
     if pid:
         project_name = pid

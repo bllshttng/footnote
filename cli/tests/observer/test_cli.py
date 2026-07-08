@@ -87,6 +87,32 @@ def test_digest_dir_keyed_to_skill_owner(monkeypatch, tmp_path):
     assert seen["project_id"] == "fno"
 
 
+def test_observer_dir_rejects_traversal_project_id(monkeypatch, tmp_path):
+    """A caller-supplied project_id carrying path separators / traversal must
+    not escape internal/<project>/ - it falls back to the configured id."""
+    import fno.paths as paths
+
+    class _Cfg:
+        class paths:
+            observer_reports_dir = None
+
+        class project:
+            id = "safeproj"
+
+        class obsidian:
+            enabled = False
+            vault = None
+
+    class _S:
+        config = _Cfg()
+
+    monkeypatch.setattr(paths, "_settings", lambda: _S())
+    monkeypatch.setattr(paths, "state_dir", lambda: tmp_path)
+    d = paths.observer_reports_dir(project_id="../../etc")
+    assert ".." not in str(d)
+    assert d == tmp_path / "observer-reports" / "safeproj"
+
+
 def test_help_lists_sweep_and_replay():
     r = runner.invoke(cli.observer_app, ["--help"])
     assert r.exit_code == 0
