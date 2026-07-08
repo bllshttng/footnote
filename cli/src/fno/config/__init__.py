@@ -1521,7 +1521,7 @@ class HealthMonitorBlock(BaseModel):
 
     Promoted from the private ``health_monitor.py:DEFAULT_CONFIG`` so the model
     is the single source of truth (US1) and ``health_monitor.py`` can read
-    ``load_settings().config.health_monitor`` instead of re-loading the YAML (US2).
+    ``load_settings().health_monitor`` instead of re-loading the YAML (US2).
     Sub-blocks use ``extra="ignore"`` + fail-safe coercers so a malformed value
     degrades to defaults rather than breaking ``load_settings()`` (Failure Modes).
     """
@@ -2462,8 +2462,7 @@ class SettingsModel(ConfigBlock):
     ``ConfigBlock`` so ``settings.review`` / ``settings.project`` resolve
     directly. The legacy ``config:``-wrapped shape still loads via the
     ``_unwrap`` before-validator (so ``SettingsModel(config={...})`` and old
-    YAML both work), and legacy readers of ``settings.config.<x>`` keep working
-    via the ``config`` property below.
+    YAML both work).
     """
 
     # schema_version versions the file format, not behavior.
@@ -2475,12 +2474,6 @@ class SettingsModel(ConfigBlock):
         if isinstance(data, dict):
             return _unwrap_config_dict(data)
         return data
-
-    @property
-    def config(self) -> "ConfigBlock":
-        # Back-compat: legacy code reads settings.config.<block>. The flat model
-        # IS the config block, so return self.
-        return self
 
 
 # Keys a per-worktree `.fno/settings.local.yaml` may override on top of the
@@ -2979,7 +2972,7 @@ def agents_headless_yolo(provider: str) -> bool:
     never silently drops the sandbox into a full bypass.
     """
     try:
-        block = getattr(load_settings().config.agents, provider, None)
+        block = getattr(load_settings().agents, provider, None)
     except Exception:
         return False
     if block is None:
