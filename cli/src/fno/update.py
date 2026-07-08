@@ -15,6 +15,7 @@ replaced while it runs" race.
 from __future__ import annotations
 
 import logging
+import filecmp
 import json
 import os
 import shlex
@@ -38,11 +39,23 @@ except Exception:
 # the source-path cache; monkeypatched in tests the same way as _CACHE_FILE.
 _INSTALLED_REV_FILE = _CACHE_FILE.parent / "installed-rev"
 
-# Records the last git commit that touched crates/ - the marker doctor.py reads
-# to decide whether cargo-installed rust bins are fresh relative to source.
-# Stored separately from _INSTALLED_REV_FILE because a Python-only commit must
-# not flag the rust bins stale.
+# Legacy breadcrumb: the last git commit that touched crates/. NO LONGER read by
+# any freshness verdict - update's gate and doctor's verdict both
+# interrogate the binary's embedded crates_rev now. Still written as an inert
+# marker in case an out-of-tree consumer wants it; delete the writes once a grep
+# proves none remain.
 _RUST_MARKER_FILE = _CACHE_FILE.parent / "installed-rust-rev"
+
+# The fno-agents triad: client + daemon + worker, one crate, three [[bin]]s.
+# They MUST stay a coherent same-build set in every install location (the
+# resolve_daemon_bin same-dir sibling contract, client.rs) - a mixed-version
+# pair is the worse bug, so update syncs all three or none per location.
+_TRIAD_STEMS = ("fno-agents", "fno-agents-daemon", "fno-agents-worker")
+
+
+def _triad_names() -> tuple[str, ...]:
+    suffix = ".exe" if os.name == "nt" else ""
+    return tuple(f"{stem}{suffix}" for stem in _TRIAD_STEMS)
 
 _log = logging.getLogger(__name__)
 
@@ -305,6 +318,44 @@ def _cargo_installed_bin() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optional[str]:
+    """The clean crates/ subtree rev the installed binary self-reports, or None.
+
+    Runs ``<binary> version --json`` (the build.rs embed) and returns its
+    ``crates_rev`` only when the binary answered cleanly AND the build is not
+    dirty. Returns None - which the gate treats as STALE, forcing a rebuild -
+    for every failure mode: a missing/hung/crashing binary (bounded by
+    ``timeout``), a non-zero exit, unparseable or non-dict JSON, a "unknown"
+    rev (non-git build), or a dirty tree. Fail toward rebuild, never toward a
+    false-fresh skip (the stale-marker gate's exact lie).
+    """
+    try:
+        result = subprocess.run(
+            [str(binary), "version", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    stdout = getattr(result, "stdout", None)
+    if not stdout:
+        return None
+    try:
+        data = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get("dirty") is True:
+        return None
+    rev = data.get("crates_rev")
+    if not isinstance(rev, str) or rev in ("", "unknown"):
+        return None
+    return rev
+
+
 def _cargo_installed_mux() -> Optional[Path]:
     """Return the path to the cargo-installed mux front-door binary (`fno`), or
     None if absent. Same `$CARGO_HOME/bin` location as the fno-agents bins - the
@@ -417,6 +468,112 @@ def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) 
     typer.echo("fno update: mux front door refreshed (crates/fno -> `fno`)")
 
 
+def _triad_install_dirs() -> list[Path]:
+    """Deduped install-location dirs that already host >=1 of the triad bins.
+
+    Enumerates the resolver's install locations (bundled ``fno/_bin``, the
+    launcher-sibling scripts dir, PATH) plus the uv tool venv bin, and keeps only
+    dirs that already host at least one triad binary. NEVER seeds a new location
+    (locked decision 4). The cargo bin dir may appear here; the caller skips it.
+    """
+    names = _triad_names()
+    candidates: list[Path] = []
+    try:
+        from fno.agents import rust_runtime as _rr
+        candidates.append(Path(_rr.__file__).resolve().parent.parent / "_bin")
+    except Exception:
+        pass
+    launcher = sys.argv[0] if sys.argv else ""
+    if launcher:
+        candidates.append(Path(launcher).resolve().parent)
+    onpath = shutil.which(names[0])
+    if onpath:
+        candidates.append(Path(onpath).resolve().parent)
+    candidates.append(Path.home() / ".local" / "share" / "uv" / "tools" / "fno" / "bin")
+
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+    for d in candidates:
+        try:
+            rd = d.resolve()
+        except OSError:
+            continue
+        if rd in seen:
+            continue
+        seen.add(rd)
+        if rd.is_dir() and any((rd / n).is_file() for n in names):
+            dirs.append(rd)
+    return dirs
+
+
+def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
+    """Propagate the freshly-built triad from ``cargo_bin_dir`` into every OTHER
+    live install location that already hosts one of the three bins, so client,
+    daemon, and worker stay a coherent same-build set wherever the resolver might
+    pick one up (locked decisions 3-4).
+
+    Runs on BOTH the rebuilt and the gate's fresh path so an interrupted prior
+    run's other locations still converge (AC2-FR). Per-location atomicity: each
+    bin is copied to a temp name then ``os.replace``'d (running processes keep
+    their inode; the next spawn gets the new bin). A location that already holds a
+    byte-identical triad is skipped so the fresh path stays cheap. A location that
+    cannot take the full triad HALTS update loud (``typer.Exit``) naming the
+    location and the bins left inconsistent - a mixed-version pair is the worse
+    bug, never left silently half-copied (AC2-ERR).
+    """
+    names = _triad_names()
+    sources = {n: cargo_bin_dir / n for n in names}
+    if any(not p.is_file() for p in sources.values()):
+        # Source root itself is incomplete - nothing coherent to propagate.
+        return
+
+    try:
+        cargo_resolved = cargo_bin_dir.resolve()
+    except OSError:
+        cargo_resolved = cargo_bin_dir
+
+    for dest in _triad_install_dirs():
+        if dest == cargo_resolved:
+            continue
+        if not any((dest / n).is_file() for n in names):
+            continue  # never seed a location that hosts none of the triad (decision 4)
+        if all(
+            (dest / n).is_file() and filecmp.cmp(sources[n], dest / n, shallow=False)
+            for n in names
+        ):
+            continue  # already the same build here
+        if dry_run:
+            typer.echo(f"Would sync fno-agents triad -> {dest}")
+            continue
+        copied: list[str] = []
+        tmp: Optional[Path] = None
+        try:
+            for n in names:
+                tmp = dest / f".{n}.{os.getpid()}.tmp"
+                shutil.copy2(sources[n], tmp)
+                os.replace(tmp, dest / n)  # consumes tmp; leaves nothing behind
+                tmp = None
+                copied.append(n)
+        except OSError as exc:
+            # A copy2 that wrote a partial temp, or an os.replace that failed,
+            # leaves the last tmp orphaned in dest - unlink it (same atomic-write
+            # cleanup as _write_rust_marker) before failing.
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            typer.echo(
+                f"fno update: ERROR: triad sync FAILED at {dest} ({exc}). "
+                f"Copied {copied or 'none'} before the failure; this location may now "
+                "hold a MIXED-VERSION fno-agents triad. Fix the location and re-run "
+                "`fno update` (or set FNO_AGENTS_DAEMON_BIN to a coherent triad dir).",
+                err=True,
+            )
+            raise typer.Exit(1)
+        typer.echo(f"fno update: synced fno-agents triad -> {dest}")
+
+
 def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = False) -> RefreshOutcome:
     """Refresh the cargo-installed fno-agents rust bins if stale.
 
@@ -455,18 +612,40 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         return "skipped-no-rev"
     # When force=True but subtree is None, we continue but remember we cannot write a marker.
 
-    marker = _read_rust_marker()
-    if not force and marker is not None and marker == subtree:
-        typer.echo(f"fno update: rust bins fresh (rev {subtree[:12]}); skipping cargo install")
+    # Freshness is proven by the BINARY ITSELF, not a marker file. The
+    # installed binary bakes in its crates_rev via build.rs; interrogate it and
+    # skip cargo only when that rev matches source AND the build is not dirty.
+    # A marker could advance past a stale/out-of-band binary and lie "fresh".
+    installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
+    # The fresh fast path also requires the daemon + worker siblings to be present
+    # beside the fresh client. A fresh client next to a MISSING daemon is the exact
+    # split this change repairs (resolve_daemon_bin -> DaemonBinMissing): taking the
+    # fresh path there would skip the rebuild AND hand _sync_triad an incomplete
+    # source it silently no-ops on, so the split would never heal. Any absent
+    # sibling -> fall through to cargo, which rebuilds the whole triad coherently.
+    # (daemon/worker carry no version verb, so presence is the checkable signal;
+    # cargo installs all three together, so a present sibling is the same build.)
+    triad_present = installed_bin is not None and all(
+        (installed_bin.parent / n).is_file() for n in _triad_names()
+    )
+    if not force and installed_rev is not None and installed_rev == subtree and triad_present:
+        typer.echo(
+            f"fno update: rust bins fresh (rev {installed_rev[:12]} from binary);"
+            " skipping cargo install"
+        )
         # The agents bins are current, but the mux front door (crates/fno ->
-        # `fno`) can still be ABSENT at a fresh marker: the fno->fno-py rename
-        # lands fno-py while a fresh-marker `fno update` never installed the mux,
+        # `fno`) can still be ABSENT at a fresh binary: the fno->fno-py rename
+        # lands fno-py while a fresh-binary `fno update` never installed the mux,
         # stranding the front door (no `fno` on PATH). Heal it additively if
         # missing, so `fno doctor`'s "run fno update" hint is true rather than a
         # dead-end. No-op when there is no crates/fno source. installed_bin is
         # non-None here (passed the `installed_bin is None and not force` gate).
         if _cargo_installed_mux() is None:
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
+        # Sync even on the fresh path: an interrupted prior run may have left the
+        # other install locations behind (AC2-FR). The gate's fresh verdict must
+        # NOT short-circuit convergence.
+        _sync_triad(installed_bin.parent, dry_run=dry_run)
         return "fresh"
 
     if shutil.which("cargo") is None:
@@ -513,29 +692,56 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         )
         return "failed"
 
+    # Post-deploy verify: interrogate the binary we just deployed. cargo can exit
+    # 0 yet leave a stale artifact (a reused build cache, or an install root that
+    # is not what the runtime actually resolves) - the marker gate hid exactly
+    # this class. HALT loud on mismatch with both revs printed. Skipped
+    # only when subtree is undeterminable (force with no git rev to check against).
+    if subtree is not None:
+        deployed = _cargo_installed_bin()
+        verify_rev = None if deployed is None else _installed_bin_crates_rev(deployed)
+        if verify_rev != subtree:
+            typer.echo(
+                "fno update: ERROR: post-deploy verify FAILED - the deployed"
+                f" fno-agents self-reports {verify_rev or 'no usable rev'} but source"
+                f" crates/ rev is {subtree[:12]}. The rebuild did not land where the"
+                f" runtime resolves it (install root {install_root}). NOT continuing.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
     # The mux front door (crates/fno -> `fno` on PATH) rides the SAME crates/
     # subtree staleness gate as the agents bins, so refresh it here too. Without
     # this the front door is an orphan: `fno update` rebuilds fno-agents but the
     # `fno` binary this whole channel is about is never installed or refreshed.
     _install_mux_front_door(source, install_root, dry_run=False)
 
+    # Propagate the freshly-built triad to every other live install location so
+    # client/daemon/worker stay a coherent set (the same-dir sibling contract).
+    # After a successful cargo install the triad lives at <install_root>/bin.
+    _sync_triad(install_root / "bin", dry_run=False)
+
     outcome: RefreshOutcome
     if subtree is None:
-        # force=True with an undeterminable rev: bins rebuilt, but with no
-        # marker the next doctor run still reports rust stale.
+        # force=True with an undeterminable rev: bins rebuilt but no marker
+        # breadcrumb written (no verdict reads it, so this is cosmetic).
         typer.echo("fno update: rust bins refreshed (marker not written: rev undeterminable)")
         outcome = "refreshed-no-marker"
     elif _write_rust_marker(subtree):
         typer.echo(f"fno update: rust bins refreshed (rev {subtree[:12]})")
         outcome = "refreshed"
     else:
+        # Marker write failed, but the deploy already passed post-deploy verify
+        # above - the bins ARE repaired, and no verdict reads the legacy marker.
+        # So this is a SUCCESSFUL refresh, not `refreshed-no-marker` (which
+        # `fno doctor --fix` treats as a failed repair and exits 1). Warn about the
+        # cosmetic breadcrumb, return success.
         typer.echo(
-            "fno update: WARNING: rust bins refreshed but the marker write"
-            " failed; doctor will still report rust stale"
-            f" (check {_RUST_MARKER_FILE.parent} permissions)",
+            "fno update: note: rust bins refreshed; the legacy marker write failed"
+            f" (harmless, no verdict reads it; check {_RUST_MARKER_FILE.parent} permissions)",
             err=True,
         )
-        outcome = "refreshed-no-marker"
+        outcome = "refreshed"
 
     # Best-effort daemon advisory: warn if the old binary is still running.
     try:
