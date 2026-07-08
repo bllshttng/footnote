@@ -125,6 +125,7 @@ uv run mypy src/fno/paths.py src/fno/config/'
     # New (not part of the verbatim yml extraction): self-test the mode
     # machinery of this very script. Hermetic via the SMOKE_REGISTRY_FILE seam.
     step "smoke.sh mode machinery self-test" "." 'bash tests/ci/test_smoke_modes.sh'
+    step "preflight.sh orchestration self-test" "." 'bash tests/ci/test_preflight.sh'
 }
 
 # ----------------------------------------------------------------------------
