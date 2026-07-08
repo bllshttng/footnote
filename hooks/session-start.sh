@@ -25,13 +25,22 @@ STATE_FILE=".fno/target-state.md"
 # is read by fno.paths._read_persisted_plugin_root. errexit-safe.
 prime_plugin_root_pointer() {
     [[ -f "$PLUGIN_ROOT/.claude-plugin/plugin.json" ]] || return 0
+    # Pin to the CANONICAL checkout, never a linked worktree: a worktree path
+    # here makes every other worktree's env-less `fno` resolve this worktree's
+    # scripts. --git-common-dir is <canonical>/.git from anywhere, so its parent
+    # is canonical (a no-op for a non-worktree checkout). Mirrors paths._canonical_plugin_root.
+    local root="$PLUGIN_ROOT" common
+    common="$(git -C "$PLUGIN_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ "$common" == */.git ]] && [[ -f "${common%/.git}/.claude-plugin/plugin.json" ]]; then
+        root="${common%/.git}"
+    fi
     local home="${FNO_HOME:-$HOME/.fno}"
     local ptr="$home/plugin-root"
-    if [[ -f "$ptr" ]] && [[ "$(cat "$ptr" 2>/dev/null)" == "$PLUGIN_ROOT" ]]; then
+    if [[ -f "$ptr" ]] && [[ "$(cat "$ptr" 2>/dev/null)" == "$root" ]]; then
         return 0
     fi
     mkdir -p "$home" 2>/dev/null || return 0
-    printf '%s\n' "$PLUGIN_ROOT" > "$ptr" 2>/dev/null || true
+    printf '%s\n' "$root" > "$ptr" 2>/dev/null || true
 }
 prime_plugin_root_pointer || true
 

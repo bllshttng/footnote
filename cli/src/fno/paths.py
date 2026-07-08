@@ -950,15 +950,40 @@ def _is_plugin_root(root: Path) -> bool:
     return (root / _PLUGIN_MARKER_RELPATH).is_file()
 
 
+def _canonical_plugin_root(root: Path) -> Path:
+    """Map a linked-worktree plugin root to its canonical checkout.
+
+    A worktree path in the persisted pointer makes every OTHER worktree's
+    env-less ``fno`` resolve THIS worktree's (possibly stale) scripts.
+    ``git --git-common-dir`` is ``<canonical>/.git`` from any worktree and
+    ``<root>/.git`` from the canonical checkout itself, so the parent is the
+    canonical root either way (a no-op for a non-worktree checkout). A non-git
+    root (OSS ``--plugin-dir`` tarball) returns unchanged."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return root
+    common = out.stdout.strip()
+    if out.returncode != 0 or not common.endswith("/.git"):
+        return root
+    canon = Path(common[: -len("/.git")])
+    return canon if (canon / ".claude-plugin" / "plugin.json").is_file() else root
+
+
 def _read_persisted_plugin_root() -> "Path | None":
     """Read ~/.fno/plugin-root, returning it only if it still looks like
     the plugin (marker present). A stale pointer (plugin moved/removed) returns
-    None so resolution falls through rather than handing back a dead path."""
+    None so resolution falls through rather than handing back a dead path. A
+    worktree pointer written by an older hook self-heals to canonical here."""
     try:
         pointer = _plugin_root_pointer()
         if not pointer.is_file():
             return None
-        cand = Path(pointer.read_text().strip()).expanduser()
+        cand = _canonical_plugin_root(Path(pointer.read_text().strip()).expanduser())
     except OSError:
         return None
     return cand if _is_plugin_root(cand) else None
@@ -967,9 +992,11 @@ def _read_persisted_plugin_root() -> "Path | None":
 def _persist_plugin_root(root: Path) -> None:
     """Best-effort cache of *root* to ~/.fno/plugin-root. Only writes a
     root carrying the plugin manifest (.claude-plugin/plugin.json), so an
-    env/test fake with just a stub hook can never poison the pointer. Never
-    raises - priming is an optimization, not a contract."""
+    env/test fake with just a stub hook can never poison the pointer. A
+    worktree root is canonicalized first so the pointer never points at a
+    worktree. Never raises - priming is an optimization, not a contract."""
     try:
+        root = _canonical_plugin_root(root)
         if not (root / ".claude-plugin" / "plugin.json").is_file():
             return
         pointer = _plugin_root_pointer()

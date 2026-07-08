@@ -13,6 +13,7 @@ monkeypatch FNO_HOME / the plugin-root env vars - nothing to clear.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -79,5 +80,56 @@ def test_resolve_falls_to_persisted_when_env_and_pkg_miss(tmp_path, monkeypatch,
     monkeypatch.setattr(paths, "_is_plugin_root", lambda r: Path(r) == plugin)
     got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
     assert got == plugin / "scripts" / "lib" / "set-gate.sh"
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                   capture_output=True, text=True)
+
+
+def _make_worktree_plugin(tmp_path: Path) -> tuple[Path, Path]:
+    """A canonical git checkout carrying the plugin + one linked worktree that
+    also carries it (mirrors how every footnote worktree shares tracked files).
+    Returns (canonical_root, worktree_root)."""
+    canon = _make_plugin(tmp_path / "canon")
+    _git(canon, "init", "-q")
+    _git(canon, "-c", "user.email=t@t", "-c", "user.name=t",
+         "add", "-A")
+    _git(canon, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "-m", "init")
+    wt = tmp_path / "wt"
+    _git(canon, "worktree", "add", "-q", str(wt))
+    return canon, wt
+
+
+def test_worktree_root_canonicalizes_to_main(tmp_path):
+    """The core cold-start-receipt fix (x-9d3c): a worktree plugin root maps to
+    its canonical checkout so resolution never runs a foreign worktree's script
+    (the source of Usage:/command-not-found noise). A non-worktree root is a
+    no-op."""
+    canon, wt = _make_worktree_plugin(tmp_path)
+    assert paths._canonical_plugin_root(wt).resolve() == canon.resolve()
+    assert paths._canonical_plugin_root(canon).resolve() == canon.resolve()
+    # Non-git dir returns unchanged (OSS --plugin-dir tarball).
+    plain = _make_plugin(tmp_path / "plain")
+    assert paths._canonical_plugin_root(plain) == plain
+
+
+def test_persisted_worktree_pointer_self_heals_to_canonical(tmp_path, isolated_home):
+    """An older hook that wrote a WORKTREE path to the pointer still resolves to
+    the canonical init script, so a cold-start receipt stays clean."""
+    canon, wt = _make_worktree_plugin(tmp_path)
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    (isolated_home / "plugin-root").write_text(str(wt) + "\n")
+    got = paths._read_persisted_plugin_root()
+    assert got is not None and got.resolve() == canon.resolve()
+
+
+def test_persist_writes_canonical_for_worktree_root(tmp_path, isolated_home):
+    """Persisting a worktree root stores the canonical path, never the worktree."""
+    canon, wt = _make_worktree_plugin(tmp_path)
+    paths._persist_plugin_root(wt)
+    assert Path((isolated_home / "plugin-root").read_text().strip()).resolve() \
+        == canon.resolve()
 
 
