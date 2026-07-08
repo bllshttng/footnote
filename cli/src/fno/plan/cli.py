@@ -224,14 +224,28 @@ def validate(
     from fno.plan.schema import PlanFrontmatter
 
     # Same repo-root resolution as `brief`: try repo-relative, fall back to bare.
-    resolved = Path(plan_path)
-    if not resolved.is_absolute():
+    def _resolve(p: Path) -> Path:
+        if p.is_absolute():
+            return p
         try:
-            candidate = resolve_repo_root() / plan_path
+            candidate = resolve_repo_root() / p
             if candidate.exists():
-                resolved = candidate
+                return candidate
         except (RuntimeError, OSError):
             pass
+        return p
+
+    resolved = _resolve(Path(plan_path))
+    # Epic-decomposition group nodes carry a `<doc>#group-<slug>` plan_path; the
+    # fragment is not a real filesystem path. Strip it when the literal is absent
+    # and the stripped path exists (mirrors _stamp.py read_plan_file, so finalize's
+    # post-stamp validate of a group node doesn't spuriously fail to load).
+    if not resolved.exists() and "#group-" in resolved.name:
+        base = resolved.name.rpartition("#group-")[0]
+        if base:
+            stripped = _resolve(resolved.with_name(base))
+            if stripped.exists():
+                resolved = stripped
 
     # Load errors (can't read this file) are reported distinctly from schema
     # violations (this file's frontmatter is invalid). FileNotFoundError is an

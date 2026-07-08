@@ -20,7 +20,7 @@ import enum
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from fno.plan._status import STATUS_PROGRESSION, TERMINAL_STATUSES
 
@@ -48,7 +48,9 @@ class PlanFrontmatter(BaseModel):
 
     node: str
     status: PlanStatus
-    created: date | datetime  # plans carry either a bare date or a full timestamp
+    # datetime BEFORE date so a full timestamp keeps its time (specific-first;
+    # Pydantic v2 smart-union already prefers datetime, but the order is explicit).
+    created: datetime | date
 
     claims: str | None = None  # observed identical to `node` in every sampled plan; not asserted (Open Q1)
     title: str | None = None
@@ -67,7 +69,10 @@ class PlanFrontmatter(BaseModel):
     shipped_at: datetime | None = None
     urls: list[str] = []
     session_ids: list[str] = []
-    expected_url_count: int | None = None
+    # >= 1 when present: graduate gates on `len(urls) >= expected`, so 0/negative
+    # would graduate a plan with no URLs; the stamp/set-expected writers already
+    # reject < 1, and this makes validate catch the same corrupt frontmatter.
+    expected_url_count: int | None = Field(default=None, ge=1)
 
     @field_validator("status", mode="before")
     @classmethod
