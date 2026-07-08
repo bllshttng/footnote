@@ -115,9 +115,10 @@ use crate::tree::{Dir, Rect, TabId};
 /// one that merges second must re-bump (v17/v18 were re-numbered once already).
 /// v20: `AgentRow.external` - a sideline row surfaced or liveness-upgraded from
 /// claude's daemon roster rather than the fno registry (x-0a2e); renders dim.
-/// `#[serde(default)]` keeps a v19 reader wire-tolerant. (Re-bumped from 19:
-/// x-96e8 merged first and took 19 - the second-to-merge re-bump rule.)
-pub const PROTO_VERSION: u32 = 20;
+/// `#[serde(default)]` keeps an older reader wire-tolerant. (Re-bumped from 19:
+/// x-96e8 merged first and took 19 - the second-to-merge re-bump rule.) v21
+/// adds `PaneSend { guarded }` for the server-side atomic guarded block-pipe.
+pub const PROTO_VERSION: u32 = 21;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -338,7 +339,19 @@ pub enum ControlVerb {
         claim: bool,
     },
     /// Write raw bytes to a pane's PTY (no focus change) -> [`ServerMsg::Ok`].
-    PaneSend { pane: u64, bytes: Vec<u8> },
+    /// `guarded` (v21) makes the send atomic against the target going busy:
+    /// the server evaluates the same idle authority as the block-rerun guard
+    /// (idle badge, then the writer-claim interlock) under the core-loop pane
+    /// lock immediately before the write, bouncing `busy: relay` with
+    /// [`err_code::TARGET_NOT_IDLE`] instead of injecting into an in-flight
+    /// write. Default `false` keeps raw `PaneSend` (the claim holder's own
+    /// channel, `fno mux pane send`) unguarded.
+    PaneSend {
+        pane: u64,
+        bytes: Vec<u8>,
+        #[serde(default)]
+        guarded: bool,
+    },
     /// Block until the pane's output settles (`quiet_ms` with no new output),
     /// matches `pattern` (regex over the visible grid), the child exits, or
     /// `timeout_ms` elapses -> [`ServerMsg::WaitDone`]. The deadline is
@@ -780,6 +793,10 @@ pub mod err_code {
     /// (v6) A block read that cannot be answered: an evicted or nonexistent
     /// block, or a specific `seq` requested on a markerless pane.
     pub const BLOCK_UNAVAILABLE: u32 = 5;
+    /// (v21) A guarded `PaneSend` refused: the target pane is not provably idle
+    /// (busy/blocked agent) or a live relay holds its writer claim. The bytes
+    /// did not land; the caller retries or overrides with `--force`.
+    pub const TARGET_NOT_IDLE: u32 = 6;
 }
 
 /// One tab's catalog entry inside [`ServerMsg::Layout`]. `id` is the stable
@@ -1588,6 +1605,7 @@ mod tests {
             ControlVerb::PaneSend {
                 pane: 5,
                 bytes: b"hello\r".to_vec(),
+                guarded: true,
             },
             ControlVerb::PaneWait {
                 pane: 5,

@@ -350,7 +350,10 @@ fn agent_edge_block_pipe_reads_guards_and_lands() {
 
     // A working-badged agent on the target pane: the idle guard refuses with
     // the typed exit and the --force hint. No-ttl report, so it never decays
-    // into a false green mid-test.
+    // into a false green mid-test. NO client is attached here on purpose: the
+    // server-side guard reads the registry FRESH per send, so it must refuse a
+    // busy target even in a headless session where the overlay reader is parked
+    // (the exact regression the guard would have had if it trusted self.agents).
     write_registry(
         &scratch,
         &format!(

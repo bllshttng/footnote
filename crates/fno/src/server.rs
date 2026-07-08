@@ -350,6 +350,12 @@ enum CoreMsg {
     PaneSend {
         pane: u64,
         bytes: Vec<u8>,
+        guarded: bool,
+        /// Fresh registry snapshot for a guarded send, read off-loop in
+        /// `handle_control`. `None` means either the read failed (guarded ->
+        /// fail closed) or the send is unguarded (unused). `Some(rows)` is the
+        /// idle authority the guard checks, `rows` empty => no agents => proceed.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     PaneWait {
@@ -2002,6 +2008,64 @@ impl Core {
         rerun_allowed(&self.agents, &self.session_name, pane)
     }
 
+    /// Write `bytes` to `pane`'s PTY. When `guarded`, apply the same authority
+    /// as the block-rerun path (idle badge FIRST, then the writer-claim
+    /// interlock) immediately before the write - and because the core loop is
+    /// serial, the check and the inject are atomic: no other input for this
+    /// pane interleaves between them, so the writer-claim holder cannot start a
+    /// burst in the gap. `agents` is the FRESH registry snapshot read off-loop
+    /// for this send (not `self.agents`, which is parked with no viewer); `None`
+    /// here means the read failed, so the guard fails closed. Raw `PaneSend`
+    /// (`guarded == false`) is the writer-claim holder's own channel and stays
+    /// unguarded (`agents` is unused).
+    fn pane_send(
+        &mut self,
+        pane: u64,
+        bytes: &[u8],
+        guarded: bool,
+        agents: Option<Vec<RegistryAgent>>,
+    ) -> ServerMsg {
+        let Some(entry) = self.panes.get(&pane) else {
+            return dead_pane(pane);
+        };
+        if guarded {
+            let Some(rows) = agents.as_deref() else {
+                return ServerMsg::Err {
+                    code: err_code::TARGET_NOT_IDLE,
+                    msg: "agents registry unreadable - target agent state unknown".to_string(),
+                };
+            };
+            if let Err(reason) = rerun_allowed(rows, &self.session_name, pane) {
+                return ServerMsg::Err {
+                    code: err_code::TARGET_NOT_IDLE,
+                    msg: reason.to_string(),
+                };
+            }
+            // A live relay holds the pane mid-write: bounce rather than
+            // interleave bytes into its burst. A dead holder releases here so
+            // the send resumes (mirrors the rerun-path interlock).
+            if let Some(&holder) = self.claims.get(&pane) {
+                if pid_alive(holder) {
+                    return ServerMsg::Err {
+                        code: err_code::TARGET_NOT_IDLE,
+                        msg: "busy: relay".to_string(),
+                    };
+                }
+                self.claims.remove(&pane);
+            }
+        }
+        match entry.pty.write_input(bytes) {
+            Ok(()) => ServerMsg::Ok,
+            // A dead/wedged pane fails closed: the child exited (BrokenPipe) or
+            // stopped reading (WouldBlock). The send did not land - never a
+            // silent Ok.
+            Err(e) => ServerMsg::Err {
+                code: err_code::DEAD_PANE,
+                msg: format!("pane {pane} send failed: {e}"),
+            },
+        }
+    }
+
     /// Answer a blocked prompt without focusing the pane (x-c929). The freshness
     /// contract: re-read the pane's live bottom-N region, re-hash, and inject the
     /// daemon-pinned `keystroke` ONLY when the hash matches the `fingerprint` the
@@ -3030,20 +3094,14 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
-            CoreMsg::PaneSend { pane, bytes, reply } => {
-                let msg = match self.panes.get(&pane) {
-                    None => dead_pane(pane),
-                    Some(entry) => match entry.pty.write_input(&bytes) {
-                        Ok(()) => ServerMsg::Ok,
-                        // A dead/wedged pane fails closed (AC4-ERR): the child
-                        // exited (BrokenPipe) or stopped reading (WouldBlock).
-                        // Either way the send did not land - never a silent Ok.
-                        Err(e) => ServerMsg::Err {
-                            code: err_code::DEAD_PANE,
-                            msg: format!("pane {pane} send failed: {e}"),
-                        },
-                    },
-                };
+            CoreMsg::PaneSend {
+                pane,
+                bytes,
+                guarded,
+                agents,
+                reply,
+            } => {
+                let msg = self.pane_send(pane, &bytes, guarded, agents);
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -3709,6 +3767,31 @@ async fn resolve_squad_key(resolver: &Arc<Mutex<Resolver>>, cwd: &str) -> String
     key
 }
 
+/// Read the agents registry FRESH for a guarded `PaneSend`, off the core loop.
+/// The server's `self.agents` overlay is parked whenever no client is attached
+/// (the reader `continue`s on a zero client count), so a headless one-shot
+/// block-pipe must not trust it. Reads the server's OWN registry path, closing
+/// the client/server HOME-divergence gap the client-side guard had. `Some(rows)`
+/// is the idle authority (empty => no agents => proceed); `None` means the
+/// registry is unreadable or malformed and the caller fails closed. A missing
+/// file means no daemon and no agents, which proceeds.
+async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // std::fs on a blocking pool (this crate's tokio has no `fs` feature); the
+    // same shape the overlay reader uses.
+    let read =
+        tokio::task::spawn_blocking(|| std::fs::read_to_string(agents_view::registry_path())).await;
+    match read {
+        Ok(Ok(raw)) => agents_view::derive_rows(&raw, now),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Ok(Err(_)) => None, // unreadable -> fail closed
+        Err(_) => None,     // blocking task join error -> fail closed
+    }
+}
+
 /// A one-shot v4 control connection: version-check, route the verb to the core
 /// loop with a oneshot reply, answer with exactly one message, close. A client
 /// that vanishes mid-verb drops the reply receiver, which the off-loop
@@ -3768,11 +3851,29 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::PaneSend { pane, bytes } => {
+        ControlVerb::PaneSend {
+            pane,
+            bytes,
+            guarded,
+        } => {
+            // A guarded send reads the agents registry FRESH here, off the core
+            // loop: the server's own overlay cache (`self.agents`) is parked
+            // whenever no client is attached, so a headless one-shot block-pipe
+            // would otherwise guard against a stale/empty snapshot and inject
+            // into a busy agent. Reading on the server (its own registry path)
+            // is what closes the client/server HOME-divergence gap; passing the
+            // snapshot into the core loop keeps the check + inject atomic.
+            let agents = if guarded {
+                read_guard_agents().await
+            } else {
+                None
+            };
             core_tx
                 .send(CoreMsg::PaneSend {
                     pane,
                     bytes,
+                    guarded,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
