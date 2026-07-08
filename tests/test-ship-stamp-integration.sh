@@ -407,19 +407,26 @@ frontmatter_contains "$S5_FILE" "$S5_SESSION" && pass "s5: backfill includes ses
 frontmatter_contains "$S5_FILE" "$S5_PR_URL" && pass "s5: backfill includes pr_url" \
     || fail "s5: backfill missing pr_url"
 
-# Structural check: assert the stop hook contains the backfill wiring
+# Structural check: assert the stop hook wiring that triggers stamp/graduate.
+# Stamping no longer lives inline in the shell hook - it moved into the Rust
+# finalize WRITER (crates/fno-agents/src/finalize.rs's stamp_and_graduate,
+# invoked via `"$BIN" finalize` on every terminal-allow), so the checks below
+# target the current wiring: the hook's finalize invocation, and finalize.rs's
+# own call into fno.plan._stamp.
 HOOK_FILE="$REPO_ROOT/hooks/target-stop-hook.sh"
-grep -q "Backfill plan stamp" "$HOOK_FILE" 2>/dev/null \
-    && pass "s5: hook contains 'Backfill plan stamp' log line (wiring present)" \
-    || fail "s5: hook missing backfill wiring (grep for 'Backfill plan stamp' failed)"
+FINALIZE_RS="$REPO_ROOT/crates/fno-agents/src/finalize.rs"
 
-grep -q 'stamp-plan.py\|stamp_script.*stamp\|"$stamp_script" stamp' "$HOOK_FILE" 2>/dev/null \
-    && pass "s5: hook invokes stamp-plan.py (call site present)" \
-    || fail "s5: hook missing stamp-plan.py invocation"
+grep -q '"\$BIN" finalize' "$HOOK_FILE" 2>/dev/null \
+    && pass "s5: hook invokes the finalize writer on terminal-allow (wiring present)" \
+    || fail "s5: hook missing finalize invocation (grep for '\"\$BIN\" finalize' failed)"
 
-grep -q "ship_artifact\|ship-\${session_id}" "$HOOK_FILE" 2>/dev/null \
-    && pass "s5: hook references ship artifact path (trigger condition present)" \
-    || fail "s5: hook missing ship artifact path reference"
+grep -q 'fno\.plan\._stamp' "$FINALIZE_RS" 2>/dev/null \
+    && pass "s5: finalize.rs invokes fno.plan._stamp (call site present)" \
+    || fail "s5: finalize.rs missing fno.plan._stamp invocation"
+
+grep -q 'gh_pr_url' "$FINALIZE_RS" 2>/dev/null \
+    && pass "s5: finalize.rs resolves the PR URL before stamping (trigger condition present)" \
+    || fail "s5: finalize.rs missing PR URL resolution"
 
 scenario_end 5 "$S5_FAIL_BEFORE"
 
