@@ -930,19 +930,21 @@ def update_command(
     # Refresh the pr-watch daemon onto the freshly-installed binary. `fno update`
     # only replaces the binary; it never re-renders/reloads the launchd plist, so
     # a migration-update that makes the next tick error wedges the daemon with no
-    # self-heal (observed with the config-flatten). The refresh runs the NEW
-    # `fno-py` (chained AFTER the install, best-effort) and self-gates on
-    # pr_watch.enabled, so we only append it when enabled - a disabled install
-    # gets nothing.
-    refresh_cmd: Optional[str] = None
+    # self-heal (observed with the config-flatten). Chained AFTER the install so
+    # it runs the NEW `fno-py`, and ALWAYS appended: the fresh `pr-watch refresh`
+    # self-gates on pr_watch.enabled, so gating here on the OLD binary's config
+    # reader would fail closed in the exact migration case this repairs (old
+    # reader can't parse the new config -> skip -> daemon stays wedged). Resolve
+    # fno-py to an ABSOLUTE, PATH-independent path (a cargo/front-door install may
+    # not have fno-py on PATH, and the post-install shell inherits that PATH), and
+    # carry it as an argv list so the Windows subprocess quotes it correctly.
+    refresh_argv: Optional[list[str]] = None
     try:
-        from fno.config import load_settings
+        from fno.pr_watch.cli import _resolve_fno_binary
 
-        if load_settings().pr_watch.enabled:
-            fno_py = shutil.which("fno-py") or "fno-py"
-            refresh_cmd = f"{shlex.quote(fno_py)} pr-watch refresh"
+        refresh_argv = [_resolve_fno_binary(), "pr-watch", "refresh"]
     except Exception:
-        refresh_cmd = None
+        refresh_argv = None
 
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
@@ -953,10 +955,11 @@ def update_command(
         result = subprocess.run(cmd, check=False)
         if result.returncode == 0 and rev:
             _write_installed_rev(rev)
-        if result.returncode == 0 and refresh_cmd:
+        if result.returncode == 0 and refresh_argv:
             # Best-effort, mirroring the Unix chain: refresh the watcher onto the
             # new binary but never let its failure change the update exit code.
-            subprocess.run(refresh_cmd, shell=True, check=False)
+            # List form (no shell) so subprocess handles Windows quoting.
+            subprocess.run(refresh_argv, check=False)
         raise typer.Exit(result.returncode)
 
     # On Unix, execvp replaces this Python process with the installer; uv
@@ -964,6 +967,7 @@ def update_command(
     # the running interpreter. Because execvp never returns, the installed-rev
     # marker write (and the best-effort pr-watch refresh) are chained onto the
     # installer via the shell so they run iff the install exits 0.
+    post_install = shlex.join(refresh_argv) if refresh_argv else None
     if rev:
         os.execvp(
             "/bin/sh",
@@ -971,16 +975,16 @@ def update_command(
                 "/bin/sh", "-c",
                 _install_then_mark(
                     cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid(),
-                    post_install=refresh_cmd,
+                    post_install=post_install,
                 ),
             ],
         )
-    elif refresh_cmd:
+    elif post_install:
         # No git rev (source is not a checkout), so no marker write - but still
         # chain the refresh after a successful install via a shell.
         os.execvp(
             "/bin/sh",
-            ["/bin/sh", "-c", f"{shlex.join(cmd)} && {{ {refresh_cmd} || true; }}"],
+            ["/bin/sh", "-c", f"{shlex.join(cmd)} && {{ {post_install} || true; }}"],
         )
     else:
         os.execvp(cmd[0], cmd)
