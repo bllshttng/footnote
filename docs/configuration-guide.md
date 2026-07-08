@@ -38,6 +38,9 @@
 | `post_merge.parking_lot_path` | str (optional) | _(none)_ | advanced | Per-repo vault parking-lot path for the post-merge ritual (repo-relative). |
 | `post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
 | `post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
+| `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno update && fno restart`). Unset = off. |
+| `post_merge.sync_paths` | list[str] | `[]` | advanced | Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge). |
+| `post_merge.auto_run` | bool | `false` | advanced | Let merge-detection auto-dispatch the /fno:pr merged ritual for a newly-merged PR (opt-in; default off). |
 | `research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
 | `review.github_apps` | list[str] (optional) | _(none)_ | advanced | GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots. |
 | `review.required_bots` | list[str] (optional) | _(none)_ | never | Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set. |

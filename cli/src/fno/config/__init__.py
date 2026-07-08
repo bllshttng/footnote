@@ -313,6 +313,15 @@ class PostMergeBlock(BaseModel):
     parking_lot_path: Optional[str] = None
     enabled: bool = True
     self_reap: bool = False
+    # Canonical-sync (x-47be): all three default to the feature-off state so a
+    # fresh install does nothing. sync_command is the project's whole sync
+    # incantation (run via `bash -lc` from the canonical checkout); sync_paths
+    # gates it on the merged file list (empty = always run); auto_run lets
+    # merge-detection dispatch the /fno:pr merged ritual. Footnote's own values
+    # are a documented example, never engine defaults.
+    sync_command: Optional[str] = None
+    sync_paths: list[str] = Field(default_factory=list)
+    auto_run: bool = False
 
     @field_validator("parking_lot_path", mode="before")
     @classmethod
@@ -349,6 +358,24 @@ class PostMergeBlock(BaseModel):
         (``true``/``yes``/``on``/``1``). A scalar typo (``self_reap: banana``)
         coerces to False rather than raising, and false is the safe direction -
         auto-removing a row the operator still wanted is the costly mistake.
+        """
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):  # bool already handled above
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    @field_validator("auto_run", mode="before")
+    @classmethod
+    def _coerce_auto_run(cls, v: object) -> bool:
+        """Fail-safe to false on any non-boolean value.
+
+        auto_run lets merge-detection dispatch a background /fno:pr merged
+        ritual worker. Default off, and a scalar typo coerces to False rather
+        than raising - false is the safe direction (never spawn an agent behind
+        the maintainer's back on a malformed value).
         """
         if isinstance(v, bool):
             return v
