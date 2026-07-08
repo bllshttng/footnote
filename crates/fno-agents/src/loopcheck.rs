@@ -3568,7 +3568,8 @@ mod tests {
 
     #[test]
     fn parse_settings_comments_ignored() {
-        let cfg = "# top comment\nbudget_cap = 1.0\n# another\n[ci]\n# inner\ndeclared_none = true\n";
+        let cfg =
+            "# top comment\nbudget_cap = 1.0\n# another\n[ci]\n# inner\ndeclared_none = true\n";
         let s = parse_settings(cfg);
         assert_eq!(s.flat_budget_cap, Some(Ok(1.0)));
         assert!(s.ci_declared_none);
@@ -4482,9 +4483,8 @@ mod tests {
         let empty = parse_settings("[review]\nrequired_bots = []  # no review gate\n");
         assert_eq!(empty.required_bots, Some(Vec::new()));
 
-        let inline = parse_settings(
-            "[review]\nrequired_bots = [\"chatgpt-codex-connector\"] # required\n",
-        );
+        let inline =
+            parse_settings("[review]\nrequired_bots = [\"chatgpt-codex-connector\"] # required\n");
         assert_eq!(
             inline.required_bots,
             Some(vec!["chatgpt-codex-connector".to_string()])
@@ -4613,9 +4613,8 @@ mod tests {
             inline.optional_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
-        let block = parse_settings(
-            "[review]\noptional_apps = [\n  \"chatgpt-codex-connector\",\n]\n",
-        );
+        let block =
+            parse_settings("[review]\noptional_apps = [\n  \"chatgpt-codex-connector\",\n]\n");
         assert_eq!(
             block.optional_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])

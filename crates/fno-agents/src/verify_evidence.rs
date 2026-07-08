@@ -467,8 +467,6 @@ fn parse_provider_cli(content: &str, pid: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-
-
 fn git_show_toplevel(git_bin: &str) -> Option<PathBuf> {
     let out = Command::new(git_bin)
         .args(["rev-parse", "--show-toplevel"])

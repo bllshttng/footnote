@@ -2372,11 +2372,7 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
     let settings_path = cwd.join(".fno/config.toml");
-    fs::write(
-        &settings_path,
-        "[review]\nrequired_bots = []\n",
-    )
-    .unwrap();
+    fs::write(&settings_path, "[review]\nrequired_bots = []\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2432,11 +2428,7 @@ fn ac3_err_malformed_required_bots_no_gate() {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
     let settings_path = cwd.join(".fno/config.toml");
-    fs::write(
-        &settings_path,
-        "[review]\nrequired_bots = \"gemini\"\n",
-    )
-    .unwrap();
+    fs::write(&settings_path, "[review]\nrequired_bots = \"gemini\"\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2542,11 +2534,7 @@ fn reviewers_gate_blocks_without_attestation() {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
     let settings_path = cwd.join(".fno/config.toml");
-    fs::write(
-        &settings_path,
-        "[review]\nreviewers = [\"sigma\"]\n",
-    )
-    .unwrap();
+    fs::write(&settings_path, "[review]\nreviewers = [\"sigma\"]\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2591,11 +2579,7 @@ fn reviewers_gate_clears_with_head_pinned_attestation() {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
     let settings_path = cwd.join(".fno/config.toml");
-    fs::write(
-        &settings_path,
-        "[review]\nreviewers = [\"sigma\"]\n",
-    )
-    .unwrap();
+    fs::write(&settings_path, "[review]\nreviewers = [\"sigma\"]\n").unwrap();
     // The attestation lands in the project events log loop-check reads.
     fs::write(
         cwd.join(".fno/events.jsonl"),
@@ -2650,11 +2634,7 @@ fn no_external_still_honors_reviewers_gate() {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
     let settings_path = cwd.join(".fno/config.toml");
-    fs::write(
-        &settings_path,
-        "[review]\nreviewers = [\"sigma\"]\n",
-    )
-    .unwrap();
+    fs::write(&settings_path, "[review]\nreviewers = [\"sigma\"]\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2714,11 +2694,7 @@ fn ac3_fr_restoring_required_bots_reenforces() {
 
     // Fire 1: required_bots [] -> passes without review.
     let empty_settings = cwd.join("empty-config.toml");
-    fs::write(
-        &empty_settings,
-        "[review]\nrequired_bots = []\n",
-    )
-    .unwrap();
+    fs::write(&empty_settings, "[review]\nrequired_bots = []\n").unwrap();
     let (_, d1) = fire(&[
         "loop-check",
         "--state",

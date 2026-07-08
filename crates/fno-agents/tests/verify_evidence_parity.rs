@@ -648,11 +648,7 @@ fn nonclaude_malformed_yaml_warn_rc1() {
     let d = tmp.path();
     let artifact = write(d, "art.md", "agents_dispatched: [reviewer]\n");
     // Malformed TOML (an unclosed table header) -> parse fails -> WARN + rc1.
-    let settings = write(
-        d,
-        "config.toml",
-        "[bad\nthis = is\n",
-    );
+    let settings = write(d, "config.toml", "[bad\nthis = is\n");
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
         settings.to_str().unwrap(),

@@ -1682,10 +1682,7 @@ mod tests {
             &cwd,
             "[project]\nid = \"demo\"\n[obsidian]\nenabled = false\n",
         );
-        write_settings(
-            &home,
-            "[obsidian]\nenabled = true\nvault = \"myvault\"\n",
-        );
+        write_settings(&home, "[obsidian]\nenabled = true\nvault = \"myvault\"\n");
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join(".fno/handoffs/demo"));
         let _ = fs::remove_dir_all(&dir);
@@ -1840,11 +1837,7 @@ mod tests {
         );
         // A `--settings` override file with postmortems_dir is honored (codex P2).
         let settings = cwd.join("custom-settings.toml");
-        fs::write(
-            &settings,
-            "[paths]\npostmortems_dir = \"/srv/pm\"\n",
-        )
-        .unwrap();
+        fs::write(&settings, "[paths]\npostmortems_dir = \"/srv/pm\"\n").unwrap();
         assert_eq!(
             resolve_postmortems_dir(None, Some(&settings), Some(&home), &cwd),
             PathBuf::from("/srv/pm"),
@@ -2116,11 +2109,7 @@ mod tests {
         // Legacy top-level project.id is only a fallback; config.project wins
         // (config/__init__.py:1982-1990).
         let dir = std::env::temp_dir().join(format!("fin-legacy-{}", std::process::id()));
-        let win = write_yaml(
-            &dir,
-            "win.yaml",
-            "[project]\nid = \"canon\"\n",
-        );
+        let win = write_yaml(&dir, "win.yaml", "[project]\nid = \"canon\"\n");
         assert_eq!(read_project_id(&win).as_deref(), Some("canon"));
         // No canonical block -> legacy top-level is the fallback.
         let fb = write_yaml(&dir, "fb.toml", "[project]\nid = \"legacy\"\n");

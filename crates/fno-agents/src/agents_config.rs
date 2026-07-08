@@ -169,13 +169,20 @@ pub fn min_free_gb(cwd: &Path) -> f64 {
 /// Resolve `agents.worker_qos`: `true` = demote workers (the `utility` default),
 /// `"off"` = no demotion. Any other value coerces to the default.
 pub fn worker_qos_enabled(cwd: &Path) -> bool {
-    !matches!(resolve_agents_value(cwd, "worker_qos").as_deref(), Some("off"))
+    !matches!(
+        resolve_agents_value(cwd, "worker_qos").as_deref(),
+        Some("off")
+    )
 }
 
 /// The normalized raw scalar for a direct child of `agents:` (the generalized
 /// `dead_row_grace_secs` chain), so each caller applies its own coercion.
 fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
-    resolve(cwd, |t| table_agents_scalar(t, key).as_ref().and_then(scalar_to_string))
+    resolve(cwd, |t| {
+        table_agents_scalar(t, key)
+            .as_ref()
+            .and_then(scalar_to_string)
+    })
 }
 
 /// `mux.notify_on_blocked` (default ON): the daemon fires an OS notification when
@@ -298,9 +305,13 @@ mod tests {
 
     #[test]
     fn agents_value_reads_spawn_gate_keys() {
-        let cfg = "[agents]\nconfirm = \"auto\"\nmax_live = 5\nmin_free_gb = 2.5\nworker_qos = \"off\"\n";
+        let cfg =
+            "[agents]\nconfirm = \"auto\"\nmax_live = 5\nmin_free_gb = 2.5\nworker_qos = \"off\"\n";
         assert_eq!(read_agents_value(cfg, "max_live").as_deref(), Some("5"));
-        assert_eq!(read_agents_value(cfg, "min_free_gb").as_deref(), Some("2.5"));
+        assert_eq!(
+            read_agents_value(cfg, "min_free_gb").as_deref(),
+            Some("2.5")
+        );
         assert_eq!(read_agents_value(cfg, "worker_qos").as_deref(), Some("off"));
     }
 
@@ -363,7 +374,10 @@ mod tests {
             read_mux_bool("[agents]\nconfirm = \"auto\"\n", "notify_on_blocked"),
             None
         );
-        assert_eq!(read_mux_bool("schema_version = 1\n", "notify_on_done"), None);
+        assert_eq!(
+            read_mux_bool("schema_version = 1\n", "notify_on_done"),
+            None
+        );
     }
 
     #[test]
@@ -446,13 +460,19 @@ mod tests {
         // no settings (which would otherwise resolve to the BOUNDED default).
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
-        let f = write_file("explicit-fullyolo", "[agents.gemini]\nheadless_yolo = true\n");
+        let f = write_file(
+            "explicit-fullyolo",
+            "[agents.gemini]\nheadless_yolo = true\n",
+        );
         std::env::set_var("FNO_CONFIG", &f);
         let cwd = std::env::temp_dir().join(format!("abi-headless-{}-nocfg", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
         let got = headless_yolo_enabled("gemini", &cwd);
         clear_config_env();
-        assert!(got, "FNO_CONFIG full-yolo opt-in must be honored on the Rust path");
+        assert!(
+            got,
+            "FNO_CONFIG full-yolo opt-in must be honored on the Rust path"
+        );
     }
 
     #[test]
@@ -465,6 +485,9 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let got = headless_yolo_enabled("codex", &cwd);
         clear_config_env();
-        assert!(!got, "absent key under FNO_CONFIG -> hang-safe BOUNDED default (false)");
+        assert!(
+            !got,
+            "absent key under FNO_CONFIG -> hang-safe BOUNDED default (false)"
+        );
     }
 }

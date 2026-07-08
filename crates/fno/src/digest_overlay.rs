@@ -267,8 +267,7 @@ mod tests {
 
     #[test]
     fn reads_mux_values() {
-        let yaml =
-            "[mux]\nattach_digest = false\nattach_digest_threshold_min = 30\n";
+        let yaml = "[mux]\nattach_digest = false\nattach_digest_threshold_min = 30\n";
         assert_eq!(
             read_mux_value(yaml, "attach_digest").as_deref(),
             Some("false")
