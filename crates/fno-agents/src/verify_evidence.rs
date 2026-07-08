@@ -453,18 +453,28 @@ fn parse_agent_provider(content: &str, agent: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `providers.records.<pid>.cli` from a flat config.toml.
+/// `cli` for the record whose `id == pid`, from a flat config.toml.
+///
+/// save_providers() serializes `providers.records` from a Python list, so it is
+/// a TOML array-of-tables (`[[providers.records]]` with an `id` field), NOT a
+/// table keyed by provider id. Reading it as a keyed table made `as_table()`
+/// return None for every real config, so codex/gemini providers went undetected
+/// and the non-Claude evidence path was skipped (codex P2).
 fn parse_provider_cli(content: &str, pid: &str) -> Option<String> {
-    cfg_table(content)?
+    let table = cfg_table(content)?;
+    let records = table
         .get("providers")?
         .as_table()?
         .get("records")?
-        .as_table()?
-        .get(pid)?
-        .as_table()?
-        .get("cli")?
-        .as_str()
-        .map(str::to_string)
+        .as_array()?;
+    records.iter().find_map(|rec| {
+        let t = rec.as_table()?;
+        if t.get("id").and_then(|v| v.as_str()) == Some(pid) {
+            t.get("cli").and_then(|v| v.as_str()).map(str::to_string)
+        } else {
+            None
+        }
+    })
 }
 
 fn git_show_toplevel(git_bin: &str) -> Option<PathBuf> {
@@ -596,7 +606,7 @@ mod tests {
 
     #[test]
     fn agent_provider_and_cli_lookup() {
-        let cfg = "[agents.reviewer]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[providers.records.codex-prov]\ncli = \"codex\"\n";
+        let cfg = "[agents.reviewer]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"codex-prov\"\ncli = \"codex\"\n";
         assert_eq!(
             parse_agent_provider(cfg, "reviewer").as_deref(),
             Some("codex-prov")
