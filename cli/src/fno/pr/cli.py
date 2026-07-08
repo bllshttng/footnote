@@ -111,6 +111,25 @@ def base_check(
 
 
 @pr_app.command(
+    "sync-canonical",
+    help=(
+        "Post-merge canonical-checkout sync (x-47be). Runs "
+        "config.post_merge.sync_command in the CANONICAL checkout after a PR "
+        "merges (opt-in; unset command = no-op). Exactly-once per merge SHA via "
+        "a marker + single-flight lock; fail-open. Exit 0 no-op/skipped/synced, "
+        "non-zero only on a failed sync_command (marker withheld -> retries)."
+    ),
+)
+def sync_canonical(
+    pr_number: int = typer.Option(..., "--pr", help="GitHub PR number of the merged PR"),
+) -> None:
+    from fno.pr import _sync_canonical
+
+    rc = _sync_canonical.run_sync_canonical(pr_number)
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
     "rebase",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
