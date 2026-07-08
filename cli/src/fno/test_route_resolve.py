@@ -58,6 +58,83 @@ def test_tier_no_snapshot_uses_static_table():
     assert any("static" in step for step in chain)
 
 
+# --- resolve_tier provider scoping (harness-aware) ------------------------- #
+
+
+def test_tier_static_scoped_to_claude_picks_same_harness():
+    """AC1-HP: medium tier scoped to claude -> claude-sonnet-5, not gpt-5.4."""
+    model, chain = rr.resolve_tier("medium", snapshot={}, provider="claude")
+    assert model == "claude-sonnet-5"  # the medium band's claude entry
+    assert any("provider(claude)" in step for step in chain)
+
+
+def test_tier_snapshot_scoped_to_claude_skips_codex():
+    """AC2-HP: cheapest floor-clearer is codex-mapped, but claude scope skips it."""
+    snap = _snap([
+        {"name": "gpt-5.4", "coding_percentile": 72},        # cheaper, codex
+        {"name": "claude-sonnet-5", "coding_percentile": 85},  # claude
+    ])
+    model, _chain = rr.resolve_tier("medium", snapshot=snap, provider="claude")
+    assert model == "claude-sonnet-5"  # cheapest CLAUDE-mapped clearer, not gpt-5.4
+
+
+def test_tier_exhausted_harness_degrades_to_default_not_codex():
+    """AC3-ERR: no claude-mapped model in any band -> None, never a codex model."""
+    snap = _snap([{"name": "gpt-5.4", "coding_percentile": 99}])  # codex only
+    model, chain = rr.resolve_tier("high", snapshot=snap, provider="claude")
+    assert model is None
+    assert any("provider default" in step for step in chain)
+
+
+def test_tier_unknown_provider_matches_nothing():
+    """AC4-EDGE: a garbage provider filters everything -> None, no raise."""
+    model, _chain = rr.resolve_tier("high", snapshot={}, provider="banana")
+    assert model is None
+
+
+def test_tier_none_provider_is_unscoped():
+    """provider=None keeps the old any-harness behavior for direct callers."""
+    snap = _snap([{"name": "gpt-5.4", "coding_percentile": 72}])
+    assert rr.resolve_tier("medium", snapshot=snap)[0] == "gpt-5.4"
+
+
+# --- node_model provider scoping ------------------------------------------- #
+
+
+def test_node_model_tier_scoped_to_claude():
+    """AC1-HP at the seam: a medium-tier node on the claude lane -> claude model."""
+    node = {"model_tier": "medium"}
+    assert rr.node_model(node, snapshot={}, provider="claude") == "claude-sonnet-5"
+
+
+def test_node_model_pin_bypasses_filter():
+    """AC5-EDGE: a model pin passes through unfiltered (seam guard owns pin policy)."""
+    node = {"model": "gpt-5.4"}
+    assert rr.node_model(node, snapshot={}, provider="claude") == "gpt-5.4"
+
+
+def test_node_model_none_provider_resolves_default_and_scopes(monkeypatch):
+    """Locked 3: None provider resolves the default harness, then scopes by it."""
+    monkeypatch.setattr(
+        "fno.agents.provider_resolve.resolve_dispatch_provider",
+        lambda _explicit: ("claude", "builtin-default"),
+    )
+    node = {"model_tier": "medium"}
+    assert rr.node_model(node, snapshot={}) == "claude-sonnet-5"
+
+
+def test_node_model_default_resolution_failure_degrades(monkeypatch):
+    """AC6-FR: provider defaulting raises -> degrade to the raw pin, spawn proceeds."""
+
+    def _boom(_explicit):
+        raise RuntimeError("provider resolve boom")
+
+    monkeypatch.setattr(
+        "fno.agents.provider_resolve.resolve_dispatch_provider", _boom
+    )
+    assert rr.node_model({"model": "glm-5.2"}, snapshot={}) == "glm-5.2"
+
+
 # --- resolve_dispatch_model (precedence) ----------------------------------- #
 
 
@@ -99,8 +176,9 @@ def test_nothing_set_is_provider_default():
 
 def test_node_model_reads_pin_and_tier():
     assert rr.node_model({"model": "glm-5.2"}) == "glm-5.2"
-    # tier with an (empty) injected snapshot -> deterministic static table
-    assert rr.node_model({"model_tier": "low"}, snapshot={}) == "glm-4.7"
+    # tier with an (empty) injected snapshot -> deterministic static table; scope
+    # to claude so the pick is env-independent (the low band is all-claude anyway).
+    assert rr.node_model({"model_tier": "low"}, snapshot={}, provider="claude") == "glm-4.7"
     assert rr.node_model({}) is None
 
 
