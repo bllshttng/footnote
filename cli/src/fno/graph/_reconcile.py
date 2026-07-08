@@ -243,6 +243,149 @@ def fetch_recent_merged_prs(
     return rows if isinstance(rows, list) else []
 
 
+def list_merged_pr_branches(
+    *,
+    cwd: str,
+    limit: int = 100,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    timeout_s: float = GH_QUERY_TIMEOUT_S,
+) -> list[dict]:
+    """Merged PRs (number/url/headRefName/mergedAt) for reverse-mapping.
+
+    Run in ``cwd`` so gh resolves the repo from that dir's origin remote - the
+    reverse map has no PR URL to scope from (that's the whole point: the node
+    is unstamped). Returns ``[]`` when gh is absent. Raises
+    :class:`ReconcileError` on a real gh failure so the caller degrades with
+    one warning per repo.
+    """
+    if _gh_executable() is None:
+        return []
+    cmd = [
+        "gh", "pr", "list", "--state", "merged", "--limit", str(limit),
+        "--json", "number,url,headRefName,mergedAt",
+    ]
+    try:
+        result = runner(
+            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ReconcileError(f"gh pr list (merged) failed: {exc}") from exc
+    if result.returncode != 0:
+        raise ReconcileError(
+            f"gh pr list (merged) failed (rc={result.returncode}): "
+            f"{(result.stderr or '').strip()}"
+        )
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
+    return rows if isinstance(rows, list) else []
+
+
+def _branch_matches_node(head_ref: str, node_id: str) -> bool:
+    """True when ``node_id`` is a full delimiter-bounded segment of ``head_ref``.
+
+    ``branch_name()`` puts the whole node id in every dispatch branch as a
+    ``/``- or ``-``-bounded segment (``feature/x-5b66``,
+    ``target/some-slug-x-5b66``). A bare substring must NOT match: fixed-width
+    hex ids make ``x-5b66`` a prefix of ``x-5b667``, so an unbounded match
+    would close the wrong node.
+    """
+    if not head_ref or not node_id:
+        return False
+    return re.search(rf"(^|[/-]){re.escape(node_id)}([/-]|$)", head_ref) is not None
+
+
+def reverse_map_unstamped(
+    entries: list[dict],
+    *,
+    node_id: Optional[str] = None,
+    list_merged: Optional[Callable[..., list[dict]]] = None,
+) -> list[MergeDriftRecord]:
+    """Close open nodes with NO PR refs by matching the id in a merged branch.
+
+    A /target session that dies between ``gh pr create`` and the node<->PR
+    stamp leaves an open node with no ``pr_number`` - invisible to the forward
+    ``scan_merge_drift`` (which needs a ref to query). The branch convention
+    (``branch_name()``) still carries the full node id, so one
+    ``gh pr list --state merged`` per repo reverse-maps it. A unique headRef hit
+    synthesizes the same MergeDriftRecord the stamped path emits (so the
+    existing close path applies unchanged); an ambiguous hit (two merged PRs
+    for one id) emits an ``error`` record naming both, never a guess.
+
+    ``list_merged`` is injected in tests to avoid shelling to gh.
+    """
+    if list_merged is None:
+        list_merged = list_merged_pr_branches
+
+    # Open, ref-less, cwd-resolvable candidates grouped by repo dir so we make
+    # ONE gh call per repo, not per node.
+    # ponytail: group by cwd string; two worktrees of one repo -> two identical
+    # gh calls. Collapse to git-common-dir only if that ever shows on a profile.
+    by_cwd: dict[str, list[dict]] = {}
+    for node in entries:
+        nid = node.get("id")
+        if not isinstance(nid, str):
+            continue
+        if node_id is not None and nid != node_id:
+            continue
+        if not node_is_open(node):
+            continue
+        if node_pr_refs(node):
+            continue
+        cwd = node.get("cwd")
+        if not cwd:
+            continue
+        by_cwd.setdefault(cwd, []).append(node)
+
+    records: list[MergeDriftRecord] = []
+    for cwd, nodes in by_cwd.items():
+        try:
+            merged = list_merged(cwd=cwd)
+        except ReconcileError as exc:
+            for node in nodes:
+                records.append(
+                    MergeDriftRecord(
+                        node_id=node["id"], plan_path=node.get("plan_path"),
+                        pr_number=0, pr_url=None, pr_state="UNKNOWN", merged_at=None,
+                        error=f"reverse-map gh query failed: {exc}",
+                        session_id=node.get("session_id"), cwd=cwd,
+                    )
+                )
+            continue
+
+        for node in nodes:
+            nid = node["id"]
+            hits = [
+                row for row in merged
+                if isinstance(row, dict)
+                and _branch_matches_node(str(row.get("headRefName") or ""), nid)
+            ]
+            if not hits:
+                continue
+            if len({row.get("number") for row in hits}) > 1:
+                nums = ", ".join(f"#{r.get('number')}" for r in hits)
+                records.append(
+                    MergeDriftRecord(
+                        node_id=nid, plan_path=node.get("plan_path"),
+                        pr_number=0, pr_url=None, pr_state="UNKNOWN", merged_at=None,
+                        error=f"reverse-map ambiguous: {nums} both match branch id {nid}",
+                        session_id=node.get("session_id"), cwd=cwd,
+                    )
+                )
+                continue
+            row = hits[0]
+            records.append(
+                MergeDriftRecord(
+                    node_id=nid, plan_path=node.get("plan_path"),
+                    pr_number=int(row.get("number") or 0), pr_url=row.get("url"),
+                    pr_state="MERGED", merged_at=row.get("mergedAt"),
+                    session_id=node.get("session_id"), cwd=cwd,
+                )
+            )
+    return records
+
+
 def detect_reverted_nodes(
     merged_prs: list[dict], entries: list[dict]
 ) -> list[tuple[str, int]]:
@@ -305,6 +448,7 @@ def scan_merge_drift(
     *,
     query: Optional[Callable[..., PrMergeState]] = None,
     node_id: Optional[str] = None,
+    list_merged: Optional[Callable[..., list[dict]]] = None,
 ) -> list[MergeDriftRecord]:
     """Find open nodes whose PR has merged outside the ship gate.
 
@@ -313,6 +457,10 @@ def scan_merge_drift(
     resolved. Nodes whose PRs are all still OPEN (or closed-unmerged) yield no
     record - they are not drift. ``node_id`` restricts the scan to a single
     node. Tests inject a ``query`` stub to avoid shelling out to gh.
+
+    A second pass (``reverse_map_unstamped``) covers open nodes with NO PR ref
+    at all - a session that died before the node<->PR stamp - by matching the
+    node id against merged branch names. ``list_merged`` is injected in tests.
     """
     if query is None:
         query = query_pr_merge_state
@@ -390,6 +538,10 @@ def scan_merge_drift(
                     cwd=cwd,
                 )
             )
+
+    records.extend(
+        reverse_map_unstamped(entries, node_id=node_id, list_merged=list_merged)
+    )
 
     return records
 

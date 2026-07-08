@@ -59,8 +59,10 @@ def _make_graph(path: Path, entries: list[dict]) -> None:
 @pytest.fixture(autouse=True)
 def _no_revert_fetch(monkeypatch):
     """Keep reconcile hermetic: never shell `gh pr list` from tests. W4 revert
-    detection has its own unit tests (test_causal_fields.py)."""
+    detection has its own unit tests (test_causal_fields.py); the reverse-map
+    pass has its own stubbed tests below."""
     monkeypatch.setattr(rec, "fetch_recent_merged_prs", lambda **kw: [])
+    monkeypatch.setattr(rec, "list_merged_pr_branches", lambda **kw: [])
 
 
 def _stub_query(state_by_number: dict[int, str]):
@@ -197,6 +199,134 @@ def test_scan_passes_repo_from_url():
     entries = [_node("ab-r", pr_number=77)]  # default url -> test-owner/test-repo
     scan_merge_drift(entries, query=_q)
     assert seen["repo"] == "test-owner/test-repo"
+
+
+# ---------------------------------------------------------------------------
+# Reverse-map: unstamped open nodes matched by merged branch name (x-8c3b)
+# ---------------------------------------------------------------------------
+
+def _merged(node_id_to_branch: dict, url_owner: str = "test-owner/test-repo"):
+    """Return a list_merged stub: yields merged-PR rows for the given branches.
+
+    ``node_id_to_branch`` maps a synthetic PR number -> headRefName.
+    """
+    rows = [
+        {
+            "number": num,
+            "url": f"https://github.com/{url_owner}/pull/{num}",
+            "headRefName": branch,
+            "mergedAt": "2026-07-08T00:00:00Z",
+        }
+        for num, branch in node_id_to_branch.items()
+    ]
+    return lambda **kw: rows
+
+
+def test_reverse_map_legacy_feature_branch():
+    """Unstamped open node + merged `feature/<id>` -> closeable drift record."""
+    entries = [_node("ab-rev1", cwd="/repo")]  # no pr_number -> ref-less
+    records = scan_merge_drift(entries, list_merged=_merged({268: "feature/ab-rev1"}))
+    assert len(records) == 1
+    r = records[0]
+    assert r.node_id == "ab-rev1" and r.closeable
+    assert r.pr_number == 268
+    assert r.pr_url.endswith("/pull/268")
+
+
+def test_reverse_map_slug_branch():
+    """Unstamped node + merged `<prefix>/<slug>-<id>` -> matches."""
+    entries = [_node("ab-rev2", cwd="/repo")]
+    records = scan_merge_drift(
+        entries, list_merged=_merged({270: "target/some-slug-ab-rev2"})
+    )
+    assert len(records) == 1 and records[0].closeable
+    assert records[0].pr_number == 270
+
+
+def test_reverse_map_prefix_collision_guard():
+    """id `ab-rev` must NOT match branch `feature/ab-rev7` or `feature/ab-reva`."""
+    entries = [_node("ab-rev", cwd="/repo")]
+    records = scan_merge_drift(
+        entries,
+        list_merged=_merged({1: "feature/ab-rev7", 2: "feature/ab-reva"}),
+    )
+    assert records == []
+
+
+def test_reverse_map_no_match_leaves_open():
+    """No merged branch carries the id -> no record, node stays open."""
+    entries = [_node("ab-rev3", cwd="/repo")]
+    records = scan_merge_drift(entries, list_merged=_merged({9: "feature/other-node"}))
+    assert records == []
+
+
+def test_reverse_map_ambiguous_is_error():
+    """Two merged PRs match one id -> error record, never an auto-close."""
+    entries = [_node("ab-dup", cwd="/repo")]
+    records = scan_merge_drift(
+        entries,
+        list_merged=_merged({10: "feature/ab-dup", 11: "target/x-ab-dup"}),
+    )
+    assert len(records) == 1
+    assert not records[0].closeable
+    assert "#10" in records[0].error and "#11" in records[0].error
+
+
+def test_reverse_map_skips_stamped_nodes():
+    """A node WITH a pr ref never enters the reverse pass (forward path owns it).
+
+    The list_merged stub raises if called for such a node, proving it is never
+    consulted for stamped nodes.
+    """
+    def _boom(**kw):
+        raise AssertionError("list_merged must not run for stamped nodes")
+
+    entries = [_node("ab-stamped", pr_number=42, cwd="/repo")]
+    records = scan_merge_drift(
+        entries, query=_stub_query({42: "OPEN"}), list_merged=_boom
+    )
+    assert records == []  # OPEN forward state, no reverse pass
+
+
+def test_reverse_map_requires_cwd():
+    """A ref-less node with no cwd is skipped (no repo to query)."""
+    def _boom(**kw):
+        raise AssertionError("list_merged must not run without a cwd")
+
+    entries = [_node("ab-nocwd", cwd=None)]
+    records = scan_merge_drift(entries, list_merged=_boom)
+    assert records == []
+
+
+def test_reverse_map_gh_failure_surfaces_error():
+    """A gh failure during reverse-map yields an error record, not a silent drop."""
+    def _boom(**kw):
+        raise rec.ReconcileError("gh list exploded")
+
+    entries = [_node("ab-fail", cwd="/repo")]
+    records = scan_merge_drift(entries, list_merged=_boom)
+    assert len(records) == 1
+    assert not records[0].closeable
+    assert "gh list exploded" in records[0].error
+
+
+def test_reverse_map_one_gh_call_per_repo(monkeypatch):
+    """Multiple ref-less nodes sharing a cwd trigger ONE gh call, not N."""
+    calls = {"n": 0}
+
+    def _once(**kw):
+        calls["n"] += 1
+        return [
+            {"number": 1, "url": "u1", "headRefName": "feature/ab-m1",
+             "mergedAt": "2026-07-08T00:00:00Z"},
+            {"number": 2, "url": "u2", "headRefName": "feature/ab-m2",
+             "mergedAt": "2026-07-08T00:00:00Z"},
+        ]
+
+    entries = [_node("ab-m1", cwd="/repo"), _node("ab-m2", cwd="/repo")]
+    records = scan_merge_drift(entries, list_merged=_once)
+    assert calls["n"] == 1
+    assert {r.node_id for r in records} == {"ab-m1", "ab-m2"}
 
 
 def test_write_retro_sentinel(tmp_path):
