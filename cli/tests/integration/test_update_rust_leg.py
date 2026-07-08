@@ -73,6 +73,45 @@ def _stub(path: Path, log: Path) -> None:
     path.chmod(0o755)
 
 
+def _cargo_stub(
+    path: Path, log: Path, cargo_home: Path, crates_rev: str, head_rev: str
+) -> None:
+    """Stub ``cargo`` that logs its args and, on ``install``, writes a fake triad
+    (client/daemon/worker) whose ``version --json`` self-reports the given revs.
+
+    update now gates the rust leg on the binary's embedded ``crates_rev`` and
+    runs a post-deploy verify that executes the deployed artifact, so a stub that
+    only logs (never producing a runnable, self-reporting binary) can no longer
+    stand in for a real ``cargo install``.
+    """
+    bindir = cargo_home / "bin"
+    version_json = '{"crates_rev": "%s", "git_rev": "%s", "dirty": false}' % (
+        crates_rev, head_rev,
+    )
+    inner = (
+        "#!/bin/sh\n"
+        'if [ "$1" = "version" ] && [ "$2" = "--json" ]; then\n'
+        f"  echo '{version_json}'\n"
+        "fi\n"
+    )
+    script = (
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{log}"\n'
+        'if [ "$1" = "install" ]; then\n'
+        f'  mkdir -p "{bindir}"\n'
+        "  for b in fno-agents fno-agents-daemon fno-agents-worker; do\n"
+        f'    cat > "{bindir}/$b" <<\'EOF\'\n'
+        f"{inner}"
+        "EOF\n"
+        f'    chmod +x "{bindir}/$b"\n'
+        "  done\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+
+
 def _run_update(cli_src: Path, env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -101,7 +140,7 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     fakebin.mkdir()
     cargo_log = tmp_path / "cargo.log"
     uv_log = tmp_path / "uv.log"
-    _stub(fakebin / "cargo", cargo_log)
+    _cargo_stub(fakebin / "cargo", cargo_log, cargo_home, crates_rev, head_rev)
     _stub(fakebin / "uv", uv_log)
 
     rust_marker = home / ".fno" / "installed-rust-rev"
@@ -153,6 +192,8 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     assert result2.returncode == 0, (
         f"exit {result2.returncode}\nstdout:\n{result2.stdout}\nstderr:\n{result2.stderr}"
     )
-    assert f"rust bins fresh (rev {crates_rev[:12]})" in result2.stdout, result2.stdout
+    # The gate now reads the binary's self-reported rev, so the message quotes it
+    # "from binary".
+    assert f"rust bins fresh (rev {crates_rev[:12]} from binary)" in result2.stdout, result2.stdout
     cargo_lines_after = cargo_log.read_text(encoding="utf-8").strip().splitlines()
     assert cargo_lines_after == cargo_lines, "fresh short-circuit must not re-invoke cargo"
