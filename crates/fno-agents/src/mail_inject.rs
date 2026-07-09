@@ -247,8 +247,14 @@ mod tests {
     #[test]
     fn inject_with_submit_sends_envelope_then_separate_cr() {
         let mut t = Fake { sent: Vec::new() };
-        inject_with_submit(&mut t, "a1b2c3d4", "hello MARKER", Some("deadbeef"), Duration::ZERO)
-            .unwrap();
+        inject_with_submit(
+            &mut t,
+            "a1b2c3d4",
+            "hello MARKER",
+            Some("deadbeef"),
+            Duration::ZERO,
+        )
+        .unwrap();
         assert_eq!(t.sent.len(), 2, "envelope inject + wire-level CR submit");
 
         let envelope: serde_json::Value = serde_json::from_str(t.sent[0].trim()).unwrap();
@@ -266,7 +272,13 @@ mod tests {
     #[test]
     fn inject_with_submit_refuses_unsafe_envelope_and_writes_nothing() {
         let mut t = Fake { sent: Vec::new() };
-        let err = inject_with_submit(&mut t, "a1b2c3d4", DETACH_SENTINELS[0], None, Duration::ZERO);
+        let err = inject_with_submit(
+            &mut t,
+            "a1b2c3d4",
+            DETACH_SENTINELS[0],
+            None,
+            Duration::ZERO,
+        );
         assert!(matches!(err, Err(DriveError::UnsafeText)));
         assert!(t.sent.is_empty(), "unsafe envelope must not submit or CR");
     }
