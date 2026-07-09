@@ -405,6 +405,10 @@ struct View {
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
+    /// (x-a621) First-visible [`View::display_rows`] index in the sideline:
+    /// follow-the-cursor scroll offset so rows below the fold render and take
+    /// the mouse. 0 (top-anchored) whenever the catalog fits the height.
+    sideline_offset: usize,
     /// Answer-overlay cursor into [`View::blocked_queue`] (x-c929), when open;
     /// the index of the selected blocked pane in `Layout.agents` order.
     answers: Option<usize>,
@@ -550,6 +554,7 @@ impl View {
             expanded,
             selector: None,
             sel_esc: Vec::new(),
+            sideline_offset: 0,
             answers: None,
             ans_esc: Vec::new(),
             digest: None,
@@ -1018,7 +1023,7 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        let i = (row - TAB_BAR_ROWS) as usize;
+        let i = (row - TAB_BAR_ROWS) as usize + self.sideline_offset;
         (i < self.display_rows().len()).then_some(i)
     }
 
@@ -1133,6 +1138,9 @@ impl View {
                 self.hover_row = None;
             }
         }
+        // Re-clamp the sideline scroll offset against the new catalog so a
+        // shrunk row set never leaves the offset past the last row (x-a621).
+        self.clamp_sideline_offset();
         // Drop a pending focus-follow whose target pane vanished, so a settle can
         // never fire `FocusPane` at a dead id (the server would refuse it anyway).
         if let Some((pane, _)) = self.hover_pending {
@@ -1190,6 +1198,34 @@ impl View {
             .rev()
             .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
             .unwrap_or(cur)
+    }
+
+    /// Sideline rows drawn below the tab bar - the scroll window height. Mirrors
+    /// [`draw_sideline`]'s `TAB_BAR_ROWS..rows` paint range.
+    fn sideline_visible_rows(&self) -> usize {
+        (self.term.0 as usize).saturating_sub(TAB_BAR_ROWS as usize)
+    }
+
+    /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
+    /// the least it takes to keep the selector (or hover) row on screen, then
+    /// clamp into `[0, rows - visible]` so a shrunk catalog never scrolls past the
+    /// last row. Everything-fits (or an empty window) resets the offset to 0, so
+    /// the common case renders byte-identically to a non-scrolling sideline.
+    fn clamp_sideline_offset(&mut self) {
+        let total = self.display_rows().len();
+        let visible = self.sideline_visible_rows();
+        if total <= visible || visible == 0 {
+            self.sideline_offset = 0;
+            return;
+        }
+        if let Some(cur) = self.selector.or(self.hover_row) {
+            if cur < self.sideline_offset {
+                self.sideline_offset = cur;
+            } else if cur >= self.sideline_offset + visible {
+                self.sideline_offset = cur + 1 - visible;
+            }
+        }
+        self.sideline_offset = self.sideline_offset.min(total - visible);
     }
 
     /// Compose the full-terminal frame: tab bar, sideline, dividers, panes.
@@ -1756,8 +1792,11 @@ impl View {
 
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
         let text_w = panel_w - 1; // last column is the divider
-        for (i, drow) in self.display_rows().into_iter().enumerate() {
-            let r = TAB_BAR_ROWS as usize + i;
+        let off = self.sideline_offset;
+        // `i` stays the TRUE display index (so the selector/hover highlight and
+        // hit-test still match); the painted row subtracts the scroll offset.
+        for (i, drow) in self.display_rows().into_iter().enumerate().skip(off) {
+            let r = TAB_BAR_ROWS as usize + (i - off);
             if r >= rows {
                 break;
             }
@@ -2867,6 +2906,9 @@ async fn handle_stdin(
                     // Row 0 is a squad row (or the footer, never a Header).
                     view.selector = Some(0);
                     view.sel_esc.clear();
+                    // Open at the top: a stale offset from a prior session must
+                    // not hide row 0 (x-a621).
+                    view.sideline_offset = 0;
                 }
             }
             Event::OpenAnswers => {
@@ -3277,6 +3319,9 @@ async fn selector_keys(
             _ => {}
         }
     }
+    // Follow the (possibly moved) cursor / expanded catalog into the scroll
+    // window so a row driven below the fold stays visible (x-a621).
+    view.clamp_sideline_offset();
     Ok(StdinFlow::Continue)
 }
 
@@ -6129,10 +6174,18 @@ mod tests {
         nav_keys(&mut v, b"\x1b[A", &mut buf).await.unwrap();
         assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "Up -> row 0");
         nav_keys(&mut v, b"\x1b[A", &mut buf).await.unwrap();
-        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "Up at top clamps (no wrap)");
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            0,
+            "Up at top clamps (no wrap)"
+        );
         assert!(buf.is_empty(), "arrows send nothing to the pane");
         nav_keys(&mut v, b"x", &mut buf).await.unwrap();
-        assert_eq!(v.nav.as_ref().unwrap().query, "x", "letter still edits query");
+        assert_eq!(
+            v.nav.as_ref().unwrap().query,
+            "x",
+            "letter still edits query"
+        );
     }
 
     #[tokio::test]
@@ -6170,14 +6223,85 @@ mod tests {
         });
         let mut buf: Vec<u8> = Vec::new();
         nav_keys(&mut v, b"\x1b[", &mut buf).await.unwrap();
-        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "partial seq: no motion yet");
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            0,
+            "partial seq: no motion yet"
+        );
         nav_keys(&mut v, b"B", &mut buf).await.unwrap();
-        assert_eq!(v.nav.as_ref().unwrap().cursor, 1, "completed Down moves cursor");
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            1,
+            "completed Down moves cursor"
+        );
         assert!(
             v.nav.as_ref().unwrap().query.is_empty(),
             "no escape tail leaked into the query"
         );
         assert!(buf.is_empty(), "nothing leaked to the pane");
+    }
+
+    #[test]
+    fn sideline_scroll_follows_cursor_and_maps_hit() {
+        // AC1+AC2 (x-a621): a selector driven below the fold scrolls the sideline
+        // to keep it visible, and a click on a scrolled row hit-tests to the right
+        // display index (no off-by-offset).
+        let mut v = two_pane_view();
+        let total = v.display_rows().len();
+        assert!(total >= 2, "fixture needs >=2 sideline rows");
+        v.term = (total as u16, 100); // visible = total - 1: one row below the fold
+        let visible = v.sideline_visible_rows();
+        v.selector = Some(total - 1);
+        v.clamp_sideline_offset();
+        assert_eq!(
+            v.sideline_offset,
+            total - visible,
+            "offset follows the cursor"
+        );
+        assert!(
+            (total - 1) >= v.sideline_offset && (total - 1) < v.sideline_offset + visible,
+            "the cursor row is inside the visible window"
+        );
+        assert!(v.panel_w() > 1, "fixture panel is visible");
+        assert_eq!(
+            v.sideline_row_at(TAB_BAR_ROWS, 0),
+            Some(v.sideline_offset),
+            "the top drawn row hit-tests to the scrolled index"
+        );
+    }
+
+    #[test]
+    fn sideline_scroll_zero_when_rows_fit() {
+        // AC3 (x-a621): when every row fits the height the offset stays 0, so the
+        // frame renders exactly as a non-scrolling sideline.
+        let mut v = two_pane_view(); // tall terminal, small catalog
+        assert!(
+            v.display_rows().len() <= v.sideline_visible_rows(),
+            "catalog fits the window"
+        );
+        v.selector = Some(0);
+        v.sideline_offset = 9; // stale offset from a prior scrolled session
+        v.clamp_sideline_offset();
+        assert_eq!(v.sideline_offset, 0, "fits -> offset resets to 0");
+    }
+
+    #[test]
+    fn sideline_scroll_never_past_last_row() {
+        // AC4 (x-a621): an offset left too large by a catalog shrink re-clamps into
+        // [0, rows - visible]; it never scrolls past the last row.
+        let mut v = two_pane_view();
+        let total = v.display_rows().len();
+        assert!(total >= 2);
+        v.term = (total as u16, 100); // visible = total - 1
+        v.selector = None;
+        v.hover_row = None;
+        v.sideline_offset = 999; // absurd, e.g. after the catalog shrank
+        v.clamp_sideline_offset();
+        assert_eq!(
+            v.sideline_offset,
+            total - v.sideline_visible_rows(),
+            "clamped to the last full window"
+        );
     }
 
     #[test]
