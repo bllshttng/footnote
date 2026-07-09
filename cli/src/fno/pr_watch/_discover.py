@@ -50,6 +50,9 @@ class PrCandidate:
     # ``owner/repo`` parsed from pr_url via repo_slug_from_url. None when the
     # URL is absent or does not match the expected GitHub URL pattern.
     repo_slug: Optional[str]
+    # The node's originating session id (warm-route target for the post-merge
+    # ritual). None when the node predates provenance stamping.
+    source_session_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,10 @@ class PrObservation:
     latest_review_ts: Optional[str]
     # ISO-8601 creation timestamp of the PR itself. Used for the max-age gate.
     opened_at: Optional[str]
+    # mergeCommit.oid when the PR is merged -- the shared dedup key the
+    # post-merge dispatcher uses, so the daemon and reconcile mark the SAME
+    # merge. None on an open PR or when gh omits it.
+    merge_sha: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +178,7 @@ def discover_open_prs(entries: list[dict]) -> list[PrCandidate]:
                     pr_url=pr_url,
                     repo_dir=repo_dir,
                     repo_slug=slug,
+                    source_session_id=node.get("source_session_id") or None,
                 )
             )
     return candidates
@@ -258,4 +266,5 @@ def read_pr_state(
         state=merge_state.state,
         latest_review_ts=latest_review_ts,
         opened_at=opened_at,
+        merge_sha=merge_state.merge_sha,
     )

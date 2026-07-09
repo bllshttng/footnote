@@ -320,6 +320,7 @@ def tick(
     store_path: Optional[Path] = None,
     # Dispatch
     fire_skill_fn: Optional[Callable] = None,
+    dispatch_ritual_fn: Optional[Callable] = None,
     # I/O seams
     emit: Optional[Callable[[str, dict], None]] = None,
     reviewers_for: Optional[Callable[[Path], list]] = None,
@@ -355,6 +356,9 @@ def tick(
     _claim = claim if claim is not None else _NullClaim()
     _notify = notify if notify is not None else (lambda *a, **kw: None)
     _fire = fire_skill_fn if fire_skill_fn is not None else fire_skill
+    _dispatch_ritual = (
+        dispatch_ritual_fn if dispatch_ritual_fn is not None else _default_dispatch_ritual
+    )
     _reviewers_for = reviewers_for if reviewers_for is not None else (lambda _: [])
     _post_merge = post_merge_readiness_fn if post_merge_readiness_fn is not None else _noop_readiness
     _discover = discover_fn if discover_fn is not None else _default_discover
@@ -378,6 +382,7 @@ def tick(
             discover_fn=_discover,
             read_pr_state_fn=_read_state,
             fire_skill_fn=_fire,
+            dispatch_ritual_fn=_dispatch_ritual,
             emit=_emit,
             reviewers_for=_reviewers_for,
             claim=_claim,
@@ -402,6 +407,7 @@ def _run_tick(
     discover_fn,
     read_pr_state_fn,
     fire_skill_fn,
+    dispatch_ritual_fn,
     emit,
     reviewers_for,
     claim,
@@ -516,10 +522,43 @@ def _run_tick(
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
             elif decision.kind in ("merge", "review"):
-                verb: Verb = "merged" if decision.kind == "merge" else "check"
-                result = fire_skill_fn(verb, pr, cand.repo_dir)
+                dispatch_ok = False
+                dispatch_extra: dict[str, Any] = {}
+                if decision.kind == "merge":
+                    # Route through the shared post-merge dispatcher: warm
+                    # inject first, this daemon's headless fire as the cold
+                    # fallback, and the SAME per-merge-SHA marker reconcile
+                    # consults -- so one merge is handed off exactly once no
+                    # matter which detector sees it first.
+                    try:
+                        pm = dispatch_ritual_fn(cand, obs, fire_skill_fn)
+                    except Exception as exc:  # noqa: BLE001 - degrade to retry path
+                        log.warning("pr-watch: ritual dispatch for PR #%d failed: %s", pr, exc)
+                        pm = None
+                    if pm is not None and pm.outcome == "already-dispatched":
+                        # The other detector (or an earlier tick) owns this
+                        # merge; record it so this PR stops re-deciding.
+                        entry["merge_dispatched"] = True
+                        store.set(key, entry)
+                        emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
+                        skipped += 1
+                        continue
+                    dispatch_ok = pm is not None and pm.outcome in (
+                        "dispatched", "routed-warm",
+                    )
+                    if dispatch_ok:
+                        dispatch_extra = {
+                            "route": "warm" if pm.outcome == "routed-warm" else "cold",
+                        }
+                        log.info(
+                            "pr-watch: PR #%d post-merge ritual %s (%s)",
+                            pr, pm.outcome, pm.detail or pm.short_id or "",
+                        )
+                else:
+                    result = fire_skill_fn("check", pr, cand.repo_dir)
+                    dispatch_ok = result.ok
 
-                if result.ok:
+                if dispatch_ok:
                     acted += 1
                     if decision.kind == "merge":
                         entry["merge_dispatched"] = True
@@ -527,7 +566,7 @@ def _run_tick(
                         entry["last_review_ts"] = obs.latest_review_ts
                     entry["retries"] = 0
                     store.set(key, entry)
-                    emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr})
+                    emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
                 else:
                     # Dispatch failed: bump retry counter (safe with None/non-int stored value)
                     try:
@@ -581,6 +620,32 @@ def _default_discover(entries: list[dict[str, Any]]) -> list[Any]:  # pragma: no
     from fno.pr_watch._discover import discover_open_prs
 
     return discover_open_prs(entries)
+
+
+def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> Any:
+    """Hand one merged PR to the shared post-merge dispatcher.
+
+    Warm route first (the node's originating session), this daemon's headless
+    ``merged`` fire as the cold fallback, deduped on the SAME per-merge-SHA
+    marker reconcile uses. A failed cold fire raises so no marker is written
+    and the tick's retry counter takes over.
+    """
+    from fno.graph._reconcile import dispatch_post_merge_ritual
+
+    def _cold_spawn(pr_number: int, cwd: str) -> str:
+        res = fire_skill_fn("merged", pr_number, Path(cwd))
+        if not res.ok:
+            raise RuntimeError(f"headless merged fire failed (rc={res.rc})")
+        return "headless"
+
+    return dispatch_post_merge_ritual(
+        cand.pr_number,
+        dedup_key=getattr(obs, "merge_sha", None),
+        auto_run=True,
+        node_cwd=str(cand.repo_dir) if cand.repo_dir else None,
+        spawn=_cold_spawn,
+        source_session_id=getattr(cand, "source_session_id", None),
+    )
 
 
 def _default_read_pr_state(
