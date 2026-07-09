@@ -58,6 +58,19 @@ target_is_active "$f"; check "empty-input stub -> not active" 1 $?
 # --- Missing file is never active ---
 target_is_active "/nonexistent/target-state.md"; check "missing file -> not active" 1 $?
 
+# Fail-open survives a caller's `set -euo pipefail` even as a BARE statement
+# (not a condition): target_state_field's grep returns non-zero on the absent
+# owner_pid field under pipefail, and `|| true` keeps the assignment from
+# aborting the script.
+(
+  set -euo pipefail
+  source "$GUARD"
+  f2="$(mktemp -d)/target-state.md"
+  printf 'input: x-7a6d\nplan_path: /tmp/p.md\n' > "$f2"
+  target_is_active "$f2"
+) && rc=$? || rc=$?
+check "fail-open under set -euo pipefail (bare call, no owner_pid)" 0 "$rc"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

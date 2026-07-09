@@ -47,9 +47,12 @@ target_is_active() {
     local state_file="${1:-.fno/target-state.md}"
     [[ -f "$state_file" ]] || return 1
 
+    # `|| true` keeps the documented fail-open behavior under a caller's
+    # `set -e` + `set -o pipefail`: target_state_field's grep returns non-zero
+    # on an absent field, which would otherwise abort the assignment.
     local input plan_path
-    input=$(target_state_field "input" "$state_file")
-    plan_path=$(target_state_field "plan_path" "$state_file")
+    input=$(target_state_field "input" "$state_file" || true)
+    plan_path=$(target_state_field "plan_path" "$state_file" || true)
     if _target_guard_is_empty_yaml "$input" && _target_guard_is_empty_yaml "$plan_path"; then
         return 1
     fi
@@ -58,7 +61,7 @@ target_is_active() {
     # by a previous abilities version) — treat as active for backward compat.
     # The stop hook will rewrite such states on the next completion anyway.
     local owner_pid
-    owner_pid=$(target_state_field "owner_pid" "$state_file")
+    owner_pid=$(target_state_field "owner_pid" "$state_file" || true)
     if ! _target_guard_is_empty_yaml "$owner_pid" && [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
         kill -0 "$owner_pid" 2>/dev/null || return 1
     fi
