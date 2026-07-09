@@ -81,7 +81,7 @@ The whole mechanism is the `fno think dispatch` verb - do NOT hand-assemble a sp
 fno think dispatch <node-id>
 ```
 
-The verb reads `$CLAUDE_CODE_SESSION_ID` + the current cwd as the live transcript pointer, resolves the node in the graph, and routes through the shared dispatch core (reason-scoped dedup token, per-day firehose ceiling, forward stamp, single decision event, strict non-fatality). Relay the verb's output verbatim - it prints the spawned worker's id and an `fno agents watch` hint, or a one-line skip reason (e.g. dedup / daily-cap). If no node token was given, print `dispatch needs a node id: /think dispatch <node-id>` and stop. If the verb exits non-zero, surface its stderr; never fabricate a launch.
+The verb reads the live transcript pointer from the first non-empty marker in this shared precedence: `$CODEX_THREAD_ID` > `$CLAUDE_CODE_SESSION_ID` > `$CODEX_SESSION_ID` > `$GEMINI_SESSION_ID`, plus the current cwd. It resolves the node in the graph and routes through the shared dispatch core (reason-scoped dedup token, per-day firehose ceiling, forward stamp, single decision event, strict non-fatality). The source pointer may therefore identify a Codex conversation, but the `/think` worker still defaults to a Claude `bg` worker unless the provider is explicitly set. Relay the verb's output verbatim - it prints the spawned worker's id and an `fno agents watch` hint, or a one-line skip reason (e.g. dedup / daily-cap). If no node token was given, print `dispatch needs a node id: /think dispatch <node-id>` and stop. If the verb exits non-zero, surface its stderr; never fabricate a launch.
 
 ## Multi-CLI
 

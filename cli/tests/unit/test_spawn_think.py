@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.harness_identity import resolve_harness_identity
 from fno.provenance import spawn_think as st
 from fno.provenance.resolver import ResolvedTranscript
 
@@ -575,6 +576,51 @@ def test_spawn_worker_default_provider_claude_no_model(monkeypatch):
     cmd = cap["cmd"]
     assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "claude"
     assert "--model" not in cmd
+
+
+def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
+    iso, monkeypatch
+):
+    """Codex may own the source conversation without becoming the worker provider."""
+    identity = resolve_harness_identity({"CODEX_THREAD_ID": "codex-thread-123"})
+    assert identity.harness == "codex"
+
+    seen: dict = {}
+
+    def fake_resolve(harness, sid, cwd, **kw):
+        seen["pointer"] = (harness, sid, cwd)
+        return ResolvedTranscript(
+            harness, sid, cwd, True, transcript_path="/live/codex-thread.jsonl"
+        )
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"short_id":"abc123"}'
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(st, "resolve_transcript", fake_resolve)
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    monkeypatch.setattr(st, "_stamp_forward", lambda *a, **kw: None)
+    monkeypatch.setattr(st, "_daily_cap", lambda root: 0)
+
+    res = st.dispatch_conversational(
+        _node(),
+        session_id=identity.session_id,
+        cwd="/tmp/codex-live",
+        harness=identity.harness or "claude",
+        events_path=iso,
+        project_root=iso.parent.parent,
+    )
+
+    assert res.decision == "spawned"
+    assert seen["pointer"] == ("codex", "codex-thread-123", "/tmp/codex-live")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--provider") + 1] == "claude"
+    assert cmd[cmd.index("--substrate") + 1] == "bg"
 
 
 def test_spawn_worker_threads_model_and_provider(monkeypatch):
