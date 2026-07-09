@@ -72,6 +72,124 @@ def test_failure_wins_over_pending():
     assert code == 1
 
 
+# ── x-def4: latest-run-per-name dedup ────────────────────────────────────────
+# A force/amend push leaves superseded runs (e.g. a CANCELLED CI) in the rollup
+# beside the fresh ones. verdict_for must classify only the latest run per name
+# so a superseded CANCELLED loses to a newer SUCCESS - WITHOUT hiding a genuine
+# cancel that IS the latest run.
+
+
+def test_superseded_cancelled_loses_to_newer_success_is_green():
+    """AC1: ci CANCELLED (earlier attempt) + ci SUCCESS (later attempt) + other
+    HEAD checks SUCCESS -> green, fail count 0."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED",
+         "startedAt": "2026-07-09T09:55:00Z", "completedAt": "2026-07-09T10:00:00Z"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T10:00:00Z", "completedAt": "2026-07-09T10:05:00Z"},
+        {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T10:00:00Z", "completedAt": "2026-07-09T10:05:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "green"
+    assert code == 0
+    assert counts["fail"] == 0
+    # total reflects the deduped set (honest check count), not the raw rollup.
+    assert counts["total"] == 2
+
+
+def test_stale_run_completing_later_does_not_hide_latest_fail():
+    """Invariant regression: the latest ATTEMPT is the one that STARTED last,
+    even when a stale superseded run completes later. A fast-failing current
+    run must not be masked by a slow stale SUCCESS - keying on startedAt (not
+    completedAt) keeps the genuine fail."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE",
+         "startedAt": "2026-07-09T10:01:00Z", "completedAt": "2026-07-09T10:02:00Z"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T09:50:00Z", "completedAt": "2026-07-09T10:03:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert code == 1
+    assert counts["total"] == 1
+
+
+def test_checkrun_and_statuscontext_same_name_not_merged():
+    """Invariant regression: a CheckRun `name` and a StatusContext `context`
+    sharing a literal string are DIFFERENT checks and must not be merged - the
+    StatusContext FAILURE must survive beside the newer CheckRun and force red."""
+    rollup = [
+        {"context": "ci", "state": "FAILURE", "createdAt": "2026-07-09T10:00:00Z"},
+        {"name": "ci", "status": "IN_PROGRESS", "conclusion": "",
+         "startedAt": "2026-07-09T10:05:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert code == 1
+    assert counts["total"] == 2
+
+
+def test_genuine_latest_cancel_stays_red():
+    """AC2: a single ci CANCELLED run with no newer same-name run -> red
+    (the invariant: filtering must not hide a genuine fail)."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED",
+         "completedAt": "2026-07-09T10:00:00Z"},
+    ]
+    verdict, code, _ = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert code == 1
+
+
+def test_latest_in_progress_over_earlier_success_is_pending():
+    """AC3: latest ci run IN_PROGRESS (empty conclusion, startedAt after the
+    earlier ci SUCCESS completed) -> pending, never green or red."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T10:00:00Z", "completedAt": "2026-07-09T10:03:00Z"},
+        {"name": "ci", "status": "IN_PROGRESS", "conclusion": "",
+         "startedAt": "2026-07-09T10:05:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "pending"
+    assert code == 2
+    assert counts["pending"] == 1
+    assert counts["total"] == 1
+
+
+def test_dedup_empty_rollup_is_unknown():
+    """AC4: empty rollup stays unknown (unchanged)."""
+    verdict, code, counts = _status.verdict_for([])
+    assert verdict == "unknown"
+    assert code == 3
+    assert counts["total"] == 0
+
+
+def test_dedup_single_entry_per_name_is_unchanged():
+    """Boundary: one entry per name -> nothing to dedup, behaves as today."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "completedAt": "2026-07-09T10:00:00Z"},
+        {"context": "legacy", "state": "SUCCESS"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "green"
+    assert counts["total"] == 2
+
+
+def test_timestampless_group_keeps_last_seen_deterministic():
+    """Errors: a whole name-group with no timestamps keeps the last-seen entry
+    (deterministic, order = gh's order). Last-seen FAILURE -> red."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"},
+    ]
+    verdict, _, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert counts["total"] == 1
+
+
 def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
