@@ -32,6 +32,7 @@ combo (YAGNI).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -131,13 +132,19 @@ def classify_followup(candidate: Candidate) -> str:
 
 
 def _dispatch_think(node_id: str, cwd: Optional[str]) -> bool:
-    """``fno think dispatch <node>`` - a bg /think carrying the ritual's live
-    context. Self-bumps the shared daily counter on a spawn, so this arm must NOT
-    bump again. Returns True only on a real spawn (exit 0); a skip (dedup /
-    daily-cap / no-origin, exit 1) or bad input (exit 2) returns False and the
-    node stays filed.
+    """``fno think dispatch <node> --json`` - a bg /think carrying the ritual's
+    live context. Self-bumps the shared daily counter ONLY on a real spawn, so
+    this arm must NOT bump again.
+
+    Return True only when the decision is ``spawned``. Exit 0 alone is NOT proof:
+    the CLI exits 0 for ``spawned`` AND ``offered``/``noop`` too, so a bumped
+    counter and a "dispatched" outcome could diverge (a false dispatch that never
+    incremented the ceiling). We assert ``decision == "spawned"`` from the JSON so
+    the outcome matches the bump exactly. (In practice dispatch_conversational
+    forces the gate on + attended=spawn, so offered/noop shouldn't arise via this
+    path - but keying off the decision is contract-correct, not exit-code-lucky.)
     """
-    cmd = [*_subprocess_util.fno_py_cmd(), "think", "dispatch", node_id]
+    cmd = [*_subprocess_util.fno_py_cmd(), "think", "dispatch", node_id, "--json"]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
@@ -151,6 +158,16 @@ def _dispatch_think(node_id: str, cwd: Optional[str]) -> bool:
         # Log the reason (else the stderr is discarded) - the node stays filed.
         _LOG.debug("keep_going: think dispatch for %s exited %d: %s",
                    node_id, proc.returncode, (proc.stderr or "").strip()[:200])
+        return False
+    try:
+        decision = (json.loads(proc.stdout or "{}") or {}).get("decision")
+    except (ValueError, TypeError):
+        decision = None
+    if decision != "spawned":
+        # exit 0 but not a spawn (offered/noop/malformed) => no counter bump
+        # happened, so do NOT report it as a dispatch. Node stays filed.
+        _LOG.debug("keep_going: think dispatch for %s decision=%r (not spawned)",
+                   node_id, decision)
         return False
     return True
 
@@ -230,6 +247,14 @@ def dispatch_followups(
 
         # Ceiling check (0 disables). The node is already filed, so a cap hit is
         # "parked as a backlog node", never a dropped follow-up.
+        # ponytail: SOFT ceiling. This check-then-bump is not atomic, and the
+        # think arm's bump lives inside spawn_think's counter (also soft, by its
+        # own documented last-writer-wins design), so concurrent rituals can
+        # overshoot `daily_cap` by at most the concurrency count. That bounded
+        # overshoot is acceptable for a firehose guard whose job is preventing
+        # RUNAWAY fan-out, not exact rationing. Exact atomic reservation would
+        # mean making the SHARED spawn_think counter lock-guarded (its stated
+        # upgrade path) - deferred, see cv on this PR.
         if cap > 0 and count_fn() >= cap:
             capped = True
             results.append(FollowupResult(node_id, arm, OUTCOME_CAPPED))

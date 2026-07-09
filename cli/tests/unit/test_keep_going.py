@@ -176,6 +176,32 @@ def test_landed_without_node_id_skipped():
 # --- gate -------------------------------------------------------------------
 
 
+def test_dispatch_think_requires_spawned_decision(monkeypatch):
+    """The think arm reports dispatched ONLY when fno think dispatch actually
+    spawned (decision=='spawned'); exit-0 offered/noop or a skip is NOT a bump."""
+    from types import SimpleNamespace
+
+    from fno.retro import keep_going as kg
+
+    def run_with(returncode, stdout, stderr=""):
+        return lambda *a, **k: SimpleNamespace(
+            returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    monkeypatch.setattr(kg.subprocess, "run", run_with(0, '{"decision":"spawned"}'))
+    assert kg._dispatch_think("x-1", None) is True
+
+    # exit 0 but not a real spawn -> False (no counter bump happened)
+    monkeypatch.setattr(kg.subprocess, "run", run_with(0, '{"decision":"offered"}'))
+    assert kg._dispatch_think("x-1", None) is False
+    monkeypatch.setattr(kg.subprocess, "run", run_with(0, "not json"))
+    assert kg._dispatch_think("x-1", None) is False
+
+    # skip (exit 1) -> False
+    monkeypatch.setattr(kg.subprocess, "run", run_with(1, "", "skipped: daily-cap"))
+    assert kg._dispatch_think("x-1", None) is False
+
+
 def test_gate_env_override():
     assert keep_going_enabled(env={"FNO_KEEP_GOING": "1"}) is True
     assert keep_going_enabled(env={"FNO_KEEP_GOING": "off"}) is False
