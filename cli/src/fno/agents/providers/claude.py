@@ -126,7 +126,11 @@ def parse_short_id(stdout: str) -> str:
 
 
 def _build_argv(
-    name: str, message: str, use_stdin: bool, model: Optional[str] = None
+    name: str,
+    message: str,
+    use_stdin: bool,
+    model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> list[str]:
     """Render the argv list for ``claude --bg``.
 
@@ -144,6 +148,11 @@ def _build_argv(
     Kept identical to the Rust ``build_argv`` (AC2-FR cross-runtime parity).
     """
     argv = ["claude", "--bg", "--name", name]
+    # x-dfa4: exact passthrough to claude's own --permission-mode; the caller
+    # resolves --yolo -> bypassPermissions before this point. Kept identical to
+    # the Rust build_argv (cross-runtime parity). Empty/None = unchanged argv.
+    if permission_mode:
+        argv += ["--permission-mode", permission_mode]
     if model:
         argv += ["--model", model]
     if not use_stdin:
@@ -158,6 +167,7 @@ def bg_create(
     timeout: Optional[int] = None,
     role: Optional[str] = None,
     model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -186,7 +196,13 @@ def bg_create(
     """
     msg_bytes = message.encode("utf-8")
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
-    argv = _build_argv(name=name, message=message, use_stdin=use_stdin, model=model)
+    argv = _build_argv(
+        name=name,
+        message=message,
+        use_stdin=use_stdin,
+        model=model,
+        permission_mode=permission_mode,
+    )
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
     # from inside the spawned agent attribute back to this parent.

@@ -171,9 +171,41 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
     assert json.loads(result.output)["permission_mode"] == "acceptEdits"
 
 
-def test_bg_permission_mode_python_fallback_fails_closed(runner, monkeypatch):
-    """The pure-Python bg fallback refuses --permission-mode (Rust owns bg)."""
+def test_bg_permission_mode_non_claude_fails_closed(runner, monkeypatch):
+    """codex bg/headless via the Python fallback refuses --permission-mode
+    (its one-shot lane hardcodes its bypass); mirrors the Rust guard."""
     _stub_pane_path(monkeypatch)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "codex", "--substrate", "headless",
+         "--permission-mode", "acceptEdits"],
+    )
+    assert result.exit_code == 2
+    assert "not supported" in result.output and "pane" in result.output
+
+
+def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
+    """claude bg via the Python fallback HONORS --permission-mode (it threads to
+    _claude_create_path -> bg_create), never a hard-fail. Regression guard for
+    the availability bug where a config default hard-failed autonomous dispatch."""
+    from fno.agents import dispatch, spawn_gate
+
+    captured: dict = {}
+
+    class _Gate:
+        def release(self) -> None:
+            pass
+
+    def fake_dispatch_spawn(**kwargs):
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
@@ -181,8 +213,19 @@ def test_bg_permission_mode_python_fallback_fails_closed(runner, monkeypatch):
         ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
          "--permission-mode", "acceptEdits"],
     )
-    assert result.exit_code == 2
-    assert "Rust" in result.output
+    assert result.exit_code == 0, result.output
+    assert captured["permission_mode"] == "acceptEdits"
+
+
+def test_claude_python_build_argv_threads_permission_mode():
+    """The Python claude bg argv builder mirrors Rust: --permission-mode rides
+    between --name and --model; unset is byte-identical."""
+    from fno.agents.providers.claude import _build_argv
+
+    argv = _build_argv("w1", "hi", False, None, "acceptEdits")
+    assert argv == ["claude", "--bg", "--name", "w1", "--permission-mode",
+                    "acceptEdits", "hi"]
+    assert _build_argv("w1", "hi", False, None, None) == _build_argv("w1", "hi", False)
 
 
 # --- AC8: config default applies to autonomous dispatchers only -------------
@@ -273,9 +316,13 @@ def test_spawn_sh_forwards_permission_mode(tmp_path):
     fake = bin_dir / "fno"
     fake.write_text(
         "#!/bin/sh\n"
-        # Answer the collision probe (`fno agents list`) with an empty roster;
-        # record the spawn argv for the assertion.
-        'case "$*" in *"agents list"*) printf \'{"agents":[]}\\n\'; exit 0 ;; esac\n'
+        # Answer the collision probe (`fno agents list`) with an empty roster,
+        # and the worktree-ensure with an empty path (so spawn.sh skips setup and
+        # never treats the spawn receipt as a worktree dir). Record the spawn argv.
+        'case "$*" in\n'
+        '  *"agents list"*) printf \'{"agents":[]}\\n\'; exit 0 ;;\n'
+        '  *"worktree ensure"*) exit 0 ;;\n'
+        'esac\n'
         f'printf "%s\\n" "$@" > "{argv_file}"\n'
         'printf \'{"short_id":"deadbeef"}\\n\'\n'
     )
@@ -286,7 +333,7 @@ def test_spawn_sh_forwards_permission_mode(tmp_path):
     res = _sp.run(
         ["bash", str(script), "--name", "w1", "--provider", "claude",
          "--message", "hi", "--permission-mode", "acceptEdits"],
-        capture_output=True, text=True, env=env, timeout=30,
+        capture_output=True, text=True, env=env, timeout=30, cwd=str(tmp_path),
     )
     assert res.returncode == 0, res.stdout + res.stderr
     forwarded = argv_file.read_text().splitlines()

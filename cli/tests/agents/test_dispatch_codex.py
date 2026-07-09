@@ -515,22 +515,25 @@ def test_followup_codex_emits_yolo_flag_in_events(workdir, fake_codex_resume):
 # ---------------------------------------------------------------------------
 
 
-def test_yolo_on_claude_create_emits_stderr_note(workdir, capsys, monkeypatch):
-    """AC3-ERR: --yolo for claude logs warning and continues normally.
-    Repointed at _claude_create_path (create contract moved from dispatch_ask to spawn verb)."""
+def test_yolo_on_claude_create_maps_to_bypass_permissions(workdir, capsys, monkeypatch):
+    """x-dfa4: --yolo for claude create now maps to bypassPermissions (was a
+    no-op note). bg_create receives permission_mode=bypassPermissions and the
+    misleading 'no effect' note is gone."""
     from fno.agents.providers import claude as claude_mod
     from fno.agents.providers.base import ProviderResult
-    monkeypatch.setattr(
-        claude_mod,
-        "bg_create",
-        lambda **kw: ProviderResult(
+    seen: dict = {}
+
+    def fake_bg_create(**kw):
+        seen.update(kw)
+        return ProviderResult(
             exit_code=0,
             stdout="backgrounded · 7c5dcf5d · worker-Y\n",
             stderr="",
             duration_ms=10,
             session_id_out="7c5dcf5d",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(claude_mod, "bg_create", fake_bg_create)
 
     from fno.agents.dispatch import _claude_create_path
     _claude_create_path(
@@ -543,7 +546,8 @@ def test_yolo_on_claude_create_emits_stderr_note(workdir, capsys, monkeypatch):
         lock_handle=_FakeLockHandle(),
     )
     err = capsys.readouterr().err
-    assert "--yolo has no effect for provider 'claude'" in err
+    assert "--yolo has no effect" not in err
+    assert seen.get("permission_mode") == "bypassPermissions"
 
 
 def test_yolo_on_claude_followup_emits_stderr_note(workdir, capsys, monkeypatch):

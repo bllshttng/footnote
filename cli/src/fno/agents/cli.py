@@ -376,7 +376,8 @@ def cmd_spawn(
             "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
             "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
             "'skip'. An unmappable value errors before spawn. Mutually exclusive "
-            "with --yolo. bg/headless honor it on the fno (Rust) binary."
+            "with --yolo. Honored on claude bg/headless (Rust or Python fallback); "
+            "codex/gemini bg/headless one-shots reject it (use --substrate pane)."
         ),
     ),
     node: str | None = typer.Option(
@@ -477,14 +478,20 @@ def cmd_spawn(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
-    # bg/headless permission-mode is owned by the fno (Rust) intercept, which
-    # runs BEFORE this Python entrypoint for the real binary. Reaching here with
-    # a mode set means the pure-Python fallback (`fno-py`), whose dispatch_spawn
-    # would silently drop it - fail closed rather than accept-and-ignore.
-    if permission_mode is not None and (substrate != "pane" or once):
+    # Fail-closed for non-claude bg/headless (mirrors the Rust intercept): only
+    # claude's bg lane honors a mapped --permission-mode via the Python fallback
+    # (dispatch_spawn -> _claude_create_path); codex/gemini one-shot lanes
+    # hardcode their own bypass and can't express a mapped mode. The pane
+    # substrate maps every provider, so it's exempt here. (x-dfa4)
+    if (
+        permission_mode is not None
+        and provider != "claude"
+        and (substrate != "pane" or once)
+    ):
         print(
-            "--permission-mode on bg/headless is handled by the fno (Rust) "
-            "binary; not supported via the pure-Python fallback",
+            f"--permission-mode is not supported for provider {provider!r} on "
+            "--substrate bg/headless (its one-shot lane hardcodes its own bypass "
+            "form); use --substrate pane",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -561,6 +568,7 @@ def cmd_spawn(
                 yolo=yolo,
                 role=role,
                 model=model,
+                permission_mode=permission_mode,
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
