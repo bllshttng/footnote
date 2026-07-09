@@ -104,7 +104,6 @@ def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
     data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
     supported = {
         "PreToolUse",
-        "PermissionRequest",
         "PostToolUse",
         "PreCompact",
         "PostCompact",
@@ -115,6 +114,15 @@ def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
         "Stop",
     }
     assert set(data["hooks"]).issubset(supported)
+
+    copied_claude_only = {
+        "WorktreeCreate",
+        "CwdChanged",
+        "FileChanged",
+        "SessionEnd",
+        "StopFailure",
+    }
+    assert set(data["hooks"]).isdisjoint(copied_claude_only)
 
     placeholder = re.compile(r"\$\{CODEX_PLUGIN_ROOT(:-[^}]*)?\}")
     failures: list[str] = []

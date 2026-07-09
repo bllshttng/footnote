@@ -15,12 +15,13 @@ codex plugin add fno@footnote-local
 Then install `fno` from that marketplace in the Codex app. The plugin manifest exposes:
 
 - skills from `skills/`
-- a plugin-bundled `SessionStart` hook through `hooks/codex-hooks.json`
+- plugin-bundled Codex lifecycle hooks through `hooks/codex-hooks.json`
 - project custom agents from tracked `.codex/agents/*.toml`
 
 Codex treats plugin hooks as untrusted until you approve them. Approve the footnote
-`SessionStart` hook when prompted; it injects project vision, `fno whoami`, worktree
-hygiene, and setup nudges through `hookSpecificOutput.additionalContext`.
+hooks when prompted. `SessionStart` injects project vision, `fno whoami`, worktree
+hygiene, and setup nudges through `hookSpecificOutput.additionalContext`; the other
+packaged hooks provide the supported target-loop and safety lifecycle described below.
 
 ## Codex App Worktrees
 
@@ -118,6 +119,23 @@ and the PreToolUse state/git protection guards.
 Do not copy the full Claude hook manifest into Codex. Codex does not support every
 Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
 `FileChanged`, `SessionEnd`, and `StopFailure` are intentionally excluded here.
+
+## Session Identity and Workflow Posture
+
+In a Codex task, `CODEX_THREAD_ID` is the durable session identity. footnote prefers it
+when creating target manifests, node claims, graph provenance, and follow-on dispatch
+context. If Codex does not provide it, the shared harness resolver falls back to the
+other supported session markers and finally the existing generated target-session id.
+
+The core `target`, `do`, `think`, and `blueprint` workflows use the same canonical
+markdown on Codex. `target` continues natively through the packaged `Stop` hook. Agent
+work uses project custom agents and `spawn_agent` when the running Codex surface exposes
+them; when a required primitive is unavailable, the workflow announces the limitation
+and executes sequentially on the main task instead of implying parallel work occurred.
+
+`/target bg` remains specifically a Claude `claude --bg` dispatch surface. A Codex build
+dispatch receives a prose brief through an owned-PTY `pane` or a one-shot `headless`
+spawn; it is never sent a Claude slash command and is never reported as `claude --bg`.
 
 ## Dependency Model
 
