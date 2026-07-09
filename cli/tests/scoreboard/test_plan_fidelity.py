@@ -116,3 +116,29 @@ def test_coverage_line_reports_joined_pct():
 def test_no_data_when_window_empty():
     pf = _fidelity([{"completed": "2020-01-01T00:00:00", "type": "think"}])
     assert pf["state"] == "no_data"
+
+
+# --- review fixes (gemini PR#317) --------------------------------------------
+def test_path_suffix_boundary_no_false_match():
+    """`some_other_fold.py` must NOT match owned `.../fold.py` (path-boundary guard)."""
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+         "phases_completed": ["think", "plan"], "plan_path": "/x/plan-a.md",
+         "session_id": "plan-sess", "cost_usd": 2.0},
+        {"completed": "2026-07-03T11:00:00", "termination_reason": "DonePRGreen",
+         "phases_completed": ["do", "ship"], "plan_path": "/x/plan-a.md",
+         "graph_node_id": "x-1", "pr_number": 42, "session_id": "build-sess", "cost_usd": 6.0},
+    ]
+    pf = _fidelity(rows, summary="", diff=["cli/src/fno/scoreboard/some_other_fold.py"])
+    r = [x for x in pf["results"] if x["status"] == "joined"][0]
+    assert "cli/src/fno/scoreboard/some_other_fold.py" in r["scope_drift"]["unplanned"]
+    assert "cli/src/fno/scoreboard/fold.py" in r["scope_drift"]["untouched"]
+
+
+def test_root_level_models_py_is_data_model():
+    """A root-level `models.py` (no leading slash) must count as data-model surprise."""
+    from fno.scoreboard.fold import _is_data_model_file
+    assert _is_data_model_file("models.py")
+    assert _is_data_model_file("model.py")
+    assert _is_data_model_file("app/models.py")
+    assert not _is_data_model_file("cli/src/fno/scoreboard/fold.py")

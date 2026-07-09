@@ -967,7 +967,7 @@ def build_efficiency(
 
 _AC_ID_RE = re.compile(r"AC\d+-[A-Z]+")
 _OWNERSHIP_FILE_RE = re.compile(r"`([^`]+/[^`]+|[^`]+\.\w+)`")
-_DATA_MODEL_RE = re.compile(r"(migration|schema|/models?\.py|\.sql|models?/|migrations?/)", re.IGNORECASE)
+_DATA_MODEL_RE = re.compile(r"(migration|schema|(?:^|/)models?\.py|\.sql|models?/|migrations?/)", re.IGNORECASE)
 
 
 def _plan_key(plan_path) -> str | None:
@@ -998,6 +998,13 @@ def _is_data_model_file(path: str) -> bool:
     return bool(_DATA_MODEL_RE.search(path))
 
 
+def _path_match(a: str, b: str) -> bool:
+    """Two repo-relative paths refer to the same file: equal, or one is the
+    other's tail on a path-component boundary. The boundary guard stops
+    `some_other_fold.py` from matching `fold.py`."""
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+
 def _score_fidelity(plan_doc: str | None, summary: str | None, diff_files: list[str] | None) -> dict:
     """The three AC-required metrics + deviation load. Each degrades to n/a
     (None) when its input is missing - an unmeasurable plan is never a 0% plan."""
@@ -1016,8 +1023,8 @@ def _score_fidelity(plan_doc: str | None, summary: str | None, diff_files: list[
     dm_surprise: int | None = None
     if plan_doc is not None and diff_files is not None:
         owned = _parse_ownership_files(plan_doc)
-        unplanned = [f for f in diff_files if not any(f == o or f.endswith(o) or o.endswith(f) for o in owned)]
-        untouched = [o for o in owned if not any(f == o or f.endswith(o) or o.endswith(f) for f in diff_files)]
+        unplanned = [f for f in diff_files if not any(_path_match(f, o) for o in owned)]
+        untouched = [o for o in owned if not any(_path_match(f, o) for f in diff_files)]
         scope = {"unplanned": sorted(unplanned), "untouched": sorted(untouched)}
         dm_surprise = sum(1 for f in unplanned if _is_data_model_file(f))
 
