@@ -53,11 +53,20 @@ command -v jq >/dev/null 2>&1 || HAVE_JQ=0
 # Resolve the WORKSPACE ROOT, not $PWD. agy can fire Stop from a subdirectory, or
 # via the global ~/.gemini/config/hooks.json with an unrelated cwd; a relative
 # .fno/target-state.md lookup would then miss the manifest init writes at the git
-# root and stop an active target. agy's stdin carries workspacePaths[] (jq-only);
-# fall back to the git toplevel, then $PWD. Every downstream path (state, synth,
-# logs, events, --cwd) hangs off ROOT so they all agree.
+# root and stop an active target. agy's stdin carries workspacePaths[]; read it
+# with jq when present, else a jq-free sed extraction of the first entry -- so a
+# jq-missing hook firing from an UNRELATED cwd still locates the active manifest
+# instead of falling to $PWD, missing it, and failing OPEN on the very gate this
+# hook exists to hold (peer review, PR #313). Fall back to git toplevel then $PWD.
+# Every downstream path (state, synth, logs, events, --cwd) hangs off ROOT.
 WORKSPACE_ROOT=""
 [[ $HAVE_JQ -eq 1 ]] && WORKSPACE_ROOT=$(printf '%s' "$HOOK_INPUT" | jq -r '.workspacePaths[0] // empty' 2>/dev/null || true)
+if [[ -z "$WORKSPACE_ROOT" ]]; then
+    # jq-free fallback: first string in a simple "workspacePaths":["..."] array.
+    # A miss (absent field, empty array) leaves it empty -> git-toplevel/$PWD.
+    WORKSPACE_ROOT=$(printf '%s' "$HOOK_INPUT" \
+        | sed -n 's/.*"workspacePaths"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+fi
 if [[ -n "$WORKSPACE_ROOT" && -d "$WORKSPACE_ROOT" ]]; then
     ROOT="$WORKSPACE_ROOT"
 else

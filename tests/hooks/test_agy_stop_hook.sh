@@ -287,6 +287,35 @@ log "T10: jq missing -> active continue, no-session {}"
     cleanup
 }
 
+# ── T11: jq missing + UNRELATED cwd -> workspacePaths sed-fallback finds manifest
+# codex peer review (PR #313): without a jq-free workspacePaths read, a jq-missing
+# hook firing from an unrelated cwd would resolve ROOT to $PWD, miss the active
+# manifest, and fail OPEN. The sed fallback must locate the workspace and gate.
+log "T11: jq missing + unrelated cwd -> sed-fallback locates active manifest"
+{
+    setup_env
+    NOJQ="${TMP_DIR}/nojq"; mkdir -p "$NOJQ"
+    for b in bash cat grep sed tr date mkdir head rm git tail dirname basename; do
+        s="$(command -v "$b" 2>/dev/null)"; [[ -n "$s" ]] && ln -sf "$s" "$NOJQ/$b"
+    done
+    # Run from an UNRELATED cwd (its own git repo, no manifest); workspacePaths
+    # points at the real workspace. With jq masked, only the sed fallback can
+    # locate $TMP_DIR's manifest.
+    OTHER="$(mktemp -d)"; git -C "$OTHER" init -q 2>/dev/null
+    INPUT="{\"transcriptPath\":\"${TRANSCRIPT_FILE}\",\"fullyIdle\":true,\"conversationId\":\"c11\",\"workspacePaths\":[\"${TMP_DIR}\"]}"
+    # jq masked -> the hook bounded-continues at the jq-missing gate BUT only
+    # after the sed fallback located $TMP_DIR's manifest. Without the fallback,
+    # ROOT would be $OTHER (no manifest) and the hook would emit {} (fail open).
+    run_hook "$OTHER" "$INPUT" "HOME=${HOME_DIR}" "PATH=${NOJQ}" "FNO_AGENTS_BIN=/nonexistent"
+    if [[ "$(stdout_decision)" == "continue" ]]; then
+        pass "T11: sed-fallback locates the active manifest without jq (no fail-open)"
+    else
+        fail "T11: jq-missing+unrelated-cwd must bounded-continue via sed fallback, got $HOOK_STDOUT"
+    fi
+    rm -rf "$OTHER" 2>/dev/null || true
+    cleanup
+}
+
 echo ""
 printf '[agy] Results: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP_COUNT"
 [[ "$FAIL" -gt 0 ]] && exit 1
