@@ -5449,7 +5449,7 @@ def cmd_archive(
         to_archive, _remaining_pool, skipped = partition_for_archive(
             pool, older_than_days, now
         )
-        arch_ids = {e["id"] for e in to_archive}
+        arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
         remaining = [e for e in entries if e.get("id") not in arch_ids]
         return to_archive, remaining, skipped
 

@@ -56,15 +56,21 @@ def _guard_ids(entries: list[Entry]) -> set[str]:
     for e in entries:
         if _is_terminal(e):
             continue  # only open nodes protect their references
-        for b in e.get("blocked_by") or []:
-            if isinstance(b, str):
-                guard.add(b)
+        # isinstance(..., list) before iterating: a legacy/malformed string value
+        # would otherwise iterate character-by-character into the guard set.
+        blocked_by = e.get("blocked_by")
+        if isinstance(blocked_by, list):
+            for b in blocked_by:
+                if isinstance(b, str):
+                    guard.add(b)
         parent = e.get("parent")
         if isinstance(parent, str):
             guard.add(parent)
-        for s in e.get("supersedes") or []:
-            if isinstance(s, str):
-                guard.add(s)
+        supersedes = e.get("supersedes")
+        if isinstance(supersedes, list):
+            for s in supersedes:
+                if isinstance(s, str):
+                    guard.add(s)
         sup = e.get("superseded_by")
         if isinstance(sup, str):
             guard.add(sup)
@@ -116,15 +122,16 @@ def merge_into_archive(existing: list[Entry], new: list[Entry]) -> list[Entry]:
     Dedup makes the crash-window duplicate self-heal: an entry that a crashed
     sweep left in both files is written once here on the next sweep.
     """
+    # Track first-seen order without mutating any input dict: last write wins in
+    # by_id, and the final list is rebuilt from the recorded order.
     by_id: dict[str, Entry] = {}
-    ordered: list[Entry] = []
+    order: list[Any] = []  # node id (str) or the entry itself (id-less)
     for e in [*existing, *new]:
         nid = e.get("id")
         if isinstance(nid, str):
-            if nid in by_id:
-                by_id[nid].clear()
-                by_id[nid].update(e)
-                continue
+            if nid not in by_id:
+                order.append(nid)
             by_id[nid] = e
-        ordered.append(e)
-    return ordered
+        else:
+            order.append(e)
+    return [by_id[x] if isinstance(x, str) else x for x in order]
