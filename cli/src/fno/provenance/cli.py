@@ -145,6 +145,14 @@ def dispatch(
     if resolved_provider is not None:
         target["provider"] = resolved_provider
 
+    if live_harness == "codex":
+        worker_posture = (
+            "claude-bg-fallback"
+            if resolved_provider is None
+            else f"{resolved_provider}-exec"
+        )
+        typer.echo(f"codex posture: think source=codex; dispatch={worker_posture}")
+
     result = dispatch_conversational(
         target, session_id=sid, cwd=live_cwd, harness=live_harness,
     )

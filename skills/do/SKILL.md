@@ -12,6 +12,9 @@ requires:
 
 **One verb on a plan.** `/do` executes a plan. It routes between a lightweight single-session executor (the default) and full wave orchestration.
 
+When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
+`codex posture: do uses spawn_agent for wave tasks when available, with main-thread sequential fallback.`
+
 | Mode | What runs | Use when |
 |------|-----------|----------|
 | `flat` (default) | lightweight single-session executor: read the plan, make the changes, verify, done | a focused plan: a bug fix, a 1-session feature, a single `.md` plan |

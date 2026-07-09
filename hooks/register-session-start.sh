@@ -24,7 +24,7 @@ CLI_DIR="$(cd "$HOOK_DIR/.." && pwd)/cli"
 if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
     PROVIDER="gemini"; SESSION_ID="${GEMINI_SESSION_ID:-}"
 elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
-    PROVIDER="codex"; SESSION_ID="${CODEX_SESSION_ID:-}"
+    PROVIDER="codex"; SESSION_ID="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
 elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
     PROVIDER="claude"; SESSION_ID="${CLAUDE_SESSION_ID:-}"
 else

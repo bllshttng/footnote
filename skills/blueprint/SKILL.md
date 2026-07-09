@@ -6,6 +6,9 @@ argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <de
 
 # Abilities Plan
 
+When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
+`codex posture: blueprint plans natively in this thread; auto-launch is Claude bg only, otherwise the node is visibly parked.`
+
 <HARD-GATE>
 NEVER edit ~/.fno/graph.json directly via Edit/Write tools or `jq -i`/`sed -i`.
 ALWAYS use `fno backlog` commands or call `locked_mutate_graph()` from Python.

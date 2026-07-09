@@ -65,6 +65,22 @@ def test_ambient_codex_session(graph, monkeypatch):
     assert r.exit_code == 0
     assert graph["session_id"] == "codex-sid"
     assert graph["harness"] == "codex"
+    posture = "codex posture: think source=codex; dispatch=claude-bg-fallback"
+    assert posture in r.output
+    assert r.output.index(posture) < r.output.index("think dispatched:")
+
+
+def test_ambient_codex_explicit_provider_reports_exec_posture(graph, monkeypatch):
+    monkeypatch.setenv("CODEX_THREAD_ID", "codex-thread")
+    r = runner.invoke(
+        think_cli.think_app,
+        ["dispatch", "x-0a9c", "--provider", "codex"],
+    )
+    assert r.exit_code == 0
+    assert graph["node"]["provider"] == "codex"
+    posture = "codex posture: think source=codex; dispatch=codex-exec"
+    assert posture in r.output
+    assert r.output.index(posture) < r.output.index("think dispatched:")
 
 
 def test_node_not_found_exits_2(graph, monkeypatch):

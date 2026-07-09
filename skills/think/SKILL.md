@@ -12,6 +12,9 @@ requires:
 
 **One verb on a design.** `/think` routes to the right reasoning flow for the idea in front of you.
 
+When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
+`codex posture: think uses this Codex conversation as the source; dispatch defaults to Claude bg unless an explicit Codex exec provider is requested.`
+
 | Mode | What runs | Use when |
 |------|-----------|----------|
 | `think` (default) | design exploration + multi-perspective challenge + BDD acceptance criteria | you are shaping a feature and want a reviewable design doc |
