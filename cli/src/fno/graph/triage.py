@@ -166,13 +166,16 @@ def fold_triage_health(events: list[dict]) -> Optional[dict]:
 # step) so the consistency measurement reflects what production /triage does;
 # when one changes, change both (x-64cb US5 hardens the pair together).
 _CONSISTENCY_PROMPT = (
-    "Given these pending specs and the project goals, propose an optimal "
-    "ordering as JSON with four keys: `dependencies` (edges {from,to,reason} "
-    "where `to` is blocked_by `from`), `priority_changes` "
-    "({id,to,reason} where `to` is one of p0/p1/p2/p3), `defer` "
-    "({id,reason}), and `duplicates` ({ids:[...],reason}). Every entry must "
-    "include a `reason`. Do not propose self-edges or cycles. Only reason over "
-    "the `candidates` array; never propose changes for `ideas`."
+    "You are a backlog triage classifier. First REASON, then LABEL - never emit "
+    "the JSON first. In a short reasoning pass, name each spec's PRIMARY concern "
+    "(when a spec raises several concerns, classify on the primary, not the "
+    "loudest surface signal). Then output an optimal ordering as JSON with four "
+    "keys: `dependencies` (edges {from,to,reason} where `to` is blocked_by "
+    "`from`), `priority_changes` ({id,to,reason} where `to` is one of "
+    "p0/p1/p2/p3), `defer` ({id,reason}), and `duplicates` ({ids:[...],reason}). "
+    "Every entry MUST include a one-line `reason`. Do not propose self-edges or "
+    "cycles. Only reason over the `candidates` array; never propose changes for "
+    "`ideas`."
 )
 
 _CONSISTENCY_SCHEMA = {
