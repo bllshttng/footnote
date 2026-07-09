@@ -571,3 +571,24 @@ def test_render_html_project_local_settings_cannot_shadow_global_vault(
     assert "obsidian://open?vault=myvault" in text, (
         "Project-local config without obsidian block must NOT shadow global vault"
     )
+
+
+def test_html_overlay_live_claim_bucketed_now(monkeypatch):
+    """x-4845: the HTML board's _bucket consults live_claimed_node_ids so a
+    lockfile-held node lands in Now even at p3, without a graph session_id."""
+    from fno.graph.render_html import _bucket
+
+    monkeypatch.setattr("fno.graph.render_html.live_claimed_node_ids", lambda: {"x-live"})
+    entries = [_entry("x-live", priority="p3")]
+    cols = _bucket(entries)
+    assert any(e["id"] == "x-live" for e in cols["Now"])
+    assert all(e["id"] != "x-live" for e in cols["Later"])
+
+
+def test_html_overlay_degrades_on_empty_claims(tmp_path: Path, monkeypatch):
+    """Claims unreadable -> empty overlay, HTML render still succeeds."""
+    monkeypatch.setattr("fno.graph.render_html.live_claimed_node_ids", lambda: set())
+    entries = [_entry("x-none", priority="p2")]
+    out = tmp_path / "graph.html"
+    render_graph_html(entries, out)
+    assert out.exists()

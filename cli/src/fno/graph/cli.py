@@ -46,29 +46,12 @@ from fno.backlog.batch import cli as _batch_cli  # noqa: E402
 cli.add_typer(_batch_cli, name="batch")
 
 
-def _live_claimed_node_ids() -> set[str]:
-    """Node ids that currently hold a LIVE ``node:<id>`` claim.
-
-    Selection-time enforcement (ab-fcf9cec5): a node another session is
-    actively driving (a `/target` run or a walker-dispatched target) holds a
-    live ``node:<id>`` claim, and must be skipped so two sessions never pick
-    up the same node. Node claims live at the GLOBAL claims root
-    (``~/.fno/claims`` via ``Path.home()``), mirroring the global graph
-    at ``~/.fno/graph.json`` so the lock coordinates across worktrees.
-
-    Best-effort: any fault in the claims subsystem degrades to an empty set
-    so selection never breaks on it (identical to pre-enforcement behavior).
-    Only LIVE claims filter; stale/expired/released ones do not.
-    """
-    try:
-        from fno.claims.core import list_claims
-        from fno.claims.io import global_claims_root
-        # list_claims(prefix="node:") guarantees every key starts with "node:";
-        # the isinstance guard keeps this robust if that contract ever changes.
-        live = list_claims(prefix="node:", include_stale=False, root=global_claims_root())
-        return {c["key"].removeprefix("node:") for c in live if isinstance(c.get("key"), str)}
-    except Exception:
-        return set()
+# Selection-time enforcement (ab-fcf9cec5): a node another session is actively
+# driving holds a live ``node:<id>`` claim and must be skipped so two sessions
+# never pick up the same node. The implementation is homed in graph/statuses.py
+# (so the board renderers can share it without a cli<->render cycle); re-exported
+# under the original module-global name that existing tests monkeypatch.
+from fno.graph.statuses import live_claimed_node_ids as _live_claimed_node_ids  # noqa: E402
 
 
 def _has_unmerged_open_pr(e: dict) -> bool:

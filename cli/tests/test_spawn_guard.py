@@ -232,3 +232,43 @@ def test_spawn_guard_listed_in_agents_help(claims_tmp):
     res = runner.invoke(agents_app, ["--help"])
     assert res.exit_code == 0
     assert "spawn-guard" in res.output
+
+
+# --- x-4652: orphaned dispatch reservation reaps (already-correct path) -------
+
+
+def test_expired_dead_dispatch_reservation_reaped(claims_tmp, monkeypatch):
+    """Regression (x-4652): a dispatch:<id> reservation whose TTL has expired AND
+    whose recorded pid is dead is STALE, so spawn-guard reaps it and dispatches,
+    taking a fresh reservation. This locks the already-correct reap path (the
+    literal 'expired + dead PID' case classify handles) against regression.
+
+    The residual x-4652 concern - a within-TTL reservation whose dispatcher pid
+    is dead reads SUSPECT and is protected for up to the 3m TTL - is left as-is:
+    it self-heals at TTL and is arguably a correct boot-window guard. The
+    SUSPECT-arm behavior is asserted by
+    test_suspect_claim_already_running_no_reservation above."""
+    import psutil
+    from fno.claims import staleness
+
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 1
+    # Orphan: dispatcher died mid-launch, reservation taken with the shortest
+    # legal TTL. Advance the clock past expiry (the reservation self-heals at
+    # TTL in reality; here we jump the clock instead of sleeping 60s).
+    acquire_claim(
+        "dispatch:x-7777", "dispatch-node:orphan", pid=dead_pid, ttl_ms=60_000
+    )
+    future = staleness.now_ms() + 120_000
+    monkeypatch.setattr(staleness, "now_ms", lambda: future)
+    assert claim_status("dispatch:x-7777")["state"] == "stale"
+
+    res = _invoke("x-7777", "--holder", "dispatch-node:fresh", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["verdict"] == "dispatchable"
+    assert obj["reservation_key"] == "dispatch:x-7777"
+    assert obj["reservation_holder"] == "dispatch-node:fresh"
+    # The orphan was reaped; the fresh dispatcher now holds the reservation.
+    assert claim_status("dispatch:x-7777")["holder"] == "dispatch-node:fresh"

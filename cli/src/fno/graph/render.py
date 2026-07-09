@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band
+from fno.graph.statuses import live_claimed_node_ids
 
 # Canonical Kanban column order, left to right. Single source of truth for both
 # renderers: render_graph_md (below) and render_html.COLUMNS import this, so the
@@ -92,7 +93,9 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
 
 
 def _kanban_column(
-    entry: dict, in_progress_epics: frozenset[str] = frozenset()
+    entry: dict,
+    in_progress_epics: frozenset[str] = frozenset(),
+    live_claimed: frozenset[str] = frozenset(),
 ) -> str | None:
     """Return the kanban column for a graph entry, or None to exclude.
 
@@ -126,6 +129,15 @@ def _kanban_column(
     # so surface it in Now. The set is derived from children by the caller; the
     # epic's `_status` stays honest (never a claim without a session_id).
     if entry.get("id") in in_progress_epics:
+        return "Now"
+    # Live-claim overlay (x-4845): a node another session is actively driving
+    # holds a LIVE `node:<id>` lockfile but may never write a graph session_id,
+    # so its `_status` is not "claimed" and it would otherwise route by bare
+    # priority. Surface it in Now off the lockfile truth. Display-only — the
+    # graph `_status` is never mutated (x-33b2: claimed => session_id stays a
+    # pure derivation). Additive: placed below the exclusions so a dead/off-board
+    # node is never resurrected, and it only ever promotes to Now.
+    if entry.get("id") in live_claimed:
         return "Now"
     # Queued is orthogonal to _status (the field stays set across blocked,
     # idea, etc.). It routes to the Triage lane - a queued node is "awaiting
@@ -221,9 +233,10 @@ def render_graph_md(
     id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
 
     epics = in_progress_epic_ids(entries)
+    live_claimed = frozenset(live_claimed_node_ids())
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
-        col = _kanban_column(entry, epics)
+        col = _kanban_column(entry, epics, live_claimed)
         if col is None:
             continue
         columns[col].append(entry)

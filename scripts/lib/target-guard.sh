@@ -37,36 +37,45 @@ target_state_field() {
         | tr -d '"' | tr -d "'"
 }
 
-# Return 0 only if the state file describes a target run owned by a live process.
-# Returns non-zero if: no state file, terminal status, empty-input stub, or
-# owner_pid is dead. Callers that only want IN_PROGRESS (not worrying about
-# ownership) should grep status directly; this is the gate for "should I act?"
+# Return 0 only if the state file describes a target run owned by a LIVE session.
+# Returns non-zero if: no state file, empty-input stub, or the node claim is dead.
+#
+# Liveness truth is the node CLAIM, not the manifest `status:` field (the writer
+# no longer emits it) and NOT `owner_pid` (that is the transient `fno target init`
+# wrapper pid, dead ~1s after init returns per claims/session_pid.py — it reads a
+# live session as inactive). The claim is acquired with the DURABLE session pid
+# (nearest claude ancestor) + TTL, so its liveness is the real signal. We delegate
+# to `fno claim status` so this never diverges from the canonical classify().
 target_is_active() {
     local state_file="${1:-.fno/target-state.md}"
     [[ -f "$state_file" ]] || return 1
 
-    # Named state_status, not status — zsh reserves $status as an alias for $?
-    # and rejects `local status` with "read-only variable" when this lib is
-    # sourced into a zsh shell (e.g. interactive testing).
-    local state_status
-    state_status=$(target_state_field "status" "$state_file")
-    [[ "$state_status" == "IN_PROGRESS" ]] || return 1
-
+    # `|| true` keeps the documented fail-open behavior under a caller's
+    # `set -e` + `set -o pipefail`: target_state_field's grep returns non-zero
+    # on an absent field, which would otherwise abort the assignment.
     local input plan_path
-    input=$(target_state_field "input" "$state_file")
-    plan_path=$(target_state_field "plan_path" "$state_file")
+    input=$(target_state_field "input" "$state_file" || true)
+    plan_path=$(target_state_field "plan_path" "$state_file" || true)
     if _target_guard_is_empty_yaml "$input" && _target_guard_is_empty_yaml "$plan_path"; then
         return 1
     fi
 
-    # Owner liveness. Absent owner_pid means pre-session-owner state (written
-    # by a previous abilities version) — treat as active for backward compat.
-    # The stop hook will rewrite such states on the next completion anyway.
-    local owner_pid
-    owner_pid=$(target_state_field "owner_pid" "$state_file")
-    if ! _target_guard_is_empty_yaml "$owner_pid" && [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
-        kill -0 "$owner_pid" 2>/dev/null || return 1
+    # Claim liveness. A LIVE or SUSPECT (TTL-protected respawn) claim means the
+    # session is active; STALE/free/absent means it is not. Fail open (active)
+    # when the signal is unavailable — no claim key on the manifest (free-text /
+    # pre-claim legacy), or `fno` unreadable — matching the prior backward-compat
+    # stance; the stop hook rewrites a genuinely completed manifest anyway.
+    local claim_key
+    claim_key=$(target_state_field "target_claim_key" "$state_file" || true)
+    if _target_guard_is_empty_yaml "$claim_key"; then
+        return 0
     fi
-
-    return 0
+    command -v fno >/dev/null 2>&1 || return 0
+    local claim_json
+    claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
+    case "$claim_json" in
+        "") return 0 ;;
+        *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
