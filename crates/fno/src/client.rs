@@ -745,63 +745,59 @@ impl View {
                     Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)]))
                 }
             },
-            // A pane-hosted agent focuses its pane. A watch-only (bg/headless)
-            // row has no pane here, but a claude bg row carries an attach id -
-            // a click attaches it into a fresh pane. A watch-only row with no
-            // attach target (non-claude, or no jobId) can only say so.
-            DisplayRow::Agent(a) => match a.pane_id {
-                Some(pid) => Some(ChromeHit::Cmds(vec![Command::FocusPane(pid)])),
-                None => match &a.attach_id {
-                    Some(id) => Some(ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())])),
-                    None => Some(ChromeHit::Notice("agent has no pane here".into())),
-                },
-            },
-            // Only a READY card starts a session (x-a496) - the same nodes
-            // leader+g would pick. Dispatching a blocked card (unmet deps) or an
-            // in-flight one (already being worked) is work leader+g never selects,
-            // so those say why instead of opening the confirm (codex peer review).
-            // Still too costly for a stray tap, so a ready card opens a
-            // one-keypress confirm rather than dispatching now.
-            DisplayRow::Card(c) => match c.state {
-                // A terminal too short to render the bottom-row prompt refuses
-                // instead of arming an INVISIBLE confirm that would capture
-                // keys and could dispatch blind (sigma review x-260a). Same
-                // guard for the create overlay below.
-                CardState::Ready if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
-                    "terminal too short for the dispatch prompt".into(),
-                )),
-                CardState::Ready => Some(ChromeHit::Confirm(ConfirmAction {
-                    action: ConfirmKind::Dispatch { node: c.id.clone() },
-                    label: if c.slug.is_empty() {
-                        c.id.clone()
-                    } else {
-                        c.slug.clone()
-                    },
-                })),
-                CardState::Blocked => Some(ChromeHit::Notice("card blocked - unmet deps".into())),
-                // An in-flight card routes to the session working it (x-54fa,
-                // route priority pane > attach > notice): focus the worker's
-                // pane in this session, else attach the paneless bg session
-                // (same command + server gates as the agents-row click), else
-                // say where the work is instead of a dead-end refusal.
-                CardState::InFlight => match (c.pane_id, &c.attach_id) {
-                    (Some(pid), _) => Some(ChromeHit::Cmds(vec![Command::FocusPane(pid)])),
-                    (None, Some(id)) => {
-                        Some(ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())]))
-                    }
-                    (None, None) => {
-                        Some(ChromeHit::Notice(c.where_hint.clone().unwrap_or_else(
-                            || "card in flight - no session visible here".into(),
-                        )))
-                    }
-                },
-            },
+            // A pane-hosted agent focuses its pane; a paneless claude bg row
+            // attaches; a non-attachable row says so. Resolved by [`agent_hit`],
+            // shared with the navigator's goto so a click and a keyboard jump
+            // never diverge on what an agent's action is (x-653d).
+            DisplayRow::Agent(a) => Some(agent_hit(a)),
+            // A work-queue card dispatches/focuses via [`View::card_hit`], the
+            // same resolver the navigator uses (x-653d).
+            DisplayRow::Card(c) => Some(self.card_hit(c)),
             DisplayRow::Header(_) => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
             )),
             DisplayRow::NewSquad => Some(ChromeHit::OpenCreate),
+        }
+    }
+
+    /// The [`ChromeHit`] for one work-queue card - the resolver shared by a
+    /// sideline click ([`View::row_action`]) and the navigator's goto
+    /// ([`View::nav_rows`], x-653d). A method (not a free fn like [`agent_hit`])
+    /// because the Ready confirm needs the term-height guard.
+    ///
+    /// Only a READY card starts a session (x-a496) - the same nodes leader+g
+    /// picks - and only behind a one-keypress confirm (too costly for a stray
+    /// tap). A blocked/in-flight card is work leader+g never selects, so it says
+    /// why or routes to the running session (x-54fa, priority pane > attach >
+    /// notice) rather than opening the confirm.
+    fn card_hit(&self, c: &BacklogCard) -> ChromeHit {
+        match c.state {
+            // A terminal too short to render the bottom-row prompt refuses
+            // instead of arming an INVISIBLE confirm that would capture keys and
+            // could dispatch blind (sigma review x-260a).
+            CardState::Ready if self.term.0 < MIN_ROWS_FOR_STATUS => {
+                ChromeHit::Notice("terminal too short for the dispatch prompt".into())
+            }
+            CardState::Ready => ChromeHit::Confirm(ConfirmAction {
+                action: ConfirmKind::Dispatch { node: c.id.clone() },
+                label: if c.slug.is_empty() {
+                    c.id.clone()
+                } else {
+                    c.slug.clone()
+                },
+            }),
+            CardState::Blocked => ChromeHit::Notice("card blocked - unmet deps".into()),
+            CardState::InFlight => match (c.pane_id, &c.attach_id) {
+                (Some(pid), _) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
+                (None, Some(id)) => ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())]),
+                (None, None) => ChromeHit::Notice(
+                    c.where_hint
+                        .clone()
+                        .unwrap_or_else(|| "card in flight - no session visible here".into()),
+                ),
+            },
         }
     }
 
@@ -1713,6 +1709,50 @@ enum ChromeHit {
     OpenCreate,
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
     ToggleExpand(u64),
+}
+
+/// The [`ChromeHit`] for an agent row: focus its pane, else attach a paneless
+/// claude bg row, else say it has no pane here. Shared by a sideline click
+/// ([`View::row_action`]) and the navigator's goto ([`View::nav_rows`]) so the
+/// two inputs resolve the same entity identically (x-653d). Pure - the agent's
+/// own fields decide, so no `&self` needed.
+fn agent_hit(a: &AgentRow) -> ChromeHit {
+    match a.pane_id {
+        Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
+        None => match &a.attach_id {
+            Some(id) => ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())]),
+            None => ChromeHit::Notice("agent has no pane here".into()),
+        },
+    }
+}
+
+/// The rollup state of a pane/agent, worst-first. The navigator's state filter
+/// (x-653d), the squad-row rollup (x-d140), and seen/unseen surfacing (x-4328)
+/// all consume it. Derived, never wire-serialized - computed from [`AgentBadge`]
+/// + the seen bit at render time. The derive orders it `Blocked < Working <
+/// DoneUnseen < Idle`, so a squad rollup is `agents.map(pane_state).min()` (the
+/// worst state wins - x-d140's `min` and this filter agree on the ordering).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PaneState {
+    Blocked,
+    Working,
+    DoneUnseen,
+    Idle,
+}
+
+/// Derive a [`PaneState`] from an agent's badge and whether its output has been
+/// seen. The seen bit is x-4328's deliverable; until it lands `pane_state` is
+/// called with `seen=false`, so every `Done` reads as `DoneUnseen` (a
+/// finished-but-unviewed agent stays surfaced) - the single seam x-4328 wires
+/// the real bit into.
+fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
+    match badge {
+        Some(AgentBadge::Blocked) => PaneState::Blocked,
+        Some(AgentBadge::Working) => PaneState::Working,
+        Some(AgentBadge::Done) if seen => PaneState::Idle,
+        Some(AgentBadge::Done) => PaneState::DoneUnseen,
+        None => PaneState::Idle,
+    }
 }
 
 /// A named tab's visible label width in the tab bar / sideline (x-c150);
@@ -3468,6 +3508,70 @@ mod tests {
             vec![SearchKey::Esc, SearchKey::Byte(b'x')]
         );
         assert!(esc.is_empty());
+    }
+
+    #[test]
+    fn pane_state_derives_worst_first_from_badge_and_seen() {
+        // The x-653d state vocabulary: badge + seen -> PaneState. x-4328 flips
+        // the seen bit later; today every Done is called with seen=false.
+        assert_eq!(
+            pane_state(Some(AgentBadge::Blocked), false),
+            PaneState::Blocked
+        );
+        assert_eq!(
+            pane_state(Some(AgentBadge::Working), false),
+            PaneState::Working
+        );
+        assert_eq!(
+            pane_state(Some(AgentBadge::Done), false),
+            PaneState::DoneUnseen
+        );
+        assert_eq!(pane_state(Some(AgentBadge::Done), true), PaneState::Idle);
+        assert_eq!(pane_state(None, false), PaneState::Idle);
+        // Worst-first ordering (Invariant): the squad rollup takes the `min`, so
+        // the worst state must be the Ord-minimum - x-d140's `min` and the
+        // navigator filter must agree on this ordering.
+        assert!(PaneState::Blocked < PaneState::Working);
+        assert!(PaneState::Working < PaneState::DoneUnseen);
+        assert!(PaneState::DoneUnseen < PaneState::Idle);
+        let rollup = [PaneState::Idle, PaneState::Blocked, PaneState::Working]
+            .into_iter()
+            .min();
+        assert_eq!(rollup, Some(PaneState::Blocked), "the worst state wins");
+    }
+
+    #[test]
+    fn agent_hit_resolves_pane_then_attach_then_notice() {
+        // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
+        // agent to the SAME ChromeHit. pane > attach > notice.
+        let hosted = AgentRow {
+            squad: Some(1),
+            name: "a".into(),
+            pane_id: Some(7),
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+        };
+        assert!(
+            matches!(agent_hit(&hosted), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
+        );
+        let bg = AgentRow {
+            pane_id: None,
+            attach_id: Some("job1".into()),
+            ..hosted.clone()
+        };
+        assert!(
+            matches!(agent_hit(&bg), ChromeHit::Cmds(c) if c == vec![Command::AttachAgent("job1".into())])
+        );
+        let orphan = AgentRow {
+            pane_id: None,
+            attach_id: None,
+            ..hosted
+        };
+        assert!(matches!(agent_hit(&orphan), ChromeHit::Notice(_)));
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
