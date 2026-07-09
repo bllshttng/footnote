@@ -49,13 +49,46 @@ warm-context backfill/handoff slots).
   scaffolds it).
 - `gh` is authenticated for reading the merged diff.
 
+## Autonomous mode (dispatched runs: no operator present)
+
+Merge-detection dispatches this ritual as a background worker with **no human
+to prompt** (`_spawn_post_merge_worker`, pr_watch, and `scripts/post-merge/watch.sh`
+all pass an `autonomous` token on the invocation; a manual headless run sets
+`POST_MERGE_NONINTERACTIVE=1` or runs under `claude --print`). An interactive
+`--bg` worker that reaches a prompt slot **hangs forever** - the exact x-47be v1
+stall this mode fixes.
+
+**In autonomous mode you MUST NOT call `AskUserQuestion` (or any interactive
+prompt) at any slot.** Take the no-operator branch everywhere and self-end after
+Step 7:
+
+- **Backfill slot (Step 4b)** -> file a node, never run it.
+- **Handoff slot (Step 6b)** -> skip silently.
+- **Think-worthy follow-up (Steps 3/6)** -> when a follow-up needs design work
+  before it is actionable, file it with `fno backlog idea` and stop there:
+  born-with-why (`config.think_spawn`, `fno.provenance.spawn_think`) dispatches
+  the background `/think` on node birth when armed - so you never prompt "run a
+  think?" and never hand-spawn a second think that would race its dedup.
+- **Self-end** after the Step-7 report: finish the turn, do not wait for input.
+
+Detect the mode once at the top: autonomous when an `autonomous` argument token
+is present, `POST_MERGE_NONINTERACTIVE=1` is set, or there is no interactive
+operator. Everything below is unchanged for an attended manual `/fno:pr merged <n>`.
+
 ## Step 0: Resolve the PR
 
-If a PR number was passed as the argument, use it. Otherwise find the most
-recently merged PR for this repo:
+If a PR number was passed as the argument, use it (ignore a trailing
+`autonomous` mode token - it is not the PR). Otherwise find the most recently
+merged PR for this repo:
 
 ```bash
-PR="${1:-}"
+# Strip the optional `autonomous` mode token, then take the PR number.
+AUTONOMOUS=0
+ARGS=("$@")
+for a in "${ARGS[@]}"; do [[ "$a" == "autonomous" ]] && AUTONOMOUS=1; done
+[[ "${POST_MERGE_NONINTERACTIVE:-0}" == "1" ]] && AUTONOMOUS=1
+PR=""
+for a in "${ARGS[@]}"; do [[ "$a" =~ ^[0-9]+$ ]] && { PR="$a"; break; }; done
 if [[ -z "$PR" ]]; then
   PR="$(gh pr list --state merged --json number,mergedAt \
           --limit 1 --jq 'sort_by(.mergedAt) | last | .number')"
@@ -316,9 +349,10 @@ via two paths - operator-run AND this slot - would double-apply):
   + command) and its `--need` precondition, then ask whether to run it now with
   warm context. On **yes**, confirm the precondition holds (e.g. the migration is
   applied), run the command, report the outcome. On **no**, file a node (below).
-- **Headless / non-interactive** (`claude --print`, `--dangerously-skip-permissions`,
-  `POST_MERGE_NONINTERACTIVE=1`, or no operator to ask): do NOT run anything; file
-  a node so the warm-context offer is not lost.
+- **Autonomous / headless** (the `autonomous` token, `claude --print`,
+  `--dangerously-skip-permissions`, `POST_MERGE_NONINTERACTIVE=1`, or no operator
+  to ask): do NOT run anything and do NOT prompt; file a node so the warm-context
+  offer is not lost.
 - **File a node (declined or headless).** Never silently drop it:
 
   ```bash
@@ -441,7 +475,7 @@ is a prompted step, not something the operator must remember.
 
 - **Interactive.** Offer to generate a handoff document (the `handoff` skill)
   covering what merged and any open threads. On yes, invoke it; on no, skip.
-- **Headless / non-interactive.** Skip silently - there is no operator to prompt,
+- **Autonomous / headless.** Skip silently (never prompt) - there is no operator,
   and the Step-6 prose follow-ups already captured the durable context.
 
 Advisory and best-effort: a skipped or failed handoff never changes the merge
