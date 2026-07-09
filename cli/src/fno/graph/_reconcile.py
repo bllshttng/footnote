@@ -306,6 +306,25 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
     return re.search(rf"(^|[/-]){re.escape(node_id)}([/-]|$)", head_ref) is not None
 
 
+def _effective_reconcile_cwd(cwd: str, project: Optional[str]) -> str:
+    """The dir reconcile should run a node's gh query / post-close routing in.
+
+    Usually the node's recorded ``cwd`` (a worktree). When that worktree was
+    archived (dir gone), fall back to the node's OWN project checkout so gh
+    queries the right repo and post-close routing (advance/auto-continue) probes
+    the campaign-arm marker under the real root, not a missing dir - but only
+    when that root exists, else keep the original cwd so the existing degrade
+    (per-node warning / node-cwd routing) is strictly unchanged.
+    """
+    if cwd and not os.path.isdir(cwd):
+        from fno.graph._intake import project_root_from_settings
+
+        root = project_root_from_settings(project)
+        if root and os.path.isdir(root):
+            return root
+    return cwd
+
+
 def reverse_map_unstamped(
     entries: list[dict],
     *,
@@ -332,8 +351,6 @@ def reverse_map_unstamped(
     # ONE gh call per repo, not per node.
     # ponytail: group by cwd string; two worktrees of one repo -> two identical
     # gh calls. Collapse to git-common-dir only if that ever shows on a profile.
-    from fno.graph._intake import project_root_from_settings
-
     by_cwd: dict[str, list[dict]] = {}
     for node in entries:
         nid = node.get("id")
@@ -350,14 +367,10 @@ def reverse_map_unstamped(
         # here and a TypeError at the subprocess cwd= below.
         if not isinstance(cwd, str) or not cwd:
             continue
-        # The recorded cwd is often an archived worktree; when it's gone, gh
-        # raises Errno 2. Fall back to the node's OWN project checkout (the
-        # correct repo for its merged-PR query) when that root exists, else keep
-        # the original cwd so the existing per-node warning still fires.
-        if not os.path.isdir(cwd):
-            root = project_root_from_settings(node.get("project"))
-            if root and os.path.isdir(root):
-                cwd = root
+        # An archived-worktree cwd would make gh raise Errno 2; substitute the
+        # node's project root when it's gone (also collapses same-project gone
+        # worktrees to one gh call).
+        cwd = _effective_reconcile_cwd(cwd, node.get("project"))
         by_cwd.setdefault(cwd, []).append(node)
 
     records: list[MergeDriftRecord] = []

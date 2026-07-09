@@ -438,6 +438,32 @@ def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):
     assert {r.node_id for r in records} == {"ab-c1", "ab-c2"}
 
 
+def test_effective_reconcile_cwd(tmp_path, monkeypatch):
+    """The deleted-worktree cwd fallback shared by the reverse-map query AND the
+    post-close auto-continue routing (x-3dd0)."""
+    import fno.graph._intake as intake
+
+    real_root = tmp_path / "proj"
+    real_root.mkdir()
+    monkeypatch.setattr(
+        intake, "project_root_from_settings",
+        lambda project: str(real_root) if project == "p" else None,
+    )
+
+    live = str(tmp_path)  # exists on disk
+    gone = str(tmp_path / "gone-wt")
+
+    assert rec._effective_reconcile_cwd(live, "p") == live          # live -> untouched
+    assert rec._effective_reconcile_cwd(gone, "p") == str(real_root)  # gone -> project root
+    assert rec._effective_reconcile_cwd(gone, "other") == gone      # unmapped -> original
+
+    # mapped-but-missing root -> original cwd kept (unchanged degrade)
+    monkeypatch.setattr(
+        intake, "project_root_from_settings", lambda project: str(tmp_path / "also-gone")
+    )
+    assert rec._effective_reconcile_cwd(gone, "p") == gone
+
+
 def test_write_retro_sentinel(tmp_path):
     record = MergeDriftRecord(
         node_id="ab-sent",

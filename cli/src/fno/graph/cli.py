@@ -4510,6 +4510,7 @@ def cmd_reconcile(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
+        _effective_reconcile_cwd,
         emit_gate_escape_for_record,
         emit_human_touch_for_record,
         emit_session_satisfied_for_record,
@@ -4691,6 +4692,13 @@ def cmd_reconcile(
                 # reconcile run from project A can close a node belonging to
                 # project B, and B's campaign-arm marker lives under B's root.
                 _adv_cwd = _adv_node.get("cwd") if _adv_node else None
+                # If the closed node's recorded cwd is an archived worktree,
+                # route from its project root instead (x-3dd0): otherwise advance
+                # probes the campaign-arm marker under a missing dir and strands
+                # the next node. Re-resolved from the POST-lock node so a
+                # concurrent reproject is still honored.
+                if _adv_cwd:
+                    _adv_cwd = _effective_reconcile_cwd(_adv_cwd, _adv_project)
                 _adv_root = Path(_adv_cwd) if _adv_cwd else None
                 # next (same-project) + cross-project dependents (G1) + contract
                 # de-stub (G4), in one shared helper.
