@@ -11,6 +11,7 @@ never mistaken for a real trend.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -956,6 +957,199 @@ def build_efficiency(
             "tokens_total": _dist(per_row_tokens),
             "duration_minutes": _dist(per_row_duration),
         },
+    }
+
+
+# ── plan fidelity (x-ed6b3294) ───────────────────────────────────────────────
+# Grades PLANNING quality, not build quality: join each planning thread's plan
+# doc to its delivery (PR diff + SUMMARY.md) and score how well the plan held up.
+# The score is attributed to the PLANNING session_id.
+
+_AC_ID_RE = re.compile(r"AC\d+-[A-Z]+")
+_OWNERSHIP_FILE_RE = re.compile(r"`([^`]+/[^`]+|[^`]+\.\w+)`")
+_DATA_MODEL_RE = re.compile(r"(migration|schema|/models?\.py|\.sql|models?/|migrations?/)", re.IGNORECASE)
+
+
+def _plan_key(plan_path) -> str | None:
+    """Normalize a plan_path for join: the plan doc's basename (minus any
+    `#anchor`). Two rows referencing the same plan share it regardless of the
+    worktree prefix each was stamped under."""
+    if not isinstance(plan_path, str) or not plan_path:
+        return None
+    return Path(plan_path.split("#", 1)[0]).name or None
+
+
+def _parse_ac_ids(doc: str) -> set[str]:
+    return set(_AC_ID_RE.findall(doc))
+
+
+def _parse_ownership_files(doc: str) -> set[str]:
+    """File paths listed under the plan's `File Ownership Map` section."""
+    idx = doc.find("File Ownership Map")
+    section = doc[idx:] if idx != -1 else ""
+    files: set[str] = set()
+    for line in section.splitlines():
+        if line.lstrip().startswith("|") and ("modify" in line or "create" in line or "delete" in line):
+            files.update(_OWNERSHIP_FILE_RE.findall(line))
+    return files
+
+
+def _is_data_model_file(path: str) -> bool:
+    return bool(_DATA_MODEL_RE.search(path))
+
+
+def _score_fidelity(plan_doc: str | None, summary: str | None, diff_files: list[str] | None) -> dict:
+    """The three AC-required metrics + deviation load. Each degrades to n/a
+    (None) when its input is missing - an unmeasurable plan is never a 0% plan."""
+    # (a) AC coverage: planned ACs mentioned in SUMMARY / total planned ACs.
+    ac_cov: dict | None = None
+    if plan_doc is not None and summary is not None:
+        acs = _parse_ac_ids(plan_doc)
+        if acs:
+            verified = sum(1 for ac in acs if ac in summary)
+            ac_cov = {"verified": verified, "total": len(acs), "pct": _pct(verified, len(acs))}
+
+    # (b) scope drift: diff files absent from the ownership map (unplanned) +
+    # planned files never touched (untouched).
+    scope: dict | None = None
+    # (c) data-model surprise: data-model files in the diff the plan did not list.
+    dm_surprise: int | None = None
+    if plan_doc is not None and diff_files is not None:
+        owned = _parse_ownership_files(plan_doc)
+        unplanned = [f for f in diff_files if not any(f == o or f.endswith(o) or o.endswith(f) for o in owned)]
+        untouched = [o for o in owned if not any(f == o or f.endswith(o) or o.endswith(f) for f in diff_files)]
+        scope = {"unplanned": sorted(unplanned), "untouched": sorted(untouched)}
+        dm_surprise = sum(1 for f in unplanned if _is_data_model_file(f))
+
+    # (d) deviation load: reasoned deviations are signal, not a penalty - counted, not scored.
+    deviations: int | None = None
+    if summary is not None:
+        deviations = summary.lower().count("deviation") + summary.count("<help") + summary.count("STOP")
+
+    return {
+        "ac_coverage": ac_cov,
+        "scope_drift": scope,
+        "data_model_surprise": dm_surprise,
+        "deviation_load": deviations,
+    }
+
+
+def _default_read_plan_doc(plan_path: str) -> str | None:
+    p = Path(plan_path.split("#", 1)[0])
+    try:
+        return p.read_text(encoding="utf-8") if p.is_file() else None
+    except OSError:
+        return None
+
+
+def _default_read_summary(row: dict) -> str | None:
+    sp = row.get("summary_path")
+    if isinstance(sp, str) and sp:
+        try:
+            p = Path(sp)
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    s = row.get("summary")
+    return s if isinstance(s, str) else None
+
+
+def _default_read_diff(pr_number) -> list[str] | None:
+    if not pr_number:
+        return None
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number), "--name-only"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+
+
+def build_plan_fidelity(
+    rows: list[dict],
+    graph_nodes: list[dict],
+    *,
+    since_days: int,
+    now: datetime,
+    read_plan_doc=None,
+    read_summary=None,
+    read_diff=None,
+) -> dict:
+    """Join each `planned` row (W1) to its delivery and score plan fidelity.
+
+    A planned row with no joinable delivery is `unjoined`, never scored 0% -
+    an unimplemented plan is unmeasurable, not a bad plan (the fold's
+    coverage-honesty rule)."""
+    read_plan_doc = read_plan_doc or _default_read_plan_doc
+    read_summary = read_summary or _default_read_summary
+    read_diff = read_diff or _default_read_diff
+
+    cutoff = now - timedelta(days=since_days)
+
+    def _in_window(ts_raw) -> bool:
+        dt = _parse_ts(ts_raw)
+        return dt is not None and cutoff <= dt <= now
+
+    windowed = [r for r in rows if _in_window(r.get("completed"))]
+    if not windowed:
+        return {"state": "no_data", "since_days": since_days, "rows": 0}
+
+    by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
+    fixes: dict[str, list[dict]] = {}
+    for n in graph_nodes:
+        origin = n.get("caused_by")
+        if origin:
+            fixes.setdefault(origin, []).append(n)
+
+    shipped_by_plan: dict[str, list[dict]] = {}
+    for r in windowed:
+        if _is_shipped_reason(r.get("termination_reason")):
+            key = _plan_key(r.get("plan_path"))
+            if key:
+                shipped_by_plan.setdefault(key, []).append(r)
+
+    results: list[dict] = []
+    joined = 0
+    for r in windowed:
+        if not _is_planned_row(r):
+            continue
+        plan_path = r.get("plan_path")
+        key = _plan_key(plan_path)
+        deliveries = shipped_by_plan.get(key, []) if key else []
+        sid = r.get("session_id")
+        if not deliveries:
+            results.append({"session_id": sid, "plan_path": plan_path, "status": "unjoined"})
+            continue
+        joined += 1
+        d = deliveries[0]
+        nid = d.get("graph_node_id")
+        score = _score_fidelity(
+            read_plan_doc(plan_path) if plan_path else None,
+            read_summary(d),
+            read_diff(d.get("pr_number")),
+        )
+        results.append({
+            "session_id": sid,
+            "plan_path": plan_path,
+            "status": "joined",
+            "pr_number": d.get("pr_number"),
+            "outcome": _node_outcome(nid, _parse_ts(d.get("completed")), by_id, fixes) if nid and nid in by_id else None,
+            **score,
+        })
+
+    planned_total = len(results)
+    return {
+        "state": "ok",
+        "since_days": since_days,
+        "results": results,
+        "coverage": {"planned_rows": planned_total, "joined_pct": _pct(joined, planned_total)},
     }
 
 
