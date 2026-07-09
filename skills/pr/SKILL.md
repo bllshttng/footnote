@@ -38,7 +38,7 @@ Parse the first argument token:
 
 - **`create`** -> mode is `create`. Print `running create (PR via Haiku worker)`. The remaining tokens are create's own arguments. Go to "Step 2".
 - **`check`** -> mode is `check`. Print `running check (poll for review)`. The remaining tokens are check's arguments (`[PR#]`). Go to "Step 3".
-- **`merged`** -> mode is `merged`. Print `running merged (post-merge ritual)`. The remaining tokens are merged's arguments (`[PR#]`). Go to "Step 4".
+- **`merged`** -> mode is `merged`. Print `running merged (post-merge ritual)`. The remaining tokens are merged's arguments (`[PR#] [autonomous]`); pass them through - a dispatched run appends `autonomous` so the ritual takes every no-prompt branch. Go to "Step 4".
 - **`merge`** -> ambiguous: one word off `merged`, and on the opposite side of the merge event. Do NOT guess. Print and stop with a non-zero result:
 
   ```

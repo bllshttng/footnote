@@ -1045,10 +1045,14 @@ def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:
     from fno import _subprocess_util
 
     name = f"pr-merged-{pr_number}"
+    # `autonomous` is load-bearing: a `--bg` worker is INTERACTIVE, so without a
+    # no-operator signal the ritual stalls at its first human-prompt slot
+    # (x-47be v1's live stall). The signal rides the prompt - the one channel
+    # that always reaches the detached worker's LLM (env need not propagate).
     cmd = [
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",
         "--provider", "claude", "--substrate", "bg", "--cwd", cwd,
-        name, f"/fno:pr merged {pr_number}",
+        name, f"/fno:pr merged {pr_number} autonomous",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
