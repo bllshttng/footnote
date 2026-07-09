@@ -42,6 +42,11 @@ use crate::claude_roster::{read_control_key, ClaudeRoster};
 const DEFAULT_ATTEMPTS: u32 = 40;
 const DEFAULT_INTERVAL_MS: u64 = 250;
 
+/// Settle delay between the envelope inject and the wire-level CR submit. The
+/// paste needs to register in the recipient input box before the Enter
+/// keystroke lands; the proven recipe (2026-07-08, CC 2.1.205) used ~0.8s.
+const CR_SETTLE_MS: u64 = 800;
+
 /// Parsed `mail-inject` flags. The turn TEXT is read from STDIN (sidesteps the
 /// argv size limit for envelopes up to the 1 MiB send cap); everything else is a
 /// flag.
@@ -112,6 +117,26 @@ fn emit(delivered: bool, reason: &str) -> i32 {
     outcome_exit(delivered)
 }
 
+/// Inject the envelope, settle, then send the wire-level CR submit as a SEPARATE
+/// `op:'reply'` carrying only `"\r"`. The daemon has no wire-level submit: the
+/// envelope text lands in the recipient input box unsent, so without this the
+/// transcript never grows and delivery demotes to durable. The CR is a distinct
+/// reply, NOT `\r` appended to the envelope text -- an embedded `\r` is part of
+/// the paste, only a separate reply is the Enter keystroke. `"\r"` is not a
+/// detach sentinel, so the guarded builder passes it untouched. Extracted so the
+/// two-reply sequence is unit-testable against a `Fake` transport (settle=ZERO).
+fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
+    transport: &mut T,
+    short: &str,
+    text: &str,
+    auth: Option<&str>,
+    settle: Duration,
+) -> Result<(), DriveError> {
+    inject_reply(transport, short, text, auth, None)?;
+    std::thread::sleep(settle);
+    inject_reply(transport, short, "\r", auth, None)
+}
+
 /// Run `mail-inject`. Resolve the recipient on the claude roster, attach to its
 /// daemon `control.sock`, inject the STDIN text as an `op:'reply'` turn, and
 /// confirm the recipient transcript grew. Every `not-delivered` reason is a clean
@@ -172,7 +197,13 @@ pub fn run_mail_inject(rest: &[String]) -> i32 {
     // side-effects cannot be mistaken for our turn landing (codex peer P2); only
     // post-inject growth counts.
     let baseline = transcript_len(&transcript);
-    if let Err(e) = inject_reply(&mut transport, &short, &text, auth.as_deref(), None) {
+    if let Err(e) = inject_with_submit(
+        &mut transport,
+        &short,
+        &text,
+        auth.as_deref(),
+        Duration::from_millis(CR_SETTLE_MS),
+    ) {
         return match e {
             DriveError::UnsafeText => emit(false, "unsafe-text"),
             _ => emit(false, "io-error"),
@@ -191,9 +222,53 @@ pub fn run_mail_inject(rest: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_attach::ControlTransport;
+    use crate::claude_drive::DETACH_SENTINELS;
+    use std::io;
+
+    /// Records every line written, so a test can assert the two-reply sequence.
+    struct Fake {
+        sent: Vec<String>,
+    }
+    impl ControlTransport for Fake {
+        fn send_line(&mut self, line: &str) -> io::Result<()> {
+            self.sent.push(line.to_string());
+            Ok(())
+        }
+        fn recv_line(&mut self) -> io::Result<Option<String>> {
+            Ok(None)
+        }
+    }
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn inject_with_submit_sends_envelope_then_separate_cr() {
+        let mut t = Fake { sent: Vec::new() };
+        inject_with_submit(&mut t, "a1b2c3d4", "hello MARKER", Some("deadbeef"), Duration::ZERO)
+            .unwrap();
+        assert_eq!(t.sent.len(), 2, "envelope inject + wire-level CR submit");
+
+        let envelope: serde_json::Value = serde_json::from_str(t.sent[0].trim()).unwrap();
+        assert_eq!(envelope["text"], "hello MARKER");
+
+        // The submit is a SEPARATE op:reply carrying ONLY the CR -- not appended
+        // to the envelope text.
+        let cr: serde_json::Value = serde_json::from_str(t.sent[1].trim()).unwrap();
+        assert_eq!(cr["op"], "reply");
+        assert_eq!(cr["short"], "a1b2c3d4");
+        assert_eq!(cr["text"], "\r");
+        assert_eq!(cr["auth"], "deadbeef");
+    }
+
+    #[test]
+    fn inject_with_submit_refuses_unsafe_envelope_and_writes_nothing() {
+        let mut t = Fake { sent: Vec::new() };
+        let err = inject_with_submit(&mut t, "a1b2c3d4", DETACH_SENTINELS[0], None, Duration::ZERO);
+        assert!(matches!(err, Err(DriveError::UnsafeText)));
+        assert!(t.sent.is_empty(), "unsafe envelope must not submit or CR");
     }
 
     #[test]
