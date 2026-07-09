@@ -26,6 +26,7 @@ config:
     graph_json: null
     # Override path to ledger.json.
     ledger_json: null
+    # Override path to the evals-history.jsonl bank-run ledger.
     evals_history: null
     # Override path to the sidecar briefs dir.
     briefs_dir: null

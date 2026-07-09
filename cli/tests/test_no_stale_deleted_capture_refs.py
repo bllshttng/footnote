@@ -40,7 +40,6 @@ _DELETED_REFS_RE = re.compile(
     r"|_OLD_TASKS_MD\b"
     r"|convo-signal-capture\.sh"
     r"|convo-signals\.jsonl"
-    r"|evals-history\.jsonl"
     r"|metrics/analyze\.sh"
     r"|\bmetrics\.jsonl\b"
     r"|\btasks\.json\b"
