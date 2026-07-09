@@ -260,8 +260,10 @@ going so the inbox prose still lands, but flag it in the report.
 # In autonomous mode add --keep-going so the keep-going engine (x-3360)
 # classifies surviving carve-outs and dispatches follow-up /think or /target work
 # under the firehose ceiling. A no-op unless config.keep_going.enabled is armed.
-KEEP_GOING_FLAG=(); [[ "$AUTONOMOUS" == "1" ]] && KEEP_GOING_FLAG=(--keep-going)
-fno retro run --pr-number "$PR" "${KEEP_GOING_FLAG[@]}" || { echo "post-merge: retro run FAILED - record in report" >&2; RETRO_FAILED=1; }
+KEEP_GOING_FLAG=()
+if [[ "$AUTONOMOUS" == "1" ]]; then KEEP_GOING_FLAG=(--keep-going); fi
+# Guarded expansion: under Bash 3.2 + set -u, "${arr[@]}" on an empty array errors.
+fno retro run --pr-number "$PR" "${KEEP_GOING_FLAG[@]+"${KEEP_GOING_FLAG[@]}"}" || { echo "post-merge: retro run FAILED - record in report" >&2; RETRO_FAILED=1; }
 # Processes any retro/.triage-pending sentinels AND explicitly harvests this
 # PR's carve-outs. The bare `retro run` only fires when a sentinel exists; a
 # manual merge with no node<->PR link drops none, so its carve-outs (now stored

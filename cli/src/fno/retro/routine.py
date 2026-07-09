@@ -216,8 +216,7 @@ def triage_pr(
                     r
                     for r in results
                     if r.node_id
-                    and (getattr(r.candidate, "extra", None) or {}).get("kind")
-                    == KIND_CARVEOUT
+                    and r.candidate.extra.get("kind") == KIND_CARVEOUT
                 ]
                 followups = dispatch_followups(
                     carveout_landed, project_root=repo_root, cwd=cwd

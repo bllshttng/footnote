@@ -48,7 +48,7 @@ from fno.provenance.spawn_think import (
     _parse_short_id,
 )
 from fno.retro.land import LandResult
-from fno.retro.types import KIND_CARVEOUT
+from fno.retro.types import KIND_CARVEOUT, Candidate
 
 _LOG = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class FollowupResult:
     detail: str = ""
 
 
-def classify_followup(candidate) -> str:
+def classify_followup(candidate: Candidate) -> str:
     """Rule-first arm for one carve-out candidate; safe default is file-only.
 
     Only carve-outs are dispatch-eligible (reviews/deferred-findings/postmortems
@@ -116,7 +116,7 @@ def classify_followup(candidate) -> str:
       - ``deferred`` -> think  (a deferred decision: design is unclear)
       - otherwise    -> file   (unknown/backfill: never dispatch on a guess)
     """
-    extra = getattr(candidate, "extra", None) or {}
+    extra = candidate.extra  # dataclass field (default_factory=dict), never None
     if extra.get("kind") != KIND_CARVEOUT:
         return ARM_FILE
     subkind = (extra.get("subkind") or "").strip().lower()
