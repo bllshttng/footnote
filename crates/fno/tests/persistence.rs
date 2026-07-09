@@ -68,7 +68,7 @@ fn persistence_reattach_restores_the_exact_screen() {
     // is byte-identical to what the old client saw at detach.
     let scratch = Scratch::new("exact");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     h.type_bytes(b"echo marker-one; echo marker-two\r");
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "marker-two"));
     // Snapshot only once the screen has been STABLE for two consecutive
@@ -104,7 +104,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     // the test needs no vim binary, only the exact escape sequence vim emits.
     let scratch = Scratch::new("altscreen");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     // Enter alt screen, clear, home, draw a marker; cat holds the program
     // "open" in the foreground exactly like an editor session.
     h.type_bytes(b"printf '\\033[?1049h\\033[2J\\033[HALT-SCREEN-HELD'; cat\r");
@@ -174,7 +174,7 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     // goodbye; the server keeps the PTY and child, and a reattach works.
     let scratch = Scratch::new("kill9");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     // The echo marker proves the assignment traversed client -> server ->
     // PTY -> shell BEFORE the kill; a bare sleep could race a loaded runner.
     h.type_bytes(b"SURVIVED=kill9; echo set-ok\r");
@@ -187,7 +187,7 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     drop(h);
 
     let mut h2 = ClientHarness::spawn(&scratch);
-    h2.wait_screen(15, |s| !s.trim().is_empty());
+    h2.wait_prompt(15);
     h2.type_bytes(b"echo var=$SURVIVED\r");
     h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "var=kill9"));
 }
@@ -199,7 +199,7 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
     // and land in a NEW shell - never hang on the dead socket.
     let scratch = Scratch::new("respawn");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     h.type_bytes(b"OLD_WORLD=yes\r");
     std::thread::sleep(Duration::from_millis(300));
     let h_diag = h.diagnostics(); // captured pre-drop; h is gone at the assert
@@ -215,7 +215,7 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
     );
 
     let mut h2 = ClientHarness::spawn(&scratch);
-    h2.wait_screen(15, |s| !s.trim().is_empty());
+    h2.wait_prompt(15);
     // Fresh shell: the old environment is gone.
     h2.type_bytes(b"echo old=[$OLD_WORLD]\r");
     h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "old=[]"));
@@ -235,7 +235,7 @@ fn persistence_two_cold_clients_converge_on_one_server() {
     let scratch = Scratch::new("race");
     let mut a = ClientHarness::spawn(&scratch);
     let mut b = ClientHarness::spawn(&scratch);
-    a.wait_screen(15, |s| !s.trim().is_empty());
+    a.wait_prompt(15);
     b.wait_screen(15, |s| !s.trim().is_empty());
 
     a.type_bytes(b"echo shared-pane-proof\r");
