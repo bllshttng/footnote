@@ -1018,7 +1018,7 @@ def dispatch_post_merge_ritual(
     # Cross-session / cross-trigger dedup: a persisted marker means the ritual
     # already ran for this merge SHA.
     if marker.exists():
-        return PostMergeDispatchResult("already-dispatched", pr_number)
+        return PostMergeDispatchResult("already-dispatched", pr_number, detail="marker-exists")
 
     from fno import claims
 
@@ -1033,7 +1033,11 @@ def dispatch_post_merge_ritual(
             reason="post-merge ritual dispatch", root=canonical,
         )
     except claims.ClaimHeldByOther:
-        return PostMergeDispatchResult("already-dispatched", pr_number)
+        # In-flight, NOT done: another detector holds the lock right now but may
+        # still fail before writing the marker. Tag it so a polling caller
+        # (pr-watch) does NOT treat this as a completed hand-off and stop
+        # retrying - unlike marker-exists, which is a genuine completed dedup.
+        return PostMergeDispatchResult("already-dispatched", pr_number, detail="lock-contention")
 
     def _persist_marker() -> None:
         # Persist the cross-session marker ONLY after a successful hand-off, so
@@ -1047,7 +1051,7 @@ def dispatch_post_merge_ritual(
 
     try:
         if marker.exists():  # re-check under the lock (double-checked)
-            return PostMergeDispatchResult("already-dispatched", pr_number)
+            return PostMergeDispatchResult("already-dispatched", pr_number, detail="marker-exists")
 
         # Warm route first: the node's originating session still holds the
         # context a cold worker re-derives. Any miss (no id, dead session,

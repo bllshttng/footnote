@@ -37,9 +37,19 @@ class TestResolveWarmSession:
         _patch_live(monkeypatch, [_Sess("aaaa-bbbb")])
         assert resolve_warm_session(empty) is None
 
-    def test_never_self_injects(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "env_var",
+        ["CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "CLAUDE_SESSION_ID"],
+    )
+    def test_never_self_injects(self, monkeypatch, env_var):
+        """The self-guard must fire against whichever ambient env var carries the
+        running session id. source_session_id is stamped from
+        CLAUDE_CODE_SESSION_ID, so a guard checking only CLAUDE_SESSION_ID would
+        miss it and inject the ritual into the running session."""
+        for v in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "CLAUDE_SESSION_ID"):
+            monkeypatch.delenv(v, raising=False)
         _patch_live(monkeypatch, [_Sess("me-me-me")])
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "me-me-me")
+        monkeypatch.setenv(env_var, "me-me-me")
         assert resolve_warm_session("me-me-me") is None
 
     def test_resolver_error_degrades_to_none(self, monkeypatch):

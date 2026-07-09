@@ -66,7 +66,26 @@ def test_second_dispatch_same_sha_is_noop(tmp_path):
     )
     assert first.outcome == "dispatched"
     assert second.outcome == "already-dispatched"
+    assert second.detail == "marker-exists"  # genuine completed dedup, not in-flight
     assert len(spawn.calls) == 1  # exactly one worker for the merge SHA
+
+
+def test_lock_contention_is_distinguished_from_marker_exists(tmp_path, monkeypatch):
+    """A concurrent holder (ClaimHeldByOther) is in-flight, NOT done: it must be
+    tagged 'lock-contention' so a polling caller does not treat it as completed."""
+    from fno import claims
+
+    def _held(*a, **kw):
+        raise claims.ClaimHeldByOther("other", pid=999, host="h", key="k")
+
+    monkeypatch.setattr(claims, "acquire_claim", _held)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaLC", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res.outcome == "already-dispatched"
+    assert res.detail == "lock-contention"
+    assert spawn.calls == []  # never spawned; another holder owns the lock
 
 
 def test_distinct_shas_each_dispatch(tmp_path):

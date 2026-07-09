@@ -1529,7 +1529,7 @@ class TestPostMergeRouting:
 class TestWarmMergeRouting:
     """The tick's merge branch routes through the shared post-merge dispatcher."""
 
-    def _run_merge_tick(self, tmp_path, ritual_outcome):
+    def _run_merge_tick(self, tmp_path, ritual_outcome, ritual_detail=None):
         from fno.graph._reconcile import PostMergeDispatchResult
         from fno.pr_watch._dispatch import tick
         from fno.pr_watch._state import WatermarkStore
@@ -1552,7 +1552,9 @@ class TestWarmMergeRouting:
 
         def fake_ritual(cand, obs, fire):
             ritual_calls.append((cand.pr_number, getattr(obs, "merge_sha", None)))
-            return PostMergeDispatchResult(ritual_outcome, cand.pr_number, short_id="abcd1234")
+            return PostMergeDispatchResult(
+                ritual_outcome, cand.pr_number, short_id="abcd1234", detail=ritual_detail
+            )
 
         tick(
             graph_path=tmp_path / "graph.json",
@@ -1585,18 +1587,36 @@ class TestWarmMergeRouting:
         entry = WatermarkStore(path=store_path).get("owner/repo#1")
         assert entry["merge_dispatched"] is True
 
-    def test_already_dispatched_by_other_detector_skips(self, tmp_path):
-        """US3: reconcile got there first (shared marker) -> the daemon marks
-        its watermark and fires nothing."""
+    def test_already_dispatched_marker_exists_advances_watermark(self, tmp_path):
+        """US3: reconcile got there first and WROTE the marker (completed dedup)
+        -> the daemon marks its watermark and fires nothing."""
         from fno.pr_watch._state import WatermarkStore
 
-        deps, store_path, _calls = self._run_merge_tick(tmp_path, "already-dispatched")
+        deps, store_path, _calls = self._run_merge_tick(
+            tmp_path, "already-dispatched", ritual_detail="marker-exists"
+        )
         assert deps["fired"] == []
         assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatched"] == []
         skips = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
         assert skips and skips[0]["data"]["reason"] == "already-dispatched"
         entry = WatermarkStore(path=store_path).get("owner/repo#1")
         assert entry["merge_dispatched"] is True
+
+    def test_lock_contention_does_not_advance_watermark(self, tmp_path):
+        """A concurrent holder is in-flight, NOT done: the daemon must NOT advance
+        its watermark, so the next tick retries if that holder later fails before
+        writing the marker (else the ritual is silently dropped)."""
+        from fno.pr_watch._state import WatermarkStore
+
+        deps, store_path, _calls = self._run_merge_tick(
+            tmp_path, "already-dispatched", ritual_detail="lock-contention"
+        )
+        assert deps["fired"] == []
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatched"] == []
+        skips = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
+        assert skips and skips[0]["data"]["reason"] == "dispatch-in-flight"
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["merge_dispatched"] is False  # unadvanced -> next tick retries
 
     def test_spawn_failed_takes_retry_path(self, tmp_path):
         """A failed hand-off leaves the watermark unadvanced and bumps retries."""

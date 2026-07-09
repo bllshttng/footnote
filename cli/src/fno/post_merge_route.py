@@ -19,6 +19,23 @@ from typing import Optional, Tuple
 # operator guaranteed present (same contract as the cold dispatch sites).
 WARM_PROMPT = "/fno:pr merged {pr} autonomous"
 
+# The ambient session-id env vars a node's `source_session_id` is stamped from
+# (graph.cli._session_provenance): CLAUDE_CODE_SESSION_ID is the claude value
+# (the dominant convention), with the codex/gemini equivalents and the legacy
+# CLAUDE_SESSION_ID for safety. The self-inject guard must check the SAME set,
+# or a session reconciling its own merged PR would inject the ritual into itself.
+_SELF_SESSION_ENV_VARS = (
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "GEMINI_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+)
+
+
+def _current_session_ids() -> set[str]:
+    """The running session's own id(s) from the ambient env (non-empty only)."""
+    return {v for k in _SELF_SESSION_ENV_VARS if (v := (os.environ.get(k) or "").strip())}
+
 
 def resolve_warm_session(source_session_id: Optional[str]) -> Optional[str]:
     """Map a node's originating session id to a live local CC session id.
@@ -32,7 +49,7 @@ def resolve_warm_session(source_session_id: Optional[str]) -> Optional[str]:
     sid = (source_session_id or "").strip()
     if not sid:
         return None
-    if sid == (os.environ.get("CLAUDE_SESSION_ID") or ""):
+    if sid in _current_session_ids():
         return None
     try:
         from fno.agents.discover import discover_live_sessions

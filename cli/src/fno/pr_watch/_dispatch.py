@@ -536,11 +536,20 @@ def _run_tick(
                         log.warning("pr-watch: ritual dispatch for PR #%d failed: %s", pr, exc)
                         pm = None
                     if pm is not None and pm.outcome == "already-dispatched":
-                        # The other detector (or an earlier tick) owns this
-                        # merge; record it so this PR stops re-deciding.
-                        entry["merge_dispatched"] = True
-                        store.set(key, entry)
-                        emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
+                        # marker-exists = a completed hand-off: advance the
+                        # watermark so this PR stops re-deciding. lock-contention
+                        # = another detector holds the lock RIGHT NOW but may
+                        # still fail before writing the marker; do NOT advance,
+                        # so the next tick retries (by then either the marker
+                        # exists -> genuine skip, or the holder released a failed
+                        # claim -> this tick dispatches). Advancing on contention
+                        # would silently drop the ritual if that holder crashed.
+                        if getattr(pm, "detail", None) == "lock-contention":
+                            emit("pr_watch_skipped", {"pr": pr, "reason": "dispatch-in-flight"})
+                        else:
+                            entry["merge_dispatched"] = True
+                            store.set(key, entry)
+                            emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
                         skipped += 1
                         continue
                     dispatch_ok = pm is not None and pm.outcome in (
