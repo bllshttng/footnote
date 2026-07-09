@@ -78,6 +78,16 @@ bash scripts/tests/test_prune_fno_dir.sh'
     step "corrections.log placement migration (ab-f063 Wave 2)" "." 'bash scripts/tests/test_corrections_migrate.sh'
     step "placement-rule lint self-test (ab-f063 Wave 2)" "." 'bash scripts/tests/test_check_placement_rule.sh'
     step "Build fno-agents debug binary (for journey tests)" "crates/fno-agents" 'cargo build'
+    # Scoped @requires_rust coverage: the main pytest step runs with the binary
+    # deleted so these skip (they would otherwise fail on a missing provider CLI
+    # that CI lacks). Here the binary is present. test_ask_e2e_dispatch self-fakes
+    # the providers it *executes*, but test_rust_verb_parity presence-checks a real
+    # codex/gemini on PATH (resume/attach --print-command) without faking one, so
+    # seed trivial stubs on PATH for the step; per-test fakes still prepend and win
+    # wherever a provider is actually run. Reuses the debug build; no second compile.
+    step "Scoped @requires_rust parity suites (binary present; stubbed providers)" "cli" 'FAKE_BIN="$(mktemp -d)"
+for p in codex gemini; do printf "%s\n%s\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done
+PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py'
     step "Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)" "cli" 'FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py'
     step "loop-check journey tests (e2e + emission-schema + backstop-subprocess)" "." 'bash tests/hooks/test_loop_check_e2e.sh
 bash tests/events/test-loop-check-emission-schema.sh

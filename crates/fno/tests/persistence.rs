@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use common::{connect_with_retry, spawn_server, ClientHarness, FakeClient, Scratch};
@@ -12,6 +13,16 @@ use fno::proto::{
     read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ServerMsg, BUILD_VERSION,
     PROTO_VERSION,
 };
+
+/// Serializes this file's PTY-spawning tests. `cargo test --all-targets` runs
+/// them in parallel by default, and the real PTYs + Unix sockets contend for
+/// the runner's CPU, which reddens rust-ci on unrelated PRs. A module-local
+/// gate (no `serial_test` dep) makes exactly these tests run one at a time.
+/// The gate guards `()`, not data, and each test owns a unique scratch cleaned
+/// up on `Drop`, so a panicking test corrupts nothing shared: take the lock
+/// with `into_inner()` to ignore poisoning, keeping the real first failure
+/// visible instead of burying it under a cascade of `PoisonError` panics.
+static PTY_GATE: Mutex<()> = Mutex::new(());
 
 /// Count live processes whose command line carries this scratch's socket
 /// path: exactly the servers of this test's session (the path is unique per
@@ -63,12 +74,13 @@ fn pane_send(scratch: &Scratch, pane: u64, bytes: &[u8]) {
 
 #[test]
 fn persistence_reattach_restores_the_exact_screen() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC3-HP + AC3-UI: reattach lands on the SAME live PTY and the full
     // screen redraws from the server grid - the new client's settled screen
     // is byte-identical to what the old client saw at detach.
     let scratch = Scratch::new("exact");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     h.type_bytes(b"echo marker-one; echo marker-two\r");
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "marker-two"));
     // Snapshot only once the screen has been STABLE for two consecutive
@@ -98,13 +110,14 @@ fn persistence_reattach_restores_the_exact_screen() {
 
 #[test]
 fn persistence_alt_screen_program_survives_detach_reattach() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC3-EDGE: a full-screen alt-screen program (vim's mechanism: DECSET
     // 1049) is running at detach; on reattach its screen renders correctly
     // because the SERVER holds the alt-screen grid. Driven with printf+cat so
     // the test needs no vim binary, only the exact escape sequence vim emits.
     let scratch = Scratch::new("altscreen");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     // Enter alt screen, clear, home, draw a marker; cat holds the program
     // "open" in the foreground exactly like an editor session.
     h.type_bytes(b"printf '\\033[?1049h\\033[2J\\033[HALT-SCREEN-HELD'; cat\r");
@@ -133,6 +146,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
 
 #[test]
 fn persistence_multi_pane_reattach_is_screen_exact() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC3-HP/AC5-FR generalized to N panes through the REAL client: build a
     // split via leader chords, put distinct markers in both panes, detach,
     // reattach - the settled screen (chrome + both panes) is byte-identical.
@@ -170,11 +184,12 @@ fn persistence_multi_pane_reattach_is_screen_exact() {
 
 #[test]
 fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC4-HP / exit criterion 3: the client dies without ANY protocol
     // goodbye; the server keeps the PTY and child, and a reattach works.
     let scratch = Scratch::new("kill9");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     // The echo marker proves the assignment traversed client -> server ->
     // PTY -> shell BEFORE the kill; a bare sleep could race a loaded runner.
     h.type_bytes(b"SURVIVED=kill9; echo set-ok\r");
@@ -187,19 +202,20 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     drop(h);
 
     let mut h2 = ClientHarness::spawn(&scratch);
-    h2.wait_screen(15, |s| !s.trim().is_empty());
+    h2.wait_prompt(15);
     h2.type_bytes(b"echo var=$SURVIVED\r");
     h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "var=kill9"));
 }
 
 #[test]
 fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC3-ERR: the server is SIGKILLed (stale socket left behind). The next
     // client must detect it, print the one-line notice, spawn a fresh server,
     // and land in a NEW shell - never hang on the dead socket.
     let scratch = Scratch::new("respawn");
     let mut h = ClientHarness::spawn(&scratch);
-    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_prompt(15);
     h.type_bytes(b"OLD_WORLD=yes\r");
     std::thread::sleep(Duration::from_millis(300));
     let h_diag = h.diagnostics(); // captured pre-drop; h is gone at the assert
@@ -215,7 +231,7 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
     );
 
     let mut h2 = ClientHarness::spawn(&scratch);
-    h2.wait_screen(15, |s| !s.trim().is_empty());
+    h2.wait_prompt(15);
     // Fresh shell: the old environment is gone.
     h2.type_bytes(b"echo old=[$OLD_WORLD]\r");
     h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "old=[]"));
@@ -228,6 +244,7 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
 
 #[test]
 fn persistence_two_cold_clients_converge_on_one_server() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC4-EDGE / exit criterion 5: two clients launch simultaneously from a
     // cold start. Exactly one server may exist, and both clients must be
     // attached to it - proven structurally (process count) and semantically
@@ -235,7 +252,7 @@ fn persistence_two_cold_clients_converge_on_one_server() {
     let scratch = Scratch::new("race");
     let mut a = ClientHarness::spawn(&scratch);
     let mut b = ClientHarness::spawn(&scratch);
-    a.wait_screen(15, |s| !s.trim().is_empty());
+    a.wait_prompt(15);
     b.wait_screen(15, |s| !s.trim().is_empty());
 
     a.type_bytes(b"echo shared-pane-proof\r");
@@ -251,6 +268,7 @@ fn persistence_two_cold_clients_converge_on_one_server() {
 
 #[test]
 fn persistence_malformed_frame_is_rejected_not_panicked() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // The wire trust boundary: a Frame whose cell count disagrees with its
     // geometry must be refused like a malformed message - a clear one-liner
     // and a non-zero exit, never a slice panic inside the alternate screen.
@@ -298,6 +316,7 @@ fn persistence_malformed_frame_is_rejected_not_panicked() {
 
 #[test]
 fn persistence_client_relays_a_version_skew_refusal() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // The client half of the handshake contract: a server that refuses the
     // attach gets its reason relayed as a plain one-liner and a non-zero
     // exit - no TUI, no hang. Driven by a fake server so the refusal text is
@@ -338,6 +357,7 @@ fn persistence_client_relays_a_version_skew_refusal() {
 
 #[test]
 fn persistence_zero_client_session_survives_and_resyncs_fully() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC6-HP + AC6-UI: every client detaches; the server holds identical
     // pane state ("hours" compressed to a beat), `mux ls` shows the
     // persistent session with clients=0 and live pane counts, and a
@@ -382,6 +402,7 @@ fn persistence_zero_client_session_survives_and_resyncs_fully() {
 
 #[test]
 fn persistence_last_pane_exit_with_zero_clients_ends_the_server() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC6-ERR: the last pane's child exits while NO client is attached -
     // the server exits 0 (nobody to Bye) and unlinks its socket (Locked 12's
     // first exit path, with the client count at zero).
