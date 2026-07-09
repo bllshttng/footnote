@@ -11,6 +11,7 @@ from fno.evals.cli import evals_app
 from fno.evals.report import (
     GraduateError,
     build_report,
+    evals_health_summary,
     graduate_task_file,
     graduation_candidates,
     load_rows,
@@ -98,6 +99,21 @@ def test_graduate_non_capability_raises(tmp_path: Path) -> None:
     p.write_text("id: r\ntier: regression\ngrade:\n  - {kind: exit, command: pytest}\n", encoding="utf-8")
     with pytest.raises(GraduateError):
         graduate_task_file(p)
+
+
+def test_evals_health_summary_none_without_history(tmp_path: Path) -> None:
+    assert evals_health_summary(tmp_path / "absent.jsonl") is None
+
+
+def test_evals_health_summary(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, _row("r", "regression", True))
+    _history.append_row(hp, _row("r", "regression", False))
+    summary = evals_health_summary(hp)
+    assert summary is not None
+    assert summary["flake_count"] == 1
+    assert summary["regression_pass_rate"] == 0.5
+    assert summary["regression_alarm"] == ["r"]
 
 
 # --- CLI ---

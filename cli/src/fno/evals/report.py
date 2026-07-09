@@ -136,6 +136,26 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
     return candidates
 
 
+def evals_health_summary(history_path: Path) -> Optional[dict[str, Any]]:
+    """One-line evals health for `fno backlog triage health`, or None.
+
+    Returns None when no history exists or it holds no rows, so the triage-health
+    consumer shows an evals line ONLY when there is data (the consumption armor:
+    the report has a real consumer from day one). Never raises.
+    """
+    if not history_path.exists():
+        return None
+    report = build_report(load_rows(history_path))
+    if report["no_data"]:
+        return None
+    reg = report["tiers"].get("regression")
+    return {
+        "regression_pass_rate": reg["pass_rate"] if reg else None,
+        "flake_count": len(report["flakes"]),
+        "regression_alarm": report["regression_alarm"],
+    }
+
+
 class GraduateError(ValueError):
     """The task cannot be graduated (not found, or not capability-tier)."""
 

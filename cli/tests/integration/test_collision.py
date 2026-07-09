@@ -613,6 +613,36 @@ def test_triage_health_failure_prone(tmp_graph, tmp_path):
     assert report["failure_prone_nodes"][0]["burned_usd"] == 13.0
 
 
+def test_triage_health_shows_evals_line_when_history_exists(tmp_graph, tmp_path, monkeypatch):
+    """The evals consumer: triage health surfaces regression rate + flakes when
+    eval history exists (US4). A regression-tier task with a failure flags the
+    alarm; evals is advisory and never changes the health exit code."""
+    import fno.paths as _paths
+    from fno.evals import history as _eh
+
+    hist = tmp_path / "evals-history.jsonl"
+    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": True})
+    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": False})
+    monkeypatch.setattr(_paths, "evals_history", lambda: hist)
+
+    res = _invoke("backlog", "triage", "health", "--all", "--json")
+    assert res.exit_code == 0, res.output
+    report = json.loads(res.output)
+    assert "evals" in report
+    assert report["evals"]["flake_count"] == 1
+    assert report["evals"]["regression_alarm"] == ["r"]
+
+
+def test_triage_health_no_evals_line_without_history(tmp_graph, tmp_path, monkeypatch):
+    """No history -> no evals key (line shows only when there is data)."""
+    import fno.paths as _paths
+
+    monkeypatch.setattr(_paths, "evals_history", lambda: tmp_path / "absent.jsonl")
+    res = _invoke("backlog", "triage", "health", "--all", "--json")
+    assert res.exit_code == 0, res.output
+    assert "evals" not in json.loads(res.output)
+
+
 def test_triage_health_resolves_relative_plan_paths(tmp_graph, tmp_path, monkeypatch):
     """Per gemini PR #189 review: when graph entries store repo-relative
     plan_paths and triage health is invoked from a non-repo-root cwd, the
