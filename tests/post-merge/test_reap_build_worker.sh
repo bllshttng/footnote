@@ -146,13 +146,22 @@ run_step2() {
 }
 count_id() { printf '%s' "$1" | tr ' ' '\n' | grep -c "^$2\$"; }
 
-GRAPH_MATCH='{"nodes":[{"id":"x-1234","pr_number":292}]}'
+# Real schema: nodes are stored flat under `.entries`, NOT `.nodes` (a `.nodes`
+# scan silently yields empty and the reap never fires - the bug codex caught).
+GRAPH_MATCH='{"entries":[{"id":"x-1234","pr_number":292}]}'
 
 # AC1 (the bug): reconcile .closed[] empty, pr_number matches -> node unioned in.
 NI="$(run_step2 '{"closed":[]}' "$GRAPH_MATCH" 292)"
 [[ "$(count_id "$NI" x-1234)" == "1" ]] \
   && pass "AC1: ship-gate close (reconcile empty) unions the PR node into NODE_IDS" \
   || fail "AC1: expected x-1234 in NODE_IDS, got: $(printf '%q' "$NI")"
+
+# AC1b (schema guard): a legacy `.nodes`-shaped graph must NOT resolve - proves
+# the scan reads `.entries`, so a regression back to `.nodes` fails loudly here.
+NI="$(run_step2 '{"closed":[]}' '{"nodes":[{"id":"x-1234","pr_number":292}]}' 292)"
+[[ -z "${NI// }" ]] \
+  && pass "AC1b: a .nodes-shaped graph resolves nothing (scan reads .entries)" \
+  || fail "AC1b: expected empty from a .nodes-shaped graph, got: $(printf '%q' "$NI")"
 
 # AC2 (dedup): reconcile already closed the same node -> unioned once, not twice.
 NI="$(run_step2 '{"closed":[{"node_id":"x-1234"}]}' "$GRAPH_MATCH" 292)"
@@ -166,8 +175,16 @@ NI="$(run_step2 '{"closed":[{"node_id":"x-aaaa"}]}' "$GRAPH_MATCH" 292)"
   && pass "AC2b: union appends the PR node without clobbering reconcile's closed ids" \
   || fail "AC2b: expected both x-aaaa and x-1234, got: $(printf '%q' "$NI")"
 
+# AC2c (collision): pr_number is not unique - two ids match -> union BOTH, so
+# the reap fires for every candidate (head -1 would drop one; this is PR 315's
+# own dogfood case where two fno nodes share the PR number).
+NI="$(run_step2 '{"closed":[]}' '{"entries":[{"id":"x-1234","pr_number":292},{"id":"x-5678","pr_number":292}]}' 292)"
+[[ "$(count_id "$NI" x-1234)" == "1" && "$(count_id "$NI" x-5678)" == "1" ]] \
+  && pass "AC2c: a non-unique pr_number unions every matching id (no head -1 drop)" \
+  || fail "AC2c: expected both x-1234 and x-5678, got: $(printf '%q' "$NI")"
+
 # AC3 (no node): pr_number matches nothing -> NODE_IDS stays empty.
-NI="$(run_step2 '{"closed":[]}' '{"nodes":[{"id":"x-9999","pr_number":999}]}' 292)"
+NI="$(run_step2 '{"closed":[]}' '{"entries":[{"id":"x-9999","pr_number":999}]}' 292)"
 [[ -z "${NI// }" ]] \
   && pass "AC3: PR mapping to no node leaves NODE_IDS empty (Step 8a skips)" \
   || fail "AC3: expected empty NODE_IDS, got: $(printf '%q' "$NI")"
