@@ -135,4 +135,42 @@ else
   log "(b): segment 2 '${SEG2_B}' has no 'cl' infix (non-claude provider in this harness) - infix is optional, skipping"
 fi
 
+# ── (c) manifest heredoc must not run command substitution ───────────
+# Regression: the manifest heredoc is unquoted (`<< EOF`) so it can expand
+# $vars, which means an unescaped backtick in a comment line executes as a
+# command. The dispatch-pins comment mentions `fno target start`/`init`; if
+# those backticks aren't escaped, init spews "No such command 'start'" +
+# "init: command not found" to stderr and writes the collapsed literal
+# "chosen at /," into every manifest. Prior scenarios ran init with
+# `2>&1 >/dev/null`, hiding it - so capture stderr here and assert the
+# comment survives verbatim.
+log "(c): manifest heredoc keeps backtick comment literal, no command substitution"
+
+make_repo TMP_C
+_ALL_TMPS+=("$TMP_C")
+
+STDERR_C="${TMP_C}/init-stderr.txt"
+(cd "$TMP_C" && \
+  HOME="${TMP_C}/home" \
+  TARGET_START=1 \
+  TARGET_INPUT="test-heredoc-no-subst" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>"$STDERR_C") \
+  || fail "(c): init exited non-zero"
+
+STATE_C="${TMP_C}/.fno/target-state.md"
+[[ -f "$STATE_C" ]] || fail "(c): target-state.md was not created"
+
+# The literal comment (backticks intact) must be present verbatim.
+grep -qF 'chosen at `fno target start`/`init`, carried' "$STATE_C" \
+  || fail "(c): dispatch-pins comment was mangled (backticks ran as command substitution)"
+pass "(c): dispatch-pins comment kept its backticks literal"
+
+# stderr must be free of the substitution symptoms.
+if grep -qE "No such command 'start'|init: command not found" "$STDERR_C"; then
+  fail "(c): init stderr shows command-substitution errors:
+$(cat "$STDERR_C")"
+fi
+pass "(c): init stderr free of command-substitution errors"
+
 log "All session_id scenarios passed"
