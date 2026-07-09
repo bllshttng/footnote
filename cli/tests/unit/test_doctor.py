@@ -39,8 +39,12 @@ def _stub_signals(
     cargo_bin_present: bool = False,
     deployed_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
     source_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
+    content_drift: int | None = None,
 ) -> None:
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
+    # Content-drift ground truth (default: check skipped) so existing tests stay
+    # hermetic and never hash the real installed package; drift tests set it.
+    monkeypatch.setattr(doctor, "_python_content_drift", lambda source: content_drift)
     monkeypatch.setattr(doctor, "_source_rev", lambda source: source_rev)
     monkeypatch.setattr(doctor, "_read_marker", lambda: marker)
     monkeypatch.setattr(doctor, "_probe_installed_verb", lambda: capture_present)
@@ -1375,3 +1379,95 @@ def test_orphan_report_degrades_on_unresolvable_cwd(
 
     report = doctor._orphan_report()
     assert str(home / ".fno" / "convo-signals.jsonl") in report
+
+
+# ---------------------------------------------------------------------------
+# Content drift: ground-truth Python freshness (catches a lying installed-rev
+# marker after a cache-hit reinstall).
+# ---------------------------------------------------------------------------
+
+
+def test_content_drift_overrides_fresh_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The regression: marker == source HEAD (rev check says fresh) but installed
+    bytes differ -> STALE, exit nonzero, message names the file count. This is the
+    month-old-install-behind-a-HEAD-marker case."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",  # marker agrees with HEAD - the lie
+        capture_present="present",
+        content_drift=3,  # but 3 .py files on disk differ
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 1
+    assert "STALE" in result.stdout
+    assert "3 .py file" in result.stdout
+
+
+def test_content_drift_zero_stays_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 differing files is byte-identical -> never flips a fresh verdict."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        content_drift=0,
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "up to date" in result.stdout
+
+
+def test_content_drift_none_does_not_affect_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undeterminable content check (None) degrades to skip, never crying wolf."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        content_drift=None,
+    )
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fresh"
+    assert payload["content_stale"] is False
+    assert payload["content_drift_count"] is None
+
+
+def test_python_content_drift_counts_differing_py_files(tmp_path: Path) -> None:
+    """_python_content_drift fingerprints installed vs source/src/fno and counts
+    only files whose bytes differ; identical files do not count."""
+    inst = tmp_path / "installed" / "fno"
+    src = tmp_path / "source"
+    src_pkg = src / "src" / "fno"
+    inst.mkdir(parents=True)
+    src_pkg.mkdir(parents=True)
+    (inst / "same.py").write_text("x = 1\n")
+    (src_pkg / "same.py").write_text("x = 1\n")
+    (inst / "drift.py").write_text("old = True\n")
+    (src_pkg / "drift.py").write_text("old = False\n")  # differs
+    (src_pkg / "added.py").write_text("new = 1\n")  # only in source
+
+    import fno as _fno_pkg
+
+    # Point _installed_pkg_dir at our fake installed tree.
+    orig_file = _fno_pkg.__file__
+    try:
+        _fno_pkg.__file__ = str(inst / "__init__.py")
+        assert doctor._python_content_drift(src) == 2  # drift.py + added.py
+    finally:
+        _fno_pkg.__file__ = orig_file
+
+
+def test_python_content_drift_none_when_source_missing(tmp_path: Path) -> None:
+    """No source/src/fno dir -> None (skip), not a false 0 or a crash."""
+    assert doctor._python_content_drift(tmp_path / "nonexistent") is None
+
+
+def test_python_content_drift_none_when_source_arg_none() -> None:
+    assert doctor._python_content_drift(None) is None

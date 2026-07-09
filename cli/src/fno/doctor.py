@@ -5,14 +5,21 @@ The ``fno`` on a developer's PATH is a snapshot, not a live view of the repo
 PR #329), an install that predates it silently fails the documented path. This
 command makes that skew detectable and self-explaining, **network-free**.
 
-Two Python-side signals, each degrading to ``unknown`` rather than crying wolf:
+Python-side signals, each degrading to ``unknown`` rather than crying wolf:
 
-1. **Revision compare** (high-signal, when a source checkout is resolvable):
-   compare ``~/.fno/installed-rev`` (written by ``fno update``) against
-   ``git rev-parse HEAD`` of the resolved source.
+1. **Revision compare** (when a source checkout is resolvable): compare
+   ``~/.fno/installed-rev`` (written by ``fno update``) against ``git rev-parse
+   HEAD`` of the resolved source.
 2. **Capability probe** (always-available fallback): run ``fno backlog capture
    --help`` against the *installed* CLI; a "No such command" failure proves a
    missing verb regardless of any marker.
+3. **Content compare** (ground truth, cannot be fooled by a lying marker):
+   fingerprint the *installed* ``fno`` package's ``.py`` bytes against the
+   source working tree ``uv tool install`` would ship. Signal 1 trusts a marker
+   ``fno update`` writes on any zero install exit -- but ``uv`` can exit 0 while
+   serving a stale *cached* wheel (a no-op reinstall), leaving month-old bytes on
+   disk under a marker that reads HEAD. That false 'fresh' went unnoticed until a
+   content compare grounded the verdict on the actual installed bytes.
 
 Plus a Rust-side report: which ``fno-agents`` binary ``auto`` mode would use,
 and whether the cargo-installed bins are stale relative to the crates/ subtree
@@ -32,8 +39,8 @@ Exit code is non-zero only when staleness is **proven**.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -178,6 +185,66 @@ def _source_config_keys(source: Optional[Path]) -> Optional[frozenset[str]]:
     if result.returncode != 0 or not result.stdout:
         return None
     return _parse_field_meta_keys(result.stdout)
+
+
+def _installed_pkg_dir() -> Optional[Path]:
+    """Directory of the RUNNING (installed) ``fno`` package - the deployed bytes.
+
+    This interpreter IS the deployed CLI, so ``fno.__file__`` points at the
+    installed copy (site-packages after ``uv tool install``). None on any import
+    quirk so the content check degrades to skip.
+    """
+    try:
+        import fno
+
+        f = getattr(fno, "__file__", None)
+        return Path(f).parent if f else None
+    except Exception:
+        return None
+
+
+def _pkg_py_fingerprint(pkg_dir: Path) -> Optional[dict[str, str]]:
+    """Map each ``.py`` under ``pkg_dir`` to its content sha256, keyed by relpath.
+
+    None (skip the check) when the dir is missing or any file is unreadable - a
+    partial fingerprint could miss real drift and read a false 'fresh'.
+    """
+    try:
+        if not pkg_dir.is_dir():
+            return None
+        fp: dict[str, str] = {}
+        for p in sorted(pkg_dir.rglob("*.py")):
+            fp[p.relative_to(pkg_dir).as_posix()] = hashlib.sha256(
+                p.read_bytes()
+            ).hexdigest()
+    except OSError:
+        return None
+    return fp
+
+
+def _python_content_drift(source: Optional[Path]) -> Optional[int]:
+    """Count of ``.py`` files where the INSTALLED package differs from SOURCE.
+
+    Ground-truths freshness on actual bytes instead of the ``installed-rev``
+    marker, which ``fno update`` writes on any zero install exit even when ``uv``
+    served a stale cached wheel - the exact way a month-old install hid behind a
+    HEAD marker. Compares against the source WORKING TREE (not committed HEAD)
+    because ``uv tool install <path>`` ships the working tree: an
+    uncommitted-but-updated install then reads fresh, and running from source
+    (installed dir == source dir) trivially reports 0. None when undeterminable.
+    """
+    if source is None:
+        return None
+    inst = _installed_pkg_dir()
+    if inst is None:
+        return None
+    inst_fp = _pkg_py_fingerprint(inst)
+    src_fp = _pkg_py_fingerprint(source / "src" / "fno")
+    if inst_fp is None or src_fp is None:
+        return None
+    return sum(
+        1 for k in set(inst_fp) | set(src_fp) if inst_fp.get(k) != src_fp.get(k)
+    )
 
 
 def _probe_installed_verb() -> ProbeResult:
@@ -661,6 +728,7 @@ def _verdict(
     cargo_bin_present: bool = False,
     deployed_config_keys: Optional[frozenset[str]] = None,
     source_config_keys: Optional[frozenset[str]] = None,
+    content_drift_count: Optional[int] = None,
 ) -> dict[str, Any]:
     """Pure verdict function (no I/O) returning the complete JSON-serializable
     result, so the decision matrix is unit-testable and the output contract is
@@ -708,6 +776,16 @@ def _verdict(
         python_stale = True
         status = "stale"
 
+    # Content drift: the authoritative Python signal. Installed .py bytes differ
+    # from the source the updater would install -> stale regardless of what the
+    # marker claims (this is what catches a cache-hit reinstall the marker lies
+    # about). A None count means the check could not run; only a positive count
+    # is stale, so a deployed CLI byte-identical to source (0) never flips.
+    content_stale = content_drift_count is not None and content_drift_count > 0
+    if content_stale:
+        python_stale = True
+        status = "stale"
+
     # Rust staleness: requires full evidence. Partial evidence is never stale.
     rust_stale = (
         cargo_bin_present
@@ -724,6 +802,8 @@ def _verdict(
         "status": status,
         "python_stale": python_stale,
         "rust_stale": rust_stale,
+        "content_stale": content_stale,
+        "content_drift_count": content_drift_count,
         "missing_verbs": missing_verbs,
         "missing_config_keys": missing_config_keys,
         "source_rev": source_rev,
@@ -755,6 +835,16 @@ def _emit_human(
                 f"fno doctor: installed fno is behind {src_label} "
                 f"(missing: {', '.join(result['missing_verbs'])}). "
                 "Run `fno update` (or `fno doctor --fix`)."
+            )
+        elif result.get("content_stale"):
+            # Authoritative signal: installed bytes differ from source. Named
+            # first because it catches the lying-marker case the rev check below
+            # would otherwise report as fresh (a cache-hit reinstall).
+            n = result.get("content_drift_count")
+            out(
+                f"fno doctor: installed fno is STALE - {n} .py file(s) on disk differ "
+                f"from {src_label} (a cache-hit reinstall can leave old bytes while the "
+                "installed-rev marker still reads HEAD). Run `fno update` (or `fno doctor --fix`)."
             )
         elif result.get("missing_config_keys"):
             # Config-schema drift is the more actionable signal (it names a
@@ -947,6 +1037,7 @@ def doctor_command(
 
     deployed_config_keys = _deployed_config_keys()
     source_config_keys = _source_config_keys(src)
+    content_drift = _python_content_drift(src)
 
     result = _verdict(
         source_resolved=src is not None,
@@ -959,6 +1050,7 @@ def doctor_command(
         cargo_bin_present=cargo_bin_present,
         deployed_config_keys=deployed_config_keys,
         source_config_keys=source_config_keys,
+        content_drift_count=content_drift,
     )
     # Advisory front-door fields (x-c267); never change status/exit.
     result.update(_mux_front_door_report())
