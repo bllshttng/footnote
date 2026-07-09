@@ -21,7 +21,6 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
-from fno.config_io import _global_settings_path, read_config_flat
 from fno.graph._constants import GRAPH_HTML
 from fno.graph.render import (
     KANBAN_COLUMNS,
@@ -55,6 +54,9 @@ def _load_obsidian_vault() -> str | None:
     is a global artifact, so the source of truth must be the global file.
     """
     try:
+        # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+        from fno.config_io import _global_settings_path, read_config_flat
+
         path = _global_settings_path()
         if not path.is_file():
             return None
@@ -89,6 +91,9 @@ def _load_wip_caps() -> dict[str, int]:
     - non-int / <=0 / bool    -> that column is uncapped (omitted), never raised
     """
     try:
+        # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+        from fno.config_io import _global_settings_path, read_config_flat
+
         path = _global_settings_path()
         if not path.is_file():
             return dict(_DEFAULT_WIP_CAPS)
