@@ -205,3 +205,134 @@ def test_scan_threads_merge_sha_onto_record():
     closeable = [r for r in records if r.closeable]
     assert len(closeable) == 1
     assert closeable[0].merge_sha == "beefcafe"
+
+
+# --- warm-session routing: inject XOR cold, one marker -------------------
+
+
+class _WarmInject:
+    def __init__(self, delivered=True, reason="delivered"):
+        self.delivered = delivered
+        self.reason = reason
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, session_id: str, pr_number: int):
+        self.calls.append((session_id, pr_number))
+        return (self.delivered, self.reason)
+
+
+def _patch_resolver(monkeypatch, result):
+    import fno.post_merge_route as pmr
+
+    monkeypatch.setattr(pmr, "resolve_warm_session", lambda sid: result)
+
+
+def test_warm_delivery_skips_cold_and_marks(tmp_path, monkeypatch):
+    """AC1-HP: live originating session -> exactly one inject, no cold
+    dispatch, shared marker set."""
+    _patch_resolver(monkeypatch, "sess-live-1")
+    warm = _WarmInject(delivered=True)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW1", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-live-1", warm_inject=warm,
+    )
+    assert res.outcome == "routed-warm"
+    assert warm.calls == [("sess-live-1", 7)]
+    assert spawn.calls == []
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW1").exists()
+
+
+def test_warm_inject_failure_falls_back_cold(tmp_path, monkeypatch):
+    """AC1-ERR: probe passes but the send fails -> cold dispatch, reason kept."""
+    _patch_resolver(monkeypatch, "sess-live-2")
+    warm = _WarmInject(delivered=False, reason="not-live")
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW2", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-live-2", warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail == "cold: not-live"
+    assert len(spawn.calls) == 1
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW2").exists()
+
+
+def test_warm_queue_timeout_falls_back_cold(tmp_path, monkeypatch):
+    """US4: a busy session queues the inject; past the confirm budget the
+    route cold-dispatches."""
+    _patch_resolver(monkeypatch, "sess-busy")
+    warm = _WarmInject(delivered=False, reason="queue-timeout")
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW3", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-busy", warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail == "cold: queue-timeout"
+    assert len(spawn.calls) == 1
+
+
+def test_no_source_session_takes_cold_path(tmp_path):
+    """AC1-EDGE: a node with no source_session_id cold-dispatches, no inject."""
+    warm = _WarmInject()
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW4", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id=None, warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert warm.calls == []
+    assert len(spawn.calls) == 1
+
+
+def test_unresolved_session_takes_cold_path(tmp_path, monkeypatch):
+    """Dead / unregistered / identity-mismatch resolves to None -> cold."""
+    _patch_resolver(monkeypatch, None)
+    warm = _WarmInject()
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW5", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-dead", warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail == "cold: no-live-source-session"
+    assert warm.calls == []
+    assert len(spawn.calls) == 1
+
+
+def test_existing_marker_blocks_warm_inject_too(tmp_path, monkeypatch):
+    """US3: a merge already handled by the other detector never re-routes --
+    neither inject nor cold fires once the shared marker exists."""
+    _patch_resolver(monkeypatch, "sess-live-3")
+    spawn = _Spawn()
+    first = dispatch_post_merge_ritual(
+        7, dedup_key="shaW6", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert first.outcome == "dispatched"
+    warm = _WarmInject()
+    second = dispatch_post_merge_ritual(
+        7, dedup_key="shaW6", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-live-3", warm_inject=warm,
+    )
+    assert second.outcome == "already-dispatched"
+    assert warm.calls == []
+    assert len(spawn.calls) == 1
+
+
+def test_warm_resolver_error_degrades_to_cold(tmp_path, monkeypatch):
+    """A resolver crash must never break the dispatch (fallback floor)."""
+    import fno.post_merge_route as pmr
+
+    def _boom(sid):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(pmr, "resolve_warm_session", _boom)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW7", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-x", warm_inject=_WarmInject(),
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail is not None and res.detail.startswith("cold: warm-error")
+    assert len(spawn.calls) == 1

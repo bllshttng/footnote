@@ -944,7 +944,9 @@ _POST_MERGE_DISPATCH_SUBDIR = "post-merge-dispatched"
 
 @dataclass
 class PostMergeDispatchResult:
-    outcome: Literal["dispatched", "already-dispatched", "disabled", "spawn-failed"]
+    outcome: Literal[
+        "dispatched", "routed-warm", "already-dispatched", "disabled", "spawn-failed"
+    ]
     pr_number: int
     short_id: Optional[str] = None
     detail: Optional[str] = None
@@ -968,6 +970,8 @@ def dispatch_post_merge_ritual(
     node_cwd: Optional[str] = None,
     canonical_root: Optional[Path] = None,
     spawn: Optional[Callable[[int, str], str]] = None,
+    source_session_id: Optional[str] = None,
+    warm_inject: Optional[Callable[[str, int], "tuple[bool, str]"]] = None,
 ) -> PostMergeDispatchResult:
     """Dispatch a bg ``/fno:pr merged <n>`` worker at most once per merge.
 
@@ -984,8 +988,13 @@ def dispatch_post_merge_ritual(
 
     Exactly-once at two layers, both under the target repo's canonical: a
     persistent ``.fno/post-merge-dispatched/<key>`` marker (cross-session /
-    cross-trigger) written ONLY after a successful spawn, guarded by a TTL
+    cross-trigger) written ONLY after a successful hand-off, guarded by a TTL
     single-flight claim (concurrent detections) that self-heals a crash.
+
+    ``source_session_id`` (the merged node's originating session) arms the
+    warm route: a live inject of the ritual into that session, tried under
+    the same lock/marker, so exactly one of {warm inject, cold spawn} runs
+    per merge. ``warm_inject`` is a test seam.
     """
     if not auto_run:
         return PostMergeDispatchResult("disabled", pr_number)
@@ -1026,9 +1035,41 @@ def dispatch_post_merge_ritual(
     except claims.ClaimHeldByOther:
         return PostMergeDispatchResult("already-dispatched", pr_number)
 
+    def _persist_marker() -> None:
+        # Persist the cross-session marker ONLY after a successful hand-off, so
+        # a crash before this point leaves no marker (the sync stays recoverable
+        # via a direct primitive call / manual ritual).
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch(exist_ok=True)
+        except OSError:
+            pass  # best-effort; a missing marker only re-dispatches (idempotent ritual)
+
     try:
         if marker.exists():  # re-check under the lock (double-checked)
             return PostMergeDispatchResult("already-dispatched", pr_number)
+
+        # Warm route first: the node's originating session still holds the
+        # context a cold worker re-derives. Any miss (no id, dead session,
+        # busy-queue timeout, inject error) degrades to the cold path below --
+        # the fallback floor is exactly the pre-warm behavior.
+        cold_reason = "no-live-source-session"
+        try:
+            from fno.post_merge_route import inject_pr_merged, resolve_warm_session
+
+            warm_sid = resolve_warm_session(source_session_id)
+            if warm_sid is not None:
+                _inject = warm_inject if warm_inject is not None else inject_pr_merged
+                delivered, reason = _inject(warm_sid, pr_number)
+                if delivered:
+                    _persist_marker()
+                    return PostMergeDispatchResult(
+                        "routed-warm", pr_number, short_id=warm_sid[:8], detail=reason
+                    )
+                cold_reason = reason
+        except Exception as exc:  # noqa: BLE001 - warm routing must never break dispatch
+            cold_reason = f"warm-error: {exc}"[:120]
+
         if spawn is None:
             spawn = _spawn_post_merge_worker
         try:
@@ -1042,15 +1083,10 @@ def dispatch_post_merge_ritual(
             # once-only best-effort. The caller surfaces the recovery command;
             # robust auto-retry belongs to the pr_watch fast-follow (x-47be Q3).
             return PostMergeDispatchResult("spawn-failed", pr_number, detail=str(exc)[:200])
-        # Persist the cross-session marker ONLY after the spawn succeeds, so a
-        # crash before this point leaves no marker (the sync stays recoverable
-        # via a direct primitive call / manual ritual, per the note above).
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.touch(exist_ok=True)
-        except OSError:
-            pass  # best-effort; a missing marker only re-dispatches (idempotent ritual)
-        return PostMergeDispatchResult("dispatched", pr_number, short_id=short_id)
+        _persist_marker()
+        return PostMergeDispatchResult(
+            "dispatched", pr_number, short_id=short_id, detail=f"cold: {cold_reason}"
+        )
     finally:
         try:
             claims.release_claim(lock_key, holder, root=canonical)
