@@ -789,6 +789,28 @@ class TaskResult:
 # validation happens at the tool-call layer").
 VALID_STATUSES = ("SUCCESS", "DONE_WITH_CONCERNS", "FAILED", "BLOCKED")
 
+# Canonical worker-facing return-contract instruction (increase-consistency.md).
+# Derived from VALID_STATUSES so the enumerated statuses can NEVER drift from the
+# parser. Three levers that raise well-formed-output rate without touching the
+# parser seam: (1) one exact well-formed example of the fenced ```json block,
+# (2) the block must be the LAST thing in the reply, (3) the four statuses
+# enumerated inline. True assistant-prefill is unreachable through headless CLI
+# dispatch, so example-plus-constraint is the available lever. The example here
+# is round-tripped through parse_task_result in tests: what we tell workers to
+# emit is exactly what the parser accepts.
+RETURN_CONTRACT_INSTRUCTION = f"""\
+Report your result as a single fenced JSON block that is the LAST thing in your
+reply (nothing after the closing fence). `result` MUST be exactly one of
+{" | ".join(VALID_STATUSES)}. Emit exactly this shape:
+
+```json
+{{"result": "SUCCESS", "task": "2.1", "commit": "abc1234", "summary": "one line"}}
+```
+
+`result` and `task` are required. `commit`/`summary` are optional on SUCCESS;
+use `error` on FAILED and `reason`/`unblocks_after` on BLOCKED. Put no prose
+inside the block and nothing after it."""
+
 # Recognized contract field keys. In the text-grammar fallback a line is read as
 # a field ONLY when its key is one of these, so prose the model appends
 # ("Note: ...", "I fixed the bug: ...") cannot be absorbed as a field - the
