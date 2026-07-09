@@ -39,8 +39,10 @@ use crate::claude_roster::{read_control_key, ClaudeRoster};
 
 /// Default transcript-growth poll budget: 40 * 250ms = 10s. A live blocked
 /// session echoes the injected turn well within this; a miss demotes to durable.
-const DEFAULT_ATTEMPTS: u32 = 40;
-const DEFAULT_INTERVAL_MS: u64 = 250;
+/// `pub` so the in-process ask-lane fallback (`claude_ask`) reuses the SAME
+/// budget the shelled `mail-inject` verb uses, keeping the two paths byte-parity.
+pub const DEFAULT_ATTEMPTS: u32 = 40;
+pub const DEFAULT_INTERVAL_MS: u64 = 250;
 
 /// Settle delay between the envelope inject and the wire-level CR submit. The
 /// paste needs to register in the recipient input box before the Enter
@@ -137,11 +139,75 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
     inject_reply(transport, short, "\r", auth, None)
 }
 
-/// Run `mail-inject`. Resolve the recipient on the claude roster, attach to its
-/// daemon `control.sock`, inject the STDIN text as an `op:'reply'` turn, and
-/// confirm the recipient transcript grew. Every `not-delivered` reason is a clean
-/// signal for Python to write the durable fallback. The live socket poll is the
-/// only untested glue; every decision it makes is a tested function.
+/// Deliver `text` to `session` over the daemon `control.sock`: resolve the
+/// recipient on the roster, attach, inject the envelope + wire-level CR submit,
+/// and confirm the recipient transcript grew. `Ok(())` == delivered (transcript
+/// grew after the inject); `Err(reason)` is a clean not-delivered signal whose
+/// value IS the `mail-inject` JSON `reason` token.
+///
+/// The SINGLE control.sock wire implementation (Locked Decision 1, node
+/// x-2681): both the `mail-inject` verb (`fno mail send`) and the Rust ask-lane
+/// fallback (`claude_ask::ask_followup`) deliver through here, so the wire
+/// contract lives in one place and can never drift. `text` is injected verbatim
+/// -- a dumb transport; callers wrap it in the `<fno_mail>` /
+/// `<cross-session-message>` envelope first.
+pub fn deliver_via_control_sock(
+    session: &str,
+    text: &str,
+    attempts: u32,
+    interval_ms: u64,
+) -> Result<(), &'static str> {
+    // Resolve the recipient on the claude daemon roster. Any miss == not live
+    // reachable.
+    let roster = ClaudeRoster::load_default().map_err(|_| "not-live")?;
+    let worker = roster.find(session).ok_or("not-live")?;
+    let sock = worker.resolve_control_sock().ok_or("not-live")?;
+    let short = worker.short_id().to_string();
+    let auth = read_control_key();
+
+    // Locate the recipient transcript. No transcript yet == we cannot confirm
+    // landing.
+    let transcript = find_transcript(&worker.session_id).ok_or("no-transcript")?;
+
+    let mut transport = UnixControlTransport::connect(&sock).map_err(|_| "io-error")?;
+    if perform_attach(
+        &mut transport,
+        &AttachRequest::for_frame_stream(short.clone(), auth.clone()),
+    )
+    .is_err()
+    {
+        return Err("attach-failed");
+    }
+    // Baseline the transcript AFTER attach, immediately before inject, so attach
+    // side-effects cannot be mistaken for our turn landing (codex peer P2); only
+    // post-inject growth counts.
+    let baseline = transcript_len(&transcript);
+    inject_with_submit(
+        &mut transport,
+        &short,
+        text,
+        auth.as_deref(),
+        Duration::from_millis(CR_SETTLE_MS),
+    )
+    .map_err(|e| match e {
+        DriveError::UnsafeText => "unsafe-text",
+        _ => "io-error",
+    })?;
+
+    for _ in 0..attempts.max(1) {
+        if transcript_len(&transcript) > baseline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(interval_ms));
+    }
+    Err("not-confirmed")
+}
+
+/// Run `mail-inject`. Reads the turn TEXT from STDIN and delivers it via
+/// [`deliver_via_control_sock`]; emits the single JSON outcome line Python
+/// parses. Every `not-delivered` reason is a clean signal for Python to write
+/// the durable fallback. The live socket poll is the only untested glue; every
+/// decision it makes is a tested function.
 pub fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -157,66 +223,10 @@ pub fn run_mail_inject(rest: &[String]) -> i32 {
         return emit(false, "io-error");
     }
 
-    // Resolve the recipient on the claude daemon roster. Any miss == not live
-    // reachable -> Python queues durable.
-    let roster = match ClaudeRoster::load_default() {
-        Ok(r) => r,
-        Err(_) => return emit(false, "not-live"),
-    };
-    let worker = match roster.find(&args.session) {
-        Some(w) => w,
-        None => return emit(false, "not-live"),
-    };
-    let sock = match worker.resolve_control_sock() {
-        Some(s) => s,
-        None => return emit(false, "not-live"),
-    };
-    let short = worker.short_id().to_string();
-    let auth = read_control_key();
-
-    // Locate the recipient transcript. No transcript yet == we cannot confirm
-    // landing -> durable.
-    let transcript = match find_transcript(&worker.session_id) {
-        Some(p) => p,
-        None => return emit(false, "no-transcript"),
-    };
-
-    let mut transport = match UnixControlTransport::connect(&sock) {
-        Ok(t) => t,
-        Err(_) => return emit(false, "io-error"),
-    };
-    if perform_attach(
-        &mut transport,
-        &AttachRequest::for_frame_stream(short.clone(), auth.clone()),
-    )
-    .is_err()
-    {
-        return emit(false, "attach-failed");
+    match deliver_via_control_sock(&args.session, &text, args.attempts, args.interval_ms) {
+        Ok(()) => emit(true, "delivered"),
+        Err(reason) => emit(false, reason),
     }
-    // Baseline the transcript AFTER attach, immediately before inject, so attach
-    // side-effects cannot be mistaken for our turn landing (codex peer P2); only
-    // post-inject growth counts.
-    let baseline = transcript_len(&transcript);
-    if let Err(e) = inject_with_submit(
-        &mut transport,
-        &short,
-        &text,
-        auth.as_deref(),
-        Duration::from_millis(CR_SETTLE_MS),
-    ) {
-        return match e {
-            DriveError::UnsafeText => emit(false, "unsafe-text"),
-            _ => emit(false, "io-error"),
-        };
-    }
-
-    for _ in 0..args.attempts.max(1) {
-        if transcript_len(&transcript) > baseline {
-            return emit(true, "delivered");
-        }
-        std::thread::sleep(Duration::from_millis(args.interval_ms));
-    }
-    emit(false, "not-confirmed")
 }
 
 #[cfg(test)]
