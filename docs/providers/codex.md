@@ -96,6 +96,13 @@ python scripts/sync-codex-agents.py --check
 Run the generator after changing `agents/*.md`. The check mode fails when generated
 Codex agents are missing, stale, or no longer parse as TOML.
 
+The generator preserves native Codex model names plus explicit `sandbox_mode` and
+`nickname_candidates` fields. Claude-only model tiers (`haiku`, `sonnet`, `opus`, and
+`inherit`) are omitted so Codex can use its configured model. Source tools determine a
+predictable sandbox (`workspace-write` for write-capable tools, otherwise `read-only`),
+while Claude-only `skills` and `disallowedTools` remain visible in the generated
+developer instructions as behavioral context.
+
 ## Target Loop Hooks
 
 Custom agents and target loop hooks are separate surfaces. The files under
