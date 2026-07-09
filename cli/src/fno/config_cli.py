@@ -596,14 +596,14 @@ def schema(
     wizard_plan: bool = typer.Option(
         False, "--wizard-plan", help="Emit the wizard-asked fields as JSON."
     ),
-    yaml: bool = typer.Option(
-        False, "--yaml", help="Emit a commented example settings.yaml (every key at its default)."
+    toml: bool = typer.Option(
+        False, "--toml", help="Emit a commented example config.toml (every key at its default)."
     ),
     write: bool = typer.Option(
-        False, "--write", help="With --markdown/--yaml: regenerate the committed reference file."
+        False, "--write", help="With --markdown/--toml: regenerate the committed reference file."
     ),
     check: bool = typer.Option(
-        False, "--check", help="With --markdown/--yaml: exit non-zero if the committed file differs."
+        False, "--check", help="With --markdown/--toml: exit non-zero if the committed file differs."
     ),
 ) -> None:
     """Generate config artifacts from the model + registry.
@@ -619,10 +619,10 @@ def schema(
 
     from fno.config import schema_gen
 
-    selected = sum([json_schema, markdown, wizard_plan, yaml])
+    selected = sum([json_schema, markdown, wizard_plan, toml])
     if selected > 1:
         typer.echo(
-            "error: pick at most one of --json-schema / --markdown / --wizard-plan / --yaml",
+            "error: pick at most one of --json-schema / --markdown / --wizard-plan / --toml",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -634,12 +634,12 @@ def schema(
         typer.echo(schema_gen.wizard_plan())
         return
 
-    # --yaml selects the example file; --markdown (default) selects the guide.
+    # --toml selects the example file; --markdown (default) selects the guide.
     # Both share the write/check/echo plumbing below.
-    if yaml:
-        rendered = schema_gen.render_example_yaml()
-        target = _repo_root() / "docs" / "settings.example.yaml"
-        regen = "fno config schema --yaml --write"
+    if toml:
+        rendered = schema_gen.render_example_toml()
+        target = _repo_root() / "docs" / "settings.example.toml"
+        regen = "fno config schema --toml --write"
     else:
         rendered = schema_gen.render_markdown()
         target = _repo_root() / "docs" / "configuration-guide.md"

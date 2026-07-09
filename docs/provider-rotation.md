@@ -29,22 +29,22 @@ at the correct credentials directory.
 
 ## Schema reference
 
-Provider records live under `config.providers` in `config.toml`.
+Provider records live under the top-level `[providers]` table in `config.toml`.
 
-```yaml
-config:
-  providers:
-    active: claude-max-secondary     # id of the active provider (optional)
-    records:
-      - id: claude-max-secondary
-        name: "Secondary Claude Max"
-        cli: claude
-        auth: oauth_dir
-        credentials_source: /Users/me/.claude.secondary
-        priority: 100
-        account_id: account-secondary
-        tags: [secondary, max]
-        description: "Personal secondary subscription"
+```toml
+[providers]
+active = "claude-max-secondary"     # id of the active provider (optional)
+
+[[providers.records]]
+id = "claude-max-secondary"
+name = "Secondary Claude Max"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "/Users/me/.claude.secondary"
+priority = 100
+account_id = "account-secondary"
+tags = ["secondary", "max"]
+description = "Personal secondary subscription"
 ```
 
 ### Field reference
@@ -70,12 +70,10 @@ default, relays B's reply back into A as a literal user turn (true
 agent-to-agent), alternating until a turn ceiling stops it. These settings live
 under `config.agents.a2a`:
 
-```yaml
-config:
-  agents:
-    a2a:
-      auto: true          # A2A relay toggle (default true)
-      turn_ceiling: 6     # hard cap on total A<->B turns per exchange (>= 1)
+```toml
+[agents.a2a]
+auto = true            # A2A relay toggle (default true)
+turn_ceiling = 6       # hard cap on total A<->B turns per exchange (>= 1)
 ```
 
 | Field | Type | Default | Description |
@@ -114,9 +112,9 @@ Settings are read from two locations. Project-local wins over global:
 Use for `claude`, `gemini`, and other CLIs whose credentials are stored as
 files on disk (OAuth tokens, session cookies).
 
-```yaml
-auth: oauth_dir
-credentials_source: /Users/me/.claude.secondary
+```toml
+auth = "oauth_dir"
+credentials_source = "/Users/me/.claude.secondary"
 ```
 
 Staging creates a symlink:
@@ -133,10 +131,9 @@ or `{"HOME": "~/.fno/providers/<id>/home"}` for other CLIs.
 
 Use for CLIs that read credentials from environment variables.
 
-```yaml
-auth: api_key
-env:
-  ANTHROPIC_API_KEY: "${KEYCHAIN:my-anthropic-key}"
+```toml
+auth = "api_key"
+env = { ANTHROPIC_API_KEY = "${KEYCHAIN:my-anthropic-key}" }
 ```
 
 Staging creates an empty marker directory (`~/.fno/providers/<id>/`);
@@ -147,28 +144,29 @@ resolved dict.
 
 ## env-value reference resolution
 
-Values in `env:` support four syntaxes:
+Values in a record's `env` table support four syntaxes (shown here as the
+`env` inline table a `[[providers.records]]` entry carries):
 
 **`${ENV:VAR_NAME}`** - Reads `VAR_NAME` from the current process environment.
 Raises `ProviderUnavailableError` if the variable is not set.
 
-```yaml
-ANTHROPIC_API_KEY: "${ENV:MY_ANTHROPIC_KEY}"
+```toml
+env = { ANTHROPIC_API_KEY = "${ENV:MY_ANTHROPIC_KEY}" }
 ```
 
 **`${KEYCHAIN:item}`** - Reads the password from macOS Keychain via
 `security find-generic-password -w -s <item>`. Raises `ProviderUnavailableError`
 if the item does not exist. macOS only.
 
-```yaml
-ANTHROPIC_API_KEY: "${KEYCHAIN:anthropic-work-account}"
+```toml
+env = { ANTHROPIC_API_KEY = "${KEYCHAIN:anthropic-work-account}" }
 ```
 
 **`${FILE:/path/to/file}`** - Reads the first line of the file, stripped of
 whitespace. Raises `ProviderUnavailableError` if the file cannot be read.
 
-```yaml
-ANTHROPIC_API_KEY: "${FILE:/run/secrets/anthropic_key}"
+```toml
+env = { ANTHROPIC_API_KEY = "${FILE:/run/secrets/anthropic_key}" }
 ```
 
 **`${literal_value}`** - Any `${...}` value that contains no `:` character is
@@ -417,24 +415,25 @@ can declare its own per-session ceiling. When the per-provider spend
 exceeds the sub-cap, the stop hook trips BLOCKED with axis tagged as
 `per_provider`:
 
-```yaml
-config:
-  providers:
-    records:
-      - id: claude-anthropic
-        name: Claude Anthropic
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-        cost_cap_usd_per_session: 30
-      - id: claude-openrouter
-        name: Claude OpenRouter
-        cli: claude
-        auth: api_key
-        env: {ANTHROPIC_API_KEY: "${KEYCHAIN:openrouter-key}"}
-        cost_cap_usd_per_session: 30
-    failover:
-      max_swaps_per_phase: 5
+```toml
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Anthropic"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+cost_cap_usd_per_session = 30
+
+[[providers.records]]
+id = "claude-openrouter"
+name = "Claude OpenRouter"
+cli = "claude"
+auth = "api_key"
+env = { ANTHROPIC_API_KEY = "${KEYCHAIN:openrouter-key}" }
+cost_cap_usd_per_session = 30
+
+[providers.failover]
+max_swaps_per_phase = 5
 ```
 
 The session cap and per-provider sub-cap are checked together; whichever
@@ -514,33 +513,38 @@ the global active provider.
 
 ### Schema
 
-```yaml
-config:
-  providers:
-    active: claude-anthropic
-    records:
-      - id: claude-anthropic
-        name: Claude Anthropic
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-      - id: gemini-pro-1
-        name: Gemini Pro 1
-        cli: gemini
-        auth: api_key
-        env: { GEMINI_API_KEY: $GEMINI_KEY }
-      - id: glm-zhipu
-        name: GLM Zhipu
-        cli: openclaw
-        auth: api_key
-        env: { OPENAI_API_KEY: $GLM_KEY }
-  agents:
-    code-reviewer:
-      provider: claude-anthropic
-    silent-failure-hunter:
-      provider: gemini-pro-1
-    type-design-analyzer:
-      provider: glm-zhipu
+```toml
+[providers]
+active = "claude-anthropic"
+
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Anthropic"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+
+[[providers.records]]
+id = "gemini-pro-1"
+name = "Gemini Pro 1"
+cli = "gemini"
+auth = "api_key"
+env = { GEMINI_API_KEY = "$GEMINI_KEY" }
+
+[[providers.records]]
+id = "glm-zhipu"
+name = "GLM Zhipu"
+cli = "openclaw"
+auth = "api_key"
+env = { OPENAI_API_KEY = "$GLM_KEY" }
+
+# Per-agent provider bindings live in the sibling top-level [agents] block.
+[agents.code-reviewer]
+provider = "claude-anthropic"
+[agents.silent-failure-hunter]
+provider = "gemini-pro-1"
+[agents.type-design-analyzer]
+provider = "glm-zhipu"
 ```
 
 Agent names under `config.agents.<name>` must exactly match the `subagent_type`
@@ -741,31 +745,27 @@ Combos are named ordered provider lists with a rotation strategy. They sit on to
 
 ### Schema
 
-```yaml
-config:
-  providers:
-    active: claude-primary             # existing
-    active_combo: my-stack             # NEW (optional; set via `fno providers combos use`)
-    records:
-      claude-key-a:
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-      claude-key-b: { ... }
-      claude-key-c: { ... }
-    combos:                            # NEW
-      my-stack:
-        strategy: round_robin            # or "fallback"
-        sticky_limit: 3                  # ignored for fallback
-        providers:
-          - claude-key-a
-          - claude-key-b
-          - claude-key-c
-      cheap-only:
-        strategy: fallback
-        providers:
-          - claude-key-c
-          - gemini-codex
+```toml
+[providers]
+active = "claude-primary"             # existing
+active_combo = "my-stack"             # NEW (optional; set via `fno providers combos use`)
+
+[[providers.records]]
+id = "claude-key-a"
+name = "Claude Key A"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+# ... claude-key-b and claude-key-c are more [[providers.records]] entries, same shape
+
+[providers.combos.my-stack]           # NEW
+strategy = "round_robin"              # or "fallback"
+sticky_limit = 3                      # ignored for fallback
+providers = ["claude-key-a", "claude-key-b", "claude-key-c"]
+
+[providers.combos.cheap-only]
+strategy = "fallback"
+providers = ["claude-key-c", "gemini-codex"]
 ```
 
 | Strategy | Behavior |
@@ -980,23 +980,25 @@ or any combo-resolution code.
 
 Example combo that routes work across Claude and Codex:
 
-```yaml
-config:
-  providers:
-    combos:
-      mixed-stack:
-        strategy: round_robin
-        providers: [claude-anthropic, codex-openai]
-        sticky_limit: 3
-    records:
-      - id: claude-anthropic
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-      - id: codex-openai
-        cli: codex
-        auth: oauth_dir
-        credentials_source: ~/.codex
+```toml
+[providers.combos.mixed-stack]
+strategy = "round_robin"
+providers = ["claude-anthropic", "codex-openai"]
+sticky_limit = 3
+
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Anthropic"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+
+[[providers.records]]
+id = "codex-openai"
+name = "Codex OpenAI"
+cli = "codex"
+auth = "oauth_dir"
+credentials_source = "~/.codex"
 ```
 
 Run with `TARGET_COMBO=mixed-stack bash scripts/run-target-loop.sh <plan>` or `/target combo mixed-stack
@@ -1006,22 +1008,21 @@ Run with `TARGET_COMBO=mixed-stack bash scripts/run-target-loop.sh <plan>` or `/
 
 A minimal Codex provider record:
 
-```yaml
-config:
-  providers:
-    records:
-      - id: codex-openai
-        name: Codex OpenAI
-        cli: codex
-        auth: oauth_dir
-        credentials_source: ~/.codex
-      # OR with api_key auth:
-      - id: codex-api
-        name: Codex API
-        cli: codex
-        auth: api_key
-        env:
-          OPENAI_API_KEY: $OPENAI_KEY
+```toml
+[[providers.records]]
+id = "codex-openai"
+name = "Codex OpenAI"
+cli = "codex"
+auth = "oauth_dir"
+credentials_source = "~/.codex"
+
+# OR with api_key auth:
+[[providers.records]]
+id = "codex-api"
+name = "Codex API"
+cli = "codex"
+auth = "api_key"
+env = { OPENAI_API_KEY = "$OPENAI_KEY" }
 ```
 
 After adding the record, `fno providers test codex-openai --smoke` validates
@@ -1161,42 +1162,45 @@ code.
 
 Example combo that routes work across Claude, Codex, and Hermes:
 
-```yaml
-config:
-  providers:
-    combos:
-      multi-cli:
-        strategy: round_robin
-        providers: [claude-anthropic, codex-openai, hermes-nous]
-        sticky_limit: 3
-    records:
-      - id: claude-anthropic
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-      - id: codex-openai
-        cli: codex
-        auth: oauth_dir
-        credentials_source: ~/.codex
-      - id: hermes-nous
-        cli: hermes
-        auth: oauth_dir
-        credentials_source: ~/.config/hermes
+```toml
+[providers.combos.multi-cli]
+strategy = "round_robin"
+providers = ["claude-anthropic", "codex-openai", "hermes-nous"]
+sticky_limit = 3
+
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Anthropic"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+
+[[providers.records]]
+id = "codex-openai"
+name = "Codex OpenAI"
+cli = "codex"
+auth = "oauth_dir"
+credentials_source = "~/.codex"
+
+[[providers.records]]
+id = "hermes-nous"
+name = "Hermes Nous"
+cli = "hermes"
+auth = "oauth_dir"
+credentials_source = "~/.config/hermes"
 ```
 
 ### Provider record example
 
 A minimal Hermes provider record:
 
-```yaml
-config:
-  providers:
-    records:
-      - id: hermes-nous
-        name: Hermes Nous
-        cli: hermes
-        auth: oauth_dir
-        credentials_source: ~/.config/hermes
+```toml
+[[providers.records]]
+id = "hermes-nous"
+name = "Hermes Nous"
+cli = "hermes"
+auth = "oauth_dir"
+credentials_source = "~/.config/hermes"
 ```
 
 ### `[VERIFY-AT-IMPL]` markers (pre-merge gates)

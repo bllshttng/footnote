@@ -144,6 +144,15 @@ def render_markdown() -> str:
         "edit the model + `cli/src/fno/config/registry.py` and regenerate."
     )
     lines.append("")
+    lines.append(
+        "Keys live in a flat `config.toml` (`.fno/config.toml` project-local, "
+        "`~/.fno/config.toml` global). A dotted key like `branch.prefix` is "
+        "`prefix` under `[branch]`. For a copy-paste template with every key at "
+        "its default, see [settings.example.toml](settings.example.toml); read "
+        "or set individual keys with `fno config get <key>` / `fno config set "
+        "<key> <value>`."
+    )
+    lines.append("")
     lines.append("| Key | Type | Default | Wizard | Description |")
     lines.append("|-----|------|---------|--------|-------------|")
     for leaf in iter_leaves():
@@ -158,106 +167,105 @@ def render_markdown() -> str:
     return "\n".join(lines)
 
 
-def _yaml_scalar(value: Any) -> str:
-    """Render a leaf default as a valid YAML scalar/flow value.
+def _toml_value(value: Any) -> str:
+    """Render a leaf default as a valid TOML value.
 
-    Lists and dicts use JSON (which is valid YAML flow syntax); strings that
-    could be misread by a YAML parser (contain an indicator char, lead/trail
-    whitespace, are empty, or start with a reserved indicator like ``~``) are
-    double-quoted via json.dumps.
+    Callers handle ``None`` (TOML has no null; optional keys are emitted
+    commented-out). Strings use ``json.dumps`` (a valid TOML basic string for
+    these config defaults); lists/dicts use JSON flow, which is valid TOML for
+    scalar-element arrays and the empty inline table ``{}``.
     """
-    if value is None:
-        return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        risky = value == "" or value.strip() != value
-        risky = risky or value[:1] in "~?-:!&*#|>@%\"'`[]{},"
-        risky = risky or any(c in value for c in ":#")
-        # A bare string YAML would read as a bool/null/number must be quoted so
-        # the round-trip preserves it as a string (e.g. "true", "null", "123").
-        risky = risky or value.lower() in _YAML_RESERVED_WORDS
-        risky = risky or _looks_numeric(value)
-        return json.dumps(value) if risky else value
-    # list / dict / anything else: JSON is a valid YAML flow representation.
+        return json.dumps(value)
+    # Only empty dicts / scalar lists occur today. json.dumps of a non-empty
+    # dict emits {"k": "v"}, which is NOT valid TOML inline-table syntax
+    # (`{ k = "v" }`), so fail loud at generation rather than emit bad TOML if a
+    # richer default is ever added to the model.
+    if isinstance(value, dict):
+        if value:
+            raise ValueError(f"_toml_value: non-empty dict default not supported: {value!r}")
+        return "{}"
+    if isinstance(value, list) and any(isinstance(v, dict) for v in value):
+        raise ValueError(f"_toml_value: list-of-dict default not supported: {value!r}")
     return json.dumps(value)
 
 
-# Bare words YAML 1.1 readers coerce to bool/null; a string default equal to one
-# (case-insensitive) must be quoted to survive the round-trip.
-_YAML_RESERVED_WORDS = frozenset(
-    {"true", "false", "null", "yes", "no", "on", "off", "~", "none"}
-)
+class _TomlNode:
+    """One table in the emit tree: direct leaves first, then child tables.
+
+    TOML requires every key/value of a table to precede its sub-table headers,
+    but the model yields top-level scalars like ``loops``/``schema_version``
+    *after* nested blocks. Splitting leaves from tables here restores a valid
+    emission order regardless of declaration order.
+    """
+
+    def __init__(self) -> None:
+        self.leaves: list[Leaf] = []
+        self.tables: dict[str, "_TomlNode"] = {}
 
 
-def _looks_numeric(s: str) -> bool:
-    """True when YAML would parse ``s`` as a number (int/float/inf/nan)."""
-    try:
-        float(s)
-        return True
-    except ValueError:
-        return False
+def _build_tree() -> _TomlNode:
+    root = _TomlNode()
+    for leaf in iter_leaves():
+        segs = leaf.path.split(".")
+        node = root
+        for seg in segs[:-1]:
+            node = node.tables.setdefault(seg, _TomlNode())
+        node.leaves.append(leaf)
+    return root
 
 
-def render_example_yaml() -> str:
-    """Render a complete, valid example settings file: every modeled key set to
-    its default, each preceded by its one-line doc blurb as a comment.
+def _emit_table(node: _TomlNode, prefix: list[str], lines: list[str]) -> None:
+    # Header for this table iff it holds direct keys (a pure container is left
+    # implicit; TOML creates it from the dotted sub-table header).
+    if prefix and node.leaves:
+        lines.append("")
+        lines.append(f"[{'.'.join(prefix)}]")
+    for leaf in node.leaves:
+        meta = _registry.meta_for(leaf.path)
+        if meta and meta.doc:
+            lines.append(f"# {' '.join(meta.doc.split())}")
+        key = leaf.path.split(".")[-1]
+        if leaf.default is None:
+            lines.append(f"# {key} = <unset>   # optional; no default")
+        else:
+            lines.append(f"{key} = {_toml_value(leaf.default)}")
+    for seg, child in node.tables.items():
+        _emit_table(child, prefix + [seg], lines)
 
-    The output is a real (parseable) settings.yaml representing the built-in
-    defaults, usable as a copy-paste-and-edit reference. Leaves are emitted in
-    declaration order so nested blocks stay contiguous; regenerating twice is
+
+def render_example_toml() -> str:
+    """Render a complete, valid example config: every modeled key set to its
+    default, each preceded by its one-line doc blurb as a comment.
+
+    The output is a real (parseable) ``config.toml`` representing the built-in
+    defaults, usable as a copy-paste-and-edit reference. Flat, top-level blocks
+    with no wrapper (mirrors the on-disk file). Optional keys with no default
+    are shown commented out (TOML has no null). Regenerating twice is
     byte-identical (same determinism guarantee as render_markdown).
     """
     lines: list[str] = [
-        "# footnote settings reference (settings.example.yaml)",
+        "# footnote settings reference (settings.example.toml)",
         "#",
-        "# Generated by `fno config schema --yaml` from the Pydantic SettingsModel",
+        "# Generated by `fno config schema --toml` from the Pydantic SettingsModel",
         "# (the single source of truth). Do not edit by hand; edit the model +",
         "# cli/src/fno/config/registry.py and regenerate.",
         "#",
         "# Every key is shown set to its DEFAULT. Copy the keys you want to change",
-        "# into .fno/settings.yaml (project-local) or ~/.fno/settings.yaml (global);",
-        "# anything you omit falls back to these defaults. Config keys nest under",
-        "# `config:` (schema_version is the only top-level key); the loader also",
-        "# reads a flat config.toml, but the on-disk settings.yaml stays wrapped.",
+        "# into .fno/config.toml (project-local) or ~/.fno/config.toml (global);",
+        "# anything you omit falls back to these defaults. config.toml is flat:",
+        "# top-level scalars and [blocks], no wrapper. Optional keys with no",
+        "# default are shown commented out (TOML has no null).",
         "#",
         "# For opinionated starters (recommended values, safe opt-ins on), see",
-        "# docs/settings.global.example.yaml and docs/settings.local.example.yaml.",
+        "# docs/settings.global.example.toml and docs/settings.local.example.toml.",
         "",
     ]
-    open_segs: list[str] = []  # container segments currently emitted, by depth
-    for leaf in iter_leaves():
-        segs = leaf.path.split(".")
-        # The example mirrors the on-disk settings.yaml, which stays wrapped in
-        # this stage: every config key nests under `config:`; schema_version is
-        # the lone top-level sibling. (The model itself is flat; only this
-        # copy-paste template re-nests, so shell readers using yq `.config.<key>`
-        # keep working until the later stage flips files + shell to flat.)
-        if segs[0] != "schema_version":
-            segs = ["config"] + segs
-        container, key = segs[:-1], segs[-1]
-        # Reuse the longest shared prefix; reopen the rest.
-        common = 0
-        while (
-            common < len(open_segs)
-            and common < len(container)
-            and open_segs[common] == container[common]
-        ):
-            common += 1
-        open_segs = open_segs[:common]
-        for depth in range(common, len(container)):
-            lines.append(f"{'  ' * depth}{container[depth]}:")
-            open_segs.append(container[depth])
-        indent = "  " * len(container)
-        meta = _registry.meta_for(leaf.path)
-        if meta and meta.doc:
-            # Collapse any newlines so a multi-line blurb stays a single comment
-            # line (a raw 2nd line would be parsed as YAML, not a comment).
-            doc_line = " ".join(meta.doc.split())
-            lines.append(f"{indent}# {doc_line}")
-        lines.append(f"{indent}{key}: {_yaml_scalar(leaf.default)}")
+    _emit_table(_build_tree(), [], lines)
     lines.append("")
     return "\n".join(lines)
 

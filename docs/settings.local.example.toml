@@ -1,0 +1,49 @@
+# footnote LOCAL settings starter  ->  copy to <project>/.fno/config.toml
+#
+# Project-local config holds the per-project deltas that override your global
+# ~/.fno/config.toml. Keep machine-wide preferences in global (see
+# settings.global.example.toml); keep what is unique to THIS repo here. Any key
+# may live in either file.
+#
+# config.toml is flat: top-level scalars and [blocks], no wrapper. Opinionated
+# QUICKSTART - absent keys fall back to their code defaults, so this file stays
+# small on purpose. For every available setting + its default, see
+# docs/settings.example.toml. Once copied, .fno/config.toml is gitignored.
+
+[project]
+id = "my-project"        # short id for this repo (used in ledger + labels)
+# vision: one-paragraph north star for this project, fed to /think and the
+# roadmap generator so generated work stays on-mission.
+# vision = "One-paragraph north star for this project."
+
+# Backlog node id prefix + hex width for this repo (e.g. 'proj' -> proj-a3f9).
+[backlog]
+id_prefix = "proj"
+
+# Obsidian vault wiring; only if this project's docs/plans live in a vault.
+[obsidian]
+enabled = false          # set true + a vault area name to route docs there
+# vault = "my-vault"
+
+# --- recommended per-project workflow toggles (code default: false) ---
+[target]
+auto_launch_on_blueprint = true   # /blueprint then auto-kicks /target
+
+# Post-merge ritual: where this repo's prose follow-ups get written.
+[post_merge]
+enabled = true           # already the code default; shown for awareness
+# parking_lot_path = "docs/<area>/parking-lot.md"
+# self_reap = true       # close the merged node as part of the ritual
+
+# Per-project override of the completion review gate (falls back to global /
+# code default when absent). Only set what differs for THIS repo.
+# [review]
+# github_apps = ["gemini-code-assist"]        # App-bot logins that MUST review before 'done'
+#                                             #   (empty list = no hard gate; PR + CI only)
+# optional_apps = ["chatgpt-codex-connector"] # honored-if-present: counted if it reviews, never waited on
+# peers = ["codex", "gemini"]                 # or gate on a locally-run CLI review under a distinct
+# peer_identity = "fno-peer-bot"              #   machine account (needs a PAT in peer_token_env)
+# peer_token_env = "GH_PEER_TOKEN"
+# reviewers = ["sigma"]                       # or gate on a LOCAL reviewer (sigma | /code-review |
+#                                             #   declare) via a head-pinned attestation - no App bot,
+#                                             #   no GitHub review object. Fits a solo/claude-only harness.
