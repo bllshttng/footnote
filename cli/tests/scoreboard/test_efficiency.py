@@ -244,6 +244,31 @@ def test_shipped_without_causal_telemetry_is_untracked_not_clean():
     assert eff["coverage"]["outcome_tracked_pct"] == 0
 
 
+def test_missing_tokens_duration_are_none_not_zero():
+    # codex P2: a row missing tokens_total/duration_minutes (finalize records
+    # None when transcript cost extraction is unavailable) must NOT be coerced to
+    # 0 and pollute the median/p90 populations with fake zero-token sessions.
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 1.0, "tokens_total": 1000, "duration_minutes": 30, "sessions": ["s-a"]},
+        {"completed": "2026-07-02T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-2",
+         "cost_usd": 2.0, "sessions": ["s-b"]},  # no tokens_total / duration_minutes
+    ]
+    events = [
+        json.loads(_loop("s-a", "SUCCESS", "2026-07-03T09:00:00Z")),
+        json.loads(_loop("s-b", "SUCCESS", "2026-07-02T09:00:00Z")),
+    ]
+    eff = build_efficiency(rows, events, [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}],
+                           since_days=28, now=NOW, read_transcript=lambda sid: None)
+    # both rows fired, so both are in the distribution population - but only the
+    # measured row contributes to token/duration medians (n=1), never a fake 0.
+    assert eff["distribution"]["tokens_total"] == {"median": 1000, "p90": 1000, "n": 1}
+    assert eff["distribution"]["duration_minutes"] == {"median": 30, "p90": 30, "n": 1}
+    assert eff["distribution"]["loop_fires"]["n"] == 2  # loop_fires still measured for both
+    # per-outcome-class median tokens is the measured value, not a 0-diluted one.
+    assert eff["per_outcome_class"]["merged_clean"]["median_tokens"] == 1000
+
+
 def test_transcript_counts_feed_coverage():
     def read_transcript(sid):
         return [

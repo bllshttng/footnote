@@ -144,6 +144,19 @@ def _num(v) -> float:
         return 0.0
 
 
+def _num_opt(v) -> float | None:
+    """Nullable numeric coercion: a MISSING/None/junk value is None, not 0.0, so
+    an unmeasurable metric (finalize records None when transcript cost extraction
+    is unavailable) stays distinct from a measured zero and is excluded from
+    distributions rather than faking a zero-token/zero-minute session."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def build_scoreboard(
     rows: list[dict],
     touch_events: list[dict],
@@ -858,13 +871,15 @@ def build_efficiency(
         else:
             cls = "unshipped"
 
-        tokens = _num(r.get("tokens_total"))
-        duration = _num(r.get("duration_minutes"))
+        tokens = _num_opt(r.get("tokens_total"))  # None (not 0) when unmeasurable
+        duration = _num_opt(r.get("duration_minutes"))
         b = buckets.setdefault(cls, {"n": 0, "spend_usd": 0.0, "tokens": [], "fires": [], "duration": []})
         b["n"] += 1
-        b["spend_usd"] += _num(r.get("cost_usd"))
-        b["tokens"].append(tokens)
-        b["duration"].append(duration)
+        b["spend_usd"] += _num(r.get("cost_usd"))  # spend is a SUM: a missing cost is 0, not None
+        if tokens is not None:
+            b["tokens"].append(tokens)
+        if duration is not None:
+            b["duration"].append(duration)
         if loop_fires is not None:
             b["fires"].append(loop_fires)
 
