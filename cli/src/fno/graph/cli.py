@@ -1167,6 +1167,20 @@ def _intake_impl(
         typer.echo(
             f'claimed {claim_id} via {claim_source}: "{spec["title"]}"'
         )
+        # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
+        # this branch returns early, so the append-path projection never runs.
+        try:
+            from fno.graph._intake import _find_node, repo_root
+            from fno.plan._project import project_node_to_plan
+
+            claimed = _find_node(read_graph(_graph_path()), claim_id)
+            if claimed and claimed.get("plan_path"):
+                p = Path(claimed["plan_path"])
+                if not p.is_absolute():
+                    p = Path(repo_root()) / p
+                project_node_to_plan(claimed, p)
+        except Exception as e:  # noqa: BLE001 - additive; never wedge the claim
+            sys.stderr.write(f"warning: post-claim plan projection failed: {e}\n")
         return
 
     new_id_holder: list[Optional[str]] = [None]
@@ -1198,6 +1212,23 @@ def _intake_impl(
         # The mutation already committed; a stray failure in the warning
         # path must not surface as if the intake itself failed.
         sys.stderr.write(f"warning: post-intake project check failed: {e}\n")
+
+    # Mirror the graph-authoritative navigation fields onto the plan doc the
+    # node just linked. Non-fatal: a missing/unreadable plan never fails intake.
+    if new_id_holder[0]:
+        try:
+            from fno.graph._intake import _find_node, repo_root
+            from fno.plan._project import project_node_to_plan
+
+            landed = _find_node(read_graph(_graph_path()), new_id_holder[0])
+            pp = landed.get("plan_path") if landed else None
+            if landed and pp:
+                p = Path(pp)
+                if not p.is_absolute():
+                    p = Path(repo_root()) / p
+                project_node_to_plan(landed, p)
+        except Exception as e:  # noqa: BLE001 - additive; never wedge the intake
+            sys.stderr.write(f"warning: post-intake plan projection failed: {e}\n")
 
     # Born-with-why (v2 A1): route the intaked node through the shared birth hook
     # for uniformity across birth paths. Independent of the project-warning block
@@ -1450,11 +1481,31 @@ def cmd_update(
         )
         raise typer.Exit(code=2)
 
+    projected_node: list = [None]
+
+    # Size flows doc->graph when a plan is (re)linked and the node has no size
+    # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
+    # outside the lock; an explicit --size still wins (applied later in-mutator).
+    linked_size: Optional[str] = None
+    if plan_path is not None:
+        try:
+            from fno.graph._intake import normalize_size, repo_root
+            from fno.plan._stamp import read_plan_file
+
+            pp = Path(plan_path)
+            if not pp.is_absolute():
+                pp = Path(repo_root()) / pp
+            _, fm, _ = read_plan_file(pp)
+            linked_size = normalize_size(fm.get("size"))
+        except Exception:
+            linked_size = None
+
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
+        projected_node[0] = node
 
         if has_blocker_edit:
             if blocked_by is not None:
@@ -1478,6 +1529,8 @@ def cmd_update(
             node["has_brief"] = has_brief.lower() == "true"
         if plan_path is not None:
             node["plan_path"] = plan_path
+            if linked_size and not node.get("size"):
+                node["size"] = linked_size
         if pr_number is not None:
             node["pr_number"] = int(pr_number)
         if pr_url is not None:
@@ -1614,6 +1667,25 @@ def cmd_update(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"Updated {task_id}")
+
+    # Mirror the graph-authoritative navigation fields onto the plan doc when a
+    # mirrored field (or the plan link itself) changed. Best-effort: a missing
+    # or unreadable plan never fails the graph mutation.
+    node = projected_node[0]
+    if node and node.get("plan_path") and (
+        priority is not None
+        or project is not None
+        or type_ is not None
+        or has_blocker_edit
+        or plan_path is not None
+    ):
+        from fno.graph._intake import repo_root
+        from fno.plan._project import project_node_to_plan
+
+        p = Path(node["plan_path"])
+        if not p.is_absolute():
+            p = Path(repo_root()) / p
+        project_node_to_plan(node, p)
 
 
 # -- unclaim / release --
@@ -2252,6 +2324,30 @@ def cmd_get(
         else:
             typer.echo(json.dumps(e, indent=2))
         return
+
+    # Read-through fallback: a node the sweep archived still resolves here
+    # (read-only). Mutating verbs stay working-graph-only and error instead.
+    from fno.paths import graph_archive_json
+
+    archive_path = graph_archive_json()
+    if archive_path.exists():
+        archived = read_graph(archive_path)
+        amatch = resolve_node(id, archived)
+        if amatch.kind == "exact":
+            e = dict(amatch.candidates[0])
+            e["_archived"] = True
+            if field:
+                value = e.get(field)
+                if value is None:
+                    typer.echo("null")
+                elif isinstance(value, (list, dict)):
+                    typer.echo(json.dumps(value))
+                else:
+                    typer.echo(value)
+            else:
+                typer.echo(json.dumps(e, indent=2))
+            return
+
     typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {_graph_path()}", err=True)
     raise typer.Exit(code=1)
 
@@ -4179,6 +4275,17 @@ def cmd_done(
     plan_path_out: list = [None]
     already_holder: list = [False]
 
+    # Cost stamp (Wave 2.2): the ledger has per-plan cost the node never captured
+    # (2-3 fills). Aggregate it outside the lock; ledger absent/rowless -> null,
+    # never blocks the close. Reuses the same rollup `fno done` uses.
+    cost_rollup: dict = {}
+    try:
+        from fno.done.cli import _rollup_from_ledger
+
+        cost_rollup = _rollup_from_ledger(node.get("plan_path"))
+    except Exception:
+        cost_rollup = {}
+
     def mutator(entries):
         n = _find_node(entries, task_id)
         if not n:
@@ -4190,6 +4297,12 @@ def cmd_done(
             already_holder[0] = True
             return entries
         _apply_completion_fields(n)
+        # Fill-only: never overwrite a cost a richer path (e.g. `fno done`)
+        # already stamped, and don't drop rows appended during the run.
+        if cost_rollup.get("cost_usd") is not None and not n.get("cost_usd"):
+            n["cost_usd"] = cost_rollup["cost_usd"]
+        if cost_rollup.get("cost_sessions") and not n.get("cost_sessions"):
+            n["cost_sessions"] = cost_rollup["cost_sessions"]
         # Close any now-all-done ancestor epic (x-33b2): the box is done when its
         # children are, and it carries no PR of its own to close it explicitly.
         _cascade_close_parents(entries, task_id)
@@ -5314,51 +5427,90 @@ def cmd_rank(
 
 @cli.command("archive")
 def cmd_archive(
-    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
+    apply: bool = typer.Option(
+        False, "--apply", help="Move the entries (default: dry-run, report only)."
+    ),
+    older_than_days: int = typer.Option(
+        30, "--older-than-days", help="Only archive terminal nodes older than N days."
+    ),
+    roadmap_id: Optional[str] = typer.Option(
+        None, "--roadmap-id", help="Restrict the sweep to this roadmap group."
+    ),
 ) -> None:
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph.store import _apply_graph_defaults, _read_json, _write_json
-    from fno.graph._constants import GRAPH_ARCHIVE_JSON
+    """Sweep old terminal (done/superseded) nodes into graph-archive.json.
+
+    Dry-run by default: prints how many would move and why some are held back.
+    ``--apply`` mutates under the graph lock (archive written first, then the
+    working graph, so a crash duplicates rather than loses). Never archives a
+    node an OPEN node still references (blocker, parent, or supersede target).
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.store import (
+        _apply_graph_defaults,
+        _read_json,
+        _write_json,
+        read_graph,
+        locked_mutate_graph,
+        GraphCorruptError,
+    )
+    from fno.graph.archive import partition_for_archive, merge_into_archive
+
+    now = datetime.now(timezone.utc)
+
+    def _split(entries):
+        # Guard against the FULL graph so an open node in another roadmap that
+        # references one of these terminal nodes (blocker/parent/supersede) is
+        # still protected; only the archive SET is roadmap-restricted.
+        to_archive, _remaining_pool, skipped = partition_for_archive(
+            entries, older_than_days, now
+        )
+        if roadmap_id:
+            to_archive = [e for e in to_archive if e.get("roadmap_id") == roadmap_id]
+        arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
+        remaining = [e for e in entries if e.get("id") not in arch_ids]
+        return to_archive, remaining, skipped
+
+    if not apply:
+        to_archive, _rem, skipped = _split(read_graph(_graph_path()))
+        typer.echo(
+            f"[dry-run] would archive {len(to_archive)} terminal node(s) "
+            f"older than {older_than_days}d to {_archive_path()}"
+        )
+        held = {}
+        for s in skipped:
+            held[s["_skip"]] = held.get(s["_skip"], 0) + 1
+        for reason, n in sorted(held.items()):
+            typer.echo(f"  held back ({reason}): {n}")
+        typer.echo("Re-run with --apply to move them.")
+        return
 
     archived_count: list = [0]
 
     def mutator(entries):
-        if roadmap_id:
-            to_archive = [e for e in entries if e.get("_status") == "done" and e.get("roadmap_id") == roadmap_id]
-            remaining = [e for e in entries if not (e.get("_status") == "done" and e.get("roadmap_id") == roadmap_id)]
-        else:
-            to_archive = [e for e in entries if e.get("_status") == "done"]
-            remaining = [e for e in entries if e.get("_status") != "done"]
-
+        to_archive, remaining, _skipped = _split(entries)
         if not to_archive:
             return entries
-
         archived_count[0] = len(to_archive)
-        archived_ids = {e["id"] for e in to_archive}
 
-        for e in remaining:
-            blocked = e.get("blocked_by", [])
-            if blocked:
-                e["blocked_by"] = [b for b in blocked if b not in archived_ids]
-
+        # Archive-first: append (deduped) and write the archive BEFORE returning
+        # `remaining` for the graph write, so a crash leaves a duplicate (healed
+        # on the next sweep) rather than a lost node.
         archive_path = _archive_path()
-        from fno.graph.store import GraphCorruptError
         try:
-            archive_entries = _apply_graph_defaults(_read_json(archive_path))
+            existing = _apply_graph_defaults(_read_json(archive_path))
         except GraphCorruptError:
             typer.echo(f"Warning: {archive_path} corrupt, starting fresh archive", err=True)
-            archive_entries = []
-        archive_entries.extend(to_archive)
+            existing = []
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(archive_entries, archive_path)
-
+        _write_json(merge_into_archive(existing, to_archive), archive_path)
         return remaining
 
     locked_mutate_graph(_graph_path(), mutator)
     if archived_count[0]:
-        typer.echo(f"Archived {archived_count[0]} done features to {_archive_path()}")
+        typer.echo(f"Archived {archived_count[0]} terminal node(s) to {_archive_path()}")
     else:
-        typer.echo("No done features to archive.")
+        typer.echo("No terminal nodes eligible to archive.")
 
 
 # -- Internal helpers for intake / update (avoid circular imports) --

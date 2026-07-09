@@ -43,7 +43,13 @@ def _graph_html() -> Path:
 
 
 def _graph_archive_json() -> Path:
-    return _state_dir() / "graph-archive.json"
+    """Route through paths.graph_archive_json() so the archive tracks any
+    config.paths.graph_json override (it is a sibling of the working graph)."""
+    try:
+        from fno import paths as _paths
+        return _paths.graph_archive_json()
+    except Exception:
+        return _state_dir() / "graph-archive.json"
 
 
 def _ledger_json() -> Path:
