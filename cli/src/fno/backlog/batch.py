@@ -441,6 +441,29 @@ def ship_batch(
             pr_number = existing[0].get("number")
 
     if pr_url is None:
+        # Stale-base guard parity (x-9b87): the batch lane is the third
+        # gh-pr-create site (x-712b), so it runs the same check_stale_base the
+        # /pr create + worker/ship.py paths run. The batch worktree is born off
+        # origin/main by `fno worktree ensure`, so this is defense-in-depth for a
+        # future refactor - refuse via the EXISTING abandon path (never a wedged
+        # `refuse`: a batch left open would re-hit the same stale worktree every
+        # daemon tick). Guard precedes the push so a stale branch is never pushed.
+        from fno.pr._preflight import check_stale_base
+
+        base_code, base_msg = check_stale_base(base=f"origin/{base}", cwd=worktree)
+        if base_msg and base_code == 0:
+            # Fail-open path: the guard was SKIPPED (git missing / fetch flake).
+            # Say so - a silently-skipped guard must not read as a clean pass.
+            import sys
+
+            print(f"batch.ship: {base_msg}", file=sys.stderr)
+        if base_code != 0:
+            _abandon_and_requeue(domain, members, root)
+            return ShipResult(
+                "abandoned", domain,
+                reason=base_msg or "stale base: refused to open batch PR",
+                members=members,
+            )
         # Push the batch branch first. `fno worktree ensure` creates only a LOCAL
         # branch and the batched worker commits locally, so `gh pr create --head`
         # (which does NOT push) would fail on an unpublished branch and abandon

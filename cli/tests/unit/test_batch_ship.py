@@ -141,6 +141,71 @@ def test_ship_gh_create_failure_abandons_and_requeues(tmp_path, graph):
     assert by_id["x-2"]["batch"] is None
 
 
+# ── x-9b87: stale-base guard parity with worker/ship.py ──────────────────────
+# The batch lane opens its PR via its own `gh pr create`, so it must run the
+# same `check_stale_base` guard the /pr create + worker paths run. On stale it
+# routes through the EXISTING abandon path (never `refuse`, which would wedge
+# the batch open and re-hit the same stale worktree every daemon tick).
+
+
+def test_ship_stale_base_abandons_and_skips_create(tmp_path, graph, monkeypatch):
+    """AC: HEAD >24h stale vs origin/main -> ShipResult('abandoned'), calls
+    _abandon_and_requeue, and does NOT run gh pr create (nor push)."""
+    gpath = graph([_member_node("x-1"), _member_node("x-2")])
+    _open(tmp_path)
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    B.join_batch(domain="code", node_id="x-2", root=tmp_path)
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_stale_base",
+        lambda *a, **k: (1, "stale base: HEAD is 30h behind origin/main"),
+    )
+    gh = FakeGh()
+    r = B.ship_batch(domain="code", root=tmp_path, run=gh)
+
+    assert r.action == "abandoned"
+    assert "stale" in (r.reason or "").lower()
+    assert B.read_batch("code", tmp_path)["status"] == "abandoned"
+    # The guard precedes create AND push: neither runs on a stale base.
+    assert not any(c[:3] == ["gh", "pr", "create"] for c in gh.calls)
+    assert not any(c[:2] == ["git", "push"] for c in gh.calls)
+    by_id = {n["id"]: n for n in _read_graph(gpath)}
+    assert by_id["x-1"]["batch"] is None
+    assert by_id["x-2"]["batch"] is None
+
+
+def test_ship_fresh_base_creates_pr(tmp_path, graph, monkeypatch):
+    """AC: fresh worktree (behind-count 0) -> guard passes, PR created as today."""
+    graph([_member_node("x-1")])
+    _open(tmp_path)
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    monkeypatch.setattr("fno.pr._preflight.check_stale_base", lambda *a, **k: (0, None))
+
+    gh = FakeGh(create=_cp(0, "https://github.com/o/r/pull/501\n"))
+    r = B.ship_batch(domain="code", root=tmp_path, run=gh)
+
+    assert r.action == "shipped"
+    assert r.pr_number == 501
+    assert any(c[:3] == ["gh", "pr", "create"] for c in gh.calls)
+
+
+def test_ship_stale_guard_failopen_still_creates_pr(tmp_path, graph, monkeypatch):
+    """AC: guard fails open (git missing / fetch flake, code 0 + message) ->
+    the PR is still created (a skipped guard never blocks a ship)."""
+    graph([_member_node("x-1")])
+    _open(tmp_path)
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_stale_base",
+        lambda *a, **k: (0, "could not refresh origin/main; stale-base check skipped"),
+    )
+
+    gh = FakeGh(create=_cp(0, "https://github.com/o/r/pull/502\n"))
+    r = B.ship_batch(domain="code", root=tmp_path, run=gh)
+
+    assert r.action == "shipped"
+    assert r.pr_number == 502
+
+
 class PrepareGh:
     """Runner double for prepare_batch: scripts `fno backlog get` + `fno worktree ensure`."""
 
