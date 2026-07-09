@@ -11,7 +11,9 @@
 # Usage:
 #   dispatch-node.sh <node-id...> [--flags "<extra /target flags>"]
 #                                 [--allow-merge] [--max N] [--dry-run] [--here]
+#                                 [--permission-mode <mode>]
 #   dispatch-node.sh --all-ready  [--flags "..."] [--allow-merge] [--max N] [--dry-run] [--here]
+#                                 [--permission-mode <mode>]
 #
 # --here / --in-place: keep a worker without a recorded node cwd in the
 #   dispatcher's cwd. Default (no node cwd) is --fresh: start from canonical
@@ -72,6 +74,7 @@ ALLOW_MERGE=0
 MAX=0          # 0 => no cap (quota is the throttle; do not invent a hard cap)
 DRY_RUN=0
 HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of --fresh)
+PERMISSION_MODE=""  # x-dfa4: forwarded as --permission-mode to each worker spawn
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -81,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --max)        MAX="${2:-0}"; shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
+    --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     --) shift; while [[ $# -gt 0 ]]; do NODES+=("$1"); shift; done ;;
     -*) echo "failed: $1 reason=\"unknown flag\"" >&2; exit 2 ;;
     *)  NODES+=("$1"); shift ;;
@@ -226,6 +230,12 @@ for id in "${NODES[@]}"; do
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
 
+  # x-dfa4: forward the permission mode to every worker spawn (same array
+  # discipline as model_args - avoids word-splitting at the trust boundary).
+  # Empty => zero args => byte-identical to today.
+  perm_args=()
+  [[ -n "$PERMISSION_MODE" ]] && perm_args=("--permission-mode" "$PERMISSION_MODE")
+
   # ---- Guards 1+2 via the shared spawn-guard verb (x-73cc) ----
   # The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
   # reservation (Guard 2) live in `fno agents spawn-guard` so this path and
@@ -341,7 +351,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}${model_pin:+--model $model_pin }$agent_name '$tgt_cmd'\""
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\""
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -393,7 +403,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
@@ -403,16 +413,16 @@ for id in "${NODES[@]}"; do
       # may not shell out to a repo-root script (shellout-drift gate).
       _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
       [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --provider claude --substrate bg "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then

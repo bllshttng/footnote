@@ -598,6 +598,7 @@ def _spawn_think_worker(
     invocation_suffix: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> str:
     """Dispatch a fire-and-forget ``/think`` claude bg worker carrying the seed.
 
@@ -624,6 +625,10 @@ def _spawn_think_worker(
     # on the claude/bg arm). Empty/None = provider default, unchanged.
     if model:
         cmd += ["--model", model]
+    # x-dfa4: forward an optional permission mode to the worker spawn. Empty/None
+    # = unchanged; the spawn verb maps or fail-closes it per provider.
+    if permission_mode:
+        cmd += ["--permission-mode", permission_mode]
     cmd += [agent_name, prompt]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)

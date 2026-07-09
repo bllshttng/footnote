@@ -39,6 +39,7 @@ PAYLOAD_MODE="build"   # build | ask | passthrough (ask -> spawn --once)
 SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
                        # (JSON receipt); headless -> one-shot (reply receipt).
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
+PERMISSION_MODE=""     # x-dfa4: forwarded as --permission-mode to the spawn verb
 FRESH=0                # 1 appends --fresh (canonical-root cwd) to the spawn argv
 HERE=0                 # 1 appends --here (opt out of --fresh) to the spawn argv
 
@@ -69,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
     --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO=1; shift ;;
+    --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     # Pass-through cwd flags (ab-77b691dc): forwarded to `fno agents spawn` so a
     # target-class dispatcher can request canonical-root cwd. NOT defaulted here:
     # plain interactive ask/host/spawn keep caller cwd unless asked (AC3).
@@ -283,6 +285,7 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 [[ "$FRESH" -eq 1 ]] && cmd+=(--fresh)
 [[ "$HERE" -eq 1 ]] && cmd+=(--here)
 [[ "$YOLO" -eq 1 ]] && cmd+=(--yolo)
+[[ -n "$PERMISSION_MODE" ]] && cmd+=(--permission-mode "$PERMISSION_MODE")
 # x-2c27: an explicit substrate emits --substrate (the canonical selector) and
 # supersedes the --once alias; otherwise the ask lane keeps --once.
 if [[ -n "$SUBSTRATE" ]]; then

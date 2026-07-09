@@ -410,6 +410,7 @@ def _spawn_worker(
     reconcile_manifest: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> str:
     """Dispatch a fire-and-forget detached ``claude --bg`` ``/target`` worker.
 
@@ -447,6 +448,10 @@ def _spawn_worker(
     # claude/bg arm). Empty/None = provider default, byte-identical to today.
     if model:
         cmd += ["--model", model]
+    # x-dfa4: forward an optional permission mode to the worker spawn. Empty/None
+    # = unchanged; the spawn verb maps or fail-closes it per provider.
+    if permission_mode:
+        cmd += ["--permission-mode", permission_mode]
     target_cmd = (
         f"/target no-merge --reconcile {reconcile_manifest} {node_id}"
         if is_reconcile
