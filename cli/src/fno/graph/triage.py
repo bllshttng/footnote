@@ -47,6 +47,48 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+def _events_path() -> Path:
+    """Repo-root ``.fno/events.jsonl`` - the same file ``fno event emit`` writes
+    to (events/cli.py) and the routing/triage fold reads. Anchoring to the repo
+    root (not cwd) keeps producer and consumer coincident regardless of which
+    subdirectory a verb runs from."""
+    try:
+        from fno.paths import resolve_repo_root
+
+        return resolve_repo_root() / ".fno" / "events.jsonl"
+    except Exception:
+        return Path(".fno/events.jsonl")
+
+
+def _emit_triage_applied(
+    applied: dict, priority_moves: list[dict], proposed: int, dropped: int
+) -> None:
+    """Best-effort ``triage_applied`` telemetry (x-64cb US2). The graph mutation
+    has already committed by the time this runs; an emit failure logs one stderr
+    line and never changes apply semantics or the exit code."""
+    import sys
+
+    try:
+        from fno.events import _build, append_event
+
+        event = _build(
+            "triage_applied",
+            "backlog",
+            {
+                "applied": applied,
+                "priority_moves": priority_moves,
+                "proposed": proposed,
+                "dropped": dropped,
+            },
+        )
+        append_event(event, events_path=_events_path())
+    except Exception as exc:  # noqa: BLE001 - telemetry is best-effort
+        print(
+            f"triage: warning: triage_applied emit failed ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+
+
 def _is_pending(entry: dict) -> bool:
     """Ready or blocked, not done/deferred/claimed/idea/roadmap-row.
 
@@ -687,6 +729,7 @@ def cmd_apply(
         "duplicates_flagged": 0,
         "deferred": 0,
     }
+    priority_moves: list[dict] = []
     locked_errors_holder: list[list[str]] = [[]]
 
     def mutator(entries: list[dict]) -> list[dict]:
@@ -709,6 +752,9 @@ def cmd_apply(
             node = by_id.get(pc["id"])
             if node is None:
                 continue
+            priority_moves.append(
+                {"id": pc["id"], "from": node.get("priority"), "to": pc["to"]}
+            )
             node["priority"] = pc["to"]
             applied["priority_changes"] += 1
         # Defer entries land deferred_at + deferred_reason on each target.
@@ -734,6 +780,18 @@ def cmd_apply(
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Telemetry (x-64cb US2): the mutation has committed; emit is best-effort and
+    # must precede the Exit(3) below so a partial apply still records what landed.
+    # proposed is the raw entry count across every category (the drop-rate
+    # denominator); dropped is what _validate_proposal rejected.
+    proposed = sum(
+        len(data.get(k, []) or [])
+        for k in ("dependencies", "priority_changes", "duplicates", "defer")
+    )
+    _emit_triage_applied(
+        applied, priority_moves, proposed, len(locked_errors_holder[0])
+    )
 
     for err in locked_errors_holder[0]:
         typer.echo(err, err=True)
