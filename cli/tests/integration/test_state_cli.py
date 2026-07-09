@@ -278,3 +278,20 @@ def test_list_fields_returns_field_names(tmp_path: Path) -> None:
     assert isinstance(data, list)
     assert "status" in data
     assert "session_id" in data
+
+
+# -- path --
+
+def test_path_ledger_prints_resolved_path() -> None:
+    """HP: state path ledger prints str(ledger_json()) on stdout."""
+    from fno.paths import ledger_json
+
+    result = run_cli("state", "path", "ledger")
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert result.stdout.strip() == str(ledger_json())
+
+
+def test_path_unknown_name_exits_1() -> None:
+    """ERR: an unknown state file name exits 1."""
+    result = run_cli("state", "path", "nope")
+    assert result.returncode == 1

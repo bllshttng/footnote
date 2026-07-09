@@ -410,3 +410,19 @@ def list_fields(
     else:
         for f in fields:
             typer.echo(f)
+
+
+@cli.command(name="path")
+def path_(name: str = typer.Argument(..., help="state file to resolve: ledger")) -> None:
+    """Print the fno.paths-resolved absolute path for a named state file."""
+    from fno.paths import ledger_json
+
+    resolvers = {"ledger": ledger_json}  # extend when a second caller needs it
+    resolver = resolvers.get(name)
+    if resolver is None:
+        typer.echo(
+            f"error: unknown state file '{name}'; known: {', '.join(sorted(resolvers))}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(str(resolver()))

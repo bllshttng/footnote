@@ -49,7 +49,7 @@ fi
 # Resolve worktree root (where we are linking INTO). Default to cwd.
 WORKTREE="${WORKTREE:-$(pwd)}"
 
-if [[ "$CANONICAL" == "$WORKTREE" ]]; then
+if [[ "$CANONICAL" -ef "$WORKTREE" ]]; then
   echo "setup-worktree: refusing to symlink canonical -> canonical (no-op)" >&2
   exit 0
 fi

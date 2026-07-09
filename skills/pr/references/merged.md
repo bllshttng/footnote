@@ -392,11 +392,12 @@ under the wrong PR/project). Resolve the owning session(s) from `ledger.json`
 (which records `pr_number` / `pr_url` per session), then pass them to `list`:
 
 ```bash
+LEDGER_JSON="$(fno state path ledger || true)"   # fno.paths-resolved; honors config.paths.ledger_json (fail-open under set -e)
 SESSIONS=$(jq -r --argjson pr "$PR" '
   .entries[]
   | select((.pr_number == $pr) or ((.pr_url // "") | test("/" + ($pr|tostring) + "$")))
   | ((.sessions // []) + [.session_id])[]
-' "$REPO_ROOT/.fno/ledger.json" 2>/dev/null | grep -vxE 'null|' | sort -u)
+' "$LEDGER_JSON" 2>/dev/null | grep -vxE 'null|' | sort -u)
 
 SESS_ARGS=(); for s in $SESSIONS; do SESS_ARGS+=(--session-id "$s"); done
 if [[ ${#SESS_ARGS[@]} -gt 0 ]]; then
