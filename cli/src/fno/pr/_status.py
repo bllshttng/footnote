@@ -107,10 +107,11 @@ def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
         else:
             unkeyed.append(c)
             continue
-        if key not in latest:
+        existing = latest.get(key)
+        if existing is None:
             latest[key] = c
             order.append(key)
-        elif _entry_ts(c) >= _entry_ts(latest[key]):
+        elif _entry_ts(c) >= _entry_ts(existing):
             latest[key] = c
     return [latest[k] for k in order] + unkeyed
 
