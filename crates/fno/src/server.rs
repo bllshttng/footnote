@@ -1495,9 +1495,10 @@ impl Core {
         // NOT level-triggered on "is this still the focused pane": AC2-EDGE
         // requires that parking on a pane while it is `Working` never marks
         // a LATER `Done` seen, so insert instead fires as a one-shot side
-        // effect of the actual focus action (`Command::FocusPane` /
-        // `AttachAgent`; hover-focus settles to a client-side `FocusPane`,
-        // so it rides the same hook for free).
+        // effect of the actual focus action (`Command::FocusPane`; hover-
+        // focus settles to a client-side `FocusPane`, so it rides the same
+        // hook for free). `AttachAgent` always spawns a brand-new pane_id,
+        // which can never already be `Done`, so it has no seen-marking hook.
         for row in self.agent_rows() {
             let Some(pid) = row.pane_id else { continue };
             if row.badge != Some(AgentBadge::Done) {
@@ -1860,13 +1861,13 @@ impl Core {
     }
 
     /// (x-4328) The insert half of the seen set: a one-shot side effect of
-    /// an actual focus action (`Command::FocusPane` / `AttachAgent`; hover-
-    /// focus settles to a client-side `FocusPane`, so it rides this for
-    /// free), never a per-pass level check - AC2-EDGE requires that parking
-    /// on a pane while it is `Working` never marks a later `Done` seen, only
-    /// a fresh focus action does. A no-op when `pid`'s current badge isn't
-    /// `Done` (the common case: a freshly attached/focused pane is rarely
-    /// already finished).
+    /// an actual focus action (`Command::FocusPane`; hover-focus settles to
+    /// a client-side `FocusPane`, so it rides this for free), never a
+    /// per-pass level check - AC2-EDGE requires that parking on a pane while
+    /// it is `Working` never marks a later `Done` seen, only a fresh focus
+    /// action does. `Command::AttachAgent` has no call to this: it always
+    /// spawns a brand-new pane_id, which can't already be `Done`. A no-op
+    /// when `pid`'s current badge isn't `Done`.
     fn mark_seen_if_done(&mut self, pid: u64) {
         if self
             .agent_rows()
