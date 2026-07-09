@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fno.claims.core import claim_status
+from fno.claims.io import claims_root_for
 
 # Claim-live + a fire within this window reads as working; older reads waiting.
 # Surfaced in the rendered age so a mis-tuned window misleads less (the age
@@ -169,7 +170,14 @@ def resolve_truth_status(
     if not node_id:
         return unknown
 
-    claim = claim_status(f"node:{node_id}", root=claims_root)
+    # node:<id> claims are GLOBAL (like ~/.fno/graph.json): they live under the
+    # global root ($FNO_CLAIMS_ROOT / $HOME), NOT the cwd/canonical .fno/claims
+    # that claim_status's default resolution uses. Route through claims_root_for
+    # so `fno agents list` reads the same dir the claim was written to; without
+    # this the list always reads `free` and the fill never appears (codex P2).
+    key = f"node:{node_id}"
+    root = claims_root if claims_root is not None else claims_root_for(key)
+    claim = claim_status(key, root=root)
     cs = claim.get("state")
     sid = _session_from_holder(claim.get("holder"))
 

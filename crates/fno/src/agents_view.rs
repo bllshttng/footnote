@@ -203,14 +203,17 @@ fn report_is_live(received_at: &str, ttl_ms: Option<u64>, now_secs: u64) -> bool
 // work (CI, preflight) runs externally. fno holds the truth the harness cannot:
 // the `node:<id>` claim liveness + per-session loop_check recency. When neither
 // senior source badged a row, `overlay_truth_badges` adds a Working badge iff the
-// claim is held by a live process AND a loop_check fired for its session within
+// claim holder is verifiably live AND a loop_check fired for its session within
 // the window. Everything else (stale/suspect/waiting claim) stays no-badge, same
 // as today. Read-only, fail-quiet, tolerant Value parsing - no fno-agents import.
 //
-// Correctness note: the recency-fire AND-gate subsumes the create-time pid-reuse
-// guard and the cross-host guard that `claims.rs::classify` carries - a reused
-// pid or a foreign-host worker is not firing loop_check for THIS session in THIS
-// project's events log, so it never earns a Working badge.
+// Liveness mirrors `claims.rs::is_live` (a focused copy, like rfc3339_like_to_secs
+// and roster_path above): host must match this host AND the pid's process must
+// have started at/before the claim's `acquired_at` (the create-time guard that
+// rejects a reused pid). The weaker `kill(pid, 0)` alone would badge a same-host
+// reused pid Working within the recency window (codex P3); the create-time check
+// closes it. Node claims are GLOBAL, so the claims root honors $FNO_CLAIMS_ROOT
+// then $HOME (matching Python `global_claims_root`), NOT the cwd/canonical root.
 // ---------------------------------------------------------------------------
 
 /// name -> "loop <age>" reason for rows the fno-truth source badges Working.
@@ -221,8 +224,8 @@ const TRUTH_RECENCY_WINDOW_S: u64 = 1800; // 30 min
 /// Bounded tail read of events.jsonl so an 11MB log stays cheap per render tick.
 const TRUTH_EVENTS_TAIL_BYTES: u64 = 256 * 1024;
 
-/// The `.fno` base, resolved off the same anchor as `registry_path`
-/// (`FNO_AGENTS_HOME`'s parent > `$HOME/.fno`). Claims + events live here.
+/// The `.fno` state base for events.jsonl, off the same anchor as
+/// `registry_path` (`FNO_AGENTS_HOME`'s parent > `$HOME/.fno`).
 fn fno_dir() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
         return Path::new(&v)
@@ -234,6 +237,18 @@ fn fno_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".fno")
+}
+
+/// The GLOBAL claims dir, mirroring Python `global_claims_root` + `claims_dir`
+/// (`$FNO_CLAIMS_ROOT` > `$HOME`, then `.fno/claims`). node:<id> claims are
+/// global (like ~/.fno/graph.json), so this must NOT be the cwd/canonical root.
+fn global_claims_dir() -> PathBuf {
+    std::env::var_os("FNO_CLAIMS_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fno")
+        .join("claims")
 }
 
 /// `target-<node-id>-<slug>` -> node id. Loose on purpose: a mis-parse yields a
@@ -263,20 +278,83 @@ fn encode_claim_key(key: &str) -> String {
     out
 }
 
-/// `kill(pid, 0)`: 0 => alive; EPERM => alive (exists, no perm); else dead.
-fn pid_alive(pid: i32) -> bool {
+/// `gethostname(2)`, matching Python `socket.gethostname()` (mirror of
+/// `claims.rs::hostname`). Empty on failure -> never equals a recorded host, so
+/// an unreadable hostname fails toward "not live".
+fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+/// Process create time in epoch ms, or None if the pid is gone/uninspectable
+/// (permission denied counts as dead). Focused copy of
+/// `claims.rs::process_create_time_ms`.
+#[cfg(target_os = "macos")]
+fn process_create_time_ms(pid: i32) -> Option<i64> {
+    use std::mem;
     if pid <= 0 {
+        return None;
+    }
+    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
+    let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    Some((info.pbi_start_tvsec as i64) * 1000 + (info.pbi_start_tvusec as i64) / 1000)
+}
+
+#[cfg(target_os = "linux")]
+fn process_create_time_ms(pid: i32) -> Option<i64> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')')?.1;
+    let starttime: i64 = after.split_whitespace().nth(19)?.parse().ok()?;
+    static BTIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+    let btime = (*BTIME.get_or_init(|| {
+        let stat = std::fs::read_to_string("/proc/stat").ok()?;
+        stat.lines()
+            .find_map(|l| l.strip_prefix("btime ").and_then(|r| r.trim().parse().ok()))
+    }))?;
+    let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if tck <= 0 {
+        return None;
+    }
+    Some(btime * 1000 + starttime * 1000 / tck as i64)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_create_time_ms(_pid: i32) -> Option<i64> {
+    None
+}
+
+/// Verifiably-running claim holder (mirror of `claims.rs::is_live`): same host
+/// AND the pid's process started at/before `acquired_at` (rejects a reused pid).
+fn holder_is_live(host: &str, pid: i32, acquired_at: i64) -> bool {
+    if host != hostname() {
         return false;
     }
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    matches!(process_create_time_ms(pid), Some(create_ms) if create_ms <= acquired_at)
 }
 
 /// The session id of a live `node:<id>` claim, or None (missing / unparseable /
-/// dead pid / non-target holder). The lockfile is flat YAML scalars; hand-parse
-/// the two lines we need rather than pull in a YAML dep (tolerant by design).
+/// not-live / non-target holder). The lockfile is flat YAML scalars; hand-parse
+/// the fields we need rather than pull in a YAML dep (tolerant by design).
 fn live_claim_session(claims_dir: &Path, node_id: &str) -> Option<String> {
     let path = claims_dir.join(format!(
         "{}.lock",
@@ -284,15 +362,21 @@ fn live_claim_session(claims_dir: &Path, node_id: &str) -> Option<String> {
     ));
     let text = std::fs::read_to_string(&path).ok()?;
     let mut pid: Option<i32> = None;
+    let mut acquired_at: Option<i64> = None;
+    let mut host: Option<&str> = None;
     let mut holder: Option<&str> = None;
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("pid:") {
             pid = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("acquired_at:") {
+            acquired_at = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("host:") {
+            host = Some(v.trim());
         } else if let Some(v) = line.strip_prefix("holder:") {
             holder = Some(v.trim());
         }
     }
-    if !pid_alive(pid?) {
+    if !holder_is_live(host?, pid?, acquired_at?) {
         return None;
     }
     holder?
@@ -362,12 +446,11 @@ fn newest_fire_ages(events_path: &Path, now_secs: u64) -> HashMap<String, u64> {
 /// the default claims dir + events log. Fail-quiet: any read failure yields
 /// fewer/no badges, never a panic or a wrong badge.
 pub fn build_truth_badges(raw: &str, now_secs: u64) -> TruthBadges {
-    let base = fno_dir();
     build_truth_badges_at(
         raw,
         now_secs,
-        &base.join("claims"),
-        &base.join("events.jsonl"),
+        &global_claims_dir(),
+        &fno_dir().join("events.jsonl"),
     )
 }
 
@@ -1241,13 +1324,25 @@ mod tests {
         fn events(&self) -> PathBuf {
             self.0.join("events.jsonl")
         }
+        // A LIVE claim: this host + acquired_at far in the future so the current
+        // pid's create time is <= acquired_at (passes the pid-reuse guard).
         fn write_claim(&self, node_id: &str, pid: i32, sid: &str) {
+            self.write_claim_full(node_id, pid, sid, &hostname(), 9_999_999_999_999);
+        }
+        fn write_claim_full(
+            &self,
+            node_id: &str,
+            pid: i32,
+            sid: &str,
+            host: &str,
+            acquired_at: i64,
+        ) {
             let name = format!("{}.lock", encode_claim_key(&format!("node:{node_id}")));
             std::fs::write(
                 self.claims().join(name),
                 format!(
                     "schema_version: 1\nkey: node:{node_id}\nholder: target-session:{sid}\n\
-                     acquired_at: 1\npid: {pid}\nhost: h\nexpires_at: 9999999999999\n"
+                     acquired_at: {acquired_at}\npid: {pid}\nhost: {host}\nexpires_at: 9999999999999\n"
                 ),
             )
             .unwrap();
@@ -1289,6 +1384,39 @@ mod tests {
         // AC3b/AC4: a dead-pid claim (suspect/stale) never earns a Working badge.
         let t = Tmp::new("dead");
         t.write_claim("x-4a48", 0x7fff_fff0, SID); // implausible pid -> dead
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
+        assert!(badges.is_empty());
+    }
+
+    #[test]
+    fn truth_badge_reused_pid_no_badge() {
+        // codex P3: holder exited and the pid was reused. The current process is
+        // alive under that pid, but it STARTED after the claim's acquired_at, so
+        // the create-time guard rejects it even with a recent fire.
+        let t = Tmp::new("reuse");
+        t.write_claim_full("x-4a48", std::process::id() as i32, SID, &hostname(), 1);
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
+        assert!(badges.is_empty());
+    }
+
+    #[test]
+    fn truth_badge_cross_host_no_badge() {
+        // A claim recorded on another host never badges here (its pid namespace
+        // is not ours), even if the local pid happens to be live.
+        let t = Tmp::new("xhost");
+        t.write_claim_full(
+            "x-4a48",
+            std::process::id() as i32,
+            SID,
+            "some-other-host",
+            9_999_999_999_999,
+        );
         t.write_event(SID, "2026-07-09T01:05:00Z");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
         let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);

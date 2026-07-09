@@ -95,6 +95,29 @@ def test_no_node_id_is_unknown():  # AC7-FR (unresolvable join)
     assert r["state"] == "unknown"
 
 
+def test_default_root_routes_through_global_claim_root(monkeypatch):
+    # codex P2 regression guard: node:<id> claims are GLOBAL. With claims_root
+    # omitted the resolver must probe the global root (claims_root_for), NOT
+    # claim_status's canonical-repo default (root=None), or `fno agents list`
+    # reads `free` for every live worker and the fill never appears.
+    from fno.claims.io import claims_root_for
+
+    captured: dict = {}
+
+    def fake_claim_status(key, root=None):
+        captured["key"] = key
+        captured["root"] = root
+        return {"state": "live", "holder": HOLDER}
+
+    monkeypatch.setattr(ts, "claim_status", fake_claim_status)
+    r = ts.resolve_truth_status("x-4a48", loop_check_ages={SID: 60})
+
+    assert captured["key"] == "node:x-4a48"
+    assert captured["root"] == claims_root_for("node:x-4a48")  # global root
+    assert captured["root"] is not None  # NOT the buggy canonical-repo default
+    assert r["state"] == "working"
+
+
 # --------------------------------------------------------------------------
 # loop_check tail scan
 # --------------------------------------------------------------------------
