@@ -75,7 +75,7 @@ emit_event() {
     local kind="$1" sid ts line
     sid=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null | head -1 \
         | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
-    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
     line="{\"ts\":\"${ts}\",\"type\":\"${kind}\",\"source\":\"hook\",\"data\":{\"session_id\":\"${sid}\",\"harness\":\"agy\"}}"
     # ${HOME:-} (not ${HOME}): under set -u an unset HOME would abort the script.
     mkdir -p "$ROOT/.fno" "${HOME:-}/.fno" 2>/dev/null || true
@@ -98,7 +98,7 @@ counter_path() {
 unavailable_continue_or_allow() {
     local counter count=0
     counter=$(counter_path)
-    [[ -f "$counter" ]] && count=$(tr -dc '0-9' < "$counter" 2>/dev/null)
+    [[ -f "$counter" ]] && count=$(tr -dc '0-9' < "$counter" 2>/dev/null || true)
     [[ -z "$count" ]] && count=0          # absent or corrupt -> start at 0
     count=$((10#$count + 1))              # 10# so a stray leading zero isn't octal
     echo "$count" > "$counter" 2>/dev/null || true
