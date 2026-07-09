@@ -75,6 +75,18 @@ def test_routing_override_ignores_same_value_relock():
     assert r["overridden_after_inference"] == 0
 
 
+def test_routing_override_keyed_by_plan_not_bare_task_id():
+    # Task ids are plan-relative: plan A's "1.1" inference must not be counted
+    # overridden by plan B's "1.1" explicit lock (peer review, PR #285).
+    a = _er("1.1", "surface-inference", "impeccable")
+    a["data"]["plan_path"] = "A.md"
+    b = _er("1.1", "task-block", "do")
+    b["data"]["plan_path"] = "B.md"
+    r = fold_routing_health([a, b])
+    assert r["overridden_after_inference"] == 0
+    assert r["inferred_tasks"] == 1  # only A's (plan,task) pair was inferred
+
+
 # --- AC8-HP: validation drop rate shows both numbers ---
 
 def test_triage_fold_drop_rate_denominator():

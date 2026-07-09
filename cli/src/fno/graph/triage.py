@@ -97,8 +97,11 @@ def fold_routing_health(events: list[dict]) -> Optional[dict]:
         return None
     tiers: dict[str, int] = {}
     warn = 0
-    inferred: dict[str, str] = {}  # task id -> first inference-resolved value
-    overridden: set[str] = set()
+    # Key by (plan_path, task): task ids like "1.1" are plan-relative, not
+    # global, so correlating override-after-inference on the bare task id would
+    # cross-contaminate two plans that both have a "1.1" (peer review, PR #285).
+    inferred: dict[tuple[str, str], str] = {}
+    overridden: set[tuple[str, str]] = set()
     for e in er:
         d = e.get("data", {}) or {}
         tier = d.get("tier", "?")
@@ -108,12 +111,13 @@ def fold_routing_health(events: list[dict]) -> Optional[dict]:
         task = d.get("task") or ""
         if not task:
             continue
+        key = (d.get("plan_path") or "", task)
         resolved = d.get("resolved")
         if tier == "surface-inference":
-            inferred.setdefault(task, resolved)
+            inferred.setdefault(key, resolved)
         elif tier in ("task-block", "plan-frontmatter"):
-            if task in inferred and resolved != inferred[task]:
-                overridden.add(task)
+            if key in inferred and resolved != inferred[key]:
+                overridden.add(key)
     return {
         "total": len(er),
         "tier_distribution": tiers,
@@ -857,12 +861,6 @@ def cmd_consistency(
     node ids that disagreed. Read-only - propose runs never touch the graph."""
     if repeat < 1:
         raise typer.BadParameter("--repeat must be >= 1")
-    if repeat > 10 and not yes:
-        typer.echo(
-            f"--repeat {repeat} makes {repeat} real LLM calls; pass --yes to confirm.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
 
     # One snapshot, read by all K runs (Invariant: never the live graph).
     if frozen_context is not None:
@@ -873,6 +871,15 @@ def cmd_consistency(
     if not context.get("candidates"):
         typer.echo("nothing to propose (no candidates in the frozen context)", err=True)
         return  # exit 0, no LLM calls (Boundaries)
+
+    # Cost guard AFTER the empty-context short-circuit: an empty context makes
+    # zero LLM calls, so it should never demand --yes (peer review, PR #285).
+    if repeat > 10 and not yes:
+        typer.echo(
+            f"--repeat {repeat} makes {repeat} real LLM calls; pass --yes to confirm.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     proposals: list[dict] = []
     errored = 0

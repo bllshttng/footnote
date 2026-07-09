@@ -114,6 +114,17 @@ def test_empty_context_short_circuits(tmp_path, monkeypatch):
     assert "nothing to propose" in r.output
 
 
+def test_empty_context_skips_high_repeat_guard(tmp_path, monkeypatch):
+    # --repeat 11 on an empty context makes zero LLM calls, so it must NOT
+    # demand --yes (peer review, PR #285): exit 0, not the exit-2 cost gate.
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"candidates": [], "ideas": []}))
+    monkeypatch.setattr(triage, "_run_consistency_propose", lambda c, m: (_ for _ in ()).throw(AssertionError("no dispatch")))
+    r = runner.invoke(app, ["backlog", "triage", "consistency", "--repeat", "11", "--frozen-context", str(empty)])
+    assert r.exit_code == 0
+    assert "nothing to propose" in r.output
+
+
 def test_k1_notes_it_measures_nothing(frozen, monkeypatch):
     monkeypatch.setattr(triage, "_run_consistency_propose", lambda c, m: _prop([{"id": "ab-1", "to": "p1"}]))
     r = runner.invoke(app, ["backlog", "triage", "consistency", "--repeat", "1", "--frozen-context", str(frozen)])
