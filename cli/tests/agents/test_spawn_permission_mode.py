@@ -215,6 +215,34 @@ def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert captured["permission_mode"] == "acceptEdits"
+    # Locked Decision 5 / Rust parity: the fallback bg receipt names the mode.
+    assert json.loads(result.output.splitlines()[0])["permission_mode"] == "acceptEdits"
+
+
+def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
+    """--yolo on the Python claude bg fallback names bypassPermissions in the
+    receipt (audit parity with the Rust bg receipt)."""
+    from fno.agents import dispatch, spawn_gate
+
+    class _Gate:
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.agents.dispatch.dispatch_spawn",
+        lambda **kw: dispatch.SpawnResult(
+            kind="created", name=kw["name"], provider="claude", short_id="abcd1234"
+        ),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg", "--yolo"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output.splitlines()[0])["permission_mode"] == "bypassPermissions"
 
 
 def test_claude_python_build_argv_threads_permission_mode():

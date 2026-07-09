@@ -585,9 +585,19 @@ def cmd_spawn(
         # consumers (name validation blocks backslash already, so this is the
         # only escapable character; sigma-review hardening finding).
         safe_name = result.name.replace('"', '\\"')
+        # Locked Decision 5 / Rust parity: name the applied mode (flag or the
+        # yolo-derived bypassPermissions) so an audit can tell elevated
+        # permissions were applied on this fallback path. Only when set, so the
+        # unset receipt is byte-identical.
+        eff_mode = permission_mode or ("bypassPermissions" if yolo else None)
+        perm_field = (
+            f', "permission_mode": "{eff_mode.replace(chr(34), chr(92) + chr(34))}"'
+            if eff_mode
+            else ""
+        )
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
-            f'"provider": "{result.provider}", "status": "live"}}'
+            f'"provider": "{result.provider}", "status": "live"{perm_field}}}'
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
