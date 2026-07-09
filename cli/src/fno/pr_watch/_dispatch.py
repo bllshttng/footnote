@@ -642,7 +642,18 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
     from fno.graph._reconcile import dispatch_post_merge_ritual
 
     def _cold_spawn(pr_number: int, cwd: str) -> str:
-        res = fire_skill_fn("merged", pr_number, Path(cwd))
+        # Post-merge workers honor config.post_merge.model (default sonnet);
+        # fail open to the sonnet default on a config-load failure, mirroring
+        # _spawn_post_merge_worker so both cold paths keep the reasoning tier
+        # the node needs. fire_skill still suppresses --model when routed.
+        model = "claude-sonnet-5"
+        try:
+            from fno.config import load_settings_for_repo
+
+            model = load_settings_for_repo(Path(cwd)).post_merge.model
+        except Exception:
+            pass
+        res = fire_skill_fn("merged", pr_number, Path(cwd), model=model)
         if not res.ok:
             raise RuntimeError(f"headless merged fire failed (rc={res.rc})")
         return "headless"

@@ -42,6 +42,7 @@
 | `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno update && fno restart`). Unset = off. |
 | `post_merge.sync_paths` | list[str] | `[]` | advanced | Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge). |
 | `post_merge.auto_run` | bool | `false` | advanced | Let merge-detection auto-dispatch the /fno:pr merged ritual for a newly-merged PR (opt-in; default off). |
+| `post_merge.model` | str | `claude-sonnet-5` | advanced | Model for post-merge ritual workers (default claude-sonnet-5). Routing wins when a secondary provider is keyed. |
 | `research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
 | `review.github_apps` | list[str] (optional) | _(none)_ | advanced | GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots. |
 | `review.required_bots` | list[str] (optional) | _(none)_ | never | Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set. |

@@ -112,6 +112,11 @@ FIELD_META: dict[str, Meta] = {
         "Let merge-detection auto-dispatch the /fno:pr merged ritual for a "
         "newly-merged PR (opt-in; default off).",
     ),
+    "post_merge.model": Meta(
+        "advanced",
+        "Model for post-merge ritual workers (default claude-sonnet-5). Routing "
+        "wins when a secondary provider is keyed.",
+    ),
     # --- config.research.* ---
     "research.output_dir": Meta(
         "advanced",

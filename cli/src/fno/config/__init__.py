@@ -343,6 +343,12 @@ class PostMergeBlock(BaseModel):
     sync_command: Optional[str] = None
     sync_paths: list[str] = Field(default_factory=list)
     auto_run: bool = False
+    # Model tier for post-merge ritual workers. Sonnet (not haiku): the Step-6
+    # diff-judgment needs real reasoning. A tier default, not an opt-in, so it
+    # carries a non-None string rather than the block's feature-toggle None.
+    # Routing still wins at the routable spawn site when a secondary provider
+    # is keyed - this is only the un-routed fallback.
+    model: str = "claude-sonnet-5"
 
     @field_validator("parking_lot_path", mode="before")
     @classmethod
@@ -405,6 +411,19 @@ class PostMergeBlock(BaseModel):
         if isinstance(v, str):
             return v.strip().lower() in {"1", "true", "yes", "on"}
         return False
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _coerce_model(cls, v: object) -> str:
+        """Fail-safe to the sonnet default on empty/whitespace/non-str.
+
+        A blank ``model = ""`` must never reach ``--model ""`` (an empty flag
+        value), so coerce it back to the tier default rather than passing it
+        through.
+        """
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        return "claude-sonnet-5"
 
 
 class ResearchBlock(BaseModel):

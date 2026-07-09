@@ -295,7 +295,7 @@ def _make_tick_deps(
     def fake_fire_skill(verb, pr_number, repo_dir, *, runner=None, model=None, env_seam=None):
         from fno.pr_watch._dispatch import DispatchResult
 
-        fired.append({"verb": verb, "pr": pr_number})
+        fired.append({"verb": verb, "pr": pr_number, "model": model})
         if fire_ok:
             return DispatchResult(ok=True, rc=0, is_error=False, raw='{"is_error":false}')
         else:
@@ -642,6 +642,57 @@ class TestTickOrchestrator:
         fresh_store = _WS(path=store_path)
         entry = fresh_store.get("owner/repo#1")
         assert entry["merge_dispatched"] is True
+
+    def _cold_fire_model(self, tmp_path, monkeypatch, config_raises=False):
+        """Drive _default_dispatch_ritual through its cold-spawn fallback and
+        return the model passed to the headless merged fire. Stubs the shared
+        dispatcher to just invoke the spawn closure (bypassing warm route +
+        claim + marker), so this isolates the model resolution in _cold_spawn."""
+        import fno.graph._reconcile as _rec
+        import fno.config as _config
+        from fno.pr_watch._dispatch import DispatchResult, _default_dispatch_ritual
+
+        if config_raises:
+            def _boom(_p):
+                raise RuntimeError("corrupt config")
+            monkeypatch.setattr(_config, "load_settings_for_repo", _boom)
+
+        fired: dict = {}
+
+        def fake_fire(verb, pr_number, repo_dir, *, model=None, **_kw):
+            fired["verb"] = verb
+            fired["model"] = model
+            return DispatchResult(ok=True, rc=0, is_error=False, raw="{}")
+
+        class _R:
+            outcome = "dispatched"
+            short_id = "headless"
+            detail = "cold"
+
+        def fake_dispatch(pr_number, *, spawn=None, node_cwd=None, **_kw):
+            spawn(pr_number, node_cwd or str(tmp_path))  # exercise _cold_spawn
+            return _R()
+
+        monkeypatch.setattr(_rec, "dispatch_post_merge_ritual", fake_dispatch)
+
+        cand = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        obs = _make_obs(1, "MERGED", merged=True)
+        _default_dispatch_ritual(cand, obs, fake_fire)
+        return fired
+
+    def test_cold_merged_fire_carries_post_merge_model(self, tmp_path, monkeypatch):
+        """The cold-fallback merged fire passes config.post_merge.model (default
+        sonnet), not fire_skill's haiku default."""
+        fired = self._cold_fire_model(tmp_path, monkeypatch)
+        assert fired["verb"] == "merged"
+        # tmp_path has no config.toml -> post_merge.model defaults to sonnet.
+        assert fired["model"] == "claude-sonnet-5"
+
+    def test_cold_merged_fire_config_failure_falls_open_to_sonnet(self, tmp_path, monkeypatch):
+        """A config-load failure at the cold fire falls open to the sonnet
+        default, mirroring _spawn_post_merge_worker (both cold paths agree)."""
+        fired = self._cold_fire_model(tmp_path, monkeypatch, config_raises=True)
+        assert fired["model"] == "claude-sonnet-5"
 
     def test_merge_already_dispatched_does_not_refire(self, tmp_path):
         """AC2-UI: merge_dispatched=True in watermark -> no re-fire on second tick."""
