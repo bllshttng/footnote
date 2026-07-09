@@ -366,6 +366,16 @@ fn is_blocked_row(a: &AgentRow) -> bool {
     !a.exited && a.badge == Some(AgentBadge::Blocked)
 }
 
+/// The squad-row rollup glyph for a folded `PaneState` (x-d140). Idle yields
+/// `None` (the row renders byte-identically to a pre-rollup row); the rest
+/// reuse the navigator's `nav_glyph` so a squad reads in its members' language.
+fn rollup_glyph(state: PaneState) -> Option<char> {
+    match state {
+        PaneState::Idle => None,
+        PaneState::Blocked | PaneState::Working | PaneState::DoneUnseen => Some(nav_glyph(state)),
+    }
+}
+
 /// Everything the client renders from. Pure state - `compose` turns it into
 /// one full-terminal `Frame` the row-diffing `Compositor` draws.
 struct View {
@@ -1743,21 +1753,50 @@ impl View {
                     let is_active_squad = squad.id == self.layout.active_squad;
                     let (text, flags) = match row.tab {
                         None => {
-                            let caret = if self.expanded.contains(&squad.id) {
-                                '▾'
-                            } else {
-                                '▸'
-                            };
+                            let expanded = self.expanded.contains(&squad.id);
+                            let caret = if expanded { '▾' } else { '▸' };
                             // `*` after the caret marks the active squad so
                             // activity survives weak-BOLD themes and manual
                             // collapse (x-2f99); replaces the space, so row
                             // width is unchanged. Same vocabulary as the
                             // active-tab marker below.
                             let mark = if is_active_squad { '*' } else { ' ' };
-                            (
-                                format!("{caret}{mark}{}", squad.name),
-                                if is_active_squad { cell_flags::BOLD } else { 0 },
-                            )
+                            let flags = if is_active_squad { cell_flags::BOLD } else { 0 };
+                            let base = format!("{caret}{mark}{}", squad.name);
+                            // Roll the squad's worst agent state onto its
+                            // COLLAPSED name row so a blocked pane is visible
+                            // without expanding (x-d140). An expanded squad
+                            // already shows each agent's glyph on its own row, so
+                            // it folds to Idle here (no duplicate glyph, name row
+                            // byte-identical to today). Reuses x-653d's
+                            // `nav_agent_state` fold (exited -> Idle; the x-4328
+                            // seen bit not yet wired); worst = Ord-min per
+                            // PaneState's ordering.
+                            let state = if expanded {
+                                PaneState::Idle
+                            } else {
+                                self.layout
+                                    .agents
+                                    .iter()
+                                    .filter(|a| a.squad == Some(squad.id))
+                                    .map(nav_agent_state)
+                                    .min()
+                                    .unwrap_or(PaneState::Idle)
+                            };
+                            let text = match rollup_glyph(state) {
+                                // Reserve the last 2 cells for ` {glyph}` at the
+                                // right edge, truncating the name into
+                                // `text_w - 2` FIRST so the later `.take(text_w)`
+                                // can never clip the signal. Guarded on width so
+                                // a narrow panel skips the reservation instead of
+                                // underflowing the subtraction.
+                                Some(glyph) if text_w >= 3 => {
+                                    let body: String = base.chars().take(text_w - 2).collect();
+                                    format!("{body:<width$} {glyph}", width = text_w - 2)
+                                }
+                                _ => base,
+                            };
+                            (text, flags)
                         }
                         Some(t) => {
                             let marker = if is_active_squad && t == squad.active_tab {
@@ -5061,6 +5100,103 @@ mod tests {
             sel_cell.flags & cell_flags::INVERSE,
             cell_flags::INVERSE,
             "selector highlight must land on the selectable notes row"
+        );
+    }
+
+    #[test]
+    fn squad_rollup_glyph_on_collapsed_row() {
+        // x-d140: a COLLAPSED squad's name row carries a trailing rollup glyph
+        // for its worst agent state, so a blocked pane is visible without
+        // expanding; an EXPANDED squad shows no rollup (its agent rows already
+        // carry the glyphs). `is_seen=|_|false` today (done == unseen; x-4328).
+        fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
+            AgentRow {
+                squad: Some(squad),
+                name: name.into(),
+                pane_id: None,
+                badge,
+                reason: None,
+                exited,
+                answerable: None,
+                attach_id: None,
+                external: false,
+            }
+        }
+        let mut view = two_pane_view();
+        let panes = view.layout.panes.clone();
+        let long = "this-is-a-very-long-squad-name-xyz";
+        view.set_layout(LayoutView {
+            squads: vec![
+                meta(1, "footnote", 1, 0),
+                meta(2, "notes", 1, 0),
+                meta(3, "quiet", 1, 0),
+                meta(4, long, 1, 0),
+            ],
+            active_squad: 1, // only footnote auto-expands; 2/3/4 stay collapsed
+            panes,
+            focus: 11,
+            area: (29, 72),
+            agents: vec![
+                ar(1, "lb", Some(AgentBadge::Blocked), false), // squad 1 is active -> expanded
+                ar(2, "w", Some(AgentBadge::Working), false),
+                ar(2, "b", Some(AgentBadge::Blocked), false), // worst-of -> Blocked
+                ar(3, "gone", Some(AgentBadge::Blocked), true), // exited -> Idle
+                ar(4, "b2", Some(AgentBadge::Blocked), false),
+            ],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        let lines: Vec<String> = frame_text(&view.compose())
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let find = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .cloned()
+                .unwrap_or_else(|| panic!("row {needle:?} not found in {lines:#?}"))
+        };
+
+        // AC1-HP + AC2-HP: collapsed `notes` shows ▲ (blocked outranks working)
+        // even though it is neither active nor expanded.
+        let notes = find("\u{25b8} notes");
+        assert!(
+            notes.contains('\u{25b2}'),
+            "notes rollup \u{25b2}: {notes:?}"
+        );
+
+        // AC1-ERR + AC2-EDGE: `quiet`'s only agent is exited -> Idle -> the name
+        // row is the pre-feature render, no rollup glyph.
+        let quiet = find("\u{25b8} quiet");
+        assert!(
+            !quiet.contains('\u{25b2}')
+                && !quiet.contains('\u{25cf}')
+                && !quiet.contains('\u{2713}'),
+            "quiet has no rollup glyph: {quiet:?}"
+        );
+
+        // AC1-EDGE: a name longer than text_w-2 is truncated but the trailing
+        // ▲ survives at the right edge (reserve-then-truncate).
+        let long_row = find("this-is-a-very-long");
+        assert!(
+            long_row.contains('\u{25b2}'),
+            "long name keeps \u{25b2}: {long_row:?}"
+        );
+        assert!(
+            !long_row.contains(long),
+            "long name is truncated: {long_row:?}"
+        );
+
+        // Collapsed-only: `footnote` is the active (auto-expanded) squad and
+        // holds a live blocked agent, but its EXPANDED name row shows no rollup
+        // glyph - the blocked `lb` agent's own row carries the ▲ instead.
+        let footnote = find("\u{25be}*footnote"); // ▾*footnote (expanded caret)
+        assert!(
+            !footnote.contains('\u{25b2}')
+                && !footnote.contains('\u{25cf}')
+                && !footnote.contains('\u{2713}'),
+            "expanded squad has no rollup glyph: {footnote:?}"
         );
     }
 
