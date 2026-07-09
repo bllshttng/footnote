@@ -27,20 +27,25 @@ if TYPE_CHECKING:
 
 _MODEL = "claude-haiku-4-5"
 
-# Rubric + abstain path, duplicated from skills/review/references/sigma.md
-# Step 3b. The CLI must stay self-contained (it never reads skill files), so
-# any alternate scorer added under scorers/ needs its own copy of this text.
-# Keep the "reply ONLY ..." format sentence LAST in each prompt: Haiku is
-# format-fragile and trailing instructions dominate compliance.
+# Rubric + abstain path for the confidence scorer. Mirrors the intent of
+# skills/review/references/sigma.md Step 3b, but the scorer payload carries
+# only the finding text (agent/severity/message/file:line via _format_finding
+# and the batch JSON), NOT the source lines - so abstention keys on the
+# finding's own vagueness, never a "verify against the provided code" check the
+# scorer cannot perform (that phrasing would push a compliant model to score
+# every finding <=25 and collapse recall). The CLI stays self-contained (never
+# reads skill files); alternate scorers under scorers/ need their own copy.
+# Keep the "reply ONLY ..." format sentence LAST: Haiku is format-fragile and
+# trailing instructions dominate compliance.
 _RUBRIC = (
     "Rate the confidence that this code review finding is a real issue, 0 to 100:\n"
     "0 = false positive, does not stand up to scrutiny, or pre-existing.\n"
-    "25 = might be real, but you cannot verify it against the provided code.\n"
+    "25 = might be real, but too vague or unspecific to confirm.\n"
     "50 = real issue, but minor or unlikely in practice.\n"
     "75 = verified real issue that directly impacts functionality.\n"
     "100 = confirmed definite issue that will happen frequently.\n"
-    "If you cannot verify the finding against the provided code, reply 25 or "
-    "lower. Never guess high."
+    "If the finding is vague or you cannot tell it identifies a real, specific "
+    "issue, assign a score of 25 or lower. Never guess high."
 )
 
 _SINGLE_SYSTEM_PROMPT = _RUBRIC + "\nReply with only the integer, nothing else."

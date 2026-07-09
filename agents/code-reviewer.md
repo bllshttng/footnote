@@ -52,7 +52,7 @@ Be thorough but filter aggressively - quality over quantity. Focus on issues tha
 Every finding you report MUST carry a verbatim quote of 1-3 lines copied from the file at the exact `file:line` you cite. Before you report a finding, re-read those lines and confirm the quote is actually there and actually supports the claim.
 
 - If you cannot produce a quote from the cited location, or the quote does not support the claim, drop the finding silently. Do not report it and do not list it as retracted.
-- If you are uncertain whether an issue is real, say "Unknown" and drop it rather than asserting it. A dropped uncertain finding is correct; a confidently wrong finding is not.
+- If you are uncertain whether an issue is real, classify it as "Unknown" and drop it silently rather than asserting it. A dropped uncertain finding is correct; a confidently wrong finding is not.
 - Never fabricate, paraphrase, or borrow a quote from a different location to satisfy this rule. The quote must be an exact copy of the cited source.
 
 Reporting zero findings is an honest, valid outcome when nothing can be cited.
