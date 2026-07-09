@@ -78,6 +78,12 @@ bash scripts/tests/test_prune_fno_dir.sh'
     step "corrections.log placement migration (ab-f063 Wave 2)" "." 'bash scripts/tests/test_corrections_migrate.sh'
     step "placement-rule lint self-test (ab-f063 Wave 2)" "." 'bash scripts/tests/test_check_placement_rule.sh'
     step "Build fno-agents debug binary (for journey tests)" "crates/fno-agents" 'cargo build'
+    # Scoped @requires_rust coverage: the main pytest step runs with the binary
+    # deleted so these skip (they would otherwise fail on a missing provider CLI
+    # that CI lacks). Here the binary is present and the two suites self-install
+    # fake codex/gemini on PATH, so the byte-parity assertions actually execute.
+    # Reuses the debug build above; adds no second cargo build.
+    step "Scoped @requires_rust parity suites (binary present; self-faked providers)" "cli" 'uv run pytest --tb=short -q tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py'
     step "Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)" "cli" 'FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py'
     step "loop-check journey tests (e2e + emission-schema + backstop-subprocess)" "." 'bash tests/hooks/test_loop_check_e2e.sh
 bash tests/events/test-loop-check-emission-schema.sh
