@@ -439,3 +439,59 @@ def test_ac1_hp_render_done_cap_at_10(tmp_path):
     # Count unique "DoneEntryNN" occurrences -- should be 10, not 15
     done_count = sum(1 for i in range(1, 16) if f"DoneEntry{i:02d}" in content)
     assert done_count <= 10
+
+
+# -- x-4845: live node-claim overlay --
+
+def test_overlay_live_claim_routes_to_now():
+    """AC: a node with a LIVE node:<id> claim and no session_id (so _status is
+    not 'claimed') routes to Now off the lockfile, not by bare priority."""
+    e = _entry("x-aaaa", priority="p3")  # p3 would be Later without the overlay
+    assert _kanban_column(e) == "Later"
+    assert _kanban_column(e, frozenset(), frozenset({"x-aaaa"})) == "Now"
+
+
+def test_overlay_absent_for_unclaimed_node():
+    """AC: a node NOT in the live set rides its normal priority (overlay is
+    additive; a STALE/absent claim contributes nothing since the set is built
+    with include_stale=False upstream)."""
+    e = _entry("x-bbbb", priority="p2")
+    assert _kanban_column(e, frozenset(), frozenset({"x-other"})) == "Next"
+
+
+def test_overlay_never_demotes_claimed():
+    """AC: a node whose _status is already 'claimed' stays in Now regardless of
+    the overlay (additive, never demotes)."""
+    e = _entry("x-cccc", session_id="s1", _status="claimed")
+    assert _kanban_column(e, frozenset(), frozenset()) == "Now"
+    assert _kanban_column(e, frozenset(), frozenset({"x-cccc"})) == "Now"
+
+
+def test_overlay_does_not_resurrect_offboard():
+    """Invariant: the overlay is additive to on-board lanes and never resurrects
+    a deferred/superseded (off-board) node even if a claim leaks onto it."""
+    for st in ("deferred", "superseded"):
+        e = _entry("x-dddd", _status=st, deferred_at="2026-01-01T00:00:00Z")
+        assert _kanban_column(e, frozenset(), frozenset({"x-dddd"})) is None
+
+
+def test_overlay_degrades_when_claims_unreadable(tmp_path, monkeypatch):
+    """AC: claims subsystem unreadable -> the helper returns an empty overlay
+    (it swallows faults), so render still succeeds with _status-only placement."""
+    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: set())
+    entries = [_entry("x-eeee", priority="p2")]
+    output = tmp_path / "graph.md"
+    render_graph_md(entries, output)
+    assert output.exists()
+
+
+def test_render_md_places_live_claimed_in_now(tmp_path, monkeypatch):
+    """End-to-end: render_graph_md consults live_claimed_node_ids and places the
+    claimed node under the Now column even though its priority is p3."""
+    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: {"x-ffff"})
+    entries = [_entry("x-ffff", title="LiveNode", priority="p3")]
+    output = tmp_path / "graph.md"
+    render_graph_md(entries, output)
+    content = output.read_text()
+    now_section = content.split("## Next")[0]  # everything before Next col
+    assert "LiveNode" in now_section

@@ -134,3 +134,25 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["_status"] = "ready"
 
     return entries
+
+
+def live_claimed_node_ids() -> set[str]:
+    """Node ids that currently hold a LIVE ``node:<id>`` claim.
+
+    The claim lockfile at ``~/.fno/claims/node:<id>`` is the liveness truth a
+    ``/target`` session (or walker-dispatched target) writes; ``classify`` (via
+    ``include_stale=False``) filters to only LIVE claims. Homed here — next to
+    the ``_status`` derivation it complements — so both selection (graph/cli.py)
+    and the board renderers can overlay it without a cli<->render import cycle.
+
+    Best-effort: any fault in the claims subsystem degrades to an empty set so
+    neither selection nor rendering ever breaks on it (identical to
+    pre-enforcement behavior). Only LIVE claims count; stale/released ones do not.
+    """
+    try:
+        from fno.claims.core import list_claims
+        from fno.claims.io import global_claims_root
+        live = list_claims(prefix="node:", include_stale=False, root=global_claims_root())
+        return {c["key"].removeprefix("node:") for c in live if isinstance(c.get("key"), str)}
+    except Exception:
+        return set()
