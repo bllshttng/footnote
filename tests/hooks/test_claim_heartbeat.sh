@@ -104,6 +104,26 @@ drop_manifest_codex_identity() {
   mv "${CWD}/.fno/target-state.legacy.md" "${CWD}/.fno/target-state.md"
 }
 
+set_manifest_claude_identity_null() {
+  awk '
+    /^[[:space:]]*claude_session_id:/ { print "claude_session_id: null"; next }
+    { print }
+  ' "${CWD}/.fno/target-state.md" > "${CWD}/.fno/target-state.codex.md"
+  mv "${CWD}/.fno/target-state.codex.md" "${CWD}/.fno/target-state.md"
+}
+
+run_hook_codex_plugin_sid() {
+  printf '{"cwd": "%s", "session_id": "%s"}' "$CWD" "$1" \
+    | CODEX_THREAD_ID= CODEX_PLUGIN_ROOT=/opt/codex-plugin FNO_PLATFORM=codex \
+      bash "$HOOK"
+}
+
+run_hook_codex_plugin_no_sid() {
+  printf '{"cwd": "%s"}' "$CWD" \
+    | CODEX_THREAD_ID= CODEX_PLUGIN_ROOT=/opt/codex-plugin FNO_PLATFORM=codex \
+      bash "$HOOK"
+}
+
 # ── T1: AC3-HP - we hold the claim -> refresh is issued ──────────────────────
 setup_env
 export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
@@ -237,6 +257,42 @@ if [[ -s "$CALLLOG" ]]; then
   fail "T12 legacy manifest reached claim status/refresh under current Codex identity"
 else
   pass "T12 legacy manifest fails closed before refreshing a generic old holder"
+fi
+teardown_env
+
+# ── T13: Codex stdin fallback mismatch must fail closed ─────────────────────
+setup_env
+set_manifest_claude_identity_null
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_codex_plugin_sid "019f48e4-different-thread" >/dev/null 2>&1
+if [[ -s "$CALLLOG" ]]; then
+  fail "T13 Codex stdin fallback mismatch refreshed a stale foreign holder"
+else
+  pass "T13 Codex stdin session fallback mismatch fails closed"
+fi
+teardown_env
+
+# ── T14: Codex stdin fallback match remains refreshable ──────────────────────
+setup_env
+set_manifest_claude_identity_null
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_codex_plugin_sid "019f48e4-owner-thread" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
+  pass "T14 Codex stdin session fallback match refreshes owner"
+else
+  fail "T14 Codex stdin session fallback match did not refresh"
+fi
+teardown_env
+
+# ── T15: Identified Codex with no usable identity fails closed ────────────────
+setup_env
+set_manifest_claude_identity_null
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_codex_plugin_no_sid >/dev/null 2>&1
+if [[ -s "$CALLLOG" ]]; then
+  fail "T15 identity-less Codex hook refreshed a stale foreign holder"
+else
+  pass "T15 identity-less Codex hook fails closed"
 fi
 teardown_env
 

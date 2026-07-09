@@ -42,9 +42,23 @@ STDIN="$(cat 2>/dev/null || true)"
 CWD=""
 CUR_CLAUDE_SID=""
 CUR_CODEX_THREAD_ID="${CODEX_THREAD_ID:-}"
+HOOK_SESSION_ID=""
+IS_CODEX_HOOK=0
+_ENV_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
+if [[ "${FNO_PLATFORM:-}" == "codex" || -n "${CODEX_PLUGIN_ROOT:-}" \
+      || -n "$_ENV_CODEX_COMPACT" ]]; then
+  IS_CODEX_HOOK=1
+fi
 if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
   CWD="$(printf '%s' "$STDIN" | jq -r '.cwd // empty' 2>/dev/null)"
-  CUR_CLAUDE_SID="$(printf '%s' "$STDIN" | jq -r '.session_id // empty' 2>/dev/null)"
+  HOOK_SESSION_ID="$(printf '%s' "$STDIN" \
+    | jq -r 'if (.session_id? | type) == "string" then .session_id else empty end' \
+      2>/dev/null)"
+fi
+if [[ "$IS_CODEX_HOOK" -eq 1 ]]; then
+  [[ -n "$_ENV_CODEX_COMPACT" ]] || CUR_CODEX_THREAD_ID="$HOOK_SESSION_ID"
+else
+  CUR_CLAUDE_SID="$HOOK_SESSION_ID"
 fi
 [[ -z "$CWD" ]] && CWD="${CLAUDE_PROJECT_DIR:-$PWD}"
 
@@ -68,18 +82,20 @@ SESSION_ID="$(sed -n 's/^[[:space:]]*session_id:[[:space:]]*//p' "$MANIFEST" | h
 # (the claim's pid arm is unreliable by design - the whole reason this hook
 # exists), so it cannot regress a dead-pid claim the way a state==live gate would.
 # Claude keeps the legacy fail-open behavior when its identity is unavailable.
-# Codex fails CLOSED when its current thread is known but the manifest lacks a
-# Codex owner: a generic pre-Codex holder cannot prove that this thread owns it.
+# Codex is detected independently from identity; CODEX_THREAD_ID wins, with a
+# string stdin session_id as fallback. Codex fails CLOSED when either current
+# identity or manifest owner is missing: a generic holder proves no ownership.
 MANIFEST_CLAUDE_SID="$(sed -n 's/^[[:space:]]*claude_session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 _CUR_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
-if [[ -z "$_CUR_CODEX_COMPACT" && -n "$CUR_CLAUDE_SID" \
+if [[ "$IS_CODEX_HOOK" -eq 0 && -n "$CUR_CLAUDE_SID" \
       && -n "$MANIFEST_CLAUDE_SID" && "$MANIFEST_CLAUDE_SID" != "null" \
       && "$CUR_CLAUDE_SID" != "$MANIFEST_CLAUDE_SID" ]]; then
   exit 0
 fi
 MANIFEST_CODEX_THREAD_ID="$(sed -n 's/^[[:space:]]*codex_thread_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 [[ "$MANIFEST_CODEX_THREAD_ID" == "null" ]] && MANIFEST_CODEX_THREAD_ID=""
-if [[ -n "$_CUR_CODEX_COMPACT" ]]; then
+if [[ "$IS_CODEX_HOOK" -eq 1 ]]; then
+  [[ -n "$_CUR_CODEX_COMPACT" ]] || exit 0
   [[ -n "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
   [[ "$CUR_CODEX_THREAD_ID" == "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
 fi

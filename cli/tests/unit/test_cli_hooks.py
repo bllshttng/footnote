@@ -380,6 +380,8 @@ def test_codex_migration_preserves_foreign_events_and_exact_backup(tmp_path):
     assert res.legacy_backup is not None
     assert res.legacy_backup.read_bytes() == original
     assert res.note and "manual consolidation" in res.note
+    assert "foreign hooks were preserved" in res.note
+    assert "foreign SessionStart hooks" not in res.note
 
     diagnostics = inspect_codex_hooks(config_path=config, hooks_json_path=legacy)
     assert diagnostics.state == "both"

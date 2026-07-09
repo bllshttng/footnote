@@ -493,8 +493,8 @@ def _codex_diagnostic_note(
         )
     if foreign_remains:
         return (
-            f"legacy hooks remain in {diagnostics.hooks_json_path}; foreign SessionStart "
-            f"hooks were preserved and need manual consolidation into "
+            f"legacy hooks remain in {diagnostics.hooks_json_path}; foreign hooks "
+            f"were preserved and need manual consolidation into "
             f"{diagnostics.config_path} (TOML is preferred)"
         )
     if diagnostics.state == "both":
