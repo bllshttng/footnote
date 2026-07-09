@@ -57,10 +57,17 @@ enum Probe {
         squads: u32,
         panes: u32,
     },
-    /// Something accepts connections but never answered a parseable `Info`
-    /// (an older build, a wedged server): listed, never unlinked, and one
-    /// bad session never breaks the listing (AC4-ERR).
+    /// Accepts connections but never answered a parseable `Info` (an older
+    /// build): listed, never unlinked, and one bad session never breaks the
+    /// listing (AC4-ERR). Distinct from `Wedged` -- an accepted connection
+    /// proves the server is alive and reachable, just proto-old.
     Unqueryable,
+    /// Holds the socket but never ACCEPTS a connection (connect times out): a
+    /// wedged server, alive-but-stuck. Split from `Unqueryable` (x-82c6) so
+    /// `restart --mux` stops reporting ok while a wedged server keeps running.
+    /// Because a dead server releases its socket (connect REFUSED -> `Stale`),
+    /// a connect-timeout implies a LIVE holder that is not accepting.
+    Wedged,
     /// Nothing listens: a leftover socket from a dead server.
     Stale,
     /// The probe itself failed CLIENT-side (fd exhaustion, permissions):
@@ -77,7 +84,7 @@ fn probe(sock: &Path) -> Probe {
         // alive-but-unqueryable, never stale. Every other error (EMFILE,
         // EACCES, ...) is OUR failure, not the server's.
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Probe::Stale,
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Probe::Unqueryable,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Probe::Wedged,
         Err(e) => return Probe::Unprobeable(e.to_string()),
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
@@ -252,6 +259,35 @@ fn session_rows() -> Result<Vec<SessionRow>, String> {
         .collect())
 }
 
+/// One `fno mux ls --json` row. The `state` string is the stable contract
+/// `fno restart --mux` reads (a `wedged` row is what makes restart report a
+/// non-zero exit); a wedged row also carries its `log` path so the operator can
+/// find the stuck server. Pure, so the state contract is unit-testable.
+fn session_row_json(row: &SessionRow) -> serde_json::Value {
+    let SessionRow { name, probe } = row;
+    match probe {
+        Probe::Live {
+            clients,
+            squads,
+            panes,
+        } => serde_json::json!({
+            "session": name, "state": "live",
+            "clients": clients, "squads": squads, "panes": panes,
+        }),
+        Probe::Unqueryable => serde_json::json!({ "session": name, "state": "unqueryable" }),
+        Probe::Wedged => {
+            let log = proto::socket_path(name)
+                .map(|p| p.with_extension("log").display().to_string())
+                .unwrap_or_default();
+            serde_json::json!({ "session": name, "state": "wedged", "log": log })
+        }
+        Probe::Stale => serde_json::json!({ "session": name, "state": "stale" }),
+        Probe::Unprobeable(e) => {
+            serde_json::json!({ "session": name, "state": "unprobeable", "error": e })
+        }
+    }
+}
+
 /// `fno mux ls`: one row per `*.sock` in the mux dir. Read-only - a stale
 /// socket is REPORTED, never unlinked (kill-server owns removal). Exits 0
 /// even when every row is stale or unqueryable; only "no sessions" is
@@ -267,26 +303,7 @@ pub fn ls(json: bool) -> i32 {
     if json {
         // Stable per-row envelope: `state` is always present; live rows carry
         // the counts. An empty listing is `[]` (never the "no sessions" prose).
-        let arr: Vec<_> = rows
-            .iter()
-            .map(|SessionRow { name, probe }| match probe {
-                Probe::Live {
-                    clients,
-                    squads,
-                    panes,
-                } => serde_json::json!({
-                    "session": name, "state": "live",
-                    "clients": clients, "squads": squads, "panes": panes,
-                }),
-                Probe::Unqueryable => {
-                    serde_json::json!({ "session": name, "state": "unqueryable" })
-                }
-                Probe::Stale => serde_json::json!({ "session": name, "state": "stale" }),
-                Probe::Unprobeable(e) => {
-                    serde_json::json!({ "session": name, "state": "unprobeable", "error": e })
-                }
-            })
-            .collect();
+        let arr: Vec<_> = rows.iter().map(session_row_json).collect();
         println!("{}", serde_json::Value::Array(arr));
         return EXIT_OK;
     }
@@ -302,6 +319,11 @@ pub fn ls(json: bool) -> i32 {
                 panes,
             } => println!("{name}: {clients} clients, {squads} squads, {panes} panes"),
             Probe::Unqueryable => println!("{name}: alive (unqueryable - older server?)"),
+            Probe::Wedged => {
+                println!(
+                    "{name}: wedged (holds the socket but not accepting - kill the server process)"
+                )
+            }
             Probe::Stale => println!("{name}: stale"),
             Probe::Unprobeable(e) => println!("{name}: probe failed ({e})"),
         }
@@ -525,6 +547,7 @@ fn render_picker(p: &Picker) -> String {
                 row.name
             ),
             Probe::Unqueryable => format!("{}  (alive, unqueryable)", row.name),
+            Probe::Wedged => format!("{}  (wedged)", row.name),
             Probe::Stale => format!("{}  (stale)", row.name),
             Probe::Unprobeable(_) => format!("{}  (unprobeable)", row.name),
         };
@@ -1865,6 +1888,27 @@ mod tests {
             name: name.into(),
             probe: Probe::Stale,
         }
+    }
+
+    fn wedged(name: &str) -> SessionRow {
+        SessionRow {
+            name: name.into(),
+            probe: Probe::Wedged,
+        }
+    }
+
+    #[test]
+    fn mux_ls_json_state_contract() {
+        // The `state` string is the contract `fno restart --mux` reads; a wedged
+        // row is what flips restart to a non-zero exit (x-82c6), split from the
+        // (still-live) unqueryable old-build row.
+        assert_eq!(session_row_json(&live("s"))["state"], "live");
+        assert_eq!(session_row_json(&stale("s"))["state"], "stale");
+        let w = session_row_json(&wedged("s"));
+        assert_eq!(w["state"], "wedged");
+        assert!(w.get("log").is_some(), "a wedged row carries its log path");
+        // A wedged row is NOT live: it must never be auto-attached.
+        assert!(!wedged("s").is_live());
     }
 
     #[test]

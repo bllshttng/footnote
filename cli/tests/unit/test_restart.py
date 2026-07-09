@@ -152,3 +152,47 @@ def test_restart_mux_kill_timeout_names_the_session(monkeypatch) -> None:
     result = runner.invoke(app, ["restart", "--mux"])
     assert result.exit_code == 1
     assert "gave up on mux session 'wedged'" in result.output
+
+
+def test_restart_wedged_row_fails_and_names_session_and_log(monkeypatch) -> None:
+    """A wedged mux row (holds the socket but not accepting) is an actionable
+    failure, not a benign non-live row: `fno restart` must exit non-zero and name
+    the session + its log, never report ok:true over it (x-82c6). Fires WITHOUT
+    --mux -- a wedged server is broken, not a restart target you opt into."""
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(restart.subprocess, "run", _record_run([]))
+    monkeypatch.setattr(
+        restart,
+        "_mux_sessions",
+        lambda: [{"session": "stuck", "state": "wedged", "log": "/tmp/mux/stuck.log"}],
+    )
+
+    result = runner.invoke(app, ["restart"])
+    assert result.exit_code == 1
+    assert "WEDGED" in result.output
+    assert "stuck" in result.output
+    assert "/tmp/mux/stuck.log" in result.output
+
+
+def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
+    """The floor reports + fails but does NOT reap a wedged server (no kill-server
+    call); the JSON summary carries it under mux_wedged with ok:false."""
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(
+        restart,
+        "_mux_sessions",
+        lambda: [
+            {"session": "ok1", "state": "live"},
+            {"session": "stuck", "state": "wedged", "log": "/tmp/mux/stuck.log"},
+        ],
+    )
+
+    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    assert result.exit_code == 1
+    assert not any("stuck" in c for c in calls), "must NOT kill a wedged server (floor: report only)"
+    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
+    assert payload["mux_wedged"] == ["stuck"]
+    assert payload["ok"] is False
