@@ -653,6 +653,261 @@ def build_skill_scoreboard(
     }
 
 
+# ── session-efficiency fold (x-c284) ─────────────────────────────────────────
+#
+# Grades the PROCESS, not just the terminal state: a session that ships
+# merged_clean but fired loop_check 132x and pushed red CI twice should read
+# poorly on efficiency. Pure fold over telemetry that already exists (ledger row
+# + loop_check events + graph), NO new events / state files (extends the x-4829
+# locked rule). CI-red data comes from recorded loop_check `ci` values, never a
+# gh call at fold time - the fold stays deterministic and offline.
+
+# Recognized `ci` shapes. A FAILURE:* value is a red; the rest are recognized
+# non-red states the emitter really produces (SUCCESS/PENDING/none plus the
+# observed unknown/skipped). Anything else is emitter drift -> ci_unparsed, and
+# the affected session's ci_reds degrades to None rather than a fabricated count.
+# NOTE (plan deviation): the plan's recognized set was SUCCESS/FAILURE:*/PENDING/
+# none, but real events.jsonl also carries `unknown` (1000s) and `skipped`
+# (100s); treating those as drift would flag ci_reds=None on most sessions, so
+# they are recognized-benign here. ci_unparsed still fires on a genuinely novel
+# shape (AC6-FR).
+_CI_RED_PREFIX = "FAILURE:"
+_CI_RECOGNIZED_NONRED = frozenset({"SUCCESS", "PENDING", "none", "unknown", "skipped"})
+
+
+def _percentile(values: list[float], p: int):
+    """Nearest-rank percentile over a sorted copy. None on empty input. For a
+    single value, every percentile is that value (no divide-by-zero)."""
+    if not values:
+        return None
+    s = sorted(values)
+    import math
+
+    k = max(1, math.ceil(p / 100 * len(s)))
+    return s[k - 1]
+
+
+def _row_session_ids(row: dict) -> set[str]:
+    """A row's session ids: the `sessions` list (both UUID and 20260708T-style),
+    falling back to the scalar `session_id` for rows predating the list."""
+    ids: set[str] = set()
+    sessions = row.get("sessions")
+    if isinstance(sessions, list):
+        ids.update(s for s in sessions if isinstance(s, str) and s)
+    scalar = row.get("session_id")
+    if isinstance(scalar, str) and scalar:
+        ids.add(scalar)
+    return ids
+
+
+def _ci_reds_from_fires(ci_ordered: list[str]) -> tuple[int | None, int]:
+    """Count distinct red EPISODES (transitions into FAILURE:*) across a
+    session's loop_check ci values in ts order. A red streak of N fires counts
+    once. Returns (ci_reds, unparsed_count); ci_reds is None when any fire
+    carried an unrecognized ci shape (drift must not be silently miscounted)."""
+    unparsed = 0
+    for ci in ci_ordered:
+        if isinstance(ci, str) and (ci.startswith(_CI_RED_PREFIX) or ci in _CI_RECOGNIZED_NONRED):
+            continue
+        unparsed += 1
+    if unparsed:
+        return None, unparsed
+    episodes = 0
+    prev_red = False  # the pre-run state is non-red, so a leading FAILURE is one episode
+    for ci in ci_ordered:
+        is_red = isinstance(ci, str) and ci.startswith(_CI_RED_PREFIX)
+        if is_red and not prev_red:
+            episodes += 1
+        prev_red = is_red
+    return episodes, 0
+
+
+def _transcript_counts(session_ids: set[str], read_transcript) -> tuple[int | None, int | None]:
+    """Best-effort (turns, toolcalls) from a row's transcript(s): count message
+    lines and tool_use blocks. Both None when no transcript resolves (GC'd /
+    per-machine) - never 0, so unmeasurable stays distinct from measured-zero."""
+    turns = 0
+    toolcalls = 0
+    found_any = False
+    for sid in session_ids:
+        lines = read_transcript(sid)
+        if not lines:
+            continue
+        found_any = True
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("message") is not None or obj.get("type") in ("user", "assistant"):
+                turns += 1
+            message = obj.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                toolcalls += sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use")
+    if not found_any:
+        return None, None
+    return turns, toolcalls
+
+
+def _dist(rows_metric: list[float | int | None]) -> dict:
+    """median/p90/n over the non-None values only (the denominator rides along)."""
+    vals = [v for v in rows_metric if v is not None]
+    return {"median": _percentile(vals, 50), "p90": _percentile(vals, 90), "n": len(vals)}
+
+
+def build_efficiency(
+    rows: list[dict],
+    loop_events: list[dict],
+    graph_nodes: list[dict],
+    *,
+    since_days: int,
+    now: datetime,
+    read_transcript=None,
+) -> dict:
+    """Fold ledger rows + loop_check events + graph into per-outcome-class costs
+    and fleet distributions for session-efficiency. Pure except the injectable
+    transcript hook (same seam as build_skill_scoreboard). Every rate/median
+    carries its denominator in coverage - a partial window is never a trend."""
+    read_transcript = read_transcript or _default_read_transcript
+    cutoff = now - timedelta(days=since_days)
+
+    def _in_window(ts_raw) -> bool:
+        dt = _parse_ts(ts_raw)
+        return dt is not None and cutoff <= dt <= now
+
+    windowed = [r for r in rows if _in_window(r.get("completed"))]
+    total = len(windowed)
+    if total == 0:
+        return {"state": "no_data", "since_days": since_days, "rows": 0}
+
+    # Index loop_check fires by session id: (ts_sort_key, ci) so a session's
+    # fires order deterministically even when ts is missing (undated last).
+    fires_by_session: dict[str, list[tuple]] = {}
+    for e in loop_events:
+        if not isinstance(e, dict):
+            continue
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        sid = data.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            continue
+        dt = _parse_ts(e.get("ts")) or _parse_ts(data.get("ts"))
+        fires_by_session.setdefault(sid, []).append((dt or datetime.max, data.get("ci")))
+
+    by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
+    fixes: dict[str, list[dict]] = {}
+    for n in graph_nodes:
+        origin = n.get("caused_by")
+        if origin:
+            fixes.setdefault(origin, []).append(n)
+    # Same w4 gate as _survival: without any causal telemetry, _node_outcome's
+    # "no fix found" branch is indistinguishable from "revert data doesn't exist
+    # yet", so a shipped row lands in `shipped_untracked`, never a fake merged_clean.
+    w4_available = any(("reverted" in n) or n.get("caused_by") for n in graph_nodes)
+
+    joined_rows = 0
+    transcript_rows = 0
+    node_linked = 0
+    ci_unparsed_total = 0
+    outcome_tracked = 0
+    shipped_rows = 0
+
+    buckets: dict[str, dict] = {}
+    per_row_fires: list[int | None] = []
+    per_row_reds: list[int | None] = []
+    per_row_tokens: list[float | None] = []
+    per_row_duration: list[float | None] = []
+
+    for r in windowed:
+        sids = _row_session_ids(r)
+        fires = []
+        for sid in sids:
+            fires.extend(fires_by_session.get(sid, []))
+        fires.sort(key=lambda pair: pair[0])
+        ci_ordered = [ci for _, ci in fires]
+
+        loop_fires = len(fires) if fires else None  # None (not 0): no joined event != measured zero
+        if loop_fires:
+            joined_rows += 1
+            ci_reds, unparsed = _ci_reds_from_fires(ci_ordered)
+            ci_unparsed_total += unparsed
+        else:
+            ci_reds = None
+
+        turns, toolcalls = _transcript_counts(sids, read_transcript)
+        if turns is not None:
+            transcript_rows += 1
+
+        nid = r.get("graph_node_id")
+        if nid:
+            node_linked += 1
+
+        shipped = _is_shipped_reason(r.get("termination_reason"))
+        if shipped:
+            shipped_rows += 1
+            if w4_available and nid and nid in by_id:
+                cls = _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes)
+                outcome_tracked += 1
+            else:
+                cls = "shipped_untracked"
+        else:
+            cls = "unshipped"
+
+        tokens = _num(r.get("tokens_total"))
+        duration = _num(r.get("duration_minutes"))
+        b = buckets.setdefault(cls, {"n": 0, "spend_usd": 0.0, "tokens": [], "fires": [], "duration": []})
+        b["n"] += 1
+        b["spend_usd"] += _num(r.get("cost_usd"))
+        b["tokens"].append(tokens)
+        b["duration"].append(duration)
+        if loop_fires is not None:
+            b["fires"].append(loop_fires)
+
+        # Distribution population = rows with >=1 joined fire (a session that
+        # never emitted loop_check would otherwise drag every median down).
+        if loop_fires is not None:
+            per_row_fires.append(loop_fires)
+            per_row_reds.append(ci_reds)
+            per_row_tokens.append(tokens)
+            per_row_duration.append(duration)
+
+    per_class = {
+        cls: {
+            "n": b["n"],
+            "spend_usd": round(b["spend_usd"], 2),
+            "median_tokens": _percentile(b["tokens"], 50),
+            "median_fires": _percentile(b["fires"], 50),
+            "median_duration_min": _percentile(b["duration"], 50),
+        }
+        for cls, b in buckets.items()
+    }
+
+    return {
+        "state": "ok",
+        "since_days": since_days,
+        "coverage": {
+            "rows": total,
+            "loop_join_pct": _pct(joined_rows, total),
+            "transcript_pct": _pct(transcript_rows, total),
+            "node_linkage_pct": _pct(node_linked, total),
+            "outcome_tracked_pct": _pct(outcome_tracked, shipped_rows),
+            "ci_unparsed": ci_unparsed_total,
+        },
+        "per_outcome_class": per_class,
+        "distribution": {
+            "loop_fires": _dist(per_row_fires),
+            "ci_reds": _dist(per_row_reds),
+            "tokens_total": _dist(per_row_tokens),
+            "duration_minutes": _dist(per_row_duration),
+        },
+    }
+
+
 if __name__ == "__main__":
     # ponytail self-check: the fold's load-bearing invariants, no framework.
     now = datetime(2026, 7, 3, 20, 0, 0)
@@ -715,5 +970,43 @@ if __name__ == "__main__":
     assert by_skill["fno:do"]["method"] == "phase-proxy" and by_skill["fno:do"]["runs"] == 1, sb3
     assert by_skill["unattributed"]["runs"] == 1, sb3
     assert sb3["coverage"]["attributed_pct"] == 67, sb3  # 2 of 3 rows attributed
+
+    # --efficiency AC2: a red streak counts as ONE episode, not per-poll.
+    assert _ci_reds_from_fires(["SUCCESS", "FAILURE:smoke", "FAILURE:smoke", "SUCCESS"]) == (1, 0)
+    assert _ci_reds_from_fires(["FAILURE:x", "SUCCESS", "FAILURE:y"]) == (2, 0)  # two distinct episodes
+    # AC6: an unrecognized ci shape -> ci_reds None + counted unparsed.
+    assert _ci_reds_from_fires(["SUCCESS", "WEIRD_SHAPE"]) == (None, 1)
+    # unknown/skipped are recognized-benign (plan deviation), not drift.
+    assert _ci_reds_from_fires(["unknown", "skipped", "SUCCESS"]) == (0, 0)
+
+    eff_rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 5.0, "tokens_total": 1000, "duration_minutes": 30, "sessions": ["s-a"]},
+        {"completed": "2026-07-02T10:00:00", "termination_reason": "NoProgress", "graph_node_id": "x-2",
+         "cost_usd": 2.0, "tokens_total": 500, "duration_minutes": 10, "sessions": ["s-none"]},
+    ]
+    eff_events = [
+        {"ts": "2026-07-03T09:00:00Z", "type": "loop_check", "data": {"session_id": "s-a", "ci": "FAILURE:smoke"}},
+        {"ts": "2026-07-03T09:05:00Z", "type": "loop_check", "data": {"session_id": "s-a", "ci": "SUCCESS"}},
+    ]
+    eff = build_efficiency(
+        eff_rows, eff_events, [{"id": "x-1", "reverted": False}],
+        since_days=28, now=now, read_transcript=lambda sid: None,
+    )
+    assert eff["state"] == "ok", eff
+    assert eff["coverage"]["rows"] == 2, eff
+    assert eff["coverage"]["loop_join_pct"] == 50, eff  # only s-a joined; s-none row missed
+    assert eff["per_outcome_class"]["merged_clean"]["n"] == 1, eff
+    assert eff["per_outcome_class"]["unshipped"]["n"] == 1, eff
+    assert eff["distribution"]["loop_fires"]["n"] == 1, eff  # the no-event row is excluded
+    assert eff["distribution"]["ci_reds"]["median"] == 1, eff
+    # AC5: a windowed row whose sessions match no events -> None, not 0.
+    solo = build_efficiency(
+        [eff_rows[1]], [], [], since_days=28, now=now, read_transcript=lambda sid: None,
+    )
+    assert solo["coverage"]["loop_join_pct"] == 0, solo
+    assert solo["distribution"]["loop_fires"] == {"median": None, "p90": None, "n": 0}, solo
+    # no-data window
+    assert build_efficiency([], [], [], since_days=28, now=now)["state"] == "no_data"
 
     print("fold self-check OK")
