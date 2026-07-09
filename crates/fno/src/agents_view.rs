@@ -12,7 +12,8 @@
 //! `serde_json::Value` with tolerant field access rather than importing the
 //! fno-agents crate: the mux needs five fields, not the daemon.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::proto::{AgentBadge, AnswerablePrompt};
 
@@ -192,6 +193,243 @@ fn report_is_live(received_at: &str, ttl_ms: Option<u64>, now_secs: u64) -> bool
     match rfc3339_like_to_secs(received_at) {
         Some(recv) => now_secs.saturating_sub(recv).saturating_mul(1000) <= ttl_ms,
         None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fno-truth badge source (x-4a48): the JUNIOR rung under inside_leg + screen_state.
+//
+// A bg /target worker between turns reads as no-badge (Idle) even while its real
+// work (CI, preflight) runs externally. fno holds the truth the harness cannot:
+// the `node:<id>` claim liveness + per-session loop_check recency. When neither
+// senior source badged a row, `overlay_truth_badges` adds a Working badge iff the
+// claim is held by a live process AND a loop_check fired for its session within
+// the window. Everything else (stale/suspect/waiting claim) stays no-badge, same
+// as today. Read-only, fail-quiet, tolerant Value parsing - no fno-agents import.
+//
+// Correctness note: the recency-fire AND-gate subsumes the create-time pid-reuse
+// guard and the cross-host guard that `claims.rs::classify` carries - a reused
+// pid or a foreign-host worker is not firing loop_check for THIS session in THIS
+// project's events log, so it never earns a Working badge.
+// ---------------------------------------------------------------------------
+
+/// name -> "loop <age>" reason for rows the fno-truth source badges Working.
+pub type TruthBadges = HashMap<String, String>;
+
+/// Claim-live + a fire within this window reads Working; older/absent stays no-badge.
+const TRUTH_RECENCY_WINDOW_S: u64 = 1800; // 30 min
+/// Bounded tail read of events.jsonl so an 11MB log stays cheap per render tick.
+const TRUTH_EVENTS_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The `.fno` base, resolved off the same anchor as `registry_path`
+/// (`FNO_AGENTS_HOME`'s parent > `$HOME/.fno`). Claims + events live here.
+fn fno_dir() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
+        return Path::new(&v)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".fno"));
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fno")
+}
+
+/// `target-<node-id>-<slug>` -> node id. Loose on purpose: a mis-parse yields a
+/// key that does not resolve -> no badge (fail-quiet), never a wrong badge.
+fn parse_node_id_from_name(name: &str) -> Option<String> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re =
+        RE.get_or_init(|| regex::Regex::new(r"^target-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)").unwrap());
+    re.captures(name).map(|c| c[1].to_string())
+}
+
+/// Percent-encode a claim key to its lockfile stem, matching the Python writer's
+/// `urllib.parse.quote(key, safe="")` (bytes not in `[A-Za-z0-9._~-]` -> %XX).
+fn encode_claim_key(key: &str) -> String {
+    const HEX: &[u8] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(key.len());
+    for &b in key.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0xf) as usize] as char);
+        }
+    }
+    out
+}
+
+/// `kill(pid, 0)`: 0 => alive; EPERM => alive (exists, no perm); else dead.
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The session id of a live `node:<id>` claim, or None (missing / unparseable /
+/// dead pid / non-target holder). The lockfile is flat YAML scalars; hand-parse
+/// the two lines we need rather than pull in a YAML dep (tolerant by design).
+fn live_claim_session(claims_dir: &Path, node_id: &str) -> Option<String> {
+    let path = claims_dir.join(format!(
+        "{}.lock",
+        encode_claim_key(&format!("node:{node_id}"))
+    ));
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut pid: Option<i32> = None;
+    let mut holder: Option<&str> = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("pid:") {
+            pid = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("holder:") {
+            holder = Some(v.trim());
+        }
+    }
+    if !pid_alive(pid?) {
+        return None;
+    }
+    holder?
+        .strip_prefix("target-session:")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Read the bounded tail of `path` as a lossy UTF-8 string, dropping the partial
+/// first line. Missing/unreadable -> None (caller degrades to no badges).
+fn read_events_tail(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(TRUTH_EVENTS_TAIL_BYTES);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    f.take(TRUTH_EVENTS_TAIL_BYTES).read_to_end(&mut buf).ok()?;
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if start > 0 {
+        if let Some(nl) = text.find('\n') {
+            text = text[nl + 1..].to_string();
+        }
+    }
+    Some(text)
+}
+
+/// One tail pass over events.jsonl -> `{session_id: age_seconds}` for the newest
+/// loop_check fire per session (mirrors read_prior_fires' tolerant filter).
+fn newest_fire_ages(events_path: &Path, now_secs: u64) -> HashMap<String, u64> {
+    let Some(text) = read_events_tail(events_path) else {
+        return HashMap::new();
+    };
+    let mut newest: HashMap<String, u64> = HashMap::new(); // sid -> newest epoch secs
+    for line in text.lines() {
+        if !line.contains("\"loop_check\"") {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("loop_check") {
+            continue;
+        }
+        let Some(sid) = val.pointer("/data/session_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(secs) = val
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .and_then(rfc3339_like_to_secs)
+        else {
+            continue;
+        };
+        newest
+            .entry(sid.to_string())
+            .and_modify(|e| *e = (*e).max(secs))
+            .or_insert(secs);
+    }
+    newest
+        .into_iter()
+        .map(|(sid, secs)| (sid, now_secs.saturating_sub(secs)))
+        .collect()
+}
+
+/// Build the fno-truth Working badges for the registry rows in `raw`, reading
+/// the default claims dir + events log. Fail-quiet: any read failure yields
+/// fewer/no badges, never a panic or a wrong badge.
+pub fn build_truth_badges(raw: &str, now_secs: u64) -> TruthBadges {
+    let base = fno_dir();
+    build_truth_badges_at(
+        raw,
+        now_secs,
+        &base.join("claims"),
+        &base.join("events.jsonl"),
+    )
+}
+
+fn build_truth_badges_at(
+    raw: &str,
+    now_secs: u64,
+    claims_dir: &Path,
+    events_path: &Path,
+) -> TruthBadges {
+    let mut out = TruthBadges::new();
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return out;
+    };
+    let Some(rows) = doc
+        .get("agents")
+        .or_else(|| doc.get("entries"))
+        .and_then(|v| v.as_array())
+    else {
+        return out;
+    };
+    let ages = newest_fire_ages(events_path, now_secs);
+    for row in rows {
+        let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(node_id) = parse_node_id_from_name(name) else {
+            continue;
+        };
+        let Some(sid) = live_claim_session(claims_dir, &node_id) else {
+            continue;
+        };
+        if let Some(&age) = ages.get(&sid) {
+            if age <= TRUTH_RECENCY_WINDOW_S {
+                out.insert(name.to_string(), format!("loop {} ago", humanize_age(age)));
+            }
+        }
+    }
+    out
+}
+
+fn humanize_age(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3600)
+    }
+}
+
+/// Overlay fno-truth Working badges onto rows no senior source badged (strictly
+/// junior: only touches `badge.is_none()` non-exited rows, so a hook/scrape badge
+/// always wins - AC6). Applied on the sideline render path only, never the
+/// idle-authority guard (which wants raw idle).
+pub fn overlay_truth_badges(rows: &mut [RegistryAgent], truth: &TruthBadges) {
+    for row in rows.iter_mut() {
+        if row.badge.is_none() && !row.exited {
+            if let Some(reason) = truth.get(&row.name) {
+                row.badge = Some(AgentBadge::Working);
+                row.reason = Some(reason.clone());
+            }
+        }
     }
 }
 
@@ -462,12 +700,17 @@ impl ReaderState {
             }
         }
 
-        let reg_rows = match &self.reg_raw {
+        let mut reg_rows = match &self.reg_raw {
             Some(raw) => derive_rows(raw, now_secs)
                 .or_else(|| self.last_good_reg.clone())
                 .unwrap_or_default(),
             None => Vec::new(),
         };
+        // fno-truth junior badge (x-4a48): fill the no-badge/Idle gap for a
+        // bg /target worker between turns from its claim + loop_check recency.
+        if let Some(raw) = &self.reg_raw {
+            overlay_truth_badges(&mut reg_rows, &build_truth_badges(raw, now_secs));
+        }
         self.last_good_reg = Some(reg_rows.clone());
 
         let roster = match &self.roster_raw {
@@ -920,5 +1163,183 @@ mod tests {
         // A hook-badged block carries no answer payload in v1.
         assert_eq!(get("hook-blocked").badge, Some(AgentBadge::Blocked));
         assert!(get("hook-blocked").answerable.is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // fno-truth junior badge (x-4a48)
+    // -------------------------------------------------------------------
+    fn plain_row(name: &str, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
+        RegistryAgent {
+            name: name.into(),
+            cwd: "/w".into(),
+            exited,
+            badge,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+        }
+    }
+
+    #[test]
+    fn parse_node_id_from_worker_name() {
+        assert_eq!(
+            parse_node_id_from_name("target-x-4a48-fleet-status").as_deref(),
+            Some("x-4a48")
+        );
+        assert_eq!(
+            parse_node_id_from_name("target-ab-1a2b3c4d-slug").as_deref(),
+            Some("ab-1a2b3c4d")
+        );
+        assert_eq!(
+            parse_node_id_from_name("target-x-4a48").as_deref(),
+            Some("x-4a48")
+        );
+        assert_eq!(parse_node_id_from_name("phasestall"), None);
+        assert_eq!(parse_node_id_from_name("worker-x-4a48-foo"), None);
+    }
+
+    #[test]
+    fn encode_claim_key_matches_python_quote() {
+        assert_eq!(encode_claim_key("node:x-4a48"), "node%3Ax-4a48");
+    }
+
+    #[test]
+    fn overlay_badges_no_badge_row_and_respects_seniority() {
+        // AC2-HP: a no-badge row gets Working from truth.
+        // AC6-EDGE: a scrape-Blocked row is never overridden (junior).
+        let mut rows = vec![
+            plain_row("idle-worker", None, false),
+            plain_row("scraped", Some(AgentBadge::Blocked), false),
+            plain_row("done-worker", None, true), // exited -> never badged
+        ];
+        let mut truth = TruthBadges::new();
+        truth.insert("idle-worker".into(), "loop 2m ago".into());
+        truth.insert("scraped".into(), "loop 1m ago".into());
+        truth.insert("done-worker".into(), "loop 3m ago".into());
+        overlay_truth_badges(&mut rows, &truth);
+
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(get("idle-worker").badge, Some(AgentBadge::Working));
+        assert_eq!(get("idle-worker").reason.as_deref(), Some("loop 2m ago"));
+        assert_eq!(get("scraped").badge, Some(AgentBadge::Blocked)); // scrape wins
+        assert_eq!(get("done-worker").badge, None); // exited stays no-badge
+    }
+
+    // ---- build_truth_badges_at over real claim + events files ----
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new(tag: &str) -> Self {
+            let d = std::env::temp_dir().join(format!("fno-truth-{}-{tag}", std::process::id()));
+            std::fs::create_dir_all(d.join("claims")).unwrap();
+            Tmp(d)
+        }
+        fn claims(&self) -> PathBuf {
+            self.0.join("claims")
+        }
+        fn events(&self) -> PathBuf {
+            self.0.join("events.jsonl")
+        }
+        fn write_claim(&self, node_id: &str, pid: i32, sid: &str) {
+            let name = format!("{}.lock", encode_claim_key(&format!("node:{node_id}")));
+            std::fs::write(
+                self.claims().join(name),
+                format!(
+                    "schema_version: 1\nkey: node:{node_id}\nholder: target-session:{sid}\n\
+                     acquired_at: 1\npid: {pid}\nhost: h\nexpires_at: 9999999999999\n"
+                ),
+            )
+            .unwrap();
+        }
+        fn write_event(&self, sid: &str, ts: &str) {
+            let line =
+                format!(r#"{{"ts":"{ts}","type":"loop_check","data":{{"session_id":"{sid}"}}}}"#);
+            let mut body = std::fs::read_to_string(self.events()).unwrap_or_default();
+            body.push_str(&line);
+            body.push('\n');
+            std::fs::write(self.events(), body).unwrap();
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const SID: &str = "20260709T001358Z-cl21834-267287";
+
+    #[test]
+    fn truth_badge_live_claim_recent_fire_is_working() {
+        // AC1-HP e2e: live pid (this process) + a fire 2m ago -> Working.
+        let t = Tmp::new("live");
+        t.write_claim("x-4a48", std::process::id() as i32, SID);
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
+        assert_eq!(
+            badges.get("target-x-4a48-fleet").map(String::as_str),
+            Some("loop 2m ago")
+        );
+    }
+
+    #[test]
+    fn truth_badge_dead_pid_no_badge() {
+        // AC3b/AC4: a dead-pid claim (suspect/stale) never earns a Working badge.
+        let t = Tmp::new("dead");
+        t.write_claim("x-4a48", 0x7fff_fff0, SID); // implausible pid -> dead
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
+        assert!(badges.is_empty());
+    }
+
+    #[test]
+    fn truth_badge_live_claim_stale_fire_no_badge() {
+        // AC3-EDGE: claim-live but no recent fire -> waiting -> no sideline badge.
+        let t = Tmp::new("staleFire");
+        t.write_claim("x-4a48", std::process::id() as i32, SID);
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T02:00:00Z").unwrap(); // 55m later
+        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
+        assert!(badges.is_empty());
+    }
+
+    #[test]
+    fn truth_badge_missing_signals_is_empty() {
+        // AC5-ERR: no claim + no events file -> no badges, no panic.
+        let t = Tmp::new("missing");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
+        assert!(badges.is_empty());
+    }
+
+    #[test]
+    fn truth_badge_non_target_name_skipped() {
+        // AC7-FR: a name with no parseable node id changes nothing.
+        let t = Tmp::new("nontarget");
+        t.write_claim("x-4a48", std::process::id() as i32, SID);
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let raw = reg(r#"{"name":"worker-frontend","cwd":"/w","status":"live"}"#);
+        let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
+        assert!(badges.is_empty());
+    }
+
+    #[test]
+    fn newest_fire_wins_and_missing_events_empty() {
+        let t = Tmp::new("newest");
+        t.write_event(SID, "2026-07-09T01:00:00Z");
+        t.write_event(SID, "2026-07-09T01:05:00Z"); // newest
+        t.write_event(SID, "2026-07-09T01:02:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let ages = newest_fire_ages(&t.events(), now);
+        assert_eq!(ages.get(SID), Some(&120)); // 01:05 -> 2m
+        let empty = newest_fire_ages(&t.0.join("nope.jsonl"), now);
+        assert!(empty.is_empty());
     }
 }
