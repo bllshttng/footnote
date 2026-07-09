@@ -18,8 +18,13 @@ from fno.retro.classify import (
     classify_postmortem,
 )
 from fno.retro.dedup import dedup_candidates, existing_keys_from_nodes
-from fno.retro.land import MODE_INTERACTIVE, LandResult, land_candidates
-from fno.retro.types import Candidate
+from fno.retro.land import (
+    MODE_AUTONOMOUS,
+    MODE_INTERACTIVE,
+    LandResult,
+    land_candidates,
+)
+from fno.retro.types import KIND_CARVEOUT, Candidate
 
 
 @dataclass
@@ -42,6 +47,11 @@ class TriageReport:
     # consume cross-session carve-outs under that PR. They are listed for the
     # operator but neither landed nor consumed.
     readonly_carveout_count: int = 0
+    # Autonomous keep-going follow-up dispatches (x-3360): one FollowupResult per
+    # landed carve-out node the engine classified (think/build dispatched, or
+    # file-only / capped). Empty unless the engine ran (autonomous mode +
+    # config.keep_going.enabled).
+    followups: list = field(default_factory=list)
 
     @property
     def partial(self) -> bool:
@@ -188,6 +198,30 @@ def triage_pr(
         caused_by=caused_by,
     )
 
+    # Autonomous keep-going engine (x-3360): after the carve-out follow-ups are
+    # filed as nodes, classify each and dispatch the next unit of work under the
+    # shared per-day firehose ceiling. Autonomous mode only (interactive queues
+    # nodes for a human ack; auto-dispatch would bypass it) and gated OFF by
+    # default. Strictly non-fatal: a failure here never sinks the harvest.
+    followups: list = []
+    if mode == MODE_AUTONOMOUS:
+        try:
+            from fno.retro.keep_going import dispatch_followups, keep_going_enabled
+
+            if keep_going_enabled(project_root=repo_root):
+                carveout_landed = [
+                    r
+                    for r in results
+                    if r.node_id
+                    and (getattr(r.candidate, "extra", None) or {}).get("kind")
+                    == KIND_CARVEOUT
+                ]
+                followups = dispatch_followups(
+                    carveout_landed, project_root=repo_root, cwd=cwd
+                )
+        except Exception as exc:  # noqa: BLE001 - additive; never wedge the harvest
+            warnings.append(f"keep-going engine skipped (non-fatal): {exc}")
+
     return TriageReport(
         pr_number=pr_number,
         source_counts=source_counts,
@@ -198,6 +232,7 @@ def triage_pr(
         uncited=uncited,
         warnings=warnings,
         gh_unavailable=gh_unavailable,
+        followups=followups,
     )
 
 
