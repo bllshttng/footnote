@@ -260,6 +260,13 @@ def _parse_state(state_path: Path) -> StateSnapshot:
     if not raw_text.strip():
         raise json.JSONDecodeError("empty", raw_text, 0)
     raw = json.loads(raw_text)
+    if not isinstance(raw, dict):
+        # Valid JSON but not an object (a list/primitive) is a malformed
+        # snapshot: raise JSONDecodeError so every caller's existing
+        # `except json.JSONDecodeError` degrades cleanly, instead of an
+        # AttributeError on the `.get` below. Matches the Rust reader, whose
+        # serde deserialize already rejects a non-object into a Parse error.
+        raise json.JSONDecodeError("state.json is not a JSON object", raw_text, 0)
     output = raw.get("output") or {}
     return StateSnapshot(
         state=raw.get("state", ""),

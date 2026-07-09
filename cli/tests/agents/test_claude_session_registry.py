@@ -492,3 +492,20 @@ def test_roster_live_honors_daemon_dir_env(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(alt))
     assert roster_live("abc12345") is True
+
+
+def test_read_state_json_rejects_non_object_json(tmp_path, monkeypatch):
+    """A valid-but-non-object state.json (list/primitive) raises JSONDecodeError,
+    not AttributeError, so callers' `except json.JSONDecodeError` degrades cleanly
+    (gemini review on PR #293)."""
+    import json as _json
+
+    from fno.agents.providers._claude_session_registry import read_state_json
+
+    home = _claude_home_setup(tmp_path, monkeypatch)
+    jobs_dir = home / ".claude" / "jobs" / "abc12345"
+    jobs_dir.mkdir(parents=True)
+    (jobs_dir / "state.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(_json.JSONDecodeError):
+        read_state_json(jobs_dir)
