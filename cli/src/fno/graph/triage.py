@@ -155,6 +155,141 @@ def fold_triage_health(events: list[dict]) -> Optional[dict]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Consistency measurement (x-64cb US4): run the propose step K times over one
+# frozen context and measure per-category agreement. Read-only toward the live
+# graph - propose runs never apply.
+# ---------------------------------------------------------------------------
+
+# The reasoning instruction handed to each headless run. MUST mirror the
+# /triage skill's reasoning prompt (skills/triage/SKILL.md, "LLM reasoning"
+# step) so the consistency measurement reflects what production /triage does;
+# when one changes, change both (x-64cb US5 hardens the pair together).
+_CONSISTENCY_PROMPT = (
+    "Given these pending specs and the project goals, propose an optimal "
+    "ordering as JSON with four keys: `dependencies` (edges {from,to,reason} "
+    "where `to` is blocked_by `from`), `priority_changes` "
+    "({id,to,reason} where `to` is one of p0/p1/p2/p3), `defer` "
+    "({id,reason}), and `duplicates` ({ids:[...],reason}). Every entry must "
+    "include a `reason`. Do not propose self-edges or cycles. Only reason over "
+    "the `candidates` array; never propose changes for `ideas`."
+)
+
+_CONSISTENCY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dependencies": {"type": "array", "items": {"type": "object"}},
+        "priority_changes": {"type": "array", "items": {"type": "object"}},
+        "defer": {"type": "array", "items": {"type": "object"}},
+        "duplicates": {"type": "array", "items": {"type": "object"}},
+    },
+    "required": ["priority_changes"],
+}
+
+
+def _run_consistency_propose(context: dict, model: Optional[str]) -> dict:
+    """Run ONE headless propose over the frozen context; return the proposal
+    dict. Raises on any failure so the caller counts it as an errored run.
+
+    Dispatch is a synchronous headless one-shot on the subscription-OAuth lane -
+    the same primitive fno.inbox.triage uses (plain ``claude -p``, which honors
+    OAuth; NOT ``--bare``, which needs an API key). Tests set
+    ``FNO_TRIAGE_CONSISTENCY_STUB`` to a script that prints proposal JSON so the
+    real model is never called under pytest/CI.
+    # ponytail: claude-only for v1; provider rotation is a follow-up node.
+    """
+    import os
+    import subprocess
+
+    stub = os.environ.get("FNO_TRIAGE_CONSISTENCY_STUB")
+    in_pytest = os.environ.get("PYTEST_CURRENT_TEST") is not None
+    in_ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
+    if not stub and (in_pytest or in_ci):
+        raise RuntimeError(
+            "FNO_TRIAGE_CONSISTENCY_STUB not configured; refusing real claude -p in tests"
+        )
+
+    prompt = f"{_CONSISTENCY_PROMPT}\n\nCONTEXT:\n{json.dumps(context)}"
+    if stub:
+        cmd = [stub]
+    else:
+        cmd = [
+            "claude", "-p",
+            "--output-format", "json",
+            "--json-schema", json.dumps(_CONSISTENCY_SCHEMA),
+            "--append-system-prompt", "You are a triage agent. Respond with JSON only.",
+        ]
+        if model:
+            cmd += ["--model", model]
+    result = subprocess.run(
+        cmd, input=prompt, capture_output=True, text=True, timeout=300, check=True
+    )
+    data = json.loads(result.stdout)
+    # claude -p wraps a schema response as the object itself; a stub may print
+    # the proposal directly. An is_error envelope (auth/runtime) surfaces here.
+    if isinstance(data, dict) and data.get("is_error"):
+        raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
+    if not isinstance(data, dict):
+        raise ValueError("proposal is not a JSON object")
+    return data
+
+
+def _priority_map(proposal: dict) -> dict[str, object]:
+    """{node id -> proposed `to`} for a proposal's priority_changes."""
+    out: dict[str, object] = {}
+    for pc in proposal.get("priority_changes", []) or []:
+        if isinstance(pc, dict) and pc.get("id"):
+            out[str(pc["id"])] = pc.get("to")
+    return out
+
+
+def _presence_map(proposal: dict, category: str, key_fn) -> dict[str, bool]:
+    """{key -> True} for a category whose agreement is presence-based."""
+    out: dict[str, bool] = {}
+    for e in proposal.get(category, []) or []:
+        if not isinstance(e, dict):
+            continue
+        k = key_fn(e)
+        if k:
+            out[k] = True
+    return out
+
+
+def _category_agreement(per_run_maps: list[dict]) -> dict:
+    """A key agrees when every completed run assigns it the SAME value (a run
+    that omits the key contributes None, so 'some propose, some don't' is a
+    disagreement). Returns {agree, total, disagreeing:[keys]}."""
+    universe: set = set()
+    for m in per_run_maps:
+        universe |= set(m.keys())
+    agree = 0
+    disagreeing: list = []
+    for k in sorted(universe, key=str):
+        vals = [m.get(k) for m in per_run_maps]
+        if all(v == vals[0] for v in vals):
+            agree += 1
+        else:
+            disagreeing.append(k)
+    return {"agree": agree, "total": len(universe), "disagreeing": disagreeing}
+
+
+def fold_consistency(proposals: list[dict]) -> dict:
+    """Per-category agreement over the COMPLETED-run proposals (x-64cb US4).
+    Priority is keyed by node id + `to` value; the rest are presence-based."""
+    return {
+        "priority": _category_agreement([_priority_map(p) for p in proposals]),
+        "dependencies": _category_agreement(
+            [_presence_map(p, "dependencies", lambda e: f"{e.get('from')}->{e.get('to')}") for p in proposals]
+        ),
+        "defer": _category_agreement(
+            [_presence_map(p, "defer", lambda e: str(e.get("id")) if e.get("id") else "") for p in proposals]
+        ),
+        "duplicates": _category_agreement(
+            [_presence_map(p, "duplicates", lambda e: ",".join(sorted(map(str, e.get("ids", []))))) for p in proposals]
+        ),
+    }
+
+
 def _emit_triage_applied(
     applied: dict, priority_moves: list[dict], proposed: int, dropped: int
 ) -> None:
@@ -601,6 +736,33 @@ def _validate_proposal(
 # ---------------------------------------------------------------------------
 
 
+def _build_context(
+    deep: bool,
+    all_projects: bool,
+    project: Optional[str],
+    roadmap_id: Optional[str],
+) -> dict:
+    """Build the LLM-reasoning context payload. Shared by `triage context` and
+    `triage consistency` so both reason over an identical snapshot."""
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
+    ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
+    inbox_items = _collect_inbox_items()
+    return {
+        "candidates": candidates,
+        "ideas": ideas,
+        "inbox_items": inbox_items,
+        "goals": _load_goals(),
+        "mode": "deep" if deep else "shallow",
+        "count": len(candidates),
+        "idea_count": len(ideas),
+        "inbox_count": len(inbox_items),
+        "scope": _resolve_scope(project, all_projects, entries),
+    }
+
+
 @cli.command("context")
 def cmd_context(
     deep: bool = typer.Option(False, "--deep", help="Include plan excerpts"),
@@ -615,24 +777,7 @@ def cmd_context(
     ),
 ) -> None:
     """Emit JSON context for an LLM reasoning subagent."""
-    from fno.graph.store import read_graph
-
-    entries = read_graph(_graph_path())
-    candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
-    ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
-    inbox_items = _collect_inbox_items()
-    ctx = {
-        "candidates": candidates,
-        "ideas": ideas,
-        "inbox_items": inbox_items,
-        "goals": _load_goals(),
-        "mode": "deep" if deep else "shallow",
-        "count": len(candidates),
-        "idea_count": len(ideas),
-        "inbox_count": len(inbox_items),
-        "scope": _resolve_scope(project, all_projects, entries),
-    }
-    typer.echo(json.dumps(ctx, indent=2))
+    typer.echo(json.dumps(_build_context(deep, all_projects, project, roadmap_id), indent=2))
 
 
 @cli.command("propose")
@@ -686,6 +831,80 @@ def cmd_propose(
         typer.echo("\n".join(header), err=True)
 
     typer.echo(json.dumps(proposal, indent=2))
+
+
+@cli.command("consistency")
+def cmd_consistency(
+    repeat: int = typer.Option(
+        3, "--repeat", "-k", help="Number of propose runs over the frozen context"
+    ),
+    frozen_context: Optional[Path] = typer.Option(
+        None, "--frozen-context", help="Pre-captured context JSON; skips capture"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Confirm --repeat > 10 (cost guard)"),
+    model: Optional[str] = typer.Option(None, "--model", help="Model for the headless runs"),
+    deep: bool = typer.Option(False, "--deep"),
+    all_projects: bool = typer.Option(False, "--all", "-A"),
+    project: Optional[str] = typer.Option(None, "--project"),
+    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Measure triage classification consistency: run the propose step K times
+    over ONE frozen context snapshot and report per-category agreement plus the
+    node ids that disagreed. Read-only - propose runs never touch the graph."""
+    if repeat < 1:
+        raise typer.BadParameter("--repeat must be >= 1")
+    if repeat > 10 and not yes:
+        typer.echo(
+            f"--repeat {repeat} makes {repeat} real LLM calls; pass --yes to confirm.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # One snapshot, read by all K runs (Invariant: never the live graph).
+    if frozen_context is not None:
+        context = json.loads(frozen_context.read_text(encoding="utf-8"))
+    else:
+        context = _build_context(deep, all_projects, project, roadmap_id)
+
+    if not context.get("candidates"):
+        typer.echo("nothing to propose (no candidates in the frozen context)", err=True)
+        return  # exit 0, no LLM calls (Boundaries)
+
+    proposals: list[dict] = []
+    errored = 0
+    for i in range(repeat):
+        try:
+            proposals.append(_run_consistency_propose(context, model))
+        except Exception as exc:  # noqa: BLE001 - one errored run must not abort the rest (AC7-FR)
+            errored += 1
+            typer.echo(f"run {i + 1}/{repeat} errored: {type(exc).__name__}: {exc}", err=True)
+
+    agreement = fold_consistency(proposals) if proposals else {}
+    report = {
+        "repeat": repeat,
+        "completed": len(proposals),
+        "errored": errored,
+        "agreement": agreement,
+    }
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        return
+
+    typer.echo(
+        f"Triage consistency: {len(proposals)}/{repeat} runs completed ({errored} errored)"
+    )
+    if repeat == 1:
+        typer.echo("  note: K=1 measures nothing (a single run trivially agrees with itself)")
+    if not proposals:
+        typer.echo("  no completed runs; agreement not computed")
+        return
+    for cat, ag in agreement.items():
+        if ag["total"] == 0:
+            continue
+        typer.echo(f"  {cat}: {ag['agree']}/{ag['total']} agree")
+        if ag["disagreeing"]:
+            typer.echo(f"    disagreeing: {', '.join(map(str, ag['disagreeing']))}")
 
 
 @cli.command("rank")
