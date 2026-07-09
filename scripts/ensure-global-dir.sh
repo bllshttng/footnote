@@ -34,19 +34,24 @@ if [ -f "$CLAUDE_SETTINGS" ] || command -v claude >/dev/null 2>&1; then
 fi
 
 # ── Codex CLI ────────────────────────────────────────────────────────────
-# Codex uses .codex/ for config. Check if it has a similar directory allowlist.
-CODEX_CONFIG="$HOME/.codex/config.json"
-if [ -f "$CODEX_CONFIG" ] || command -v codex >/dev/null 2>&1; then
-    if [ -f "$CODEX_CONFIG" ]; then
-        if jq -e '.additionalDirectories // [] | index("~/.fno")' "$CODEX_CONFIG" >/dev/null 2>&1; then
-            echo "[ok] Codex: ~/.fno already registered"
+# Current Codex uses ~/.codex/config.toml for hooks. Older local builds used a
+# JSON sandbox allowlist; preserve that path if it exists, but do not nudge new
+# installs toward config.json.
+CODEX_CONFIG_TOML="$HOME/.codex/config.toml"
+CODEX_LEGACY_JSON="$HOME/.codex/config.json"
+if [ -f "$CODEX_CONFIG_TOML" ] || [ -f "$CODEX_LEGACY_JSON" ] || command -v codex >/dev/null 2>&1; then
+    if [ -f "$CODEX_LEGACY_JSON" ]; then
+        if jq -e '.additionalDirectories // [] | index("~/.fno")' "$CODEX_LEGACY_JSON" >/dev/null 2>&1; then
+            echo "[ok] Codex: ~/.fno already registered in legacy config.json"
         else
             TMP=$(mktemp)
-            jq '.additionalDirectories = ((.additionalDirectories // []) + ["~/.fno"] | unique)' "$CODEX_CONFIG" > "$TMP" && mv "$TMP" "$CODEX_CONFIG"
-            echo "[ok] Codex: added ~/.fno to config"
+            jq '.additionalDirectories = ((.additionalDirectories // []) + ["~/.fno"] | unique)' "$CODEX_LEGACY_JSON" > "$TMP" && mv "$TMP" "$CODEX_LEGACY_JSON"
+            echo "[ok] Codex: added ~/.fno to legacy config.json"
         fi
+    elif [ -f "$CODEX_CONFIG_TOML" ]; then
+        echo "[ok] Codex: config.toml present"
     else
-        echo "[skip] Codex: no config.json yet"
+        echo "[skip] Codex: no config.toml yet"
     fi
 fi
 
