@@ -724,6 +724,17 @@ struct Core {
     /// because the readers park in `tick().await` and need the
     /// `changed()` edge as the 0->1 wakeup.
     client_count: watch::Sender<usize>,
+    /// (x-4328) Pane ids the operator has focused while badged `Done`.
+    /// Inserted as a one-shot side effect of an actual focus action
+    /// (`Command::FocusPane`, via [`Core::mark_seen_if_done`]) when that
+    /// pane is currently `Done`; evicted level-triggered every layout pass
+    /// the instant a pane's badge leaves `Done` (a re-run re-arms unseen,
+    /// and never self-reinserts merely by remaining the focused pane -
+    /// AC1-EDGE/AC2-EDGE). Reattach-durable for free - `Core` survives a
+    /// client detach/reattach - but not server-restart (a cold-scrape
+    /// non-goal, Locked Decision 7). Orphan ids from reaped panes are inert
+    /// (never re-matched); no GC.
+    seen: HashSet<u64>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -1478,6 +1489,33 @@ impl Core {
             tab_rects.insert(tid, (rects, focus, area));
         }
 
+        // (x-4328) Evict half of the seen set: level-triggered every pass,
+        // no prev-tick diffing - any pane whose CURRENT badge isn't `Done` is
+        // dropped, so a re-run re-arms unseen for free. The insert half is
+        // NOT level-triggered on "is this still the focused pane": AC2-EDGE
+        // requires that parking on a pane while it is `Working` never marks
+        // a LATER `Done` seen, so insert instead fires as a one-shot side
+        // effect of the actual focus action (`Command::FocusPane`; hover-
+        // focus settles to a client-side `FocusPane`, so it rides the same
+        // hook for free). `AttachAgent` always spawns a brand-new pane_id,
+        // which can never already be `Done`, so it has no seen-marking hook.
+        // Read `self.agents` directly rather than `self.agent_rows()`: the
+        // latter allocates a `Vec<AgentRow>` and clones every row's strings
+        // for the full registry on every pass, which is wasteful for a check
+        // that only needs a pane's own badge (gemini review).
+        for a in &self.agents {
+            if let Some((sess, pane)) = &a.mux {
+                if sess == &self.session_name {
+                    let pid = *pane;
+                    let exited = a.exited || !self.panes.contains_key(&pid);
+                    let badge = if exited { None } else { a.badge };
+                    if badge != Some(AgentBadge::Done) {
+                        self.seen.remove(&pid);
+                    }
+                }
+            }
+        }
+
         // Per-client messages, precomputed so the send loop can borrow
         // clients mutably. A dangling view yields an empty layout, never a
         // panic (re-anchor upstream is the real guarantee).
@@ -1824,9 +1862,36 @@ impl Core {
                 // above already forced `exited` for a dead pane, so the client's
                 // exited glyph stays senior over the external marker (AC2-EDGE).
                 external: a.external,
+                // (x-4328) A watch-only row (`pane_id: None`) has nothing to
+                // focus, so it is always unseen.
+                seen: pane_id.is_some_and(|p| self.seen.contains(&p)),
             });
         }
         out
+    }
+
+    /// (x-4328) The insert half of the seen set: a one-shot side effect of
+    /// an actual focus action (`Command::FocusPane`; hover-focus settles to
+    /// a client-side `FocusPane`, so it rides this for free), never a
+    /// per-pass level check - AC2-EDGE requires that parking on a pane while
+    /// it is `Working` never marks a later `Done` seen, only a fresh focus
+    /// action does. `Command::AttachAgent` has no call to this: it always
+    /// spawns a brand-new pane_id, which can't already be `Done`. A no-op
+    /// when `pid`'s current badge isn't `Done`.
+    fn mark_seen_if_done(&mut self, pid: u64) {
+        // Read `self.agents` directly rather than `self.agent_rows()`: the
+        // latter allocates + clones the full registry for a check that only
+        // needs this one pane's badge (gemini review).
+        if self.agents.iter().any(|a| {
+            a.mux
+                .as_ref()
+                .is_some_and(|(sess, pane)| sess == &self.session_name && *pane == pid)
+                && !a.exited
+                && self.panes.contains_key(&pid)
+                && a.badge == Some(AgentBadge::Done)
+        }) {
+            self.seen.insert(pid);
+        }
     }
 
     /// Fan one pane's fresh frame out - but only into the dirty slots of
@@ -2567,6 +2632,9 @@ impl Core {
                         if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
                             tab.focus = pid;
                         }
+                        // (x-4328) AC1-HP: focusing a `Done` pane clears its
+                        // unseen bit.
+                        self.mark_seen_if_done(pid);
                         self.push_layout(true);
                     }
                     // The pane exited racing the click; fail-closed like the
@@ -3423,6 +3491,7 @@ async fn serve(
         touch_last_emit: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         client_count: client_count_tx,
+        seen: HashSet::new(),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -5576,6 +5645,7 @@ mod tests {
             touch_last_emit: HashMap::new(),
             touch_emit_failures: Arc::new(AtomicU64::new(0)),
             client_count: watch::channel(0).0,
+            seen: HashSet::new(),
         }
     }
 
@@ -5772,6 +5842,131 @@ mod tests {
             "a reemit=false push_layout must preserve a pending frame: it is \
              the only copy of a quiet pane's latest output (x-0296)"
         );
+    }
+
+    /// A one-squad, two-tab (one pane each) `Core` with a client attached and
+    /// viewing it - the shared rig for the x-4328 seen-bit tests below. The
+    /// returned receiver must stay alive for the test's duration: dropping it
+    /// closes the client's channel, which `push_layout` reads as "gone" and
+    /// prunes the client, breaking every later `Command::FocusPane` (no
+    /// client view to act on).
+    fn seen_test_core() -> (Core, u64, u64, u64, mpsc::Receiver<ServerMsg>) {
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp/seen").expect("pane 1");
+        let p2 = core.spawn_pane(24, 40, "/tmp/seen").expect("pane 2");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/seen".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(p1),
+                focus: p1,
+            },
+        );
+        core.session.squad_mut(1).unwrap().tabs.push(Tab {
+            name: None,
+            id: 2,
+            root: Node::Leaf(p2),
+            focus: p2,
+        });
+        let (tx, rx) = mpsc::channel::<ServerMsg>(32);
+        let client_id = 9;
+        core.attach(
+            client_id,
+            24,
+            80,
+            "/tmp/seen".into(),
+            "/tmp/seen".into(),
+            tx,
+            Arc::default(),
+            Arc::new(Notify::new()),
+        );
+        (core, client_id, p1, p2, rx)
+    }
+
+    #[test]
+    fn focus_pane_marks_a_done_pane_seen() {
+        // AC1-HP: focusing a `Done` pane inserts it into `Core.seen`.
+        let (mut core, client_id, p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Done), false)];
+        core.command(client_id, Command::FocusPane(p1));
+        assert!(
+            core.seen.contains(&p1),
+            "focusing a Done pane marks it seen"
+        );
+    }
+
+    #[test]
+    fn a_re_run_evicts_and_does_not_self_reinsert() {
+        // AC1-EDGE: Done(focused) -> seen; the pane re-runs to Working (the
+        // level-triggered evict in push_layout drops it); it finishes to
+        // Done again WITHOUT a fresh focus action - it must stay unseen
+        // until re-focused, not re-arm itself just because focus never left.
+        let (mut core, client_id, p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Done), false)];
+        core.command(client_id, Command::FocusPane(p1));
+        assert!(core.seen.contains(&p1), "precondition: seen after focus");
+
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Working), false)];
+        core.push_layout(true);
+        assert!(!core.seen.contains(&p1), "a Working tick evicts it");
+
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Done), false)];
+        core.push_layout(true);
+        assert!(
+            !core.seen.contains(&p1),
+            "the second Done must stay unseen until re-focused - insert is \
+             a one-shot side effect of FocusPane, never a per-pass level \
+             check on \"is this still the focused pane\""
+        );
+
+        core.command(client_id, Command::FocusPane(p1));
+        assert!(core.seen.contains(&p1), "re-focusing re-arms seen");
+    }
+
+    #[test]
+    fn focusing_while_working_never_seeds_a_later_done() {
+        // AC2-EDGE: a focus action that lands while the badge is `Working`
+        // must not mark the pane seen once it later finishes unattended.
+        let (mut core, client_id, p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Working), false)];
+        core.command(client_id, Command::FocusPane(p1));
+        assert!(
+            !core.seen.contains(&p1),
+            "a Working-time focus never sets the done-seen bit"
+        );
+
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Done), false)];
+        core.push_layout(true);
+        assert!(
+            !core.seen.contains(&p1),
+            "finishing without a fresh focus action stays unseen"
+        );
+    }
+
+    #[test]
+    fn evict_is_per_pane_not_per_focus() {
+        // A non-focused Done pane's seen bit (set earlier) is untouched by a
+        // push_layout pass that focuses a DIFFERENT pane; eviction keys on
+        // the pane's OWN current badge, never on which pane is focused.
+        let (mut core, client_id, p1, p2, _rx) = seen_test_core();
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Done), false)];
+        core.command(client_id, Command::FocusPane(p1));
+        assert!(core.seen.contains(&p1));
+
+        core.agents = vec![
+            agent_in("test", p1, Some(AgentBadge::Done), false),
+            agent_in("test", p2, Some(AgentBadge::Working), false),
+        ];
+        core.command(client_id, Command::FocusPane(p2));
+        assert!(
+            core.seen.contains(&p1),
+            "p1 stays seen: it is still Done, just no longer focused"
+        );
+        assert!(!core.seen.contains(&p2), "p2 never reached Done");
     }
 
     #[test]

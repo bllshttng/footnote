@@ -118,7 +118,12 @@ use crate::tree::{Dir, Rect, TabId};
 /// `#[serde(default)]` keeps an older reader wire-tolerant. (Re-bumped from 19:
 /// x-96e8 merged first and took 19 - the second-to-merge re-bump rule.) v21
 /// adds `PaneSend { guarded }` for the server-side atomic guarded block-pipe.
-pub const PROTO_VERSION: u32 = 22;
+/// v22: `TabMeta.panes: Vec<PaneMeta>` - every leaf pane of a tab, labelled, so
+/// the session navigator (x-653d) can goto a pane in any tab/squad.
+/// v23: `AgentRow.seen` - server-side per-pane seen bit (x-4328), set when the
+/// operator focuses a `Done` pane, cleared when it leaves `Done`; distinguishes
+/// a looked-at finished agent (`Idle`) from one still surfaced (`DoneUnseen`).
+pub const PROTO_VERSION: u32 = 23;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -430,6 +435,15 @@ pub struct AgentRow {
     /// wire-tolerant (defaults false).
     #[serde(default)]
     pub external: bool,
+    /// (v23, x-4328) True once the operator has focused this pane while it was
+    /// `Done` (server-side `Core.seen`, keyed by `pane_id`; a watch-only row
+    /// with no `pane_id` is always false - it cannot be focused). Consumed at
+    /// the client's `pane_state` fold to distinguish a seen-Done (`Idle`) from
+    /// an unseen-Done (`DoneUnseen`, surfaced). `#[serde(default)]` keeps a
+    /// v22 reader wire-tolerant (defaults false, degrading to the
+    /// pre-feature `done == unseen`).
+    #[serde(default)]
+    pub seen: bool,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1435,6 +1449,17 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_from_pre_seen_json_defaults_seen_false() {
+        // AC1-ERR (x-4328): a pre-v23 AgentRow omits `seen` entirely. A v23
+        // reader must decode it as `false` - the client then degrades to the
+        // pre-feature `done == unseen`, never a panic.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(older).unwrap();
+        assert!(!row.seen, "missing seen key => false");
+    }
+
+    #[test]
     fn backlog_card_from_pre_v18_json_defaults_route_fields_none() {
         // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
         // (skip-when-None). A v18 reader must decode it as all-None, never
@@ -1531,6 +1556,7 @@ mod tests {
                         }),
                         attach_id: None,
                         external: false,
+                        seen: false,
                     },
                     AgentRow {
                         squad: None,
@@ -1542,6 +1568,7 @@ mod tests {
                         answerable: None,
                         attach_id: None,
                         external: false,
+                        seen: false,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
