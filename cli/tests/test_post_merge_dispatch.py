@@ -105,6 +105,34 @@ def test_missing_sha_falls_back_to_pr_key(tmp_path):
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "pr-42").exists()
 
 
+# --- x-490d US1: the dispatched ritual runs autonomously (no prompt) -----
+
+
+def test_spawn_worker_prompt_carries_autonomous(monkeypatch):
+    """A dispatched `claude --bg` worker is interactive, so it stalls at the
+    ritual's first human-prompt slot unless told it has no operator. The signal
+    rides the worker's initial prompt (the one channel that always reaches its
+    LLM), so the constructed spawn command must end in `... merged <n> autonomous`."""
+    from fno.graph import _reconcile
+
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"short_id": "abc123"}'
+        stderr = ""
+
+    def _fake_run(cmd, **_kw):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(_reconcile.subprocess, "run", _fake_run)
+    sid = _reconcile._spawn_post_merge_worker(42, "/tmp/canon")
+
+    assert sid == "abc123"
+    assert captured["cmd"][-1] == "/fno:pr merged 42 autonomous"
+
+
 # --- task 2.3: location - dispatch marker lands under canonical ----------
 
 

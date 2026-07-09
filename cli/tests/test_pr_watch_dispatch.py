@@ -224,6 +224,9 @@ class TestFireSkill:
         cmd_str = " ".join(str(c) for c in captured["cmd"])
         assert "merged" in cmd_str
         assert "42" in cmd_str
+        # x-490d US1: the merged ritual runs with no operator, so it carries the
+        # autonomous token (take every no-prompt branch, never stall).
+        assert "autonomous" in cmd_str
 
     def test_check_verb_fires_correct_skill(self, tmp_path):
         """AC-HP: verb='check' -> /fno:pr check <n> in command."""
@@ -239,6 +242,8 @@ class TestFireSkill:
         cmd_str = " ".join(str(c) for c in captured["cmd"])
         assert "check" in cmd_str
         assert "7" in cmd_str
+        # `autonomous` is merged-only; check must not carry it.
+        assert "autonomous" not in cmd_str
 
 
 # ---------------------------------------------------------------------------

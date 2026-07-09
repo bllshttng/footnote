@@ -64,10 +64,13 @@ fire_ritual() {
     # exit status. The skill itself is idempotent per PR (marker-keyed).
     # Two branches (not a "${arr[@]}" on a possibly-empty array, which errors
     # under bash 3.2 + set -u) so an empty MODEL inherits the CLI default.
+    # `autonomous`: uniform no-operator contract across both dispatch paths.
+    # Redundant here (`--print` cannot prompt) but keeps the ritual's mode one
+    # thing regardless of substrate (--print here, --bg in _spawn_post_merge_worker).
     if [[ -n "$MODEL" ]]; then
-      ( cd "$REPO_ROOT" && claude --print --dangerously-skip-permissions --model "$MODEL" "/fno:pr merged ${pr}" )
+      ( cd "$REPO_ROOT" && claude --print --dangerously-skip-permissions --model "$MODEL" "/fno:pr merged ${pr} autonomous" )
     else
-      ( cd "$REPO_ROOT" && claude --print --dangerously-skip-permissions "/fno:pr merged ${pr}" )
+      ( cd "$REPO_ROOT" && claude --print --dangerously-skip-permissions "/fno:pr merged ${pr} autonomous" )
     fi
   fi
 }

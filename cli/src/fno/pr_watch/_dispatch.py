@@ -201,7 +201,13 @@ def fire_skill(
         # --model flag would name an Anthropic id the GLM endpoint lacks.
         if model and not route:
             cmd += ["--model", model]
-        cmd.append(f"/fno:pr {verb} {pr_number}")
+        # `merged` runs the post-merge ritual with no operator: the `autonomous`
+        # token makes it take every no-prompt branch (uniform across all three
+        # dispatch paths; see graph._reconcile._spawn_post_merge_worker).
+        prompt = f"/fno:pr {verb} {pr_number}"
+        if verb == "merged":
+            prompt += " autonomous"
+        cmd.append(prompt)
 
     run_kwargs: dict[str, Any] = {}
     if route:
