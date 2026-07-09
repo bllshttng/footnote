@@ -38,19 +38,14 @@ target_state_field() {
 }
 
 # Return 0 only if the state file describes a target run owned by a live process.
-# Returns non-zero if: no state file, terminal status, empty-input stub, or
-# owner_pid is dead. Callers that only want IN_PROGRESS (not worrying about
-# ownership) should grep status directly; this is the gate for "should I act?"
+# Returns non-zero if: no state file, empty-input stub, or owner_pid is dead.
+# Liveness truth is owner_pid, not a status field: the manifest writer no longer
+# emits `status:`, so gating on it returned "not active" for every live session
+# and silently disabled every consumer (x-6044). A legacy manifest that still
+# carries `status:` is unaffected — that field is simply not read here anymore.
 target_is_active() {
     local state_file="${1:-.fno/target-state.md}"
     [[ -f "$state_file" ]] || return 1
-
-    # Named state_status, not status — zsh reserves $status as an alias for $?
-    # and rejects `local status` with "read-only variable" when this lib is
-    # sourced into a zsh shell (e.g. interactive testing).
-    local state_status
-    state_status=$(target_state_field "status" "$state_file")
-    [[ "$state_status" == "IN_PROGRESS" ]] || return 1
 
     local input plan_path
     input=$(target_state_field "input" "$state_file")
