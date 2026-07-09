@@ -95,6 +95,14 @@ def run_command(
         typer.echo("Error: selection matched no bank tasks.", err=True)
         raise typer.Exit(code=1)
 
+    # Headless spawn REQUIRES a provider (the Rust agents runtime rejects a
+    # provider-less non-pane spawn), so a prompt-bearing task with no --provider
+    # would grade every run as a spawn failure. Default to claude when any
+    # selected task has a prompt. Grade-only tasks never spawn, so they are fine.
+    if provider is None and any(t.prompt for t in tasks):
+        provider = "claude"
+        typer.echo("no --provider given; defaulting prompt-bearing tasks to claude headless")
+
     total_runs = len(tasks) * repeat
     if total_runs > 20 and not yes:
         typer.echo(f"About to run {len(tasks)} task(s) x {repeat} = {total_runs} live runs.")

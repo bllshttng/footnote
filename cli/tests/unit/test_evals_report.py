@@ -48,6 +48,32 @@ def test_regression_alarm_silent_at_100() -> None:
     assert build_report(rows)["regression_alarm"] == []
 
 
+def test_graduated_task_excludes_pre_graduation_failures() -> None:
+    """codex P2: after a capability task graduates, its old capability failures
+    must NOT count in the regression pass rate / fire a false alarm."""
+    rows = [
+        _row("t", "capability", False),  # pre-graduation hill failure
+        _row("t", "capability", True),
+        _row("t", "capability", True),
+        _row("t", "regression", True),   # first post-graduation run, green
+    ]
+    report = build_report(rows)
+    assert report["regression_alarm"] == []  # no false alarm
+    task = report["tasks"][0]
+    assert task["tier"] == "regression"
+    assert task["runs"] == 1 and task["passes"] == 1  # only the post-graduation run
+    assert report["tiers"]["regression"]["pass_rate"] == 1.0
+
+
+def test_regression_alarm_still_fires_on_real_post_graduation_failure() -> None:
+    rows = [
+        _row("t", "capability", True),
+        _row("t", "regression", True),
+        _row("t", "regression", False),  # real regression after graduation
+    ]
+    assert build_report(rows)["regression_alarm"] == ["t"]
+
+
 def test_no_data() -> None:
     assert build_report([])["no_data"] is True
 

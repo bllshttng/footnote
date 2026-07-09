@@ -60,11 +60,18 @@ def _stats(rows: list[dict[str, object]]) -> list[TaskStat]:
     stats: list[TaskStat] = []
     for tid in sorted(by_id):
         task_rows = by_id[tid]
-        # Tier is taken from the most recent row (a graduated task's later rows
-        # carry the new tier).
-        tier = str(task_rows[-1].get("tier", "unknown"))
-        passes = sum(1 for r in task_rows if r.get("pass") is True)
-        stats.append(TaskStat(tid, tier, len(task_rows), passes))
+        current_tier = str(task_rows[-1].get("tier", "unknown"))
+        # Only rows SINCE the latest tier change count toward the task's current
+        # stats: a freshly-graduated task's pre-graduation capability failures
+        # must not inflate its regression pass rate and fire a false alarm the
+        # instant it graduates (each row carries the tier it ran under).
+        segment: list[dict[str, object]] = []
+        for r in reversed(task_rows):
+            if str(r.get("tier", "unknown")) != current_tier:
+                break
+            segment.append(r)
+        passes = sum(1 for r in segment if r.get("pass") is True)
+        stats.append(TaskStat(tid, current_tier, len(segment), passes))
     return stats
 
 

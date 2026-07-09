@@ -41,3 +41,27 @@ def test_bad_repeat_exits_1(tmp_path: Path) -> None:
               "id: a\ntier: regression\ngrade:\n  - {kind: exit, command: 'true'}\n")
     res = runner.invoke(evals_app, ["run", "--bank", str(d), "--repeat", "0"])
     assert res.exit_code == 1
+
+
+def test_prompt_task_defaults_provider(tmp_path: Path, monkeypatch) -> None:
+    """codex P2: a prompt-bearing task with no --provider defaults to claude so
+    the headless spawn is never provider-less. Assert run_task gets a provider."""
+    import fno.evals.runner as runner_mod
+
+    seen: dict = {}
+
+    def fake_run_task(task, *, repeat, repo_root, worker_provider=None):
+        seen["provider"] = worker_provider
+        return [runner_mod.RunResult(task.id, task.tier, True, "", 0.0, 0)]
+
+    # run_command does `from fno.evals.runner import run_task, sweep_orphans` at
+    # call time, so patching the source module is what the import resolves.
+    monkeypatch.setattr(runner_mod, "run_task", fake_run_task)
+    monkeypatch.setattr(runner_mod, "sweep_orphans", lambda root: 0)
+
+    d = _bank(tmp_path, "cap.yaml",
+              "id: cap\ntier: capability\nprompt: do it\ngrade:\n  - {kind: exit, command: 'true'}\n")
+    res = runner.invoke(evals_app, ["run", "--bank", str(d)])
+    assert res.exit_code == 0
+    assert seen.get("provider") == "claude"
+    assert "defaulting" in res.stdout
