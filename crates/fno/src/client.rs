@@ -834,8 +834,9 @@ impl View {
 
     /// The navigator's flat GLOBAL catalog (x-653d): one [`NavRow`] per squad,
     /// per tab (ignoring expand state - a collapsed squad's tabs still appear,
-    /// the key difference from [`display_rows`]), per agent, and per work-queue
-    /// card across the WHOLE session. Shares the agent/card -> [`ChromeHit`]
+    /// the key difference from [`display_rows`]), per plain pane (v22: those NOT
+    /// already shown as an agent row), per agent, and per work-queue card across
+    /// the WHOLE session. Shares the agent/card -> [`ChromeHit`]
     /// mapping with [`row_action`] (via [`agent_hit`]/[`card_hit`]) so a keyboard
     /// goto and a mouse click never diverge. Squad/tab rows carry their own
     /// SelectSquad/SelectTab in `hit`; an agent row carries a `goto_squad`
@@ -844,6 +845,7 @@ impl View {
     /// owned (no layout borrow) so goto can mutate the view after building it.
     fn nav_rows(&self) -> Vec<NavRow> {
         let mut out = Vec::new();
+        let cross = |sq: u64| (sq != self.layout.active_squad).then_some(sq);
         for s in &self.layout.squads {
             // Always SelectSquad (unlike the sideline's active-squad
             // ToggleExpand): the navigator is a jump, never an expand toggle.
@@ -851,17 +853,36 @@ impl View {
                 label: s.name.clone(),
                 state: PaneState::Idle,
                 goto_squad: None,
+                goto_tab: None,
                 hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
             });
             for (t, tab) in s.tabs.iter().enumerate() {
+                let tab_text = tab_label_text(&tab.name, t);
                 out.push(NavRow {
-                    label: format!("{} › {}", s.name, tab_label_text(&tab.name, t)),
+                    label: format!("{} › {}", s.name, tab_text),
                     state: PaneState::Idle,
                     // SelectTab resolves the squad server-side, so one command
                     // switches squad+tab (row_action's tab arm, gemini review).
                     goto_squad: None,
+                    goto_tab: None,
                     hit: ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
                 });
+                // Plain panes of the tab (v22): a pane already shown as an agent
+                // row is skipped (the agent row is the richer view of the same
+                // pane); the rest become goto-able so a bare shell pane in any
+                // tab/squad is reachable, not just the active view (codex review).
+                for p in &tab.panes {
+                    if self.layout.agents.iter().any(|a| a.pane_id == Some(p.id)) {
+                        continue;
+                    }
+                    out.push(NavRow {
+                        label: format!("{} › {} › {}", s.name, tab_text, p.label),
+                        state: PaneState::Idle,
+                        goto_squad: cross(s.id),
+                        goto_tab: Some(tab.id),
+                        hit: ChromeHit::Cmds(vec![Command::FocusPane(p.id)]),
+                    });
+                }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
                 out.push(NavRow {
@@ -870,7 +891,8 @@ impl View {
                     // Switch to the agent's squad first when it is not active,
                     // so the following FocusPane lands there (AgentRow carries no
                     // tab id, so the server resolves the pane's tab on focus).
-                    goto_squad: (s.id != self.layout.active_squad).then_some(s.id),
+                    goto_squad: cross(s.id),
+                    goto_tab: None,
                     hit: agent_hit(a),
                 });
             }
@@ -883,6 +905,7 @@ impl View {
                 label: a.name.clone(),
                 state: nav_agent_state(a),
                 goto_squad: None,
+                goto_tab: None,
                 hit: agent_hit(a),
             });
         }
@@ -895,6 +918,7 @@ impl View {
                 label: format!("{label} {}", c.priority),
                 state: card_state(c),
                 goto_squad: None,
+                goto_tab: None,
                 hit: self.card_hit(c),
             });
         }
@@ -1938,9 +1962,15 @@ struct NavRow {
     /// Derived rollup state, for the state filter + the leading glyph.
     state: PaneState,
     /// Switch to this squad before applying `hit`, when it is not already the
-    /// active one (an agent's pane lives in another squad). `None` for a
+    /// active one (an agent's or pane's row lives in another squad). `None` for a
     /// squad/tab row (the switch is in `hit`) or a card (never switches).
     goto_squad: Option<u64>,
+    /// Switch to this tab (after `goto_squad`) before applying `hit`, when it is
+    /// not the active view's tab. `Some` only for a pane row (a pane lives in a
+    /// specific tab, which `FocusPane` alone does not select); `None` for every
+    /// other row. Together the two prefixes give a pane goto the full
+    /// SelectSquad -> SelectTab -> FocusPane sequence.
+    goto_tab: Option<u64>,
     /// The terminal action: SelectSquad/SelectTab for a container row,
     /// FocusPane/AttachAgent for an agent, the dispatch confirm / focus for a
     /// card, or a [`ChromeHit::Notice`] that keeps the navigator open.
@@ -3487,14 +3517,34 @@ async fn nav_goto(
     }
     view.nav = None;
     view.nav_esc.clear();
-    // Cross-squad prefix: an agent's pane lives in another squad; switch first
-    // so the following FocusPane lands there. Squad/tab rows carry their own
-    // SelectSquad/SelectTab in `hit` (goto_squad is None), so no double send.
-    if let Some(sq) = target.goto_squad {
-        if sq != view.layout.active_squad {
-            write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
+    // Ordered goto prefix (Locked 4: existing wire commands only). An agent/pane
+    // row in another squad switches squad first; a pane row then selects its tab
+    // (FocusPane alone does not) so the sequence is SelectSquad -> SelectTab ->
+    // FocusPane. Squad/tab rows carry their own switch in `hit` (both prefixes
+    // None), so no double send; a pane already in the active view collapses to a
+    // bare FocusPane.
+    let switching_squad = target
+        .goto_squad
+        .is_some_and(|sq| sq != view.layout.active_squad);
+    if let Some(sq) = target.goto_squad.filter(|_| switching_squad) {
+        write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
+            .await
+            .map_err(|e| format!("nav select-squad send failed: {e}"))?;
+    }
+    if let Some(tid) = target.goto_tab {
+        // Skip SelectTab only when the target is already the active view's tab
+        // (same squad, same tab); a squad switch always needs it.
+        let active_tab_id = view
+            .layout
+            .squads
+            .iter()
+            .find(|s| s.id == view.layout.active_squad)
+            .and_then(|s| s.tabs.get(s.active_tab))
+            .map(|t| t.id);
+        if switching_squad || active_tab_id != Some(tid) {
+            write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
                 .await
-                .map_err(|e| format!("nav select-squad send failed: {e}"))?;
+                .map_err(|e| format!("nav select-tab send failed: {e}"))?;
         }
     }
     apply_hit(view, target.hit, sock_w).await
@@ -3843,7 +3893,7 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AnswerOption, AnswerablePrompt, TabMeta};
+    use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, TabMeta};
     use crate::vt::frame_text;
 
     #[test]
@@ -3969,6 +4019,7 @@ mod tests {
                 .map(|i| TabMeta {
                     id: (i - 1) as u64,
                     name: i.to_string(),
+                    panes: Vec::new(),
                 })
                 .collect(),
             active_tab,
@@ -5814,6 +5865,151 @@ mod tests {
             "cursor clamped into the shrunk catalog"
         );
         assert!(v.nav.is_some(), "navigator stays open across the push");
+    }
+
+    #[test]
+    fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
+        // Fold-in (codex): plain panes become goto rows; a pane already shown as
+        // an agent row is NOT double-listed (the agent row is the richer view).
+        let mut v = two_pane_view();
+        v.layout.squads[0].tabs[1].panes = vec![
+            PaneMeta {
+                id: 10,
+                label: "claude".into(),
+            },
+            PaneMeta {
+                id: 20,
+                label: "htop".into(),
+            },
+        ];
+        v.layout.agents = vec![AgentRow {
+            squad: Some(1),
+            name: "worker".into(),
+            pane_id: Some(10),
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+        }];
+        let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
+        assert!(
+            labels.iter().any(|l| l == "footnote › 2 › htop"),
+            "plain pane listed: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.ends_with("› claude")),
+            "agent-hosted pane not double-listed: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "footnote › worker"),
+            "the agent keeps its own row"
+        );
+    }
+
+    #[tokio::test]
+    async fn nav_goto_pane_cross_squad_sends_squad_tab_focus() {
+        // Fold-in AC4-HP (now fulfilled): a pane in a non-active squad+tab sends
+        // SelectSquad, SelectTab, FocusPane in order.
+        let mut v = two_pane_view(); // active squad 1; notes = squad 2, tab id 0
+        v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
+            id: 55,
+            label: "vim".into(),
+        }];
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label == "notes › 1 › vim")
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_goto(&mut v, &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::SelectSquad(2))
+        ));
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::SelectTab(0))
+        ));
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::FocusPane(55))
+        ));
+    }
+
+    #[tokio::test]
+    async fn nav_goto_pane_active_view_is_bare_focus() {
+        // AC4-UI: a pane in the active squad AND active tab collapses to a bare
+        // FocusPane - no redundant SelectSquad/SelectTab.
+        let mut v = two_pane_view(); // active squad 1, active_tab idx 1 (tab id 1)
+        v.layout.squads[0].tabs[1].panes = vec![PaneMeta {
+            id: 77,
+            label: "shell".into(),
+        }];
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label == "footnote › 2 › shell")
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_goto(&mut v, &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::FocusPane(77))
+        ));
+        assert!(
+            crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).is_err(),
+            "bare focus, no prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn nav_goto_pane_same_squad_other_tab_selects_tab_only() {
+        // A pane in the active squad but a different tab: SelectTab then
+        // FocusPane, no SelectSquad.
+        let mut v = two_pane_view(); // active squad 1, active_tab idx 1 (id 1)
+        v.layout.squads[0].tabs[0].panes = vec![PaneMeta {
+            id: 88,
+            label: "logs".into(),
+        }]; // tab idx 0, id 0
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label == "footnote › 1 › logs")
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_goto(&mut v, &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::SelectTab(0))
+        ));
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::FocusPane(88))
+        ));
+        assert!(
+            crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).is_err(),
+            "no SelectSquad for the active squad"
+        );
     }
 
     // ---- x-c929: answer overlay + next-blocked cycle ----

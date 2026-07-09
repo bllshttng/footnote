@@ -38,7 +38,7 @@ use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
-    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta,
+    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, ServerMsg, SquadMeta, TabMeta,
     WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
@@ -552,6 +552,30 @@ fn tab_label(
         }
     }
     (i + 1).to_string()
+}
+
+/// A pane's display label for the session navigator (v22, x-653d). Unlike
+/// [`tab_label`] (which prefers a dir name so a tab reads as its worktree), a
+/// pane's discriminator WITHIN a tab is what it is running, so `cmd` leads:
+/// `cmd` -> `node` -> cwd basename -> `shell`. Sanitized like a wire name (these
+/// land in chrome cells). Never an ordinal - a plain pane is `shell`, not a
+/// number the operator cannot map back.
+fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
+    for cand in [cmd, node] {
+        if let Some(c) = cand {
+            let clean = sanitize_tab_name(c);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+    }
+    let base = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let clean = sanitize_tab_name(base);
+    if clean.is_empty() {
+        "shell".to_string()
+    } else {
+        clean
+    }
 }
 
 /// Sanitize a wire-supplied name: strip control characters (they would corrupt
@@ -1593,6 +1617,23 @@ impl Core {
                             s.canonical_cwd(),
                             i,
                         ),
+                        // (v22, x-653d) Every leaf pane of the tab, labelled from
+                        // its own entry, so the navigator can goto a pane in any
+                        // tab/squad - not just the active view the client tiles.
+                        panes: tree::leaves(&t.root)
+                            .iter()
+                            .map(|pid| {
+                                let e = self.panes.get(pid);
+                                PaneMeta {
+                                    id: *pid,
+                                    label: pane_label(
+                                        e.and_then(|e| e.node.as_deref()),
+                                        e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                        e.and_then(|e| e.cmd.as_deref()),
+                                    ),
+                                }
+                            })
+                            .collect(),
                     })
                     .collect(),
                 // The viewed squad highlights the VIEWER's tab; other squads
@@ -4332,6 +4373,21 @@ mod tests {
         );
         // No `env` wrapper at all -> never scanned, even with a bare token.
         assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
+    }
+
+    #[test]
+    fn pane_label_prefers_cmd_then_node_then_cwd_then_shell() {
+        // The navigator's pane label (v22, x-653d): cmd is the intra-tab
+        // discriminator, then node, then the cwd basename, else "shell".
+        assert_eq!(
+            pane_label(Some("x-abcd"), "/home/u/proj", Some("claude")),
+            "claude"
+        );
+        assert_eq!(pane_label(Some("x-abcd"), "/home/u/proj", None), "x-abcd");
+        assert_eq!(pane_label(None, "/home/u/proj", None), "proj");
+        assert_eq!(pane_label(None, "", None), "shell");
+        // A control-only candidate sanitizes to empty and falls through.
+        assert_eq!(pane_label(None, "/home/u/proj", Some("\u{7}")), "proj");
     }
 
     #[test]

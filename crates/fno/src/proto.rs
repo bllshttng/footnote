@@ -118,7 +118,7 @@ use crate::tree::{Dir, Rect, TabId};
 /// `#[serde(default)]` keeps an older reader wire-tolerant. (Re-bumped from 19:
 /// x-96e8 merged first and took 19 - the second-to-merge re-bump rule.) v21
 /// adds `PaneSend { guarded }` for the server-side atomic guarded block-pipe.
-pub const PROTO_VERSION: u32 = 21;
+pub const PROTO_VERSION: u32 = 22;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -799,6 +799,16 @@ pub mod err_code {
     pub const TARGET_NOT_IDLE: u32 = 6;
 }
 
+/// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
+/// navigator's goto targets plus a derived, display-only `label` (the running
+/// command / node / cwd basename, else `shell`). The client never focuses a
+/// pane by label - it sends `FocusPane(id)`; the label is filter/display text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaneMeta {
+    pub id: u64,
+    pub label: String,
+}
+
 /// One tab's catalog entry inside [`ServerMsg::Layout`]. `id` is the stable
 /// session-scoped tab identity (monotonic u64, never reused - Locked
 /// Decision 6 extended to tabs); `Command::SelectTab` names it, so a
@@ -807,6 +817,12 @@ pub mod err_code {
 pub struct TabMeta {
     pub id: u64,
     pub name: String,
+    /// (v22, x-653d) Every leaf pane of this tab, so the session navigator can
+    /// list and goto panes across tabs/squads (the sideline only ever tiled the
+    /// active view's panes). `#[serde(default)]` keeps a v21 reader wire-tolerant
+    /// (empty -> the navigator simply lists no plain panes for the tab).
+    #[serde(default)]
+    pub panes: Vec<PaneMeta>,
 }
 
 /// One squad's catalog entry inside [`ServerMsg::Layout`]. Identity is the
@@ -1451,10 +1467,15 @@ mod tests {
                         TabMeta {
                             id: 7,
                             name: "1".into(),
+                            panes: vec![PaneMeta {
+                                id: 4,
+                                label: "claude".into(),
+                            }],
                         },
                         TabMeta {
                             id: 12,
                             name: "2".into(),
+                            panes: vec![],
                         },
                     ],
                     active_tab: 1,
