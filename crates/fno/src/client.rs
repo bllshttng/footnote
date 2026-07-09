@@ -585,6 +585,7 @@ impl View {
         self.search = None;
         self.rename = None;
         self.move_pick = None;
+        self.nav = None;
         self.create = Some(String::new());
         self.create_esc.clear();
     }
@@ -608,6 +609,10 @@ impl View {
         self.rename = None;
         self.rename_esc.clear();
         self.move_pick = None;
+        // A live navigator overlay (x-653d) must not linger behind the confirm:
+        // it wins stdin routing after the confirm resolves and would swallow the
+        // next keys, same reasoning as the selector above.
+        self.nav = None;
         self.confirm = Some(action);
     }
 
@@ -621,6 +626,7 @@ impl View {
         self.search = None;
         self.move_pick = None;
         self.create = None;
+        self.nav = None;
         self.rename = Some((target, String::new()));
         self.rename_esc.clear();
     }
@@ -635,6 +641,7 @@ impl View {
         self.create = None;
         self.rename = None;
         self.confirm = None;
+        self.nav = None;
         self.move_pick = Some((tab, squads));
     }
 
@@ -5449,6 +5456,11 @@ mod tests {
         view.selector = Some(8);
         view.answers = Some(0);
         view.create = Some("half-typed".into());
+        view.nav = Some(NavView {
+            query: "half".into(),
+            state_filter: None,
+            cursor: 0,
+        });
         view.open_confirm(ConfirmAction {
             action: ConfirmKind::Dispatch {
                 node: "x-rdy".into(),
@@ -5459,6 +5471,10 @@ mod tests {
         assert!(view.answers.is_none(), "confirm clears the answer overlay");
         assert!(view.create.is_none(), "confirm drops a half-typed create");
         assert!(view.search.is_none());
+        assert!(
+            view.nav.is_none(),
+            "confirm clears an open navigator (x-653d)"
+        );
         assert!(
             matches!(&view.confirm.as_ref().unwrap().action, ConfirmKind::Dispatch { node } if node == "x-rdy"),
             "the armed confirm carries the node"
