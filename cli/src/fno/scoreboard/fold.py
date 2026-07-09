@@ -40,6 +40,20 @@ def _is_shipped_reason(termination_reason: str | None) -> bool:
     return (termination_reason or "") in _SHIPPED_TERMINALS
 
 
+# A plan-only thread produces planning output and no build phase. The
+# discriminator is the phase SET (or a quick-entry type), never the terminal
+# reason: a build that wedged after planning carries a do/review/ship phase and
+# must stay `unshipped`, so it can never launder itself as `planned`.
+_PLAN_PHASES = frozenset({"think", "plan"})
+
+
+def _is_planned_row(row: dict) -> bool:
+    phases = row.get("phases_completed")
+    if isinstance(phases, list) and phases and all(p in _PLAN_PHASES for p in phases):
+        return True
+    return row.get("type") in ("think", "plan")
+
+
 # Survival follow-up window: a fix-node created within this many days of a
 # node's ship counts against that node's survival.
 _SURVIVAL_FOLLOWUP_DAYS = 14
@@ -830,6 +844,12 @@ def build_efficiency(
     outcome_tracked = 0
     shipped_rows = 0
 
+    # Plan-thread cost vs build-thread cost per node (the node's one extra line):
+    # sum `planned` spend and shipped spend per graph_node_id, emitted only for
+    # nodes that carry at least one planned row.
+    plan_cost_by_node: dict[str, float] = {}
+    build_cost_by_node: dict[str, float] = {}
+
     buckets: dict[str, dict] = {}
     per_row_fires: list[int | None] = []
     per_row_reds: list[int | None] = []
@@ -868,6 +888,15 @@ def build_efficiency(
                 outcome_tracked += 1
             else:
                 cls = "shipped_untracked"
+            if nid:
+                build_cost_by_node[nid] = build_cost_by_node.get(nid, 0.0) + _num(r.get("cost_usd"))
+        elif _is_planned_row(r):
+            cls = "planned"
+            if nid:
+                plan_cost_by_node[nid] = plan_cost_by_node.get(nid, 0.0) + _num(r.get("cost_usd"))
+        elif (r.get("termination_reason") or "") == "delegated":
+            # A handed-off thread is not waste; keep it out of `unshipped`.
+            cls = "delegated"
         else:
             cls = "unshipped"
 
@@ -914,6 +943,13 @@ def build_efficiency(
             "ci_unparsed": ci_unparsed_total,
         },
         "per_outcome_class": per_class,
+        "plan_vs_build_cost": {
+            nid: {
+                "plan_usd": round(plan_cost_by_node[nid], 2),
+                "build_usd": round(build_cost_by_node.get(nid, 0.0), 2),
+            }
+            for nid in plan_cost_by_node
+        },
         "distribution": {
             "loop_fires": _dist(per_row_fires),
             "ci_reds": _dist(per_row_reds),

@@ -282,3 +282,60 @@ def test_transcript_counts_feed_coverage():
     eff = build_efficiency(rows, [], [{"id": "x-1", "reverted": False}],
                            since_days=28, now=NOW, read_transcript=read_transcript)
     assert eff["coverage"]["transcript_pct"] == 100
+
+
+# --- planned bucket (x-c3d6c136 / x-68d3) -------------------------------------
+def _rt(sid):  # no-transcript stub for planned-bucket tests
+    return None
+
+
+def test_idea_thread_think_plan_folds_planned():
+    """A /target idea thread that ran think+plan and stopped is `planned`, not `unshipped`."""
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+             "phases_completed": ["think", "plan"], "graph_node_id": "x-1", "cost_usd": 3.0}]
+    eff = build_efficiency(rows, [], [], since_days=28, now=NOW, read_transcript=_rt)
+    assert "planned" in eff["per_outcome_class"]
+    assert "unshipped" not in eff["per_outcome_class"]
+    assert eff["per_outcome_class"]["planned"]["n"] == 1
+
+
+def test_quick_entry_think_folds_planned():
+    """A standalone /think quick-entry (type=think, phases=[], no termination_reason) is `planned`."""
+    rows = [{"completed": "2026-07-03T10:00:00", "type": "think",
+             "phases_completed": [], "cost_usd": 1.0}]
+    eff = build_efficiency(rows, [], [], since_days=28, now=NOW, read_transcript=_rt)
+    assert eff["per_outcome_class"].get("planned", {}).get("n") == 1
+    assert "unshipped" not in eff["per_outcome_class"]
+
+
+def test_wedged_build_stays_unshipped():
+    """INV: a thread that reached `do` then wedged carries a build phase and stays unshipped."""
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "NoProgress",
+             "phases_completed": ["think", "plan", "do"], "graph_node_id": "x-1", "cost_usd": 4.0}]
+    eff = build_efficiency(rows, [], [], since_days=28, now=NOW, read_transcript=_rt)
+    assert eff["per_outcome_class"].get("unshipped", {}).get("n") == 1
+    assert "planned" not in eff["per_outcome_class"]
+
+
+def test_delegated_not_unshipped():
+    """A handed-off (delegated) build thread is `delegated`, never `unshipped` waste."""
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "delegated",
+             "phases_completed": ["think", "plan", "do"], "graph_node_id": "x-1", "cost_usd": 2.0}]
+    eff = build_efficiency(rows, [], [], since_days=28, now=NOW, read_transcript=_rt)
+    assert eff["per_outcome_class"].get("delegated", {}).get("n") == 1
+    assert "unshipped" not in eff["per_outcome_class"]
+
+
+def test_plan_vs_build_cost_per_node():
+    """Plan-thread cost and build-thread cost sum per node, only for nodes with a planned row."""
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+         "phases_completed": ["think", "plan"], "graph_node_id": "x-1", "cost_usd": 3.0},
+        {"completed": "2026-07-03T11:00:00", "termination_reason": "DonePRGreen",
+         "phases_completed": ["do", "ship"], "graph_node_id": "x-1", "cost_usd": 7.0},
+        {"completed": "2026-07-03T12:00:00", "termination_reason": "DonePRGreen",
+         "phases_completed": ["do", "ship"], "graph_node_id": "x-2", "cost_usd": 5.0},
+    ]
+    eff = build_efficiency(rows, [], [], since_days=28, now=NOW, read_transcript=_rt)
+    pvb = eff["plan_vs_build_cost"]
+    assert pvb == {"x-1": {"plan_usd": 3.0, "build_usd": 7.0}}  # x-2 has no planned row -> excluded

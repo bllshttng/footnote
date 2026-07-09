@@ -210,6 +210,13 @@ def _render_efficiency(eff: dict) -> None:
             f"{_fmt(b['median_tokens']):>10}{_fmt(b['median_fires']):>11}{_fmt(b['median_duration_min']):>9}\n"
         )
 
+    pvb = eff.get("plan_vs_build_cost") or {}
+    if pvb:
+        out("\nPlan vs build cost per node\n")
+        out(f"  {'node':<14}{'plan$':>10}{'build$':>10}\n")
+        for nid, c in sorted(pvb.items(), key=lambda kv: -kv[1]["plan_usd"]):
+            out(f"  {nid:<14}{c['plan_usd']:>10.2f}{c['build_usd']:>10.2f}\n")
+
     out("\nDistribution (rows with >=1 loop_check fire)\n")
     out(f"  {'metric':<18}{'median':>10}{'p90':>10}{'n':>6}\n")
     for metric in ("loop_fires", "ci_reds", "tokens_total", "duration_minutes"):
