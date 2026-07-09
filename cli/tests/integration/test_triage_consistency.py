@@ -10,7 +10,6 @@ The headless dispatch is monkeypatched so no real model is called.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
