@@ -96,6 +96,67 @@ fi
 [[ -n "$PR" && "$PR" != "null" ]] || { echo "post-merge: no merged PR found; pass a PR number."; exit 0; }
 ```
 
+## Step 0.5: First-action reservation (dedup mutex)
+
+Before ANY mutating step, reserve this PR's ritual with a global TTL claim so a
+second runner (an attended `/fno:pr merged` racing the auto-dispatched
+`pr-merged-<N>` worker) cannot execute the destructive middle (Steps 2-4)
+concurrently. This is the ritual's FIRST action once the PR is known - it is
+pure bash/CLI (no prompt), so it behaves identically in attended and
+autonomous/headless modes.
+
+```bash
+# Runner-unique, stable-per-runner holder: unique per session (the attended
+# run and the dispatched worker each have their own) yet identical across this
+# session's many short-lived bash sub-invocations, so Step 8 recomputes the
+# SAME string to release. A shared-constant holder would read as an idempotent
+# re-acquire and silently defeat the mutex - keep it session-keyed.
+#
+# `fno claim session-pid` exits 0 with EMPTY stdout when no claude ancestor
+# exists (codex/gemini/plain-shell), so guard on EMPTINESS, not exit code - an
+# empty suffix would collapse both racing runners to the SAME holder and
+# silently defeat the mutex in exactly the autonomous modes this protects. `$$`
+# is process-unique, so distinct runners still get distinct holders.
+_SID="${CLAUDE_CODE_SESSION_ID:-}"
+[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null || true)"
+[[ -n "$_SID" ]] || _SID="$$"
+HOLDER="postmerge:pr-${PR}:${_SID}"
+
+# `reconcile:` routes to the GLOBAL claims root (~/.fno/claims), so the two
+# racing runners - which run from different cwds - see each other's claim.
+# --ttl 15m: the ritual is many short-lived bash calls with no durable PID to
+# anchor PID-liveness to; 15m bounds a run that finishes in 1-3 min and
+# self-frees on crash.
+if fno claim acquire reconcile:pr-${PR} --holder "$HOLDER" --ttl 15m; then
+  :   # won the race - we own the ritual
+else
+  rc=$?
+  if [[ "$rc" == "1" ]]; then
+    echo "post-merge: PR #${PR} ritual already claimed by another runner; it will complete the ritual. Exiting."
+    exit 0
+  fi
+  # Any other non-zero (transient corrupt/gone-away, validation) - FAIL OPEN.
+  # A claims-subsystem hiccup must not wedge the ritual; the Step-5 marker is
+  # the backstop, and a simultaneous double-failure (the only double-fire
+  # re-open) is vanishingly rare.
+  echo "post-merge: reservation claim errored (exit $rc); proceeding without it (marker guard backstops)." >&2
+fi
+
+# Belt-and-braces: covers a cold re-run whose prior completed ritual's claim TTL
+# has since expired. If this PR's parking-lot marker already exists there is
+# nothing left to do - release our fresh claim and exit BEFORE any mutation.
+# Best-effort resolve here (Step 1 does the fail-loud version); an unresolvable
+# config/path just skips the shortcut and lets Step 1/Step 5 handle it.
+_RR="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+_PLREL="$(fno config get config.post_merge.parking_lot_path 2>/dev/null || echo "")"
+if [[ -n "$_RR" && -n "$_PLREL" ]] && \
+   bash "${CLAUDE_PLUGIN_ROOT:-$_RR}/skills/pr/scripts/inbox-has-pr.sh" "$_RR/$_PLREL" "$PR" 2>/dev/null; then
+  echo "post-merge: PR #${PR} already recorded (marker present) - releasing claim and exiting."
+  fno claim release reconcile:pr-${PR} --holder "$HOLDER" 2>/dev/null || true
+  exit 0
+fi
+```
+
 ## Step 1: Resolve per-project context (FAIL LOUD, never guess)
 
 ```bash
@@ -499,6 +560,22 @@ A background `/fno:pr merged` worker leaves a finished row in `claude agents`:
 the daemon retires the *process* after ~1h idle, but the *row* lingers until
 reaped, so the agent view accumulates one dead row per merge. This step lets the
 worker clear its own row.
+
+Release our reservation now that the durable Step-6 marker is written - it is
+the barrier for any later re-run, so the claim's job is done. Best-effort and
+non-fatal: release matches on our own holder, so it drops only our claim and
+never a successor's TTL-expired re-acquire. Skipping it just lets the claim
+linger to TTL expiry.
+
+```bash
+# Recompute the SAME holder Step 0.5 used (guard on emptiness, not exit code).
+_SID="${CLAUDE_CODE_SESSION_ID:-}"
+[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null || true)"
+[[ -n "$_SID" ]] || _SID="$$"
+HOLDER="postmerge:pr-${PR}:${_SID}"
+fno claim release reconcile:pr-${PR} --holder "$HOLDER" 2>/dev/null \
+  || echo "post-merge: reservation release skipped (already gone / holder mismatch); TTL will reap." >&2
+```
 
 Run LAST, after the Step-7 report is already emitted - the report must reach the
 operator before the session can tear itself down:

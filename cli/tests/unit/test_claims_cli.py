@@ -83,6 +83,29 @@ def test_acquire_conflict_exits_1(cwd_tmp):
     assert "held by" in result.output
 
 
+def test_reconcile_pr_reservation_mutex(cwd_tmp):
+    """Post-merge ritual reservation: distinct holders race, exactly one wins.
+
+    Pins the mutex the double-fire fix relies on. Two runners (attended +
+    dispatched) enter the ritual for the same PR with DISTINCT session-keyed
+    holders; the reconcile:pr-<n> claim is the mutex, so exactly one acquires
+    (exit 0) and the loser exits 1. A re-acquire with the SAME holder is
+    idempotent success - the trap that would silently defeat the mutex if the
+    holder were a shared constant, so it is pinned here.
+
+    (`reconcile:` routes to the global claims root; cwd_tmp pins HOME=cwd so the
+    global root coincides with the tmp dir and stays isolated.)
+    """
+    key = "reconcile:pr-286"
+    a = runner.invoke(cli, ["acquire", key, "--holder", "postmerge:pr-286:sessA", "--ttl", "15m"])
+    assert a.exit_code == 0
+    b = runner.invoke(cli, ["acquire", key, "--holder", "postmerge:pr-286:sessB", "--ttl", "15m"])
+    assert b.exit_code == 1
+    assert "held by" in b.output
+    a2 = runner.invoke(cli, ["acquire", key, "--holder", "postmerge:pr-286:sessA", "--ttl", "15m"])
+    assert a2.exit_code == 0
+
+
 def test_acquire_validation_exits_2(cwd_tmp):
     """key too long -> exit 2."""
     result = runner.invoke(cli, ["acquire", "x" * 300, "--holder", "h"])
