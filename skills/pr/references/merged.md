@@ -165,14 +165,19 @@ Close the backlog node whose PR merged outside the ship gate and stamp its
 plan. If you know the node id, scope it; otherwise sweep:
 
 ```bash
-fno backlog reconcile || { echo "post-merge: reconcile FAILED - record in report" >&2; RECONCILE_FAILED=1; }
-# full sweep above, or scope it: fno backlog reconcile --node ab-XXXXXXXX
+# Capture the ids reconcile closed into NODE_IDS (Step 8a reaps each closed
+# node's build-worker row). --json runs the same mutations; only the output
+# shape changes, so the failure flag still reads reconcile's own exit code.
+RECONCILE_JSON="$(fno backlog reconcile --json 2>/dev/null)" \
+  || { echo "post-merge: reconcile FAILED - record in report" >&2; RECONCILE_FAILED=1; }
+NODE_IDS="$(printf '%s' "$RECONCILE_JSON" | jq -r '.closed[]?.node_id // empty' 2>/dev/null | tr '\n' ' ')"
+# full sweep above, or scope it: fno backlog reconcile --node ab-XXXXXXXX --json
 ```
 
 `reconcile` is idempotent and a no-op when nothing drifted. If the PR maps to
-no node, that is fine (reconcile closes nothing, exit 0) - continue. A
-non-zero exit is a genuine failure (e.g. corrupt graph.json): keep going so
-the inbox prose still lands, but flag it in the report.
+no node, that is fine (reconcile closes nothing, exit 0, `NODE_IDS` empty) -
+continue. A non-zero exit is a genuine failure (e.g. corrupt graph.json): keep
+going so the inbox prose still lands, but flag it in the report.
 
 ## Step 3: Mechanical triage harvest
 
@@ -492,6 +497,64 @@ If any Step 2-6 verb exited non-zero (`RECONCILE_FAILED` / `RETRO_FAILED` /
 a failed `backlog idea`), the report MUST include a **Failures** line naming
 the verb and its error. A partial run is never reported as a clean success.
 In the headless watcher path, also exit non-zero so the failure is logged.
+
+## Step 8a: Reap the original build worker's agent-view row
+
+The `/target` build that shipped this PR left its own `target-<node>-<slug>` row
+in `fno agents list`. The daemon retires that worker's *process* after ~1h idle,
+but the *row* lingers until then, so the agent view accumulates one dead
+`target-*` row per merge. This reaps it, gated behind the same
+`config.post_merge.self_reap` opt-in that governs Step 8's self-clean.
+
+Run this BEFORE Step 8: the build worker is a *different* session with its own
+row, so it can be reaped while this ritual is still alive to report it; Step 8's
+self-clean can tear down the ritual's own session, so it must run last.
+
+```bash
+# NODE_IDS: the node id(s) reconcile closed for this PR (from Step 2). Empty
+# when the PR mapped to no node -> the whole step is skipped. Best-effort:
+# every failure is logged and stepped past, never fatal.
+if [[ -n "${NODE_IDS:-}" ]]; then
+  # Same coercer as Step 8: default OFF; only an explicit affirmative auto-reaps.
+  SELF_REAP="$(fno config get config.post_merge.self_reap 2>/dev/null || true)"
+  REAP_ON=0
+  case "$(printf '%s' "$SELF_REAP" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    true|1|yes|on) REAP_ON=1 ;;
+  esac
+
+  for NODE in $NODE_IDS; do
+    # Resolve by the purpose-built name convention target-<node>-<slug>. NOT by
+    # node claim: a finished worker has already released its node:<id> claim, so
+    # only the row and its name survive. Skip `status == "live"` rows - a node id
+    # can be re-used by a fresh re-dispatch or a G4 de-stub, and killing an
+    # actively running worker would be data loss.
+    ROWS="$(fno agents list --json 2>/dev/null \
+      | jq -r --arg n "target-${NODE}-" \
+          '.agents[]? | select(.name | startswith($n))
+                      | select(.status != "live")
+                      | .name' 2>/dev/null || true)"
+    [[ -z "$ROWS" ]] && continue   # no lingering row -> skip silently
+
+    while IFS= read -r ROW; do
+      [[ -z "$ROW" ]] && continue
+      if [[ "$REAP_ON" == "1" ]]; then
+        echo "post-merge: reaping build worker row $ROW (node $NODE)."
+        # STOP before RM - `claude rm` on a live agent orphans its supervisor.
+        fno agents stop "$ROW" 2>&1 || echo "post-merge: 'fno agents stop $ROW' non-zero (continuing)."
+        fno agents rm   "$ROW" 2>&1 || echo "post-merge: 'fno agents rm $ROW' non-zero - clear it manually."
+      else
+        echo "post-merge: build worker row $ROW (node $NODE) still in 'fno agents list'. Clear when ready:"
+        echo "    fno agents stop $ROW && fno agents rm $ROW"
+      fi
+    done <<< "$ROWS"
+  done
+fi
+```
+
+**Why reuse `self_reap` (no new flag).** Reaping a finished merged build worker's
+row is the same action class, risk profile, and default-off caution as Step 8's
+self-clean - a second config field would mean a registry FIELD_META entry + docs
+regen for zero added expressiveness.
 
 ## Step 8: Self-clean (agent-view row)
 
