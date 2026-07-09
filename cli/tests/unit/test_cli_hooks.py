@@ -164,3 +164,61 @@ def test_cli_cli_hooks_writes_both(tmp_path, monkeypatch):
     assert gset.exists() and cconf.exists()
     assert "UNTRUSTED" in res.output  # codex trust instruction surfaced
     assert str(fake_entry) in json.loads(gset.read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+
+def test_cli_cli_hooks_no_gemini_writes_only_codex(tmp_path, monkeypatch):
+    import fno.paths as paths
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    from fno.setup_cli import app
+
+    gset = tmp_path / "g" / "settings.json"
+    cconf = tmp_path / "c" / "config.toml"
+    res = CliRunner().invoke(
+        app,
+        [
+            "cli-hooks",
+            "--no-gemini",
+            "--gemini-settings",
+            str(gset),
+            "--codex-config",
+            str(cconf),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert cconf.exists()
+    assert not gset.exists()
+    assert "codex: wired SessionStart" in res.output
+    assert "gemini:" not in res.output
+
+
+def test_cli_cli_hooks_codex_alias_writes_only_codex(tmp_path, monkeypatch):
+    import tomllib
+
+    import fno.paths as paths
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    from fno.setup_cli import app
+
+    cconf = tmp_path / "c" / "config.toml"
+    res = CliRunner().invoke(
+        app,
+        ["cli-hooks-codex", "--codex-config", str(cconf)],
+    )
+    assert res.exit_code == 0, res.output
+    parsed = tomllib.loads(cconf.read_text())
+    cmds = [
+        h["command"]
+        for g in parsed["hooks"]["SessionStart"]
+        for h in g["hooks"]
+    ]
+    assert cmds == [f"env FNO_PLATFORM=codex {fake_entry}"]
+    assert "gemini:" not in res.output

@@ -55,8 +55,12 @@ __pycache__/
 # Other provider configs (local, not distributed).
 # NB: .codex-plugin/ is intentionally NOT here - it's the public Codex plugin
 # manifest (parity with .claude-plugin/), so it must ship.
-.agents/
-.codex/
+.agents/*
+!.agents/plugins/
+!.agents/plugins/marketplace.json
+.codex/*
+!.codex/agents/
+!.codex/agents/*.toml
 .gemini/
 
 # Private/local scripts and docs (environment-specific, not for distribution)

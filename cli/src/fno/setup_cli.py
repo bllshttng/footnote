@@ -48,6 +48,36 @@ def cli_hooks_cmd(
     Codex treats the hook as untrusted until you approve it, so after this runs
     you must trust the footnote SessionStart hook in Codex before it fires.
     """
+    _install_cli_hooks(
+        codex=codex,
+        gemini=gemini,
+        gemini_settings=gemini_settings,
+        codex_config=codex_config,
+    )
+
+
+@app.command("cli-hooks-codex")
+def cli_hooks_codex_cmd(
+    codex_config: Optional[Path] = typer.Option(
+        None, "--codex-config", help="Override the Codex config.toml path."
+    ),
+) -> None:
+    """Wire only the Codex SessionStart hook."""
+    _install_cli_hooks(
+        codex=True,
+        gemini=False,
+        gemini_settings=None,
+        codex_config=codex_config,
+    )
+
+
+def _install_cli_hooks(
+    *,
+    codex: bool,
+    gemini: bool,
+    gemini_settings: Optional[Path],
+    codex_config: Optional[Path],
+) -> None:
     import os
 
     from fno.setup.cli_hooks import install_codex_hook, install_gemini_hook

@@ -1,51 +1,98 @@
 # Codex Provider Guide
 
-This repository is a Claude marketplace project with a Codex adapter layer.
+footnote ships a native Codex plugin plus a local-development fallback.
 
-## What works in Codex
+## Native Quick Start
 
-- Canonical plugin skills via generated symlinks in `.agents/skills`
-- Shared automation scripts under `scripts/` and `plugins/*/scripts`
-- Shared custom agents in `.codex/agents/`:
-  - `archer`
-  - `reviewer`
-  - `roadmap-generator`
-  - `verifier`
+The repo carries a local Codex marketplace fixture at `.agents/plugins/marketplace.json`.
+It points at this checkout and exposes `.codex-plugin/plugin.json`.
 
-## Quick start
+```bash
+codex plugin marketplace add .agents/plugins
+```
+
+Then install `fno` from that marketplace in the Codex app. The plugin manifest exposes:
+
+- skills from `skills/`
+- a plugin-bundled `SessionStart` hook through `hooks/codex-hooks.json`
+- project custom agents from tracked `.codex/agents/*.toml`
+
+Codex treats plugin hooks as untrusted until you approve them. Approve the footnote
+`SessionStart` hook when prompted; it injects project vision, `fno whoami`, worktree
+hygiene, and setup nudges through `hookSpecificOutput.additionalContext`.
+
+## Codex App Worktrees
+
+Codex app worktrees are managed under `$CODEX_HOME/worktrees` and start from tracked
+files in the selected Git branch. That is why `.codex/agents/*.toml`,
+`.codex-plugin/plugin.json`, `hooks/codex-hooks.json`, and
+`.agents/plugins/marketplace.json` are committed.
+
+Use the Codex app Worktree mode for background tasks. When a worktree needs a branch
+and PR, use **Create branch here** in the app, then push and open the PR. Use Handoff
+when you want to move the thread and code between Local and a Codex-managed worktree.
+
+footnote's CLI-created worktrees under `~/conductor/workspaces/` are still used by
+`/fno:target` and background dispatch. They are separate from Codex app managed
+worktrees.
+
+## Local-Development Fallback
+
+For older Codex builds or CLI-only sessions where plugin-bundled hooks are unavailable,
+wire the SessionStart hook into user config:
+
+```bash
+fno setup cli-hooks-codex
+```
+
+The compatibility command remains available:
+
+```bash
+fno setup cli-hooks --no-gemini
+```
+
+For dev-only skill symlinks:
 
 ```bash
 ./scripts/setup.sh --provider codex
-./scripts/doctor.sh
 ```
 
-Then start Codex from this repository root so `.agents/skills` is in scope.
+This populates `.agents/skills/plugin--fno--*` without replacing the native plugin
+marketplace fixture.
 
-## Native lifecycle hooks
+## Custom Agents
 
-Codex now exposes native lifecycle hooks (`SessionStart`, `Stop`, `PreToolUse`, etc.) in `~/.codex/config.toml`. footnote's SessionStart context hook (project vision, `fno whoami`, worktree hygiene, and the first-run setup nudge) is the same `hooks/session-start.sh` wrapper Claude Code and Gemini use; it emits the unified `hookSpecificOutput.additionalContext` contract all three CLIs share.
-
-Install it into your Codex config:
+Codex reads project custom agents recursively from `.codex/agents/*.toml`. Those files
+are generated from canonical `agents/*.md` definitions:
 
 ```bash
-fno setup cli-hooks             # writes ~/.codex/config.toml (and ~/.gemini/settings.json)
-fno setup cli-hooks --no-gemini # Codex only
+python scripts/sync-codex-agents.py
+python scripts/sync-codex-agents.py --check
 ```
 
-The writer is idempotent, backs up `config.toml` first, and never clobbers your other hooks. **Codex treats a newly added hook as untrusted**, so after installing you must approve the footnote SessionStart hook in Codex before it runs.
+Run the generator after changing `agents/*.md`. The check mode fails when generated
+Codex agents are missing, stale, or no longer parse as TOML.
 
-### Soft-hook checkpoints (legacy)
+## Target Loop Hooks
 
-The older skill-invoked checkpoints still exist for environments without native hooks:
+Custom agents and target loop hooks are separate surfaces. The files under
+`.codex/agents/` make footnote's specialist agents available to Codex; they do not
+make `/fno:target` continue autonomously.
 
-- `scripts/hooks/session-start.sh`
-- `scripts/hooks/pre-compact.sh`
-- `scripts/hooks/pre-tool-use.sh`
-- `scripts/hooks/session-end.sh`
+Target continuation is driven by hook events. `hooks/codex-hooks.json` wires the
+Codex-supported subset needed for target loops: `Stop` for
+`hooks/target-stop-hook.sh` (`fno-agents loop-check` + `finalize`), `PostToolUse`
+for claim heartbeat/context monitoring, compact handoff hooks, subagent guards,
+and the PreToolUse state/git protection guards.
 
-## Dependency model
+Do not copy the full Claude hook manifest into Codex. Codex does not support every
+Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
+`FileChanged`, `SessionEnd`, and `StopFailure` are intentionally excluded here.
+
+## Dependency Model
 
 Core dependencies:
+
 - `bash`
 - `git`
 - `gh`
