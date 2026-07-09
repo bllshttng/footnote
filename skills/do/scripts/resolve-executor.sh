@@ -30,6 +30,11 @@ TASK_EXEC="${TASK_EXEC:-}"
 PLAN_EXEC="${PLAN_EXEC:-}"
 TASK_FILES="${TASK_FILES:-}"
 AUTO_ROUTE_FRONTEND="${AUTO_ROUTE_FRONTEND:-true}"
+# Attribution for the executor_resolved telemetry event (x-64cb); both are
+# best-effort - empty when the caller does not set them, and the event still
+# emits with empty strings.
+TASK_ID="${TASK_ID:-}"
+PLAN_PATH="${PLAN_PATH:-}"
 
 # KNOWN_EXECUTORS holds canonical names only. Aliases are normalized before
 # the validation check (normalize_alias runs first), so adding an alias
@@ -58,9 +63,49 @@ is_falsey() {
     esac
 }
 
+# Best-effort telemetry: record the resolution decision so `fno backlog triage
+# health` can fold routing-tier metrics. NEVER changes routing - stdout carries
+# only the resolved value (echoed before this runs), and fno's own output is
+# swallowed so it cannot corrupt that contract. On a missing/failing `fno` we
+# print one stderr note and move on (AC5-ERR).
+emit_resolution() {
+    local resolved="$1" tier="$2" warn_bool="$3"
+    if ! command -v fno >/dev/null 2>&1; then
+        echo "resolve-executor: note: fno unavailable, skipped executor_resolved emit" >&2
+        return 0
+    fi
+    local esc_task esc_plan esc_val
+    esc_task="$(json_escape "$TASK_ID")"
+    esc_plan="$(json_escape "$PLAN_PATH")"
+    esc_val="$(json_escape "$resolved")"
+    local data
+    data="$(printf '{"task":"%s","plan_path":"%s","resolved":"%s","tier":"%s","warn_fallback":%s}' \
+        "$esc_task" "$esc_plan" "$esc_val" "$tier" "$warn_bool")"
+    if ! fno event emit -t executor_resolved -d "$data" >/dev/null 2>&1; then
+        echo "resolve-executor: note: executor_resolved emit failed (non-fatal)" >&2
+    fi
+}
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+tier_for() {
+    case "$1" in
+        task) echo "task-block" ;;
+        plan) echo "plan-frontmatter" ;;
+        inference) echo "surface-inference" ;;
+        *) echo "default" ;;
+    esac
+}
+
 resolve() {
     local source=""
     local value=""
+    local warn_fired=0
 
     if [[ -n "$TASK_EXEC" ]]; then
         source="task"
@@ -99,10 +144,17 @@ resolve() {
     if ! is_known_executor "$value"; then
         echo "resolve-executor: WARN: unknown executor '$value' from $source - falling closed to 'do'" >&2
         value="do"
+        warn_fired=1
     fi
 
     echo "$value"
     echo "resolve-executor: resolved=$value source=$source" >&2
+
+    # Emit AFTER the stdout/stderr contract is satisfied so telemetry can never
+    # alter the resolved value or the resolver's diagnostics.
+    local warn_bool="false"
+    [[ "$warn_fired" -eq 1 ]] && warn_bool="true"
+    emit_resolution "$value" "$(tier_for "$source")" "$warn_bool"
 }
 
 resolve

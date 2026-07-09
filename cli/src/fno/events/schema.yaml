@@ -2337,6 +2337,52 @@ event_types:
           description: "PR-less dedup bucket (reason:session:day) for a spawn-cap/manual escape with no `pr`. Collapses a looped intervention to one count (x-91b5); not consumed by retro (optional)."
     consumers: [fno retro run]
 
+  - name: executor_resolved
+    description: "The /do three-tier executor resolver (skills/do/scripts/resolve-executor.sh) decided a task's executor. Best-effort telemetry: routing is byte-identical whether or not this emits (x-64cb). Folded into `fno backlog triage health` as tier distribution + inference share + warn-fallback count + override-after-inference rate."
+    sources: [target, test]
+    data:
+      required: [resolved, tier]
+      properties:
+        task:
+          type: string
+          description: "Task id being resolved (e.g. '1.2'); empty when the caller did not pass TASK_ID."
+        plan_path:
+          type: string
+          description: "Plan the task belongs to; empty when the caller did not pass PLAN_PATH."
+        resolved:
+          type: string
+          description: "The resolved executor name (do | impeccable) after alias-normalization and the fail-closed check."
+        tier:
+          type: string
+          enum: [task-block, plan-frontmatter, surface-inference, default]
+          description: "Which resolution tier decided (documented contract; producer is a fixed case in resolve-executor.sh)."
+        warn_fallback:
+          type: boolean
+          description: "True when an unknown executor triggered the WARN fail-closed to 'do'."
+    consumers: [fno backlog triage health]
+
+  - name: triage_applied
+    description: "A `fno backlog triage apply` mutation committed to the graph. Best-effort telemetry emitted after locked_mutate_graph (x-64cb): triage semantics are unchanged whether or not this emits. Makes _validate_proposal's silent drops a first-class number. Folded into `fno backlog triage health` as per-category apply counts + validation drop rate."
+    sources: [backlog, target, test]
+    data:
+      required: [applied, proposed, dropped]
+      properties:
+        applied:
+          type: object
+          description: "Per-category applied counts: priority_changes, dependencies, duplicates_flagged, deferred."
+        priority_moves:
+          type: array
+          description: "Per-node priority transitions [{id, from, to}] that landed."
+          items:
+            type: object
+        proposed:
+          type: integer
+          description: "Total proposal entries seen across all categories (the drop-rate denominator)."
+        dropped:
+          type: integer
+          description: "Entries dropped by _validate_proposal (unknown id, cycle, invalid priority, missing reason). Today's silent fail-open becomes a visible number."
+    consumers: [fno backlog triage health]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:
