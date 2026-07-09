@@ -1976,11 +1976,10 @@ enum PaneState {
     Idle,
 }
 
-/// Derive a [`PaneState`] from an agent's badge and whether its output has been
-/// seen. The seen bit is x-4328's deliverable; until it lands `pane_state` is
-/// called with `seen=false`, so every `Done` reads as `DoneUnseen` (a
-/// finished-but-unviewed agent stays surfaced) - the single seam x-4328 wires
-/// the real bit into.
+/// Derive a [`PaneState`] from an agent's badge and whether its output has
+/// been seen (x-4328's `AgentRow.seen`, server-owned): a `Done` badge folds
+/// to `Idle` once seen, else `DoneUnseen` (a finished-but-unviewed agent
+/// stays surfaced).
 fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
     match badge {
         Some(AgentBadge::Blocked) => PaneState::Blocked,
@@ -2017,13 +2016,14 @@ struct NavRow {
 }
 
 /// The navigator state of an agent row: an exited pane reads `Idle` (finished,
-/// nothing to act on); otherwise derive from the badge. The seen bit is not yet
-/// wired (x-4328), so a live `Done` reads `DoneUnseen`.
+/// nothing to act on); otherwise derive from the badge + the server-owned
+/// seen bit (x-4328): a looked-at `Done` reads `Idle`, an unseen one
+/// `DoneUnseen`.
 fn nav_agent_state(a: &AgentRow) -> PaneState {
     if a.exited {
         PaneState::Idle
     } else {
-        pane_state(a.badge, false)
+        pane_state(a.badge, a.seen)
     }
 }
 
@@ -4029,6 +4029,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            seen: false,
         };
         assert!(
             matches!(agent_hit(&hosted), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
@@ -4737,6 +4738,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            seen: false,
         };
         // A watch-only bg row with a claude jobId: a click attaches it.
         let bg_attach = AgentRow {
@@ -4749,6 +4751,7 @@ mod tests {
             answerable: None,
             attach_id: Some("c19cd2c3".into()),
             external: false,
+            seen: false,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -4761,6 +4764,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            seen: false,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // display order: squad 1 (row1), its 2 tabs (rows2-3), its agent
@@ -4795,6 +4799,7 @@ mod tests {
                 answerable: None,
                 attach_id: None,
                 external: false,
+                seen: false,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -5040,6 +5045,7 @@ mod tests {
                     answerable: None,
                     attach_id: None,
                     external: false,
+                    seen: false,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -5051,6 +5057,7 @@ mod tests {
                     answerable: None,
                     attach_id: None,
                     external: false,
+                    seen: false,
                 },
                 AgentRow {
                     squad: None,
@@ -5062,6 +5069,7 @@ mod tests {
                     answerable: None,
                     attach_id: None,
                     external: false,
+                    seen: false,
                 },
             ],
             focus_node: None,
@@ -5225,6 +5233,7 @@ mod tests {
                     answerable: None,
                     attach_id: None,
                     external: false,
+                    seen: false,
                 },
                 AgentRow {
                     squad: None,
@@ -5236,6 +5245,7 @@ mod tests {
                     answerable: None,
                     attach_id: Some("ab12cd34".into()),
                     external: true,
+                    seen: false,
                 },
                 AgentRow {
                     squad: None,
@@ -5247,6 +5257,7 @@ mod tests {
                     answerable: None,
                     attach_id: None,
                     external: false,
+                    seen: false,
                 },
             ],
             focus_node: None,
@@ -5495,6 +5506,7 @@ mod tests {
             answerable: None,
             attach_id: attach_id.map(Into::into),
             external: false,
+            seen: false,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -5773,6 +5785,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            seen: false,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -5793,6 +5806,46 @@ mod tests {
             1,
             "[blocked] excludes the Idle squad/tab rows"
         );
+    }
+
+    #[test]
+    fn nav_rows_fold_done_through_the_seen_bit() {
+        // AC1-HP/AC2-HP (x-4328), at the navigator seam: a seen Done row
+        // folds to Idle (the unseen glyph clears); an unseen Done row stays
+        // DoneUnseen (surfaced) - `nav_agent_state` must forward `a.seen`,
+        // not hardcode it.
+        let mut v = two_pane_view();
+        v.layout.agents = vec![
+            AgentRow {
+                squad: Some(2),
+                name: "finished-seen".into(),
+                pane_id: Some(9),
+                badge: Some(AgentBadge::Done),
+                reason: None,
+                exited: false,
+                answerable: None,
+                attach_id: None,
+                external: false,
+                seen: true,
+            },
+            AgentRow {
+                squad: Some(2),
+                name: "finished-unseen".into(),
+                pane_id: Some(10),
+                badge: Some(AgentBadge::Done),
+                reason: None,
+                exited: false,
+                answerable: None,
+                attach_id: None,
+                external: false,
+                seen: false,
+            },
+        ];
+        let rows = v.nav_rows();
+        let seen_row = rows.iter().find(|r| r.label.ends_with("finished-seen"));
+        let unseen_row = rows.iter().find(|r| r.label.ends_with("finished-unseen"));
+        assert_eq!(seen_row.map(|r| r.state), Some(PaneState::Idle));
+        assert_eq!(unseen_row.map(|r| r.state), Some(PaneState::DoneUnseen));
     }
 
     #[test]
@@ -5861,6 +5914,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            seen: false,
         }];
         let idx = v
             .nav_rows()
@@ -6028,6 +6082,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            seen: false,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -6177,6 +6232,7 @@ mod tests {
             answerable: ans,
             attach_id: None,
             external: false,
+            seen: false,
         }
     }
 
