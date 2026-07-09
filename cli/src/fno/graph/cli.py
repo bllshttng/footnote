@@ -5693,26 +5693,25 @@ def cmd_find(
     entries = read_graph(_graph_path())
     q = (query or "").strip()
 
-    # Exact resolution first (id / slug / bare-hex). Trying resolve_node BEFORE
-    # the ab- prefix branch is deliberate: a title can slugify to an `ab-`-led
-    # slug (e.g. "AB test cleanup" -> `ab-test-cleanup`), which resolve_id would
-    # reject as a malformed id; the exact-slug tier catches it so `find` and
-    # `get` resolve the same slug (codex P2).
-    node = resolve_node(query, entries)
-    if node.kind == "exact":
-        matched: list[dict] = list(node.candidates)
-    elif q.startswith("ab-"):
-        # Canonical id / id-prefix path - unchanged (resolve_id owns it).
-        match = resolve_id(query, entries)
-        if match.kind == "ambiguous":
-            matched = list(match.candidates)
-        elif match.kind in {"exact", "fuzzy", "branch_derived"}:
-            matched = [e for e in entries if e.get("id") == match.id]
-        else:
-            matched = []
-    else:
+    def _resolve_against(pool: list[dict]) -> list[dict]:
+        # Exact resolution first (id / slug / bare-hex). Trying resolve_node
+        # BEFORE the ab- prefix branch is deliberate: a title can slugify to an
+        # `ab-`-led slug (e.g. "AB test cleanup" -> `ab-test-cleanup`), which
+        # resolve_id would reject as a malformed id; the exact-slug tier catches
+        # it so `find` and `get` resolve the same slug (codex P2).
+        node = resolve_node(query, pool)
+        if node.kind == "exact":
+            return list(node.candidates)
+        if q.startswith("ab-"):
+            # Canonical id / id-prefix path - unchanged (resolve_id owns it).
+            match = resolve_id(query, pool)
+            if match.kind == "ambiguous":
+                return list(match.candidates)
+            if match.kind in {"exact", "fuzzy", "branch_derived"}:
+                return [e for e in pool if e.get("id") == match.id]
+            return []
         # High-recall describe-it search over title+slug+details.
-        matched = search_entries(query, entries, fields=("title", "slug", "details"))
+        return search_entries(query, pool, fields=("title", "slug", "details"))
 
     def _passes_filters(e: dict) -> bool:
         if domain is not None and e.get("domain") != domain:
@@ -5723,7 +5722,27 @@ def cmd_find(
             return False
         return True
 
-    matched = [e for e in matched if _passes_filters(e)]
+    matched = [e for e in _resolve_against(entries) if _passes_filters(e)]
+
+    # Read-through fallback to the archive: a node the sweep drained out of the
+    # working graph must still surface here, or archiving done nodes silently
+    # destroys the dedup recall `/think` + `/blueprint` depend on. Mirrors
+    # `backlog get`'s fallback: working graph first, archive read lazily only on
+    # a miss, results stamped `_archived`. A corrupt/absent archive is a miss,
+    # never a crash (design "Errors").
+    if not matched:
+        from fno.paths import graph_archive_json
+
+        archive_path = graph_archive_json()
+        if archive_path.exists():
+            try:
+                archived = read_graph(archive_path)
+            except Exception:
+                archived = []
+            for e in _resolve_against(archived):
+                if _passes_filters(e):
+                    e["_archived"] = True
+                    matched.append(e)
 
     if not matched:
         typer.echo(f"fno find: no matches for {query!r}", err=True)

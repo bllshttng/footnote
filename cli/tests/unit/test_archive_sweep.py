@@ -137,6 +137,37 @@ def test_get_missing_everywhere_exits_1(tmp_path, monkeypatch):
     assert r.exit_code == 1
 
 
+def test_find_read_through_resolves_archived_node(tmp_path, monkeypatch):
+    """AC1-UI: the dedup path must still surface an archived node (stamped
+    _archived), or archiving done nodes silently destroys /think + /blueprint
+    recall against everything ever shipped."""
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])  # working graph empty
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-arch0001", "slug": "old-archived-feature",
+         "title": "Old Archived Feature", "domain": "code",
+         "completed_at": "2026-01-01T00:00:00Z"}
+    ]}) + "\n")
+
+    r = runner.invoke(app, ["backlog", "find", "Archived Feature", "--json"])
+    assert r.exit_code == 0, r.output
+    hits = json.loads(r.output)
+    assert [h["id"] for h in hits] == ["ab-arch0001"]
+    assert hits[0]["_archived"] is True
+
+
+def test_find_corrupt_archive_is_miss_not_crash(tmp_path, monkeypatch):
+    """AC1-ERR: a corrupt graph-archive.json is a miss (fall through to exit-1),
+    never a crash propagated to the caller."""
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])  # working graph empty
+    archive.write_text("{not json at all")
+
+    r = runner.invoke(app, ["backlog", "find", "anything", "--json"])
+    assert r.exit_code == 1
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
 def test_roadmap_archive_guards_across_roadmaps(tmp_path, monkeypatch):
     """A --roadmap-id sweep must not archive a done node still referenced by an
     OPEN node in a DIFFERENT roadmap (codex P2: guard the full graph)."""
