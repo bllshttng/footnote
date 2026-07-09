@@ -15,6 +15,7 @@ from fno.scoreboard.fold import (
     BrokenLedger,
     build_calibration,
     build_efficiency,
+    build_plan_fidelity,
     build_scoreboard,
     build_skill_scoreboard,
     load_ledger_rows,
@@ -54,13 +55,23 @@ def scoreboard_command(
             "process, not just the terminal state."
         ),
     ),
+    plan_fidelity: bool = typer.Option(
+        False,
+        "--plan-fidelity",
+        help=(
+            "Plan-fidelity graders: join each planning thread's plan doc to its "
+            "delivery (PR diff + SUMMARY.md) and score AC-coverage, scope-drift, "
+            "and data-model-surprise. Grades PLANNING quality; an unimplemented "
+            "plan is reported `unjoined`, never scored 0%."
+        ),
+    ),
 ) -> None:
     """Fold ledger + events + graph into a stop-cause / spend / autonomy /
     survival scoreboard, with a mandatory coverage line."""
     if since < 1:
         raise typer.BadParameter("--since must be at least 1 (days).")
     # The view flags are mutually exclusive: each renders a different fold.
-    _views = [f for f, on in (("--calibration", calibration), ("--by-skill", by_skill), ("--efficiency", efficiency)) if on]
+    _views = [f for f, on in (("--calibration", calibration), ("--by-skill", by_skill), ("--efficiency", efficiency), ("--plan-fidelity", plan_fidelity)) if on]
     if len(_views) > 1:
         raise typer.BadParameter(f"{' and '.join(_views)} are mutually exclusive views; pick one.")
     from fno import paths as _paths
@@ -114,6 +125,19 @@ def scoreboard_command(
             typer.echo(_json.dumps(eff, indent=2))
             return
         _render_efficiency(eff)
+        return
+
+    if plan_fidelity:
+        pf = build_plan_fidelity(
+            rows,
+            read_graph_nodes(graph_path),
+            since_days=since,
+            now=datetime.now(),
+        )
+        if json_out:
+            typer.echo(_json.dumps(pf, indent=2))
+            return
+        _render_plan_fidelity(pf)
         return
 
     touch_events = read_jsonl_events(events_paths, {"human_touch"})
@@ -210,11 +234,42 @@ def _render_efficiency(eff: dict) -> None:
             f"{_fmt(b['median_tokens']):>10}{_fmt(b['median_fires']):>11}{_fmt(b['median_duration_min']):>9}\n"
         )
 
+    pvb = eff.get("plan_vs_build_cost") or {}
+    if pvb:
+        out("\nPlan vs build cost per node\n")
+        out(f"  {'node':<14}{'plan$':>10}{'build$':>10}\n")
+        for nid, c in sorted(pvb.items(), key=lambda kv: -kv[1]["plan_usd"]):
+            out(f"  {nid:<14}{c['plan_usd']:>10.2f}{c['build_usd']:>10.2f}\n")
+
     out("\nDistribution (rows with >=1 loop_check fire)\n")
     out(f"  {'metric':<18}{'median':>10}{'p90':>10}{'n':>6}\n")
     for metric in ("loop_fires", "ci_reds", "tokens_total", "duration_minutes"):
         d = eff["distribution"][metric]
         out(f"  {metric:<18}{_fmt(d['median']):>10}{_fmt(d['p90']):>10}{d['n']:>6}\n")
+
+
+def _render_plan_fidelity(pf: dict) -> None:
+    out = sys.stdout.write
+    win = pf["since_days"]
+    if pf["state"] == "no_data":
+        out(f"fno scoreboard --plan-fidelity (last {win}d)\n\n  no terminal sessions in window.\n")
+        return
+    cov = pf["coverage"]
+    out(f"fno scoreboard --plan-fidelity (last {win}d)\n\n")
+    out(f"  {cov['planned_rows']} planned row(s), {cov['joined_pct']}% joined to a delivery.\n\n")
+    for r in pf["results"]:
+        if r["status"] == "unjoined":
+            out(f"  {r.get('session_id') or '?':<24} unjoined (plan not yet delivered)\n")
+            continue
+        ac = r["ac_coverage"]
+        ac_s = f"{ac['verified']}/{ac['total']} ({ac['pct']}%)" if ac else "n/a"
+        dm = _fmt(r["data_model_surprise"])
+        drift = len(r["scope_drift"]["unplanned"]) if r["scope_drift"] else "n/a"
+        out(
+            f"  {r.get('session_id') or '?':<24} PR#{r.get('pr_number') or '?'} "
+            f"AC {ac_s} | drift {drift} | data-model-surprise {dm} | "
+            f"deviations {_fmt(r['deviation_load'])} | outcome {r.get('outcome') or 'n/a'}\n"
+        )
 
 
 def _render_by_skill(sb: dict) -> None:

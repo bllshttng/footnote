@@ -36,6 +36,14 @@ pub enum TerminationReason {
     /// marks the node done - a human merge then the out-of-band-merge reconcile
     /// path closes it, and DonePRGreen always wins when observable.
     DoneAwaitingMerge,
+    /// A plan-only thread reached the plan boundary cleanly (manifest `planned`
+    /// flag + a promise). It produced planning output, not a delivery, so it is
+    /// terminal but deliberately NOT a ship reason (out of finalize.SHIP_REASONS
+    /// -> no plan stamp/graduate) and NOT a postmortem reason (a plan is not
+    /// stuck). Benign like NoWork; distinct from DoneAdvisory, which DOES
+    /// graduate. The scoreboard's `planned` bucket is keyed on the phase set,
+    /// never on this terminal.
+    DonePlanned,
     NoWork,
     Budget,
     NoProgress,
@@ -66,6 +74,9 @@ struct Manifest {
     no_external: bool,
     /// batch-lane member: commits ship via the batch PR, not a per-node PR.
     batched: bool,
+    /// plan-only thread: reaches the plan boundary and terminates DonePlanned
+    /// (not DoneAdvisory, which would graduate the plan).
+    planned: bool,
     legacy_status: Option<String>, // COMPLETE | BLOCKED | ABORTED
     /// None = absent (unlimited). Some(Ok(v)) = valid cap. Some(Err(s)) = malformed raw value.
     budget_wall_clock_cap_minutes: Option<Result<u64, String>>,
@@ -83,6 +94,7 @@ impl Default for Manifest {
             no_ship: false,
             no_external: false,
             batched: false,
+            planned: false,
             legacy_status: None,
             budget_wall_clock_cap_minutes: None, // None = absent = unlimited
             budget_cost_cap_usd: None,           // None = absent = unlimited
@@ -141,6 +153,7 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
                 "no_ship" => m.no_ship = v == "true",
                 "no_external" => m.no_external = v == "true",
                 "batched" => m.batched = v == "true",
+                "planned" => m.planned = v == "true",
                 "status" => {
                     let upper = v.to_uppercase();
                     if matches!(upper.as_str(), "COMPLETE" | "BLOCKED" | "ABORTED") {
@@ -2853,6 +2866,47 @@ pub fn decide(args: &[String]) -> (i32, String) {
             );
         }
 
+        // Plan-only unit: a plan-only thread reached the plan boundary. Checked
+        // BEFORE the advisory unit because DoneAdvisory is a ship reason (it
+        // graduates the plan) and a plan-only thread must not graduate its own
+        // plan. DonePlanned is benign: not a ship reason, not a postmortem.
+        if manifest.planned && intent == Intent::Promise {
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "DonePlanned",
+                    "message": "promise in plan-only unit"
+                }),
+            );
+            emit(
+                "loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "fingerprint": fingerprint,
+                    "fires": this_fire,
+                    "consecutive_unchanged": consecutive_after,
+                    "decision": "allow",
+                    "intent": "promise",
+                    "intent_source": intent_source,
+                    "pr_state": fp_pr_state.as_str(),
+                    "ci": fp_ci.render(),
+                    "reviewed": true,
+                    "fp_read_failed": fp_read_failed
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::DonePlanned),
+                    "promise + plan-only unit; done",
+                    this_fire,
+                    Some(fingerprint),
+                ),
+            );
+        }
+
         // Advisory unit (no_ship or manifest advisory)
         if (manifest.no_ship || manifest.advisory) && intent == Intent::Promise {
             emit(
@@ -3488,6 +3542,14 @@ mod tests {
         let m = parse_manifest(content).unwrap();
         assert!(m.no_ship);
         assert!(!m.no_external);
+    }
+
+    #[test]
+    fn parse_manifest_planned() {
+        let content = "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nplanned: true\n---\n";
+        let m = parse_manifest(content).unwrap();
+        assert!(m.planned);
+        assert!(!m.advisory); // planned is distinct from advisory (which graduates)
     }
 
     #[test]
