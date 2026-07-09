@@ -146,7 +146,13 @@ def _dispatch_think(node_id: str, cwd: Optional[str]) -> bool:
     except Exception as exc:  # noqa: BLE001 - dispatch failure is never fatal
         _LOG.debug("keep_going: think dispatch failed for %s: %s", node_id, exc)
         return False
-    return proc.returncode == 0
+    if proc.returncode != 0:
+        # exit 1 is an expected skip (dedup/cap/no-origin); exit 2 is bad input.
+        # Log the reason (else the stderr is discarded) - the node stays filed.
+        _LOG.debug("keep_going: think dispatch for %s exited %d: %s",
+                   node_id, proc.returncode, (proc.stderr or "").strip()[:200])
+        return False
+    return True
 
 
 def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
@@ -170,6 +176,8 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
         _LOG.debug("keep_going: target spawn failed for %s: %s", node_id, exc)
         return False
     if proc.returncode != 0:
+        _LOG.debug("keep_going: target spawn for %s exited %d: %s",
+                   node_id, proc.returncode, (proc.stderr or "").strip()[:200])
         return False
     return bool(_parse_short_id(proc.stdout or ""))
 

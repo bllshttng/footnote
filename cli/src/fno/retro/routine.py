@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from fno.retro.keep_going import FollowupResult
 
 from fno.retro import harvest as _harvest
 from fno.retro.classify import (
@@ -51,7 +54,7 @@ class TriageReport:
     # landed carve-out node the engine classified (think/build dispatched, or
     # file-only / capped). Empty unless the engine ran (autonomous mode +
     # config.keep_going.enabled).
-    followups: list = field(default_factory=list)
+    followups: "list[FollowupResult]" = field(default_factory=list)
 
     @property
     def partial(self) -> bool:
