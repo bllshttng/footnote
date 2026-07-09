@@ -39,11 +39,12 @@ def _stub_signals(
     cargo_bin_present: bool = False,
     deployed_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
     source_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
-    content_drift: int | None = None,
+    content_drift: int | None = 0,
 ) -> None:
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
-    # Content-drift ground truth (default: check skipped) so existing tests stay
-    # hermetic and never hash the real installed package; drift tests set it.
+    # Content-drift ground truth. Default 0 = "check ran, byte-identical" so a
+    # fresh-marker test stays fresh; drift/indeterminate tests set >0 or None.
+    # Never hashes the real installed package (hermetic).
     monkeypatch.setattr(doctor, "_python_content_drift", lambda source: content_drift)
     monkeypatch.setattr(doctor, "_source_rev", lambda source: source_rev)
     monkeypatch.setattr(doctor, "_read_marker", lambda: marker)
@@ -1420,23 +1421,44 @@ def test_content_drift_zero_stays_fresh(monkeypatch: pytest.MonkeyPatch) -> None
     assert "up to date" in result.stdout
 
 
-def test_content_drift_none_does_not_affect_verdict(
+def test_content_indeterminate_downgrades_fresh_to_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An undeterminable content check (None) degrades to skip, never crying wolf."""
+    """An undeterminable content check (None) must NOT leave a marker-only fresh
+    standing: the marker can lie about a cache-hit reinstall, so downgrade to
+    unknown. It never flips to stale (no positive drift proven)."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",  # marker matches -> rev check alone would say fresh
+        capture_present="present",
+        content_drift=None,  # but the ground-truth check could not run
+    )
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "unknown"
+    assert payload["content_stale"] is False
+    assert payload["content_indeterminate"] is True
+    assert payload["content_drift_count"] is None
+
+
+def test_content_indeterminate_does_not_downgrade_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A None content check only touches a would-be fresh; a verdict already proven
+    stale by another signal (a missing verb) stays stale, not unknown."""
     _stub_signals(
         monkeypatch,
         src=Path("/src"),
         source_rev="abc123",
         marker="abc123",
-        capture_present="present",
+        capture_present="missing",  # proves stale independently
         content_drift=None,
     )
     result = runner.invoke(app, ["doctor", "--json"])
     payload = json.loads(result.stdout)
-    assert payload["status"] == "fresh"
-    assert payload["content_stale"] is False
-    assert payload["content_drift_count"] is None
+    assert payload["status"] == "stale"
 
 
 def test_python_content_drift_counts_differing_py_files(tmp_path: Path) -> None:

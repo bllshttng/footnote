@@ -728,7 +728,7 @@ def _verdict(
     cargo_bin_present: bool = False,
     deployed_config_keys: Optional[frozenset[str]] = None,
     source_config_keys: Optional[frozenset[str]] = None,
-    content_drift_count: Optional[int] = None,
+    content_drift_count: Optional[int] = 0,
 ) -> dict[str, Any]:
     """Pure verdict function (no I/O) returning the complete JSON-serializable
     result, so the decision matrix is unit-testable and the output contract is
@@ -786,6 +786,21 @@ def _verdict(
         python_stale = True
         status = "stale"
 
+    # If the authoritative content check could not run, a "fresh" verdict would
+    # rest only on the installed-rev marker - the signal that lies about a
+    # cache-hit reinstall. Downgrade to unknown rather than assert a marker-only
+    # fresh (the module's never-claim-false-fresh rule). Only bites the rare
+    # resolved-source-but-unreadable-bytes case: a source-absent install is
+    # already unknown, and a normal install yields a count (0 or N), never None.
+    # Unlike config-schema drift (a supplementary check that skips on None), the
+    # content signal is authoritative, so its absence is not neutral for a fresh.
+    # The param DEFAULTS to 0 (no content concern) so a caller uninterested in
+    # content is neutral; an EXPLICIT None means _python_content_drift genuinely
+    # could not run - only that downgrades.
+    content_indeterminate = content_drift_count is None
+    if content_indeterminate and status == "fresh":
+        status = "unknown"
+
     # Rust staleness: requires full evidence. Partial evidence is never stale.
     rust_stale = (
         cargo_bin_present
@@ -804,6 +819,7 @@ def _verdict(
         "rust_stale": rust_stale,
         "content_stale": content_stale,
         "content_drift_count": content_drift_count,
+        "content_indeterminate": content_indeterminate,
         "missing_verbs": missing_verbs,
         "missing_config_keys": missing_config_keys,
         "source_rev": source_rev,
@@ -876,6 +892,17 @@ def _emit_human(
                 f"(installed {ri[:12]} != source {rs[:12]}). "
                 "Run fno update (or fno doctor --fix)."
             )
+    elif (
+        result.get("content_indeterminate")
+        and result.get("installed_rev") is not None
+        and result.get("installed_rev") == result.get("source_rev")
+    ):
+        out(
+            "fno doctor: status unknown - the installed-rev marker matches HEAD, but the "
+            "content check could not read the installed/source .py bytes to confirm it (the "
+            "marker alone can lie about a cache-hit reinstall). Check file permissions, or "
+            "run `fno update` to be safe."
+        )
     elif src is None:
         out("fno doctor: status unknown (no source checkout to compare against).")
     else:
