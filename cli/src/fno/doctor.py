@@ -41,6 +41,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1019,6 +1020,106 @@ def _emit_human(
 # ---------------------------------------------------------------------------
 
 
+def _codex_hooks_report() -> dict[str, Any]:
+    """Inspect Codex's user-level hook layers without running doctor collectors."""
+    from fno.setup.cli_hooks import inspect_codex_hooks
+
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    config_path = codex_home / "config.toml"
+    hooks_json_path = codex_home / "hooks.json"
+    diagnostics = inspect_codex_hooks(
+        config_path=config_path,
+        hooks_json_path=hooks_json_path,
+    )
+    toml_wired = bool(diagnostics.toml_footnote_commands)
+    toml_trusted = diagnostics.all_toml_footnote_hooks_trusted
+    toml_trust = dict(
+        zip(
+            diagnostics.toml_footnote_state_keys,
+            diagnostics.toml_footnote_trusted,
+            strict=True,
+        )
+    )
+    duplicate_layers = diagnostics.has_toml_hooks and diagnostics.has_json_hooks
+
+    if diagnostics.errors:
+        status = "error"
+    elif not toml_wired or not toml_trusted or diagnostics.has_json_hooks:
+        status = "warn"
+    else:
+        status = "ok"
+
+    return {
+        "status": status,
+        "preferred_layer": "config.toml",
+        "state": diagnostics.state,
+        "config_path": str(config_path),
+        "hooks_json_path": str(hooks_json_path),
+        "footnote_toml_wired": toml_wired,
+        "footnote_toml_trusted": toml_trusted,
+        "footnote_toml_trust": toml_trust,
+        "duplicate_layers": duplicate_layers,
+        "footnote_json_hooks": list(diagnostics.json_footnote_commands),
+        "foreign_json_hooks": list(diagnostics.json_foreign_commands),
+        "errors": list(diagnostics.errors),
+    }
+
+
+def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
+    """Render one summary plus actionable Codex hook diagnostics."""
+
+    def out(message: str) -> None:
+        typer.echo(message, err=err)
+
+    if result["footnote_toml_trusted"]:
+        trust = "trusted"
+    elif result["footnote_toml_wired"]:
+        trust = "missing"
+    else:
+        trust = "n/a"
+    out(
+        f"fno doctor: codex hooks: {result['status']} preferred=config.toml; "
+        f"footnote SessionStart={'wired' if result['footnote_toml_wired'] else 'missing'}; "
+        f"trust={trust}; layers={result['state']}."
+    )
+
+    for error in result["errors"]:
+        out(f"fno doctor: codex hooks: parse error: {error}")
+
+    for state_key, present in result["footnote_toml_trust"].items():
+        state = "found" if present else "missing"
+        out(f"fno doctor: codex hooks: trust state {state}: {state_key}")
+    if result["footnote_toml_wired"]:
+        if not result["footnote_toml_trusted"]:
+            out("fno doctor: codex hooks: approve the footnote SessionStart hook in Codex.")
+
+    if result["duplicate_layers"]:
+        out(
+            "fno doctor: codex hooks: loading hooks from both "
+            f"{result['hooks_json_path']} and {result['config_path']}; "
+            "config.toml is preferred."
+        )
+
+    if result["footnote_json_hooks"]:
+        out(
+            "fno doctor: codex hooks: run "
+            "`fno setup cli-hooks-codex --migrate-legacy-hooks-json` to remove only "
+            "footnote-owned legacy JSON hooks."
+        )
+
+    for command in result["foreign_json_hooks"]:
+        out(
+            "fno doctor: codex hooks: foreign legacy JSON hook preserved: "
+            f"{command}; manually consolidate it into {result['config_path']} if desired."
+        )
+
+    if not result["footnote_toml_wired"] and not result["errors"]:
+        command = "fno setup cli-hooks-codex"
+        if result["footnote_json_hooks"]:
+            command += " --migrate-legacy-hooks-json"
+        out(f"fno doctor: codex hooks: run `{command}` to wire the preferred TOML hook.")
+
+
 def doctor_command(
     fix: bool = typer.Option(
         False,
@@ -1043,15 +1144,31 @@ def doctor_command(
         "(opt-in; gracefully skips when ccusage is not installed). "
         "Exit 1 only on proven divergence.",
     ),
+    codex_hooks: bool = typer.Option(
+        False,
+        "--codex-hooks",
+        help="Inspect Codex user-level SessionStart hook layers and trust (advisory).",
+    ),
 ) -> None:
     """Report skew between the installed fno and its source checkout."""
-    from fno import update
+    if codex_hooks:
+        if fix or source is not None or cost_check:
+            raise typer.BadParameter("--codex-hooks may only be combined with --json")
+        result = _codex_hooks_report()
+        if json_out:
+            typer.echo(json.dumps(result))
+            _emit_codex_hooks_report(result, err=True)
+        else:
+            _emit_codex_hooks_report(result, err=False)
+        raise typer.Exit(0)
 
     if cost_check:
         # Dedicated mode: the staleness check stays network-free and
         # ccusage-free by default; this opt-in path never mixes its exit
         # semantics with the staleness verdict.
         raise typer.Exit(_cost_check())
+
+    from fno import update
 
     src = _resolve_source(source)
     source_rev = _source_rev(src) if src is not None else None

@@ -68,6 +68,8 @@ class CodexHookDiagnostics:
     json_footnote_commands: tuple[str, ...] = ()
     toml_foreign_commands: tuple[str, ...] = ()
     json_foreign_commands: tuple[str, ...] = ()
+    toml_footnote_state_keys: tuple[str, ...] = ()
+    toml_footnote_trusted: tuple[bool, ...] = ()
     errors: tuple[str, ...] = ()
 
     @property
@@ -77,6 +79,10 @@ class CodexHookDiagnostics:
     @property
     def has_json_hooks(self) -> bool:
         return bool(self.json_commands)
+
+    @property
+    def all_toml_footnote_hooks_trusted(self) -> bool:
+        return bool(self.toml_footnote_commands) and all(self.toml_footnote_trusted)
 
 
 def _backup(path: Path) -> Optional[Path]:
@@ -123,6 +129,18 @@ def _is_footnote_codex_command(command: str) -> bool:
 
 def _session_start_commands(data: Any, *, source: str) -> tuple[str, ...]:
     """Extract commands from the shared TOML/JSON SessionStart shape."""
+    return tuple(
+        command
+        for _group_index, _hook_index, command in _session_start_hook_records(
+            data, source=source
+        )
+    )
+
+
+def _session_start_hook_records(
+    data: Any, *, source: str
+) -> tuple[tuple[int, int, str], ...]:
+    """Extract ``(group index, hook index, command)`` SessionStart records."""
     if not isinstance(data, dict):
         raise ValueError(f"{source} root is not an object")
     hooks = data.get("hooks", {})
@@ -136,8 +154,8 @@ def _session_start_commands(data: Any, *, source: str) -> tuple[str, ...]:
     if not isinstance(groups, list):
         raise ValueError(f"{source} `hooks.SessionStart` is not an array")
 
-    commands: list[str] = []
-    for group in groups:
+    records: list[tuple[int, int, str]] = []
+    for group_index, group in enumerate(groups):
         if not isinstance(group, dict):
             raise ValueError(f"{source} SessionStart group is not an object")
         entries = group.get("hooks", [])
@@ -145,15 +163,36 @@ def _session_start_commands(data: Any, *, source: str) -> tuple[str, ...]:
             entries = []
         if not isinstance(entries, list):
             raise ValueError(f"{source} SessionStart `hooks` is not an array")
-        for hook in entries:
+        for hook_index, hook in enumerate(entries):
             if not isinstance(hook, dict):
                 raise ValueError(f"{source} SessionStart hook is not an object")
             command = hook.get("command")
             if command is not None and not isinstance(command, str):
                 raise ValueError(f"{source} SessionStart command is not a string")
             if command:
-                commands.append(command)
-    return tuple(commands)
+                records.append((group_index, hook_index, command))
+    return tuple(records)
+
+
+def _codex_hook_trust(
+    data: dict[str, Any],
+    *,
+    config_path: Path,
+    records: tuple[tuple[int, int, str], ...],
+) -> tuple[tuple[str, ...], tuple[bool, ...]]:
+    """Return Codex state keys and trust-entry presence for footnote hooks."""
+    hooks = data.get("hooks", {}) or {}
+    state = hooks.get("state", {}) or {}
+    if not isinstance(state, dict):
+        raise ValueError("config.toml `hooks.state` is not an object")
+
+    path = config_path.expanduser().absolute()
+    keys = tuple(
+        f"{path}:session_start:{group_index}:{hook_index}"
+        for group_index, hook_index, command in records
+        if _is_footnote_codex_command(command)
+    )
+    return keys, tuple(key in state for key in keys)
 
 
 def inspect_codex_hooks(
@@ -167,12 +206,20 @@ def inspect_codex_hooks(
     """
     toml_commands: tuple[str, ...] = ()
     json_commands: tuple[str, ...] = ()
+    toml_footnote_state_keys: tuple[str, ...] = ()
+    toml_footnote_trusted: tuple[bool, ...] = ()
     errors: list[str] = []
 
     if config_path.exists():
         try:
             parsed_toml = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            toml_commands = _session_start_commands(parsed_toml, source="config.toml")
+            toml_records = _session_start_hook_records(parsed_toml, source="config.toml")
+            toml_commands = tuple(command for _, _, command in toml_records)
+            toml_footnote_state_keys, toml_footnote_trusted = _codex_hook_trust(
+                parsed_toml,
+                config_path=config_path,
+                records=toml_records,
+            )
         except (OSError, UnicodeError, tomllib.TOMLDecodeError, ValueError) as exc:
             errors.append(f"{config_path}: {exc}")
 
@@ -206,6 +253,8 @@ def inspect_codex_hooks(
         json_footnote_commands=json_footnote,
         toml_foreign_commands=tuple(c for c in toml_commands if c not in toml_footnote),
         json_foreign_commands=tuple(c for c in json_commands if c not in json_footnote),
+        toml_footnote_state_keys=toml_footnote_state_keys,
+        toml_footnote_trusted=toml_footnote_trusted,
         errors=tuple(errors),
     )
 

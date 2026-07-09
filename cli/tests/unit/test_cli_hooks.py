@@ -218,6 +218,26 @@ def test_codex_inspector_classifies_owned_and_foreign_commands(tmp_path):
     assert diagnostics.json_foreign_commands == (foreign,)
 
 
+def test_codex_inspector_reports_footnote_trust_key(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    state_key = f"{config.absolute()}:session_start:0:0"
+    config.write_text(
+        "[[hooks.SessionStart]]\n\n"
+        "[[hooks.SessionStart.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(CMD)}\n\n"
+        f"[hooks.state.{json.dumps(state_key)}]\n"
+        'trusted_hash = "sha256:test"\n'
+    )
+
+    diagnostics = inspect_codex_hooks(config_path=config, hooks_json_path=legacy)
+
+    assert diagnostics.toml_footnote_state_keys == (state_key,)
+    assert diagnostics.toml_footnote_trusted == (True,)
+    assert diagnostics.all_toml_footnote_hooks_trusted
+
+
 def test_codex_duplicate_layers_warn_without_mutating_json(tmp_path):
     config = tmp_path / "config.toml"
     legacy = tmp_path / "hooks.json"

@@ -52,6 +52,28 @@ The compatibility command remains available:
 fno setup cli-hooks --no-gemini
 ```
 
+Native plugin hooks are preferred when the Codex build supports them. The user-level
+`$CODEX_HOME/config.toml` hook is a fallback for local development; Codex records its
+approval separately under `[hooks.state]`. Check the effective fallback wiring and trust
+state without modifying either hook layer:
+
+```bash
+fno doctor --codex-hooks
+```
+
+Codex may report `loading hooks from both ... hooks.json and ... config.toml` when the
+legacy `$CODEX_HOME/hooks.json` and preferred TOML layer both contain SessionStart hooks.
+If the JSON entries are footnote-owned, migrate only those entries with:
+
+```bash
+fno setup cli-hooks-codex --migrate-legacy-hooks-json
+```
+
+The migration preserves foreign JSON hooks. For example, a `herdr-agent-state.sh` hook is
+not owned by footnote and remains in `hooks.json`; consolidate it into `config.toml`
+manually if desired. Do not delete the legacy file until every foreign hook has been
+accounted for.
+
 For dev-only skill symlinks:
 
 ```bash
