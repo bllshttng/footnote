@@ -333,3 +333,37 @@ def test_lazy_group_get_command_imports_on_demand():
     assert "fno.state.cli" not in (modules_after_list - modules_before), (
         "list_commands() triggered import of fno.state.cli"
     )
+
+
+# ---------------------------------------------------------------------------
+# config <-> graph import cycle: broken by the fno.config_io leaf (x-7fdd).
+# Guards the invariant that both packages import at module scope in EITHER
+# order without ImportError, and that the leaf holds no back-edge.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("order", ["fno.config, fno.graph", "fno.graph, fno.config"])
+def test_config_graph_import_cycle_broken(order: str):
+    """A fresh interpreter can import config and graph in either order."""
+    result = _run_py(f"import {order}; print('ok')")
+    assert result.returncode == 0, (
+        f"import order '{order}' failed:\n{result.stderr}"
+    )
+    assert "ok" in result.stdout
+
+
+def test_config_io_is_a_leaf():
+    """The extracted leaf must never import fno.config or fno.graph (a back-edge
+    reintroduces the cycle). Assert on real import statements, not the docstring."""
+    import re
+
+    import fno.config_io as leaf
+
+    src = open(leaf.__file__).read()
+    assert not re.search(r"^\s*(from|import)\s+fno\.(config|graph)\b", src, re.M), (
+        "fno.config_io must not import fno.config or fno.graph"
+    )
+    # re-export shim: config exposes the moved names as the SAME objects
+    import fno.config as cfg
+
+    assert cfg.read_config_flat is leaf.read_config_flat
+    assert cfg._deep_merge is leaf._deep_merge

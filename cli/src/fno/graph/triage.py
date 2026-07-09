@@ -26,6 +26,7 @@ from typing import Optional
 import typer
 
 from fno import paths as _paths
+from fno.config_io import config_read_candidates, read_config_flat
 
 
 cli = typer.Typer(
@@ -509,7 +510,6 @@ def _collect_inbox_items() -> list[dict]:
 def _load_goals() -> list[dict]:
     """Read project goals from the project config (config.toml, else legacy
     settings.yaml)."""
-    from fno.config import config_read_candidates, read_config_flat
 
     candidates = config_read_candidates([Path(".fno/settings.yaml"), _paths.config_file()])
     for path in candidates:

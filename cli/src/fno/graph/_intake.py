@@ -18,6 +18,11 @@ from fno.graph._constants import (
     is_wellformed_node_id, mint_node_id, _rank_band,
 )
 from fno import paths as _paths
+from fno.config_io import (
+    _global_settings_path,
+    config_read_candidates,
+    read_config_flat,
+)
 from fno.graph.depends import (
     _collect_frontmatter_depends,
     _resolve_depends_on,
@@ -328,7 +333,6 @@ def _settings_candidate_paths() -> list[Path]:
     # $FNO_GLOBAL_SETTINGS_PATH redirect (config_file() / state_dir() do NOT
     # follow it), so a redirected global work-map is still consulted (codex P2
     # on PR #419).
-    from fno.config import _global_settings_path, config_read_candidates
 
     out: list[Path] = []
     seen: set[str] = set()
@@ -383,7 +387,6 @@ def detect_project_from_settings(cwd_path: str | None = None) -> str | None:
     # stored as ~ / absolute, so a relative target would never match.
     target = os.path.abspath(os.path.expanduser(cwd_path)) if cwd_path else os.getcwd()
 
-    from fno.config import read_config_flat
 
     for path in _settings_candidate_paths():
         if not path.exists():
@@ -465,7 +468,6 @@ def project_root_from_settings(project: str | None) -> str | None:
     if not project:
         return None
 
-    from fno.config import read_config_flat
 
     for path in _settings_candidate_paths():
         if not path.exists():
@@ -570,7 +572,6 @@ def _list_known_projects() -> set[str]:
     Used by the post-resolution sanity check that warns when an intake
     routes to a project the orchestrator has never heard of.
     """
-    from fno.config import read_config_flat
 
     known: set[str] = set()
     for path in _settings_candidate_paths():
