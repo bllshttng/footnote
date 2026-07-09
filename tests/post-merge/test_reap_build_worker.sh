@@ -85,7 +85,7 @@ OUT="$(run_block "" "$JSON_ORPHANED" "x-1234")"
 [[ ! -s "$CALLLOG" ]] \
   && pass "US2: self_reap off removes nothing" \
   || fail "US2: expected no stop/rm calls, got: $(cat "$CALLLOG")"
-printf '%s' "$OUT" | grep -qF "fno agents stop $ROW && fno agents rm $ROW" \
+printf '%s' "$OUT" | grep -F "fno agents stop $ROW && fno agents rm $ROW" >/dev/null \
   && pass "US2: prints the stop-then-rm manual command" \
   || fail "US2: manual command line missing from output"
 
@@ -108,8 +108,8 @@ run_block "true" "$JSON_LIVE" "x-1234" >/dev/null
   || fail "US3c: live row was reaped (status guard broken)"
 
 # --- Static guards: ordering invariant + live guard present ---------------
-STOP_LN="$(grep -n 'fno agents stop' "$BLOCK" | head -1 | cut -d: -f1)"
-RM_LN="$(grep -n 'fno agents rm' "$BLOCK" | head -1 | cut -d: -f1)"
+STOP_LN="$(awk '/fno agents stop/ {print NR; exit}' "$BLOCK")"
+RM_LN="$(awk '/fno agents rm/ {print NR; exit}' "$BLOCK")"
 [[ -n "$STOP_LN" && -n "$RM_LN" && "$STOP_LN" -lt "$RM_LN" ]] \
   && pass "invariant: 'fno agents stop' textually precedes 'fno agents rm'" \
   || fail "invariant: stop must precede rm in the block (stop=$STOP_LN rm=$RM_LN)"
