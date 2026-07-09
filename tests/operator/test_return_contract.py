@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "skills" / "do"))
 
 from orchestrator import (  # noqa: E402
+    RETURN_CONTRACT_INSTRUCTION,
     VALID_STATUSES,
     parse_structured_result,
     parse_task_result,
@@ -135,3 +136,65 @@ def test_structured_absent_returns_none_so_caller_falls_back():
 
 def test_valid_statuses_enum_is_the_contract():
     assert VALID_STATUSES == ("SUCCESS", "DONE_WITH_CONCERNS", "FAILED", "BLOCKED")
+
+
+# ── AC7-HP: parser hardening property tests (increase-consistency.md) ──
+
+
+def test_fenced_block_with_prose_before_and_after_parses():
+    """A well-formed block still parses when narration surrounds it."""
+    out = (
+        "I finished the task and ran the tests.\n"
+        '```json\n{"result": "SUCCESS", "task": "4.2", "commit": "beefcafe"}\n```\n'
+        "Let me know if anything else is needed."
+    )
+    r = parse_task_result(out)
+    assert r is not None and r.status == "SUCCESS" and r.task_id == "4.2"
+    assert r.structured is True
+
+
+def test_stray_result_line_does_not_hijack_structured_block():
+    """A valid JSON block wins even when prose also contains a RESULT: line."""
+    out = (
+        "Earlier I thought this would be RESULT: FAILED but then I fixed it.\n"
+        '```json\n{"result": "SUCCESS", "task": "1.1"}\n```'
+    )
+    r = parse_task_result(out)
+    assert r is not None and r.status == "SUCCESS"
+
+
+def test_text_grammar_first_result_occurrence_wins():
+    """Two RESULT: lines -> the first is authoritative; a later one cannot flip it."""
+    out = "RESULT: BLOCKED\nTASK: 2.2\nREASON: waiting\nRESULT: SUCCESS"
+    r = parse_task_result(out)
+    assert r is not None and r.status == "BLOCKED" and r.task_id == "2.2"
+
+
+def test_out_of_enum_in_prose_wrapped_block_rejected():
+    out = 'prose\n```json\n{"result": "DONELIKE", "task": "1.1"}\n```\nmore prose'
+    assert parse_task_result(out) is None
+
+
+# ── the instruction we ship must agree with the parser ──
+
+
+def test_instruction_enumerates_every_valid_status():
+    for status in VALID_STATUSES:
+        assert status in RETURN_CONTRACT_INSTRUCTION
+
+
+def test_instruction_states_block_last_rule():
+    assert "LAST" in RETURN_CONTRACT_INSTRUCTION
+
+
+def test_instruction_example_round_trips_through_parser():
+    """The exact JSON example we tell workers to emit must parse to SUCCESS.
+
+    This is the anti-drift guarantee: the instruction and the parser can never
+    disagree about what a well-formed block looks like."""
+    import re
+
+    block = re.search(r"```json\s*(\{.*?\})\s*```", RETURN_CONTRACT_INSTRUCTION, re.DOTALL)
+    assert block is not None
+    r = parse_task_result(f"```json\n{block.group(1)}\n```")
+    assert r is not None and r.status == "SUCCESS" and r.task_id and r.structured is True

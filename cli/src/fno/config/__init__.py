@@ -91,6 +91,7 @@ class PathsBlock(BaseModel):
 
     graph_json: Optional[str] = None
     ledger_json: Optional[str] = None
+    evals_history: Optional[str] = None
     briefs_dir: Optional[str] = None
     fleet_dir: Optional[str] = None
     postmortems_dir: Optional[str] = None
@@ -109,6 +110,7 @@ class PathsBlock(BaseModel):
     @field_validator(
         "graph_json",
         "ledger_json",
+        "evals_history",
         "briefs_dir",
         "fleet_dir",
         "postmortems_dir",

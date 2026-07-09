@@ -9,6 +9,7 @@
 | `branch.prefix` | str | `fno` | advanced | Prefix for dispatched worktree branches: <prefix>/<slug>-<node>. |
 | `paths.graph_json` | str (optional) | _(none)_ | never | Override path to the backlog graph.json. |
 | `paths.ledger_json` | str (optional) | _(none)_ | never | Override path to ledger.json. |
+| `paths.evals_history` | str (optional) | _(none)_ | never | Override path to the evals-history.jsonl bank-run ledger. |
 | `paths.briefs_dir` | str (optional) | _(none)_ | never | Override path to the sidecar briefs dir. |
 | `paths.fleet_dir` | str (optional) | _(none)_ | never | Override path to the megatron fleet dir. |
 | `paths.postmortems_dir` | str (optional) | _(none)_ | never | Override path to the postmortems dir. |

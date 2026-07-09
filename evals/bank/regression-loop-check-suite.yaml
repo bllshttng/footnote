@@ -1,0 +1,16 @@
+# CI-flake regression tier: the loop_check suite is the known recurring flake
+# source (ETXTBSY, ac5_hp, ac1_fr, daemon PID-race). Running it K times under
+# pass^k turns "we re-run and it clears" folklore into a graded flake rate.
+# Grade-only: no worker step, the suite already exists at the fixture.
+#
+# NOTE (plan Open Question 1): the pty::tests leg cannot run inside a bg-agent
+# shell (openpty ENXIO). This task scopes to the pytest loop_check suite, which
+# is process-level and headless-safe; the Rust pty leg stays CI-only.
+id: regression-loop-check-suite
+tier: regression
+grade:
+  - kind: exit
+    command: "cd cli && uv run pytest tests -k loop_check -q"
+    expect: 0
+timeout_minutes: 15
+tags: [ci-flake]

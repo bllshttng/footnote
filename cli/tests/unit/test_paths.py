@@ -322,6 +322,31 @@ def test_ledger_json_pinned_global_ignores_relative_state_dir(
     assert tmp_path not in result.parents
 
 
+def test_evals_history_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """evals_history() returns ~/.fno/evals-history.jsonl (cross-project)."""
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+
+    from fno.paths import evals_history
+
+    result = evals_history()
+    assert isinstance(result, Path)
+    assert result.is_absolute()
+    assert result.name == "evals-history.jsonl"
+
+
+def test_evals_history_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit config.paths.evals_history override wins."""
+    target = tmp_path / "custom" / "eh.jsonl"
+    _set_settings(
+        monkeypatch, tmp_path,
+        f"schema_version: 1\nconfig:\n  paths:\n    evals_history: {target}\n",
+    )
+
+    from fno.paths import evals_history
+
+    assert evals_history() == target
+
+
 def test_briefs_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC1-HP: briefs_dir() returns ~/.fno/briefs."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")

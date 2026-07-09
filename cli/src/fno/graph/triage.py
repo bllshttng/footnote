@@ -1022,6 +1022,19 @@ def cmd_health(
     except Exception:  # noqa: BLE001 - advisory only; health must not break
         pass
 
+    # 9. Evals health (advisory, best-effort): regression pass rate + flake
+    # count, shown only when eval history exists. This is the consumption armor
+    # for the evals harness - the report has a wired consumer from day one.
+    # Never gates the health exit code.
+    evals_summary: dict | None = None
+    try:
+        from fno.evals.report import evals_health_summary
+        from fno.paths import evals_history as _evals_history
+
+        evals_summary = evals_health_summary(_evals_history())
+    except Exception:  # noqa: BLE001 - advisory only; health must not break
+        pass
+
     report = {
         "scope": _resolve_scope(project, all_projects, entries),
         "idea_pile_depth": idea_count,
@@ -1033,6 +1046,7 @@ def cmd_health(
         "project_cwd_mismatch_nodes": mismatch_ids,
         "stranded_by_failed_blocker": stranded_payload,
         **({"batch_verdict": batch_verdict} if batch_verdict else {}),
+        **({"evals": evals_summary} if evals_summary else {}),
         "totals": {
             "pending": len(pending_active),
             "ideas": idea_count,
@@ -1135,6 +1149,11 @@ def cmd_health(
         f"  stranded by failed blocker: "
         f"{report['totals']['stranded_by_failed_blocker']}"
     )
+    if evals_summary:
+        rate = evals_summary["regression_pass_rate"]
+        alarm = " ALARM" if evals_summary["regression_alarm"] else ""
+        rate_txt = f"regression pass {rate:.0%}, " if rate is not None else ""
+        typer.echo(f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{alarm}")
     if batch_verdict == "build-wave4":
         typer.echo(
             "  batch-lane verdict: build-wave4 - abandonment waste exceeds savings; "

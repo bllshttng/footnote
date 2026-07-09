@@ -46,6 +46,7 @@ FIELD_META: dict[str, Meta] = {
     "branch.prefix": Meta("advanced", "Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.", default_source="default"),
     "paths.graph_json": Meta("never", "Override path to the backlog graph.json."),
     "paths.ledger_json": Meta("never", "Override path to ledger.json."),
+    "paths.evals_history": Meta("never", "Override path to the evals-history.jsonl bank-run ledger."),
     "paths.briefs_dir": Meta("never", "Override path to the sidecar briefs dir."),
     "paths.fleet_dir": Meta("never", "Override path to the megatron fleet dir."),
     "paths.postmortems_dir": Meta("never", "Override path to the postmortems dir."),

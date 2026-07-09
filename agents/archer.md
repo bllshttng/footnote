@@ -185,7 +185,21 @@ If you make **5+ consecutive Read/Grep/Glob calls without any Edit/Write/Bash ac
 
 ## Return Contract
 
-When complete, return this EXACT format to the orchestrator:
+Return a single fenced JSON block that is the **LAST thing in your reply** —
+nothing after the closing fence. `result` MUST be exactly one of
+`SUCCESS | DONE_WITH_CONCERNS | FAILED | BLOCKED`. `result` and `task` are
+required; every other field is optional. Emit exactly this shape:
+
+```json
+{"result": "SUCCESS", "task": "2.1", "commit": "abc1234", "summary": "one line describing what was implemented"}
+```
+
+Put no prose inside the block and nothing after it. Field vocabulary by status:
+`commit`/`summary` on SUCCESS, `concerns` on DONE_WITH_CONCERNS, `error` on
+FAILED, `reason`/`unblocks_after` on BLOCKED.
+
+If your harness cannot emit a fenced block, fall back to the `KEY: value` text
+grammar below (codex/gemini). The JSON block, when present, is authoritative.
 
 **On Success:**
 ```
