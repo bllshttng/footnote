@@ -1339,6 +1339,7 @@ def _claude_create_path(
     lock_handle,  # type: ignore[no-untyped-def]
     role: Optional[str] = None,
     model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1351,15 +1352,12 @@ def _claude_create_path(
     ``agent_ask_failed``.  On registry-write failure, detaches the lock
     (AC1-FR) and surfaces the orphaned short_id in the error message.
 
-    The ``--yolo`` no-op stderr note for claude lives here (AC3-ERR).
+    x-dfa4: ``--yolo`` maps to bypassPermissions for claude (was a no-op); an
+    explicit ``permission_mode`` wins (the two are mutually exclusive upstream).
     """
-    if yolo:
-        # AC3-ERR: --yolo is a no-op for the claude create path.
-        # Emit a single-line stderr note; do not block.
-        print(
-            "--yolo has no effect for provider 'claude'",
-            file=sys.stderr,
-        )
+    # x-dfa4: fold --yolo -> bypassPermissions; an explicit mode wins. Both unset
+    # leaves the argv byte-identical to today (matches the Rust bg path).
+    effective_mode = permission_mode or ("bypassPermissions" if yolo else None)
 
     from fno.agents.providers import claude as claude_mod
 
@@ -1371,6 +1369,7 @@ def _claude_create_path(
             timeout=timeout,
             role=role,
             model=model,
+            permission_mode=effective_mode,
         )
     except claude_mod.ProviderSubprocessError as exc:
         events.emit(
@@ -1788,6 +1787,7 @@ def dispatch_spawn(
     yolo: bool = False,
     role: Optional[str] = None,
     model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -1914,6 +1914,7 @@ def dispatch_spawn(
                         lock_handle=lock_handle,
                         role=role,
                         model=model,
+                        permission_mode=permission_mode,
                     )
                     return SpawnResult(
                         kind="created",

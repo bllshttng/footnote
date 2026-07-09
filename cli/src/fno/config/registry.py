@@ -169,6 +169,7 @@ FIELD_META: dict[str, Meta] = {
     "agents.max_live": Meta("advanced", "Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).", default_source="default"),
     "agents.min_free_gb": Meta("advanced", "Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).", default_source="default"),
     "agents.worker_qos": Meta("advanced", "Worker CPU/IO priority: utility (background QoS, default) or off.", default_source="default"),
+    "agents.spawn_permission_mode": Meta("advanced", "Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); an explicit flag wins, empty = unset. Provider-native, fail-closed at the spawn seam.", default_source="default"),
     "agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
     "agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.auto_continue.* ---

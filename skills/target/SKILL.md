@@ -212,7 +212,7 @@ If `override <reason>` is passed: the operator-override machinery was removed in
 If `bg <node...>` or `bg --all-ready` is passed (US5 targeted bg-dispatch): this is a **fire-and-forget** dispatch of one or more `ready` backlog nodes as fresh `claude --bg` `/target` workers. Do NOT init a pipeline, do NOT resume, do NOT write `target-state.md` — the planning session stays usable for more `/think` + `/blueprint` while the dispatched workers run on their own (the fresh bg process IS the context "clear"; the agent cannot `/clear` itself). Run the dispatch primitive, relay its per-node outcome lines verbatim with the `fno agents logs <name>` hints, then STOP:
 
 ```bash
-bash "${SKILL_DIR}/scripts/dispatch-node.sh" <node...|--all-ready> [--flags "<size/modifiers>"] [--allow-merge] [--max N]
+bash "${SKILL_DIR}/scripts/dispatch-node.sh" <node...|--all-ready> [--flags "<size/modifiers>"] [--allow-merge] [--max N] [--permission-mode <mode>]
 ```
 
 Each line is one of `launched` / `already-running` / `parked` / `skipped-done` / `failed` / `deferred-cap`, followed by a `summary:` line; never silent. Locked semantics:

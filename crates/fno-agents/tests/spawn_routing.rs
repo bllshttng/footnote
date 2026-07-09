@@ -332,6 +332,7 @@ fn spawn_claude_receipt_byte_shape() {
         None,
         &[("PATH", path.as_str())],
         None,
+        None,
     );
 
     assert_eq!(
@@ -395,6 +396,7 @@ fn spawn_claude_collision_exits_2() {
         false,
         None,
         &[],
+        None,
         None,
     );
 
@@ -848,6 +850,82 @@ fn client_spawn_substrate_bg_codex_hard_errors() {
     assert!(
         stderr.contains("claude-only") && stderr.contains("headless"),
         "codex --substrate bg error must name the claude-only constraint and headless: {stderr}"
+    );
+}
+
+/// x-dfa4: --permission-mode on a NON-claude bg/headless lane is fail-closed
+/// (exit 2, pointing at --substrate pane); the one-shot lanes hardcode their own
+/// bypass form and can't honor a mapped mode without a silent downgrade.
+#[test]
+fn client_spawn_permission_mode_codex_headless_fails_closed() {
+    let home_dir = tmpdir("cli-spawn-perm-codex-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_permission_mode_codex_headless_fails_closed: binary not found"
+        );
+        return;
+    }
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "myagent",
+            "hi",
+            "--provider",
+            "codex",
+            "--substrate",
+            "headless",
+            "--permission-mode",
+            "acceptEdits",
+        ])
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_E2E", "1")
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .output()
+        .expect("failed to run fno-agents");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "must exit 2; stderr: {stderr}");
+    assert!(
+        stderr.contains("permission-mode") && stderr.contains("pane"),
+        "error must name --permission-mode and point at pane: {stderr}"
+    );
+}
+
+/// x-dfa4: --permission-mode and --yolo are one knob at a time on the bg lane
+/// too (the pane lane enforces this in Python).
+#[test]
+fn client_spawn_permission_mode_and_yolo_mutually_exclusive() {
+    let home_dir = tmpdir("cli-spawn-perm-mutex-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_permission_mode_and_yolo_mutually_exclusive: binary not found"
+        );
+        return;
+    }
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "myagent",
+            "hi",
+            "--provider",
+            "claude",
+            "--substrate",
+            "bg",
+            "--yolo",
+            "--permission-mode",
+            "plan",
+        ])
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_E2E", "1")
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .output()
+        .expect("failed to run fno-agents");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "must exit 2; stderr: {stderr}");
+    assert!(
+        stderr.contains("mutually exclusive"),
+        "error must name the mutual exclusion: {stderr}"
     );
 }
 

@@ -74,6 +74,7 @@
 | `agents.max_live` | int | `3` | advanced | Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). |
 | `agents.min_free_gb` | float | `4.0` | advanced | Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). |
 | `agents.worker_qos` | str | `utility` | advanced | Worker CPU/IO priority: utility (background QoS, default) or off. |
+| `agents.spawn_permission_mode` | str | `` | advanced | Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); an explicit flag wins, empty = unset. Provider-native, fail-closed at the spawn seam. |
 | `auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
 | `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |
 | `think_spawn.max_per_run` | int | `5` | advanced | Blast-radius cap on /think spawns per node-generation run. |

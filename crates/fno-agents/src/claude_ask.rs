@@ -394,13 +394,26 @@ fn head_chars(s: &str, n: usize) -> String {
 /// (x-571f per-node pin) appends `--model <m>` between `--name` and the
 /// message, scoping the pin to this session; empty/None means today's argv
 /// byte-for-byte (parity with Python's falsy-`model` check).
-pub fn build_argv(name: &str, message: &str, use_stdin: bool, model: Option<&str>) -> Vec<String> {
+pub fn build_argv(
+    name: &str,
+    message: &str,
+    use_stdin: bool,
+    model: Option<&str>,
+    permission_mode: Option<&str>,
+) -> Vec<String> {
     let mut argv = vec![
         "claude".to_string(),
         "--bg".to_string(),
         "--name".to_string(),
         name.to_string(),
     ];
+    // x-dfa4: exact passthrough to claude's own --permission-mode. The caller
+    // resolves --yolo -> bypassPermissions before this point; empty/None = the
+    // claude default (unchanged argv).
+    if let Some(m) = permission_mode.filter(|m| !m.is_empty()) {
+        argv.push("--permission-mode".to_string());
+        argv.push(m.to_string());
+    }
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
         argv.push(m.to_string());
@@ -937,11 +950,12 @@ pub fn bg_create(
     timeout: Option<Duration>,
     extra_env: &[(&str, &str)],
     model: Option<&str>,
+    permission_mode: Option<&str>,
 ) -> Result<CreateResult, AskError> {
     use std::process::{Command, Stdio};
 
     let use_stdin = use_stdin_for(message);
-    let argv = build_argv(name, message, use_stdin, model);
+    let argv = build_argv(name, message, use_stdin, model, permission_mode);
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -1617,6 +1631,7 @@ pub fn dispatch_claude_spawn(
     timeout: Option<Duration>,
     extra_env: &[(&str, &str)],
     model: Option<&str>,
+    permission_mode: Option<&str>,
 ) -> AskOutcome {
     // spawn allows an empty initial message (Python dispatch_spawn parity).
     if let Err(msg) = validate_spawn_inputs(name, from_name) {
@@ -1668,6 +1683,15 @@ pub fn dispatch_claude_spawn(
         );
     }
 
+    // x-dfa4: --yolo now maps to bypassPermissions for claude (was a no-op); an
+    // explicit --permission-mode wins (the two are mutually exclusive upstream).
+    // Resolved once here so the receipt below can name the applied mode.
+    let effective_mode: Option<&str> = match permission_mode {
+        Some(m) => Some(m),
+        None if yolo => Some("bypassPermissions"),
+        None => None,
+    };
+
     // Delegate to the retained create machinery. A spawn always bounds the
     // launch wait (DEFAULT_SPAWN_TIMEOUT when the caller passed no --timeout) so
     // a `claude --bg` that never EOFs its inherited stdout/stderr can't hang the
@@ -1685,6 +1709,7 @@ pub fn dispatch_claude_spawn(
         Some(spawn_create_timeout(timeout)),
         extra_env,
         model,
+        effective_mode,
     );
     if inner.exit_code != 0 {
         return inner;
@@ -1705,9 +1730,17 @@ pub fn dispatch_claude_spawn(
     // Escape `"` in the name so the receipt stays valid JSON for jq consumers
     // (name validation blocks backslash already; Python cmd_spawn parity).
     let safe_name = name.replace('"', "\\\"");
+    // Locked Decision 5: name the applied mode (flag or yolo-derived) so an audit
+    // of "why did this worker have edit rights" has a durable answer. Only when
+    // set, so the unset receipt is byte-identical (AC7). Values are exact
+    // passthrough, so escape `"` defensively.
+    let perm_field = match effective_mode.filter(|m| !m.is_empty()) {
+        Some(m) => format!(r#", "permission_mode": "{}""#, m.replace('"', "\\\"")),
+        None => String::new(),
+    };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "provider": "claude", "status": "live"}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "provider": "claude", "status": "live"{perm_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,
@@ -1737,6 +1770,7 @@ pub fn dispatch_claude_headless(
     _yolo: bool,
     timeout: Option<Duration>,
     model: Option<&str>,
+    permission_mode: Option<&str>,
 ) -> AskOutcome {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1751,11 +1785,17 @@ pub fn dispatch_claude_headless(
     let effective = if message.is_empty() { "hello" } else { message };
     let use_stdin = use_stdin_for(effective);
 
-    let mut argv: Vec<String> = vec![
-        "claude".into(),
-        "-p".into(),
-        "--dangerously-skip-permissions".into(),
-    ];
+    // x-dfa4: an explicit --permission-mode replaces the hardcoded
+    // --dangerously-skip-permissions for the headless lane; unset keeps the
+    // skip (a headless one-shot cannot answer permission prompts).
+    let mut argv: Vec<String> = vec!["claude".into(), "-p".into()];
+    match permission_mode.filter(|m| !m.is_empty()) {
+        Some(m) => {
+            argv.push("--permission-mode".into());
+            argv.push(m.into());
+        }
+        None => argv.push("--dangerously-skip-permissions".into()),
+    }
     // x-c772: an explicit --model is forwarded to `claude -p --model <m>`
     // (empty/None = claude default). Exact passthrough, no fuzzy resolution.
     if let Some(m) = model.filter(|m| !m.is_empty()) {
@@ -2134,17 +2174,24 @@ fn create(
     timeout: Option<Duration>,
     extra_env: &[(&str, &str)],
     model: Option<&str>,
+    // x-dfa4: the already-resolved permission mode (dispatch_claude_spawn folds
+    // --yolo -> bypassPermissions before calling); None = the claude default.
+    permission_mode: Option<&str>,
 ) -> AskOutcome {
-    let mut pre_stderr = String::new();
-    if yolo {
-        // AC3-ERR: --yolo is a no-op for the claude create path.
-        pre_stderr.push_str("--yolo has no effect for provider 'claude'\n");
-    }
+    let pre_stderr = String::new();
 
     // Python passes the raw CLI timeout (None when --timeout unset) to
     // bg_create, so an unset timeout means NO SIGKILL deadline on the
     // claude --bg create. Pass it through unchanged (don't default to 600s).
-    let result = match bg_create(name, message, cwd, timeout, extra_env, model) {
+    let result = match bg_create(
+        name,
+        message,
+        cwd,
+        timeout,
+        extra_env,
+        model,
+        permission_mode,
+    ) {
         Ok(r) => r,
         Err(AskError::Subprocess { exit_code, stderr }) => {
             emit_event(
@@ -2553,13 +2600,40 @@ mod tests {
     #[test]
     fn build_argv_inline_vs_stdin() {
         assert_eq!(
-            build_argv("a", "hi", false, None),
+            build_argv("a", "hi", false, None, None),
             vec!["claude", "--bg", "--name", "a", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true, None),
+            build_argv("a", "hi", true, None, None),
             vec!["claude", "--bg", "--name", "a"]
         );
+    }
+
+    // x-dfa4: an explicit --permission-mode rides between --name and --model as
+    // an exact passthrough; empty/None is byte-identical to today (AC1-HP/AC7).
+    #[test]
+    fn build_argv_appends_permission_mode() {
+        assert_eq!(
+            build_argv("a", "hi", false, None, Some("acceptEdits")),
+            vec![
+                "claude",
+                "--bg",
+                "--name",
+                "a",
+                "--permission-mode",
+                "acceptEdits",
+                "hi"
+            ]
+        );
+        // Empty mode == unset: no flag, byte-identical to the None case (AC7).
+        assert_eq!(
+            build_argv("a", "hi", false, None, Some("")),
+            build_argv("a", "hi", false, None, None)
+        );
+        // Does NOT stack with --dangerously-skip-permissions (bg never had it).
+        assert!(!build_argv("a", "hi", false, None, Some("acceptEdits"))
+            .iter()
+            .any(|t| t == "--dangerously-skip-permissions"));
     }
 
     // x-571f: a per-node model pin appends `--model <m>` between --name and the
@@ -2568,17 +2642,17 @@ mod tests {
     #[test]
     fn build_argv_appends_model_pin() {
         assert_eq!(
-            build_argv("a", "hi", false, Some("fable")),
+            build_argv("a", "hi", false, Some("fable"), None),
             vec!["claude", "--bg", "--name", "a", "--model", "fable", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true, Some("fable")),
+            build_argv("a", "hi", true, Some("fable"), None),
             vec!["claude", "--bg", "--name", "a", "--model", "fable"]
         );
         // Empty pin == unset: no flag, byte-identical to the None case.
         assert_eq!(
-            build_argv("a", "hi", false, Some("")),
-            build_argv("a", "hi", false, None)
+            build_argv("a", "hi", false, Some(""), None),
+            build_argv("a", "hi", false, None, None)
         );
     }
 

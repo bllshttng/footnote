@@ -134,6 +134,56 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
 )
 
 
+def permission_pane_tokens(provider: str, mode: str) -> list[str]:
+    """Map a ``--permission-mode`` value to provider-native pane argv tokens.
+
+    Fail-closed (Locked Decision 1): an unmappable (provider, value) pair raises
+    before any spawn - permissions are a trust boundary, never a silent
+    downgrade. agy ``skip`` returns ``[]`` because its argv already carries
+    ``--dangerously-skip-permissions`` unconditionally."""
+    if not mode:
+        raise DispatchAskError("--permission-mode requires a value", exit_code=2)
+    if provider == "claude":
+        # Exact passthrough; claude's own CLI validates the vocabulary.
+        return ["--permission-mode", mode]
+    if provider == "gemini":
+        return ["--yolo"] if mode == "yolo" else ["--approval-mode", mode]
+    if provider == "codex":
+        if mode == "full-auto":
+            return ["--full-auto"]
+        if mode == "yolo":
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+        sandbox, sep, approval = mode.partition(":")
+        if sep and sandbox and approval:
+            return ["--sandbox", sandbox, "--ask-for-approval", approval]
+        raise DispatchAskError(
+            f"codex --permission-mode {mode!r} unmappable; use a shortcut "
+            "(full-auto, yolo) or the <sandbox>:<approval> form "
+            "(e.g. workspace-write:on-request)",
+            exit_code=2,
+        )
+    if provider == "opencode":
+        if mode == "auto":
+            return ["--auto"]
+        raise DispatchAskError(
+            f"opencode --permission-mode {mode!r} unmappable; only 'auto' maps "
+            "(--auto). Per-tool permissions are config-only (permission table).",
+            exit_code=2,
+        )
+    if provider == "agy":
+        if mode == "skip":
+            return []
+        raise DispatchAskError(
+            f"agy --permission-mode {mode!r} unmappable; only 'skip' maps "
+            "(--dangerously-skip-permissions). Finer control is config-only "
+            "(toolPermission).",
+            exit_code=2,
+        )
+    raise DispatchAskError(
+        f"provider {provider!r} has no permission-mode mapping", exit_code=2
+    )
+
+
 def build_pane_argv(
     provider: str,
     message: str,
@@ -141,6 +191,7 @@ def build_pane_argv(
     yolo: bool,
     session_uuid: Optional[str],
     model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -164,17 +215,25 @@ def build_pane_argv(
             argv += ["--session-id", session_uuid]
         if model:
             argv += ["--model", model]
+        if permission_mode:
+            argv += permission_pane_tokens("claude", permission_mode)
+        elif yolo:
+            # AC4-HP: claude --yolo now means bypassPermissions (was a no-op).
+            argv += ["--permission-mode", "bypassPermissions"]
         if message:
             argv.append(message)
         return argv
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
         argv = ["codex", "-C", str(cwd)]
-        argv += (
-            ["--dangerously-bypass-approvals-and-sandbox"]
-            if yolo
-            else ["--sandbox", "workspace-write"]
-        )
+        if permission_mode:
+            argv += permission_pane_tokens("codex", permission_mode)
+        else:
+            argv += (
+                ["--dangerously-bypass-approvals-and-sandbox"]
+                if yolo
+                else ["--sandbox", "workspace-write"]
+            )
         if model:
             argv += ["--model", model]
         if message:
@@ -188,7 +247,10 @@ def build_pane_argv(
             argv += ["--model", model]
         if message:
             argv += ["-i", message]
-        argv += ["--yolo"] if yolo else ["--approval-mode", "default"]
+        if permission_mode:
+            argv += permission_pane_tokens("gemini", permission_mode)
+        else:
+            argv += ["--yolo"] if yolo else ["--approval-mode", "default"]
         return argv
     if provider == "agy":
         # agy (Antigravity) interactive pane (x-8f7f US1). Mirrors AgyProvider in
@@ -201,6 +263,9 @@ def build_pane_argv(
         # ponytail: argv unvalidated against a live agy TUI (agy is closed-source);
         # pin it via capture-readiness-grid.sh when the manifest is validated.
         argv = ["agy", "--dangerously-skip-permissions"]
+        if permission_mode:
+            # skip -> [] (argv already carries the flag); anything else raises.
+            argv += permission_pane_tokens("agy", permission_mode)
         if model:
             argv += ["--model", model]
         if message:
@@ -220,7 +285,9 @@ def build_pane_argv(
         # opencode expects the provider/model form and is always launched with a
         # model: an explicit --model wins, else the z-ai/glm-5.2 default.
         argv += ["--model", model or _OPENCODE_DEFAULT_MODEL]
-        if yolo:
+        if permission_mode:
+            argv += permission_pane_tokens("opencode", permission_mode)
+        elif yolo:
             argv.append("--auto")
         return argv
     raise DispatchAskError(
@@ -361,6 +428,7 @@ def dispatch_spawn_pane(
     yolo: bool = False,
     role: Optional[str] = None,
     model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
     session: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
@@ -392,7 +460,9 @@ def dispatch_spawn_pane(
 
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
-    argv = build_pane_argv(provider, message, cwd, yolo, session_uuid, model)
+    argv = build_pane_argv(
+        provider, message, cwd, yolo, session_uuid, model, permission_mode
+    )
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "

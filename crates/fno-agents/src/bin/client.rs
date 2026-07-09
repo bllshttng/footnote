@@ -735,6 +735,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // wired codex/gemini/claude-headless; claude --bg was x-571f). Exact
     // passthrough appended to the worker argv.
     let model = params.get("model").and_then(|v| v.as_str());
+    // x-dfa4: permission mode for the bg/headless lanes. The pane substrate
+    // never reaches here (it re-execs the Python CLI, which owns pane mapping);
+    // this arm handles the claude bg/headless lanes only.
+    let permission_mode = params.get("permission_mode").and_then(|v| v.as_str());
 
     // Validate the provider FIRST so an unknown provider is a client-side
     // error (exit 2) for every substrate, never a fall-through to the daemon.
@@ -743,6 +747,25 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             "unknown provider {}; supported: {}",
             py_repr(provider),
             known_providers_csv()
+        );
+        return Some(2);
+    }
+
+    // AC5-ERR: one knob at a time (pane enforces this in Python; here for
+    // bg/headless).
+    if permission_mode.is_some() && yolo {
+        eprintln!("--permission-mode and --yolo are mutually exclusive; pass one");
+        return Some(2);
+    }
+    // Fail-closed (Locked Decision 1/2): only claude's bg/headless lanes accept
+    // a mapped --permission-mode. codex/gemini/agy one-shot lanes hardcode their
+    // own bypass form and bg is claude-only, so a mode here can't be honored
+    // without a silent downgrade - reject it, pointing at the pane substrate
+    // (which DOES map every provider's vocabulary).
+    if permission_mode.is_some() && provider != "claude" {
+        eprintln!(
+            "--permission-mode is not supported for provider {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); use --substrate pane",
+            py_repr(provider)
         );
         return Some(2);
     }
@@ -816,6 +839,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 timeout,
                 &[],
                 model,
+                permission_mode,
             );
             if !outcome.stderr.is_empty() {
                 eprint!("{}", outcome.stderr);
@@ -866,6 +890,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 yolo,
                 timeout,
                 model,
+                permission_mode,
             ))
         }
 
@@ -1209,6 +1234,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--model",
         "--mode",
         "--substrate",
+        "--permission-mode",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -1320,6 +1346,16 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--yolo" | "-Y" => {
                 // NOTE: --yolo is accepted and forwarded; daemon ignores it for now.
                 params.insert("yolo".into(), Value::Bool(true));
+            }
+            "--permission-mode" => {
+                // x-dfa4: provider permission/approval mode. Parsed here so the
+                // pane substrate (raw-arg re-exec to Python) is not blocked by an
+                // unknown-flag error; bg/headless read it in maybe_run_spawn.
+                // Mapping + fail-closed validation live at the spawn seam.
+                params.insert(
+                    "permission_mode".into(),
+                    str_arg(&mut it, "--permission-mode")?,
+                );
             }
             "--substrate" => {
                 // The session-substrate selector (x-2c27): pane (owned-PTY,
@@ -2513,6 +2549,33 @@ mod tests {
         let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--model=pro".to_string()])
             .expect("--model= must parse");
         assert_eq!(eq["model"], "pro");
+    }
+
+    /// x-dfa4: `--permission-mode` parses in both space and equals form so the
+    /// pane re-exec (raw args) and the bg/headless reader (maybe_run_spawn) both
+    /// see it; an unknown-flag rejection would otherwise block the pane path.
+    #[test]
+    fn spawn_forwards_permission_mode_flag() {
+        let (_m, space) = build_request(
+            "spawn",
+            &[
+                "wk".to_string(),
+                "--provider".to_string(),
+                "claude".to_string(),
+                "--substrate".to_string(),
+                "bg".to_string(),
+                "--permission-mode".to_string(),
+                "acceptEdits".to_string(),
+            ],
+        )
+        .expect("--permission-mode must parse");
+        assert_eq!(space["permission_mode"], "acceptEdits");
+        let (_m2, eq) = build_request(
+            "spawn",
+            &["wk".to_string(), "--permission-mode=plan".to_string()],
+        )
+        .expect("--permission-mode= must parse");
+        assert_eq!(eq["permission_mode"], "plan");
     }
 
     /// ab-3ff64151 AC1 (Rust-path parity): `agents ask` accepts the phone shorts
