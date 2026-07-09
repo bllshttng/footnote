@@ -204,6 +204,24 @@ def test_timestampless_tie_is_fail_closed_fail_then_pass():
     assert counts["total"] == 1
 
 
+def test_newer_success_before_older_superseded_fail_is_green():
+    """Regression (gemini HIGH / codex P1 on PR #316): the fail-preservation
+    branch must fire ONLY on a true tie. A newer SUCCESS seen BEFORE an older
+    superseded FAILURE of the same name must keep the SUCCESS -> green; the
+    strictly-older fail loses (else it re-hides as a false red, the x-e858 bug)."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T10:05:00Z"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED",
+         "startedAt": "2026-07-09T10:00:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "green"
+    assert code == 0
+    assert counts["fail"] == 0
+    assert counts["total"] == 1
+
+
 def test_equal_timestamp_tie_preserves_fail():
     """Tie on EQUAL (present) startedAt: a same-name FAILURE before a SUCCESS is
     preserved -> red, regardless of order."""

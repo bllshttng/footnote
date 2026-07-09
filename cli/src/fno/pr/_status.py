@@ -115,13 +115,16 @@ def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
         if existing is None:
             latest[key] = c
             order.append(key)
-        elif _entry_ts(c) > _entry_ts(existing):
-            latest[key] = c
-        elif _classify(existing) != "fail" and _classify(c) == "fail":
-            # Tie (equal/missing timestamps): a fail must never be dropped by a
-            # same-time non-fail. Newer already won above; this is the only case
-            # where an equal-time entry replaces - to preserve a failure.
-            latest[key] = c
+        else:
+            tc, te = _entry_ts(c), _entry_ts(existing)
+            if tc > te:
+                latest[key] = c
+            elif tc == te and _classify(existing) != "fail" and _classify(c) == "fail":
+                # Tie ONLY (equal/missing timestamps): a fail must never be
+                # dropped by a same-time non-fail. A strictly-OLDER fail still
+                # loses (the `tc == te` guard is load-bearing - without it a
+                # superseded older CANCELLED would re-hide as a false red).
+                latest[key] = c
     return [latest[k] for k in order] + unkeyed
 
 
