@@ -39,6 +39,7 @@ SocketError in the provider adapter; we never silently misread.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +96,39 @@ def _sessions_dir() -> Path:
 def _jobs_dir_for(short_id: str) -> Path:
     """Return ``~/.claude/jobs/<short-id>`` resolved against the current HOME."""
     return Path.home() / ".claude" / "jobs" / short_id
+
+
+def _daemon_dir() -> Path:
+    """Return the claude daemon dir, honoring ``FNO_CLAUDE_DAEMON_DIR`` (tests)."""
+    override = os.environ.get("FNO_CLAUDE_DAEMON_DIR")
+    return Path(override) if override else Path.home() / ".claude" / "daemon"
+
+
+def roster_live(short_id: str) -> bool:
+    """True iff a session whose 8-hex short id matches is present in the daemon
+    roster (``~/.claude/daemon/roster.json``).
+
+    The roster keys workers by full ``sessionId``; the short id is its first
+    hyphen segment (mirrors ``spawn_gate.census``). Lenient by design: a
+    missing, torn, or type-drifted roster returns ``False`` and never raises --
+    a strict read once zeroed the whole roster (``procStart`` drift). This is a
+    cheap PRE-check for the control.sock ask fallback; the ``mail-inject`` verb's
+    own connect is the authoritative liveness gate, so roster PRESENCE (not
+    pid-liveness) is enough here."""
+    try:
+        raw = json.loads((_daemon_dir() / "roster.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, UnicodeDecodeError):
+        return False
+    workers = raw.get("workers") if isinstance(raw, dict) else None
+    if not isinstance(workers, dict):
+        return False
+    for w in workers.values():
+        if not isinstance(w, dict):
+            continue
+        sid = w.get("sessionId")
+        if isinstance(sid, str) and sid and sid.split("-")[0] == short_id:
+            return True
+    return False
 
 
 def locate_session(short_id: str) -> Optional[SessionLocator]:

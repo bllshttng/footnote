@@ -39,7 +39,9 @@ import time
 from pathlib import Path
 from typing import Literal, Optional
 
-OrphanReason = Literal["not-found", "socket-null", "liveness-failed"]
+OrphanReason = Literal[
+    "not-found", "socket-null", "liveness-failed", "roster-live-inject-failed",
+]
 
 from fno.agents.providers._claude_session_registry import (
     TERMINAL_STATES,
@@ -49,6 +51,7 @@ from fno.agents.providers._claude_session_registry import (
     read_state_json,
     read_timeline_tail,
     resolve_session_uuid,
+    roster_live,
 )
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
 from fno.claims import ClaimHeldByOther, acquire_claim, release_claim
@@ -362,9 +365,13 @@ class ProviderOrphanError(RuntimeError):
 
     ``reason`` is one of ``"not-found"`` (no sessions/<pid>.json entry
     matches the short-id), ``"socket-null"`` (matched entry has
-    ``messagingSocketPath: null``; session is suspended), or
+    ``messagingSocketPath: null``; session is suspended),
     ``"liveness-failed"`` (matched entry's socket exists but the 250 ms
-    connect probe failed). The dispatch layer maps this to exit code 13.
+    connect probe failed), or ``"roster-live-inject-failed"`` (x-2681: the
+    session is live in the daemon roster but the control.sock fallback inject
+    did not confirm -- a delivery failure, NOT a dead session, so the dispatch
+    layer must NOT stamp it orphaned). The dispatch layer maps this to exit
+    code 13.
     """
 
     def __init__(self, *, reason: OrphanReason, short_id: str,
@@ -592,9 +599,24 @@ def ask_followup(
         # the sessions dir: not-found is "no entry at all"; socket-null is
         # "entry exists but messagingSocketPath is null".
         reason = _classify_orphan_reason(claude_short_id)
+        # x-2681: a socket-null session that is live in the daemon roster is
+        # reachable over the daemon control.sock even though the BG8 messaging
+        # socket is down. Fall back to that vehicle before orphaning. not-found
+        # is genuinely dead and never falls back (Locked Decision 5).
+        if reason == "socket-null" and roster_live(claude_short_id):
+            return _ask_via_control_sock(
+                claude_short_id, message, from_name, timeout,
+                jobs_dir=jobs_dir, poll_interval=poll_interval,
+            )
         raise ProviderOrphanError(reason=reason, short_id=claude_short_id)
 
     if not liveness_probe(locator.messaging_socket_path):
+        # Socket exists but is dead. Same control.sock fallback when roster-live.
+        if roster_live(claude_short_id):
+            return _ask_via_control_sock(
+                claude_short_id, message, from_name, timeout,
+                jobs_dir=jobs_dir, poll_interval=poll_interval,
+            )
         raise ProviderOrphanError(
             reason="liveness-failed", short_id=claude_short_id,
             detail=locator.messaging_socket_path,
@@ -619,6 +641,73 @@ def ask_followup(
             timeline_offset = 0
 
     send_to_session(locator.messaging_socket_path, message, from_name)
+
+    return wait_for_reply(
+        jobs_dir=target_jobs_dir,
+        baseline_updated_at=baseline_updated_at,
+        timeline_offset=timeline_offset,
+        timeout=timeout,
+        poll_interval=poll_interval,
+    )
+
+
+def _ask_via_control_sock(
+    short_id: str,
+    message: str,
+    from_name: str,
+    timeout: float,
+    *,
+    jobs_dir: Optional[Path] = None,
+    poll_interval: float = 0.5,
+) -> str:
+    """x-2681 ask-lane fallback: deliver ``message`` to a roster-live but
+    socket-null session over the daemon ``control.sock`` (the tested Rust
+    ``mail-inject`` verb), then collect the reply from the bg jobs-dir.
+
+    Reuses the SAME single wire vehicle as ``fno mail send`` -- Python never
+    opens ``control.sock``. The message is wrapped in the cross-session-message
+    container so the recipient reads it as a peer turn, matching the socket
+    path's framing.
+
+    Outcomes:
+      - inject not confirmed -> ``ProviderOrphanError("roster-live-inject-failed")``:
+        a delivery failure on a LIVE session, so the dispatch caller reports it
+        WITHOUT stamping the row orphaned (AC6-FR).
+      - delivered, reply collected from the jobs-dir tail -> the reply text.
+      - delivered, no jobs-dir reply within budget -> ``ProviderTimeoutError``
+        (message landed, not lost; exit 15). Operator sessions with no bg
+        jobs-dir degrade here for v1 (Open Questions 1/3: bg is the confirmed
+        reply surface; never fabricate an empty reply).
+    """
+    from fno.agents.dispatch import _mail_inject_claude  # lazy: no import cycle
+
+    target_jobs_dir = jobs_dir if jobs_dir is not None else _jobs_dir_for(short_id)
+    # Baseline the reply surface BEFORE inject so a pre-existing terminal state
+    # cannot impersonate this turn's reply (mirrors ask_followup's invariant).
+    baseline_updated_at: Optional[str] = None
+    try:
+        baseline_updated_at = read_state_json(target_jobs_dir).updated_at
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        baseline_updated_at = None
+    timeline_offset = 0
+    timeline_path = target_jobs_dir / "timeline.jsonl"
+    if timeline_path.exists():
+        try:
+            timeline_offset = timeline_path.stat().st_size
+        except OSError:
+            timeline_offset = 0
+
+    wrapped = build_cross_session_container(message, from_name)
+    if not _mail_inject_claude(short_id, wrapped):
+        raise ProviderOrphanError(
+            reason="roster-live-inject-failed", short_id=short_id,
+        )
+
+    # Delivered. A bg recipient writes state.json/timeline; poll for its reply.
+    # No jobs-dir (operator session) -> nothing to poll: report delivered-no-reply
+    # rather than spin the full timeout or fabricate an empty reply.
+    if not target_jobs_dir.exists():
+        raise ProviderTimeoutError(elapsed_sec=0.0, short_id=short_id)
 
     return wait_for_reply(
         jobs_dir=target_jobs_dir,
