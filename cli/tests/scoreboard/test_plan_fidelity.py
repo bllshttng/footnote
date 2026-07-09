@@ -44,13 +44,16 @@ def _fidelity(rows, graph=None, *, plan_doc=PLAN_DOC, summary="", diff=None):
 
 # --- AC1 ---------------------------------------------------------------------
 def test_joined_plan_emits_scores_attributed_to_planning_session():
+    # Same plan dir, different WORKTREE prefixes: the join is prefix-independent
+    # (keys on parent-dir + file), so a plan-thread and a build-thread in
+    # separate worktrees still join.
     rows = [
         {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
-         "phases_completed": ["think", "plan"], "plan_path": "/x/plan-a.md",
-         "session_id": "plan-sess", "cost_usd": 2.0},
+         "phases_completed": ["think", "plan"], "plan_path": "/wt-a/feat-a/00-INDEX.md",
+         "project": "fno", "session_id": "plan-sess", "cost_usd": 2.0},
         {"completed": "2026-07-03T11:00:00", "termination_reason": "DonePRGreen",
-         "phases_completed": ["do", "ship"], "plan_path": "/other/plan-a.md",
-         "graph_node_id": "x-1", "pr_number": 42, "session_id": "build-sess", "cost_usd": 6.0},
+         "phases_completed": ["do", "ship"], "plan_path": "/wt-b/feat-a/00-INDEX.md",
+         "project": "fno", "graph_node_id": "x-1", "pr_number": 42, "session_id": "build-sess", "cost_usd": 6.0},
     ]
     pf = _fidelity(rows, summary="AC1-HP verified. AC2-ERR verified.",
                    diff=["cli/src/fno/scoreboard/fold.py"])
@@ -142,3 +145,49 @@ def test_root_level_models_py_is_data_model():
     assert _is_data_model_file("model.py")
     assert _is_data_model_file("app/models.py")
     assert not _is_data_model_file("cli/src/fno/scoreboard/fold.py")
+
+
+def test_cross_project_same_basename_does_not_collide():
+    """Two `00-INDEX.md` plans in different projects must NOT join to each other."""
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+         "phases_completed": ["think", "plan"], "plan_path": "/a/feat/00-INDEX.md",
+         "project": "proj-a", "session_id": "plan-a", "cost_usd": 2.0},
+        # A shipped row in a DIFFERENT project with the same filename+parent.
+        {"completed": "2026-07-03T11:00:00", "termination_reason": "DonePRGreen",
+         "phases_completed": ["do", "ship"], "plan_path": "/b/feat/00-INDEX.md",
+         "project": "proj-b", "graph_node_id": "x-9", "pr_number": 99, "session_id": "build-b", "cost_usd": 6.0},
+    ]
+    pf = _fidelity(rows, summary="", diff=["x.py"])
+    # The proj-a plan has no delivery IN proj-a -> unjoined, never mis-joined to proj-b.
+    plan_a = [r for r in pf["results"] if r["session_id"] == "plan-a"][0]
+    assert plan_a["status"] == "unjoined"
+
+
+def test_read_diff_pins_repo_from_pr_url(monkeypatch):
+    """_default_read_diff must pass --repo derived from the delivery row's pr_url."""
+    import subprocess as _sp
+    from fno.scoreboard import fold
+
+    captured = {}
+
+    class _Done:
+        returncode = 0
+        stdout = "a.py\nb.py\n"
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _Done()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+    files = fold._default_read_diff(
+        {"pr_number": 42, "pr_url": "https://github.com/acme/widgets/pull/42"}
+    )
+    assert files == ["a.py", "b.py"]
+    assert "--repo" in captured["cmd"]
+    assert "acme/widgets" in captured["cmd"]
+
+
+def test_read_diff_no_pr_number_returns_none():
+    from fno.scoreboard import fold
+    assert fold._default_read_diff({"pr_number": None}) is None

@@ -970,13 +970,20 @@ _OWNERSHIP_FILE_RE = re.compile(r"`([^`]+/[^`]+|[^`]+\.\w+)`")
 _DATA_MODEL_RE = re.compile(r"(migration|schema|(?:^|/)models?\.py|\.sql|models?/|migrations?/)", re.IGNORECASE)
 
 
-def _plan_key(plan_path) -> str | None:
-    """Normalize a plan_path for join: the plan doc's basename (minus any
-    `#anchor`). Two rows referencing the same plan share it regardless of the
-    worktree prefix each was stamped under."""
+def _plan_key(plan_path, project=None) -> str | None:
+    """Normalize a plan_path for join, scoped to a `project`. Uses the last two
+    path segments (parent dir + file) rather than the bare basename, so a
+    recurring folder-plan filename (`00-INDEX.md`) does not collapse unrelated
+    plans in the GLOBAL ledger; the `project` prefix scopes across repos. Still
+    prefix-independent, so the planning row and its shipped row match regardless
+    of the worktree each was stamped under."""
     if not isinstance(plan_path, str) or not plan_path:
         return None
-    return Path(plan_path.split("#", 1)[0]).name or None
+    p = Path(plan_path.split("#", 1)[0])
+    tail = f"{p.parent.name}/{p.name}" if p.parent.name else p.name
+    if not tail or tail == "/":
+        return None
+    return f"{project or ''}::{tail}"
 
 
 def _parse_ac_ids(doc: str) -> set[str]:
@@ -1062,16 +1069,23 @@ def _default_read_summary(row: dict) -> str | None:
     return s if isinstance(s, str) else None
 
 
-def _default_read_diff(pr_number) -> list[str] | None:
+def _default_read_diff(row: dict) -> list[str] | None:
+    pr_number = row.get("pr_number")
     if not pr_number:
         return None
     import subprocess
 
+    # The ledger is global (cross-repo), so a bare `gh pr diff <n>` resolves the
+    # number in the operator's cwd and can diff an unrelated PR. Pin the repo
+    # from the delivery row's pr_url so the diff always targets the right repo.
+    cmd = ["gh", "pr", "diff", str(pr_number), "--name-only"]
+    pr_url = row.get("pr_url")
+    if isinstance(pr_url, str):
+        m = re.search(r"github\.com/([^/]+/[^/]+?)(?:\.git)?/pull/", pr_url)
+        if m:
+            cmd += ["--repo", m.group(1)]
     try:
-        out = subprocess.run(
-            ["gh", "pr", "diff", str(pr_number), "--name-only"],
-            capture_output=True, text=True, timeout=30,
-        )
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
@@ -1118,7 +1132,7 @@ def build_plan_fidelity(
     shipped_by_plan: dict[str, list[dict]] = {}
     for r in windowed:
         if _is_shipped_reason(r.get("termination_reason")):
-            key = _plan_key(r.get("plan_path"))
+            key = _plan_key(r.get("plan_path"), r.get("project"))
             if key:
                 shipped_by_plan.setdefault(key, []).append(r)
 
@@ -1128,7 +1142,7 @@ def build_plan_fidelity(
         if not _is_planned_row(r):
             continue
         plan_path = r.get("plan_path")
-        key = _plan_key(plan_path)
+        key = _plan_key(plan_path, r.get("project"))
         deliveries = shipped_by_plan.get(key, []) if key else []
         sid = r.get("session_id")
         if not deliveries:
@@ -1140,7 +1154,7 @@ def build_plan_fidelity(
         score = _score_fidelity(
             read_plan_doc(plan_path) if plan_path else None,
             read_summary(d),
-            read_diff(d.get("pr_number")),
+            read_diff(d),
         )
         results.append({
             "session_id": sid,
