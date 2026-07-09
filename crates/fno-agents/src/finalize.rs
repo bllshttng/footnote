@@ -505,9 +505,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
 /// relative to the binary, PYTHONPATH is left untouched, and the installed
 /// `fno` package is used.
 fn py_module(cwd: &Path) -> Command {
-    let mut cmd = Command::new(py_interpreter());
+    let mut cmd = Command::new(py_interpreter(cwd));
     cmd.current_dir(cwd);
-    if let Some(src) = repo_cli_src() {
+    if let Some(src) = repo_cli_src(cwd) {
         let joined = match std::env::var_os("PYTHONPATH") {
             Some(prev) if !prev.is_empty() => {
                 // APPEND (not prepend): cli/src is only a fallback that resolves
@@ -527,11 +527,44 @@ fn py_module(cwd: &Path) -> Command {
     cmd
 }
 
-/// Locate `<repo>/cli/src` by walking up from the running binary until an
-/// ancestor holds `cli/src/fno/__init__.py`. Returns `None` when the binary is
-/// not inside a source checkout (e.g. an installed wheel), so PYTHONPATH stays
-/// unset and the installed package is used instead.
-fn repo_cli_src() -> Option<String> {
+/// Canonical repo root for `cwd`. For a linked worktree this is the MAIN
+/// checkout (which carries `cli/.venv`); for the main checkout it is the repo
+/// itself. Resolved via git's common dir so a worktree finalize can reach the
+/// shared venv + package the worktree does not have. `None` outside a repo.
+fn canonical_repo(cwd: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    // <root>/.git -> <root>
+    common.parent().map(Path::to_path_buf)
+}
+
+/// Locate `<repo>/cli/src` (the dir holding `cli/src/fno/__init__.py`). Anchored
+/// on the target PROJECT (`cwd`), NOT the running binary: the DEPLOYED
+/// fno-agents binary lives in `~/.local/bin`, whose ancestors hold no checkout,
+/// so a `current_exe()` walk found neither `cli/src` nor `cli/.venv` and every
+/// deployed-binary finalize dropped its ledger row (x-b74b). `cwd` is the
+/// worktree, which tracks `cli/src`. Falls back to the canonical repo, then to a
+/// `current_exe()` walk (checkout-built binary run outside its repo). `None`
+/// when nothing resolves, so PYTHONPATH stays unset and an installed `fno` is
+/// used.
+fn repo_cli_src(cwd: &Path) -> Option<String> {
+    for anc in cwd.ancestors() {
+        if anc.join("cli/src/fno/__init__.py").is_file() {
+            return Some(anc.join("cli/src").to_string_lossy().into_owned());
+        }
+    }
+    if let Some(root) = canonical_repo(cwd) {
+        if root.join("cli/src/fno/__init__.py").is_file() {
+            return Some(root.join("cli/src").to_string_lossy().into_owned());
+        }
+    }
     let exe = std::env::current_exe().ok()?;
     for anc in exe.ancestors() {
         if anc.join("cli/src/fno/__init__.py").is_file() {
@@ -550,16 +583,30 @@ fn repo_cli_src() -> Option<String> {
 /// and its deps. PYTHONPATH entries still precede site-packages, so the
 /// finalize_e2e stub package keeps precedence over the venv's installed `fno`.
 /// Falls back to `python3` when no venv is found (installed-wheel or bare
-/// environment).
-fn py_interpreter() -> String {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return "python3".to_string(),
-    };
-    for anc in exe.ancestors() {
+/// environment). Anchored on `cwd`, then the CANONICAL repo, then a
+/// `current_exe()` walk: a linked worktree has `cli/src` but NO `cli/.venv`, and
+/// bare Homebrew `python3` lacks fno's deps (pydantic, ...), so a worktree
+/// finalize must resolve the canonical checkout's venv (x-b74b) - PYTHONPATH
+/// alone would still fail on the missing dep.
+fn py_interpreter(cwd: &Path) -> String {
+    for anc in cwd.ancestors() {
         let venv = anc.join("cli/.venv/bin/python3");
         if venv.is_file() {
             return venv.to_string_lossy().into_owned();
+        }
+    }
+    if let Some(root) = canonical_repo(cwd) {
+        let venv = root.join("cli/.venv/bin/python3");
+        if venv.is_file() {
+            return venv.to_string_lossy().into_owned();
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for anc in exe.ancestors() {
+            let venv = anc.join("cli/.venv/bin/python3");
+            if venv.is_file() {
+                return venv.to_string_lossy().into_owned();
+            }
         }
     }
     "python3".to_string()
@@ -2173,5 +2220,73 @@ mod tests {
         );
         assert_eq!(read_project_id(&f).as_deref(), Some("good"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // x-b74b: from a linked worktree (has cli/src, but cli/.venv is gitignored
+    // so it is NOT checked out) the interpreter must resolve the CANONICAL
+    // repo's venv, and cli/src must anchor on the worktree - neither via
+    // current_exe(). Reproduces the deployed-binary anchor failure.
+    #[test]
+    fn worktree_resolves_canonical_venv_and_own_cli_src() {
+        fn git(cwd: &Path, args: &[&str]) -> bool {
+            Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let canon = tmp.path().join("canon");
+        let wt = tmp.path().join("wt"); // sibling of canon, NOT nested inside it
+        fs::create_dir_all(canon.join("cli/src/fno")).unwrap();
+        fs::write(canon.join("cli/src/fno/__init__.py"), "").unwrap();
+
+        if !git(&canon, &["init", "-q"]) {
+            return; // no git available - nothing to assert
+        }
+        for kv in [
+            "user.email=t@t",
+            "user.name=t",
+            "commit.gpgsign=false",
+            "init.defaultBranch=main",
+        ] {
+            git(
+                &canon,
+                &[
+                    "config",
+                    kv.split('=').next().unwrap(),
+                    kv.split('=').nth(1).unwrap(),
+                ],
+            );
+        }
+        git(&canon, &["add", "-A"]);
+        assert!(git(&canon, &["commit", "-qm", "init"]), "commit failed");
+
+        // Canonical carries the venv; a linked worktree does NOT (gitignored).
+        fs::create_dir_all(canon.join("cli/.venv/bin")).unwrap();
+        fs::write(canon.join("cli/.venv/bin/python3"), "").unwrap();
+
+        assert!(
+            git(&canon, &["worktree", "add", "-q", wt.to_str().unwrap()]),
+            "worktree add failed"
+        );
+        assert!(
+            wt.join("cli/src/fno/__init__.py").is_file(),
+            "wt has cli/src"
+        );
+        assert!(!wt.join("cli/.venv/bin/python3").exists(), "wt lacks venv");
+
+        // canonicalize both sides: git's --path-format=absolute returns the
+        // realpath (/private/var on macOS) while the temp path is /var.
+        let real = |p: &str| fs::canonicalize(p).unwrap();
+        assert_eq!(
+            real(&py_interpreter(&wt)),
+            real(canon.join("cli/.venv/bin/python3").to_str().unwrap())
+        );
+        assert_eq!(
+            real(&repo_cli_src(&wt).unwrap()),
+            real(wt.join("cli/src").to_str().unwrap())
+        );
     }
 }
