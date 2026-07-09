@@ -3,6 +3,7 @@
   "version": "0.2.1",
   "description": "Set a target and walk away. Say f[no] to mostly done.",
   "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json",
   "interface": {
     "displayName": "f[no]",
     "shortDescription": "Set a target. Say f[no] to mostly done.",

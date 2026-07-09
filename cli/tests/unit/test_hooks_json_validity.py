@@ -18,6 +18,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
+CODEX_HOOKS_JSON = REPO_ROOT / "hooks" / "codex-hooks.json"
 
 
 def test_hooks_json_is_valid_json() -> None:
@@ -74,6 +75,40 @@ def test_hooks_json_command_paths_resolve() -> None:
                     failures.append(f"{event}: missing path {path}")
     if failures:
         pytest.fail("hooks.json references missing files:\n  " + "\n  ".join(failures))
+
+
+def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
+    manifest = json.loads(
+        (REPO_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    assert manifest["hooks"] == "./hooks/codex-hooks.json"
+
+    data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
+    hooks = data["hooks"]["SessionStart"][0]["hooks"]
+    assert hooks == [
+        {
+            "type": "command",
+            "command": "env FNO_PLATFORM=codex ${CODEX_PLUGIN_ROOT}/hooks/session-start.sh",
+        }
+    ]
+    resolved = hooks[0]["command"].replace("${CODEX_PLUGIN_ROOT}", str(REPO_ROOT))
+    assert str(REPO_ROOT / "hooks" / "session-start.sh") in resolved
+
+
+def test_local_codex_marketplace_points_at_repo_plugin_root() -> None:
+    marketplace = json.loads(
+        (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    entry = marketplace["plugins"][0]
+    assert entry["name"] == "fno"
+    assert entry["source"] == {"source": "local", "path": "../.."}
+    plugin_root = (
+        REPO_ROOT / ".agents" / "plugins" / entry["source"]["path"]
+    ).resolve()
+    assert plugin_root == REPO_ROOT
+    assert (plugin_root / ".codex-plugin" / "plugin.json").is_file()
 
 
 def test_postmortem_script_is_executable() -> None:

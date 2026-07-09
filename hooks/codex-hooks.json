@@ -1,0 +1,16 @@
+{
+  "description": "Codex plugin hooks for footnote context injection",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env FNO_PLATFORM=codex ${CODEX_PLUGIN_ROOT}/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

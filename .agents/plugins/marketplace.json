@@ -1,0 +1,20 @@
+{
+  "name": "footnote-local",
+  "interface": {
+    "displayName": "Footnote Local"
+  },
+  "plugins": [
+    {
+      "name": "fno",
+      "source": {
+        "source": "local",
+        "path": "../.."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
