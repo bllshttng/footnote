@@ -66,7 +66,26 @@ def test_second_dispatch_same_sha_is_noop(tmp_path):
     )
     assert first.outcome == "dispatched"
     assert second.outcome == "already-dispatched"
+    assert second.detail == "marker-exists"  # genuine completed dedup, not in-flight
     assert len(spawn.calls) == 1  # exactly one worker for the merge SHA
+
+
+def test_lock_contention_is_distinguished_from_marker_exists(tmp_path, monkeypatch):
+    """A concurrent holder (ClaimHeldByOther) is in-flight, NOT done: it must be
+    tagged 'lock-contention' so a polling caller does not treat it as completed."""
+    from fno import claims
+
+    def _held(*a, **kw):
+        raise claims.ClaimHeldByOther("other", pid=999, host="h", key="k")
+
+    monkeypatch.setattr(claims, "acquire_claim", _held)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaLC", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res.outcome == "already-dispatched"
+    assert res.detail == "lock-contention"
+    assert spawn.calls == []  # never spawned; another holder owns the lock
 
 
 def test_distinct_shas_each_dispatch(tmp_path):
@@ -205,3 +224,222 @@ def test_scan_threads_merge_sha_onto_record():
     closeable = [r for r in records if r.closeable]
     assert len(closeable) == 1
     assert closeable[0].merge_sha == "beefcafe"
+
+
+# --- daemon adapter: the real _default_dispatch_ritual cold-spawn chain ---
+
+
+class _Cand:
+    def __init__(self, pr_number, repo_dir, source_session_id=None):
+        self.pr_number = pr_number
+        self.repo_dir = repo_dir
+        self.source_session_id = source_session_id
+
+
+class _Obs:
+    def __init__(self, merge_sha=None):
+        self.merge_sha = merge_sha
+
+
+class _FireResult:
+    def __init__(self, ok, rc=0):
+        self.ok = ok
+        self.rc = rc
+
+
+def test_default_dispatch_ritual_cold_fire_ok_marks(tmp_path, monkeypatch):
+    """The daemon's real adapter: a successful headless fire is a completed
+    hand-off (dispatched, marker set)."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    fired: list = []
+
+    def fire(verb, pr, repo_dir):
+        fired.append((verb, pr, str(repo_dir)))
+        return _FireResult(ok=True)
+
+    res = _default_dispatch_ritual(
+        _Cand(7, tmp_path, source_session_id=None), _Obs(merge_sha="shaD1"), fire
+    )
+    assert res.outcome == "dispatched"
+    assert fired == [("merged", 7, str(tmp_path))]
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaD1").exists()
+
+
+def test_default_dispatch_ritual_cold_fire_notok_no_marker(tmp_path):
+    """A not-ok headless fire raises inside _cold_spawn -> spawn-failed, and NO
+    marker is written so the next tick retries (the load-bearing invariant the
+    generic dispatcher tests only assert at the seam)."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    def fire(verb, pr, repo_dir):
+        return _FireResult(ok=False, rc=1)
+
+    res = _default_dispatch_ritual(
+        _Cand(7, tmp_path, source_session_id=None), _Obs(merge_sha="shaD2"), fire
+    )
+    assert res.outcome == "spawn-failed"
+    assert not (tmp_path / ".fno" / "post-merge-dispatched" / "shaD2").exists()
+
+
+def test_cross_detector_one_handoff_per_sha(tmp_path):
+    """US3: reconcile (via canonical_root) and the daemon adapter (via node_cwd)
+    converge on the SAME per-SHA marker under one canonical, so a merge both
+    detectors observe is handed off exactly once."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    canonical = tmp_path / "canon"
+    canonical.mkdir()
+
+    # Detector A: reconcile-style call (its own canonical_root + merge_sha).
+    spawn_a = _Spawn(short_id="A")
+    first = dispatch_post_merge_ritual(
+        7, dedup_key="shaXD", auto_run=True, canonical_root=canonical,
+        spawn=spawn_a, source_session_id=None,
+    )
+    assert first.outcome == "dispatched"
+
+    # Detector B: the daemon adapter, resolving the SAME canonical from node_cwd.
+    fired_b: list = []
+
+    def fire(verb, pr, repo_dir):
+        fired_b.append(pr)
+        return _FireResult(ok=True)
+
+    second = _default_dispatch_ritual(
+        _Cand(7, canonical, source_session_id=None), _Obs(merge_sha="shaXD"), fire
+    )
+    assert second.outcome == "already-dispatched"
+    assert fired_b == []  # the second detector fired nothing
+    assert len(spawn_a.calls) == 1  # exactly one hand-off total
+
+
+# --- warm-session routing: inject XOR cold, one marker -------------------
+
+
+class _WarmInject:
+    def __init__(self, delivered=True, reason="delivered"):
+        self.delivered = delivered
+        self.reason = reason
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, session_id: str, pr_number: int):
+        self.calls.append((session_id, pr_number))
+        return (self.delivered, self.reason)
+
+
+def _patch_resolver(monkeypatch, result):
+    import fno.post_merge_route as pmr
+
+    monkeypatch.setattr(pmr, "resolve_warm_session", lambda sid: result)
+
+
+def test_warm_delivery_skips_cold_and_marks(tmp_path, monkeypatch):
+    """AC1-HP: live originating session -> exactly one inject, no cold
+    dispatch, shared marker set."""
+    _patch_resolver(monkeypatch, "sess-live-1")
+    warm = _WarmInject(delivered=True)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW1", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-live-1", warm_inject=warm,
+    )
+    assert res.outcome == "routed-warm"
+    assert warm.calls == [("sess-live-1", 7)]
+    assert spawn.calls == []
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW1").exists()
+
+
+def test_warm_inject_failure_falls_back_cold(tmp_path, monkeypatch):
+    """AC1-ERR: probe passes but the send fails -> cold dispatch, reason kept."""
+    _patch_resolver(monkeypatch, "sess-live-2")
+    warm = _WarmInject(delivered=False, reason="not-live")
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW2", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-live-2", warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail == "cold: not-live"
+    assert len(spawn.calls) == 1
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW2").exists()
+
+
+def test_warm_queue_timeout_falls_back_cold(tmp_path, monkeypatch):
+    """US4: a busy session queues the inject; past the confirm budget the
+    route cold-dispatches."""
+    _patch_resolver(monkeypatch, "sess-busy")
+    warm = _WarmInject(delivered=False, reason="queue-timeout")
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW3", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-busy", warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail == "cold: queue-timeout"
+    assert len(spawn.calls) == 1
+
+
+def test_no_source_session_takes_cold_path(tmp_path):
+    """AC1-EDGE: a node with no source_session_id cold-dispatches, no inject."""
+    warm = _WarmInject()
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW4", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id=None, warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert warm.calls == []
+    assert len(spawn.calls) == 1
+
+
+def test_unresolved_session_takes_cold_path(tmp_path, monkeypatch):
+    """Dead / unregistered / identity-mismatch resolves to None -> cold."""
+    _patch_resolver(monkeypatch, None)
+    warm = _WarmInject()
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW5", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-dead", warm_inject=warm,
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail == "cold: no-live-source-session"
+    assert warm.calls == []
+    assert len(spawn.calls) == 1
+
+
+def test_existing_marker_blocks_warm_inject_too(tmp_path, monkeypatch):
+    """US3: a merge already handled by the other detector never re-routes --
+    neither inject nor cold fires once the shared marker exists."""
+    _patch_resolver(monkeypatch, "sess-live-3")
+    spawn = _Spawn()
+    first = dispatch_post_merge_ritual(
+        7, dedup_key="shaW6", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert first.outcome == "dispatched"
+    warm = _WarmInject()
+    second = dispatch_post_merge_ritual(
+        7, dedup_key="shaW6", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-live-3", warm_inject=warm,
+    )
+    assert second.outcome == "already-dispatched"
+    assert warm.calls == []
+    assert len(spawn.calls) == 1
+
+
+def test_warm_resolver_error_degrades_to_cold(tmp_path, monkeypatch):
+    """A resolver crash must never break the dispatch (fallback floor)."""
+    import fno.post_merge_route as pmr
+
+    def _boom(sid):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(pmr, "resolve_warm_session", _boom)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaW7", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-x", warm_inject=_WarmInject(),
+    )
+    assert res.outcome == "dispatched"
+    assert res.detail is not None and res.detail.startswith("cold: warm-error")
+    assert len(spawn.calls) == 1

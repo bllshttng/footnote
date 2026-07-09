@@ -285,6 +285,59 @@ def refresh() -> None:
     typer.echo(f"pr-watch refresh: {msg}")
 
 
+# Single-flight window for the SessionStart self-heal: long enough to cover the
+# render + bounce round-trip, short enough that a crashed heal recovers soon.
+_HEAL_TTL_MS = 5 * 60 * 1000
+
+
+@cli.command()
+def heal() -> None:
+    """Revive a previously-enabled-but-dead watcher (idempotent, race-guarded).
+
+    The SessionStart self-heal entrypoint: fired when the liveness verdict is
+    ``dead``. Acts only when ``pr_watch.enabled`` is true, so a never-enabled
+    watcher is never auto-installed; a claim single-flights concurrent
+    SessionStarts so the reinstall happens at most once per window. The heal
+    itself is ``refresh_watcher`` (re-render plist + bounce), which cures both
+    an unloaded agent and the wedged-job state a plain ``launchctl load``
+    cannot fix.
+    """
+    from fno import claims
+    from fno.claims.io import global_claims_root
+    from fno.pr_watch import _install as m
+
+    settings = load_settings()
+    if not settings.pr_watch.enabled:
+        typer.echo("pr-watch heal: disabled; nothing to heal")
+        return
+
+    holder = f"pr-watch-heal:{os.getpid()}"
+    heal_root = global_claims_root()
+    try:
+        claims.acquire_claim(
+            "pr-watch:heal", holder, ttl_ms=_HEAL_TTL_MS,
+            reason="pr-watch SessionStart self-heal", root=heal_root,
+        )
+    except claims.ClaimHeldByOther:
+        typer.echo("pr-watch heal: another session is healing; skipped")
+        return
+    try:
+        msg, rc = m.refresh_watcher(
+            launch_agents_dir=_LAUNCH_AGENTS_DIR,
+            fno_binary=_resolve_fno_binary(),
+            install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+            interval=settings.pr_watch.interval_seconds,
+        )
+        typer.echo(f"pr-watch heal: {msg}")
+        if rc != 0:
+            raise typer.Exit(1)
+    finally:
+        try:
+            claims.release_claim("pr-watch:heal", holder, root=heal_root)
+        except Exception:  # noqa: BLE001 - TTL-bounded; a failed release self-recovers
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Activation coupling entrypoints (called by `fno config set pr_watch.enabled`)
 # ---------------------------------------------------------------------------

@@ -1519,3 +1519,112 @@ class TestPostMergeRouting:
             resolve_route_fn=lambda role: None,
         )
         assert (home / ".claude.json").read_text(encoding="utf-8") == original
+
+
+# ---------------------------------------------------------------------------
+# Warm-route merge dispatch (shared marker with reconcile)
+# ---------------------------------------------------------------------------
+
+
+class TestWarmMergeRouting:
+    """The tick's merge branch routes through the shared post-merge dispatcher."""
+
+    def _run_merge_tick(self, tmp_path, ritual_outcome, ritual_detail=None):
+        from fno.graph._reconcile import PostMergeDispatchResult
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        store.set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        obs_map = {1: _make_obs(1, "MERGED", merged=True)}
+        deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map, merge_ready=True)
+
+        ritual_calls: list[tuple] = []
+
+        def fake_ritual(cand, obs, fire):
+            ritual_calls.append((cand.pr_number, getattr(obs, "merge_sha", None)))
+            return PostMergeDispatchResult(
+                ritual_outcome, cand.pr_number, short_id="abcd1234", detail=ritual_detail
+            )
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            dispatch_ritual_fn=fake_ritual,
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+        return deps, store_path, ritual_calls
+
+    def test_routed_warm_counts_as_dispatched(self, tmp_path):
+        """A warm inject is a completed hand-off: watermark advances, no
+        headless fire, and the event carries route=warm."""
+        from fno.pr_watch._state import WatermarkStore
+
+        deps, store_path, ritual_calls = self._run_merge_tick(tmp_path, "routed-warm")
+        assert ritual_calls == [(1, None)]
+        assert deps["fired"] == []  # the ritual seam owns any cold fire
+        dispatched = [e for e in deps["events"] if e["type"] == "pr_watch_dispatched"]
+        assert len(dispatched) == 1
+        assert dispatched[0]["data"]["kind"] == "merge"
+        assert dispatched[0]["data"]["route"] == "warm"
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["merge_dispatched"] is True
+
+    def test_already_dispatched_marker_exists_advances_watermark(self, tmp_path):
+        """US3: reconcile got there first and WROTE the marker (completed dedup)
+        -> the daemon marks its watermark and fires nothing."""
+        from fno.pr_watch._state import WatermarkStore
+
+        deps, store_path, _calls = self._run_merge_tick(
+            tmp_path, "already-dispatched", ritual_detail="marker-exists"
+        )
+        assert deps["fired"] == []
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatched"] == []
+        skips = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
+        assert skips and skips[0]["data"]["reason"] == "already-dispatched"
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["merge_dispatched"] is True
+
+    def test_lock_contention_does_not_advance_watermark(self, tmp_path):
+        """A concurrent holder is in-flight, NOT done: the daemon must NOT advance
+        its watermark, so the next tick retries if that holder later fails before
+        writing the marker (else the ritual is silently dropped)."""
+        from fno.pr_watch._state import WatermarkStore
+
+        deps, store_path, _calls = self._run_merge_tick(
+            tmp_path, "already-dispatched", ritual_detail="lock-contention"
+        )
+        assert deps["fired"] == []
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatched"] == []
+        skips = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
+        assert skips and skips[0]["data"]["reason"] == "dispatch-in-flight"
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["merge_dispatched"] is False  # unadvanced -> next tick retries
+
+    def test_spawn_failed_takes_retry_path(self, tmp_path):
+        """A failed hand-off leaves the watermark unadvanced and bumps retries."""
+        from fno.pr_watch._state import WatermarkStore
+
+        deps, store_path, _calls = self._run_merge_tick(tmp_path, "spawn-failed")
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["merge_dispatched"] is False
+        assert entry["retries"] == 1
+        failed = [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"]
+        assert len(failed) == 1

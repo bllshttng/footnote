@@ -173,6 +173,26 @@ def test_boundary_open_node_with_pr_number_included(tmp_path):
     assert cand.repo_slug == "owner/repo"
 
 
+def test_source_session_id_threads_onto_candidate(tmp_path):
+    """The node's originating session (warm-route target) reaches the candidate;
+    a node without one is None (a field rename would silently break warm routing)."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    with_sess = {
+        "id": "x-0006", "pr_number": 5,
+        "pr_url": "https://github.com/owner/repo/pull/5",
+        "cwd": str(repo_dir), "source_session_id": "sess-abc",
+    }
+    without = {
+        "id": "x-0007", "pr_number": 6,
+        "pr_url": "https://github.com/owner/repo/pull/6",
+        "cwd": str(repo_dir),
+    }
+    got = {c.node_id: c.source_session_id for c in discover_open_prs([with_sess, without])}
+    assert got == {"x-0006": "sess-abc", "x-0007": None}
+
+
 def test_boundary_node_with_superseded_by_excluded():
     """Boundary: node with superseded_by is excluded (not open)."""
     node = {

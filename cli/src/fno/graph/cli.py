@@ -4735,17 +4735,30 @@ def cmd_reconcile(
                 # still fires in JSON mode - only the human line is suppressed.
                 if _pm_auto:
                     from fno.graph._reconcile import dispatch_post_merge_ritual
+                    try:
+                        _pm_node = _find_node(post_entries, record.node_id)
+                    except Exception:  # noqa: BLE001 - warm route is best-effort
+                        _pm_node = None
                     _pm = dispatch_post_merge_ritual(
                         record.pr_number,
                         dedup_key=record.merge_sha,
                         node_cwd=record.cwd,
                         auto_run=True,
+                        source_session_id=(
+                            (_pm_node or {}).get("source_session_id")
+                        ),
                     )
                     if not json_out:
-                        if _pm.outcome == "dispatched":
+                        if _pm.outcome == "routed-warm":
+                            typer.echo(
+                                f"post-merge: routed warm /fno:pr merged "
+                                f"{record.pr_number} to session {_pm.short_id}"
+                            )
+                        elif _pm.outcome == "dispatched":
                             typer.echo(
                                 f"post-merge: dispatched /fno:pr merged "
-                                f"{record.pr_number} (short_id={_pm.short_id})"
+                                f"{record.pr_number} (short_id={_pm.short_id}, "
+                                f"{_pm.detail or 'cold'})"
                             )
                         elif _pm.outcome == "already-dispatched":
                             typer.echo(
