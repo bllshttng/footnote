@@ -70,17 +70,19 @@ def test_ambient_codex_session(graph, monkeypatch):
     assert r.output.index(posture) < r.output.index("think dispatched:")
 
 
-def test_ambient_codex_explicit_provider_reports_exec_posture(graph, monkeypatch):
+def test_ambient_codex_explicit_non_claude_provider_is_refused(graph, monkeypatch):
     monkeypatch.setenv("CODEX_THREAD_ID", "codex-thread")
     r = runner.invoke(
         think_cli.think_app,
         ["dispatch", "x-0a9c", "--provider", "codex"],
     )
-    assert r.exit_code == 0
-    assert graph["node"]["provider"] == "codex"
-    posture = "codex posture: think source=codex; dispatch=codex-exec"
-    assert posture in r.output
-    assert r.output.index(posture) < r.output.index("think dispatched:")
+    assert r.exit_code == 2
+    posture = "codex posture: think source=codex; dispatch=unsupported"
+    assert r.output.count(posture) == 1
+    assert "detached /think uses Claude bg" in r.output
+    assert "omit --provider to use the Claude fallback" in r.output
+    assert "no live think-session receipt" in r.output
+    assert graph == {}  # dispatch_conversational was never called
 
 
 def test_node_not_found_exits_2(graph, monkeypatch):
@@ -111,12 +113,22 @@ def test_model_flag_overlays_node(graph, monkeypatch):
     assert graph["node"]["model"] == "glm-4.7"
 
 
-def test_provider_flag_overlays_node(graph, monkeypatch):
+def test_claude_provider_flag_overlays_node(graph, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "live-sid")
+    r = runner.invoke(think_cli.think_app,
+                      ["dispatch", "x-0a9c", "--provider", "claude"])
+    assert r.exit_code == 0
+    assert graph["node"]["provider"] == "claude"
+
+
+def test_claude_source_explicit_non_claude_provider_is_refused(graph, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "live-sid")
     r = runner.invoke(think_cli.think_app,
                       ["dispatch", "x-0a9c", "--provider", "codex"])
-    assert r.exit_code == 0
-    assert graph["node"]["provider"] == "codex"
+    assert r.exit_code == 2
+    assert "detached /think uses Claude bg" in r.output
+    assert "codex posture: think source=codex" not in r.output
+    assert graph == {}  # dispatch_conversational was never called
 
 
 def test_empty_model_rejected_exits_2(graph, monkeypatch):

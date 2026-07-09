@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[3]
 POSTURES = {
     "target": "codex posture: target uses the native Stop loop on the main thread; delegated work uses spawn_agent; bg dispatch is Claude-only.",
     "do": "codex posture: do uses spawn_agent for wave tasks when available, with main-thread sequential fallback.",
-    "think": "codex posture: think uses this Codex conversation as the source; dispatch defaults to Claude bg unless an explicit Codex exec provider is requested.",
+    "think": "codex posture: think uses this Codex conversation as the source; dispatch defaults to Claude bg; explicit non-Claude providers are refused.",
     "blueprint": "codex posture: blueprint plans natively in this thread; auto-launch is Claude bg only, otherwise the node is visibly parked.",
 }
 
