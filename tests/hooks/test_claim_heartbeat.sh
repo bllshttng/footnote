@@ -12,6 +12,8 @@
 #   T4  AC3-UI    fresh stamp (throttled)    -> exits 0, `fno claim status` NOT called
 #   T5           no manifest                 -> exits 0, `fno` never called
 #   T6  AC3-UI    not-holder no-op is silent -> no stdout
+#   T7/T8         Claude owner identity match/mismatch
+#   T9/T10        Codex thread identity match/mismatch
 
 set -uo pipefail
 
@@ -40,6 +42,7 @@ setup_env() {
 ---
 session_id: 20260707T203700Z-cl55246-f3fe72
 claude_session_id: 182b29c8-owner-uuid
+codex_thread_id: 019f48e4-owner-thread
 plan_path: ""
 ---
 # Mission
@@ -71,13 +74,20 @@ run_hook() {
   # No throttle stamp is written by the harness unless a test does so; a fresh
   # tmp project has none, so the throttle gate passes. No session_id on stdin,
   # so the identity gate fails open and the holder gate is what is exercised.
-  printf '{"cwd": "%s"}' "$CWD" | bash "$HOOK"
+  printf '{"cwd": "%s"}' "$CWD" | CODEX_THREAD_ID= bash "$HOOK"
 }
 
 # Like run_hook but with a Claude session uuid on stdin, so the identity gate
 # (current session vs manifest claude_session_id) is exercised. $1 = uuid.
 run_hook_sid() {
-  printf '{"cwd": "%s", "session_id": "%s"}' "$CWD" "$1" | bash "$HOOK"
+  printf '{"cwd": "%s", "session_id": "%s"}' "$CWD" "$1" \
+    | CODEX_THREAD_ID= bash "$HOOK"
+}
+
+# Like run_hook but with a Codex thread identity in the hook environment.
+# $1 = thread id.
+run_hook_codex() {
+  printf '{"cwd": "%s"}' "$CWD" | CODEX_THREAD_ID="$1" bash "$HOOK"
 }
 
 # ── T1: AC3-HP - we hold the claim -> refresh is issued ──────────────────────
@@ -168,6 +178,28 @@ if grep -q "claim refresh" "$CALLLOG"; then
   fail "T8 revived a dead owner's claim from a different session (codex P1)"
 else
   pass "T8 different session on a stale manifest does not refresh"
+fi
+teardown_env
+
+# ── T9: Codex identity match -> refresh ──────────────────────────────────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_codex "019f48e4-owner-thread" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
+  pass "T9 CODEX_THREAD_ID == manifest codex_thread_id -> refresh"
+else
+  fail "T9 Codex owner thread did not refresh; calls: $(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T10: Codex identity mismatch -> NO refresh ───────────────────────────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_codex "019f48e4-different-thread" >/dev/null 2>&1
+if grep -q "claim refresh" "$CALLLOG"; then
+  fail "T10 revived a Codex claim from a different thread"
+else
+  pass "T10 different Codex thread on a stale manifest does not refresh"
 fi
 teardown_env
 

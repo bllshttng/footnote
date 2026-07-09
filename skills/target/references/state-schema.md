@@ -20,7 +20,8 @@ Any other field write exits with code 5 and logs a `state_write_refused` event r
 
 ```yaml
 session_id: 20260420T091434Z-56177-a1b2c3
-  # Format: YYYYMMDDTHHMMSSZ-PPID-<6 hex chars>
+  # Precedence: explicit TARGET_SESSION_ID, then nonblank CODEX_THREAD_ID,
+  # then generated YYYYMMDDTHHMMSSZ-<provider-infix>PPID-<6 hex chars>.
   # Stable for the lifetime of the session (across resume and external-loop restarts).
   # Used by fno-agents loop-check as the primary session discriminator.
 
@@ -81,7 +82,9 @@ owner_pid: 12345                     # PPID of the init subprocess (dead at t+0;
 owner_started_at: "2026-06-05T03:00:00Z"
 owner_cwd: "~/conductor/workspaces/abilities/my-feature"
                                      # absolute path to the worktree at init time
-claude_transcript_id: "abc123def"    # Claude session UUID (used by shim's foreign-session guard)
+claude_session_id: "abc123def"       # Claude session UUID; TARGET_TRANSCRIPT_ID/
+                                     # CLAUDE_CODE_SESSION_ID semantics are unchanged
+codex_thread_id: "019f48e4-..."      # CODEX_THREAD_ID, or null outside Codex
 ```
 
 ### Auto-merge (set at init from config; never mutated)
@@ -106,10 +109,16 @@ mission_from_msg_id: ""
 graph_node_id: ""                    # backlog node ID associated with this session
 graph_node_claim_refused: false      # true if claim acquisition failed
 target_claim_key: ""                 # claim key (node:<id>)
-target_claim_holder: ""
+target_claim_holder: "target-session:<session_id>"
 target_claim_ttl: ""
 target_claim_blocked_reason: ""
 ```
+
+The graph lock owner and authoritative claim holder derive from the same
+manifest `session_id`: graph `--locked-by <session_id>` and claim holder
+`target-session:<session_id>` must never diverge. For Codex, the default
+`session_id` is the thread id, so both ownership layers follow the conversation
+across subprocesses; `TARGET_SESSION_ID` remains the explicit override.
 
 ## What was removed (ab-d0337fbc)
 

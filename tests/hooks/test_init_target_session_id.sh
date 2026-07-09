@@ -3,10 +3,12 @@
 # init-target-state.sh (ab-7303e5d7, GAP-3).
 #
 # Covers:
-#   (a) TARGET_SESSION_ID=preset-key-123 + TARGET_START=1 + TARGET_INPUT set
-#       => written manifest has `session_id: preset-key-123`
-#   (b) No TARGET_SESSION_ID => generated session_id matches the pattern
+#   (a) TARGET_SESSION_ID=preset-key-123 wins over CODEX_THREAD_ID and the
+#       Codex thread is recorded additively in the manifest
+#   (b) No TARGET_SESSION_ID or CODEX_THREAD_ID => generated session_id matches
+#       the pattern
 #       [0-9]{8}T[0-9]{6}Z-[0-9]+-...
+#   (d) No TARGET_SESSION_ID + CODEX_THREAD_ID => thread id is used verbatim
 #
 # Exit codes:
 #   0  all scenarios passed
@@ -59,6 +61,7 @@ _ALL_TMPS+=("$TMP_A")
   TARGET_START=1 \
   TARGET_INPUT="test-session-id-preset" \
   TARGET_SESSION_ID="preset-key-123" \
+  CODEX_THREAD_ID="codex-thread-loses-to-explicit" \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(a): init exited non-zero"
@@ -71,6 +74,11 @@ SESSION_ID_A=$(grep '^session_id:' "$STATE_A" | sed 's/^session_id:[[:space:]]*/
 [[ "$SESSION_ID_A" == "preset-key-123" ]] \
   || fail "(a): expected session_id 'preset-key-123', got '${SESSION_ID_A}'"
 pass "(a): session_id written verbatim as 'preset-key-123'"
+
+CODEX_THREAD_ID_A=$(grep '^codex_thread_id:' "$STATE_A" | sed 's/^codex_thread_id:[[:space:]]*//' | tr -d '\r')
+[[ "$CODEX_THREAD_ID_A" == "codex-thread-loses-to-explicit" ]] \
+  || fail "(a): expected codex_thread_id to be recorded, got '${CODEX_THREAD_ID_A}'"
+pass "(a): TARGET_SESSION_ID wins while codex_thread_id is still recorded"
 
 # Verify the YAML parses and the field matches
 python3 -c "
@@ -101,6 +109,7 @@ _ALL_TMPS+=("$TMP_B")
   HOME="${TMP_B}/home" \
   TARGET_START=1 \
   TARGET_INPUT="test-session-id-generated" \
+  CODEX_THREAD_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(b): init exited non-zero"
@@ -154,6 +163,7 @@ STDERR_C="${TMP_C}/init-stderr.txt"
   HOME="${TMP_C}/home" \
   TARGET_START=1 \
   TARGET_INPUT="test-heredoc-no-subst" \
+  CODEX_THREAD_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>"$STDERR_C") \
   || fail "(c): init exited non-zero"
@@ -172,5 +182,35 @@ if grep -qE "No such command 'start'|init: command not found" "$STDERR_C"; then
 $(cat "$STDERR_C")"
 fi
 pass "(c): init stderr free of command-substitution errors"
+
+# ── (d) CODEX_THREAD_ID becomes the target session identity ─────────
+log "(d): no TARGET_SESSION_ID + CODEX_THREAD_ID => thread id used verbatim"
+
+make_repo TMP_D
+_ALL_TMPS+=("$TMP_D")
+
+(cd "$TMP_D" && \
+  HOME="${TMP_D}/home" \
+  TARGET_START=1 \
+  TARGET_INPUT="test-codex-thread-id" \
+  CODEX_THREAD_ID="019f48e4-codex-thread" \
+  CLAUDE_CODE_SESSION_ID="claude-transcript-stays-separate" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>&1) \
+  || fail "(d): init exited non-zero"
+
+STATE_D="${TMP_D}/.fno/target-state.md"
+[[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
+
+SESSION_ID_D=$(grep '^session_id:' "$STATE_D" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+CODEX_THREAD_ID_D=$(grep '^codex_thread_id:' "$STATE_D" | sed 's/^codex_thread_id:[[:space:]]*//' | tr -d '\r')
+CLAUDE_SESSION_ID_D=$(grep '^claude_session_id:' "$STATE_D" | sed 's/^claude_session_id:[[:space:]]*//' | tr -d '\r')
+[[ "$SESSION_ID_D" == "019f48e4-codex-thread" ]] \
+  || fail "(d): expected Codex thread as session_id, got '${SESSION_ID_D}'"
+[[ "$CODEX_THREAD_ID_D" == "019f48e4-codex-thread" ]] \
+  || fail "(d): expected codex_thread_id in manifest, got '${CODEX_THREAD_ID_D}'"
+[[ "$CLAUDE_SESSION_ID_D" == "claude-transcript-stays-separate" ]] \
+  || fail "(d): Claude transcript semantics changed, got '${CLAUDE_SESSION_ID_D}'"
+pass "(d): Codex thread binds session identity without changing Claude transcript identity"
 
 log "All session_id scenarios passed"

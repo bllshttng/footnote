@@ -678,11 +678,20 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # transcript and silently disable the stop hook).
   claude_transcript_id="${TARGET_TRANSCRIPT_ID:-${CLAUDE_CODE_SESSION_ID:-null}}"
 
+  # Codex exposes the durable conversation identity directly. Record it beside
+  # the Claude transcript id; unset/whitespace-only values render as YAML null.
+  _codex_thread_raw="${CODEX_THREAD_ID:-}"
+  _codex_thread_compact="${_codex_thread_raw//[[:space:]]/}"
+  if [[ -n "$_codex_thread_compact" ]]; then
+    codex_thread_id="$_codex_thread_raw"
+  else
+    codex_thread_id="null"
+  fi
+
   # session_id: {UTC-timestamp}-{infix}{PPID}-{6 hex chars of /dev/urandom}
-  # ab-7303e5d7: when TARGET_SESSION_ID is set (megawalk walker pre-assigns it),
-  # use it verbatim so (a) loopcheck termination events match the walker's
-  # Unit.session_key and (b) the worker's node claim re-acquire is idempotent
-  # (same holder string = same session_key -> core.py acquire sees existing.holder==holder).
+  # ab-7303e5d7: TARGET_SESSION_ID is the absolute override (megawalk walkers
+  # pre-assign it). Otherwise a Codex thread id is already a durable session
+  # identity and is used verbatim. The generated path remains the fallback.
   #
   # Provenance infix lives glued to the pid INSIDE segment 2 (never a 4th
   # dash-segment - 3 segments is load-bearing for split('-')[0] consumers). Driver
@@ -701,6 +710,8 @@ if [[ ! -f "$STATE_FILE" ]]; then
   esac
   if [[ -n "${TARGET_SESSION_ID:-}" ]]; then
     local_session_id="$TARGET_SESSION_ID"
+  elif [[ -n "$_codex_thread_compact" ]]; then
+    local_session_id="$_codex_thread_raw"
   else
     local_sid_entropy="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo "")"
     if [[ -n "$local_sid_entropy" ]]; then
@@ -758,6 +769,7 @@ owner_pid: $local_owner_pid
 owner_started_at: $local_owner_started_at
 owner_cwd: "$local_owner_cwd"
 claude_session_id: $claude_transcript_id
+codex_thread_id: $codex_thread_id
 scratchpad_path: $REPO_ROOT/.fno/scratchpad
 target_size: ${TARGET_SIZE:-}
 # Dispatch pins - a model/provider chosen at \`fno target start\`/\`init\`, carried
