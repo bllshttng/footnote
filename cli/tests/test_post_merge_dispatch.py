@@ -207,6 +207,94 @@ def test_scan_threads_merge_sha_onto_record():
     assert closeable[0].merge_sha == "beefcafe"
 
 
+# --- daemon adapter: the real _default_dispatch_ritual cold-spawn chain ---
+
+
+class _Cand:
+    def __init__(self, pr_number, repo_dir, source_session_id=None):
+        self.pr_number = pr_number
+        self.repo_dir = repo_dir
+        self.source_session_id = source_session_id
+
+
+class _Obs:
+    def __init__(self, merge_sha=None):
+        self.merge_sha = merge_sha
+
+
+class _FireResult:
+    def __init__(self, ok, rc=0):
+        self.ok = ok
+        self.rc = rc
+
+
+def test_default_dispatch_ritual_cold_fire_ok_marks(tmp_path, monkeypatch):
+    """The daemon's real adapter: a successful headless fire is a completed
+    hand-off (dispatched, marker set)."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    fired: list = []
+
+    def fire(verb, pr, repo_dir):
+        fired.append((verb, pr, str(repo_dir)))
+        return _FireResult(ok=True)
+
+    res = _default_dispatch_ritual(
+        _Cand(7, tmp_path, source_session_id=None), _Obs(merge_sha="shaD1"), fire
+    )
+    assert res.outcome == "dispatched"
+    assert fired == [("merged", 7, str(tmp_path))]
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaD1").exists()
+
+
+def test_default_dispatch_ritual_cold_fire_notok_no_marker(tmp_path):
+    """A not-ok headless fire raises inside _cold_spawn -> spawn-failed, and NO
+    marker is written so the next tick retries (the load-bearing invariant the
+    generic dispatcher tests only assert at the seam)."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    def fire(verb, pr, repo_dir):
+        return _FireResult(ok=False, rc=1)
+
+    res = _default_dispatch_ritual(
+        _Cand(7, tmp_path, source_session_id=None), _Obs(merge_sha="shaD2"), fire
+    )
+    assert res.outcome == "spawn-failed"
+    assert not (tmp_path / ".fno" / "post-merge-dispatched" / "shaD2").exists()
+
+
+def test_cross_detector_one_handoff_per_sha(tmp_path):
+    """US3: reconcile (via canonical_root) and the daemon adapter (via node_cwd)
+    converge on the SAME per-SHA marker under one canonical, so a merge both
+    detectors observe is handed off exactly once."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    canonical = tmp_path / "canon"
+    canonical.mkdir()
+
+    # Detector A: reconcile-style call (its own canonical_root + merge_sha).
+    spawn_a = _Spawn(short_id="A")
+    first = dispatch_post_merge_ritual(
+        7, dedup_key="shaXD", auto_run=True, canonical_root=canonical,
+        spawn=spawn_a, source_session_id=None,
+    )
+    assert first.outcome == "dispatched"
+
+    # Detector B: the daemon adapter, resolving the SAME canonical from node_cwd.
+    fired_b: list = []
+
+    def fire(verb, pr, repo_dir):
+        fired_b.append(pr)
+        return _FireResult(ok=True)
+
+    second = _default_dispatch_ritual(
+        _Cand(7, canonical, source_session_id=None), _Obs(merge_sha="shaXD"), fire
+    )
+    assert second.outcome == "already-dispatched"
+    assert fired_b == []  # the second detector fired nothing
+    assert len(spawn_a.calls) == 1  # exactly one hand-off total
+
+
 # --- warm-session routing: inject XOR cold, one marker -------------------
 
 
