@@ -44,6 +44,41 @@ def _json_result(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# AC1-HP: scorer prompts carry the rubric and the abstain path
+# ---------------------------------------------------------------------------
+
+_RUBRIC_ANCHORS = ("0 =", "25 =", "50 =", "75 =", "100 =")
+
+
+class TestScorerPromptRubric:
+    """AC1-HP: both system prompts embed the 0/25/50/75/100 rubric and the
+    'reply 25 or lower when unverifiable / never guess high' abstain path,
+    while keeping the reply-format sentence last."""
+
+    def test_single_prompt_carries_rubric_and_abstain(self) -> None:
+        from fno.review.scorers.claude_scorer import _SINGLE_SYSTEM_PROMPT as p
+
+        for anchor in _RUBRIC_ANCHORS:
+            assert anchor in p, f"missing rubric anchor {anchor!r}"
+        assert "25 or lower" in p.lower()
+        assert "never guess high" in p.lower()
+        # Format instruction stays last (trailing instructions dominate Haiku).
+        assert p.rstrip().endswith("Reply with only the integer, nothing else.")
+
+    def test_batch_prompt_carries_rubric_and_abstain(self) -> None:
+        from fno.review.scorers.claude_scorer import _batch_system_prompt
+
+        p = _batch_system_prompt(4)
+        for anchor in _RUBRIC_ANCHORS:
+            assert anchor in p, f"missing rubric anchor {anchor!r}"
+        assert "25 or lower" in p.lower()
+        assert "never guess high" in p.lower()
+        # Output contract intact: array-of-N-integers instruction, last.
+        assert "JSON array of 4 integers" in p
+        assert p.rstrip().endswith("no other text.")
+
+
+# ---------------------------------------------------------------------------
 # AC1-HP / AC1-ERR: single-finding claude_scorer
 # ---------------------------------------------------------------------------
 

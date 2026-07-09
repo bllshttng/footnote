@@ -129,15 +129,18 @@ Based on detected change type, add appropriate agents. See [agent-selection.md](
 ### Step 3b: Confidence Scoring (MANDATORY for issues found)
 
 For each issue flagged by agents in Steps 2-3, spawn a parallel Haiku validation agent:
-- Input: issue description + relevant code snippet + CLAUDE.md context
+- Input: issue description + the finding's cited `file:line` quote + relevant code snippet + CLAUDE.md context
+- **Quote validation (cite-or-drop):** the validator MUST open the finding's cited `file:line` and check the finding's verbatim quote against the actual file content, not plausibility alone. A finding whose quote is missing from the cited location, does not match the file, or does not support the claim scores in the **0-25 abstain band** — it is treated as unverifiable, not asserted.
 - Agent scores 0-100 confidence using this rubric:
   - **0**: False positive, doesn't stand up to scrutiny, or pre-existing issue
-  - **25**: Might be real, but couldn't verify. Stylistic issue not in CLAUDE.md
+  - **25**: Might be real, but couldn't verify against the actual file content (abstain). Uncitable/unsupported quote. Stylistic issue not in CLAUDE.md
   - **50**: Real issue, but minor or unlikely in practice
   - **75**: Verified real issue, important, directly impacts functionality or violates CLAUDE.md
   - **100**: Confirmed definite issue, will happen frequently in practice
 
-Filter out issues scoring below **80**. Only report high-confidence issues.
+When uncertain whether the quote supports the claim, prefer the abstain band (0-25) over guessing high — a dropped uncertain finding is correct; a confidently wrong one is not.
+
+Filter out issues scoring below **80**. Only report high-confidence issues. (The sub-80 threshold is unchanged; abstain-band findings simply fall below it.)
 
 For CLAUDE.md-related issues: validator must verify the CLAUDE.md actually calls out that specific issue.
 

@@ -27,17 +27,36 @@ if TYPE_CHECKING:
 
 _MODEL = "claude-haiku-4-5"
 
-_SINGLE_SYSTEM_PROMPT = (
-    "Rate the confidence of this code review finding from 0 to 100. "
-    "Reply with only the integer, nothing else."
+# Rubric + abstain path for the confidence scorer. Mirrors the intent of
+# skills/review/references/sigma.md Step 3b, but the scorer payload carries
+# only the finding text (agent/severity/message/file:line via _format_finding
+# and the batch JSON), NOT the source lines - so abstention keys on the
+# finding's own vagueness, never a "verify against the provided code" check the
+# scorer cannot perform (that phrasing would push a compliant model to score
+# every finding <=25 and collapse recall). The CLI stays self-contained (never
+# reads skill files); alternate scorers under scorers/ need their own copy.
+# Keep the "reply ONLY ..." format sentence LAST: Haiku is format-fragile and
+# trailing instructions dominate compliance.
+_RUBRIC = (
+    "Rate the confidence that this code review finding is a real issue, 0 to 100:\n"
+    "0 = false positive, does not stand up to scrutiny, or pre-existing.\n"
+    "25 = might be real, but too vague or unspecific to confirm.\n"
+    "50 = real issue, but minor or unlikely in practice.\n"
+    "75 = verified real issue that directly impacts functionality.\n"
+    "100 = confirmed definite issue that will happen frequently.\n"
+    "If the finding is vague or you cannot tell it identifies a real, specific "
+    "issue, assign a score of 25 or lower. Never guess high."
 )
+
+_SINGLE_SYSTEM_PROMPT = _RUBRIC + "\nReply with only the integer, nothing else."
 
 
 def _batch_system_prompt(n: int) -> str:
     return (
-        f"Rate each of the {n} code review findings below from 0 (likely false positive) "
-        f"to 100 (definitely a real issue). Reply with ONLY a JSON array of {n} integers "
-        "in the same order as the input, no other text."
+        f"Score each of the {n} code review findings below.\n"
+        + _RUBRIC
+        + f"\nReply with ONLY a JSON array of {n} integers in the same order as "
+        "the input, no other text."
     )
 
 
