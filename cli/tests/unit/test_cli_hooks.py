@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
-from fno.setup.cli_hooks import install_codex_hook, install_gemini_hook
+from fno.setup.cli_hooks import (
+    inspect_codex_hooks,
+    install_codex_hook,
+    install_gemini_hook,
+)
 
 CMD = "/opt/footnote/hooks/session-start.sh"
 
@@ -140,6 +145,176 @@ def test_codex_backup_only_when_file_exists(tmp_path):
     assert res.backup is None  # nothing to back up on a fresh file
 
 
+def _write_codex_toml(path, command):
+    path.write_text(
+        "[[hooks.SessionStart]]\n\n"
+        "[[hooks.SessionStart.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(command)}\n"
+    )
+
+
+def _write_codex_json(path, *commands):
+    path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": command}
+                                for command in commands
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("toml_command", "json_command", "state"),
+    [
+        (None, None, "neither"),
+        (CMD, None, "toml-only"),
+        (None, CMD, "json-only"),
+        (CMD, CMD, "both"),
+    ],
+)
+def test_codex_inspector_distinguishes_hook_layers(
+    tmp_path, toml_command, json_command, state
+):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    if toml_command:
+        _write_codex_toml(config, toml_command)
+    if json_command:
+        _write_codex_json(legacy, json_command)
+
+    diagnostics = inspect_codex_hooks(
+        config_path=config, hooks_json_path=legacy
+    )
+
+    assert diagnostics.state == state
+    assert diagnostics.has_toml_hooks is bool(toml_command)
+    assert diagnostics.has_json_hooks is bool(json_command)
+
+
+def test_codex_inspector_classifies_owned_and_foreign_commands(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    wrapper_only = "env FNO_PLATFORM=codex custom-session-command"
+    foreign = "bash '/Users/bb16/.codex/herdr-agent-state.sh' session"
+    _write_codex_toml(config, CMD)
+    _write_codex_json(legacy, wrapper_only, foreign)
+
+    diagnostics = inspect_codex_hooks(
+        config_path=config, hooks_json_path=legacy
+    )
+
+    assert diagnostics.toml_footnote_commands == (CMD,)
+    assert diagnostics.json_footnote_commands == (wrapper_only,)
+    assert diagnostics.json_foreign_commands == (foreign,)
+
+
+def test_codex_duplicate_layers_warn_without_mutating_json(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    _write_codex_toml(config, CMD)
+    _write_codex_json(legacy, CMD)
+    before = legacy.read_bytes()
+
+    res = install_codex_hook(
+        CMD, config_path=config, hooks_json_path=legacy
+    )
+
+    assert not res.changed and res.already_present
+    assert res.note and "both Codex hook layers" in res.note
+    assert str(config) in res.note and str(legacy) in res.note
+    assert "TOML is preferred" in res.note
+    assert legacy.read_bytes() == before
+    assert not legacy.with_name("hooks.json.fno-bak").exists()
+
+
+def test_codex_explicit_migration_backs_up_and_removes_owned_json(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    _write_codex_toml(config, CMD)
+    _write_codex_json(legacy, CMD)
+    before = legacy.read_bytes()
+
+    res = install_codex_hook(
+        CMD,
+        config_path=config,
+        hooks_json_path=legacy,
+        migrate_legacy_hooks_json=True,
+    )
+
+    assert res.changed and res.legacy_backup is not None
+    assert res.legacy_backup.read_bytes() == before
+    assert not legacy.exists()
+    assert res.note and "migrated footnote-owned" in res.note
+
+
+def test_codex_migration_preserves_foreign_json_and_requests_manual_consolidation(
+    tmp_path,
+):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    foreign = "bash '/Users/bb16/.codex/herdr-agent-state.sh' session"
+    _write_codex_toml(config, CMD)
+    _write_codex_json(legacy, CMD, foreign)
+
+    res = install_codex_hook(
+        CMD,
+        config_path=config,
+        hooks_json_path=legacy,
+        migrate_legacy_hooks_json=True,
+    )
+
+    remaining = json.loads(legacy.read_text())
+    commands = [
+        hook["command"]
+        for group in remaining["hooks"]["SessionStart"]
+        for hook in group["hooks"]
+    ]
+    assert commands == [foreign]
+    assert res.legacy_backup is not None
+    assert res.note and "manual consolidation" in res.note
+    assert "TOML is preferred" in res.note
+
+
+@pytest.mark.parametrize("malformed", ["toml", "json"])
+def test_codex_inspector_returns_malformed_diagnostics(tmp_path, malformed):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    if malformed == "toml":
+        config.write_text("[[not valid")
+    else:
+        legacy.write_text("{not json")
+
+    diagnostics = inspect_codex_hooks(
+        config_path=config, hooks_json_path=legacy
+    )
+
+    assert diagnostics.state == "malformed"
+    assert len(diagnostics.errors) == 1
+    assert str(config if malformed == "toml" else legacy) in diagnostics.errors[0]
+
+
+def test_codex_malformed_toml_is_not_modified(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    config.write_text("[[not valid")
+
+    res = install_codex_hook(CMD, config_path=config, hooks_json_path=legacy)
+
+    assert not res.changed
+    assert res.note and "malformed" in res.note
+    assert config.read_text() == "[[not valid"
+
+
 # --- CLI surface ------------------------------------------------------------
 
 
@@ -222,3 +397,61 @@ def test_cli_cli_hooks_codex_alias_writes_only_codex(tmp_path, monkeypatch):
     ]
     assert cmds == [f"env FNO_PLATFORM=codex {fake_entry}"]
     assert "gemini:" not in res.output
+
+
+def test_cli_cli_hooks_codex_wires_legacy_path_and_migration_flag(tmp_path, monkeypatch):
+    import fno.paths as paths
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    from fno.setup_cli import app
+
+    cconf = tmp_path / "codex" / "config.toml"
+    legacy = tmp_path / "legacy" / "hooks.json"
+    legacy.parent.mkdir()
+    _write_codex_json(legacy, f"env FNO_PLATFORM=codex {fake_entry}")
+    res = CliRunner().invoke(
+        app,
+        [
+            "cli-hooks-codex",
+            "--codex-config",
+            str(cconf),
+            "--codex-hooks-json",
+            str(legacy),
+            "--migrate-legacy-hooks-json",
+        ],
+    )
+
+    assert res.exit_code == 0, res.output
+    assert cconf.exists() and not legacy.exists()
+    assert legacy.with_name("hooks.json.fno-bak").exists()
+    assert "migrated footnote-owned" in res.output
+
+
+def test_cli_cli_hooks_codex_defaults_hooks_json_next_to_codex_config(
+    tmp_path, monkeypatch
+):
+    import fno.paths as paths
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    from fno.setup_cli import app
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    foreign = "bash '/Users/bb16/.codex/herdr-agent-state.sh' session"
+    _write_codex_json(codex_home / "hooks.json", foreign)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    res = CliRunner().invoke(app, ["cli-hooks-codex"])
+
+    assert res.exit_code == 0, res.output
+    assert str(codex_home / "hooks.json") in res.output
+    assert str(codex_home / "config.toml") in res.output
+    assert "manual consolidation" in res.output
+    assert foreign in (codex_home / "hooks.json").read_text()
