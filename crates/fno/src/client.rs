@@ -456,6 +456,15 @@ struct View {
     /// visually follows the moved workspace. Cleared by any non-reorder key or a
     /// selector close.
     sel_follow: Option<u64>,
+    /// (x-653d) The session-navigator overlay (leader+f): a global goto picker
+    /// over a flat catalog of every squad/tab/agent/card, filtered by typed text
+    /// AND by agent state. `Some` while open; stdin diverts to [`nav_keys`].
+    /// Client-local like `search` - opening never sends a message and reserves
+    /// no row (it draws over the content top-left, not the bottom chrome).
+    nav: Option<NavView>,
+    /// Pending escape bytes in navigator mode, carried ACROSS reads (same
+    /// split-arrow safety as [`View::search_esc`]).
+    nav_esc: Vec<u8>,
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -501,6 +510,19 @@ struct SearchView {
     result: Option<(u32, u32)>,
 }
 
+/// Client-local session-navigator overlay state (x-653d). The rows are NOT
+/// stored here - they are recomputed from the live layout each keypress (the
+/// same per-key re-read discipline as the selector/search), so a layout push
+/// under an open navigator is reflected at once.
+struct NavView {
+    /// Incremental text filter (substring, case-insensitive) over row labels.
+    query: String,
+    /// The active state chip; `None` = all states. `Tab` cycles it.
+    state_filter: Option<PaneState>,
+    /// Cursor into the CURRENTLY filtered rows (clamped per key, no wrap).
+    cursor: usize,
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Seed with the active squad so the first frame already shows its tabs
@@ -534,6 +556,8 @@ impl View {
             rename_esc: Vec::new(),
             move_pick: None,
             sel_follow: None,
+            nav: None,
+            nav_esc: Vec::new(),
         }
     }
 
@@ -798,6 +822,129 @@ impl View {
                         .unwrap_or_else(|| "card in flight - no session visible here".into()),
                 ),
             },
+        }
+    }
+
+    /// The navigator's flat GLOBAL catalog (x-653d): one [`NavRow`] per squad,
+    /// per tab (ignoring expand state - a collapsed squad's tabs still appear,
+    /// the key difference from [`display_rows`]), per agent, and per work-queue
+    /// card across the WHOLE session. Shares the agent/card -> [`ChromeHit`]
+    /// mapping with [`row_action`] (via [`agent_hit`]/[`card_hit`]) so a keyboard
+    /// goto and a mouse click never diverge. Squad/tab rows carry their own
+    /// SelectSquad/SelectTab in `hit`; an agent row carries a `goto_squad`
+    /// prefix (its pane lives in another squad). The `+ new workspace` footer is
+    /// omitted - the navigator is a goto-existing picker (Discretion 4). Fully
+    /// owned (no layout borrow) so goto can mutate the view after building it.
+    fn nav_rows(&self) -> Vec<NavRow> {
+        let mut out = Vec::new();
+        for s in &self.layout.squads {
+            // Always SelectSquad (unlike the sideline's active-squad
+            // ToggleExpand): the navigator is a jump, never an expand toggle.
+            out.push(NavRow {
+                label: s.name.clone(),
+                state: PaneState::Idle,
+                goto_squad: None,
+                hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
+            });
+            for (t, tab) in s.tabs.iter().enumerate() {
+                out.push(NavRow {
+                    label: format!("{} › {}", s.name, tab_label_text(&tab.name, t)),
+                    state: PaneState::Idle,
+                    // SelectTab resolves the squad server-side, so one command
+                    // switches squad+tab (row_action's tab arm, gemini review).
+                    goto_squad: None,
+                    hit: ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
+                });
+            }
+            for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
+                out.push(NavRow {
+                    label: format!("{} › {}", s.name, a.name),
+                    state: nav_agent_state(a),
+                    // Switch to the agent's squad first when it is not active,
+                    // so the following FocusPane lands there (AgentRow carries no
+                    // tab id, so the server resolves the pane's tab on focus).
+                    goto_squad: (s.id != self.layout.active_squad).then_some(s.id),
+                    hit: agent_hit(a),
+                });
+            }
+        }
+        // Orphan agents (no live squad), mirroring display_rows' orphan section.
+        for a in self.layout.agents.iter().filter(
+            |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
+        ) {
+            out.push(NavRow {
+                label: a.name.clone(),
+                state: nav_agent_state(a),
+                goto_squad: None,
+                hit: agent_hit(a),
+            });
+        }
+        // Work-queue cards: goto opens the dispatch confirm / focuses the worker
+        // (card_hit), no squad switch. A blocked/in-flight card reads as
+        // Blocked/Working so the state filter surfaces stuck work uniformly.
+        for c in &self.layout.backlog {
+            let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+            out.push(NavRow {
+                label: format!("{label} {}", c.priority),
+                state: card_state(c),
+                goto_squad: None,
+                hit: self.card_hit(c),
+            });
+        }
+        out
+    }
+
+    /// The navigator rows matching the current text + state filter (x-653d),
+    /// recomputed per keypress (no cache): case-insensitive substring on the
+    /// label AND the state chip when one is set. Text and state compose (both
+    /// must match); letters only ever edit the query (Locked 5).
+    fn nav_filtered(&self, nav: &NavView) -> Vec<NavRow> {
+        let q = nav.query.to_lowercase();
+        self.nav_rows()
+            .into_iter()
+            .filter(|r| nav.state_filter.is_none_or(|s| r.state == s))
+            .filter(|r| q.is_empty() || r.label.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    /// Move the navigator cursor by `delta`, clamped to the filtered row count
+    /// (no wrap). Rows are recomputed to know the current ceiling.
+    fn nav_move_cursor(&mut self, delta: isize) {
+        let len = match self.nav.as_ref() {
+            Some(n) => self.nav_filtered(n).len(),
+            None => return,
+        };
+        if len == 0 {
+            return;
+        }
+        if let Some(n) = self.nav.as_mut() {
+            let cur = n.cursor.min(len - 1) as isize;
+            n.cursor = (cur + delta).clamp(0, len as isize - 1) as usize;
+        }
+    }
+
+    /// Advance the state chip on `Tab`: all -> Blocked -> Working -> DoneUnseen
+    /// -> Idle -> all. Resets the cursor to the top of the re-filtered set.
+    fn nav_cycle_state(&mut self) {
+        if let Some(n) = self.nav.as_mut() {
+            n.state_filter = match n.state_filter {
+                None => Some(PaneState::Blocked),
+                Some(PaneState::Blocked) => Some(PaneState::Working),
+                Some(PaneState::Working) => Some(PaneState::DoneUnseen),
+                Some(PaneState::DoneUnseen) => Some(PaneState::Idle),
+                Some(PaneState::Idle) => None,
+            };
+            n.cursor = 0;
+        }
+    }
+
+    /// BEL when the current filter excludes every row (AC2-ERR/AC3-ERR): a query
+    /// or state that matches nothing is audible, never a silent empty overlay.
+    fn nav_ring_if_empty(&self) {
+        if let Some(n) = self.nav.as_ref() {
+            if self.nav_filtered(n).is_empty() {
+                let _ = raw_out(b"\x07");
+            }
         }
     }
 
@@ -1108,6 +1255,13 @@ impl View {
             // candidate squad, on the same inverse-video overlay chrome.
             let lines = self.move_pick_lines(squads);
             draw_lines_overlay(&mut cells, rows, cols, &lines);
+        } else if let Some(nav) = &self.nav {
+            // x-653d navigator: the filtered flat catalog + query/chip line, on
+            // the same inverse-video overlay chrome. Rows recompute per frame
+            // from the live layout (no cache), so a push repopulates it.
+            let filtered = self.nav_filtered(nav);
+            let lines = nav_overlay_lines(&filtered, nav);
+            draw_lines_overlay(&mut cells, rows, cols, &lines);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -1117,6 +1271,7 @@ impl View {
             && self.answers.is_none()
             && self.digest.is_none()
             && self.move_pick.is_none()
+            && self.nav.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -1755,6 +1910,47 @@ fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
     }
 }
 
+/// One row of the navigator's flat catalog (x-653d). Fully owned (no layout
+/// borrow) so goto can mutate the view after the catalog is built; recomputed
+/// per keypress, never cached.
+struct NavRow {
+    /// The searchable, displayed label (e.g. `nairobi › build` or
+    /// `nairobi › claude#3`). The text filter matches here, case-insensitively.
+    label: String,
+    /// Derived rollup state, for the state filter + the leading glyph.
+    state: PaneState,
+    /// Switch to this squad before applying `hit`, when it is not already the
+    /// active one (an agent's pane lives in another squad). `None` for a
+    /// squad/tab row (the switch is in `hit`) or a card (never switches).
+    goto_squad: Option<u64>,
+    /// The terminal action: SelectSquad/SelectTab for a container row,
+    /// FocusPane/AttachAgent for an agent, the dispatch confirm / focus for a
+    /// card, or a [`ChromeHit::Notice`] that keeps the navigator open.
+    hit: ChromeHit,
+}
+
+/// The navigator state of an agent row: an exited pane reads `Idle` (finished,
+/// nothing to act on); otherwise derive from the badge. The seen bit is not yet
+/// wired (x-4328), so a live `Done` reads `DoneUnseen`.
+fn nav_agent_state(a: &AgentRow) -> PaneState {
+    if a.exited {
+        PaneState::Idle
+    } else {
+        pane_state(a.badge, false)
+    }
+}
+
+/// The navigator state of a work-queue card: blocked/in-flight map onto
+/// `Blocked`/`Working` so the state filter surfaces stuck and running work
+/// uniformly with agents; a ready card is neutral (`Idle`).
+fn card_state(c: &BacklogCard) -> PaneState {
+    match c.state {
+        CardState::Blocked => PaneState::Blocked,
+        CardState::InFlight => PaneState::Working,
+        CardState::Ready => PaneState::Idle,
+    }
+}
+
 /// A named tab's visible label width in the tab bar / sideline (x-c150);
 /// keeps ~4 labeled tabs visible at 100 cols.
 const TAB_LABEL_W: usize = 14;
@@ -1897,6 +2093,51 @@ fn answer_overlay_lines(blocked: &[AgentRow], sel: usize) -> Vec<String> {
             }
             None => lines.push(pad_to("   ⚠ needs you — ⏎ to focus", ANSWER_OVERLAY_W)),
         }
+    }
+    lines
+}
+
+/// The navigator overlay content width (x-653d): labels truncate to it and pad
+/// to it so the inverse block is a clean rectangle, like the answer overlay.
+const NAV_OVERLAY_W: usize = 54;
+
+/// The leading state glyph for a navigator row (x-653d), reusing the sideline's
+/// agent-badge lattice: blocked `▲`, working `●`, done `✓`, idle `·`.
+fn nav_glyph(s: PaneState) -> char {
+    match s {
+        PaneState::Blocked => '▲',
+        PaneState::Working => '●',
+        PaneState::DoneUnseen => '✓',
+        PaneState::Idle => '·',
+    }
+}
+
+/// Build the navigator overlay lines (x-653d): a top `find › <query>  [chip]`
+/// line, then one line per FILTERED row with a leading state glyph and the
+/// cursor row marked `▸`. An empty result renders a single `no matches` line
+/// (the key handler BELs). `rows` is pre-filtered; `cursor` is pre-clamped.
+fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
+    let chip = match nav.state_filter {
+        None => "all",
+        Some(PaneState::Blocked) => "blocked",
+        Some(PaneState::Working) => "working",
+        Some(PaneState::DoneUnseen) => "done",
+        Some(PaneState::Idle) => "idle",
+    };
+    let mut lines = vec![pad_to(
+        &format!(" find › {}   [{chip}]", nav.query),
+        NAV_OVERLAY_W,
+    )];
+    if rows.is_empty() {
+        lines.push(pad_to("   no matches", NAV_OVERLAY_W));
+        return lines;
+    }
+    for (i, r) in rows.iter().enumerate() {
+        let marker = if i == nav.cursor { '▸' } else { ' ' };
+        lines.push(pad_to(
+            &format!(" {marker} {} {}", nav_glyph(r.state), r.label),
+            NAV_OVERLAY_W,
+        ));
     }
     lines
 }
@@ -2471,6 +2712,9 @@ async fn handle_stdin(
     if view.search.is_some() {
         return search_keys(view, &passthrough, sock_w).await;
     }
+    if view.nav.is_some() {
+        return nav_keys(view, &passthrough, sock_w).await;
+    }
     for event in scanner.scan(&passthrough) {
         match event {
             Event::Forward(chunk) => {
@@ -2600,6 +2844,21 @@ async fn handle_stdin(
                     result: None,
                 });
                 view.search_esc.clear();
+                break;
+            }
+            Event::OpenNav => {
+                // Client-local overlay (x-653d): opening sends nothing and
+                // reserves no row (it draws over the content top-left like the
+                // answer overlay, not the bottom chrome). Break so same-chunk
+                // bytes after the chord can't leak to the pane (like SearchOpen).
+                // No width gate: draw_lines_overlay clips a tiny terminal, and a
+                // zero-squad session shows an explicit `no matches` (AC1-EDGE).
+                view.nav = Some(NavView {
+                    query: String::new(),
+                    state_filter: None,
+                    cursor: 0,
+                });
+                view.nav_esc.clear();
                 break;
             }
             Event::OpenRename => {
@@ -3112,6 +3371,113 @@ async fn search_keys(
         }
     }
     Ok(StdinFlow::Continue)
+}
+
+/// Navigator-overlay keys (x-653d): a client-owned typing overlay like search.
+/// Printable bytes edit the text filter (Locked 5: letters are ALWAYS query
+/// text, never state keys); Backspace widens; `Tab` cycles the state chip;
+/// `Ctrl-n`/`Ctrl-p` move the cursor over the filtered rows (clamped, no wrap);
+/// Enter goto's the row; Esc closes. Reuses [`fold_search_input`]'s split-arrow
+/// fold (which swallows arrows whole, so cursor motion is Ctrl-n/p as in search)
+/// and its per-key re-read so an Esc mid-chunk swallows the chunk's remainder.
+async fn nav_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.nav_esc);
+    let keys = fold_search_input(&mut esc, bytes);
+    view.nav_esc = esc;
+    for key in keys {
+        // Re-read the mode each key: an Esc mid-chunk closes it and the rest of
+        // the chunk must be swallowed, never forwarded.
+        if view.nav.is_none() {
+            break;
+        }
+        match key {
+            SearchKey::Esc => {
+                view.nav = None;
+                view.nav_esc.clear();
+                break;
+            }
+            SearchKey::Byte(b) => match b {
+                b'\r' | b'\n' => nav_goto(view, sock_w).await?,
+                b'\t' => {
+                    view.nav_cycle_state();
+                    view.nav_ring_if_empty();
+                }
+                // Ctrl-n / Ctrl-p move the cursor (readline convention); arrows
+                // are swallowed by the fold, so these are the motion keys.
+                0x0e => view.nav_move_cursor(1),
+                0x10 => view.nav_move_cursor(-1),
+                0x7f | 0x08 => {
+                    if let Some(n) = view.nav.as_mut() {
+                        n.query.pop();
+                        n.cursor = 0;
+                    }
+                    view.nav_ring_if_empty();
+                }
+                // Printable ASCII edits the query; capped like search so a held
+                // key / paste can't grow it unbounded. Cursor re-anchors to 0.
+                0x20..=0x7e => {
+                    if let Some(n) = view.nav.as_mut() {
+                        if n.query.len() < MAX_SEARCH_QUERY {
+                            n.query.push(b as char);
+                            n.cursor = 0;
+                        }
+                    }
+                    view.nav_ring_if_empty();
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Teleport to the navigator's cursor row (x-653d). Materializes the OWNED
+/// target before mutating the view (`nav_rows` borrows the layout), re-reading
+/// the filtered catalog at Enter time (per-key re-read; AC4-ERR relies on the
+/// server refusing a stale id fail-closed). A refusal (`Notice`: blocked /
+/// in-flight card, paneless agent) KEEPS the navigator open and shows the notice
+/// (Locked 6), sending nothing. Otherwise it closes the overlay, switches squad
+/// when the target lives in another one (a same-squad target collapses to a bare
+/// hit), and applies the hit. Existing wire commands only - no new `Command`, no
+/// proto bump (Locked 4).
+async fn nav_goto(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let target = match view.nav.as_ref() {
+        Some(n) => match view.nav_filtered(n).into_iter().nth(n.cursor) {
+            Some(r) => r,
+            // Empty/stale cursor: BEL, keep the overlay open (never a silent
+            // close), matching the selector's stale-cursor BEL.
+            None => {
+                let _ = raw_out(b"\x07");
+                return Ok(());
+            }
+        },
+        None => return Ok(()),
+    };
+    // A refusal keeps the overlay open (Locked 6), identical to the selector.
+    if let ChromeHit::Notice(msg) = &target.hit {
+        view.set_notice(msg.clone());
+        return Ok(());
+    }
+    view.nav = None;
+    view.nav_esc.clear();
+    // Cross-squad prefix: an agent's pane lives in another squad; switch first
+    // so the following FocusPane lands there. Squad/tab rows carry their own
+    // SelectSquad/SelectTab in `hit` (goto_squad is None), so no double send.
+    if let Some(sq) = target.goto_squad {
+        if sq != view.layout.active_squad {
+            write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
+                .await
+                .map_err(|e| format!("nav select-squad send failed: {e}"))?;
+        }
+    }
+    apply_hit(view, target.hit, sock_w).await
 }
 
 /// New-workspace name-input keys (x-9e5e). Reuses the search input's split-arrow
@@ -5114,6 +5480,254 @@ mod tests {
         selector_keys(&mut v, b"k", &mut buf).await.unwrap();
         assert_eq!(v.selector, Some(5), "k skips it back");
         assert!(buf.is_empty(), "navigation sends nothing");
+    }
+
+    // ---- x-653d: session navigator (leader+f) ----
+
+    #[test]
+    fn nav_rows_lists_every_squads_tabs_ignoring_expand() {
+        // AC1-HP + Locked 3: the flat catalog lists a COLLAPSED squad's tabs too
+        // (the sideline gates tabs behind expand; the navigator never does).
+        let v = two_pane_view(); // footnote(active, tabs 1&2), notes(collapsed, tab 1)
+        assert!(!v.expanded.contains(&2), "notes is collapsed");
+        let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
+        for want in [
+            "footnote",
+            "footnote › 1",
+            "footnote › 2",
+            "notes",
+            "notes › 1",
+        ] {
+            assert!(
+                labels.iter().any(|l| l == want),
+                "missing {want:?} in {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nav_filter_text_is_case_insensitive_substring() {
+        // AC2-HP + AC2-UI: typed text narrows to matching labels; case-folded.
+        let v = two_pane_view();
+        let nav = NavView {
+            query: "NOTES".into(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&nav);
+        assert_eq!(
+            rows.len(),
+            2,
+            "notes squad + its one tab, footnote excluded"
+        );
+        assert!(rows
+            .iter()
+            .all(|r| r.label.to_lowercase().contains("notes")));
+    }
+
+    #[test]
+    fn nav_filter_state_composes_with_text() {
+        // AC3-HP + AC3-EDGE: text AND state both apply. Squad/tab rows are Idle,
+        // so a [blocked] chip leaves only the blocked agent.
+        let mut v = two_pane_view();
+        v.layout.agents = vec![AgentRow {
+            squad: Some(2),
+            name: "stuck".into(),
+            pane_id: Some(9),
+            badge: Some(AgentBadge::Blocked),
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+        }];
+        let composed = NavView {
+            query: "notes".into(),
+            state_filter: Some(PaneState::Blocked),
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&composed);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "notes › stuck");
+        assert_eq!(rows[0].state, PaneState::Blocked);
+        let state_only = NavView {
+            query: String::new(),
+            state_filter: Some(PaneState::Blocked),
+            cursor: 0,
+        };
+        assert_eq!(
+            v.nav_filtered(&state_only).len(),
+            1,
+            "[blocked] excludes the Idle squad/tab rows"
+        );
+    }
+
+    #[test]
+    fn nav_overlay_lines_show_query_chip_cursor_and_no_matches() {
+        // AC1-UI: query line + [all] chip + cursor `▸` on row 0. AC2-ERR: an
+        // empty filtered result renders `no matches`.
+        let v = two_pane_view();
+        let nav = NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&nav);
+        let lines = nav_overlay_lines(&rows, &nav);
+        assert!(lines[0].contains("find ›") && lines[0].contains("[all]"));
+        assert!(
+            lines[1].trim_start().starts_with('▸'),
+            "cursor on row 0: {:?}",
+            lines[1]
+        );
+        let empty = NavView {
+            query: "zzzz".into(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&empty);
+        let lines = nav_overlay_lines(&rows, &empty);
+        assert!(lines.iter().any(|l| l.contains("no matches")));
+    }
+
+    #[test]
+    fn nav_cursor_clamps_no_wrap() {
+        // Boundaries: Ctrl-p at the top and Ctrl-n past the last filtered row
+        // both clamp, never wrap.
+        let mut v = two_pane_view();
+        let n = v.nav_rows().len();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        v.nav_move_cursor(-1);
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "clamp at the top");
+        for _ in 0..(n + 5) {
+            v.nav_move_cursor(1);
+        }
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            n - 1,
+            "clamp at the last row"
+        );
+    }
+
+    #[tokio::test]
+    async fn nav_goto_teleports_cross_squad_then_focuses() {
+        // AC4-HP: goto an agent in a collapsed, non-active squad sends
+        // SelectSquad then FocusPane in order, and closes the navigator.
+        let mut v = two_pane_view(); // active squad = 1 (footnote)
+        v.layout.agents = vec![AgentRow {
+            squad: Some(2),
+            name: "stuck".into(),
+            pane_id: Some(9),
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+        }];
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label == "notes › stuck")
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_goto(&mut v, &mut buf).await.unwrap();
+        assert!(v.nav.is_none(), "goto closes the navigator");
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::SelectSquad(2))
+        ));
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::FocusPane(9))
+        ));
+    }
+
+    #[tokio::test]
+    async fn nav_goto_same_squad_is_a_bare_focus() {
+        // AC4-UI: a pane already in the active squad collapses to a bare
+        // FocusPane - no redundant SelectSquad.
+        let mut v = unified_rows_view(); // worker: sq1 (active), pane 10
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label == "footnote › worker")
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_goto(&mut v, &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(matches!(
+            crate::proto::read_msg_sync(&mut cur).unwrap(),
+            ClientMsg::Command(Command::FocusPane(10))
+        ));
+        assert!(
+            crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).is_err(),
+            "bare focus only - no SelectSquad"
+        );
+    }
+
+    #[tokio::test]
+    async fn nav_goto_refusal_keeps_navigator_open() {
+        // AC4-FR + Locked 6: Enter on a Blocked card shows a notice, sends
+        // nothing, and the navigator stays open.
+        let mut v = unified_rows_view();
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label.starts_with("x-blk"))
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        v.notice = None;
+        let mut buf: Vec<u8> = Vec::new();
+        nav_goto(&mut v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "refusal sends nothing");
+        assert!(v.notice.is_some(), "refusal explains itself");
+        assert!(v.nav.is_some(), "navigator stays open");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_type_tab_and_esc() {
+        // AC2-HP: printable bytes edit the query (never leak). AC3-UI: Tab cycles
+        // the state chip. Esc closes (a lone ESC stays pending until the next
+        // byte disambiguates it - same fold as search; the trailing byte is
+        // swallowed on close).
+        let mut v = two_pane_view();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"notes", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().query, "notes");
+        assert!(buf.is_empty(), "typing sends nothing");
+        nav_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(
+            v.nav.as_ref().unwrap().state_filter,
+            Some(PaneState::Blocked),
+            "Tab advances the chip to [blocked]"
+        );
+        nav_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
+        assert!(v.nav.is_none(), "Esc closes; the trailing x is swallowed");
     }
 
     // ---- x-c929: answer overlay + next-blocked cycle ----

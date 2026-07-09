@@ -82,6 +82,11 @@ pub enum Event {
     /// client enters a local typing mode; the query and n/N/Esc are interpreted
     /// by the client's view layer, not here (like OpenSelector / OpenAnswers).
     SearchOpen,
+    /// Open the session navigator (leader+f, x-653d): a global goto picker over
+    /// a flat catalog of every squad/tab/agent/card. The client owns the typing
+    /// mode (text filter, Tab state filter, Ctrl-n/p cursor, Enter goto); the
+    /// chord only opens it (like SearchOpen).
+    OpenNav,
     /// Open the rename-tab name overlay for the active tab (leader+,, tmux
     /// `rename-window` convention, x-c150). The client owns the typing mode
     /// and resolves the active tab's stable id; the chord only opens it.
@@ -257,6 +262,9 @@ fn chord(b: u8) -> Event {
         // In-scrollback search (leader+/, x-e780): tmux copy-mode `/` muscle
         // memory. The client owns the typing mode; the chord only opens it.
         b'/' => Event::SearchOpen,
+        // Session navigator (leader+f = "find", x-653d): a free key (leader+g
+        // stays "grab work"). The client owns the typing mode; the chord opens.
+        b'f' => Event::OpenNav,
         // Rename the active tab (leader+,, tmux rename-window convention,
         // x-c150). Same client-owned typing mode shape as search.
         b',' => Event::OpenRename,
@@ -385,6 +393,17 @@ mod tests {
                 Event::Forward(b"b".to_vec()),
             ]
         );
+        // leader+f opens the session navigator (x-653d); the `f` never leaks,
+        // and leader+g stays "grab work" (DispatchNext, unchanged).
+        assert_eq!(
+            scan_all(&[b"a\x02fb"]),
+            vec![
+                Event::Forward(b"a".to_vec()),
+                Event::OpenNav,
+                Event::Forward(b"b".to_vec()),
+            ]
+        );
+        assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
     }
 
     #[test]
