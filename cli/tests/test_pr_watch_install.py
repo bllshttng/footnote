@@ -370,6 +370,90 @@ def test_refresh_verb_refreshes_when_enabled(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# heal: SessionStart self-heal (enabled-gated, single-flighted)
+# ---------------------------------------------------------------------------
+
+
+def _patch_heal_claims(monkeypatch, *, held=False):
+    """Stub the claim single-flight so tests never touch the real claims root."""
+    import fno.claims as claims
+
+    acquired: list = []
+
+    def _acquire(key, holder, **kw):
+        if held:
+            raise claims.ClaimHeldByOther("other-holder", pid=999, host="h", key=key)
+        acquired.append(key)
+
+    monkeypatch.setattr(claims, "acquire_claim", _acquire)
+    monkeypatch.setattr(claims, "release_claim", lambda *a, **kw: None)
+    return acquired
+
+
+def test_heal_verb_never_installs_when_disabled(monkeypatch):
+    """A never-enabled watcher is left alone (no auto-install)."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(False))
+    import fno.pr_watch._install as m
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: pytest.fail("must not heal when disabled"))
+
+    result = CliRunner().invoke(app, ["pr-watch", "heal"])
+    assert result.exit_code == 0
+    assert "disabled" in result.stdout
+
+
+def test_heal_verb_bounces_when_enabled(monkeypatch):
+    """An enabled-but-dead watcher is re-rendered + bounced, one status line."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
+    _patch_heal_claims(monkeypatch)
+    import fno.pr_watch._install as m
+    calls: list = []
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: calls.append(kw) or ("bounced; awaiting first tick", 0))
+
+    result = CliRunner().invoke(app, ["pr-watch", "heal"])
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert "pr-watch heal:" in result.stdout
+
+
+def test_heal_verb_single_flight_skips_when_held(monkeypatch):
+    """Two concurrent SessionStarts reinstall at most once: the loser skips."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    _patch_heal_claims(monkeypatch, held=True)
+    import fno.pr_watch._install as m
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: pytest.fail("loser must not heal"))
+
+    result = CliRunner().invoke(app, ["pr-watch", "heal"])
+    assert result.exit_code == 0
+    assert "skipped" in result.stdout
+
+
+def test_heal_verb_reports_failed_bounce(monkeypatch):
+    """A wedged launchctl surfaces as a nonzero exit, never silently green."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
+    _patch_heal_claims(monkeypatch)
+    import fno.pr_watch._install as m
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: ("bootstrap timed out", 1))
+
+    result = CliRunner().invoke(app, ["pr-watch", "heal"])
+    assert result.exit_code == 1
+    assert "bootstrap timed out" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # Config: PrWatchBlock schema
 # ---------------------------------------------------------------------------
 
