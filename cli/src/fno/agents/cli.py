@@ -367,6 +367,18 @@ def cmd_spawn(
             "Unset = provider default; opencode defaults to z-ai/glm-5.2."
         ),
     ),
+    permission_mode: str | None = typer.Option(
+        None, "--permission-mode",
+        help=(
+            "Permission/approval mode forwarded to the provider (x-dfa4). "
+            "Provider-native values, fail-closed: claude default|acceptEdits|"
+            "plan|bypassPermissions (exact passthrough); gemini --approval-mode "
+            "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
+            "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
+            "'skip'. An unmappable value errors before spawn. Mutually exclusive "
+            "with --yolo. bg/headless honor it on the fno (Rust) binary."
+        ),
+    ),
     node: str | None = typer.Option(
         None, "--node",
         help=(
@@ -458,6 +470,25 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    # AC5-ERR: --permission-mode and --yolo are one knob at a time.
+    if permission_mode is not None and yolo:
+        print(
+            "--permission-mode and --yolo are mutually exclusive; pass one",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    # bg/headless permission-mode is owned by the fno (Rust) intercept, which
+    # runs BEFORE this Python entrypoint for the real binary. Reaching here with
+    # a mode set means the pure-Python fallback (`fno-py`), whose dispatch_spawn
+    # would silently drop it - fail closed rather than accept-and-ignore.
+    if permission_mode is not None and (substrate != "pane" or once):
+        print(
+            "--permission-mode on bg/headless is handled by the fno (Rust) "
+            "binary; not supported via the pure-Python fallback",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
     # that reaches cmd_spawn (the front door execs the binary for bg/headless,
@@ -488,6 +519,7 @@ def cmd_spawn(
                     yolo=yolo,
                     role=role,
                     model=model,
+                    permission_mode=permission_mode,
                     provenance=resolve_provenance(node, slug, plan),
                 )
             except DispatchAskError as exc:
@@ -496,17 +528,21 @@ def cmd_spawn(
             # Compact one-line receipt, superset of the daemon-spawn receipt shape
             # ({"name","short_id","provider","status"}) so line-parsing consumers
             # keep working; short_id is empty (a mux row has no worker socket).
-            receipt = json.dumps(
-                {
-                    "name": pane_result.name,
-                    "short_id": "",
-                    "provider": pane_result.provider,
-                    "provider_source": provider_source,
-                    "status": "live",
-                    "mux_session": pane_result.session,
-                    "pane_id": pane_result.pane_id,
-                }
-            )
+            receipt_obj = {
+                "name": pane_result.name,
+                "short_id": "",
+                "provider": pane_result.provider,
+                "provider_source": provider_source,
+                "status": "live",
+                "mux_session": pane_result.session,
+                "pane_id": pane_result.pane_id,
+            }
+            # Locked Decision 5: name the applied mode so an audit of "why did
+            # this worker have edit rights" has a durable answer. Only when set,
+            # so the unset receipt is unchanged.
+            if permission_mode is not None:
+                receipt_obj["permission_mode"] = permission_mode
+            receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
             return
