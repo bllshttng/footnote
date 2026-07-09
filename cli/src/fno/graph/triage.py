@@ -60,6 +60,101 @@ def _events_path() -> Path:
         return Path(".fno/events.jsonl")
 
 
+def _read_canonical_events(path: Optional[Path] = None) -> list[dict]:
+    """Tolerant read of the canonical ``{ts,type,source,data}`` events log.
+    Best-effort: a malformed line is skipped, never raised - the health fold is
+    advisory and must not break because one event row is corrupt."""
+    p = path or _events_path()
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            out.append(json.loads(raw))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return out
+
+
+def fold_routing_health(events: list[dict]) -> Optional[dict]:
+    """Fold ``executor_resolved`` events into routing-tier metrics (x-64cb US3).
+
+    Returns None when no such events exist so the health render can gate the
+    section (AC6-EDGE: no fabricated zeros). The override-after-inference count
+    is the v1 mis-route PROXY: a task first resolved by surface-inference that a
+    later explicit lock (task-block / plan-frontmatter) resolved to a *different*
+    executor. Only tasks carrying an id can be correlated; the denominator is
+    those tasks, surfaced alongside the numerator so the rate is never bare."""
+    er = [e for e in events if e.get("type") == "executor_resolved"]
+    if not er:
+        return None
+    tiers: dict[str, int] = {}
+    warn = 0
+    inferred: dict[str, str] = {}  # task id -> first inference-resolved value
+    overridden: set[str] = set()
+    for e in er:
+        d = e.get("data", {}) or {}
+        tier = d.get("tier", "?")
+        tiers[tier] = tiers.get(tier, 0) + 1
+        if d.get("warn_fallback"):
+            warn += 1
+        task = d.get("task") or ""
+        if not task:
+            continue
+        resolved = d.get("resolved")
+        if tier == "surface-inference":
+            inferred.setdefault(task, resolved)
+        elif tier in ("task-block", "plan-frontmatter"):
+            if task in inferred and resolved != inferred[task]:
+                overridden.add(task)
+    return {
+        "total": len(er),
+        "tier_distribution": tiers,
+        "inference": tiers.get("surface-inference", 0),
+        "warn_fallback_count": warn,
+        "inferred_tasks": len(inferred),
+        "overridden_after_inference": len(overridden),
+    }
+
+
+def fold_triage_health(events: list[dict]) -> Optional[dict]:
+    """Fold ``triage_applied`` events into apply-count + validation-drop metrics
+    (x-64cb US3). Returns None when absent (event-gated render). The drop rate
+    ships both numerator and denominator so it is never a bare percentage."""
+    ta = [e for e in events if e.get("type") == "triage_applied"]
+    if not ta:
+        return None
+    cats = {"priority_changes": 0, "dependencies": 0, "duplicates_flagged": 0, "deferred": 0}
+    proposed = 0
+    dropped = 0
+    for e in ta:
+        d = e.get("data", {}) or {}
+        a = d.get("applied", {}) or {}
+        for k in cats:
+            try:
+                cats[k] += int(a.get(k, 0) or 0)
+            except (TypeError, ValueError):
+                pass
+        try:
+            proposed += int(d.get("proposed", 0) or 0)
+            dropped += int(d.get("dropped", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    return {
+        "applies": len(ta),
+        "applied_by_category": cats,
+        "proposed": proposed,
+        "dropped": dropped,
+    }
+
+
 def _emit_triage_applied(
     applied: dict, priority_moves: list[dict], proposed: int, dropped: int
 ) -> None:
@@ -1093,8 +1188,22 @@ def cmd_health(
     except Exception:  # noqa: BLE001 - advisory only; health must not break
         pass
 
+    # 10. Routing + triage decision metrics (x-64cb): folded from the canonical
+    # events log, event-gated (absent when no decisions recorded - AC6-EDGE).
+    # Advisory only; a read failure leaves the sections off, never breaks health.
+    routing_metrics: Optional[dict] = None
+    triage_metrics: Optional[dict] = None
+    try:
+        _canon_events = _read_canonical_events()
+        routing_metrics = fold_routing_health(_canon_events)
+        triage_metrics = fold_triage_health(_canon_events)
+    except Exception:  # noqa: BLE001 - advisory only; health must not break
+        pass
+
     report = {
         "scope": _resolve_scope(project, all_projects, entries),
+        **({"routing": routing_metrics} if routing_metrics else {}),
+        **({"triage_metrics": triage_metrics} if triage_metrics else {}),
         "idea_pile_depth": idea_count,
         "stale_ready_nodes": stale,
         "failure_prone_nodes": failure_prone,
@@ -1212,6 +1321,43 @@ def cmd_health(
         alarm = " ALARM" if evals_summary["regression_alarm"] else ""
         rate_txt = f"regression pass {rate:.0%}, " if rate is not None else ""
         typer.echo(f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{alarm}")
+    if routing_metrics:
+        rm = routing_metrics
+        total = rm["total"]
+        typer.echo("")
+        typer.echo(f"Executor routing ({total} resolutions):")
+        dist = ", ".join(
+            f"{t}={c}/{total}" for t, c in sorted(rm["tier_distribution"].items())
+        )
+        typer.echo(f"  tier distribution: {dist}")
+        typer.echo(f"  inference share: {rm['inference']}/{total}")
+        typer.echo(f"  warn-fallback: {rm['warn_fallback_count']}/{total}")
+        if rm["inferred_tasks"]:
+            typer.echo(
+                f"  override-after-inference (mis-route proxy): "
+                f"{rm['overridden_after_inference']}/{rm['inferred_tasks']}"
+            )
+        else:
+            typer.echo(
+                "  override-after-inference (mis-route proxy): n/a "
+                "(no inference-resolved tasks with ids)"
+            )
+    if triage_metrics:
+        tm = triage_metrics
+        cats = tm["applied_by_category"]
+        typer.echo("")
+        typer.echo(f"Triage applies ({tm['applies']}):")
+        typer.echo(
+            "  applied: "
+            f"priority={cats['priority_changes']}, deps={cats['dependencies']}, "
+            f"dups={cats['duplicates_flagged']}, deferred={cats['deferred']}"
+        )
+        if tm["proposed"]:
+            typer.echo(
+                f"  validation drop rate: {tm['dropped']}/{tm['proposed']}"
+            )
+        else:
+            typer.echo("  validation drop rate: n/a (no proposal entries recorded)")
     if batch_verdict == "build-wave4":
         typer.echo(
             "  batch-lane verdict: build-wave4 - abandonment waste exceeds savings; "
