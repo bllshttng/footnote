@@ -2551,6 +2551,33 @@ mod tests {
         assert_eq!(eq["model"], "pro");
     }
 
+    /// x-dfa4: `--permission-mode` parses in both space and equals form so the
+    /// pane re-exec (raw args) and the bg/headless reader (maybe_run_spawn) both
+    /// see it; an unknown-flag rejection would otherwise block the pane path.
+    #[test]
+    fn spawn_forwards_permission_mode_flag() {
+        let (_m, space) = build_request(
+            "spawn",
+            &[
+                "wk".to_string(),
+                "--provider".to_string(),
+                "claude".to_string(),
+                "--substrate".to_string(),
+                "bg".to_string(),
+                "--permission-mode".to_string(),
+                "acceptEdits".to_string(),
+            ],
+        )
+        .expect("--permission-mode must parse");
+        assert_eq!(space["permission_mode"], "acceptEdits");
+        let (_m2, eq) = build_request(
+            "spawn",
+            &["wk".to_string(), "--permission-mode=plan".to_string()],
+        )
+        .expect("--permission-mode= must parse");
+        assert_eq!(eq["permission_mode"], "plan");
+    }
+
     /// ab-3ff64151 AC1 (Rust-path parity): `agents ask` accepts the phone shorts
     /// `-p`/`-c`/`-t` and the global `-Y`, building the byte-identical request
     /// the long flags would. This is the cross-language parity guard from the
