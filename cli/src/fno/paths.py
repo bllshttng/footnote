@@ -444,6 +444,26 @@ def ledger_json() -> Path:
     return _resolve("~/.fno/") / "ledger.json"
 
 
+def evals_history() -> Path:
+    """Return the path to evals-history.jsonl (one row per bank task-run).
+
+    Cross-project like :func:`ledger_json`: eval history is a per-machine
+    ledger of bank runs, not a per-repo artifact. An explicit
+    ``config.paths.evals_history`` override wins (tests/sandboxes set it);
+    otherwise it follows an absolute ``config.state_dir`` (the ``~/.fno``
+    default and test sandboxes qualify) and falls back to user-global
+    ``~/.fno`` rather than forking a relative state_dir into a repo checkout.
+    """
+    settings = _settings()
+    override = settings.paths.evals_history
+    if override is not None:
+        return _resolve(override)
+    raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
+    if os.path.isabs(raw):
+        return state_dir() / "evals-history.jsonl"
+    return _resolve("~/.fno/") / "evals-history.jsonl"
+
+
 def benchmarks_json() -> Path:
     """Return the path to the OpenRouter benchmark snapshot (``benchmarks.json``).
 

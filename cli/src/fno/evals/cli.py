@@ -1,17 +1,17 @@
-"""fno evals subcommand - research-brief grader.
+"""fno evals subcommand - golden-task bank runner + research-brief grader.
 
+``fno evals run``
+    Execute bank tasks (``evals/bank/*.yaml``) in disposable worktrees via the
+    headless spawn substrate, grade mechanically, and append one history row
+    per task-run. ``--repeat K`` scores pass^k reliability.
+``fno evals report``
+    Fold the history: per-tier pass rates, per-task pass@1 / pass^k, flake list,
+    and a regression alarm. ``--graduate`` lists saturated capability tasks.
+``fno evals graduate <id>``
+    Retag a capability task's YAML to regression (a reviewed edit).
 ``fno evals grade``
-    Grade a research brief against a golden doc with three mechanical
-    assertions (zero uncited claims, zero dead source URLs, >=1 golden
-    checklist item per section). This is the mechanical green for a
-    ``/ship doc`` deliverable; the research-verify panel is advisory and
-    never changes the verdict.
-
-The golden-task efficacy harness (``run`` / ``report`` / ``diff``) was
-removed in the cutlist (x-c6a1). Only the research grader survives here
-because it backs the kept research surfaces (``/ship doc``, ``/review
-research``); it depends only on ``fno.research.core``, not the deleted
-harness.
+    Grade a research brief against a golden doc (three mechanical assertions).
+    Backs the kept research surfaces (``/ship doc``, ``/review research``).
 """
 from __future__ import annotations
 
@@ -21,9 +21,22 @@ from typing import Optional
 import typer
 
 
+def _resolve_bank_dir(bank: Optional[Path]) -> Path:
+    """Resolve the bank dir: explicit --bank, else <repo-root>/evals/bank."""
+    if bank is not None:
+        return bank
+    from fno.paths import resolve_canonical_repo_root
+
+    try:
+        root = resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001 - outside a repo, fall back to cwd
+        root = Path.cwd()
+    return root / "evals" / "bank"
+
+
 evals_app = typer.Typer(
     name="evals",
-    help="Research-brief grading (grade).",
+    help="Golden-task bank (run / report / graduate) + research-brief grading (grade).",
     no_args_is_help=True,
 )
 
@@ -36,6 +49,81 @@ def _evals_callback() -> None:
     a single subcommand instead of collapsing ``grade`` into the top-level
     callback (which would break ``fno evals grade`` routing).
     """
+
+
+@evals_app.command("run")
+def run_command(
+    task: Optional[str] = typer.Option(None, "--task", help="Run only this task id."),
+    tier: Optional[str] = typer.Option(None, "--tier", help="Run only this tier (capability|regression)."),
+    repeat: int = typer.Option(1, "--repeat", "-k", help="Run each task K times (pass^k)."),
+    bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Worker provider for the headless spawn."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt above 20 total runs."),
+) -> None:
+    """Run bank tasks in disposable worktrees and grade them mechanically.
+
+    Exit codes:
+      0  all runs graded (individual fails are in the summary + history)
+      1  no bank present, or --task/--tier selected nothing
+      2  a bank task is invalid (load-time discipline violation)
+    """
+    from fno.evals.bank import BankError, discover_bank
+    from fno.evals.runner import run_task, sweep_orphans
+    from fno.paths import resolve_canonical_repo_root
+
+    if repeat < 1:
+        typer.echo("Error: --repeat must be >= 1", err=True)
+        raise typer.Exit(code=1)
+
+    bank_dir = _resolve_bank_dir(bank)
+    try:
+        tasks = discover_bank(bank_dir)
+    except BankError as exc:
+        # A missing dir means no bank; any other load error is a discipline
+        # violation the author must fix.
+        if "not found" in str(exc):
+            typer.echo(f"Error: no bank at {bank_dir} (expected evals/bank/*.yaml).", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    if task is not None:
+        tasks = [t for t in tasks if t.id == task]
+    if tier is not None:
+        tasks = [t for t in tasks if t.tier == tier]
+    if not tasks:
+        typer.echo("Error: selection matched no bank tasks.", err=True)
+        raise typer.Exit(code=1)
+
+    total_runs = len(tasks) * repeat
+    if total_runs > 20 and not yes:
+        typer.echo(f"About to run {len(tasks)} task(s) x {repeat} = {total_runs} live runs.")
+        if not typer.confirm("Proceed?"):
+            typer.echo("Aborted.")
+            raise typer.Exit(code=0)
+
+    try:
+        repo_root = resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001
+        repo_root = Path.cwd()
+
+    swept = sweep_orphans(repo_root)
+    if swept:
+        typer.echo(f"swept {swept} orphaned eval worktree(s) from a prior run")
+
+    all_passed = True
+    for t in tasks:
+        results = run_task(t, repeat=repeat, repo_root=repo_root, worker_provider=provider)
+        passes = sum(1 for r in results if r.passed)
+        passk = "PASS" if passes == repeat else "FAIL"
+        typer.echo(f"  {t.tier:11} {t.id}: {passes}/{repeat} pass  (pass^{repeat}={passk})")
+        for r in results:
+            if not r.passed:
+                typer.echo(f"      run {r.repeat_index}: {r.reason}")
+        if passes < repeat:
+            all_passed = False
+    typer.echo("done." if all_passed else "done (some runs failed; see history).")
+    raise typer.Exit(code=0)
 
 
 @evals_app.command("grade")
