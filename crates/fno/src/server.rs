@@ -1499,10 +1499,20 @@ impl Core {
         // focus settles to a client-side `FocusPane`, so it rides the same
         // hook for free). `AttachAgent` always spawns a brand-new pane_id,
         // which can never already be `Done`, so it has no seen-marking hook.
-        for row in self.agent_rows() {
-            let Some(pid) = row.pane_id else { continue };
-            if row.badge != Some(AgentBadge::Done) {
-                self.seen.remove(&pid);
+        // Read `self.agents` directly rather than `self.agent_rows()`: the
+        // latter allocates a `Vec<AgentRow>` and clones every row's strings
+        // for the full registry on every pass, which is wasteful for a check
+        // that only needs a pane's own badge (gemini review).
+        for a in &self.agents {
+            if let Some((sess, pane)) = &a.mux {
+                if sess == &self.session_name {
+                    let pid = *pane;
+                    let exited = a.exited || !self.panes.contains_key(&pid);
+                    let badge = if exited { None } else { a.badge };
+                    if badge != Some(AgentBadge::Done) {
+                        self.seen.remove(&pid);
+                    }
+                }
             }
         }
 
@@ -1869,11 +1879,17 @@ impl Core {
     /// spawns a brand-new pane_id, which can't already be `Done`. A no-op
     /// when `pid`'s current badge isn't `Done`.
     fn mark_seen_if_done(&mut self, pid: u64) {
-        if self
-            .agent_rows()
-            .iter()
-            .any(|r| r.pane_id == Some(pid) && r.badge == Some(AgentBadge::Done))
-        {
+        // Read `self.agents` directly rather than `self.agent_rows()`: the
+        // latter allocates + clones the full registry for a check that only
+        // needs this one pane's badge (gemini review).
+        if self.agents.iter().any(|a| {
+            a.mux
+                .as_ref()
+                .is_some_and(|(sess, pane)| sess == &self.session_name && *pane == pid)
+                && !a.exited
+                && self.panes.contains_key(&pid)
+                && a.badge == Some(AgentBadge::Done)
+        }) {
             self.seen.insert(pid);
         }
     }
