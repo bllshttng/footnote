@@ -487,7 +487,7 @@ Load [deviation-handling.md](deviation-handling.md) for the full deviation handl
 
 ## Linear Integration (optional - requires linear plugin)
 
-If the linear plugin is installed and the plan has a Linear ticket (check the plan's frontmatter for `linear: RR-XXX`), sync status at phase transitions. If no linear plugin or no ticket field, skip all Linear sync steps.
+If the linear plugin is installed and the plan has a Linear ticket (check the plan's frontmatter for `linear: RR-XXX`), sync status at wave transitions. If no linear plugin or no ticket field, skip all Linear sync steps.
 
 | Event | Linear Action |
 |-------|---------------|
