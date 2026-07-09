@@ -47,6 +47,285 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+def _events_path() -> Path:
+    """Repo-root ``.fno/events.jsonl`` - the same file ``fno event emit`` writes
+    to (events/cli.py) and the routing/triage fold reads. Anchoring to the repo
+    root (not cwd) keeps producer and consumer coincident regardless of which
+    subdirectory a verb runs from."""
+    try:
+        from fno.paths import resolve_repo_root
+
+        return resolve_repo_root() / ".fno" / "events.jsonl"
+    except Exception:
+        return Path(".fno/events.jsonl")
+
+
+def _read_canonical_events(path: Optional[Path] = None) -> list[dict]:
+    """Tolerant read of the canonical ``{ts,type,source,data}`` events log.
+    Best-effort: a malformed line is skipped, never raised - the health fold is
+    advisory and must not break because one event row is corrupt."""
+    p = path or _events_path()
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            out.append(json.loads(raw))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return out
+
+
+def fold_routing_health(events: list[dict]) -> Optional[dict]:
+    """Fold ``executor_resolved`` events into routing-tier metrics (x-64cb US3).
+
+    Returns None when no such events exist so the health render can gate the
+    section (AC6-EDGE: no fabricated zeros). The override-after-inference count
+    is the v1 mis-route PROXY: a task first resolved by surface-inference that a
+    later explicit lock (task-block / plan-frontmatter) resolved to a *different*
+    executor. Only tasks carrying an id can be correlated; the denominator is
+    those tasks, surfaced alongside the numerator so the rate is never bare."""
+    er = [e for e in events if e.get("type") == "executor_resolved"]
+    if not er:
+        return None
+    tiers: dict[str, int] = {}
+    warn = 0
+    # Key by (plan_path, task): task ids like "1.1" are plan-relative, not
+    # global, so correlating override-after-inference on the bare task id would
+    # cross-contaminate two plans that both have a "1.1" (peer review, PR #285).
+    inferred: dict[tuple[str, str], str] = {}
+    overridden: set[tuple[str, str]] = set()
+    for e in er:
+        d = e.get("data", {}) or {}
+        tier = d.get("tier", "?")
+        tiers[tier] = tiers.get(tier, 0) + 1
+        if d.get("warn_fallback"):
+            warn += 1
+        task = d.get("task") or ""
+        if not task:
+            continue
+        key = (d.get("plan_path") or "", task)
+        resolved = d.get("resolved")
+        if tier == "surface-inference":
+            inferred.setdefault(key, resolved)
+        elif tier in ("task-block", "plan-frontmatter"):
+            if key in inferred and resolved != inferred[key]:
+                overridden.add(key)
+    return {
+        "total": len(er),
+        "tier_distribution": tiers,
+        "inference": tiers.get("surface-inference", 0),
+        "warn_fallback_count": warn,
+        "inferred_tasks": len(inferred),
+        "overridden_after_inference": len(overridden),
+    }
+
+
+def fold_triage_health(events: list[dict]) -> Optional[dict]:
+    """Fold ``triage_applied`` events into apply-count + validation-drop metrics
+    (x-64cb US3). Returns None when absent (event-gated render). The drop rate
+    ships both numerator and denominator so it is never a bare percentage."""
+    ta = [e for e in events if e.get("type") == "triage_applied"]
+    if not ta:
+        return None
+    cats = {"priority_changes": 0, "dependencies": 0, "duplicates_flagged": 0, "deferred": 0}
+    proposed = 0
+    dropped = 0
+    for e in ta:
+        d = e.get("data", {}) or {}
+        a = d.get("applied", {}) or {}
+        for k in cats:
+            try:
+                cats[k] += int(a.get(k, 0) or 0)
+            except (TypeError, ValueError):
+                pass
+        try:
+            proposed += int(d.get("proposed", 0) or 0)
+            dropped += int(d.get("dropped", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    return {
+        "applies": len(ta),
+        "applied_by_category": cats,
+        "proposed": proposed,
+        "dropped": dropped,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Consistency measurement (x-64cb US4): run the propose step K times over one
+# frozen context and measure per-category agreement. Read-only toward the live
+# graph - propose runs never apply.
+# ---------------------------------------------------------------------------
+
+# The reasoning instruction handed to each headless run. MUST mirror the
+# /triage skill's reasoning prompt (skills/triage/SKILL.md, "LLM reasoning"
+# step) so the consistency measurement reflects what production /triage does;
+# when one changes, change both (x-64cb US5 hardens the pair together).
+_CONSISTENCY_PROMPT = (
+    "You are a backlog triage classifier. First REASON, then LABEL - never emit "
+    "the JSON first. In a short reasoning pass, name each spec's PRIMARY concern "
+    "(when a spec raises several concerns, classify on the primary, not the "
+    "loudest surface signal). Then output an optimal ordering as JSON with four "
+    "keys: `dependencies` (edges {from,to,reason} where `to` is blocked_by "
+    "`from`), `priority_changes` ({id,to,reason} where `to` is one of "
+    "p0/p1/p2/p3), `defer` ({id,reason}), and `duplicates` ({ids:[...],reason}). "
+    "Every entry MUST include a one-line `reason`. Do not propose self-edges or "
+    "cycles. Only reason over the `candidates` array; never propose changes for "
+    "`ideas`."
+)
+
+_CONSISTENCY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dependencies": {"type": "array", "items": {"type": "object"}},
+        "priority_changes": {"type": "array", "items": {"type": "object"}},
+        "defer": {"type": "array", "items": {"type": "object"}},
+        "duplicates": {"type": "array", "items": {"type": "object"}},
+    },
+    "required": ["priority_changes"],
+}
+
+
+def _run_consistency_propose(context: dict, model: Optional[str]) -> dict:
+    """Run ONE headless propose over the frozen context; return the proposal
+    dict. Raises on any failure so the caller counts it as an errored run.
+
+    Dispatch is a synchronous headless one-shot on the subscription-OAuth lane -
+    the same primitive fno.inbox.triage uses (plain ``claude -p``, which honors
+    OAuth; NOT ``--bare``, which needs an API key). Tests set
+    ``FNO_TRIAGE_CONSISTENCY_STUB`` to a script that prints proposal JSON so the
+    real model is never called under pytest/CI.
+    # ponytail: claude-only for v1; provider rotation is a follow-up node.
+    """
+    import os
+    import subprocess
+
+    stub = os.environ.get("FNO_TRIAGE_CONSISTENCY_STUB")
+    in_pytest = os.environ.get("PYTEST_CURRENT_TEST") is not None
+    in_ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
+    if not stub and (in_pytest or in_ci):
+        raise RuntimeError(
+            "FNO_TRIAGE_CONSISTENCY_STUB not configured; refusing real claude -p in tests"
+        )
+
+    prompt = f"{_CONSISTENCY_PROMPT}\n\nCONTEXT:\n{json.dumps(context)}"
+    if stub:
+        cmd = [stub]
+    else:
+        cmd = [
+            "claude", "-p",
+            "--output-format", "json",
+            "--json-schema", json.dumps(_CONSISTENCY_SCHEMA),
+            "--append-system-prompt", "You are a triage agent. Respond with JSON only.",
+        ]
+        if model:
+            cmd += ["--model", model]
+    result = subprocess.run(
+        cmd, input=prompt, capture_output=True, text=True, timeout=300, check=True
+    )
+    data = json.loads(result.stdout)
+    # claude -p wraps a schema response as the object itself; a stub may print
+    # the proposal directly. An is_error envelope (auth/runtime) surfaces here.
+    if isinstance(data, dict) and data.get("is_error"):
+        raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
+    if not isinstance(data, dict):
+        raise ValueError("proposal is not a JSON object")
+    return data
+
+
+def _priority_map(proposal: dict) -> dict[str, object]:
+    """{node id -> proposed `to`} for a proposal's priority_changes."""
+    out: dict[str, object] = {}
+    for pc in proposal.get("priority_changes", []) or []:
+        if isinstance(pc, dict) and pc.get("id"):
+            out[str(pc["id"])] = pc.get("to")
+    return out
+
+
+def _presence_map(proposal: dict, category: str, key_fn) -> dict[str, bool]:
+    """{key -> True} for a category whose agreement is presence-based."""
+    out: dict[str, bool] = {}
+    for e in proposal.get(category, []) or []:
+        if not isinstance(e, dict):
+            continue
+        k = key_fn(e)
+        if k:
+            out[k] = True
+    return out
+
+
+def _category_agreement(per_run_maps: list[dict]) -> dict:
+    """A key agrees when every completed run assigns it the SAME value (a run
+    that omits the key contributes None, so 'some propose, some don't' is a
+    disagreement). Returns {agree, total, disagreeing:[keys]}."""
+    universe: set = set()
+    for m in per_run_maps:
+        universe |= set(m.keys())
+    agree = 0
+    disagreeing: list = []
+    for k in sorted(universe, key=str):
+        vals = [m.get(k) for m in per_run_maps]
+        if all(v == vals[0] for v in vals):
+            agree += 1
+        else:
+            disagreeing.append(k)
+    return {"agree": agree, "total": len(universe), "disagreeing": disagreeing}
+
+
+def fold_consistency(proposals: list[dict]) -> dict:
+    """Per-category agreement over the COMPLETED-run proposals (x-64cb US4).
+    Priority is keyed by node id + `to` value; the rest are presence-based."""
+    return {
+        "priority": _category_agreement([_priority_map(p) for p in proposals]),
+        "dependencies": _category_agreement(
+            [_presence_map(p, "dependencies", lambda e: f"{e.get('from')}->{e.get('to')}") for p in proposals]
+        ),
+        "defer": _category_agreement(
+            [_presence_map(p, "defer", lambda e: str(e.get("id")) if e.get("id") else "") for p in proposals]
+        ),
+        "duplicates": _category_agreement(
+            [_presence_map(p, "duplicates", lambda e: ",".join(sorted(map(str, e.get("ids", []))))) for p in proposals]
+        ),
+    }
+
+
+def _emit_triage_applied(
+    applied: dict, priority_moves: list[dict], proposed: int, dropped: int
+) -> None:
+    """Best-effort ``triage_applied`` telemetry (x-64cb US2). The graph mutation
+    has already committed by the time this runs; an emit failure logs one stderr
+    line and never changes apply semantics or the exit code."""
+    import sys
+
+    try:
+        from fno.events import _build, append_event
+
+        event = _build(
+            "triage_applied",
+            "backlog",
+            {
+                "applied": applied,
+                "priority_moves": priority_moves,
+                "proposed": proposed,
+                "dropped": dropped,
+            },
+        )
+        append_event(event, events_path=_events_path())
+    except Exception as exc:  # noqa: BLE001 - telemetry is best-effort
+        print(
+            f"triage: warning: triage_applied emit failed ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+
+
 def _is_pending(entry: dict) -> bool:
     """Ready or blocked, not done/deferred/claimed/idea/roadmap-row.
 
@@ -464,6 +743,33 @@ def _validate_proposal(
 # ---------------------------------------------------------------------------
 
 
+def _build_context(
+    deep: bool,
+    all_projects: bool,
+    project: Optional[str],
+    roadmap_id: Optional[str],
+) -> dict:
+    """Build the LLM-reasoning context payload. Shared by `triage context` and
+    `triage consistency` so both reason over an identical snapshot."""
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
+    ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
+    inbox_items = _collect_inbox_items()
+    return {
+        "candidates": candidates,
+        "ideas": ideas,
+        "inbox_items": inbox_items,
+        "goals": _load_goals(),
+        "mode": "deep" if deep else "shallow",
+        "count": len(candidates),
+        "idea_count": len(ideas),
+        "inbox_count": len(inbox_items),
+        "scope": _resolve_scope(project, all_projects, entries),
+    }
+
+
 @cli.command("context")
 def cmd_context(
     deep: bool = typer.Option(False, "--deep", help="Include plan excerpts"),
@@ -478,24 +784,7 @@ def cmd_context(
     ),
 ) -> None:
     """Emit JSON context for an LLM reasoning subagent."""
-    from fno.graph.store import read_graph
-
-    entries = read_graph(_graph_path())
-    candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
-    ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
-    inbox_items = _collect_inbox_items()
-    ctx = {
-        "candidates": candidates,
-        "ideas": ideas,
-        "inbox_items": inbox_items,
-        "goals": _load_goals(),
-        "mode": "deep" if deep else "shallow",
-        "count": len(candidates),
-        "idea_count": len(ideas),
-        "inbox_count": len(inbox_items),
-        "scope": _resolve_scope(project, all_projects, entries),
-    }
-    typer.echo(json.dumps(ctx, indent=2))
+    typer.echo(json.dumps(_build_context(deep, all_projects, project, roadmap_id), indent=2))
 
 
 @cli.command("propose")
@@ -549,6 +838,83 @@ def cmd_propose(
         typer.echo("\n".join(header), err=True)
 
     typer.echo(json.dumps(proposal, indent=2))
+
+
+@cli.command("consistency")
+def cmd_consistency(
+    repeat: int = typer.Option(
+        3, "--repeat", "-k", help="Number of propose runs over the frozen context"
+    ),
+    frozen_context: Optional[Path] = typer.Option(
+        None, "--frozen-context", help="Pre-captured context JSON; skips capture"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Confirm --repeat > 10 (cost guard)"),
+    model: Optional[str] = typer.Option(None, "--model", help="Model for the headless runs"),
+    deep: bool = typer.Option(False, "--deep"),
+    all_projects: bool = typer.Option(False, "--all", "-A"),
+    project: Optional[str] = typer.Option(None, "--project"),
+    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Measure triage classification consistency: run the propose step K times
+    over ONE frozen context snapshot and report per-category agreement plus the
+    node ids that disagreed. Read-only - propose runs never touch the graph."""
+    if repeat < 1:
+        raise typer.BadParameter("--repeat must be >= 1")
+
+    # One snapshot, read by all K runs (Invariant: never the live graph).
+    if frozen_context is not None:
+        context = json.loads(frozen_context.read_text(encoding="utf-8"))
+    else:
+        context = _build_context(deep, all_projects, project, roadmap_id)
+
+    if not context.get("candidates"):
+        typer.echo("nothing to propose (no candidates in the frozen context)", err=True)
+        return  # exit 0, no LLM calls (Boundaries)
+
+    # Cost guard AFTER the empty-context short-circuit: an empty context makes
+    # zero LLM calls, so it should never demand --yes (peer review, PR #285).
+    if repeat > 10 and not yes:
+        typer.echo(
+            f"--repeat {repeat} makes {repeat} real LLM calls; pass --yes to confirm.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    proposals: list[dict] = []
+    errored = 0
+    for i in range(repeat):
+        try:
+            proposals.append(_run_consistency_propose(context, model))
+        except Exception as exc:  # noqa: BLE001 - one errored run must not abort the rest (AC7-FR)
+            errored += 1
+            typer.echo(f"run {i + 1}/{repeat} errored: {type(exc).__name__}: {exc}", err=True)
+
+    agreement = fold_consistency(proposals) if proposals else {}
+    report = {
+        "repeat": repeat,
+        "completed": len(proposals),
+        "errored": errored,
+        "agreement": agreement,
+    }
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        return
+
+    typer.echo(
+        f"Triage consistency: {len(proposals)}/{repeat} runs completed ({errored} errored)"
+    )
+    if repeat == 1:
+        typer.echo("  note: K=1 measures nothing (a single run trivially agrees with itself)")
+    if not proposals:
+        typer.echo("  no completed runs; agreement not computed")
+        return
+    for cat, ag in agreement.items():
+        if ag["total"] == 0:
+            continue
+        typer.echo(f"  {cat}: {ag['agree']}/{ag['total']} agree")
+        if ag["disagreeing"]:
+            typer.echo(f"    disagreeing: {', '.join(map(str, ag['disagreeing']))}")
 
 
 @cli.command("rank")
@@ -687,6 +1053,7 @@ def cmd_apply(
         "duplicates_flagged": 0,
         "deferred": 0,
     }
+    priority_moves: list[dict] = []
     locked_errors_holder: list[list[str]] = [[]]
 
     def mutator(entries: list[dict]) -> list[dict]:
@@ -709,6 +1076,9 @@ def cmd_apply(
             node = by_id.get(pc["id"])
             if node is None:
                 continue
+            priority_moves.append(
+                {"id": pc["id"], "from": node.get("priority"), "to": pc["to"]}
+            )
             node["priority"] = pc["to"]
             applied["priority_changes"] += 1
         # Defer entries land deferred_at + deferred_reason on each target.
@@ -734,6 +1104,18 @@ def cmd_apply(
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Telemetry (x-64cb US2): the mutation has committed; emit is best-effort and
+    # must precede the Exit(3) below so a partial apply still records what landed.
+    # proposed is the raw entry count across every category (the drop-rate
+    # denominator); dropped is what _validate_proposal rejected.
+    proposed = sum(
+        len(data.get(k, []) or [])
+        for k in ("dependencies", "priority_changes", "duplicates", "defer")
+    )
+    _emit_triage_applied(
+        applied, priority_moves, proposed, len(locked_errors_holder[0])
+    )
 
     for err in locked_errors_holder[0]:
         typer.echo(err, err=True)
@@ -1035,8 +1417,22 @@ def cmd_health(
     except Exception:  # noqa: BLE001 - advisory only; health must not break
         pass
 
+    # 10. Routing + triage decision metrics (x-64cb): folded from the canonical
+    # events log, event-gated (absent when no decisions recorded - AC6-EDGE).
+    # Advisory only; a read failure leaves the sections off, never breaks health.
+    routing_metrics: Optional[dict] = None
+    triage_metrics: Optional[dict] = None
+    try:
+        _canon_events = _read_canonical_events()
+        routing_metrics = fold_routing_health(_canon_events)
+        triage_metrics = fold_triage_health(_canon_events)
+    except Exception:  # noqa: BLE001 - advisory only; health must not break
+        pass
+
     report = {
         "scope": _resolve_scope(project, all_projects, entries),
+        **({"routing": routing_metrics} if routing_metrics else {}),
+        **({"triage_metrics": triage_metrics} if triage_metrics else {}),
         "idea_pile_depth": idea_count,
         "stale_ready_nodes": stale,
         "failure_prone_nodes": failure_prone,
@@ -1154,6 +1550,43 @@ def cmd_health(
         alarm = " ALARM" if evals_summary["regression_alarm"] else ""
         rate_txt = f"regression pass {rate:.0%}, " if rate is not None else ""
         typer.echo(f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{alarm}")
+    if routing_metrics:
+        rm = routing_metrics
+        total = rm["total"]
+        typer.echo("")
+        typer.echo(f"Executor routing ({total} resolutions):")
+        dist = ", ".join(
+            f"{t}={c}/{total}" for t, c in sorted(rm["tier_distribution"].items())
+        )
+        typer.echo(f"  tier distribution: {dist}")
+        typer.echo(f"  inference share: {rm['inference']}/{total}")
+        typer.echo(f"  warn-fallback: {rm['warn_fallback_count']}/{total}")
+        if rm["inferred_tasks"]:
+            typer.echo(
+                f"  override-after-inference (mis-route proxy): "
+                f"{rm['overridden_after_inference']}/{rm['inferred_tasks']}"
+            )
+        else:
+            typer.echo(
+                "  override-after-inference (mis-route proxy): n/a "
+                "(no inference-resolved tasks with ids)"
+            )
+    if triage_metrics:
+        tm = triage_metrics
+        cats = tm["applied_by_category"]
+        typer.echo("")
+        typer.echo(f"Triage applies ({tm['applies']}):")
+        typer.echo(
+            "  applied: "
+            f"priority={cats['priority_changes']}, deps={cats['dependencies']}, "
+            f"dups={cats['duplicates_flagged']}, deferred={cats['deferred']}"
+        )
+        if tm["proposed"]:
+            typer.echo(
+                f"  validation drop rate: {tm['dropped']}/{tm['proposed']}"
+            )
+        else:
+            typer.echo("  validation drop rate: n/a (no proposal entries recorded)")
     if batch_verdict == "build-wave4":
         typer.echo(
             "  batch-lane verdict: build-wave4 - abandonment waste exceeds savings; "

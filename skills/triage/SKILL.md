@@ -130,10 +130,21 @@ translate positional words into the equivalent flag:
    there is no claim-ordering decision to make until a spec lands).
 
 2. **LLM reasoning.** Spawn a subagent (Task tool) with the context JSON
-   and this instruction:
+   and this instruction. Run the subagent at **temperature 0** - triage is a
+   classification task and determinism drives the 95%+ consistency target
+   (`fno backlog triage consistency` measures it).
 
-   > Given these pending specs and the project goals, propose an optimal
-   > ordering as JSON with four keys:
+   > You are a backlog triage classifier. First **reason**, then **label** -
+   > this ordering (analysis before the JSON) is what makes the classification
+   > consistent, so never emit the JSON first.
+   >
+   > **First**, in a short `## Reasoning` section, work through the candidates:
+   > which specs block which, which priorities are misaligned with the project
+   > goals, which are stale or duplicated. Name the primary concern of each spec
+   > you touch. When a spec raises several concerns at once, classify on its
+   > *primary* intent, not the loudest surface signal.
+   >
+   > **Then**, output an optimal ordering as JSON with four keys:
    >
    > - `dependencies`: edges where one spec must complete before another
    >   (e.g. `{"from": "ab-X", "to": "ab-Y", "reason": "..."}` means Y is
@@ -149,9 +160,10 @@ translate positional words into the equivalent flag:
    >   `recommended` action of `"merge"` and a reason. To pause one of a
    >   pair without merging, use the `defer` action above instead.
    >
-   > Every entry must include a `reason` field referencing the plan
-   > contents (deep mode) or the title/priority signal (shallow mode).
-   > Do not propose self-edges or edges that create cycles.
+   > Every entry MUST include a `reason` field (one line) referencing the plan
+   > contents (deep mode) or the title/priority signal (shallow mode). An entry
+   > without a reason is dropped by validation, so a missing reason is a wasted
+   > proposal. Do not propose self-edges or edges that create cycles.
    >
    > **Field reference:** each candidate carries enrichment fields beyond
    > the basic id/title/priority. `size` is S/M/L (omit size-based
@@ -172,6 +184,26 @@ translate positional words into the equivalent flag:
    > propose dependencies or priority changes for ideas. Pass them
    > through unchanged in your summary so the user sees them and can
    > spec them next.
+   >
+   > **Examples** (reasoning before label; classify on primary intent):
+   >
+   > - *Implicit dependency.* Candidate `ab-9f` "add rate-limit headers to the
+   >   API" and `ab-3c` "build the API gateway". The gateway is never named as a
+   >   blocker, but headers cannot ship before the gateway exists.
+   >   Reasoning: ab-9f's work sits on top of ab-3c's surface.
+   >   Label: `dependencies: [{"from":"ab-3c","to":"ab-9f","reason":"rate-limit headers need the gateway surface first"}]`.
+   > - *Emotion over intent.* Candidate details read "this flaky test has wasted
+   >   HOURS, it is infuriating, the whole suite is garbage." The heat is noise;
+   >   the actionable intent is one flaky test.
+   >   Reasoning: strip the frustration, the core ask is de-flaking one test - a
+   >   normal p2, not a p0 because it is loud.
+   >   Label: no priority bump; a `defer` only if it is blocked on an external fix.
+   > - *Multiple issues, pick the primary.* Candidate details raise a perf
+   >   regression, a typo in a log line, and a docs gap. The perf regression is
+   >   the reason the node exists; the rest are incidental.
+   >   Reasoning: classify on the perf regression (the primary), mention the
+   >   others in the summary, do not split the node.
+   >   Label: priority reflects the perf regression only.
 
    The subagent returns proposal JSON.
 
