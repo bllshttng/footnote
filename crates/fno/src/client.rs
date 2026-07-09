@@ -1063,6 +1063,17 @@ impl View {
                 .count();
             self.answers = if n == 0 { None } else { Some(cur.min(n - 1)) };
         }
+        // Navigator re-clamps its cursor when a scrape tick reorders/removes rows
+        // under it (x-653d, AC1-FR/AC2-EDGE): the rows recompute from self.layout
+        // on every access, so after a push a past-the-end cursor would draw no
+        // marker and mis-target Enter. Clamp, don't reset - the query and state
+        // filter are unchanged, only the underlying catalog moved; resetting to 0
+        // on every tick would fight a live badge update (matching the selector's
+        // clamp-don't-jump discipline above).
+        let nav_count = self.nav.as_ref().map(|n| self.nav_filtered(n).len());
+        if let (Some(count), Some(nav)) = (nav_count, self.nav.as_mut()) {
+            nav.cursor = count.saturating_sub(1).min(nav.cursor);
+        }
         // Hover highlight re-anchors to a live display row on a layout push
         // (x-a496, AC3-FR): a dropped row must not leave the bar on a stale index.
         // Clear (not clamp) - a re-clamp would slide the highlight to an unrelated
@@ -5763,6 +5774,46 @@ mod tests {
         );
         nav_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
         assert!(v.nav.is_none(), "Esc closes; the trailing x is swallowed");
+    }
+
+    #[test]
+    fn nav_cursor_re_clamps_on_layout_shrink() {
+        // AC1-FR / AC2-EDGE: a layout push that shrinks the catalog under an open
+        // navigator re-clamps the cursor into the live rows (no past-the-end
+        // marker, no mis-targeted Enter) without reopening the overlay.
+        let mut v = two_pane_view();
+        let last = v.nav_rows().len() - 1;
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: last,
+        });
+        v.set_layout(LayoutView {
+            squads: vec![meta(2, "notes", 1, 0)],
+            active_squad: 2,
+            panes: vec![(
+                20,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 20,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        let n = v.nav_rows().len();
+        assert!(n < last + 1, "catalog shrank");
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            n - 1,
+            "cursor clamped into the shrunk catalog"
+        );
+        assert!(v.nav.is_some(), "navigator stays open across the push");
     }
 
     // ---- x-c929: answer overlay + next-blocked cycle ----
