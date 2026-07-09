@@ -5116,7 +5116,8 @@ mod tests {
         // x-d140: a COLLAPSED squad's name row carries a trailing rollup glyph
         // for its worst agent state, so a blocked pane is visible without
         // expanding; an EXPANDED squad shows no rollup (its agent rows already
-        // carry the glyphs). `is_seen=|_|false` today (done == unseen; x-4328).
+        // carry the glyphs). `seen: false` here (done == unseen); the real bit
+        // is x-4328's, exercised elsewhere.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
                 squad: Some(squad),
@@ -5128,6 +5129,7 @@ mod tests {
                 answerable: None,
                 attach_id: None,
                 external: false,
+                seen: false,
             }
         }
         let mut view = two_pane_view();
