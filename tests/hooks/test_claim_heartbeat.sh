@@ -90,6 +90,14 @@ run_hook_codex() {
   printf '{"cwd": "%s"}' "$CWD" | CODEX_THREAD_ID="$1" bash "$HOOK"
 }
 
+# Codex lifecycle payloads also carry the thread as session_id. The heartbeat
+# must route that field through the Codex identity gate, not compare it with the
+# manifest's unrelated Claude identity.
+run_hook_codex_sid() {
+  printf '{"cwd": "%s", "session_id": "%s"}' "$CWD" "$1" \
+    | CODEX_THREAD_ID="$1" bash "$HOOK"
+}
+
 # ── T1: AC3-HP - we hold the claim -> refresh is issued ──────────────────────
 setup_env
 export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
@@ -200,6 +208,17 @@ if grep -q "claim refresh" "$CALLLOG"; then
   fail "T10 revived a Codex claim from a different thread"
 else
   pass "T10 different Codex thread on a stale manifest does not refresh"
+fi
+teardown_env
+
+# ── T11: Realistic Codex payload must not trip the Claude guard ───────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_codex_sid "019f48e4-owner-thread" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
+  pass "T11 Codex stdin session_id routes through Codex ownership"
+else
+  fail "T11 Codex session_id was rejected by the Claude identity guard"
 fi
 teardown_env
 

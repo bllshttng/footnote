@@ -214,8 +214,8 @@ def test_codex_inspector_classifies_owned_and_foreign_commands(tmp_path):
     )
 
     assert diagnostics.toml_footnote_commands == (CMD,)
-    assert diagnostics.json_footnote_commands == (wrapper_only,)
-    assert diagnostics.json_foreign_commands == (foreign,)
+    assert diagnostics.json_footnote_commands == ()
+    assert diagnostics.json_foreign_commands == (wrapper_only, foreign)
 
 
 def test_codex_inspector_reports_footnote_trust_key(tmp_path):
@@ -234,8 +234,8 @@ def test_codex_inspector_reports_footnote_trust_key(tmp_path):
     diagnostics = inspect_codex_hooks(config_path=config, hooks_json_path=legacy)
 
     assert diagnostics.toml_footnote_state_keys == (state_key,)
-    assert diagnostics.toml_footnote_trusted == (True,)
-    assert diagnostics.all_toml_footnote_hooks_trusted
+    assert diagnostics.toml_footnote_state_recorded == (True,)
+    assert not diagnostics.all_toml_footnote_hooks_verified
 
 
 def test_codex_duplicate_layers_warn_without_mutating_json(tmp_path):
@@ -275,6 +275,80 @@ def test_codex_explicit_migration_backs_up_and_removes_owned_json(tmp_path):
     assert res.legacy_backup.read_bytes() == before
     assert not legacy.exists()
     assert res.note and "migrated footnote-owned" in res.note
+
+
+def test_codex_migration_removes_owned_json_with_description_metadata(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    _write_codex_toml(config, CMD)
+    original = (
+        json.dumps(
+            {
+                "description": "Legacy footnote Codex hooks",
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": CMD}]}
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n"
+    ).encode()
+    legacy.write_bytes(original)
+
+    res = install_codex_hook(
+        CMD,
+        config_path=config,
+        hooks_json_path=legacy,
+        migrate_legacy_hooks_json=True,
+    )
+
+    assert not legacy.exists()
+    assert res.legacy_backup is not None
+    assert res.legacy_backup.read_bytes() == original
+
+
+def test_codex_migration_preserves_foreign_events_and_exact_backup(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    _write_codex_toml(config, CMD)
+    original = (
+        json.dumps(
+            {
+                "description": "Mixed legacy hooks",
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": CMD}]}
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "foreign-stop.sh"}
+                            ]
+                        }
+                    ],
+                },
+            },
+            indent=4,
+        )
+        + "\n"
+    ).encode()
+    legacy.write_bytes(original)
+
+    res = install_codex_hook(
+        CMD,
+        config_path=config,
+        hooks_json_path=legacy,
+        migrate_legacy_hooks_json=True,
+    )
+
+    remaining = json.loads(legacy.read_text())
+    assert "SessionStart" not in remaining["hooks"]
+    assert remaining["hooks"]["Stop"][0]["hooks"][0]["command"] == "foreign-stop.sh"
+    assert remaining["description"] == "Mixed legacy hooks"
+    assert res.legacy_backup is not None
+    assert res.legacy_backup.read_bytes() == original
 
 
 def test_codex_migration_preserves_foreign_json_and_requests_manual_consolidation(
@@ -331,8 +405,53 @@ def test_codex_malformed_toml_is_not_modified(tmp_path):
     res = install_codex_hook(CMD, config_path=config, hooks_json_path=legacy)
 
     assert not res.changed
+    assert res.error
+    assert not res.needs_trust
     assert res.note and "malformed" in res.note
     assert config.read_text() == "[[not valid"
+
+
+def test_cli_codex_malformed_config_exits_nonzero_without_success_output(
+    tmp_path, monkeypatch
+):
+    import fno.paths as paths
+    from fno.setup_cli import app
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+    config = tmp_path / "config.toml"
+    config.write_text("[[not valid")
+
+    result = CliRunner().invoke(
+        app,
+        ["cli-hooks-codex", "--codex-config", str(config)],
+    )
+
+    assert result.exit_code == 1
+    assert "malformed" in result.stderr
+    assert "UNTRUSTED" not in result.output
+    assert "Nothing to do" not in result.output
+
+
+def test_codex_malformed_legacy_json_returns_failure_without_writing_toml(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    legacy.write_text("{not json")
+
+    result = install_codex_hook(
+        CMD,
+        config_path=config,
+        hooks_json_path=legacy,
+        migrate_legacy_hooks_json=True,
+    )
+
+    assert result.error and "malformed" in result.error
+    assert not result.changed
+    assert not result.needs_trust
+    assert not config.exists()
+    assert legacy.read_text() == "{not json"
 
 
 # --- CLI surface ------------------------------------------------------------

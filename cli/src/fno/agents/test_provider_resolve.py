@@ -81,9 +81,13 @@ def test_multiple_markers_are_ambiguous():
     assert resolve_dispatch_provider(None, env=env) == ("claude", "builtin-default")
 
 
-def test_codex_thread_and_legacy_codex_marker_are_ambiguous():
+def test_codex_thread_and_legacy_codex_marker_infer_same_harness():
     env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
-    assert infer_invoking_harness(env) is None
+    assert infer_invoking_harness(env) == "codex"
+    assert resolve_dispatch_provider(None, env=env) == (
+        "codex",
+        "harness-inferred",
+    )
 
 
 def test_whitespace_marker_is_absent():

@@ -11,6 +11,7 @@ depending on the installed `fno` snapshot. Proves:
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -98,6 +99,34 @@ def test_bare_node_id_acquires_global_ttl_claim(tmp_path):
     line = acquire_lines[0]
     assert "--ttl 2h" in line, line
     assert f"ROOT:{home}" in line, "acquire must set FNO_CLAIMS_ROOT=$HOME: " + line
+
+
+def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
+    repo, home, log, env = _sandbox(tmp_path)
+    (repo / "scripts").symlink_to(REPO_ROOT / "scripts", target_is_directory=True)
+    thread_id = "019f48e4-codex-owner"
+    env.update(
+        {
+            "CODEX_THREAD_ID": thread_id,
+            "CODEX_SESSION_ID": "legacy-must-not-own",
+            "MOCK_ABI_ACQUIRE_RC": "0",
+        }
+    )
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+
+    result = _run_init(repo, env)
+    state = _state(repo)
+    assert state, result.stderr
+    graph = json.loads((home / ".fno" / "graph.json").read_text())["entries"][0]
+    acquire = next(
+        line for line in log.read_text().splitlines() if "claim acquire" in line
+    )
+
+    assert f"session_id: {thread_id}" in state
+    assert f"codex_thread_id: {thread_id}" in state
+    assert graph["session_id"] == thread_id
+    assert f'--holder target-session:{thread_id}' in acquire
+    assert f'target_claim_holder: "target-session:{thread_id}"' in state
 
 
 def test_held_by_other_refuses(tmp_path):

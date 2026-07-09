@@ -50,7 +50,7 @@ def _write_json(path: Path, *commands: str) -> None:
     )
 
 
-def test_toml_footnote_hook_with_trust_is_ok(tmp_path, monkeypatch) -> None:
+def test_toml_footnote_hook_with_recorded_hash_is_unverified(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     config = tmp_path / "config.toml"
     state_key = _write_toml(config)
@@ -58,10 +58,11 @@ def test_toml_footnote_hook_with_trust_is_ok(tmp_path, monkeypatch) -> None:
     result = runner.invoke(app, ["doctor", "--codex-hooks"])
 
     assert result.exit_code == 0
-    assert "fno doctor: codex hooks: ok" in result.stdout
+    assert "fno doctor: codex hooks: warn" in result.stdout
     assert "preferred=config.toml" in result.stdout
     assert "footnote SessionStart=wired" in result.stdout
-    assert f"trust state found: {state_key}" in result.stdout
+    assert f"trust state recorded-unverified: {state_key}" in result.stdout
+    assert "trusted_hash was not locally verified" in result.stdout
 
 
 def test_both_layers_with_foreign_json_warns_and_preserves_paths(
@@ -128,20 +129,20 @@ def test_json_output_is_one_parseable_object(tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.stdout.strip())
     assert payload == {
-        "status": "ok",
+        "status": "warn",
         "preferred_layer": "config.toml",
         "state": "toml-only",
         "config_path": str(config),
         "hooks_json_path": str(tmp_path / "hooks.json"),
         "footnote_toml_wired": True,
-        "footnote_toml_trusted": True,
-        "footnote_toml_trust": {state_key: True},
+        "footnote_toml_trust_verified": False,
+        "footnote_toml_trust": {state_key: "recorded-unverified"},
         "duplicate_layers": False,
         "footnote_json_hooks": [],
         "foreign_json_hooks": [],
         "errors": [],
     }
-    assert "fno doctor: codex hooks: ok" in result.stderr
+    assert "fno doctor: codex hooks: warn" in result.stderr
 
 
 def test_dedicated_mode_skips_normal_doctor_collectors(tmp_path, monkeypatch) -> None:

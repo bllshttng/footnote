@@ -6,11 +6,16 @@ LIVE (session_id, cwd) pointer is what flows into the dispatch core.
 """
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
 from fno.provenance import cli as think_cli
 from fno.provenance.spawn_think import ThinkSpawnResult
+from fno.provenance.resolver import ResolvedTranscript
 
 runner = CliRunner()
 
@@ -66,8 +71,23 @@ def test_ambient_codex_session(graph, monkeypatch):
     assert graph["session_id"] == "codex-sid"
     assert graph["harness"] == "codex"
     posture = "codex posture: think source=codex; dispatch=claude-bg-fallback"
-    assert posture in r.output
-    assert r.output.index(posture) < r.output.index("think dispatched:")
+    assert posture in r.stderr
+    assert posture not in r.stdout
+    assert "think dispatched:" in r.stdout
+
+
+def test_ambient_codex_json_stdout_is_single_document(graph, monkeypatch):
+    monkeypatch.setenv("CODEX_THREAD_ID", "codex-thread")
+    r = runner.invoke(
+        think_cli.think_app,
+        ["dispatch", "x-0a9c", "--json"],
+    )
+    assert r.exit_code == 0
+    payload = json.loads(r.stdout)
+    assert payload["decision"] == "spawned"
+    assert payload["think_session"] == "abc123"
+    assert "codex posture:" not in r.stdout
+    assert "codex posture: think source=codex" in r.stderr
 
 
 def test_ambient_codex_explicit_non_claude_provider_is_refused(graph, monkeypatch):
@@ -78,7 +98,7 @@ def test_ambient_codex_explicit_non_claude_provider_is_refused(graph, monkeypatc
     )
     assert r.exit_code == 2
     posture = "codex posture: think source=codex; dispatch=unsupported"
-    assert r.output.count(posture) == 1
+    assert r.stderr.count(posture) == 1
     assert "detached /think uses Claude bg" in r.output
     assert "omit --provider to use the Claude fallback" in r.output
     assert "no live think-session receipt" in r.output
@@ -160,3 +180,89 @@ def test_skipped_exits_1(graph, monkeypatch):
     r = runner.invoke(think_cli.think_app, ["dispatch", "x-0a9c"])
     assert r.exit_code == 1
     assert "already-claimed" in r.output
+
+
+def _subprocess_journey(tmp_path: Path, monkeypatch):
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-0a9c",
+                        "slug": "conv-think",
+                        "title": "conversational verb",
+                        "cwd": str(tmp_path),
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr("fno.graph.cli._graph_path", lambda: graph_path)
+    monkeypatch.setattr(
+        "fno.provenance.spawn_think.resolve_transcript",
+        lambda harness, sid, cwd, **kw: ResolvedTranscript(
+            harness,
+            sid,
+            cwd,
+            True,
+            transcript_path=str(tmp_path / "transcript.jsonl"),
+        ),
+    )
+    monkeypatch.setenv("CODEX_THREAD_ID", "codex-subprocess-thread")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "fno-home"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture = tmp_path / "spawn-argv"
+    fake = bin_dir / "fno-py"
+    fake.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\0' \"$@\" > \"$SPAWN_CAPTURE\"\n"
+        "printf '%s\\n' '{\"short_id\":\"real123\"}'\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("SPAWN_CAPTURE", str(capture))
+    return capture
+
+
+def test_codex_json_dispatch_reaches_spawn_subprocess_and_parses_receipt(
+    tmp_path, monkeypatch
+):
+    capture = _subprocess_journey(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        think_cli.think_app,
+        ["dispatch", "x-0a9c", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "spawned"
+    assert payload["think_session"] == "real123"
+    argv = capture.read_bytes().decode().rstrip("\0").split("\0")
+    assert argv[:6] == [
+        "agents",
+        "spawn",
+        "--provider",
+        "claude",
+        "--substrate",
+        "bg",
+    ]
+    assert "codex posture:" not in result.stdout
+    assert "claude-bg-fallback" in result.stderr
+
+
+def test_unsupported_provider_never_launches_spawn_subprocess(tmp_path, monkeypatch):
+    capture = _subprocess_journey(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        think_cli.think_app,
+        ["dispatch", "x-0a9c", "--provider", "codex", "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert not capture.exists()
+    assert "dispatch=unsupported" in result.stderr

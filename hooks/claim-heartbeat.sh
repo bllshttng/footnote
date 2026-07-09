@@ -71,12 +71,14 @@ SESSION_ID="$(sed -n 's/^[[:space:]]*session_id:[[:space:]]*//p' "$MANIFEST" | h
 # stdin uuid, no CODEX_THREAD_ID, or an older manifest without the field): the
 # holder gate still applies, so this only ever ADDS a refusal, never widens refresh.
 MANIFEST_CLAUDE_SID="$(sed -n 's/^[[:space:]]*claude_session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
-if [[ -n "$CUR_CLAUDE_SID" && -n "$MANIFEST_CLAUDE_SID" && "$CUR_CLAUDE_SID" != "$MANIFEST_CLAUDE_SID" ]]; then
+_CUR_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
+if [[ -z "$_CUR_CODEX_COMPACT" && -n "$CUR_CLAUDE_SID" \
+      && -n "$MANIFEST_CLAUDE_SID" && "$MANIFEST_CLAUDE_SID" != "null" \
+      && "$CUR_CLAUDE_SID" != "$MANIFEST_CLAUDE_SID" ]]; then
   exit 0
 fi
 MANIFEST_CODEX_THREAD_ID="$(sed -n 's/^[[:space:]]*codex_thread_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 [[ "$MANIFEST_CODEX_THREAD_ID" == "null" ]] && MANIFEST_CODEX_THREAD_ID=""
-_CUR_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
 if [[ -n "$_CUR_CODEX_COMPACT" && -n "$MANIFEST_CODEX_THREAD_ID" \
       && "$CUR_CODEX_THREAD_ID" != "$MANIFEST_CODEX_THREAD_ID" ]]; then
   exit 0

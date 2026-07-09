@@ -53,6 +53,7 @@ class HookInstallResult:
     needs_trust: bool = False  # Codex: user must approve the hook before it runs
     note: Optional[str] = None
     legacy_backup: Optional[Path] = None
+    error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ class CodexHookDiagnostics:
     toml_foreign_commands: tuple[str, ...] = ()
     json_foreign_commands: tuple[str, ...] = ()
     toml_footnote_state_keys: tuple[str, ...] = ()
-    toml_footnote_trusted: tuple[bool, ...] = ()
+    toml_footnote_state_recorded: tuple[bool, ...] = ()
     errors: tuple[str, ...] = ()
 
     @property
@@ -81,8 +82,11 @@ class CodexHookDiagnostics:
         return bool(self.json_commands)
 
     @property
-    def all_toml_footnote_hooks_trusted(self) -> bool:
-        return bool(self.toml_footnote_commands) and all(self.toml_footnote_trusted)
+    def all_toml_footnote_hooks_verified(self) -> bool:
+        # A stored trusted_hash is only an approval record. Until this module
+        # recomputes and compares Codex's exact local hash contract, it cannot
+        # truthfully claim the command is verified.
+        return False
 
 
 def _backup(path: Path) -> Optional[Path]:
@@ -124,7 +128,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def _is_footnote_codex_command(command: str) -> bool:
     """Classify only footnote-owned Codex SessionStart commands."""
-    return _HOOK_SUFFIX in command or "FNO_PLATFORM=codex" in command
+    return _HOOK_SUFFIX in command
 
 
 def _session_start_commands(data: Any, *, source: str) -> tuple[str, ...]:
@@ -207,7 +211,7 @@ def inspect_codex_hooks(
     toml_commands: tuple[str, ...] = ()
     json_commands: tuple[str, ...] = ()
     toml_footnote_state_keys: tuple[str, ...] = ()
-    toml_footnote_trusted: tuple[bool, ...] = ()
+    toml_footnote_state_recorded: tuple[bool, ...] = ()
     errors: list[str] = []
 
     if config_path.exists():
@@ -215,7 +219,7 @@ def inspect_codex_hooks(
             parsed_toml = tomllib.loads(config_path.read_text(encoding="utf-8"))
             toml_records = _session_start_hook_records(parsed_toml, source="config.toml")
             toml_commands = tuple(command for _, _, command in toml_records)
-            toml_footnote_state_keys, toml_footnote_trusted = _codex_hook_trust(
+            toml_footnote_state_keys, toml_footnote_state_recorded = _codex_hook_trust(
                 parsed_toml,
                 config_path=config_path,
                 records=toml_records,
@@ -254,7 +258,7 @@ def inspect_codex_hooks(
         toml_foreign_commands=tuple(c for c in toml_commands if c not in toml_footnote),
         json_foreign_commands=tuple(c for c in json_commands if c not in json_footnote),
         toml_footnote_state_keys=toml_footnote_state_keys,
-        toml_footnote_trusted=toml_footnote_trusted,
+        toml_footnote_state_recorded=toml_footnote_state_recorded,
         errors=tuple(errors),
     )
 
@@ -417,7 +421,10 @@ def _migrate_legacy_codex_hooks(
     migrated["hooks"] = migrated_hooks
 
     backup = _backup(hooks_json_path)
-    wholly_footnote_owned = set(migrated) == {"hooks"} and not migrated_hooks
+    wholly_footnote_owned = (
+        not migrated_hooks
+        and set(migrated).issubset({"description", "hooks"})
+    )
     if wholly_footnote_owned:
         hooks_json_path.unlink()
     else:
@@ -477,11 +484,11 @@ def install_codex_hook(
     """
     legacy_path = hooks_json_path or config_path.with_name("hooks.json")
     before = inspect_codex_hooks(config_path=config_path, hooks_json_path=legacy_path)
-    config_error = any(str(config_path) in error for error in before.errors)
-    if config_error:
+    if before.errors:
+        message = _codex_diagnostic_note(before)
         return HookInstallResult(
             cli="codex", path=config_path, changed=False, already_present=False,
-            needs_trust=True, note=_codex_diagnostic_note(before),
+            needs_trust=False, note=message, error=message,
         )
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -507,8 +514,7 @@ def install_codex_hook(
     legacy_backup: Optional[Path] = None
     migrated = False
     foreign_remains = False
-    json_error = any(str(legacy_path) in error for error in before.errors)
-    if migrate_legacy_hooks_json and legacy_path.exists() and not json_error:
+    if migrate_legacy_hooks_json and legacy_path.exists():
         legacy_backup, removed, foreign_remains = _migrate_legacy_codex_hooks(legacy_path)
         migrated = removed > 0
         changed = changed or migrated

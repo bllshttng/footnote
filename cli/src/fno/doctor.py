@@ -1032,11 +1032,14 @@ def _codex_hooks_report() -> dict[str, Any]:
         hooks_json_path=hooks_json_path,
     )
     toml_wired = bool(diagnostics.toml_footnote_commands)
-    toml_trusted = diagnostics.all_toml_footnote_hooks_trusted
+    toml_verified = diagnostics.all_toml_footnote_hooks_verified
     toml_trust = dict(
         zip(
             diagnostics.toml_footnote_state_keys,
-            diagnostics.toml_footnote_trusted,
+            (
+                "recorded-unverified" if recorded else "missing"
+                for recorded in diagnostics.toml_footnote_state_recorded
+            ),
             strict=True,
         )
     )
@@ -1044,7 +1047,7 @@ def _codex_hooks_report() -> dict[str, Any]:
 
     if diagnostics.errors:
         status = "error"
-    elif not toml_wired or not toml_trusted or diagnostics.has_json_hooks:
+    elif not toml_wired or not toml_verified or diagnostics.has_json_hooks:
         status = "warn"
     else:
         status = "ok"
@@ -1056,7 +1059,7 @@ def _codex_hooks_report() -> dict[str, Any]:
         "config_path": str(config_path),
         "hooks_json_path": str(hooks_json_path),
         "footnote_toml_wired": toml_wired,
-        "footnote_toml_trusted": toml_trusted,
+        "footnote_toml_trust_verified": toml_verified,
         "footnote_toml_trust": toml_trust,
         "duplicate_layers": duplicate_layers,
         "footnote_json_hooks": list(diagnostics.json_footnote_commands),
@@ -1071,8 +1074,11 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
     def out(message: str) -> None:
         typer.echo(message, err=err)
 
-    if result["footnote_toml_trusted"]:
-        trust = "trusted"
+    trust_states = set(result["footnote_toml_trust"].values())
+    if result["footnote_toml_trust_verified"]:
+        trust = "verified"
+    elif "recorded-unverified" in trust_states:
+        trust = "recorded-unverified"
     elif result["footnote_toml_wired"]:
         trust = "missing"
     else:
@@ -1086,12 +1092,20 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
     for error in result["errors"]:
         out(f"fno doctor: codex hooks: parse error: {error}")
 
-    for state_key, present in result["footnote_toml_trust"].items():
-        state = "found" if present else "missing"
+    for state_key, state in result["footnote_toml_trust"].items():
         out(f"fno doctor: codex hooks: trust state {state}: {state_key}")
     if result["footnote_toml_wired"]:
-        if not result["footnote_toml_trusted"]:
-            out("fno doctor: codex hooks: approve the footnote SessionStart hook in Codex.")
+        if not result["footnote_toml_trust_verified"]:
+            if "recorded-unverified" in trust_states:
+                out(
+                    "fno doctor: codex hooks: approval record found, but its "
+                    "trusted_hash was not locally verified; confirm it in Codex."
+                )
+            else:
+                out(
+                    "fno doctor: codex hooks: approve the footnote SessionStart "
+                    "hook in Codex."
+                )
 
     if result["duplicate_layers"]:
         out(

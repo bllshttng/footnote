@@ -117,6 +117,7 @@ def _install_cli_hooks(
 
     any_change = False
     needs_trust = False
+    failures: list[str] = []
 
     if gemini:
         gpath = _safe_expand(gemini_settings) if gemini_settings else (
@@ -149,18 +150,25 @@ def _install_cli_hooks(
             hooks_json_path=legacy_path,
             migrate_legacy_hooks_json=migrate_legacy_hooks_json,
         )
-        any_change = any_change or res.changed
-        needs_trust = needs_trust or res.needs_trust
-        if res.note:
-            legacy_bak = (
-                f"; backed up {res.legacy_backup.name}" if res.legacy_backup else ""
-            )
-            typer.echo(f"codex: {res.note}{legacy_bak} ({res.path})")
-        elif res.already_present:
-            typer.echo(f"codex: already wired ({res.path})")
+        if res.error:
+            typer.echo(f"codex: error: {res.error} ({res.path})", err=True)
+            failures.append(res.error)
         else:
-            bak = f"; backed up {res.backup.name}" if res.backup else ""
-            typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
+            any_change = any_change or res.changed
+            needs_trust = needs_trust or res.needs_trust
+            if res.note:
+                legacy_bak = (
+                    f"; backed up {res.legacy_backup.name}" if res.legacy_backup else ""
+                )
+                typer.echo(f"codex: {res.note}{legacy_bak} ({res.path})")
+            elif res.already_present:
+                typer.echo(f"codex: already wired ({res.path})")
+            else:
+                bak = f"; backed up {res.backup.name}" if res.backup else ""
+                typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
+
+    if failures:
+        raise typer.Exit(1)
 
     if needs_trust:
         typer.echo(

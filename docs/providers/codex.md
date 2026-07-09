@@ -62,6 +62,11 @@ state without modifying either hook layer:
 fno doctor --codex-hooks
 ```
 
+The presence of a `[hooks.state]` `trusted_hash` is reported as
+`recorded-unverified`, not as proof that the current command is trusted. footnote does
+not currently reproduce Codex's local hash-verification contract, so the diagnostic
+stays advisory/warn and asks you to confirm approval in Codex itself.
+
 Codex may report `loading hooks from both ... hooks.json and ... config.toml` when the
 legacy `$CODEX_HOME/hooks.json` and preferred TOML layer both contain SessionStart hooks.
 If the JSON entries are footnote-owned, migrate only those entries with:
@@ -124,8 +129,10 @@ Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
 
 In a Codex task, `CODEX_THREAD_ID` is the durable session identity. footnote prefers it
 when creating target manifests, node claims, graph provenance, and follow-on dispatch
-context. If Codex does not provide it, the shared harness resolver falls back to the
-other supported session markers and finally the existing generated target-session id.
+context. The shared SessionStart wrapper also registers that thread for addressable
+`fno mail` delivery. If Codex does not provide it, the shared harness resolver falls
+back to the other supported session markers and finally the existing generated
+target-session id.
 
 The core `target`, `do`, `think`, and `blueprint` workflows use the same canonical
 markdown on Codex. `target` continues natively through the packaged `Stop` hook. Agent

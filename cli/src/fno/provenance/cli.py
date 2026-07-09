@@ -101,7 +101,10 @@ def dispatch(
     live_harness = (harness or prov.get("source_harness") or "claude").strip()
     if resolved_provider is not None and resolved_provider != "claude":
         if live_harness == "codex":
-            typer.echo("codex posture: think source=codex; dispatch=unsupported")
+            typer.echo(
+                "codex posture: think source=codex; dispatch=unsupported",
+                err=True,
+            )
         typer.echo(
             "fno think dispatch: detached /think uses Claude bg; omit --provider "
             "to use the Claude fallback; non-Claude headless is a one-shot with "
@@ -156,7 +159,10 @@ def dispatch(
         target["provider"] = resolved_provider
 
     if live_harness == "codex":
-        typer.echo("codex posture: think source=codex; dispatch=claude-bg-fallback")
+        typer.echo(
+            "codex posture: think source=codex; dispatch=claude-bg-fallback",
+            err=True,
+        )
 
     result = dispatch_conversational(
         target, session_id=sid, cwd=live_cwd, harness=live_harness,
