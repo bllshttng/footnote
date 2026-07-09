@@ -440,6 +440,25 @@ def test_presence_interactive_session_is_attended(tmp_path):
     ) == "attended"
 
 
+def test_presence_codex_thread_is_attended(tmp_path):
+    assert st.classify_presence(
+        env={"CODEX_THREAD_ID": "thread-id"}, project_root=tmp_path
+    ) == "attended"
+
+
+def test_presence_codex_spawned_worker_is_away(tmp_path):
+    assert st.classify_presence(
+        env={"CODEX_THREAD_ID": "thread-id", "FNO_AGENT_SELF": "think-x-1-foo"},
+        project_root=tmp_path,
+    ) == "away"
+
+
+def test_presence_gemini_behavior_remains_away(tmp_path):
+    assert st.classify_presence(
+        env={"GEMINI_SESSION_ID": "gemini-id"}, project_root=tmp_path
+    ) == "away"
+
+
 def test_presence_no_signal_defaults_away(tmp_path):
     assert st.classify_presence(env={}, project_root=tmp_path) == "away"
 
@@ -477,6 +496,17 @@ def test_presence_foreign_manifest_ignored(tmp_path):
     assert st.classify_presence(
         env={"CLAUDE_CODE_SESSION_ID": "sid-123"}, project_root=tmp_path
     ) == "attended"
+
+
+def test_codex_identity_never_owns_claude_manifest(tmp_path):
+    fno = tmp_path / ".fno"
+    fno.mkdir()
+    (fno / "target-state.md").write_text(
+        "claude_transcript_id: thread-id\nattended: false\n", encoding="utf-8"
+    )
+    env = {"CODEX_THREAD_ID": "thread-id"}
+    assert st._owned_manifest_attended(tmp_path, env) is None
+    assert st.classify_presence(env=env, project_root=tmp_path) == "attended"
 
 
 # ---------------------------------------------------------------------------
@@ -1073,4 +1103,3 @@ def test_worker_name_unique_per_conversation():
     assert a.endswith("-sessaaaa") and b.endswith("-sessbbbb")
     # No suffix -> byte-for-byte the prior name (birth/lifecycle unchanged).
     assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "think-x-1-slug"
-

@@ -16,15 +16,7 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
-# Env markers that identify the invoking harness, highest priority first. Mirrors
-# _capture_parent_edge() in dispatch.py (the source_harness detector); kept as a
-# small self-contained table here so the resolver carries no heavy import and
-# stays env-injectable for tests. These are external tool env vars (stable).
-_HARNESS_MARKERS: tuple[tuple[str, str], ...] = (
-    ("CLAUDE_CODE_SESSION_ID", "claude"),
-    ("CODEX_SESSION_ID", "codex"),
-    ("GEMINI_SESSION_ID", "gemini"),
-)
+from fno.harness_identity import HARNESS_SESSION_MARKERS
 
 # decision_source vocabulary surfaced in the spawn receipt so a dispatch's
 # provider choice is auditable after the fact. The resolver emits this subset.
@@ -49,7 +41,7 @@ def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[
     environ = os.environ if env is None else env
     present = [
         harness
-        for marker, harness in _HARNESS_MARKERS
+        for marker, harness in HARNESS_SESSION_MARKERS
         if (environ.get(marker) or "").strip()
     ]
     return present[0] if len(present) == 1 else None

@@ -50,6 +50,7 @@ from fno.agents.registry import (
     load_registry,
     update_registry,
 )
+from fno.harness_identity import resolve_harness_identity
 
 
 # ---------------------------------------------------------------------------
@@ -1303,36 +1304,23 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     """Capture the spawning session's ambient identity from environment variables.
 
     Returns ``(session_id, harness, cwd)`` — all three are strings or None.
-    Claude takes precedence when multiple session env vars are set.
+    The shared harness identity precedence applies when multiple vars are set.
     Never raises; always returns a triple (missing fields degrade to None).
 
     Harness detection order (Task 2.2, x-30f6):
+      CODEX_THREAD_ID        -> harness="codex"
       CLAUDE_CODE_SESSION_ID -> harness="claude"
       CODEX_SESSION_ID       -> harness="codex"
       GEMINI_SESSION_ID      -> harness="gemini"
     """
-    session_id: Optional[str] = None
-    harness: Optional[str] = None
-
-    # Trim then coerce empty -> None, symmetric with graph.cli._session_provenance,
-    # so a whitespace-only env value reads as unset rather than a bogus pointer.
-    claude_sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip() or None
-    codex_sid = (os.environ.get("CODEX_SESSION_ID") or "").strip() or None
-    gemini_sid = (os.environ.get("GEMINI_SESSION_ID") or "").strip() or None
-
-    if claude_sid:
-        session_id, harness = claude_sid, "claude"
-    elif codex_sid:
-        session_id, harness = codex_sid, "codex"
-    elif gemini_sid:
-        session_id, harness = gemini_sid, "gemini"
+    identity = resolve_harness_identity()
 
     # $PWD may be unset (non-interactive shells, cron, daemonized procs); fall
     # back to os.getcwd(), which for a `fno agents spawn` subprocess is the
     # spawning session's cwd (inherited), so the parent cwd is always captured.
     parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
 
-    return session_id, harness, parent_cwd
+    return identity.session_id, identity.harness, parent_cwd
 
 
 def _claude_create_path(

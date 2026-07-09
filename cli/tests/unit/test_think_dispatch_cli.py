@@ -15,6 +15,17 @@ from fno.provenance.spawn_think import ThinkSpawnResult
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _clear_harness_markers(monkeypatch):
+    for marker in (
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+    ):
+        monkeypatch.delenv(marker, raising=False)
+
+
 @pytest.fixture
 def graph(monkeypatch, tmp_path):
     """A one-node graph + a captured dispatch seam. Returns the capture dict."""
@@ -34,7 +45,9 @@ def graph(monkeypatch, tmp_path):
 
 
 def test_no_live_session_exits_2(graph, monkeypatch):
-    for v in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+    for v in (
+        "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"
+    ):
         monkeypatch.delenv(v, raising=False)
     r = runner.invoke(think_cli.think_app, ["dispatch", "x-0a9c"])
     assert r.exit_code == 2

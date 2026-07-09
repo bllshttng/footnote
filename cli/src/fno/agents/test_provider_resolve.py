@@ -15,7 +15,12 @@ from fno.agents.provider_resolve import (
     resolve_dispatch_provider,
 )
 
-_ALL_MARKERS = ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID")
+_ALL_MARKERS = (
+    "CODEX_THREAD_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "GEMINI_SESSION_ID",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +61,7 @@ def test_explicit_empty_provider_rejected():
 @pytest.mark.parametrize(
     "marker,expected",
     [
+        ("CODEX_THREAD_ID", "codex"),
         ("CLAUDE_CODE_SESSION_ID", "claude"),
         ("CODEX_SESSION_ID", "codex"),
         ("GEMINI_SESSION_ID", "gemini"),
@@ -73,6 +79,11 @@ def test_multiple_markers_are_ambiguous():
     env = {"CODEX_SESSION_ID": "b", "GEMINI_SESSION_ID": "c"}
     assert infer_invoking_harness(env) is None
     assert resolve_dispatch_provider(None, env=env) == ("claude", "builtin-default")
+
+
+def test_codex_thread_and_legacy_codex_marker_are_ambiguous():
+    env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
+    assert infer_invoking_harness(env) is None
 
 
 def test_whitespace_marker_is_absent():

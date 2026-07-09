@@ -247,7 +247,12 @@ def test_ac_entry_model_declares_parent_edge_fields():
 
 
 def _clear_session_env(monkeypatch):
-    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+    for var in (
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -349,6 +354,22 @@ def test_ambient_codex_degrades_to_session_no_manifest_read(tmp_path, monkeypatc
     assert prov["source_session_id"] == "codex-abc"
     assert prov["source_harness"] == "codex"
     # node/plan resolution is claude-only (the proven resolver lane); degrade.
+    assert prov["source_node_id"] is None
+    assert prov["source_plan_path"] is None
+
+
+def test_ambient_codex_thread_precedes_claude_and_skips_manifest(tmp_path, monkeypatch):
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-abc")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-abc")
+    _write_manifest(tmp_path, transcript_id="claude-abc",
+                    node_id="ab-claudenode", plan_path="p.md")
+
+    prov = _session_provenance(str(tmp_path))
+    assert prov["source_session_id"] == "thread-abc"
+    assert prov["source_harness"] == "codex"
     assert prov["source_node_id"] is None
     assert prov["source_plan_path"] is None
 

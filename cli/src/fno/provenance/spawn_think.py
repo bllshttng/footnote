@@ -43,6 +43,7 @@ from typing import Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
+from fno.harness_identity import resolve_harness_identity
 from fno.provenance.resolver import resolve_transcript
 
 _LOG = logging.getLogger(__name__)
@@ -341,9 +342,10 @@ def _owned_manifest_attended(project_root: Path, environ: dict) -> Optional[bool
     leaks a presence verdict this session does not own. Returns None when there
     is no owned manifest (caller falls back to env signal).
     """
-    sid = (environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
-    if not sid:
+    identity = resolve_harness_identity(environ)
+    if identity.harness != "claude" or not identity.session_id:
         return None
+    sid = identity.session_id
     try:
         text = (project_root / ".fno" / "target-state.md").read_text(encoding="utf-8")
     except OSError:
@@ -376,8 +378,8 @@ def classify_presence(
          too, so without this a manifest-less bg worker would misclassify as
          attended (codex PR #9).
       3. This session's OWNED target-state manifest's ``attended`` flag.
-      4. An interactive claude session env (``CLAUDE_CODE_SESSION_ID`` set)
-         with no autonomous manifest => attended.
+      4. An interactive Claude or Codex session identity with no autonomous
+         manifest => attended.
       5. Default => away (filed from a script/cron with no human present).
 
     tty probing is deliberately NOT primary (Domain Pitfall: false-positives
@@ -400,7 +402,8 @@ def classify_presence(
     if attended is not None:
         return "attended" if attended else "away"
 
-    if (environ.get("CLAUDE_CODE_SESSION_ID") or "").strip():
+    identity = resolve_harness_identity(environ)
+    if identity.session_id and identity.harness in ("claude", "codex"):
         return "attended"
 
     return "away"

@@ -112,7 +112,9 @@ def runner() -> CliRunner:
 
 @pytest.fixture(autouse=True)
 def _no_harness_markers(monkeypatch):
-    for m in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+    for m in (
+        "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"
+    ):
         monkeypatch.delenv(m, raising=False)
 
 

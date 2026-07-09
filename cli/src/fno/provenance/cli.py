@@ -40,8 +40,8 @@ def dispatch(
     ),
     session_id: Optional[str] = typer.Option(
         None, "--session-id",
-        help="Live transcript session id (default: ambient $CLAUDE_CODE_SESSION_ID "
-             "/ $CODEX_SESSION_ID / $GEMINI_SESSION_ID).",
+        help="Live transcript session id (default: ambient $CODEX_THREAD_ID / "
+             "$CLAUDE_CODE_SESSION_ID / $CODEX_SESSION_ID / $GEMINI_SESSION_ID).",
     ),
     cwd: Optional[str] = typer.Option(
         None, "--cwd", help="Live session cwd (default: the current working dir)."
@@ -102,8 +102,9 @@ def dispatch(
     if not sid:
         typer.echo(
             "fno think dispatch: no live session id - set --session-id or run "
-            "inside a claude/codex/gemini session ($CLAUDE_CODE_SESSION_ID / "
-            "$CODEX_SESSION_ID / $GEMINI_SESSION_ID). There is nothing to carry "
+            "inside a claude/codex/gemini session ($CODEX_THREAD_ID / "
+            "$CLAUDE_CODE_SESSION_ID / $CODEX_SESSION_ID / $GEMINI_SESSION_ID). "
+            "There is nothing to carry "
             "without a live pointer.",
             err=True,
         )
