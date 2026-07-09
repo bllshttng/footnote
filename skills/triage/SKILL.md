@@ -172,9 +172,7 @@ translate positional words into the equivalent flag:
    > captured at intake; cite it for shallow-mode reasoning instead of
    > paying for a deep read. `claim_history.session_count > 1` means the
    > node has been claimed and released before; `claim_history.total_cost_usd`
-   > is cumulative spend without shipping; `claim_history.compacted: true`
-   > flags a node that has hit context-compaction in prior runs (consider
-   > rescoping). `ship_state.pr_number` set means a PR exists - the node
+   > is cumulative spend without shipping. `ship_state.pr_number` set means a PR exists - the node
    > may already be done and just needs a `done` flip rather than
    > re-triaging. `ship_state.merge_status` carries the PR's merge state
    > (merged/closed/null).
