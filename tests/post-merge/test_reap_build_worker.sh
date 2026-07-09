@@ -8,7 +8,8 @@
 #   US2  self_reap off/unset         -> nothing removed, prints the manual command
 #   US3  no NODE_IDS / no row / live  -> clean no-op, no stop/rm
 # Plus static guards for the stop-before-rm ordering invariant and the
-# status!="live" guard (the one line a reviewer must check).
+# status!="live" guard (the one line a reviewer must check), and the Step 2
+# stderr-capture contract that feeds NODE_IDS.
 #
 # Exit: 0 all pass, 1 assertion failed, 77 skipped (missing jq).
 
@@ -40,6 +41,17 @@ awk '
 ' "$MERGED_MD" > "$BLOCK"
 
 [[ -s "$BLOCK" ]] || fail "could not extract Step 8a bash block from merged.md"
+
+STEP2="$TMP/step2.sh"
+awk '
+  /^## Step 2:/      { in_section=1 }
+  in_section && /^## Step 3:/ { exit }
+  in_section && /^```bash$/ { grab=1; next }
+  in_section && grab && /^```$/ { exit }
+  in_section && grab { print }
+' "$MERGED_MD" > "$STEP2"
+
+[[ -s "$STEP2" ]] || fail "could not extract Step 2 bash block from merged.md"
 
 # --- Fake `fno` shim (records stop/rm call order) -------------------------
 BIN="$TMP/bin"
@@ -116,6 +128,11 @@ RM_LN="$(awk '/fno agents rm/ {print NR; exit}' "$BLOCK")"
 grep -q 'status != "live"' "$BLOCK" \
   && pass "guard: status != \"live\" present" \
   || fail "guard: status != \"live\" missing from the block"
+grep -F '2>"$RECONCILE_ERR"' "$STEP2" >/dev/null \
+  && grep -F 'cat "$RECONCILE_ERR" >&2' "$STEP2" >/dev/null \
+  && ! grep -F 'reconcile --json 2>/dev/null' "$STEP2" >/dev/null \
+  && pass "guard: reconcile stderr is captured and surfaced" \
+  || fail "guard: reconcile stderr must be captured, not discarded"
 
 echo ""
 [[ "$FAILED" -eq 0 ]] && echo "[reap-build-worker] all assertions passed" \

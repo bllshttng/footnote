@@ -168,8 +168,13 @@ plan. If you know the node id, scope it; otherwise sweep:
 # Capture the ids reconcile closed into NODE_IDS (Step 8a reaps each closed
 # node's build-worker row). --json runs the same mutations; only the output
 # shape changes, so the failure flag still reads reconcile's own exit code.
-RECONCILE_JSON="$(fno backlog reconcile --json 2>/dev/null)" \
-  || { echo "post-merge: reconcile FAILED - record in report" >&2; RECONCILE_FAILED=1; }
+RECONCILE_ERR="$(mktemp)"
+if ! RECONCILE_JSON="$(fno backlog reconcile --json 2>"$RECONCILE_ERR")"; then
+  echo "post-merge: reconcile FAILED - record in report" >&2
+  cat "$RECONCILE_ERR" >&2
+  RECONCILE_FAILED=1
+fi
+rm -f "$RECONCILE_ERR"
 NODE_IDS="$(printf '%s' "$RECONCILE_JSON" | jq -r '.closed[]?.node_id // empty' 2>/dev/null | tr '\n' ' ')"
 # full sweep above, or scope it: fno backlog reconcile --node ab-XXXXXXXX --json
 ```
