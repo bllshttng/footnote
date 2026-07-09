@@ -979,6 +979,22 @@ impl View {
         }
     }
 
+    /// Reverse the state chip on `Shift-Tab`: all -> Idle -> DoneUnseen ->
+    /// Working -> Blocked -> all (the exact reverse of [`nav_cycle_state`]).
+    /// Resets the cursor to the top of the re-filtered set.
+    fn nav_cycle_state_rev(&mut self) {
+        if let Some(n) = self.nav.as_mut() {
+            n.state_filter = match n.state_filter {
+                None => Some(PaneState::Idle),
+                Some(PaneState::Idle) => Some(PaneState::DoneUnseen),
+                Some(PaneState::DoneUnseen) => Some(PaneState::Working),
+                Some(PaneState::Working) => Some(PaneState::Blocked),
+                Some(PaneState::Blocked) => None,
+            };
+            n.cursor = 0;
+        }
+    }
+
     /// BEL when the current filter excludes every row (AC2-ERR/AC3-ERR): a query
     /// or state that matches nothing is audible, never a silent empty overlay.
     fn nav_ring_if_empty(&self) {
@@ -3376,6 +3392,74 @@ fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
     keys
 }
 
+/// Navigator fold keys. Superset of [`SearchKey`]: the same split-arrow escape
+/// fold, but a completed CSI whose final byte is Up/Down/Shift-Tab surfaces as a
+/// motion token instead of being swallowed (ab-63b44059). Every other CSI is
+/// still consumed whole, so no escape tail leaks into the query or the pane.
+enum NavKey {
+    Byte(u8),
+    Esc,
+    Up,
+    Down,
+    ShiftTab,
+}
+
+/// Fold navigator-mode bytes. Identical escape-carry semantics to
+/// [`fold_search_input`] (whole CSI consumed, split sequences carried across
+/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`, and
+/// Shift-Tab `ESC [ Z` finals become [`NavKey::Up`]/[`Down`]/[`ShiftTab`] so the
+/// navigator can move its cursor and reverse-cycle the state chip. A modified
+/// arrow (`ESC [ 1 ; 5 A`) shares the final byte and maps to the same motion -
+/// harmless. All other finals are swallowed, same leak-safety as search.
+fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
+    let mut keys = Vec::new();
+    for &b in bytes {
+        match esc.as_slice() {
+            [] => {
+                if b == 0x1b {
+                    esc.push(0x1b);
+                } else {
+                    keys.push(NavKey::Byte(b));
+                }
+            }
+            [0x1b] => {
+                if b == b'[' {
+                    esc.push(b);
+                } else {
+                    esc.clear();
+                    keys.push(NavKey::Esc);
+                    if b == 0x1b {
+                        esc.push(0x1b);
+                    } else {
+                        keys.push(NavKey::Byte(b));
+                    }
+                }
+            }
+            _ => {
+                if b == 0x1b {
+                    esc.clear();
+                    esc.push(0x1b);
+                } else if (0x40..=0x7e).contains(&b) {
+                    // CSI complete. Surface the three motion finals; swallow the
+                    // rest (whole sequence consumed either way - no leak).
+                    match b {
+                        b'A' => keys.push(NavKey::Up),
+                        b'B' => keys.push(NavKey::Down),
+                        b'Z' => keys.push(NavKey::ShiftTab),
+                        _ => {}
+                    }
+                    esc.clear();
+                } else if esc.len() >= 16 {
+                    esc.clear();
+                } else {
+                    esc.push(b);
+                }
+            }
+        }
+    }
+    keys
+}
+
 /// Search-mode keys (v12, x-e780). Typing: printable append, Backspace pops,
 /// Enter submits (send [`ClientMsg::SearchOpen`]), Esc cancels locally. Browsing
 /// (post-submit): `n`/`N` send [`ClientMsg::SearchStep`] (older/newer), Esc sends
@@ -3464,18 +3548,19 @@ async fn search_keys(
 
 /// Navigator-overlay keys (x-653d): a client-owned typing overlay like search.
 /// Printable bytes edit the text filter (Locked 5: letters are ALWAYS query
-/// text, never state keys); Backspace widens; `Tab` cycles the state chip;
-/// `Ctrl-n`/`Ctrl-p` move the cursor over the filtered rows (clamped, no wrap);
-/// Enter goto's the row; Esc closes. Reuses [`fold_search_input`]'s split-arrow
-/// fold (which swallows arrows whole, so cursor motion is Ctrl-n/p as in search)
-/// and its per-key re-read so an Esc mid-chunk swallows the chunk's remainder.
+/// text, never state keys); Backspace widens; `Tab`/`Shift-Tab` cycle the state
+/// chip forward/back; `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) move the cursor over the
+/// filtered rows (clamped, no wrap); Enter goto's the row; Esc closes. Uses
+/// [`fold_nav_input`]'s split-arrow fold (which surfaces the motion finals while
+/// swallowing every other escape) and a per-key re-read so an Esc mid-chunk
+/// swallows the chunk's remainder (ab-63b44059).
 async fn nav_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
     let mut esc = std::mem::take(&mut view.nav_esc);
-    let keys = fold_search_input(&mut esc, bytes);
+    let keys = fold_nav_input(&mut esc, bytes);
     view.nav_esc = esc;
     for key in keys {
         // Re-read the mode each key: an Esc mid-chunk closes it and the rest of
@@ -3484,19 +3569,26 @@ async fn nav_keys(
             break;
         }
         match key {
-            SearchKey::Esc => {
+            NavKey::Esc => {
                 view.nav = None;
                 view.nav_esc.clear();
                 break;
             }
-            SearchKey::Byte(b) => match b {
+            // Arrows mirror Ctrl-p/Ctrl-n; Shift-Tab reverses the state ring.
+            NavKey::Up => view.nav_move_cursor(-1),
+            NavKey::Down => view.nav_move_cursor(1),
+            NavKey::ShiftTab => {
+                view.nav_cycle_state_rev();
+                view.nav_ring_if_empty();
+            }
+            NavKey::Byte(b) => match b {
                 b'\r' | b'\n' => nav_goto(view, sock_w).await?,
                 b'\t' => {
                     view.nav_cycle_state();
                     view.nav_ring_if_empty();
                 }
-                // Ctrl-n / Ctrl-p move the cursor (readline convention); arrows
-                // are swallowed by the fold, so these are the motion keys.
+                // Ctrl-n / Ctrl-p move the cursor (readline convention), kept
+                // alongside the arrow tokens for muscle memory.
                 0x0e => view.nav_move_cursor(1),
                 0x10 => view.nav_move_cursor(-1),
                 0x7f | 0x08 => {
@@ -6017,6 +6109,75 @@ mod tests {
         );
         nav_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
         assert!(v.nav.is_none(), "Esc closes; the trailing x is swallowed");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_arrows_move_cursor() {
+        // AC1 (ab-63b44059): Down/Up move the cursor one filtered row (same as
+        // Ctrl-n/Ctrl-p), clamped no-wrap; arrows never leak to the pane; and
+        // printable input still edits the query afterwards (Locked-5).
+        let mut v = two_pane_view();
+        assert!(v.nav_rows().len() >= 2, "fixture needs >=2 nav rows");
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[B", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 1, "Down -> row 1");
+        nav_keys(&mut v, b"\x1b[A", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "Up -> row 0");
+        nav_keys(&mut v, b"\x1b[A", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "Up at top clamps (no wrap)");
+        assert!(buf.is_empty(), "arrows send nothing to the pane");
+        nav_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().query, "x", "letter still edits query");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_shift_tab_reverse_cycles_state() {
+        // AC2 (ab-63b44059): Shift-Tab steps to the PREVIOUS state in the ring
+        // (reverse of Tab, which advances None -> Blocked) and re-clamps cursor 0.
+        let mut v = two_pane_view();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 1,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[Z", &mut buf).await.unwrap();
+        assert_eq!(
+            v.nav.as_ref().unwrap().state_filter,
+            Some(PaneState::Idle),
+            "Shift-Tab reverses to [idle]"
+        );
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "cursor re-clamped to 0");
+        assert!(buf.is_empty(), "Shift-Tab sends nothing to the pane");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_split_arrow_carries_across_reads() {
+        // AC4 (ab-63b44059): a Down arrow split across two reads (ESC[ then B)
+        // carries via nav_esc and still moves the cursor, with no stray byte
+        // leaking to the query or the pane.
+        let mut v = two_pane_view();
+        assert!(v.nav_rows().len() >= 2);
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "partial seq: no motion yet");
+        nav_keys(&mut v, b"B", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 1, "completed Down moves cursor");
+        assert!(
+            v.nav.as_ref().unwrap().query.is_empty(),
+            "no escape tail leaked into the query"
+        );
+        assert!(buf.is_empty(), "nothing leaked to the pane");
     }
 
     #[test]
