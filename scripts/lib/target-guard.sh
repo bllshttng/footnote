@@ -37,12 +37,15 @@ target_state_field() {
         | tr -d '"' | tr -d "'"
 }
 
-# Return 0 only if the state file describes a target run owned by a live process.
-# Returns non-zero if: no state file, empty-input stub, or owner_pid is dead.
-# Liveness truth is owner_pid, not a status field: the manifest writer no longer
-# emits `status:`, so gating on it returned "not active" for every live session
-# and silently disabled every consumer (x-6044). A legacy manifest that still
-# carries `status:` is unaffected — that field is simply not read here anymore.
+# Return 0 only if the state file describes a target run owned by a LIVE session.
+# Returns non-zero if: no state file, empty-input stub, or the node claim is dead.
+#
+# Liveness truth is the node CLAIM, not the manifest `status:` field (the writer
+# no longer emits it) and NOT `owner_pid` (that is the transient `fno target init`
+# wrapper pid, dead ~1s after init returns per claims/session_pid.py — it reads a
+# live session as inactive). The claim is acquired with the DURABLE session pid
+# (nearest claude ancestor) + TTL, so its liveness is the real signal. We delegate
+# to `fno claim status` so this never diverges from the canonical classify().
 target_is_active() {
     local state_file="${1:-.fno/target-state.md}"
     [[ -f "$state_file" ]] || return 1
@@ -57,14 +60,22 @@ target_is_active() {
         return 1
     fi
 
-    # Owner liveness. Absent owner_pid means pre-session-owner state (written
-    # by a previous abilities version) — treat as active for backward compat.
-    # The stop hook will rewrite such states on the next completion anyway.
-    local owner_pid
-    owner_pid=$(target_state_field "owner_pid" "$state_file" || true)
-    if ! _target_guard_is_empty_yaml "$owner_pid" && [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
-        kill -0 "$owner_pid" 2>/dev/null || return 1
+    # Claim liveness. A LIVE or SUSPECT (TTL-protected respawn) claim means the
+    # session is active; STALE/free/absent means it is not. Fail open (active)
+    # when the signal is unavailable — no claim key on the manifest (free-text /
+    # pre-claim legacy), or `fno` unreadable — matching the prior backward-compat
+    # stance; the stop hook rewrites a genuinely completed manifest anyway.
+    local claim_key
+    claim_key=$(target_state_field "target_claim_key" "$state_file" || true)
+    if _target_guard_is_empty_yaml "$claim_key"; then
+        return 0
     fi
-
-    return 0
+    command -v fno >/dev/null 2>&1 || return 0
+    local claim_json
+    claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
+    case "$claim_json" in
+        "") return 0 ;;
+        *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
