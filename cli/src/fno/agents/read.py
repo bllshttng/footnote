@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from fno.agents import format as fmt
+from fno.agents import truth_status
 from fno.agents.registry import (
     AgentEntry,
     RegistryVersionError,
@@ -111,6 +112,13 @@ def list_agents(
         live_map, augment_warnings = claude_mod.claude_agents_json()
         warnings.extend(augment_warnings)
 
+    # fno-truth status (x-4a48): a bg /target worker between turns reads Idle
+    # even while CI/preflight run externally. Fill only the ambiguous Idle /
+    # missing gap from the node claim + loop_check recency; never override a
+    # harness Working / Needs input (Locked Decision 1). One tail read of the
+    # events log, shared across rows (not O(rows)).
+    loop_check_ages = truth_status.build_loop_check_index()
+
     rows: list[dict] = []
     for entry in filtered:
         live_status: Optional[str] = None
@@ -118,6 +126,15 @@ def list_agents(
             live_status = (live_map.get(entry.claude_short_id) or {}).get(
                 "live_status"
             )
+        if live_status in (None, "Idle"):
+            node_id = truth_status.parse_node_id(entry.name)
+            if node_id is not None:
+                truth = truth_status.resolve_truth_status(
+                    node_id, loop_check_ages=loop_check_ages
+                )
+                rendered = truth_status.render_truth_status(truth)
+                if rendered is not None:
+                    live_status = rendered
         rows.append(fmt.serialize_entry(entry, live_status=live_status))
 
     # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort
