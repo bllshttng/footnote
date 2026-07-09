@@ -64,28 +64,29 @@ def test_committed_docs_are_fresh() -> None:
     )
 
 
-def test_example_yaml_is_deterministic_and_valid() -> None:
-    """The example yaml regenerates byte-identically and is a valid config."""
-    import yaml
+def test_example_toml_is_deterministic_and_valid() -> None:
+    """The example toml regenerates byte-identically and is a valid config."""
+    import tomllib
 
     from fno.config import SettingsModel
 
-    rendered = schema_gen.render_example_yaml()
-    assert rendered == schema_gen.render_example_yaml()
-    # Parses as YAML and round-trips through the model (defaults are valid).
-    SettingsModel.model_validate(yaml.safe_load(rendered))
+    rendered = schema_gen.render_example_toml()
+    assert rendered == schema_gen.render_example_toml()
+    # Parses as TOML and round-trips through the flat model (defaults are valid;
+    # optional keys are commented out so tomllib sees only the live ones).
+    SettingsModel.model_validate(tomllib.loads(rendered))
 
 
-def test_committed_example_yaml_is_fresh() -> None:
-    """docs/settings.example.yaml must equal the generator's output.
+def test_committed_example_toml_is_fresh() -> None:
+    """docs/settings.example.toml must equal the generator's output.
 
-    Regenerate with `fno config schema --yaml --write`.
+    Regenerate with `fno config schema --toml --write`.
     """
-    example = _repo_root() / "docs" / "settings.example.yaml"
+    example = _repo_root() / "docs" / "settings.example.toml"
     committed = example.read_text(encoding="utf-8")
-    assert committed == schema_gen.render_example_yaml(), (
-        "docs/settings.example.yaml is stale; run "
-        "`fno config schema --yaml --write`"
+    assert committed == schema_gen.render_example_toml(), (
+        "docs/settings.example.toml is stale; run "
+        "`fno config schema --toml --write`"
     )
 
 

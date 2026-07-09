@@ -29,4 +29,4 @@ else
 fi
 
 "${FNO[@]}" config schema --markdown --check
-"${FNO[@]}" config schema --yaml --check
+"${FNO[@]}" config schema --toml --check
