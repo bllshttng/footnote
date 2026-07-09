@@ -73,6 +73,22 @@ python scripts/sync-codex-agents.py --check
 Run the generator after changing `agents/*.md`. The check mode fails when generated
 Codex agents are missing, stale, or no longer parse as TOML.
 
+## Target Loop Hooks
+
+Custom agents and target loop hooks are separate surfaces. The files under
+`.codex/agents/` make footnote's specialist agents available to Codex; they do not
+make `/fno:target` continue autonomously.
+
+Target continuation is driven by hook events. `hooks/codex-hooks.json` wires the
+Codex-supported subset needed for target loops: `Stop` for
+`hooks/target-stop-hook.sh` (`fno-agents loop-check` + `finalize`), `PostToolUse`
+for claim heartbeat/context monitoring, compact handoff hooks, subagent guards,
+and the PreToolUse state/git protection guards.
+
+Do not copy the full Claude hook manifest into Codex. Codex does not support every
+Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
+`FileChanged`, `SessionEnd`, and `StopFailure` are intentionally excluded here.
+
 ## Dependency Model
 
 Core dependencies:

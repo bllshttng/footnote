@@ -41,9 +41,22 @@ if ! declare -F drive_authority_active >/dev/null 2>&1; then
     drive_authority_active() { return 1; }
 fi
 
-_approve() { printf '%s\n' '{"decision": "approve"}'; exit 0; }
-_block()   { jq -n --arg r "$1" '{"decision":"block","reason":$r}' 2>/dev/null \
-                || printf '{"decision":"block","reason":"%s"}\n' "$1"; exit 0; }
+_approve() {
+    printf '%s\n' '{"decision":"approve","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+    exit 0
+}
+_block() {
+    jq -n --arg r "$1" '{
+        decision: "block",
+        reason: $r,
+        hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: $r
+        }
+    }' 2>/dev/null || printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$1" "$1"
+    exit 0
+}
 
 # _bash_targets_protected CMD -> return 0 if a write operator in CMD is bound to
 # a protected path (.fno/graph.json or .fno/target-state.md), else 1. Keyed on

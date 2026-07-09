@@ -1,6 +1,116 @@
 {
-  "description": "Codex plugin hooks for footnote context injection",
+  "description": "Codex plugin hooks for footnote context injection, safety gates, and target loops",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/graph-write-protect.sh",
+            "statusMessage": "checking fno state surfaces"
+          }
+        ]
+      },
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/git-protection.py",
+            "statusMessage": "checking git guardrails"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+          },
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-stop-hook.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CODEX_PLUGIN_ROOT}/hooks/context-monitor.js"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CODEX_PLUGIN_ROOT}/hooks/claim-heartbeat.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-subagent-guard.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-subagent-guard.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CODEX_PLUGIN_ROOT}/scripts/save-session.py"
+          },
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/arm-handoff-precompact.sh"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "",

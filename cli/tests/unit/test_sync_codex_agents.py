@@ -24,5 +24,8 @@ def test_codex_agents_are_generated_and_parse() -> None:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         assert data["name"] == path.stem
         assert data["description"]
+        assert len(data["description"]) <= 360
+        assert "<example>" not in data["description"]
+        assert "\\n" not in data["description"]
         assert data["developer_instructions"]
         assert data["sandbox_mode"] in {"read-only", "workspace-write"}

@@ -5,10 +5,11 @@
 set -uo pipefail
 
 STATE_FILE=".fno/target-state.md"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}}"
 
 # Only act during a live, session-owned target. Stale state from a prior
 # session would otherwise create noisy stashes around unrelated subagent runs.
-GUARD_LIB="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/lib/target-guard.sh"
+GUARD_LIB="${PLUGIN_ROOT}/scripts/lib/target-guard.sh"
 if [[ -f "$GUARD_LIB" ]]; then
     # shellcheck source=../scripts/lib/target-guard.sh
     source "$GUARD_LIB"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -162,10 +163,27 @@ def codex_model(value: Any) -> str | None:
     return model
 
 
+def codex_description(value: Any) -> str:
+    text = str(value or "").replace("\\n", "\n").strip()
+    for marker in ("\nExamples:", "\n<example>"):
+        before, sep, _after = text.partition(marker)
+        if sep:
+            text = before
+            break
+    text = re.sub(r"\s+", " ", text).strip()
+    if text.startswith("Use this agent when"):
+        first_sentence, sep, _rest = text.partition(". ")
+        if sep:
+            text = first_sentence + "."
+    if len(text) <= 360:
+        return text
+    return text[:357].rsplit(" ", 1)[0].rstrip(".,;:") + "..."
+
+
 def generated_toml(source: Path) -> str:
     frontmatter, body = split_frontmatter(source.read_text(encoding="utf-8"), source)
     name = str(frontmatter.get("name") or source.stem)
-    description = str(frontmatter.get("description") or "").strip()
+    description = codex_description(frontmatter.get("description"))
     if not description:
         raise ValueError(f"{source}: missing description")
 

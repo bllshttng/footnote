@@ -84,15 +84,52 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
     assert manifest["hooks"] == "./hooks/codex-hooks.json"
 
     data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
-    hooks = data["hooks"]["SessionStart"][0]["hooks"]
+    hooks = data["hooks"]["SessionStart"]
     assert hooks == [
         {
-            "type": "command",
-            "command": "env FNO_PLATFORM=codex ${CODEX_PLUGIN_ROOT}/hooks/session-start.sh",
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "env FNO_PLATFORM=codex ${CODEX_PLUGIN_ROOT}/hooks/session-start.sh",
+                }
+            ],
         }
     ]
-    resolved = hooks[0]["command"].replace("${CODEX_PLUGIN_ROOT}", str(REPO_ROOT))
+    resolved = hooks[0]["hooks"][0]["command"].replace("${CODEX_PLUGIN_ROOT}", str(REPO_ROOT))
     assert str(REPO_ROOT / "hooks" / "session-start.sh") in resolved
+
+
+def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
+    data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
+    supported = {
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "PreCompact",
+        "PostCompact",
+        "SessionStart",
+        "UserPromptSubmit",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+    }
+    assert set(data["hooks"]).issubset(supported)
+
+    placeholder = re.compile(r"\$\{CODEX_PLUGIN_ROOT(:-[^}]*)?\}")
+    failures: list[str] = []
+    for event, registrations in data["hooks"].items():
+        for reg in registrations:
+            for hook in reg.get("hooks", []):
+                substituted = placeholder.sub(str(REPO_ROOT), hook.get("command", ""))
+                m = re.search(rf"{re.escape(str(REPO_ROOT))}\S+", substituted)
+                if m is None:
+                    continue
+                path = Path(m.group(0).rstrip(';"'))
+                if not path.exists():
+                    failures.append(f"{event}: missing path {path}")
+    if failures:
+        pytest.fail("codex-hooks.json references missing files:\n  " + "\n  ".join(failures))
 
 
 def test_local_codex_marketplace_points_at_repo_plugin_root() -> None:
