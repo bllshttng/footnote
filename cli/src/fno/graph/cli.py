@@ -5734,14 +5734,19 @@ def cmd_find(
 
         archive_path = graph_archive_json()
         if archive_path.exists():
+            # Guard the whole read + resolve + filter: a corrupt archive OR a
+            # malformed archived entry must degrade to a miss, never propagate a
+            # crash to the caller (design "Errors").
             try:
                 archived = read_graph(archive_path)
+                hits = [
+                    {**e, "_archived": True}
+                    for e in _resolve_against(archived)
+                    if _passes_filters(e)
+                ]
             except Exception:
-                archived = []
-            for e in _resolve_against(archived):
-                if _passes_filters(e):
-                    e["_archived"] = True
-                    matched.append(e)
+                hits = []
+            matched.extend(hits)
 
     if not matched:
         typer.echo(f"fno find: no matches for {query!r}", err=True)
