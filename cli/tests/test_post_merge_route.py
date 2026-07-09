@@ -1,0 +1,92 @@
+"""Warm-session resolver + inject mapping for the post-merge ritual."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from fno.post_merge_route import inject_pr_merged, resolve_warm_session
+
+
+@dataclass
+class _Sess:
+    session_id: str
+
+
+def _patch_live(monkeypatch, sessions):
+    import fno.agents.discover as discover
+
+    monkeypatch.setattr(
+        discover, "discover_live_sessions", lambda **_kw: sessions
+    )
+
+
+class TestResolveWarmSession:
+    def test_live_source_session_resolves(self, monkeypatch):
+        _patch_live(monkeypatch, [_Sess("aaaa-bbbb"), _Sess("cccc-dddd")])
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        assert resolve_warm_session("cccc-dddd") == "cccc-dddd"
+
+    def test_dead_or_unknown_session_is_none(self, monkeypatch):
+        _patch_live(monkeypatch, [_Sess("aaaa-bbbb")])
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        assert resolve_warm_session("gone-gone") is None
+
+    @pytest.mark.parametrize("empty", [None, "", "   "])
+    def test_missing_id_is_none(self, monkeypatch, empty):
+        _patch_live(monkeypatch, [_Sess("aaaa-bbbb")])
+        assert resolve_warm_session(empty) is None
+
+    def test_never_self_injects(self, monkeypatch):
+        _patch_live(monkeypatch, [_Sess("me-me-me")])
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "me-me-me")
+        assert resolve_warm_session("me-me-me") is None
+
+    def test_resolver_error_degrades_to_none(self, monkeypatch):
+        import fno.agents.discover as discover
+
+        def _boom(**_kw):
+            raise RuntimeError("registry unreadable")
+
+        monkeypatch.setattr(discover, "discover_live_sessions", _boom)
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        assert resolve_warm_session("aaaa-bbbb") is None
+
+
+class TestInjectPrMerged:
+    def _patch_submit(self, monkeypatch, outcome, capture=None):
+        import fno.relay.roundtrip as rt
+
+        def _fake(session_id, framed):
+            if capture is not None:
+                capture.append((session_id, framed))
+            return outcome
+
+        monkeypatch.setattr(rt, "submit_via_control_reply", _fake)
+
+    def test_confirmed_is_delivered(self, monkeypatch):
+        sent: list = []
+        self._patch_submit(monkeypatch, "confirmed", sent)
+        delivered, reason = inject_pr_merged("aaaa-bbbb", 123)
+        assert delivered is True
+        assert reason == "delivered"
+        assert sent == [("aaaa-bbbb", "/fno:pr merged 123 autonomous")]
+
+    def test_unconfirmed_maps_to_queue_timeout(self, monkeypatch):
+        self._patch_submit(monkeypatch, "unconfirmed")
+        assert inject_pr_merged("aaaa-bbbb", 7) == (False, "queue-timeout")
+
+    def test_not_sent_maps_to_not_live(self, monkeypatch):
+        self._patch_submit(monkeypatch, "not_sent")
+        assert inject_pr_merged("aaaa-bbbb", 7) == (False, "not-live")
+
+    def test_submit_exception_is_contained(self, monkeypatch):
+        import fno.relay.roundtrip as rt
+
+        def _boom(session_id, framed):
+            raise OSError("socket vanished")
+
+        monkeypatch.setattr(rt, "submit_via_control_reply", _boom)
+        delivered, reason = inject_pr_merged("aaaa-bbbb", 7)
+        assert delivered is False
+        assert reason.startswith("inject-error")
