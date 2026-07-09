@@ -29,7 +29,7 @@ at the correct credentials directory.
 
 ## Schema reference
 
-Provider records live under `config.providers` in `config.toml`.
+Provider records live under the top-level `[providers]` table in `config.toml`.
 
 ```toml
 [providers]
@@ -144,13 +144,14 @@ resolved dict.
 
 ## env-value reference resolution
 
-Values in `env:` support four syntaxes:
+Values in a record's `env` table support four syntaxes (shown here as the
+`env` inline table a `[[providers.records]]` entry carries):
 
 **`${ENV:VAR_NAME}`** - Reads `VAR_NAME` from the current process environment.
 Raises `ProviderUnavailableError` if the variable is not set.
 
 ```toml
-ANTHROPIC_API_KEY = "${ENV:MY_ANTHROPIC_KEY}"
+env = { ANTHROPIC_API_KEY = "${ENV:MY_ANTHROPIC_KEY}" }
 ```
 
 **`${KEYCHAIN:item}`** - Reads the password from macOS Keychain via
@@ -158,14 +159,14 @@ ANTHROPIC_API_KEY = "${ENV:MY_ANTHROPIC_KEY}"
 if the item does not exist. macOS only.
 
 ```toml
-ANTHROPIC_API_KEY = "${KEYCHAIN:anthropic-work-account}"
+env = { ANTHROPIC_API_KEY = "${KEYCHAIN:anthropic-work-account}" }
 ```
 
 **`${FILE:/path/to/file}`** - Reads the first line of the file, stripped of
 whitespace. Raises `ProviderUnavailableError` if the file cannot be read.
 
 ```toml
-ANTHROPIC_API_KEY = "${FILE:/run/secrets/anthropic_key}"
+env = { ANTHROPIC_API_KEY = "${FILE:/run/secrets/anthropic_key}" }
 ```
 
 **`${literal_value}`** - Any `${...}` value that contains no `:` character is
@@ -751,6 +752,7 @@ active_combo = "my-stack"             # NEW (optional; set via `fno providers co
 
 [[providers.records]]
 id = "claude-key-a"
+name = "Claude Key A"
 cli = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
@@ -986,12 +988,14 @@ sticky_limit = 3
 
 [[providers.records]]
 id = "claude-anthropic"
+name = "Claude Anthropic"
 cli = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 
 [[providers.records]]
 id = "codex-openai"
+name = "Codex OpenAI"
 cli = "codex"
 auth = "oauth_dir"
 credentials_source = "~/.codex"
@@ -1166,18 +1170,21 @@ sticky_limit = 3
 
 [[providers.records]]
 id = "claude-anthropic"
+name = "Claude Anthropic"
 cli = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 
 [[providers.records]]
 id = "codex-openai"
+name = "Codex OpenAI"
 cli = "codex"
 auth = "oauth_dir"
 credentials_source = "~/.codex"
 
 [[providers.records]]
 id = "hermes-nous"
+name = "Hermes Nous"
 cli = "hermes"
 auth = "oauth_dir"
 credentials_source = "~/.config/hermes"
