@@ -7,6 +7,8 @@ description: Loaded at every SessionStart so the agent knows the two footnote su
 
 This workspace has the `footnote` plugin installed. There are **two surfaces** for getting things done, and they compose - skills call CLI verbs internally. Knowing both keeps you out of loops where you would otherwise hand-edit state files the CLI is meant to manage.
 
+**Worktree-first default:** for any repo work, create or enter a dedicated feature worktree whenever possible before editing files, running generators, or committing. Keep the canonical main checkout unclogged and pullable. If you are already in the correct feature worktree, continue there. After the PR lands, prune the finished worktree.
+
 ## 1. Slash-command workflows (orchestration, reasoning-required)
 
 Invoke via `/fno:<verb>`. These compose multiple steps and require LLM reasoning. The full skill body loads when invoked.

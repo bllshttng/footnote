@@ -8,6 +8,7 @@ Project context and behavioral guidelines for AI agents (Claude Code, Gemini CLI
 
 Bias toward caution over speed; for trivial tasks, use judgment. Derived from [Karpathy's notes](https://x.com/karpathy/status/2015883857489522876) on LLM coding pitfalls.
 
+0. **Worktree-first.** For any repo work, create or enter a dedicated feature worktree whenever possible before editing files, running generators, or committing. Keep the canonical main checkout unclogged and pullable. If you are already in the correct feature worktree, continue there. After the PR lands, prune the finished worktree.
 1. **Think before coding.** State assumptions; if uncertain, ask. Surface multiple interpretations and simpler alternatives instead of silently picking. Name what's confusing.
 2. **Simplicity first.** Minimum code that solves the problem. No speculative features, single-use abstractions, unrequested config, or error handling for impossible cases. If 200 lines could be 50, rewrite.
 3. **Surgical changes.** Touch only what the task requires. Don't refactor working code or restyle adjacent lines. Match existing style. Remove orphans *your* change created; flag pre-existing dead code, don't delete it. Every changed line should trace to the request. But don't walk past a broken window either: when you notice breakage outside your task (a flaky or failing test, a lint violation, dead code), don't silently pass it and don't fix it inline. Capture it with `fno carveout add --kind oos-bug` (or file a node) so it gets triaged, keeping this PR to its one node. Fix inline only when it blocks your task.
@@ -31,7 +32,7 @@ footnote/
 
 ### Conventions
 
-- **Worktrees:** `claude --worktree <name>` is intercepted by footnote's `WorktreeCreate` hook (`hooks/worktree-setup.sh`); after creation, `bash scripts/setup/setup-worktree.sh` links shared state from canonical. Placement rule and full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
+- **Worktrees:** default to worktree-first for all repo work, not only large changes. Use a dedicated feature worktree whenever possible, leave the canonical main checkout unclogged, and prune the worktree after merge. `claude --worktree <name>` is intercepted by footnote's `WorktreeCreate` hook (`hooks/worktree-setup.sh`); after creation, `bash scripts/setup/setup-worktree.sh` links shared state from canonical. Placement rule and full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
 - **Search hygiene:** prefer `rg` / the Grep tool over `grep -r` (which ignores `.gitignore` and descends into nested worktree checkouts, returning hundreds of false hits). If you must use `grep -r`, scope it to a path.
 - **Comments:** terse, high-signal, only when needed. Default to no comment; not every function needs a docstring. Full rule: [.claude/rules/comments.md](.claude/rules/comments.md).
 - **Multi-CLI:** skills are portable; orchestration needs per-CLI hook config. Gemini defaults to sequential execution; Codex uses `.codex/agents/`. Substrate facts in [docs/HARNESSES.md](docs/HARNESSES.md), wiring in [docs/architecture/multi-cli-hooks.md](docs/architecture/multi-cli-hooks.md), per-skill compat in [docs/SKILL-COMPAT-MATRIX.md](docs/SKILL-COMPAT-MATRIX.md). [RTK](https://github.com/rtk-ai/rtk) is a recommended companion for long loops (`/fno:setup` wires it).
