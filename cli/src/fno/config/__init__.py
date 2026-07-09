@@ -45,11 +45,6 @@ import tomli_w
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# graph -> config was a load-time cycle; now that the pure file-readers live in
-# the fno.config_io leaf and graph imports THAT, config can reach graph._constants
-# at top level (a clean one-way config -> graph edge). See fno.config_io.
-from fno.graph._constants import RESERVED_PREFIXES
-
 # Pure file-reader leaf, extracted to break the config<->graph cycle. Re-exported
 # here so every existing `from fno.config import read_config_flat` (etc.) caller
 # keeps working unchanged. The redundant `X as X` aliases are the explicit-reexport
@@ -284,6 +279,15 @@ class BacklogBlock(BaseModel):
         if v is None:
             return None
         import re as _re
+
+        # Function-local, NOT top-level: a top-level `from fno.graph._constants`
+        # makes `import fno.config` eagerly load the graph package (its __init__
+        # imports store, which freezes `read_graph`'s GRAPH_JSON default) while
+        # config is only partially initialized, so store's config lookup fails and
+        # silently falls back to ~/.fno, ignoring a configured paths.graph_json.
+        # The config<->graph cycle is already broken on the graph side (it imports
+        # the fno.config_io leaf), so this edge can stay lazy with no cycle.
+        from fno.graph._constants import RESERVED_PREFIXES
 
         raw = v.strip().lower()
         if not _re.fullmatch(r"[a-z][a-z0-9]{0,6}-?", raw):
