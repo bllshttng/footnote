@@ -1160,6 +1160,9 @@ impl View {
         if !self.expanded.remove(&id) {
             self.expanded.insert(id);
         }
+        // Collapsing shrinks the row set; re-clamp so a scrolled sideline never
+        // skips past the new last row (x-a621).
+        self.clamp_sideline_offset();
     }
 
     /// Clamp a selector cursor into the current [`View::display_rows`] and
@@ -1200,10 +1203,15 @@ impl View {
             .unwrap_or(cur)
     }
 
-    /// Sideline rows drawn below the tab bar - the scroll window height. Mirrors
-    /// [`draw_sideline`]'s `TAB_BAR_ROWS..rows` paint range.
+    /// Sideline rows the cursor can occupy: below the tab bar and above the
+    /// bottom chrome row. `draw_bottom_row` repaints the last row over the
+    /// sideline when it is chrome, and [`sideline_row_at`] excludes it from
+    /// hit-testing, so it must not count as a scroll slot - else follow-cursor
+    /// scroll would park the last row under the status bar (invisible, unclickable).
     fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize).saturating_sub(TAB_BAR_ROWS as usize)
+        (self.term.0 as usize)
+            .saturating_sub(TAB_BAR_ROWS as usize)
+            .saturating_sub(self.bottom_row_is_chrome() as usize)
     }
 
     /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
@@ -2685,6 +2693,9 @@ async fn attach_and_run(
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
                     view.term = (rows, cols);
+                    // A shorter terminal shrinks the scroll window; re-clamp so
+                    // the offset never scrolls past the last row (x-a621).
+                    view.clamp_sideline_offset();
                     let (c_rows, c_cols) = view.content_dims();
                     // The server resizes PTYs + grids off the content area
                     // and re-emits Layout + frames; the local redraw keeps
@@ -6301,6 +6312,43 @@ mod tests {
             v.sideline_offset,
             total - v.sideline_visible_rows(),
             "clamped to the last full window"
+        );
+    }
+
+    #[test]
+    fn sideline_scroll_window_excludes_chrome_bottom_row() {
+        // Regression (code-reviewer): the bottom status row is chrome-owned and
+        // overwritten after the sideline paints, and sideline_row_at excludes it,
+        // so it must not count as a scroll slot - otherwise follow-cursor scroll
+        // parks the last row under the status bar.
+        let mut v = two_pane_view();
+        v.term = ((MIN_ROWS_FOR_STATUS as usize).max(10) as u16, 100);
+        // Clear every chrome trigger, then toggle only status_on so the branch
+        // under test is the bottom-chrome subtraction, nothing else.
+        v.confirm = None;
+        v.create = None;
+        v.rename = None;
+        v.search = None;
+        v.hint = false;
+        v.status_on = true;
+        assert!(
+            v.bottom_row_is_chrome(),
+            "status bar occupies the bottom row"
+        );
+        assert_eq!(
+            v.sideline_visible_rows(),
+            v.term.0 as usize - TAB_BAR_ROWS as usize - 1,
+            "chrome bottom row is not a scroll slot"
+        );
+        v.status_on = false;
+        assert!(
+            !v.bottom_row_is_chrome(),
+            "no chrome -> bottom row reclaimed"
+        );
+        assert_eq!(
+            v.sideline_visible_rows(),
+            v.term.0 as usize - TAB_BAR_ROWS as usize,
+            "with no chrome the full height below the tab bar is usable"
         );
     }
 
