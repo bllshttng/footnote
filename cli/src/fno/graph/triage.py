@@ -410,7 +410,6 @@ def _candidate_record(entry: dict, deep: bool) -> dict:
             "session_count": len(valid_sessions),
             "total_cost_usd": round(cost_total, 2),
             "last_claimed_at": entry.get("claimed_at"),
-            "compacted": bool(entry.get("compacted")),
         },
         "ship_state": {
             "pr_number": entry.get("pr_number"),
