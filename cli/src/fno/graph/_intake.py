@@ -439,7 +439,6 @@ def project_root_from_settings(project: str | None) -> str | None:
 
     - ``project`` is falsy (None or empty string)
     - no settings file maps that project name
-    - PyYAML is absent
     - all settings files are missing, unreadable, or malformed
 
     Pure map lookup: no stat(), no git calls, no existence check. A mapped-but-
@@ -466,28 +465,15 @@ def project_root_from_settings(project: str | None) -> str | None:
     if not project:
         return None
 
-    try:
-        import yaml
-    except ImportError:
-        sys.stderr.write(
-            "warning: PyYAML missing - settings-based project root lookup disabled\n"
-        )
-        return None
+    from fno.config import read_config_flat
 
     for path in _settings_candidate_paths():
         if not path.exists():
             continue
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except OSError as e:
-            sys.stderr.write(f"warning: could not read {path}: {e}\n")
-            continue
-        except yaml.YAMLError as e:
-            sys.stderr.write(f"warning: could not parse {path}: {e}\n")
-            continue
-        if not isinstance(data, dict):
-            continue
-        work = (data.get("config") or {}).get("work") or data.get("work")
+        # read_config_flat parses config.toml (or a legacy settings.yaml) and
+        # returns the FLAT dict; work is top-level. A missing/unparseable file
+        # contributes nothing (best-effort, same as the forward reader).
+        work = read_config_flat(path).get("work")
         if not isinstance(work, dict):
             continue
 
