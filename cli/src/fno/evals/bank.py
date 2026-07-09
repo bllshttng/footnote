@@ -163,6 +163,7 @@ def load_task(path: Path) -> TaskSpec:
     tier = raw.get("tier")
     _require(tier in VALID_TIERS,
              f"task '{task_id}' ({path}): tier must be one of {VALID_TIERS}, got {tier!r}")
+    assert isinstance(tier, str)
 
     prompt = raw.get("prompt")
     _require(prompt is None or isinstance(prompt, str),
@@ -193,7 +194,7 @@ def load_task(path: Path) -> TaskSpec:
         id=task_id,
         tier=tier,
         prompt=prompt,
-        grade=checks,  # type: ignore[arg-type]
+        grade=checks,
         repo_fixture=str(raw.get("repo_fixture", "HEAD")),
         timeout_minutes=timeout,
         tags=list(tags_raw),
