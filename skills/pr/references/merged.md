@@ -118,7 +118,7 @@ autonomous/headless modes.
 # silently defeat the mutex in exactly the autonomous modes this protects. `$$`
 # is process-unique, so distinct runners still get distinct holders.
 _SID="${CLAUDE_CODE_SESSION_ID:-}"
-[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null)"
+[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null || true)"
 [[ -n "$_SID" ]] || _SID="$$"
 HOLDER="postmerge:pr-${PR}:${_SID}"
 
@@ -147,7 +147,7 @@ fi
 # nothing left to do - release our fresh claim and exit BEFORE any mutation.
 # Best-effort resolve here (Step 1 does the fail-loud version); an unresolvable
 # config/path just skips the shortcut and lets Step 1/Step 5 handle it.
-_RR="$(git rev-parse --show-toplevel 2>/dev/null)"
+_RR="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 _PLREL="$(fno config get config.post_merge.parking_lot_path 2>/dev/null || echo "")"
 if [[ -n "$_RR" && -n "$_PLREL" ]] && \
    bash "${CLAUDE_PLUGIN_ROOT:-$_RR}/skills/pr/scripts/inbox-has-pr.sh" "$_RR/$_PLREL" "$PR" 2>/dev/null; then
@@ -570,7 +570,7 @@ linger to TTL expiry.
 ```bash
 # Recompute the SAME holder Step 0.5 used (guard on emptiness, not exit code).
 _SID="${CLAUDE_CODE_SESSION_ID:-}"
-[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null)"
+[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null || true)"
 [[ -n "$_SID" ]] || _SID="$$"
 HOLDER="postmerge:pr-${PR}:${_SID}"
 fno claim release reconcile:pr-${PR} --holder "$HOLDER" 2>/dev/null \
