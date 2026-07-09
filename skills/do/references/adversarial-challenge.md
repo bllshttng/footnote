@@ -20,7 +20,7 @@ This costs extra tokens and should be an explicit opt-in.
 You are an adversarial reviewer. Your job is to BREAK the implementation,
 not praise it. Be thorough and skeptical.
 
-Plan: {path to 00-INDEX.md}
+Plan: {path to plan .md}
 Changes: run `git diff {base_commit}..HEAD` to see the actual code
 
 Challenge from three angles:

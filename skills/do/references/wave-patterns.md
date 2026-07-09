@@ -152,7 +152,7 @@ Also check hidden shared outputs:
 ## Pattern: Dynamic Parallelization
 
 **When it activates:**
-Plan's 00-INDEX.md has a `## File Ownership Map` section and execution
+Plan has a `## File Ownership Map` section and execution
 strategy has at least one sequential wave.
 
 **What it does:**
@@ -169,7 +169,7 @@ wave, checks if task file sets are disjoint. Upgrades disjoint waves to parallel
 ```
 Is wave declared sequential?
 +-- NO (parallel) -> Leave as-is
-+-- YES -> Does 00-INDEX.md have a File Ownership Map?
++-- YES -> Does the plan have a File Ownership Map?
          +-- NO -> Keep sequential (declared strategy)
          +-- YES -> Are all tasks present in the map?
                   +-- NO -> Keep sequential (unknown scope)

@@ -4,23 +4,23 @@
 
 **Only if `config.linear.enabled: true` in config.toml.** Also skippable with `--no-linear` flag.
 
-After writing the plan folder, create the Linear ticket if configured:
+After writing the plan, create the Linear ticket if configured:
 
 ```bash
 # Skip if --no-linear flag was passed
 if [[ "$NO_LINEAR" != "true" ]]; then
   # Use /linear skill with --from-index
-  /linear --from-index "$PLAN_DIR/00-INDEX.md"
+  /linear --from-index "$PLAN_PATH"
 fi
 ```
 
 **What `/linear --from-index` does:**
-1. Reads the 00-INDEX.md you just created
+1. Reads the plan you just created
 2. Extracts title, goal, architecture, phases
 3. Creates Linear ticket with structured description
-4. **Updates 00-INDEX.md frontmatter** with `linear: {TEAM}-XXX`
+4. **Updates the plan's frontmatter** with `linear: {TEAM}-XXX`
 
-**The INDEX.md frontmatter will be updated to:**
+**The plan's frontmatter will be updated to:**
 ```yaml
 ---
 created: YYYY-MM-DDTHH:MM
@@ -38,7 +38,7 @@ linearis issues create "[Feature Name]" \
 [Feature description]
 
 ## Plan
-See: {plans_path}/YYYY-MM-DD-feature-name/00-INDEX.md
+See: {plans_path}/YYYY-MM-DD-feature-name.md
 
 ## Phases
 - [ ] Phase 1: Database
@@ -58,14 +58,14 @@ Plans link to Linear tickets for tracking. The relationship can be:
 | Pattern | Use Case |
 |---------|----------|
 | 1 plan : 1 ticket | Standard feature development |
-| N plans : 1 ticket | Large epic with multiple plan folders |
+| N plans : 1 ticket | Large epic with multiple plans |
 | 1 plan : N tickets | Plan broken into sub-tickets |
 
 **Linking rules:**
-1. **INDEX.md frontmatter** must include `linear: {TEAM}-XXX`
+1. **The plan's frontmatter** must include `linear: {TEAM}-XXX`
 2. **Commit messages** reference ticket: `feat: add feature ({TEAM}-XXX)`
 3. **PR description** links to ticket
-4. **Linear ticket** links back to plan folder path
+4. **Linear ticket** links back to the plan path
 
 **If ticket already exists:**
 ```markdown

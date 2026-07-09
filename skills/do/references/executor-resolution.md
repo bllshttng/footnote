@@ -9,9 +9,9 @@ and failure modes.
 For each task, in order, highest priority first:
 
 1. **Explicit `executor:` on the task block** — `executor: impeccable` directly
-   on the task in the phase file. Always wins.
+   on the task block in the plan. Always wins.
 2. **Explicit `executor:` on the plan frontmatter** — `executor: impeccable`
-   in the plan's `00-INDEX.md` (or quick-plan file). Applies to all tasks
+   in the plan's frontmatter. Applies to all tasks
    that don't set their own executor.
 3. **Surface inference** — runs only when neither task nor plan declared an
    executor. Reads the task's file list and matches against the locked

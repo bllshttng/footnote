@@ -1,12 +1,12 @@
 # Dynamic Parallelization
 
 Automatic optimization that upgrades sequential waves to parallel when task
-file sets are provably disjoint. Activated when 00-INDEX.md contains a
+file sets are provably disjoint. Activated when the plan contains a
 `## File Ownership Map` section.
 
 ## Activation
 
-Automatic when 00-INDEX.md contains `## File Ownership Map`.
+Automatic when the plan contains `## File Ownership Map`.
 Skip if no file ownership map found - use declared execution strategy as-is.
 
 ## Parsing the File Ownership Map
@@ -73,7 +73,7 @@ declared execution strategy.
 ```
 Is wave declared sequential?
 +-- NO (parallel) -> Leave as-is
-+-- YES -> Does 00-INDEX.md have a File Ownership Map?
++-- YES -> Does the plan have a File Ownership Map?
          +-- NO -> Keep sequential (declared strategy)
          +-- YES -> Are all tasks present in the map?
                   +-- NO -> Keep sequential (unknown scope)

@@ -28,7 +28,7 @@ Provider-aware execution is hook-driven. A parallel wave downgrades to sequentia
 ## Core Behavior
 
 1. **Validate** plan structure before spending tokens
-2. **Load** execution strategy from 00-INDEX.md
+2. **Load** execution strategy from the plan's Execution Strategy section
 3. **Optimize** parallelism from file ownership map (when available)
 4. **Research** codebase via read-only workers (when scratchpad available)
 5. **Execute** waves according to mode (sequential/parallel)
@@ -37,9 +37,9 @@ Provider-aware execution is hook-driven. A parallel wave downgrades to sequentia
 
 ## Prerequisites
 
-- Plan folder from `/blueprint` with 00-INDEX.md
-- Execution strategy section in 00-INDEX.md
-- Phase files with detailed tasks
+- Single `.md` plan from `/blueprint`
+- An `## Execution Strategy` section in the plan body
+- Task blocks with detailed tasks (in that Execution Strategy)
 
 ## Process
 
@@ -61,7 +61,7 @@ If `fno` is unavailable or `fno codemap`'s deps are missing, skip silently. Read
 
 ### 1. Load Execution Strategy
 
-Read and parse the execution strategy from 00-INDEX.md.
+Read and parse the execution strategy from the plan's `## Execution Strategy` section.
 
 #### Optional: Read Plan Summary from Scratchpad
 
@@ -71,11 +71,11 @@ Before loading the full execution strategy, check if a plan summary exists in th
 SCRATCHPAD=$(sed -n 's/^scratchpad_path:[[:space:]]*//p' .fno/target-state.md 2>/dev/null)
 if [[ -n "$SCRATCHPAD" && -f "$SCRATCHPAD/plan-summary.md" ]]; then
   # Plan summary has condensed constraints and execution notes
-  # Use this for context, but always read 00-INDEX.md for the canonical strategy
+  # Use this for context, but always read the plan for the canonical strategy
 fi
 ```
 
-The plan summary supplements but never replaces 00-INDEX.md.
+The plan summary supplements but never replaces the plan.
 
 #### Foreign-wave handling (spawn-into-project)
 
@@ -111,7 +111,7 @@ If no execution strategy found, fall back to sequential execution of all phases.
 
 ### 1b. Dynamic Parallelization (automatic)
 
-If 00-INDEX.md contains a `## File Ownership Map` section, load
+If the plan contains a `## File Ownership Map` section, load
 [dynamic-parallelization.md](dynamic-parallelization.md)
 and run the set intersection algorithm. Sequential waves with provably
 disjoint task file sets are upgraded to parallel. Only upgrades, never
@@ -121,8 +121,7 @@ downgrades. Skip if no file ownership map found.
 
 Check activation conditions:
 1. Scratchpad exists with `research/` directory
-2. Plan is a folder plan (has 00-INDEX.md)
-3. Plan has 2 or more phase files
+2. Plan declares 2 or more waves in its Execution Strategy
 
 If all conditions met (or `research` modifier is set), load
 [research-protocol.md](research-protocol.md)
@@ -488,7 +487,7 @@ Load [deviation-handling.md](deviation-handling.md) for the full deviation handl
 
 ## Linear Integration (optional - requires linear plugin)
 
-If the linear plugin is installed and the plan has a Linear ticket (check 00-INDEX.md frontmatter for `linear: RR-XXX`), sync status at phase transitions. If no linear plugin or no ticket field, skip all Linear sync steps.
+If the linear plugin is installed and the plan has a Linear ticket (check the plan's frontmatter for `linear: RR-XXX`), sync status at phase transitions. If no linear plugin or no ticket field, skip all Linear sync steps.
 
 | Event | Linear Action |
 |-------|---------------|

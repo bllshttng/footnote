@@ -8,18 +8,17 @@ producing richer implementation prompts with fewer retries.
 
 ALL of these must be true:
 1. Scratchpad exists: `.fno/scratchpad/research/` directory present
-2. Plan is a folder plan (has 00-INDEX.md, not a single .md file)
-3. Plan has 2 or more phase files (01-*.md, 02-*.md, etc.)
+2. Plan declares 2 or more waves in its Execution Strategy
 
 If ANY condition is false: skip research, proceed to wave execution.
 
 **Override:** The `--research` flag forces research phase even when conditions
-are not fully met (e.g., single-phase plan where you still want codebase
+are not fully met (e.g., single-wave plan where you still want codebase
 investigation before implementation).
 
 ## Worker Dispatch
 
-For each phase file in the plan, construct a Task tool invocation:
+For each wave in the plan, construct a Task tool invocation:
 
 - **Agent:** archer
 - **Tools override:** `["Read", "Grep", "Glob"]` (no Write, Edit, or Bash)
@@ -28,7 +27,7 @@ For each phase file in the plan, construct a Task tool invocation:
 ### Prompt Template
 
 ```
-You are investigating the codebase for phase {NN}: {phase_title}.
+You are investigating the codebase for wave {N}: {wave_name}.
 DO NOT write code, create files, or modify anything.
 
 Read the files listed in the tasks below and report:
@@ -37,11 +36,11 @@ Read the files listed in the tasks below and report:
 3. What could break when these files are modified
 4. Anything the implementation worker needs to know
 
-Tasks in this phase:
-{task details with file paths from the phase file}
+Tasks in this wave:
+{task details with file paths from the wave}
 
 Return your findings in this format (the orchestrator will write them to scratchpad):
-## Phase {NN}: {title} - Research Findings
+## Wave {N}: {name} - Research Findings
 ### Files Examined
 - `path/to/file`: [what it does, key functions, patterns]
 ### Reusable Patterns
@@ -59,7 +58,7 @@ The orchestrator captures each worker's return text and writes it to scratchpad:
 
 ```bash
 # After each worker completes, write its output to scratchpad
-# $SCRATCHPAD/research/phase-{NN}-findings.md
+# $SCRATCHPAD/research/wave-{N}-findings.md
 ```
 
 ## Collecting Results
@@ -73,13 +72,13 @@ The orchestrator captures each worker's return text and writes it to scratchpad:
 
 After reading all findings, apply the existing synthesis protocol:
 
-1. Read all `research/phase-*-findings.md` files from scratchpad
+1. Read all `research/wave-*-findings.md` files from scratchpad
 2. Follow the five-point synthesis checklist in `references/synthesis-checklist.md`
 3. For each task in wave execution, enrich the implementation prompt with:
    - File paths and current state (from research findings)
    - Reusable patterns the worker should follow
    - Risk areas to watch out for
-   - Integration notes from adjacent phases
+   - Integration notes from adjacent waves
 
 Research findings are INPUT to synthesis, not a replacement for it.
 The synthesis checklist remains the governing standard.
@@ -96,5 +95,5 @@ On resume: if `coordinator_phase: research`, re-run research from scratch
 ## Cost Note
 
 - Research workers are read-only and typically use 5-15K tokens each
-- For a 4-phase plan, research phase costs ~40-60K tokens total
+- For a 4-wave plan, research phase costs ~40-60K tokens total
 - This investment pays back through fewer implementation failures and retries

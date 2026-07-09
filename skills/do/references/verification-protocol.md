@@ -26,7 +26,7 @@ These are different questions. Both must pass.
 ```
 You are verifying that the implementation matches the plan.
 
-Plan: {path to 00-INDEX.md}
+Plan: {path to plan .md}
 Changes: run `git diff {base_commit}..HEAD --stat` to see what changed
 
 For each task in the plan:
