@@ -119,6 +119,59 @@ run_block "true" "$JSON_LIVE" "x-1234" >/dev/null
   && pass "US3c: status=live row is left untouched" \
   || fail "US3c: live row was reaped (status guard broken)"
 
+# --- Step 2 union: reap on the ship-gate-close path (pr_number scan) -------
+# Runs the Step 2 block against a fake `fno backlog reconcile` + a controlled
+# graph.json, asserting the union that feeds NODE_IDS. python3 is shimmed to
+# fail so GJ falls back to $HOME/.fno/graph.json (deterministic, no real graph).
+UBIN="$TMP/bin2"
+mkdir -p "$UBIN"
+cat > "$UBIN/fno" <<'SHIM'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "backlog reconcile") printf '%s' "${FAKE_RECONCILE_JSON:-{\"closed\":[]}}" ;;
+  *) echo "unexpected fno call: $*" >&2; exit 2 ;;
+esac
+SHIM
+chmod +x "$UBIN/fno"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$UBIN/python3"
+chmod +x "$UBIN/python3"
+
+UHOME="$TMP/home"; mkdir -p "$UHOME/.fno"
+run_step2() {
+  # run_step2 <reconcile_json> <graph_json> <pr> -> prints resulting NODE_IDS
+  printf '%s' "$2" > "$UHOME/.fno/graph.json"
+  local runner="$TMP/step2-run.sh"; cp "$STEP2" "$runner"
+  printf '\nprintf "%%s" "$NODE_IDS"\n' >> "$runner"
+  FAKE_RECONCILE_JSON="$1" PR="$3" HOME="$UHOME" PATH="$UBIN:$PATH" bash "$runner"
+}
+count_id() { printf '%s' "$1" | tr ' ' '\n' | grep -c "^$2\$"; }
+
+GRAPH_MATCH='{"nodes":[{"id":"x-1234","pr_number":292}]}'
+
+# AC1 (the bug): reconcile .closed[] empty, pr_number matches -> node unioned in.
+NI="$(run_step2 '{"closed":[]}' "$GRAPH_MATCH" 292)"
+[[ "$(count_id "$NI" x-1234)" == "1" ]] \
+  && pass "AC1: ship-gate close (reconcile empty) unions the PR node into NODE_IDS" \
+  || fail "AC1: expected x-1234 in NODE_IDS, got: $(printf '%q' "$NI")"
+
+# AC2 (dedup): reconcile already closed the same node -> unioned once, not twice.
+NI="$(run_step2 '{"closed":[{"node_id":"x-1234"}]}' "$GRAPH_MATCH" 292)"
+[[ "$(count_id "$NI" x-1234)" == "1" ]] \
+  && pass "AC2: out-of-gate id present in both .closed[] and pr_number match dedups to one" \
+  || fail "AC2: expected exactly one x-1234, got: $(printf '%q' "$NI")"
+
+# AC2b (append, no clobber): reconcile closed a different node -> both survive.
+NI="$(run_step2 '{"closed":[{"node_id":"x-aaaa"}]}' "$GRAPH_MATCH" 292)"
+[[ "$(count_id "$NI" x-aaaa)" == "1" && "$(count_id "$NI" x-1234)" == "1" ]] \
+  && pass "AC2b: union appends the PR node without clobbering reconcile's closed ids" \
+  || fail "AC2b: expected both x-aaaa and x-1234, got: $(printf '%q' "$NI")"
+
+# AC3 (no node): pr_number matches nothing -> NODE_IDS stays empty.
+NI="$(run_step2 '{"closed":[]}' '{"nodes":[{"id":"x-9999","pr_number":999}]}' 292)"
+[[ -z "${NI// }" ]] \
+  && pass "AC3: PR mapping to no node leaves NODE_IDS empty (Step 8a skips)" \
+  || fail "AC3: expected empty NODE_IDS, got: $(printf '%q' "$NI")"
+
 # --- Static guards: ordering invariant + live guard present ---------------
 STOP_LN="$(awk '/fno agents stop/ {print NR; exit}' "$BLOCK")"
 RM_LN="$(awk '/fno agents rm/ {print NR; exit}' "$BLOCK")"

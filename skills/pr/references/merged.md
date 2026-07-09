@@ -246,6 +246,15 @@ if ! RECONCILE_JSON="$(fno backlog reconcile --json 2>"$RECONCILE_ERR")"; then
 fi
 rm -f "$RECONCILE_ERR"
 NODE_IDS="$(printf '%s' "$RECONCILE_JSON" | jq -r '.closed[]?.node_id // empty' 2>/dev/null | tr '\n' ' ')"
+# On the dominant /target ship-gate path the node is closed+stamped BEFORE this
+# ritual runs, so reconcile no-ops and .closed[] is empty. Union in the node the
+# PR already maps to (read-only pr_number scan of the graph) so Step 8a still
+# reaps its build-worker row. Deduped so the out-of-gate case reaps once.
+GJ="$(python3 -c 'from fno.paths import graph_json; print(graph_json())' 2>/dev/null || echo "$HOME/.fno/graph.json")"
+PR_NODE="$(jq -r --argjson pr "$PR" '.nodes[]? | select(.pr_number == $pr) | .id' "$GJ" 2>/dev/null | head -1)"
+if [[ -n "$PR_NODE" ]]; then
+  case " $NODE_IDS " in *" $PR_NODE "*) : ;; *) NODE_IDS="${NODE_IDS}${NODE_IDS:+ }$PR_NODE" ;; esac
+fi
 # full sweep above, or scope it: fno backlog reconcile --node ab-XXXXXXXX --json
 ```
 
