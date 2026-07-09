@@ -14,6 +14,7 @@ import typer
 from fno.scoreboard.fold import (
     BrokenLedger,
     build_calibration,
+    build_efficiency,
     build_scoreboard,
     build_skill_scoreboard,
     load_ledger_rows,
@@ -43,11 +44,25 @@ def scoreboard_command(
             "skill+version, with a coverage line for how many runs attributed."
         ),
     ),
+    efficiency: bool = typer.Option(
+        False,
+        "--efficiency",
+        help=(
+            "Session-efficiency graders: per-row loop_check fires and CI-red "
+            "episodes joined from recorded telemetry, aggregated into "
+            "per-outcome-class costs and median/p90 distributions. Grades the "
+            "process, not just the terminal state."
+        ),
+    ),
 ) -> None:
     """Fold ledger + events + graph into a stop-cause / spend / autonomy /
     survival scoreboard, with a mandatory coverage line."""
     if since < 1:
         raise typer.BadParameter("--since must be at least 1 (days).")
+    # The view flags are mutually exclusive: each renders a different fold.
+    _views = [f for f, on in (("--calibration", calibration), ("--by-skill", by_skill), ("--efficiency", efficiency)) if on]
+    if len(_views) > 1:
+        raise typer.BadParameter(f"{' and '.join(_views)} are mutually exclusive views; pick one.")
     from fno import paths as _paths
 
     ledger_path = _paths.ledger_json()
@@ -85,6 +100,20 @@ def scoreboard_command(
             typer.echo(_json.dumps(sb, indent=2))
             return
         _render_by_skill(sb)
+        return
+
+    if efficiency:
+        eff = build_efficiency(
+            rows,
+            read_jsonl_events(events_paths, {"loop_check"}),
+            read_graph_nodes(graph_path),
+            since_days=since,
+            now=datetime.now(),
+        )
+        if json_out:
+            typer.echo(_json.dumps(eff, indent=2))
+            return
+        _render_efficiency(eff)
         return
 
     touch_events = read_jsonl_events(events_paths, {"human_touch"})
@@ -134,6 +163,58 @@ def _render_calibration(cal: dict) -> None:
         f"\n  false-positive (pass -> bounced/reverted): "
         f"{fp['count']}/{fp['of_pass']} ({fp['rate_pct']}%)\n"
     )
+
+
+def _fmt(v) -> str:
+    """Render a None-able metric: 'n/a' when unmeasurable (never a fake 0), a
+    plain integer when whole (no sci-notation for million-scale token counts),
+    else one decimal."""
+    if v is None:
+        return "n/a"
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v) if isinstance(v, int) else f"{v:.1f}"
+
+
+def _render_efficiency(eff: dict) -> None:
+    out = sys.stdout.write
+    win = eff["since_days"]
+    if eff["state"] == "no_data":
+        out(f"fno scoreboard --efficiency (last {win}d)\n\n  no terminal sessions in window.\n")
+        return
+
+    cov = eff["coverage"]
+    out(f"fno scoreboard --efficiency (last {win}d)\n\n")
+    out("Coverage\n")
+    out(f"  rows in window:      {cov['rows']}\n")
+    out(f"  loop-check join:     {cov['loop_join_pct']}%")
+    out(f"    transcript:  {cov['transcript_pct']}%")
+    out(f"    node linkage:  {cov['node_linkage_pct']}%\n")
+    out(f"  outcome tracked:     {cov['outcome_tracked_pct']}% of shipped rows\n")
+    if cov["loop_join_pct"] < 100 or cov["node_linkage_pct"] < 100:
+        out(
+            f"  ! metrics below reflect {cov['loop_join_pct']}% loop-join / "
+            f"{cov['node_linkage_pct']}% node-linkage coverage - a partial window is not a trend.\n"
+        )
+    if cov["ci_unparsed"]:
+        out(
+            f"  ! {cov['ci_unparsed']} loop_check fire(s) carried an unrecognized ci shape "
+            "(emitter drift); their sessions' ci_reds are n/a, not counted as green.\n"
+        )
+
+    out("\nPer-outcome-class cost\n")
+    out(f"  {'class':<20}{'n':>4}{'spend$':>10}{'med tok':>10}{'med fires':>11}{'med min':>9}\n")
+    for cls, b in sorted(eff["per_outcome_class"].items(), key=lambda kv: (-kv[1]["n"], kv[0])):
+        out(
+            f"  {cls:<20}{b['n']:>4}{b['spend_usd']:>10.2f}"
+            f"{_fmt(b['median_tokens']):>10}{_fmt(b['median_fires']):>11}{_fmt(b['median_duration_min']):>9}\n"
+        )
+
+    out("\nDistribution (rows with >=1 loop_check fire)\n")
+    out(f"  {'metric':<18}{'median':>10}{'p90':>10}{'n':>6}\n")
+    for metric in ("loop_fires", "ci_reds", "tokens_total", "duration_minutes"):
+        d = eff["distribution"][metric]
+        out(f"  {metric:<18}{_fmt(d['median']):>10}{_fmt(d['p90']):>10}{d['n']:>6}\n")
 
 
 def _render_by_skill(sb: dict) -> None:
