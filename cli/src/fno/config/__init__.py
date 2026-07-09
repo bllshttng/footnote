@@ -1219,6 +1219,51 @@ class AutoContinueBlock(BaseModel):
         return False
 
 
+class KeepGoingBlock(BaseModel):
+    """Autonomous keep-going engine settings (nested under 'config.keep_going').
+
+    The opt-in for the autonomous keep-going engine (x-3360): when enabled, the
+    autonomous ``/fno:pr merged`` ritual classifies each surviving carve-out
+    follow-up and DISPATCHES the next unit of work (a ``/think``, a ``/target``,
+    or just a filed node) instead of only closing the merged node. This is what
+    keeps the autonomous loop moving without a human in the seat.
+
+    Default ``False`` (same posture as ``config.auto_continue`` /
+    ``config.think_spawn``): shipping this changes nothing until the operator
+    arms it - false-enabled (background workers dispatched against the operator's
+    intent) is the dangerous direction, so a malformed block fails safe to
+    disabled rather than breaking the whole settings load.
+
+    The firehose ceiling is NOT a knob here: it deliberately reuses
+    ``config.think_spawn.daily_cap`` (the same per-install per-day counter
+    ``fno think dispatch`` bumps) so think + target dispatches share ONE budget -
+    a single ceiling on total autonomous fan-out per day. The classify + dispatch
+    logic lives in :mod:`fno.retro.keep_going`.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        """Fail-safe to disabled on any non-boolean value; strict affirmative.
+
+        Mirrors ``AutoContinueBlock._coerce_enabled``: only a clear affirmative
+        (``true``/``yes``/``on``/``1``) arms the engine; an ambiguous value fails
+        safe to disabled, because false-enabled (autonomous workers dispatched
+        against the operator's intent) is the dangerous direction here.
+        """
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):  # bool already handled above
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+
 class ThinkSpawnBlock(BaseModel):
     """Context-carrying /think spawn settings (nested under 'config.think_spawn').
 
@@ -2256,6 +2301,7 @@ class ConfigBlock(BaseModel):
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
+    keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)
     think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
@@ -2416,6 +2462,19 @@ class ConfigBlock(BaseModel):
         ``enabled`` coercer still runs.
         """
         if isinstance(v, (dict, AutoContinueBlock)):
+            return v
+        return {}
+
+    @field_validator("keep_going", mode="before")
+    @classmethod
+    def _coerce_keep_going(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``keep_going:`` degrades to defaults (OFF).
+
+        Mirrors ``_coerce_auto_continue``: a scalar/list/null cannot build the
+        block; fall back to the default disabled block rather than raising out of
+        the whole settings load. A dict passes through so the inner coercer runs.
+        """
+        if isinstance(v, (dict, KeepGoingBlock)):
             return v
         return {}
 

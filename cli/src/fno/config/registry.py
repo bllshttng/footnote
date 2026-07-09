@@ -179,6 +179,8 @@ FIELD_META: dict[str, Meta] = {
     "agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.auto_continue.* ---
     "auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
+    # --- config.keep_going.* ---
+    "keep_going.enabled": Meta("advanced", "Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap)."),
     # --- config.think_spawn.* ---
     "think_spawn.enabled": Meta(
         "advanced", "Born-with-why: spawn/offer a context-carrying /think for a generated idea node."
