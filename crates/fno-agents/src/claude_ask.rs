@@ -277,13 +277,17 @@ impl ClaudeHome {
         self.home.join(".claude").join("jobs").join(short_id)
     }
 
-    /// The daemon roster path (`<home>/.claude/daemon/roster.json`). Home-relative
-    /// like the sessions/jobs dirs, so the ask-lane roster pre-check is hermetic
-    /// under a test `ClaudeHome`. In production `ClaudeHome` is the real home, so
-    /// this is `~/.claude/daemon/roster.json` -- byte-parity with Python's
-    /// `_daemon_dir` (which resolves the same path when `FNO_CLAUDE_DAEMON_DIR` is
-    /// unset, as it always is outside tests).
+    /// The daemon roster path. Honors `FNO_CLAUDE_DAEMON_DIR` FIRST (a supported
+    /// alt-home / alternate-daemon override, matching `claude_roster::daemon_dir`
+    /// and the deliver path's `load_default`), else `<home>/.claude/daemon`. The
+    /// env-first order keeps the ask-lane roster pre-check reading the SAME roster
+    /// the deliver step resolves, so the fallback never skips in an alt-daemon
+    /// setup; the home-relative fallback keeps it hermetic under a test
+    /// `ClaudeHome`. Byte-parity with Python's `_daemon_dir` (env-first-else-home).
     pub fn daemon_roster_path(&self) -> PathBuf {
+        if let Some(dir) = std::env::var_os(crate::claude_roster::DAEMON_DIR_ENV) {
+            return PathBuf::from(dir).join("roster.json");
+        }
         self.home.join(".claude").join("daemon").join("roster.json")
     }
 }
@@ -3395,6 +3399,11 @@ mod tests {
 
     // --- x-2681 ask-lane control.sock fallback ---
 
+    // daemon_roster_path reads FNO_CLAUDE_DAEMON_DIR, a process-global. Serialize
+    // the env-touching tests below (cargo runs tests in parallel threads; no
+    // serial_test dep in this crate) so they never observe each other's mutation.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn write_roster(home: &Path, session_uuid: &str) {
         let daemon = home.join(".claude").join("daemon");
         fs::create_dir_all(&daemon).unwrap();
@@ -3423,11 +3432,32 @@ mod tests {
     }
 
     #[test]
+    fn daemon_roster_path_honors_env_override_first() {
+        // x-2681 / codex P2: the roster pre-check must honor FNO_CLAUDE_DAEMON_DIR
+        // (a supported alt-daemon override) the SAME way the deliver path does, or
+        // the fallback silently skips in an alt-daemon setup.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tmpdir();
+        let ch = ClaudeHome::at(&home);
+        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
+        assert_eq!(
+            ch.daemon_roster_path(),
+            home.join(".claude").join("daemon").join("roster.json")
+        );
+        let alt = tmpdir();
+        std::env::set_var(crate::claude_roster::DAEMON_DIR_ENV, &alt);
+        assert_eq!(ch.daemon_roster_path(), alt.join("roster.json"));
+        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
+    }
+
+    #[test]
     fn ask_followup_socket_null_roster_live_falls_back_to_control_sock() {
         // A socket-null session that is present in the daemon roster takes the
         // control.sock fallback. With no real control.sock the deliver fails and
         // surfaces the DISTINCT reason (not socket-null) -- which the dispatch
         // layer routes to the no-stamp branch (AC6-FR: never orphan a live row).
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
         let home = tmpdir();
         let sessions = home.join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
