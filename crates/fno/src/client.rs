@@ -405,6 +405,10 @@ struct View {
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
+    /// (x-a621) First-visible [`View::display_rows`] index in the sideline:
+    /// follow-the-cursor scroll offset so rows below the fold render and take
+    /// the mouse. 0 (top-anchored) whenever the catalog fits the height.
+    sideline_offset: usize,
     /// Answer-overlay cursor into [`View::blocked_queue`] (x-c929), when open;
     /// the index of the selected blocked pane in `Layout.agents` order.
     answers: Option<usize>,
@@ -550,6 +554,7 @@ impl View {
             expanded,
             selector: None,
             sel_esc: Vec::new(),
+            sideline_offset: 0,
             answers: None,
             ans_esc: Vec::new(),
             digest: None,
@@ -756,8 +761,10 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        // Row i of display_rows() is painted at TAB_BAR_ROWS + i (draw_sideline).
-        self.row_action((row - TAB_BAR_ROWS) as usize)
+        // Display row i is painted at TAB_BAR_ROWS + (i - sideline_offset)
+        // (draw_sideline), so invert with the offset - else a click on a scrolled
+        // row activates the wrong unscrolled row (codex P2). Mirrors sideline_row_at.
+        self.row_action((row - TAB_BAR_ROWS) as usize + self.sideline_offset)
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -979,6 +986,22 @@ impl View {
         }
     }
 
+    /// Reverse the state chip on `Shift-Tab`: all -> Idle -> DoneUnseen ->
+    /// Working -> Blocked -> all (the exact reverse of [`nav_cycle_state`]).
+    /// Resets the cursor to the top of the re-filtered set.
+    fn nav_cycle_state_rev(&mut self) {
+        if let Some(n) = self.nav.as_mut() {
+            n.state_filter = match n.state_filter {
+                None => Some(PaneState::Idle),
+                Some(PaneState::Idle) => Some(PaneState::DoneUnseen),
+                Some(PaneState::DoneUnseen) => Some(PaneState::Working),
+                Some(PaneState::Working) => Some(PaneState::Blocked),
+                Some(PaneState::Blocked) => None,
+            };
+            n.cursor = 0;
+        }
+    }
+
     /// BEL when the current filter excludes every row (AC2-ERR/AC3-ERR): a query
     /// or state that matches nothing is audible, never a silent empty overlay.
     fn nav_ring_if_empty(&self) {
@@ -1002,7 +1025,7 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        let i = (row - TAB_BAR_ROWS) as usize;
+        let i = (row - TAB_BAR_ROWS) as usize + self.sideline_offset;
         (i < self.display_rows().len()).then_some(i)
     }
 
@@ -1117,6 +1140,9 @@ impl View {
                 self.hover_row = None;
             }
         }
+        // Re-clamp the sideline scroll offset against the new catalog so a
+        // shrunk row set never leaves the offset past the last row (x-a621).
+        self.clamp_sideline_offset();
         // Drop a pending focus-follow whose target pane vanished, so a settle can
         // never fire `FocusPane` at a dead id (the server would refuse it anyway).
         if let Some((pane, _)) = self.hover_pending {
@@ -1136,6 +1162,9 @@ impl View {
         if !self.expanded.remove(&id) {
             self.expanded.insert(id);
         }
+        // Collapsing shrinks the row set; re-clamp so a scrolled sideline never
+        // skips past the new last row (x-a621).
+        self.clamp_sideline_offset();
     }
 
     /// Clamp a selector cursor into the current [`View::display_rows`] and
@@ -1174,6 +1203,39 @@ impl View {
             .rev()
             .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
             .unwrap_or(cur)
+    }
+
+    /// Sideline rows the cursor can occupy: below the tab bar and above the
+    /// bottom chrome row. `draw_bottom_row` repaints the last row over the
+    /// sideline when it is chrome, and [`sideline_row_at`] excludes it from
+    /// hit-testing, so it must not count as a scroll slot - else follow-cursor
+    /// scroll would park the last row under the status bar (invisible, unclickable).
+    fn sideline_visible_rows(&self) -> usize {
+        (self.term.0 as usize)
+            .saturating_sub(TAB_BAR_ROWS as usize)
+            .saturating_sub(self.bottom_row_is_chrome() as usize)
+    }
+
+    /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
+    /// the least it takes to keep the selector (or hover) row on screen, then
+    /// clamp into `[0, rows - visible]` so a shrunk catalog never scrolls past the
+    /// last row. Everything-fits (or an empty window) resets the offset to 0, so
+    /// the common case renders byte-identically to a non-scrolling sideline.
+    fn clamp_sideline_offset(&mut self) {
+        let total = self.display_rows().len();
+        let visible = self.sideline_visible_rows();
+        if total <= visible || visible == 0 {
+            self.sideline_offset = 0;
+            return;
+        }
+        if let Some(cur) = self.selector.or(self.hover_row) {
+            if cur < self.sideline_offset {
+                self.sideline_offset = cur;
+            } else if cur >= self.sideline_offset + visible {
+                self.sideline_offset = cur + 1 - visible;
+            }
+        }
+        self.sideline_offset = self.sideline_offset.min(total - visible);
     }
 
     /// Compose the full-terminal frame: tab bar, sideline, dividers, panes.
@@ -1740,8 +1802,11 @@ impl View {
 
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
         let text_w = panel_w - 1; // last column is the divider
-        for (i, drow) in self.display_rows().into_iter().enumerate() {
-            let r = TAB_BAR_ROWS as usize + i;
+        let off = self.sideline_offset;
+        // `i` stays the TRUE display index (so the selector/hover highlight and
+        // hit-test still match); the painted row subtracts the scroll offset.
+        for (i, drow) in self.display_rows().into_iter().enumerate().skip(off) {
+            let r = TAB_BAR_ROWS as usize + (i - off);
             if r >= rows {
                 break;
             }
@@ -2630,6 +2695,9 @@ async fn attach_and_run(
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
                     view.term = (rows, cols);
+                    // A shorter terminal shrinks the scroll window; re-clamp so
+                    // the offset never scrolls past the last row (x-a621).
+                    view.clamp_sideline_offset();
                     let (c_rows, c_cols) = view.content_dims();
                     // The server resizes PTYs + grids off the content area
                     // and re-emits Layout + frames; the local redraw keeps
@@ -2851,6 +2919,9 @@ async fn handle_stdin(
                     // Row 0 is a squad row (or the footer, never a Header).
                     view.selector = Some(0);
                     view.sel_esc.clear();
+                    // Open at the top: a stale offset from a prior session must
+                    // not hide row 0 (x-a621).
+                    view.sideline_offset = 0;
                 }
             }
             Event::OpenAnswers => {
@@ -3261,6 +3332,9 @@ async fn selector_keys(
             _ => {}
         }
     }
+    // Follow the (possibly moved) cursor / expanded catalog into the scroll
+    // window so a row driven below the fold stays visible (x-a621).
+    view.clamp_sideline_offset();
     Ok(StdinFlow::Continue)
 }
 
@@ -3376,6 +3450,74 @@ fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
     keys
 }
 
+/// Navigator fold keys. Superset of [`SearchKey`]: the same split-arrow escape
+/// fold, but a completed CSI whose final byte is Up/Down/Shift-Tab surfaces as a
+/// motion token instead of being swallowed (ab-63b44059). Every other CSI is
+/// still consumed whole, so no escape tail leaks into the query or the pane.
+enum NavKey {
+    Byte(u8),
+    Esc,
+    Up,
+    Down,
+    ShiftTab,
+}
+
+/// Fold navigator-mode bytes. Identical escape-carry semantics to
+/// [`fold_search_input`] (whole CSI consumed, split sequences carried across
+/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`, and
+/// Shift-Tab `ESC [ Z` finals become [`NavKey::Up`]/[`Down`]/[`ShiftTab`] so the
+/// navigator can move its cursor and reverse-cycle the state chip. A modified
+/// arrow (`ESC [ 1 ; 5 A`) shares the final byte and maps to the same motion -
+/// harmless. All other finals are swallowed, same leak-safety as search.
+fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
+    let mut keys = Vec::new();
+    for &b in bytes {
+        match esc.as_slice() {
+            [] => {
+                if b == 0x1b {
+                    esc.push(0x1b);
+                } else {
+                    keys.push(NavKey::Byte(b));
+                }
+            }
+            [0x1b] => {
+                if b == b'[' {
+                    esc.push(b);
+                } else {
+                    esc.clear();
+                    keys.push(NavKey::Esc);
+                    if b == 0x1b {
+                        esc.push(0x1b);
+                    } else {
+                        keys.push(NavKey::Byte(b));
+                    }
+                }
+            }
+            _ => {
+                if b == 0x1b {
+                    esc.clear();
+                    esc.push(0x1b);
+                } else if (0x40..=0x7e).contains(&b) {
+                    // CSI complete. Surface the three motion finals; swallow the
+                    // rest (whole sequence consumed either way - no leak).
+                    match b {
+                        b'A' => keys.push(NavKey::Up),
+                        b'B' => keys.push(NavKey::Down),
+                        b'Z' => keys.push(NavKey::ShiftTab),
+                        _ => {}
+                    }
+                    esc.clear();
+                } else if esc.len() >= 16 {
+                    esc.clear();
+                } else {
+                    esc.push(b);
+                }
+            }
+        }
+    }
+    keys
+}
+
 /// Search-mode keys (v12, x-e780). Typing: printable append, Backspace pops,
 /// Enter submits (send [`ClientMsg::SearchOpen`]), Esc cancels locally. Browsing
 /// (post-submit): `n`/`N` send [`ClientMsg::SearchStep`] (older/newer), Esc sends
@@ -3464,18 +3606,19 @@ async fn search_keys(
 
 /// Navigator-overlay keys (x-653d): a client-owned typing overlay like search.
 /// Printable bytes edit the text filter (Locked 5: letters are ALWAYS query
-/// text, never state keys); Backspace widens; `Tab` cycles the state chip;
-/// `Ctrl-n`/`Ctrl-p` move the cursor over the filtered rows (clamped, no wrap);
-/// Enter goto's the row; Esc closes. Reuses [`fold_search_input`]'s split-arrow
-/// fold (which swallows arrows whole, so cursor motion is Ctrl-n/p as in search)
-/// and its per-key re-read so an Esc mid-chunk swallows the chunk's remainder.
+/// text, never state keys); Backspace widens; `Tab`/`Shift-Tab` cycle the state
+/// chip forward/back; `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) move the cursor over the
+/// filtered rows (clamped, no wrap); Enter goto's the row; Esc closes. Uses
+/// [`fold_nav_input`]'s split-arrow fold (which surfaces the motion finals while
+/// swallowing every other escape) and a per-key re-read so an Esc mid-chunk
+/// swallows the chunk's remainder (ab-63b44059).
 async fn nav_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
     let mut esc = std::mem::take(&mut view.nav_esc);
-    let keys = fold_search_input(&mut esc, bytes);
+    let keys = fold_nav_input(&mut esc, bytes);
     view.nav_esc = esc;
     for key in keys {
         // Re-read the mode each key: an Esc mid-chunk closes it and the rest of
@@ -3484,19 +3627,26 @@ async fn nav_keys(
             break;
         }
         match key {
-            SearchKey::Esc => {
+            NavKey::Esc => {
                 view.nav = None;
                 view.nav_esc.clear();
                 break;
             }
-            SearchKey::Byte(b) => match b {
+            // Arrows mirror Ctrl-p/Ctrl-n; Shift-Tab reverses the state ring.
+            NavKey::Up => view.nav_move_cursor(-1),
+            NavKey::Down => view.nav_move_cursor(1),
+            NavKey::ShiftTab => {
+                view.nav_cycle_state_rev();
+                view.nav_ring_if_empty();
+            }
+            NavKey::Byte(b) => match b {
                 b'\r' | b'\n' => nav_goto(view, sock_w).await?,
                 b'\t' => {
                     view.nav_cycle_state();
                     view.nav_ring_if_empty();
                 }
-                // Ctrl-n / Ctrl-p move the cursor (readline convention); arrows
-                // are swallowed by the fold, so these are the motion keys.
+                // Ctrl-n / Ctrl-p move the cursor (readline convention), kept
+                // alongside the arrow tokens for muscle memory.
                 0x0e => view.nav_move_cursor(1),
                 0x10 => view.nav_move_cursor(-1),
                 0x7f | 0x08 => {
@@ -4574,6 +4724,25 @@ mod tests {
         // The divider column and the pane content beyond it are not chrome hits.
         assert!(view.chrome_hit(1, 27).is_none());
         assert!(view.chrome_hit(1, 40).is_none());
+    }
+
+    #[test]
+    fn chrome_hit_adds_sideline_offset_when_scrolled() {
+        // Regression (codex P2): a click must invert draw_sideline's scroll
+        // offset, so a click on a scrolled row activates the row painted there,
+        // not the unscrolled row at the same terminal cell.
+        // Rows: [0 squad1(active), 1 tab, 2 tab, 3 squad2, 4 footer].
+        let mut v = two_pane_view();
+        // Unscrolled: terminal row 4 -> display index 3 -> squad2.
+        assert_eq!(cmds(v.chrome_hit(4, 4)), vec![Command::SelectSquad(2)]);
+        // Scrolled by 1: terminal row 3 -> display index 3 -> squad2 (without the
+        // offset it would resolve to index 2, a tab row).
+        v.sideline_offset = 1;
+        assert_eq!(
+            cmds(v.chrome_hit(3, 4)),
+            vec![Command::SelectSquad(2)],
+            "click resolves through the scroll offset"
+        );
     }
 
     // ---- x-2f99: active-squad visibility ----
@@ -6017,6 +6186,191 @@ mod tests {
         );
         nav_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
         assert!(v.nav.is_none(), "Esc closes; the trailing x is swallowed");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_arrows_move_cursor() {
+        // AC1 (ab-63b44059): Down/Up move the cursor one filtered row (same as
+        // Ctrl-n/Ctrl-p), clamped no-wrap; arrows never leak to the pane; and
+        // printable input still edits the query afterwards (Locked-5).
+        let mut v = two_pane_view();
+        assert!(v.nav_rows().len() >= 2, "fixture needs >=2 nav rows");
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[B", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 1, "Down -> row 1");
+        nav_keys(&mut v, b"\x1b[A", &mut buf).await.unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "Up -> row 0");
+        nav_keys(&mut v, b"\x1b[A", &mut buf).await.unwrap();
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            0,
+            "Up at top clamps (no wrap)"
+        );
+        assert!(buf.is_empty(), "arrows send nothing to the pane");
+        nav_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert_eq!(
+            v.nav.as_ref().unwrap().query,
+            "x",
+            "letter still edits query"
+        );
+    }
+
+    #[tokio::test]
+    async fn nav_keys_shift_tab_reverse_cycles_state() {
+        // AC2 (ab-63b44059): Shift-Tab steps to the PREVIOUS state in the ring
+        // (reverse of Tab, which advances None -> Blocked) and re-clamps cursor 0.
+        let mut v = two_pane_view();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 1,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[Z", &mut buf).await.unwrap();
+        assert_eq!(
+            v.nav.as_ref().unwrap().state_filter,
+            Some(PaneState::Idle),
+            "Shift-Tab reverses to [idle]"
+        );
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "cursor re-clamped to 0");
+        assert!(buf.is_empty(), "Shift-Tab sends nothing to the pane");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_split_arrow_carries_across_reads() {
+        // AC4 (ab-63b44059): a Down arrow split across two reads (ESC[ then B)
+        // carries via nav_esc and still moves the cursor, with no stray byte
+        // leaking to the query or the pane.
+        let mut v = two_pane_view();
+        assert!(v.nav_rows().len() >= 2);
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[", &mut buf).await.unwrap();
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            0,
+            "partial seq: no motion yet"
+        );
+        nav_keys(&mut v, b"B", &mut buf).await.unwrap();
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            1,
+            "completed Down moves cursor"
+        );
+        assert!(
+            v.nav.as_ref().unwrap().query.is_empty(),
+            "no escape tail leaked into the query"
+        );
+        assert!(buf.is_empty(), "nothing leaked to the pane");
+    }
+
+    #[test]
+    fn sideline_scroll_follows_cursor_and_maps_hit() {
+        // AC1+AC2 (x-a621): a selector driven below the fold scrolls the sideline
+        // to keep it visible, and a click on a scrolled row hit-tests to the right
+        // display index (no off-by-offset).
+        let mut v = two_pane_view();
+        let total = v.display_rows().len();
+        assert!(total >= 2, "fixture needs >=2 sideline rows");
+        v.term = (total as u16, 100); // visible = total - 1: one row below the fold
+        let visible = v.sideline_visible_rows();
+        v.selector = Some(total - 1);
+        v.clamp_sideline_offset();
+        assert_eq!(
+            v.sideline_offset,
+            total - visible,
+            "offset follows the cursor"
+        );
+        assert!(
+            (total - 1) >= v.sideline_offset && (total - 1) < v.sideline_offset + visible,
+            "the cursor row is inside the visible window"
+        );
+        assert!(v.panel_w() > 1, "fixture panel is visible");
+        assert_eq!(
+            v.sideline_row_at(TAB_BAR_ROWS, 0),
+            Some(v.sideline_offset),
+            "the top drawn row hit-tests to the scrolled index"
+        );
+    }
+
+    #[test]
+    fn sideline_scroll_zero_when_rows_fit() {
+        // AC3 (x-a621): when every row fits the height the offset stays 0, so the
+        // frame renders exactly as a non-scrolling sideline.
+        let mut v = two_pane_view(); // tall terminal, small catalog
+        assert!(
+            v.display_rows().len() <= v.sideline_visible_rows(),
+            "catalog fits the window"
+        );
+        v.selector = Some(0);
+        v.sideline_offset = 9; // stale offset from a prior scrolled session
+        v.clamp_sideline_offset();
+        assert_eq!(v.sideline_offset, 0, "fits -> offset resets to 0");
+    }
+
+    #[test]
+    fn sideline_scroll_never_past_last_row() {
+        // AC4 (x-a621): an offset left too large by a catalog shrink re-clamps into
+        // [0, rows - visible]; it never scrolls past the last row.
+        let mut v = two_pane_view();
+        let total = v.display_rows().len();
+        assert!(total >= 2);
+        v.term = (total as u16, 100); // visible = total - 1
+        v.selector = None;
+        v.hover_row = None;
+        v.sideline_offset = 999; // absurd, e.g. after the catalog shrank
+        v.clamp_sideline_offset();
+        assert_eq!(
+            v.sideline_offset,
+            total - v.sideline_visible_rows(),
+            "clamped to the last full window"
+        );
+    }
+
+    #[test]
+    fn sideline_scroll_window_excludes_chrome_bottom_row() {
+        // Regression (code-reviewer): the bottom status row is chrome-owned and
+        // overwritten after the sideline paints, and sideline_row_at excludes it,
+        // so it must not count as a scroll slot - otherwise follow-cursor scroll
+        // parks the last row under the status bar.
+        let mut v = two_pane_view();
+        v.term = ((MIN_ROWS_FOR_STATUS as usize).max(10) as u16, 100);
+        // Clear every chrome trigger, then toggle only status_on so the branch
+        // under test is the bottom-chrome subtraction, nothing else.
+        v.confirm = None;
+        v.create = None;
+        v.rename = None;
+        v.search = None;
+        v.hint = false;
+        v.status_on = true;
+        assert!(
+            v.bottom_row_is_chrome(),
+            "status bar occupies the bottom row"
+        );
+        assert_eq!(
+            v.sideline_visible_rows(),
+            v.term.0 as usize - TAB_BAR_ROWS as usize - 1,
+            "chrome bottom row is not a scroll slot"
+        );
+        v.status_on = false;
+        assert!(
+            !v.bottom_row_is_chrome(),
+            "no chrome -> bottom row reclaimed"
+        );
+        assert_eq!(
+            v.sideline_visible_rows(),
+            v.term.0 as usize - TAB_BAR_ROWS as usize,
+            "with no chrome the full height below the tab bar is usable"
+        );
     }
 
     #[test]

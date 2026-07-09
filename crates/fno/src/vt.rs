@@ -28,15 +28,15 @@ pub const DEFAULT_COLS: u16 = 80;
 /// Default scrollback cap per pane. `Term::new` treats `scrolling_history` as a
 /// bound the history grows toward, not an allocation, so a pane that emits 500
 /// lines costs 500 lines even at this ceiling. 100k is alacritty's documented
-/// max; a memory-constrained deployment lowers it via `config.mux.scrollback_lines`
-/// (wired in Task 1.5). Governs how far `pane read --lines` and a still-streaming
-/// block can reach into history (4b).
+/// max; a memory-constrained deployment lowers it via the
+/// `FNO_MUX_SCROLLBACK_LINES` env var (see `scrollback_lines`). Governs how far
+/// `pane read --lines` and a still-streaming block can reach into history (4b).
 const SCROLLBACK_LINES: usize = 100_000;
 
-/// Resolve the per-pane scrollback cap. `config.mux.scrollback_lines` is
-/// exported by the launcher as `FNO_MUX_SCROLLBACK_LINES` (the crate reads env,
-/// not config.toml - same pattern as `FNO_SESSION`/`FNO_MUX_DIR`); a
-/// memory-constrained deployment lowers it. Falls back to the 100k default.
+/// Resolve the per-pane scrollback cap. Read directly from the
+/// `FNO_MUX_SCROLLBACK_LINES` env var (set it yourself); it is NOT wired to
+/// `config.mux` - the crate reads env only, same pattern as
+/// `FNO_SESSION`/`FNO_MUX_DIR`. Falls back to the 100k default.
 fn scrollback_lines() -> usize {
     std::env::var("FNO_MUX_SCROLLBACK_LINES")
         .ok()
