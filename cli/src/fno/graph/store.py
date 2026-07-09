@@ -72,7 +72,6 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "deferred_at",
     "deferred_reason",
     "has_brief",
-    "compacted",
     "roadmap_id",
     "vision_path",
     "details",
@@ -286,7 +285,6 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         # canonicalize_entries; populated authoritatively on every write.
         e.setdefault("children", [])
         e.setdefault("has_brief", False)
-        e.setdefault("compacted", False)
         e.setdefault("roadmap_id", None)
         e.setdefault("vision_path", None)
         e.setdefault("details", None)

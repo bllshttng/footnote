@@ -76,19 +76,16 @@ def test_claim_history_handles_missing_cost_sessions():
     assert record["claim_history"]["session_count"] == 0
     assert record["claim_history"]["total_cost_usd"] == 0
     assert record["claim_history"]["last_claimed_at"] is None
-    assert record["claim_history"]["compacted"] is False
 
 
-def test_claim_history_passes_through_claimed_at_and_compacted():
+def test_claim_history_passes_through_claimed_at():
     entry = {
         "id": "ab-1",
         "title": "X",
         "claimed_at": "2026-04-27T10:00:00Z",
-        "compacted": True,
     }
     record = _candidate_record(entry, deep=False)
     assert record["claim_history"]["last_claimed_at"] == "2026-04-27T10:00:00Z"
-    assert record["claim_history"]["compacted"] is True
 
 
 def test_claim_history_skips_malformed_sessions():
@@ -263,7 +260,6 @@ def test_cli_context_candidate_round_trips_enriched_fields(tmp_graph, tmp_path):
                 "details": "user-supplied implementation guidance",
                 "cost_sessions": [{"cost_usd": 1.5}, {"cost_usd": 2.0}],
                 "claimed_at": "2026-04-27T10:00:00Z",
-                "compacted": True,
                 "pr_number": 42,
                 "merge_status": "open",
                 "_status": "ready",
@@ -284,7 +280,6 @@ def test_cli_context_candidate_round_trips_enriched_fields(tmp_graph, tmp_path):
     assert c["claim_history"]["session_count"] == 2
     assert c["claim_history"]["total_cost_usd"] == 3.5
     assert c["claim_history"]["last_claimed_at"] == "2026-04-27T10:00:00Z"
-    assert c["claim_history"]["compacted"] is True
     assert c["ship_state"]["pr_number"] == 42
     assert c["ship_state"]["merge_status"] == "open"
 

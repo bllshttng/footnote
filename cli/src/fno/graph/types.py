@@ -97,7 +97,6 @@ class Entry(BaseModel):
     deferred_at: Optional[str] = None
     deferred_reason: Optional[str] = None
     has_brief: bool = False
-    compacted: bool = False
     roadmap_id: Optional[str] = None
     vision_path: Optional[str] = None
     details: Optional[str] = None

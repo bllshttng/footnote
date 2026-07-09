@@ -1113,7 +1113,6 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "claimed_at": None,
         "completed_at": None,
         "has_brief": False,
-        "compacted": False,
         "roadmap_id": spec["roadmap_id"],
         "vision_path": None,
         "details": None,
