@@ -19,7 +19,7 @@ Bias toward caution over speed; for trivial tasks, use judgment. Derived from [K
 ```
 footnote/
 ├── .claude-plugin/   # Plugin manifest
-├── skills/           # Skills; advertised set in skills/using-abilities/SKILL.md
+├── skills/           # Skills; advertised set in skills/using-fno/SKILL.md
 ├── agents/           # Subagents (target, code-reviewer, sigma-review specialists)
 ├── commands/         # Slash commands
 ├── hooks/            # Stop hooks, session-start, context monitor
@@ -38,7 +38,7 @@ footnote/
 
 ## Commands
 
-**Front door.** Six advertised verbs: `/target`, `/megawalk`, `/think`, `/review`, `/pr`, `/fix`. Each fans out to modes (`/review sigma|peer`, `/fix` + `investigate`, `/think` + `what-if|panel`, `/pr create|check|merged`, `/do flat|waves`). Everything else is invocable by full name. The advertised set lives in `skills/using-abilities/SKILL.md`, injected at SessionStart.
+**Front door.** Six advertised verbs: `/target`, `/megawalk`, `/think`, `/review`, `/pr`, `/fix`. Each fans out to modes (`/review sigma|peer`, `/fix` + `investigate`, `/think` + `what-if|panel`, `/pr create|check|merged`, `/do flat|waves`). Everything else is invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`, injected at SessionStart.
 
 | Command | Purpose |
 |---------|---------|

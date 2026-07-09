@@ -119,14 +119,14 @@ hydrate_state_provider_context() {
 # turn one. Keep this aligned with the SessionStart array in hooks.json
 # so the Claude and non-Claude surfaces converge on the same preamble.
 
-# 1. using-abilities preamble — names both surfaces (slash commands + fno
+# 1. using-fno preamble — names both surfaces (slash commands + fno
 #    CLI) and the HARD-GATE forbidden writes. Highest priority because
 #    it teaches the agent the verbs the rest of the context will use.
-using_abilities_content=""
-if [[ -f "${SCRIPT_DIR}/session-start-using-abilities.sh" ]]; then
-    raw_using_abilities=$(bash "${SCRIPT_DIR}/session-start-using-abilities.sh" 2>/dev/null || echo "")
-    if [[ -n "$raw_using_abilities" ]]; then
-        using_abilities_content=$(echo "$raw_using_abilities" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // .additionalContext // empty' 2>/dev/null || echo "$raw_using_abilities")
+using_fno_content=""
+if [[ -f "${SCRIPT_DIR}/session-start-using-fno.sh" ]]; then
+    raw_using_fno=$(bash "${SCRIPT_DIR}/session-start-using-fno.sh" 2>/dev/null || echo "")
+    if [[ -n "$raw_using_fno" ]]; then
+        using_fno_content=$(echo "$raw_using_fno" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // .additionalContext // empty' 2>/dev/null || echo "$raw_using_fno")
     fi
 fi
 
@@ -210,7 +210,7 @@ append_section() {
         combined="${combined}"$'\n\n'"${section}"
     fi
 }
-append_section "$using_abilities_content"
+append_section "$using_fno_content"
 append_section "$vision_content"
 append_section "$whoami_content"
 append_section "$hygiene_content"

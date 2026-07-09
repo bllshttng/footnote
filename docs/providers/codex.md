@@ -8,7 +8,8 @@ The repo carries a local Codex marketplace fixture at `.agents/plugins/marketpla
 It points at this checkout and exposes `.codex-plugin/plugin.json`.
 
 ```bash
-codex plugin marketplace add .agents/plugins
+codex plugin marketplace add .
+codex plugin add fno@footnote-local
 ```
 
 Then install `fno` from that marketplace in the Codex app. The plugin manifest exposes:

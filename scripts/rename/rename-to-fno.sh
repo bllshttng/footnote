@@ -162,8 +162,7 @@ sweep '(?<![/\w.])abilities(?![/\w])' 'fno' '*.py' ':!cli/benchmarks/**'
 # dot requirement and by the `(?<![\w./])` lookbehind on the slash form.
 # `.(?!ext)` excludes file-extension contexts (abilities.sh / abilities.md /
 # abilities.json filenames) - those are not module qualifiers and must not move
-# unless the file itself is renamed (e.g. the `session-start-using-abilities.sh`
-# hook + `using-abilities` skill stay). The slash form excludes vault subdir
+# unless the file itself is renamed. The slash form excludes vault subdir
 # leaves (backlog/plans/design/...) so `{vault}/abilities/backlog` stays while a
 # real package path like `abilities/cli.py` still moves.
 sweep '\babilities\.(?!(?:sh|py|md|json|ya?ml|txt|toml|rs|lock|jsonl|cfg|ini|template|example|bak)\b)(?=[a-z_])' 'fno.'
@@ -278,10 +277,7 @@ sweep 'abilities-test-home' 'fno-test-home'
 #    `{project_id}-{name}` with project_id `abi` -> `fno`; the compound-preserve
 #    pass kept the literal, so align it.
 sweep 'abi-my-feature' 'fno-my-feature'
-# 3. The `using-abilities` skill + its SessionStart hook file are NOT renamed
-#    (skill dirs are out of scope), so any `using-fno` produced by a bare-token
-#    pass must be restored. (Idempotent no-op on a fresh run.)
-sweep 'using-fno' 'using-abilities'
+# 3. `using-fno` is now the canonical SessionStart orientation skill name.
 
 echo "== Phase 11: brand prose (footnote) + skill-namespace residual (fno:) =="
 # Skill namespace WITHOUT a leading slash (handle): `abilities:tdd`, `$abilities:do`,
@@ -309,8 +305,8 @@ brand_edit .github/workflows/rust-ci.yml 's/Install abilities Python package/Ins
 # yaml) would rewrite synthetic test-project fixtures and code strings, breaking
 # internal consistency (a test project named `abilities` whose `$ROOT/abilities/`
 # path the `/`-exclusion would skip -> half-renamed). Excludes: vault paths/URLs
-# (`/abilities`), `capabilities` (`\w` before), `_abilities`, and the
-# `using-abilities` skill. Still renames `non-abilities`, `abilities-ecosystem`.
+# (`/abilities`), `capabilities` (`\w` before), `_abilities`, and using-* skill
+# names. Still renames `non-abilities`, `abilities-ecosystem`.
 sweep '(?<!using-)(?<![\w/])abilities(?![\w])' 'footnote' '*.md' 'NOTICE'
 
 echo

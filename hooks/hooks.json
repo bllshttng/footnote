@@ -186,7 +186,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start-using-abilities.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start-using-fno.sh"
           },
           {
             "type": "command",

@@ -83,7 +83,7 @@ Driver skills (`/target`, `/megawalk`) must stay portable to any markdown-aware 
 
 ## State files are CLI-owned
 
-Never hand-edit `~/.fno/graph.json` or the immutable session manifest `.fno/target-state.md` (an inputs-only file; the only legal post-init write is first-fill of `plan_path` via `fno state set`). Use the `fno` verbs (e.g. `fno backlog`). Hooks detect direct graph mutations post-hoc. See `skills/using-abilities/SKILL.md` for the full surface map.
+Never hand-edit `~/.fno/graph.json` or the immutable session manifest `.fno/target-state.md` (an inputs-only file; the only legal post-init write is first-fill of `plan_path` via `fno state set`). Use the `fno` verbs (e.g. `fno backlog`). Hooks detect direct graph mutations post-hoc. See `skills/using-fno/SKILL.md` for the full surface map.
 
 ## Conventions
 
