@@ -111,7 +111,16 @@ autonomous/headless modes.
 # session's many short-lived bash sub-invocations, so Step 8 recomputes the
 # SAME string to release. A shared-constant holder would read as an idempotent
 # re-acquire and silently defeat the mutex - keep it session-keyed.
-HOLDER="postmerge:pr-${PR}:${CLAUDE_CODE_SESSION_ID:-$(fno claim session-pid 2>/dev/null || echo "$$")}"
+#
+# `fno claim session-pid` exits 0 with EMPTY stdout when no claude ancestor
+# exists (codex/gemini/plain-shell), so guard on EMPTINESS, not exit code - an
+# empty suffix would collapse both racing runners to the SAME holder and
+# silently defeat the mutex in exactly the autonomous modes this protects. `$$`
+# is process-unique, so distinct runners still get distinct holders.
+_SID="${CLAUDE_CODE_SESSION_ID:-}"
+[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null)"
+[[ -n "$_SID" ]] || _SID="$$"
+HOLDER="postmerge:pr-${PR}:${_SID}"
 
 # `reconcile:` routes to the GLOBAL claims root (~/.fno/claims), so the two
 # racing runners - which run from different cwds - see each other's claim.
@@ -559,7 +568,11 @@ never a successor's TTL-expired re-acquire. Skipping it just lets the claim
 linger to TTL expiry.
 
 ```bash
-HOLDER="postmerge:pr-${PR}:${CLAUDE_CODE_SESSION_ID:-$(fno claim session-pid 2>/dev/null || echo "$$")}"
+# Recompute the SAME holder Step 0.5 used (guard on emptiness, not exit code).
+_SID="${CLAUDE_CODE_SESSION_ID:-}"
+[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null)"
+[[ -n "$_SID" ]] || _SID="$$"
+HOLDER="postmerge:pr-${PR}:${_SID}"
 fno claim release reconcile:pr-${PR} --holder "$HOLDER" 2>/dev/null \
   || echo "post-merge: reservation release skipped (already gone / holder mismatch); TTL will reap." >&2
 ```
