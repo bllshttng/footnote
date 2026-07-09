@@ -137,7 +137,11 @@ def _parse_field_meta_keys(source_text: str) -> Optional[frozenset[str]]:
         if "FIELD_META" not in targets:
             continue
         if not isinstance(node.value, ast.Dict):
-            return None
+            # A bare `FIELD_META: dict[...]` annotation (value None) or a computed
+            # assignment: keep walking to find the real literal rather than
+            # skipping the check. A truly computed-only FIELD_META finds no dict
+            # and falls through to None below.
+            continue
         keys: set[str] = set()
         for k in node.value.keys:
             # k is None for a `**spread` entry; non-Constant for a computed key.

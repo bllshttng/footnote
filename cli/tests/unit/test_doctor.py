@@ -302,6 +302,18 @@ def test_parse_field_meta_keys_spread_returns_none() -> None:
     assert doctor._parse_field_meta_keys(computed) is None
 
 
+def test_parse_field_meta_keys_split_annotation_then_assign() -> None:
+    """A bare annotation followed by a separate dict assignment still parses: the
+    valueless AnnAssign is skipped, not treated as an unreadable form."""
+    split = (
+        "FIELD_META: dict[str, int]\n"
+        'FIELD_META = {"project.id": 1, "backlog.id_prefix": 2}\n'
+    )
+    assert doctor._parse_field_meta_keys(split) == frozenset(
+        {"project.id", "backlog.id_prefix"}
+    )
+
+
 def test_parse_field_meta_keys_broken_or_absent_returns_none() -> None:
     """Unparseable text or no FIELD_META => None."""
     assert doctor._parse_field_meta_keys("FIELD_META = {  # truncated\n") is None
