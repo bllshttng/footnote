@@ -9,7 +9,8 @@
 # Tests:
 #   T1  no state file              -> stdout {} (allow stop)
 #   T2  fullyIdle == false         -> stdout continue (bg tasks live), binary not called
-#   T3  binary missing             -> stdout {} (allow) + loop_check_binary_missing event
+#   T3  binary missing (active)    -> bounded-continue x3 then give-up {} + events
+#   T10 jq missing gating          -> active: continue; no session: {} (allow)
 #   T4  loop-check block            -> stdout continue, message carried in reason
 #   T5  loop-check terminal allow   -> stdout {} + finalize invoked
 #   T6  loop-check garbage (present) -> stdout continue (transient retry) + event
@@ -106,16 +107,28 @@ STUB
     cleanup
 }
 
-# ── T3: binary missing -> {} (allow) + event ──────────────────────────────────
-log "T3: binary missing -> allow {} + binary_missing event"
+# ── T3: binary missing on active session -> bounded-continue, then give-up {} ──
+# The active-session ship gate must not silently fail open on a missing checker
+# (x-984e): it bounded-continues up to MAX_UNAVAIL_RETRIES (3), then gives up with
+# {} + a give-up event so a persistently-broken checker never wedges a forever-loop.
+log "T3: binary missing -> bounded-continue x3 then give-up {}"
 {
     setup_env
+    # jq reachable (so we exercise the binary-missing path, not jq-missing);
+    # FNO_AGENTS_BIN points nowhere so the binary is genuinely absent.
+    T3PATH="$(safe_path):$(dirname "$(command -v jq)")"
     INPUT="{\"transcriptPath\":\"${TRANSCRIPT_FILE}\",\"fullyIdle\":true,\"conversationId\":\"c3\"}"
-    run_hook "$TMP_DIR" "$INPUT" "HOME=${HOME_DIR}" "PATH=$(safe_path)" "FNO_AGENTS_BIN=/nonexistent"
     t3=true
-    [[ "$(stdout_decision)" == "<none>" ]] && printf '%s' "$HOOK_STDOUT" | jq -e . >/dev/null 2>&1 || { fail "T3: expected {} allow, got $HOOK_STDOUT"; t3=false; }
+    for i in 1 2 3; do
+        run_hook "$TMP_DIR" "$INPUT" "HOME=${HOME_DIR}" "PATH=${T3PATH}" "FNO_AGENTS_BIN=/nonexistent"
+        [[ "$(stdout_decision)" == "continue" ]] || { fail "T3: fire#$i expected continue, got $HOOK_STDOUT"; t3=false; }
+    done
     grep -q 'loop_check_binary_missing' "${TMP_DIR}/.fno/events.jsonl" 2>/dev/null || { fail "T3: binary_missing event not emitted"; t3=false; }
-    [[ "$t3" == true ]] && pass "T3: binary missing -> {} + event"
+    # A 4th consecutive fire exceeds MAX_UNAVAIL_RETRIES -> loud give-up allow.
+    run_hook "$TMP_DIR" "$INPUT" "HOME=${HOME_DIR}" "PATH=${T3PATH}" "FNO_AGENTS_BIN=/nonexistent"
+    { [[ "$(stdout_decision)" == "<none>" ]] && printf '%s' "$HOOK_STDOUT" | jq -e . >/dev/null 2>&1; } || { fail "T3: 4th fire expected {} give-up, got $HOOK_STDOUT"; t3=false; }
+    grep -q 'loop_check_unavailable_giveup' "${TMP_DIR}/.fno/events.jsonl" 2>/dev/null || { fail "T3: give-up event not emitted"; t3=false; }
+    [[ "$t3" == true ]] && pass "T3: binary missing -> bounded-continue x3 then give-up {} + events"
     cleanup
 }
 
@@ -243,6 +256,63 @@ STUB
     [[ "$(stdout_decision)" == "continue" ]] || { fail "T9: expected continue via workspacePaths, got $HOOK_STDOUT"; t9=false; }
     rm -rf "$OTHER" 2>/dev/null || true
     [[ "$t9" == true ]] && pass "T9: manifest resolved from workspacePaths[0]"
+    cleanup
+}
+
+# ── T10: jq-missing gating -- active bounded-continue; no session allows {} ────
+# The state-file discriminator gates the jq-missing path too: an active session
+# bounded-continues (never fails open), a plain agy session still allows the stop.
+log "T10: jq missing -> active continue, no-session {}"
+{
+    setup_env
+    # A PATH with the hook's coreutils but NO jq, so `command -v jq` fails in the
+    # hook (the harness keeps its own jq for stdout_decision).
+    NOJQ="${TMP_DIR}/nojq"; mkdir -p "$NOJQ"
+    for b in bash cat grep sed tr date mkdir head rm git tail dirname basename; do
+        s="$(command -v "$b" 2>/dev/null)"; [[ -n "$s" ]] && ln -sf "$s" "$NOJQ/$b"
+    done
+    # git-init so the jq-missing ROOT fallback (git-toplevel) is the fixture dir.
+    git -C "$TMP_DIR" init -q 2>/dev/null
+    INPUT="{\"transcriptPath\":\"${TRANSCRIPT_FILE}\",\"fullyIdle\":true,\"conversationId\":\"c10\"}"
+    t10=true
+    # (a) active session + jq missing -> bounded continue (not a silent {}).
+    run_hook "$TMP_DIR" "$INPUT" "HOME=${HOME_DIR}" "PATH=${NOJQ}" "FNO_AGENTS_BIN=/nonexistent"
+    [[ "$(stdout_decision)" == "continue" ]] || { fail "T10a: active+jq-missing expected continue, got $HOOK_STDOUT"; t10=false; }
+    # (b) no manifest + jq missing -> {} allow, no bounded-block.
+    NOSESS="$(mktemp -d)"; git -C "$NOSESS" init -q 2>/dev/null
+    run_hook "$NOSESS" "$INPUT" "HOME=${HOME_DIR}" "PATH=${NOJQ}" "FNO_AGENTS_BIN=/nonexistent"
+    { [[ "$(stdout_decision)" == "<none>" ]] && printf '%s' "$HOOK_STDOUT" | jq -e . >/dev/null 2>&1; } || { fail "T10b: no-session+jq-missing expected {}, got $HOOK_STDOUT"; t10=false; }
+    rm -rf "$NOSESS" 2>/dev/null || true
+    [[ "$t10" == true ]] && pass "T10: jq-missing gating (active continue, no-session {})"
+    cleanup
+}
+
+# ── T11: jq missing + UNRELATED cwd -> workspacePaths sed-fallback finds manifest
+# codex peer review (PR #313): without a jq-free workspacePaths read, a jq-missing
+# hook firing from an unrelated cwd would resolve ROOT to $PWD, miss the active
+# manifest, and fail OPEN. The sed fallback must locate the workspace and gate.
+log "T11: jq missing + unrelated cwd -> sed-fallback locates active manifest"
+{
+    setup_env
+    NOJQ="${TMP_DIR}/nojq"; mkdir -p "$NOJQ"
+    for b in bash cat grep sed tr date mkdir head rm git tail dirname basename; do
+        s="$(command -v "$b" 2>/dev/null)"; [[ -n "$s" ]] && ln -sf "$s" "$NOJQ/$b"
+    done
+    # Run from an UNRELATED cwd (its own git repo, no manifest); workspacePaths
+    # points at the real workspace. With jq masked, only the sed fallback can
+    # locate $TMP_DIR's manifest.
+    OTHER="$(mktemp -d)"; git -C "$OTHER" init -q 2>/dev/null
+    INPUT="{\"transcriptPath\":\"${TRANSCRIPT_FILE}\",\"fullyIdle\":true,\"conversationId\":\"c11\",\"workspacePaths\":[\"${TMP_DIR}\"]}"
+    # jq masked -> the hook bounded-continues at the jq-missing gate BUT only
+    # after the sed fallback located $TMP_DIR's manifest. Without the fallback,
+    # ROOT would be $OTHER (no manifest) and the hook would emit {} (fail open).
+    run_hook "$OTHER" "$INPUT" "HOME=${HOME_DIR}" "PATH=${NOJQ}" "FNO_AGENTS_BIN=/nonexistent"
+    if [[ "$(stdout_decision)" == "continue" ]]; then
+        pass "T11: sed-fallback locates the active manifest without jq (no fail-open)"
+    else
+        fail "T11: jq-missing+unrelated-cwd must bounded-continue via sed fallback, got $HOOK_STDOUT"
+    fi
+    rm -rf "$OTHER" 2>/dev/null || true
     cleanup
 }
 

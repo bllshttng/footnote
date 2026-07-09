@@ -4307,39 +4307,13 @@ def _deliver_live(
             except Exception:
                 pass  # fall through to socket path
 
-    # Dual-lane inject (node x-849b). An owned-PTY worker (host_mode=interactive)
-    # has NO control.sock handle -- it is driven via worker.submit; an adopted
-    # `claude --bg` session (host_mode=attached) is driven over control.sock
-    # op:reply (the fno-agents mail-inject verb, G1; node x-1f23). resolve_live_lane
-    # picks the live lane (worker first, lossless); both carry the SAME `wrapped`
-    # <fno_mail> turn, so the envelope rides every lane. Neither live -> the caller
-    # writes the durable fallback (unchanged).
-    from fno.relay.roundtrip import (
-        _worker_sock,
-        resolve_live_lane,
-        submit_via_worker,
-    )
-
-    if entry.claude_session_uuid:
-        live = resolve_live_lane(entry.claude_session_uuid)
-        if live is not None and live[0] == "worker":
-            if submit_via_worker(_worker_sock(live[1]), wrapped):
-                return True
-            # The worker.sock was gone: a STALE live-looking interactive row can
-            # coexist with a valid adopted row for one uuid, so do NOT demote
-            # straight to durable -- fall through to the control.sock lane, which
-            # may still reach the adopted session (codex P2 on #95). This mirrors
-            # the relay's claim-based dispatch (daemon.py:351-365): try the other
-            # lane rather than refuse on precedence. Worst case is a bounded double
-            # delivery if a slow worker later drains, an accepted semantic here.
-
-    # control.sock lane (adopted --bg), unresolved, or worker-lane fall-through: the
-    # mail-inject verb resolves the control.sock handle itself (via ClaudeRoster,
-    # more liberal than resolve_attached_short_id) and returns False (-> durable)
-    # when not reachable. A ("control", short_id) verdict from resolve_live_lane is
-    # handled here by re-deriving the recipient from the roster (the verb re-resolves
-    # the handle), so its short_id is intentionally not threaded through. The roster
-    # accepts either the full session uuid or 8-hex short id.
+    # Live inject over control.sock (adopted `claude --bg`, the fno-agents
+    # mail-inject verb, G1; node x-1f23). The claude PTY worker.sock lane retired
+    # with daemon PTY hosting (x-f54c), so every live claude row now carries an
+    # empty plain `short_id` -- the worker lane can no longer resolve a mail
+    # recipient, leaving control.sock the sole live path (x-3dac). The mail-inject
+    # verb resolves the handle itself via ClaudeRoster (accepts the full session
+    # uuid or 8-hex short id) and returns False (-> durable) when not reachable.
     recipient = entry.claude_session_uuid or entry.claude_short_id
     if not recipient:
         return False

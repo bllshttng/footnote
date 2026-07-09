@@ -67,7 +67,8 @@ def restart_command(
     result: dict[str, Any] = {
         "daemon": None,
         "mux_sessions": [],  # LIVE session names (the restart targets)
-        "mux_other": [],  # non-live rows (stale/unqueryable): reported, never killed
+        "mux_wedged": [],  # wedged rows: actionable failures (holds socket, not accepting)
+        "mux_other": [],  # other non-live rows (stale/unqueryable): reported, never killed
         "mux_restarted": [],
     }
     failures: list[str] = []  # non-empty -> exit 1
@@ -116,13 +117,35 @@ def restart_command(
             for s in sessions
             if isinstance(s, dict) and s.get("session") and s.get("state") == "live"
         ]
+        # A wedged server holds its socket but never accepts (x-82c6): it is a
+        # broken server, NOT a benign non-live socket. Reporting it as
+        # "restart succeeded" is the ok:true lie this fixes -- surface each one
+        # (name + log) and fail the command so `fno restart` exits non-zero.
+        wedged = [
+            s
+            for s in sessions
+            if isinstance(s, dict) and s.get("session") and s.get("state") == "wedged"
+        ]
         other = [
             s["session"]
             for s in sessions
-            if isinstance(s, dict) and s.get("session") and s.get("state") != "live"
+            if isinstance(s, dict)
+            and s.get("session")
+            and s.get("state") not in ("live", "wedged")
         ]
         result["mux_sessions"] = live
+        result["mux_wedged"] = [w["session"] for w in wedged]
         result["mux_other"] = other
+        for w in wedged:
+            name = w["session"]
+            log = w.get("log") or "(server log path unknown)"
+            say(
+                f"fno restart: mux session '{name}' is WEDGED (holds its socket but is not "
+                f"accepting connections); the server is stuck. Kill the server process directly "
+                f"(its log: {log}).",
+                err=True,
+            )
+            failures.append(f"mux: {name} wedged")
         if other:
             say(f"fno restart: {len(other)} non-live mux row(s) (not restarted): {other}.")
         if not live:
