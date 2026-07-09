@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -305,6 +306,25 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
     return re.search(rf"(^|[/-]){re.escape(node_id)}([/-]|$)", head_ref) is not None
 
 
+def _effective_reconcile_cwd(cwd: str, project: Optional[str]) -> str:
+    """The dir reconcile should run a node's gh query / post-close routing in.
+
+    Usually the node's recorded ``cwd`` (a worktree). When that worktree was
+    archived (dir gone), fall back to the node's OWN project checkout so gh
+    queries the right repo and post-close routing (advance/auto-continue) probes
+    the campaign-arm marker under the real root, not a missing dir - but only
+    when that root exists, else keep the original cwd so the existing degrade
+    (per-node warning / node-cwd routing) is strictly unchanged.
+    """
+    if cwd and not os.path.isdir(cwd):
+        from fno.graph._intake import project_root_from_settings
+
+        root = project_root_from_settings(project)
+        if root and os.path.isdir(root):
+            return root
+    return cwd
+
+
 def reverse_map_unstamped(
     entries: list[dict],
     *,
@@ -347,6 +367,10 @@ def reverse_map_unstamped(
         # here and a TypeError at the subprocess cwd= below.
         if not isinstance(cwd, str) or not cwd:
             continue
+        # An archived-worktree cwd would make gh raise Errno 2; substitute the
+        # node's project root when it's gone (also collapses same-project gone
+        # worktrees to one gh call).
+        cwd = _effective_reconcile_cwd(cwd, node.get("project"))
         by_cwd.setdefault(cwd, []).append(node)
 
     records: list[MergeDriftRecord] = []

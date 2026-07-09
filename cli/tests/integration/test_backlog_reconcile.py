@@ -329,6 +329,141 @@ def test_reverse_map_one_gh_call_per_repo(monkeypatch):
     assert {r.node_id for r in records} == {"ab-m1", "ab-m2"}
 
 
+# ---------------------------------------------------------------------------
+# Reverse-map: deleted-worktree cwd falls back to the project root (x-3dd0)
+# ---------------------------------------------------------------------------
+
+def test_reverse_map_gone_cwd_falls_back_to_project_root(tmp_path, monkeypatch):
+    """AC1-HP: a gone recorded cwd reverse-maps from the node's project root."""
+    import fno.graph._intake as intake
+
+    root = tmp_path / "proj-root"
+    root.mkdir()
+    monkeypatch.setattr(
+        intake, "project_root_from_settings",
+        lambda project: str(root) if project == "myproj" else None,
+    )
+
+    seen: dict = {}
+
+    def _spy(**kw):
+        seen["cwd"] = kw.get("cwd")
+        return [{"number": 5, "url": "u5", "headRefName": "feature/ab-gone",
+                 "mergedAt": "2026-07-08T00:00:00Z"}]
+
+    gone = str(tmp_path / "archived-worktree")  # never created -> gone
+    entries = [_node("ab-gone", cwd=gone, project="myproj")]
+    records = scan_merge_drift(entries, list_merged=_spy)
+    assert seen["cwd"] == str(root)  # resolved root, not the gone cwd
+    assert len(records) == 1 and records[0].closeable
+    assert records[0].pr_number == 5
+
+
+@pytest.mark.parametrize("resolved", [None, "__nonexistent__"])
+def test_reverse_map_gone_cwd_unresolvable_keeps_original(tmp_path, monkeypatch, resolved):
+    """AC2-ERR: gone cwd + (unmapped project | mapped-but-missing root) ->
+    original cwd kept and the existing gh-failure warning still fires."""
+    import fno.graph._intake as intake
+
+    missing_root = str(tmp_path / "also-gone")
+    monkeypatch.setattr(
+        intake, "project_root_from_settings",
+        lambda project: (missing_root if resolved == "__nonexistent__" else None),
+    )
+
+    gone = str(tmp_path / "gone-wt")
+
+    def _boom(**kw):
+        raise rec.ReconcileError(
+            f"gh pr list (merged) failed: [Errno 2] No such file: {kw.get('cwd')}"
+        )
+
+    entries = [_node("ab-unresolvable", cwd=gone, project="p")]
+    records = scan_merge_drift(entries, list_merged=_boom)
+    assert len(records) == 1
+    assert not records[0].closeable
+    assert records[0].cwd == gone  # original cwd preserved, never substituted
+
+
+def test_reverse_map_existing_cwd_skips_resolver(tmp_path, monkeypatch):
+    """AC3-EDGE: a live recorded cwd is used as-is; the resolver never runs."""
+    import fno.graph._intake as intake
+
+    def _no_resolve(project):
+        raise AssertionError("project_root_from_settings must not run for a live cwd")
+
+    monkeypatch.setattr(intake, "project_root_from_settings", _no_resolve)
+
+    seen: dict = {}
+
+    def _spy(**kw):
+        seen["cwd"] = kw.get("cwd")
+        return [{"number": 7, "url": "u7", "headRefName": "feature/ab-live",
+                 "mergedAt": "2026-07-08T00:00:00Z"}]
+
+    live = str(tmp_path)  # exists on disk
+    entries = [_node("ab-live", cwd=live, project="whatever")]
+    records = scan_merge_drift(entries, list_merged=_spy)
+    assert seen["cwd"] == live
+    assert len(records) == 1 and records[0].pr_number == 7
+
+
+def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):
+    """AC4-EDGE: two gone-cwd nodes of one project collapse to ONE gh call."""
+    import fno.graph._intake as intake
+
+    root = tmp_path / "shared-root"
+    root.mkdir()
+    monkeypatch.setattr(intake, "project_root_from_settings", lambda project: str(root))
+
+    calls = {"n": 0, "cwds": []}
+
+    def _once(**kw):
+        calls["n"] += 1
+        calls["cwds"].append(kw.get("cwd"))
+        return [
+            {"number": 1, "url": "u1", "headRefName": "feature/ab-c1",
+             "mergedAt": "2026-07-08T00:00:00Z"},
+            {"number": 2, "url": "u2", "headRefName": "feature/ab-c2",
+             "mergedAt": "2026-07-08T00:00:00Z"},
+        ]
+
+    entries = [
+        _node("ab-c1", cwd=str(tmp_path / "wt1"), project="p"),
+        _node("ab-c2", cwd=str(tmp_path / "wt2"), project="p"),
+    ]
+    records = scan_merge_drift(entries, list_merged=_once)
+    assert calls["n"] == 1
+    assert calls["cwds"] == [str(root)]
+    assert {r.node_id for r in records} == {"ab-c1", "ab-c2"}
+
+
+def test_effective_reconcile_cwd(tmp_path, monkeypatch):
+    """The deleted-worktree cwd fallback shared by the reverse-map query AND the
+    post-close auto-continue routing (x-3dd0)."""
+    import fno.graph._intake as intake
+
+    real_root = tmp_path / "proj"
+    real_root.mkdir()
+    monkeypatch.setattr(
+        intake, "project_root_from_settings",
+        lambda project: str(real_root) if project == "p" else None,
+    )
+
+    live = str(tmp_path)  # exists on disk
+    gone = str(tmp_path / "gone-wt")
+
+    assert rec._effective_reconcile_cwd(live, "p") == live          # live -> untouched
+    assert rec._effective_reconcile_cwd(gone, "p") == str(real_root)  # gone -> project root
+    assert rec._effective_reconcile_cwd(gone, "other") == gone      # unmapped -> original
+
+    # mapped-but-missing root -> original cwd kept (unchanged degrade)
+    monkeypatch.setattr(
+        intake, "project_root_from_settings", lambda project: str(tmp_path / "also-gone")
+    )
+    assert rec._effective_reconcile_cwd(gone, "p") == gone
+
+
 def test_write_retro_sentinel(tmp_path):
     record = MergeDriftRecord(
         node_id="ab-sent",
