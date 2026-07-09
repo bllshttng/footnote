@@ -14,6 +14,7 @@ network-free verdict.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -36,11 +37,17 @@ def _stub_signals(
     rust_marker: str | None = None,
     rust_source_rev: str | None = None,
     cargo_bin_present: bool = False,
+    deployed_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
+    source_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
 ) -> None:
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
     monkeypatch.setattr(doctor, "_source_rev", lambda source: source_rev)
     monkeypatch.setattr(doctor, "_read_marker", lambda: marker)
     monkeypatch.setattr(doctor, "_probe_installed_verb", lambda: capture_present)
+    # Config-schema surfaces (x-6c5b): default to EQUAL keysets so existing tests
+    # exercise no drift; drift tests pass differing sets explicitly.
+    monkeypatch.setattr(doctor, "_deployed_config_keys", lambda: deployed_config_keys)
+    monkeypatch.setattr(doctor, "_source_config_keys", lambda source: source_config_keys)
     # Post ab-716cd330 `revision` carries the binary's self-reported crates/ rev
     # (the verdict driver), not the installed-rust-rev marker. `rust_marker` is
     # the value the resolved binary reports here.
@@ -190,6 +197,168 @@ def test_rust_binary_always_reported(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Python config-schema drift
+# ---------------------------------------------------------------------------
+
+
+def test_config_schema_drift_reports_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deployed FIELD_META missing a key the source defines => stale, exit nonzero,
+    names a missing key + remediation. Revs match, so this is caught by the schema
+    fingerprint alone (the exact stale-uv-tool symptom)."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",  # rev + verb both look fresh...
+        capture_present="present",
+        deployed_config_keys=frozenset({"project.id"}),  # ...but the config schema is behind
+        source_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code != 0
+    assert "config schema is STALE" in result.stdout
+    assert "backlog.id_prefix" in result.stdout
+    assert "fno update" in result.stdout
+
+
+def test_config_schema_drift_shows_rev_delta_when_also_rev_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Overlap case (schema-behind AND rev-behind): the config message leads but the
+    rev delta is still surfaced, not dropped."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="newsha",
+        marker="oldsha",  # rev-behind too
+        capture_present="present",
+        deployed_config_keys=frozenset({"project.id"}),
+        source_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code != 0
+    assert "config schema is STALE" in result.stdout
+    assert "oldsha" in result.stdout and "newsha" in result.stdout
+
+
+def test_config_schema_in_sync_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matching keysets on an otherwise-fresh install stay silent (no false positive)."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        deployed_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
+        source_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "up to date" in result.stdout
+    assert "config schema" not in result.stdout
+
+
+def test_config_deployed_ahead_of_source_not_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployed CLI with MORE keys than source is not drift (don't cry wolf)."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        deployed_config_keys=frozenset({"project.id", "backlog.id_prefix", "new.key"}),
+        source_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "config schema is STALE" not in result.stdout
+
+
+_FLAT_REGISTRY = (
+    "from dataclasses import dataclass\n"
+    "@dataclass\n"
+    "class Meta:\n"
+    "    doc: str\n"
+    'FIELD_META: dict[str, Meta] = {\n'
+    '    "project.id": Meta("x"),\n'
+    '    "backlog.id_prefix": Meta("y"),\n'
+    "}\n"
+)
+
+
+def test_parse_field_meta_keys_flat() -> None:
+    """A flat literal of constant string keys parses to the exact keyset."""
+    assert doctor._parse_field_meta_keys(_FLAT_REGISTRY) == frozenset(
+        {"project.id", "backlog.id_prefix"}
+    )
+
+
+def test_parse_field_meta_keys_spread_returns_none() -> None:
+    """A `**spread` (or computed key) can't be read completely => None, never a
+    truncated set that would risk a false 'fresh'."""
+    spread = 'BASE = {"a.b": 1}\nFIELD_META = {**BASE, "backlog.id_prefix": 2}\n'
+    assert doctor._parse_field_meta_keys(spread) is None
+    computed = 'K = "x"\nFIELD_META = {K: 1}\n'
+    assert doctor._parse_field_meta_keys(computed) is None
+
+
+def test_parse_field_meta_keys_broken_or_absent_returns_none() -> None:
+    """Unparseable text or no FIELD_META => None."""
+    assert doctor._parse_field_meta_keys("FIELD_META = {  # truncated\n") is None
+    assert doctor._parse_field_meta_keys("x = 1\n") is None
+
+
+def _init_git_source(root: Path, registry_text: str) -> None:
+    """Commit a registry.py into a throwaway git repo laid out like the cli source."""
+    import subprocess
+
+    reg = root / "src" / "fno" / "config" / "registry.py"
+    reg.parent.mkdir(parents=True)
+    reg.write_text(registry_text, encoding="utf-8")
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "init"]):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True, env=env)
+
+
+def test_source_config_keys_reads_committed_head(tmp_path: Path) -> None:
+    """The source keyset comes from committed HEAD, NOT the dirty working tree: an
+    uncommitted edit must not leak into the verdict (matches _source_rev semantics)."""
+    _init_git_source(tmp_path, _FLAT_REGISTRY)
+    assert doctor._source_config_keys(tmp_path) == frozenset(
+        {"project.id", "backlog.id_prefix"}
+    )
+    # Add a key in the WORKING TREE only (no commit). HEAD is unchanged, so the
+    # committed keyset must not include it - else a dirty checkout false-STALEs.
+    reg = tmp_path / "src" / "fno" / "config" / "registry.py"
+    reg.write_text(
+        _FLAT_REGISTRY.replace("}\n", '    "batch.enabled": Meta("z"),\n}\n'),
+        encoding="utf-8",
+    )
+    assert doctor._source_config_keys(tmp_path) == frozenset(
+        {"project.id", "backlog.id_prefix"}
+    )
+
+
+def test_source_config_keys_fails_open_on_missing_or_non_git(tmp_path: Path) -> None:
+    """None source or a non-git dir => None (skip the check, never crash doctor)."""
+    assert doctor._source_config_keys(None) is None
+    assert doctor._source_config_keys(tmp_path) is None  # not a git repo
+
+
+def test_deployed_config_keys_reflects_real_field_meta() -> None:
+    """The deployed surface is the real in-process FIELD_META (includes the sentinel key)."""
+    keys = doctor._deployed_config_keys()
+    assert keys is not None
+    assert "backlog.id_prefix" in keys
+
+
+# ---------------------------------------------------------------------------
 # _verdict: pure decision matrix
 # ---------------------------------------------------------------------------
 
@@ -224,6 +393,21 @@ def test_rust_binary_always_reported(monkeypatch: pytest.MonkeyPatch) -> None:
         # Rust fold-in: python stale + rust stale -> status stale.
         (dict(source_resolved=True, source_rev="a", marker="b", capture_present="present",
               rust_installed_rev="aaa", rust_source_rev="bbb", cargo_bin_present=True), "stale", True, True),
+        # Config drift: source defines a key deployed lacks, revs match -> python stale.
+        (dict(source_resolved=True, source_rev="a", marker="a", capture_present="present",
+              deployed_config_keys=frozenset({"a"}), source_config_keys=frozenset({"a", "b"})),
+         "stale", True, False),
+        # Config drift proven even when the python status would otherwise be unknown.
+        (dict(source_resolved=True, source_rev="a", marker=None, capture_present="present",
+              deployed_config_keys=frozenset({"a"}), source_config_keys=frozenset({"a", "b"})),
+         "stale", True, False),
+        # Config match -> no drift, stays fresh.
+        (dict(source_resolved=True, source_rev="a", marker="a", capture_present="present",
+              deployed_config_keys=frozenset({"a", "b"}), source_config_keys=frozenset({"a", "b"})),
+         "fresh", False, False),
+        # Config partial evidence (source keyset unknown) -> not stale.
+        (dict(source_resolved=True, source_rev="a", marker="a", capture_present="present",
+              deployed_config_keys=frozenset({"a"}), source_config_keys=None), "fresh", False, False),
     ],
 )
 def test_verdict_matrix(kwargs, expected_status, expected_python_stale, expected_rust_stale) -> None:
