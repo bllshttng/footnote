@@ -172,6 +172,8 @@ config:
     min_free_gb: 4.0
     # Worker CPU/IO priority: utility (background QoS, default) or off.
     worker_qos: utility
+    # Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); an explicit flag wins, empty = unset. Provider-native, fail-closed at the spawn seam.
+    spawn_permission_mode: ""
   auto_continue:
     # Auto-dispatch the next ready node after a PR merges.
     enabled: false

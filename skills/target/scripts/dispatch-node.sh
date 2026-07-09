@@ -91,6 +91,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# x-dfa4: config default for autonomous dispatch (config.agents.spawn_permission_mode).
+# An explicit --permission-mode flag wins; empty + config-unset = unchanged. A
+# stale `fno` that rejects the unmodeled key degrades to empty (fail-safe).
+if [[ -z "$PERMISSION_MODE" ]]; then
+  PERMISSION_MODE="$(fno config get agents.spawn_permission_mode 2>/dev/null | tr -d '[:space:]' || true)"
+fi
+
 # ---- resolve the node set ---------------------------------------------------
 if [[ "$ALL_READY" -eq 1 ]]; then
   # Project-scoped ready, non-deferred nodes (megawalk selection semantics:

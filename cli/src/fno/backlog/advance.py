@@ -448,10 +448,21 @@ def _spawn_worker(
     # claude/bg arm). Empty/None = provider default, byte-identical to today.
     if model:
         cmd += ["--model", model]
-    # x-dfa4: forward an optional permission mode to the worker spawn. Empty/None
-    # = unchanged; the spawn verb maps or fail-closes it per provider.
-    if permission_mode:
-        cmd += ["--permission-mode", permission_mode]
+    # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
+    # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
+    mode = (permission_mode or "").strip()
+    if not mode:
+        try:
+            from fno.config import load_settings, load_settings_for_repo
+
+            settings = (
+                load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
+            )
+            mode = (settings.agents.spawn_permission_mode or "").strip()
+        except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
+            mode = ""
+    if mode:
+        cmd += ["--permission-mode", mode]
     target_cmd = (
         f"/target no-merge --reconcile {reconcile_manifest} {node_id}"
         if is_reconcile

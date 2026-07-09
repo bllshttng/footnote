@@ -1045,6 +1045,12 @@ class AgentsBlock(BaseModel):
     max_live: int = 3
     min_free_gb: float = 4.0
     worker_qos: str = "utility"
+    # x-dfa4: default permission/approval mode for AUTONOMOUS dispatchers only
+    # (dispatch-node.sh / `fno backlog advance` / `/think dispatch`). An explicit
+    # --permission-mode flag wins; empty ("") = unset = today's behavior exactly.
+    # Interactive `fno agents spawn` does NOT read this. The value is
+    # provider-native and fail-closed-validated at the spawn seam, never here.
+    spawn_permission_mode: str = ""
 
     @field_validator("dead_row_grace")
     @classmethod

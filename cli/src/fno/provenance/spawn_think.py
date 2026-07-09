@@ -625,10 +625,21 @@ def _spawn_think_worker(
     # on the claude/bg arm). Empty/None = provider default, unchanged.
     if model:
         cmd += ["--model", model]
-    # x-dfa4: forward an optional permission mode to the worker spawn. Empty/None
-    # = unchanged; the spawn verb maps or fail-closes it per provider.
-    if permission_mode:
-        cmd += ["--permission-mode", permission_mode]
+    # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
+    # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
+    mode = (permission_mode or "").strip()
+    if not mode:
+        try:
+            mode = (
+                _settings_for(
+                    Path(node_cwd) if node_cwd else None
+                ).agents.spawn_permission_mode
+                or ""
+            ).strip()
+        except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
+            mode = ""
+    if mode:
+        cmd += ["--permission-mode", mode]
     cmd += [agent_name, prompt]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
