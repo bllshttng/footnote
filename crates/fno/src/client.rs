@@ -761,8 +761,10 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        // Row i of display_rows() is painted at TAB_BAR_ROWS + i (draw_sideline).
-        self.row_action((row - TAB_BAR_ROWS) as usize)
+        // Display row i is painted at TAB_BAR_ROWS + (i - sideline_offset)
+        // (draw_sideline), so invert with the offset - else a click on a scrolled
+        // row activates the wrong unscrolled row (codex P2). Mirrors sideline_row_at.
+        self.row_action((row - TAB_BAR_ROWS) as usize + self.sideline_offset)
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -4722,6 +4724,25 @@ mod tests {
         // The divider column and the pane content beyond it are not chrome hits.
         assert!(view.chrome_hit(1, 27).is_none());
         assert!(view.chrome_hit(1, 40).is_none());
+    }
+
+    #[test]
+    fn chrome_hit_adds_sideline_offset_when_scrolled() {
+        // Regression (codex P2): a click must invert draw_sideline's scroll
+        // offset, so a click on a scrolled row activates the row painted there,
+        // not the unscrolled row at the same terminal cell.
+        // Rows: [0 squad1(active), 1 tab, 2 tab, 3 squad2, 4 footer].
+        let mut v = two_pane_view();
+        // Unscrolled: terminal row 4 -> display index 3 -> squad2.
+        assert_eq!(cmds(v.chrome_hit(4, 4)), vec![Command::SelectSquad(2)]);
+        // Scrolled by 1: terminal row 3 -> display index 3 -> squad2 (without the
+        // offset it would resolve to index 2, a tab row).
+        v.sideline_offset = 1;
+        assert_eq!(
+            cmds(v.chrome_hit(3, 4)),
+            vec![Command::SelectSquad(2)],
+            "click resolves through the scroll offset"
+        );
     }
 
     // ---- x-2f99: active-squad visibility ----
