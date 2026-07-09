@@ -67,9 +67,9 @@ SESSION_ID="$(sed -n 's/^[[:space:]]*session_id:[[:space:]]*//p' "$MANIFEST" | h
 # claim and block dispatch from reclaiming the node. This check is pid-independent
 # (the claim's pid arm is unreliable by design - the whole reason this hook
 # exists), so it cannot regress a dead-pid claim the way a state==live gate would.
-# Fail OPEN when either side of a harness-specific comparison is unknown (no
-# stdin uuid, no CODEX_THREAD_ID, or an older manifest without the field): the
-# holder gate still applies, so this only ever ADDS a refusal, never widens refresh.
+# Claude keeps the legacy fail-open behavior when its identity is unavailable.
+# Codex fails CLOSED when its current thread is known but the manifest lacks a
+# Codex owner: a generic pre-Codex holder cannot prove that this thread owns it.
 MANIFEST_CLAUDE_SID="$(sed -n 's/^[[:space:]]*claude_session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 _CUR_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
 if [[ -z "$_CUR_CODEX_COMPACT" && -n "$CUR_CLAUDE_SID" \
@@ -79,9 +79,9 @@ if [[ -z "$_CUR_CODEX_COMPACT" && -n "$CUR_CLAUDE_SID" \
 fi
 MANIFEST_CODEX_THREAD_ID="$(sed -n 's/^[[:space:]]*codex_thread_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 [[ "$MANIFEST_CODEX_THREAD_ID" == "null" ]] && MANIFEST_CODEX_THREAD_ID=""
-if [[ -n "$_CUR_CODEX_COMPACT" && -n "$MANIFEST_CODEX_THREAD_ID" \
-      && "$CUR_CODEX_THREAD_ID" != "$MANIFEST_CODEX_THREAD_ID" ]]; then
-  exit 0
+if [[ -n "$_CUR_CODEX_COMPACT" ]]; then
+  [[ -n "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
+  [[ "$CUR_CODEX_THREAD_ID" == "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
 fi
 
 # Throttle: skip when the stamp is younger than THROTTLE seconds.

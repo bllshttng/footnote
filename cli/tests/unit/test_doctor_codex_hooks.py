@@ -85,6 +85,38 @@ def test_both_layers_with_foreign_json_warns_and_preserves_paths(
     assert "--migrate-legacy-hooks-json" not in result.stdout
 
 
+def test_foreign_non_session_event_keeps_json_layer_visible(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    _write_toml(config)
+    legacy.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "foreign-stop.sh"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    result = runner.invoke(app, ["doctor", "--codex-hooks"])
+
+    assert result.exit_code == 0
+    assert "layers=both" in result.stdout
+    assert f"loading hooks from both {legacy} and {config}" in result.stdout
+    assert "foreign legacy JSON hook preserved: foreign-stop.sh" in result.stdout
+    assert "manually consolidate" in result.stdout
+
+
 @pytest.mark.parametrize("malformed", ["toml", "json"])
 def test_malformed_layer_reports_error_but_exits_zero(
     tmp_path, monkeypatch, malformed

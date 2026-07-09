@@ -128,7 +128,45 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def _is_footnote_codex_command(command: str) -> bool:
     """Classify only footnote-owned Codex SessionStart commands."""
-    return _HOOK_SUFFIX in command
+    if _HOOK_SUFFIX not in command:
+        return False
+    return (
+        "FNO_PLATFORM=codex" in command
+        or "/footnote/hooks/session-start.sh" in command
+    )
+
+
+def _all_hook_commands(data: Any, *, source: str) -> tuple[str, ...]:
+    """Extract commands from every hook event array, excluding trust state."""
+    if not isinstance(data, dict):
+        raise ValueError(f"{source} root is not an object")
+    hooks = data.get("hooks", {}) or {}
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{source} `hooks` is not an object")
+
+    commands: list[str] = []
+    for event, groups in hooks.items():
+        if event == "state":
+            continue
+        if groups is None:
+            continue
+        if not isinstance(groups, list):
+            raise ValueError(f"{source} `hooks.{event}` is not an array")
+        for group in groups:
+            if not isinstance(group, dict):
+                raise ValueError(f"{source} {event} group is not an object")
+            entries = group.get("hooks", []) or []
+            if not isinstance(entries, list):
+                raise ValueError(f"{source} {event} `hooks` is not an array")
+            for hook in entries:
+                if not isinstance(hook, dict):
+                    raise ValueError(f"{source} {event} hook is not an object")
+                command = hook.get("command")
+                if command is not None and not isinstance(command, str):
+                    raise ValueError(f"{source} {event} command is not a string")
+                if command:
+                    commands.append(command)
+    return tuple(commands)
 
 
 def _session_start_commands(data: Any, *, source: str) -> tuple[str, ...]:
@@ -210,6 +248,8 @@ def inspect_codex_hooks(
     """
     toml_commands: tuple[str, ...] = ()
     json_commands: tuple[str, ...] = ()
+    toml_session_commands: tuple[str, ...] = ()
+    json_session_commands: tuple[str, ...] = ()
     toml_footnote_state_keys: tuple[str, ...] = ()
     toml_footnote_state_recorded: tuple[bool, ...] = ()
     errors: list[str] = []
@@ -218,7 +258,8 @@ def inspect_codex_hooks(
         try:
             parsed_toml = tomllib.loads(config_path.read_text(encoding="utf-8"))
             toml_records = _session_start_hook_records(parsed_toml, source="config.toml")
-            toml_commands = tuple(command for _, _, command in toml_records)
+            toml_session_commands = tuple(command for _, _, command in toml_records)
+            toml_commands = _all_hook_commands(parsed_toml, source="config.toml")
             toml_footnote_state_keys, toml_footnote_state_recorded = _codex_hook_trust(
                 parsed_toml,
                 config_path=config_path,
@@ -230,7 +271,10 @@ def inspect_codex_hooks(
     if hooks_json_path.exists():
         try:
             parsed_json = json.loads(hooks_json_path.read_text(encoding="utf-8"))
-            json_commands = _session_start_commands(parsed_json, source="hooks.json")
+            json_session_commands = _session_start_commands(
+                parsed_json, source="hooks.json"
+            )
+            json_commands = _all_hook_commands(parsed_json, source="hooks.json")
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
             errors.append(f"{hooks_json_path}: {exc}")
 
@@ -245,8 +289,12 @@ def inspect_codex_hooks(
     else:
         state = "neither"
 
-    toml_footnote = tuple(c for c in toml_commands if _is_footnote_codex_command(c))
-    json_footnote = tuple(c for c in json_commands if _is_footnote_codex_command(c))
+    toml_footnote = tuple(
+        c for c in toml_session_commands if _is_footnote_codex_command(c)
+    )
+    json_footnote = tuple(
+        c for c in json_session_commands if _is_footnote_codex_command(c)
+    )
     return CodexHookDiagnostics(
         config_path=config_path,
         hooks_json_path=hooks_json_path,
@@ -409,7 +457,7 @@ def _migrate_legacy_codex_hooks(
             kept_groups.append(kept_group)
 
     if not removed:
-        foreign_remains = bool(_session_start_commands(data, source="hooks.json"))
+        foreign_remains = bool(_all_hook_commands(data, source="hooks.json"))
         return None, 0, foreign_remains
 
     migrated = dict(data)
@@ -429,7 +477,9 @@ def _migrate_legacy_codex_hooks(
         hooks_json_path.unlink()
     else:
         _atomic_write(hooks_json_path, json.dumps(migrated, indent=2) + "\n")
-    return backup, removed, bool(kept_groups)
+    return backup, removed, bool(
+        _all_hook_commands(migrated, source="hooks.json")
+    )
 
 
 def _codex_diagnostic_note(
@@ -451,7 +501,7 @@ def _codex_diagnostic_note(
         action = "footnote-owned legacy JSON hooks were migrated; " if migrated else ""
         if diagnostics.json_foreign_commands:
             return (
-                f"{action}both Codex hook layers contain SessionStart hooks: "
+                f"{action}both Codex hook layers contain hooks: "
                 f"{diagnostics.config_path} and {diagnostics.hooks_json_path}; TOML is "
                 "preferred. Legacy JSON contains foreign hooks and needs manual "
                 "consolidation; it was left unchanged"

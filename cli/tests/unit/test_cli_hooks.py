@@ -205,9 +205,10 @@ def test_codex_inspector_classifies_owned_and_foreign_commands(tmp_path):
     config = tmp_path / "config.toml"
     legacy = tmp_path / "hooks.json"
     wrapper_only = "env FNO_PLATFORM=codex custom-session-command"
+    other_plugin = "/opt/other-plugin/hooks/session-start.sh"
     foreign = "bash '/Users/bb16/.codex/herdr-agent-state.sh' session"
     _write_codex_toml(config, CMD)
-    _write_codex_json(legacy, wrapper_only, foreign)
+    _write_codex_json(legacy, wrapper_only, other_plugin, foreign)
 
     diagnostics = inspect_codex_hooks(
         config_path=config, hooks_json_path=legacy
@@ -215,7 +216,36 @@ def test_codex_inspector_classifies_owned_and_foreign_commands(tmp_path):
 
     assert diagnostics.toml_footnote_commands == (CMD,)
     assert diagnostics.json_footnote_commands == ()
-    assert diagnostics.json_foreign_commands == (wrapper_only, foreign)
+    assert diagnostics.json_foreign_commands == (
+        wrapper_only,
+        other_plugin,
+        foreign,
+    )
+
+
+def test_codex_migration_preserves_other_plugins_session_start(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    owned = f"env FNO_PLATFORM=codex {CMD}"
+    other_plugin = "/opt/other-plugin/hooks/session-start.sh"
+    _write_codex_toml(config, owned)
+    _write_codex_json(legacy, owned, other_plugin)
+
+    result = install_codex_hook(
+        owned,
+        config_path=config,
+        hooks_json_path=legacy,
+        migrate_legacy_hooks_json=True,
+    )
+
+    remaining = json.loads(legacy.read_text())
+    commands = [
+        hook["command"]
+        for group in remaining["hooks"]["SessionStart"]
+        for hook in group["hooks"]
+    ]
+    assert commands == [other_plugin]
+    assert result.note and "manual consolidation" in result.note
 
 
 def test_codex_inspector_reports_footnote_trust_key(tmp_path):
@@ -349,6 +379,12 @@ def test_codex_migration_preserves_foreign_events_and_exact_backup(tmp_path):
     assert remaining["description"] == "Mixed legacy hooks"
     assert res.legacy_backup is not None
     assert res.legacy_backup.read_bytes() == original
+    assert res.note and "manual consolidation" in res.note
+
+    diagnostics = inspect_codex_hooks(config_path=config, hooks_json_path=legacy)
+    assert diagnostics.state == "both"
+    assert diagnostics.has_json_hooks
+    assert diagnostics.json_foreign_commands == ("foreign-stop.sh",)
 
 
 def test_codex_migration_preserves_foreign_json_and_requests_manual_consolidation(

@@ -98,6 +98,12 @@ run_hook_codex_sid() {
     | CODEX_THREAD_ID="$1" bash "$HOOK"
 }
 
+drop_manifest_codex_identity() {
+  awk '!/^[[:space:]]*codex_thread_id:/' "${CWD}/.fno/target-state.md" \
+    > "${CWD}/.fno/target-state.legacy.md"
+  mv "${CWD}/.fno/target-state.legacy.md" "${CWD}/.fno/target-state.md"
+}
+
 # ── T1: AC3-HP - we hold the claim -> refresh is issued ──────────────────────
 setup_env
 export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
@@ -219,6 +225,18 @@ if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
   pass "T11 Codex stdin session_id routes through Codex ownership"
 else
   fail "T11 Codex session_id was rejected by the Claude identity guard"
+fi
+teardown_env
+
+# ── T12: Current Codex + legacy manifest must fail closed ───────────────
+setup_env
+drop_manifest_codex_identity
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_codex_sid "019f48e4-owner-thread" >/dev/null 2>&1
+if [[ -s "$CALLLOG" ]]; then
+  fail "T12 legacy manifest reached claim status/refresh under current Codex identity"
+else
+  pass "T12 legacy manifest fails closed before refreshing a generic old holder"
 fi
 teardown_env
 
