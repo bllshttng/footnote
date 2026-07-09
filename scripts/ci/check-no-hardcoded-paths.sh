@@ -85,6 +85,8 @@ add_violation() {
 #
 # Files excluded (known legitimate fallbacks or bootstrap paths):
 #   paths.py, paths_cli.py, paths_verify.py, config/__init__.py,
+#   config_io.py (bootstrap: _global_settings_path defines where ~/.fno is,
+#     so it predates and cannot route through fno.paths),
 #   setup/emit_shell.py, setup/migrate_paths.py,
 #   update.py (try/except), megawalk_drivers/fallback.py (try/except),
 #   adapters/providers/dispatch.py (try/except), adapters/providers/staging.py (try/except),
@@ -106,6 +108,7 @@ PY_HITS=$(
     | grep -v 'setup/emit_shell\.py' \
     | grep -v 'setup/migrate_paths\.py' \
     | grep -v 'config/__init__\.py' \
+    | grep -v 'config_io\.py' \
     | grep -v 'graph/_constants\.py' \
     | grep -v 'update\.py' \
     | grep -v 'megawalk_drivers/fallback\.py' \

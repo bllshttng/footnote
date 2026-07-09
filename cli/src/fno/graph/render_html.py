@@ -54,7 +54,9 @@ def _load_obsidian_vault() -> str | None:
     is a global artifact, so the source of truth must be the global file.
     """
     try:
-        from fno.config import _global_settings_path, read_config_flat
+        # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+        from fno.config_io import _global_settings_path, read_config_flat
+
         path = _global_settings_path()
         if not path.is_file():
             return None
@@ -89,7 +91,9 @@ def _load_wip_caps() -> dict[str, int]:
     - non-int / <=0 / bool    -> that column is uncapped (omitted), never raised
     """
     try:
-        from fno.config import _global_settings_path, read_config_flat
+        # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+        from fno.config_io import _global_settings_path, read_config_flat
+
         path = _global_settings_path()
         if not path.is_file():
             return dict(_DEFAULT_WIP_CAPS)

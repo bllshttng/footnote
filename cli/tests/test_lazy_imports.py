@@ -333,3 +333,66 @@ def test_lazy_group_get_command_imports_on_demand():
     assert "fno.state.cli" not in (modules_after_list - modules_before), (
         "list_commands() triggered import of fno.state.cli"
     )
+
+
+# ---------------------------------------------------------------------------
+# config <-> graph import cycle: broken by the fno.config_io leaf (x-7fdd).
+# Guards the invariant that both packages import at module scope in EITHER
+# order without ImportError, and that the leaf holds no back-edge.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("order", ["fno.config, fno.graph", "fno.graph, fno.config"])
+def test_config_graph_import_cycle_broken(order: str):
+    """A fresh interpreter can import config and graph in either order."""
+    result = _run_py(f"import {order}; print('ok')")
+    assert result.returncode == 0, (
+        f"import order '{order}' failed:\n{result.stderr}"
+    )
+    assert "ok" in result.stdout
+
+
+def test_config_io_is_a_leaf():
+    """The extracted leaf must never import fno.config or fno.graph (a back-edge
+    reintroduces the cycle). Assert on real import statements, not the docstring."""
+    import re
+
+    import fno.config_io as leaf
+
+    src = open(leaf.__file__).read()
+    assert not re.search(r"^\s*(from|import)\s+fno\.(config|graph)\b", src, re.M), (
+        "fno.config_io must not import fno.config or fno.graph"
+    )
+    # re-export shim: config exposes the moved names as the SAME objects
+    import fno.config as cfg
+
+    assert cfg.read_config_flat is leaf.read_config_flat
+    assert cfg._deep_merge is leaf._deep_merge
+
+
+def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
+    """config's graph._constants import stays function-local: a top-level one makes
+    `import fno.config` eagerly load the graph package during config's partial init,
+    which freezes store.read_graph's GRAPH_JSON default to the ~/.fno fallback and
+    silently ignores a configured paths.graph_json (Codex P1). Regression guard:
+    with a graph_json override, config-first import must still resolve it."""
+    import os
+
+    cfg = tmp_path / "config.toml"
+    graph_json = tmp_path / "state" / "mygraph.json"
+    cfg.write_text(f'[paths]\ngraph_json = "{graph_json}"\n')
+
+    code = (
+        "import fno.config, fno.graph, inspect\n"  # config-first (the risky order)
+        "import fno.graph.store as store\n"
+        "d = inspect.signature(store.read_graph).parameters['path'].default\n"
+        "print(str(d))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "FNO_CONFIG": str(cfg)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "mygraph.json" in result.stdout, (
+        f"read_graph default froze to the fallback, not the configured path:\n{result.stdout}"
+    )

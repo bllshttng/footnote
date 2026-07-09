@@ -48,7 +48,7 @@ def load_workspaces() -> dict[str, str]:
     # redirect-aware, de-duped) so this map cannot drift from
     # detect_project_from_settings, and so paths route through fno.paths
     # rather than a hardcoded ~/.fno (the no-hardcoded-paths guard).
-    from fno.config import read_config_flat
+    from fno.config_io import read_config_flat
     from fno.graph._intake import _settings_candidate_paths
 
     out: dict[str, str] = {}

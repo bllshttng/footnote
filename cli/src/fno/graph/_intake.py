@@ -328,7 +328,11 @@ def _settings_candidate_paths() -> list[Path]:
     # $FNO_GLOBAL_SETTINGS_PATH redirect (config_file() / state_dir() do NOT
     # follow it), so a redirected global work-map is still consulted (codex P2
     # on PR #419).
-    from fno.config import _global_settings_path, config_read_candidates
+    # Function-local: config_io imports pydantic/yaml at module load; a top-level
+    # import here would pull them into every graph-module import (bare-python
+    # smoke consumers of the graph package have neither). config_io (a leaf) not
+    # fno.config, so no config<->graph cycle.
+    from fno.config_io import _global_settings_path, config_read_candidates
 
     out: list[Path] = []
     seen: set[str] = set()
@@ -383,7 +387,8 @@ def detect_project_from_settings(cwd_path: str | None = None) -> str | None:
     # stored as ~ / absolute, so a relative target would never match.
     target = os.path.abspath(os.path.expanduser(cwd_path)) if cwd_path else os.getcwd()
 
-    from fno.config import read_config_flat
+    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+    from fno.config_io import read_config_flat
 
     for path in _settings_candidate_paths():
         if not path.exists():
@@ -465,7 +470,8 @@ def project_root_from_settings(project: str | None) -> str | None:
     if not project:
         return None
 
-    from fno.config import read_config_flat
+    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+    from fno.config_io import read_config_flat
 
     for path in _settings_candidate_paths():
         if not path.exists():
@@ -570,9 +576,11 @@ def _list_known_projects() -> set[str]:
     Used by the post-resolution sanity check that warns when an intake
     routes to a project the orchestrator has never heard of.
     """
-    from fno.config import read_config_flat
 
     known: set[str] = set()
+    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+    from fno.config_io import read_config_flat
+
     for path in _settings_candidate_paths():
         if not path.exists():
             continue
