@@ -99,6 +99,8 @@ config:
     sync_paths: []
     # Let merge-detection auto-dispatch the /fno:pr merged ritual for a newly-merged PR (opt-in; default off).
     auto_run: false
+    # Model for post-merge ritual workers (default claude-sonnet-5). Routing wins when a secondary provider is keyed.
+    model: claude-sonnet-5
   research:
     # Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses).
     output_dir: null

@@ -252,3 +252,39 @@ def test_config_get_self_reap_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     )
     assert result.exit_code == 0, result.output
     assert result.output.strip() == "True"
+
+
+# ---------------------------------------------------------------------------
+# model - the post-merge worker tier knob
+# ---------------------------------------------------------------------------
+
+
+def test_post_merge_model_defaults_sonnet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No config: model defaults to sonnet (the Step-6 diff-judgment needs real
+    reasoning), never the account default (Fable)."""
+    settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
+    assert settings.post_merge.model == "claude-sonnet-5"
+
+
+def test_post_merge_model_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit model is read verbatim."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  post_merge:\n    model: claude-opus-4-8\n",
+    )
+    assert settings.post_merge.model == "claude-opus-4-8"
+
+
+def test_post_merge_model_empty_coerces_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank model must never reach `--model ""` - it coerces to the default."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        'schema_version: 1\nconfig:\n  post_merge:\n    model: ""\n',
+    )
+    assert settings.post_merge.model == "claude-sonnet-5"

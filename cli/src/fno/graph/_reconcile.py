@@ -1108,6 +1108,18 @@ def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:
     """
     from fno import _subprocess_util
 
+    # Function-local import: the config<->graph cycle means a top-level
+    # `from fno.config import ...` freezes read_graph's GRAPH_JSON to the ~/.fno
+    # fallback (same reason graph/cli.py imports it inside a try). Fail open to
+    # the sonnet default - dispatch is strictly non-fatal.
+    model = "claude-sonnet-5"
+    try:
+        from fno.config import load_settings_for_repo
+
+        model = load_settings_for_repo(Path(cwd)).post_merge.model
+    except Exception:
+        pass
+
     name = f"pr-merged-{pr_number}"
     # `autonomous` is load-bearing: a `--bg` worker is INTERACTIVE, so without a
     # no-operator signal the ritual stalls at its first human-prompt slot
@@ -1115,7 +1127,7 @@ def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:
     # that always reaches the detached worker's LLM (env need not propagate).
     cmd = [
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",
-        "--provider", "claude", "--substrate", "bg", "--cwd", cwd,
+        "--provider", "claude", "--substrate", "bg", "--model", model, "--cwd", cwd,
         name, f"/fno:pr merged {pr_number} autonomous",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)

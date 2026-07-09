@@ -152,6 +152,75 @@ def test_spawn_worker_prompt_carries_autonomous(monkeypatch):
     assert captured["cmd"][-1] == "/fno:pr merged 42 autonomous"
 
 
+def _stub_spawn_run(monkeypatch, captured):
+    from fno.graph import _reconcile
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"short_id": "abc123"}'
+        stderr = ""
+
+    def _fake_run(cmd, **_kw):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(_reconcile.subprocess, "run", _fake_run)
+
+
+def _model_of(cmd):
+    return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
+
+
+def test_spawn_worker_uses_config_model_default(monkeypatch):
+    """The bg worker runs on config.post_merge.model (default sonnet), not the
+    claude account default (Fable)."""
+    import types
+    import fno.config as _config
+    from fno.graph import _reconcile
+
+    captured: dict = {}
+    _stub_spawn_run(monkeypatch, captured)
+    settings = types.SimpleNamespace(post_merge=types.SimpleNamespace(model="claude-sonnet-5"))
+    monkeypatch.setattr(_config, "load_settings_for_repo", lambda _p: settings)
+
+    _reconcile._spawn_post_merge_worker(42, "/tmp/canon")
+    assert _model_of(captured["cmd"]) == "claude-sonnet-5"
+
+
+def test_spawn_worker_honors_operator_override(monkeypatch):
+    """An operator's config.post_merge.model override reaches the spawn cmd."""
+    import types
+    import fno.config as _config
+    from fno.graph import _reconcile
+
+    captured: dict = {}
+    _stub_spawn_run(monkeypatch, captured)
+    settings = types.SimpleNamespace(post_merge=types.SimpleNamespace(model="claude-opus-4-8"))
+    monkeypatch.setattr(_config, "load_settings_for_repo", lambda _p: settings)
+
+    _reconcile._spawn_post_merge_worker(42, "/tmp/canon")
+    assert _model_of(captured["cmd"]) == "claude-opus-4-8"
+
+
+def test_spawn_worker_config_failure_falls_open(monkeypatch):
+    """A config-load failure falls open to the sonnet default and never crashes
+    the (strictly non-fatal) dispatch."""
+    import fno.config as _config
+    from fno.graph import _reconcile
+
+    captured: dict = {}
+    _stub_spawn_run(monkeypatch, captured)
+
+    def _boom(_p):
+        raise RuntimeError("corrupt config")
+
+    monkeypatch.setattr(_config, "load_settings_for_repo", _boom)
+
+    sid = _reconcile._spawn_post_merge_worker(42, "/tmp/canon")
+    assert sid == "abc123"
+    assert _model_of(captured["cmd"]) == "claude-sonnet-5"
+
+
 # --- task 2.3: location - dispatch marker lands under canonical ----------
 
 
@@ -254,7 +323,7 @@ def test_default_dispatch_ritual_cold_fire_ok_marks(tmp_path, monkeypatch):
 
     fired: list = []
 
-    def fire(verb, pr, repo_dir):
+    def fire(verb, pr, repo_dir, *, model=None):
         fired.append((verb, pr, str(repo_dir)))
         return _FireResult(ok=True)
 
@@ -272,7 +341,7 @@ def test_default_dispatch_ritual_cold_fire_notok_no_marker(tmp_path):
     generic dispatcher tests only assert at the seam)."""
     from fno.pr_watch._dispatch import _default_dispatch_ritual
 
-    def fire(verb, pr, repo_dir):
+    def fire(verb, pr, repo_dir, *, model=None):
         return _FireResult(ok=False, rc=1)
 
     res = _default_dispatch_ritual(
@@ -302,7 +371,7 @@ def test_cross_detector_one_handoff_per_sha(tmp_path):
     # Detector B: the daemon adapter, resolving the SAME canonical from node_cwd.
     fired_b: list = []
 
-    def fire(verb, pr, repo_dir):
+    def fire(verb, pr, repo_dir, *, model=None):
         fired_b.append(pr)
         return _FireResult(ok=True)
 
