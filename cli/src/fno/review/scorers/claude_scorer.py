@@ -27,17 +27,31 @@ if TYPE_CHECKING:
 
 _MODEL = "claude-haiku-4-5"
 
-_SINGLE_SYSTEM_PROMPT = (
-    "Rate the confidence of this code review finding from 0 to 100. "
-    "Reply with only the integer, nothing else."
+# Rubric + abstain path, duplicated from skills/review/references/sigma.md
+# Step 3b. The CLI must stay self-contained (it never reads skill files), so
+# any alternate scorer added under scorers/ needs its own copy of this text.
+# Keep the "reply ONLY ..." format sentence LAST in each prompt: Haiku is
+# format-fragile and trailing instructions dominate compliance.
+_RUBRIC = (
+    "Rate the confidence that this code review finding is a real issue, 0 to 100:\n"
+    "0 = false positive, does not stand up to scrutiny, or pre-existing.\n"
+    "25 = might be real, but you cannot verify it against the provided code.\n"
+    "50 = real issue, but minor or unlikely in practice.\n"
+    "75 = verified real issue that directly impacts functionality.\n"
+    "100 = confirmed definite issue that will happen frequently.\n"
+    "If you cannot verify the finding against the provided code, reply 25 or "
+    "lower. Never guess high."
 )
+
+_SINGLE_SYSTEM_PROMPT = _RUBRIC + "\nReply with only the integer, nothing else."
 
 
 def _batch_system_prompt(n: int) -> str:
     return (
-        f"Rate each of the {n} code review findings below from 0 (likely false positive) "
-        f"to 100 (definitely a real issue). Reply with ONLY a JSON array of {n} integers "
-        "in the same order as the input, no other text."
+        f"Score each of the {n} code review findings below.\n"
+        + _RUBRIC
+        + f"\nReply with ONLY a JSON array of {n} integers in the same order as "
+        "the input, no other text."
     )
 
 
