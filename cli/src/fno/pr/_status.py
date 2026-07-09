@@ -65,6 +65,44 @@ def _classify(check: dict) -> str:
     return "pending"
 
 
+def _entry_ts(check: dict) -> str:
+    """Sort key for 'latest run per name'. CheckRun uses completedAt then
+    startedAt (an in-progress run has empty completedAt but a startedAt, so it
+    still sorts); StatusContext uses createdAt. Missing all three -> '' (sorts
+    oldest, loses to any timestamped sibling). ISO-8601 strings sort
+    chronologically as plain strings.
+    """
+    return str(_alt(check.get("completedAt"), check.get("startedAt"), check.get("createdAt"), ""))
+
+
+def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
+    """Keep only the latest run per check name/context.
+
+    A force/amend push leaves superseded runs (e.g. a CANCELLED CI) in the
+    rollup beside the fresh ones; classifying all of them counts a stale
+    CANCELLED as a live fail. Grouping by name and keeping the max-timestamp
+    entry drops the stale run, so a superseded CANCELLED loses to a newer
+    SUCCESS of the same name while a genuinely-cancelled *latest* run stays.
+    `>=` on a timestamp tie keeps the last-seen entry (deterministic, gh's
+    order) so a whole timestampless name-group resolves to its last member.
+    An entry with no name/context key is never merged with another.
+    """
+    latest: dict[Any, dict] = {}
+    order: list[Any] = []
+    unkeyed: list[dict] = []
+    for c in rollup:
+        key = _alt(c.get("name"), c.get("context"), None)
+        if key is None:
+            unkeyed.append(c)
+            continue
+        if key not in latest:
+            latest[key] = c
+            order.append(key)
+        elif _entry_ts(c) >= _entry_ts(latest[key]):
+            latest[key] = c
+    return [latest[k] for k in order] + unkeyed
+
+
 def _fetch(pr: str, cwd: Optional[str]) -> Optional[dict]:
     res = run(
         ["gh", "pr", "view", pr, "--json", "state,statusCheckRollup"],
@@ -79,11 +117,17 @@ def _fetch(pr: str, cwd: Optional[str]) -> Optional[dict]:
 
 
 def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
-    """Pure verdict computation. Returns (verdict, exit_code, counts)."""
-    counts = {"total": len(rollup), "pass": 0, "fail": 0, "pending": 0}
-    for c in rollup:
+    """Pure verdict computation. Returns (verdict, exit_code, counts).
+
+    Classifies only the latest run per check name so a superseded CANCELLED run
+    (left in the rollup by a force/amend push) no longer yields a false red.
+    `counts["total"]` is the deduped count, the honest check total.
+    """
+    deduped = _latest_per_name(rollup)
+    counts = {"total": len(deduped), "pass": 0, "fail": 0, "pending": 0}
+    for c in deduped:
         counts[_classify(c)] += 1
-    if not rollup:
+    if not deduped:
         return ("unknown", 3, counts)
     if counts["fail"]:
         return ("red", 1, counts)
