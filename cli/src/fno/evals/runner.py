@@ -59,7 +59,9 @@ def _git_rev(repo_root: Path, ref: str) -> Optional[str]:
         return None
 
 
-def _default_spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
+def _default_spawn(
+    prompt: str, workdir: Path, timeout_s: int, *, provider: Optional[str] = None
+) -> SpawnResult:
     """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
 
     A non-zero exit, a missing binary, or a timeout is a *graded failure*
@@ -71,6 +73,8 @@ def _default_spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
         "--substrate", "headless", "--cwd", str(workdir),
         "--timeout", str(timeout_s),
     ]
+    if provider:
+        cmd += ["--provider", provider]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
     except FileNotFoundError:
@@ -150,7 +154,11 @@ def run_task(
     worktree removed (Invariant: removed after grading). A worker-spawn failure
     is recorded as a graded fail and the remaining repeats still run (AC3-ERR).
     """
-    spawn_fn = spawn or _default_spawn
+    # When no spawn is injected, bind the worker provider into the default spawn
+    # so --provider actually routes the headless worker (not just logged).
+    spawn_fn = spawn or (
+        lambda p, w, t: _default_spawn(p, w, t, provider=worker_provider)
+    )
     if history_path is None:
         from fno import paths as _paths
         history_path = _paths.evals_history()
