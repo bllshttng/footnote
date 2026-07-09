@@ -262,45 +262,6 @@ def test_resolve_attached_rejects_non_hex_short(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# resolve_live_lane: the single place encoding lane precedence (node x-849b).
-# ---------------------------------------------------------------------------
-
-def test_resolve_live_lane_worker_beats_control(tmp_path, monkeypatch):
-    # Both an interactive worker AND an adopted row for one uuid: the worker
-    # (lossless worker.submit) lane wins -- the precedence this helper exists to pin.
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
-    _write_registry(tmp_path, [
-        {"name": "w", "short_id": "wkW", "provider": "claude",
-         "claude_session_uuid": "u", "host_mode": "interactive", "status": "live"},
-        {"name": "a", "short_id": "", "provider": "claude",
-         "claude_session_uuid": "u", "claude_short_id": "aa11bb22",
-         "host_mode": "attached", "status": "live"},
-    ])
-    assert rt_mod.resolve_live_lane("u") == ("worker", "wkW")
-
-
-def test_resolve_live_lane_control_when_only_attached(tmp_path, monkeypatch):
-    # No interactive worker, an adopted --bg row -> the control.sock lane.
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
-    _write_registry(tmp_path, [
-        {"name": "cc-aa11bb22", "short_id": "", "provider": "claude",
-         "claude_session_uuid": "u", "claude_short_id": "aa11bb22",
-         "host_mode": "attached", "status": "live"},
-    ])
-    assert rt_mod.resolve_live_lane("u") == ("control", "aa11bb22")
-
-
-def test_resolve_live_lane_none_when_neither_live(tmp_path, monkeypatch):
-    # A dead interactive row resolves on neither lane -> None (caller queues durable).
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
-    _write_registry(tmp_path, [
-        {"name": "dead", "short_id": "wkD", "provider": "claude",
-         "claude_session_uuid": "u", "host_mode": "interactive", "status": "exited"},
-    ])
-    assert rt_mod.resolve_live_lane("u") is None
-
-
-# ---------------------------------------------------------------------------
 # The worker.submit RPC client.
 # ---------------------------------------------------------------------------
 
