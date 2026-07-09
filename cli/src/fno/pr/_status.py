@@ -85,9 +85,13 @@ def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
     rollup beside the fresh ones; classifying all of them counts a stale
     CANCELLED as a live fail. Grouping by name and keeping the max-startedAt
     entry drops the stale run, so a superseded CANCELLED loses to a newer
-    same-name run while a genuinely-cancelled *latest* run stays. `>=` on a
-    timestamp tie keeps the last-seen entry (deterministic, gh's order) so a
-    whole timestampless name-group resolves to its last member.
+    same-name run while a genuinely-cancelled *latest* run stays.
+
+    Only a STRICTLY-newer timestamp replaces the kept entry. On a tie (equal
+    timestamps, or both missing) the tie-break is fail-closed: a failing entry
+    is never dropped by a same-time non-fail, so a superseded pass can never
+    hide a real fail even when gh emits no usable ordering (the load-bearing
+    invariant). A tie between two non-fails keeps the first-seen (deterministic).
 
     The key discriminates a CheckRun's `name` space from a StatusContext's
     `context` space, so two DIFFERENT checks that happen to share a literal
@@ -111,7 +115,12 @@ def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
         if existing is None:
             latest[key] = c
             order.append(key)
-        elif _entry_ts(c) >= _entry_ts(existing):
+        elif _entry_ts(c) > _entry_ts(existing):
+            latest[key] = c
+        elif _classify(existing) != "fail" and _classify(c) == "fail":
+            # Tie (equal/missing timestamps): a fail must never be dropped by a
+            # same-time non-fail. Newer already won above; this is the only case
+            # where an equal-time entry replaces - to preserve a failure.
             latest[key] = c
     return [latest[k] for k in order] + unkeyed
 
