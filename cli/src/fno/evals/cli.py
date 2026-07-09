@@ -126,6 +126,100 @@ def run_command(
     raise typer.Exit(code=0)
 
 
+@evals_app.command("report")
+def report_command(
+    since: Optional[int] = typer.Option(None, "--since", help="Fold only the most recent N runs."),
+    graduate: bool = typer.Option(False, "--graduate", help="List capability tasks eligible to graduate."),
+    n: int = typer.Option(3, "--consecutive", help="Consecutive passes required for graduation eligibility."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
+    history_file: Optional[Path] = typer.Option(None, "--history", help="History file (default: paths.evals_history())."),
+) -> None:
+    """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
+
+    Exit codes:
+      0  report rendered (or no data)
+      4  regression alarm: a regression-tier task is below 100%
+    """
+    import json as _json
+
+    from fno.evals.report import build_report, graduation_candidates, load_rows
+
+    if history_file is None:
+        from fno.paths import evals_history
+        history_file = evals_history()
+
+    rows = load_rows(history_file, since=since)
+    report = build_report(rows)
+
+    if graduate:
+        candidates = graduation_candidates(rows, n=n)
+        report["graduation_eligible"] = candidates
+
+    if json_output:
+        typer.echo(_json.dumps(report, indent=2))
+    elif report["no_data"]:
+        typer.echo("evals report: no_data (no history yet)")
+    else:
+        typer.echo("Evals report:")
+        for tier, agg in report["tiers"].items():
+            typer.echo(f"  {tier}: {agg['passes']}/{agg['runs']} pass ({agg['pass_rate']:.0%})")
+        for t in report["tasks"]:
+            mark = "FLAKE" if t["flake"] else ("PASS" if t["pass_k"] else "FAIL")
+            typer.echo(
+                f"    {t['tier']:11} {t['task_id']}: pass@1={t['pass_at_1']:.0%} "
+                f"pass^{t['runs']}={t['pass_k']} [{mark}]"
+            )
+        if report["flakes"]:
+            typer.echo(f"  flakes: {', '.join(report['flakes'])}")
+        if report["regression_alarm"]:
+            typer.echo(f"  REGRESSION ALARM: {', '.join(report['regression_alarm'])} below 100%")
+        if graduate:
+            elig = report.get("graduation_eligible") or []
+            typer.echo(
+                f"  graduation-eligible: {', '.join(elig)}" if elig
+                else "  graduation-eligible: none"
+            )
+
+    raise typer.Exit(code=4 if report["regression_alarm"] else 0)
+
+
+@evals_app.command("graduate")
+def graduate_command(
+    task_id: str = typer.Argument(..., help="Bank task id to graduate to the regression tier."),
+    bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
+) -> None:
+    """Retag a capability task's YAML tier to regression (a reviewed edit).
+
+    Exit codes:
+      0  retagged
+      1  task id not found in the bank
+      2  task is not capability-tier (nothing to graduate)
+    """
+    from fno.evals.bank import BankError, discover_bank
+    from fno.evals.report import GraduateError, graduate_task_file
+
+    bank_dir = _resolve_bank_dir(bank)
+    try:
+        tasks = discover_bank(bank_dir)
+    except BankError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    match = next((t for t in tasks if t.id == task_id), None)
+    if match is None or match.source_path is None:
+        typer.echo(f"Error: no bank task '{task_id}' in {bank_dir}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        graduate_task_file(match.source_path)
+    except GraduateError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    typer.echo(f"graduated '{task_id}' -> regression ({match.source_path})")
+    raise typer.Exit(code=0)
+
+
 @evals_app.command("grade")
 def grade_command(
     brief: Path = typer.Option(..., "--brief", help="Path to the research brief <slug>.md."),
