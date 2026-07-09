@@ -140,10 +140,8 @@ def test_local_codex_marketplace_points_at_repo_plugin_root() -> None:
     )
     entry = marketplace["plugins"][0]
     assert entry["name"] == "fno"
-    assert entry["source"] == {"source": "local", "path": "../.."}
-    plugin_root = (
-        REPO_ROOT / ".agents" / "plugins" / entry["source"]["path"]
-    ).resolve()
+    assert entry["source"] == {"source": "local", "path": "."}
+    plugin_root = (REPO_ROOT / entry["source"]["path"]).resolve()
     assert plugin_root == REPO_ROOT
     assert (plugin_root / ".codex-plugin" / "plugin.json").is_file()
 

@@ -35,4 +35,4 @@ codex and gemini are driven through a pseudo-terminal the daemon owns. claude no
 ## See also
 
 - [provider-rotation.md](provider-rotation.md) - provider records, failover, and the switchboard settings schema.
-- `skills/using-abilities/SKILL.md` - the two-surface orientation loaded each session.
+- `skills/using-fno/SKILL.md` - the two-surface orientation loaded each session.
