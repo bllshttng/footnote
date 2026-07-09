@@ -332,6 +332,7 @@ fn spawn_claude_receipt_byte_shape() {
         None,
         &[("PATH", path.as_str())],
         None,
+        None,
     );
 
     assert_eq!(
@@ -395,6 +396,7 @@ fn spawn_claude_collision_exits_2() {
         false,
         None,
         &[],
+        None,
         None,
     );
 

@@ -34,6 +34,7 @@ for a in "$@"; do
   if [ "$prev" = "--name" ]; then name="$a"; fi
   prev="$a"
 done
+if [ -n "$FAKE_CLAUDE_ARGV" ]; then printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGV"; fi
 printf 'backgrounded · 7c5dcf5d · %s\n' "$name"
 exit 0
 "#;
@@ -188,6 +189,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         None,
         &[("PATH", path.as_str())],
         None,
+        None,
     );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     // spawn returns JSON receipt, not bare short_id.
@@ -222,15 +224,18 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     assert!(events.contains("\"kind\":\"agent_ask_done\""), "{}", events);
 }
 
-// Task 1.3a: yolo note now comes from spawn, not ask.
+// x-dfa4: --yolo is no longer a claude no-op - it maps to
+// --permission-mode bypassPermissions (AC4-HP for the bg lane) and the
+// misleading "no effect" note is gone. The applied mode is named in the receipt.
 #[test]
-fn spawn_yolo_prints_noop_note() {
+fn spawn_yolo_maps_to_bypass_permissions() {
     let home = AgentsHome::at(tmpdir("yolo-home"));
     let ch = ClaudeHome::at(tmpdir("yolo-claude"));
     let cwd = tmpdir("yolo-cwd");
     let bin = tmpdir("yolo-bin");
     install_fake_claude(&bin);
     let path = path_with(&bin);
+    let argv_file = cwd.join("argv.txt");
 
     let out = dispatch_claude_spawn(
         &home,
@@ -241,16 +246,27 @@ fn spawn_yolo_prints_noop_note() {
         &cwd,
         true,
         None,
-        &[("PATH", path.as_str())],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_ARGV", argv_file.to_str().unwrap()),
+        ],
+        None,
         None,
     );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     assert!(
-        out.stderr
-            .contains("--yolo has no effect for provider 'claude'"),
-        "stderr: {}",
+        !out.stderr.contains("--yolo has no effect"),
+        "the no-op note must be gone: {}",
         out.stderr
     );
+    let argv = std::fs::read_to_string(&argv_file).unwrap();
+    assert!(
+        argv.contains("--permission-mode") && argv.contains("bypassPermissions"),
+        "yolo must map to bypassPermissions; argv: {argv}"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_str(out.stdout.trim_end_matches('\n')).unwrap();
+    assert_eq!(receipt["permission_mode"], "bypassPermissions");
 }
 
 // --- follow-up ---
@@ -543,6 +559,7 @@ fn spawn_missing_cli_exit_14() {
         false,
         Some(Duration::from_secs(5)),
         &[("PATH", path.as_str())],
+        None,
         None,
     );
     assert_eq!(out.exit_code, 14, "stderr={}", out.stderr);
