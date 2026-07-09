@@ -38,4 +38,3 @@ def test_codex_thread_id_wins_with_mocked_uv(tmp_path: Path) -> None:
     argv = capture.read_text(encoding="utf-8").splitlines()
     assert argv[argv.index("--provider") + 1] == "codex"
     assert argv[argv.index("--session-id") + 1] == "thread-wins"
-
