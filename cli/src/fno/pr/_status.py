@@ -66,13 +66,16 @@ def _classify(check: dict) -> str:
 
 
 def _entry_ts(check: dict) -> str:
-    """Sort key for 'latest run per name'. CheckRun uses completedAt then
-    startedAt (an in-progress run has empty completedAt but a startedAt, so it
-    still sorts); StatusContext uses createdAt. Missing all three -> '' (sorts
-    oldest, loses to any timestamped sibling). ISO-8601 strings sort
-    chronologically as plain strings.
+    """Recency key for 'latest run per name' = when the run was TRIGGERED, not
+    when it finished. A superseding run always STARTS later but need not finish
+    later (a fast rerun can complete before a slow superseded run still winding
+    down), so keying on startedAt - createdAt for a StatusContext, never
+    completedAt - makes 'latest by timestamp' mean 'latest attempt'. An
+    in-progress run has a startedAt and empty completedAt, so it still sorts.
+    Missing both -> '' (sorts oldest, loses to any timestamped sibling).
+    ISO-8601 strings sort chronologically as plain strings.
     """
-    return str(_alt(check.get("completedAt"), check.get("startedAt"), check.get("createdAt"), ""))
+    return str(_alt(check.get("startedAt"), check.get("createdAt"), ""))
 
 
 def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
@@ -80,19 +83,28 @@ def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
 
     A force/amend push leaves superseded runs (e.g. a CANCELLED CI) in the
     rollup beside the fresh ones; classifying all of them counts a stale
-    CANCELLED as a live fail. Grouping by name and keeping the max-timestamp
+    CANCELLED as a live fail. Grouping by name and keeping the max-startedAt
     entry drops the stale run, so a superseded CANCELLED loses to a newer
-    SUCCESS of the same name while a genuinely-cancelled *latest* run stays.
-    `>=` on a timestamp tie keeps the last-seen entry (deterministic, gh's
-    order) so a whole timestampless name-group resolves to its last member.
-    An entry with no name/context key is never merged with another.
+    same-name run while a genuinely-cancelled *latest* run stays. `>=` on a
+    timestamp tie keeps the last-seen entry (deterministic, gh's order) so a
+    whole timestampless name-group resolves to its last member.
+
+    The key discriminates a CheckRun's `name` space from a StatusContext's
+    `context` space, so two DIFFERENT checks that happen to share a literal
+    string are never merged (which could drop a genuine fail); same-kind reruns
+    still group on the shared name. An entry with neither key is never merged.
     """
     latest: dict[Any, dict] = {}
     order: list[Any] = []
     unkeyed: list[dict] = []
     for c in rollup:
-        key = _alt(c.get("name"), c.get("context"), None)
-        if key is None:
+        nm = c.get("name")
+        ctx = c.get("context")
+        if nm not in (None, ""):
+            key: Any = ("check", nm)
+        elif ctx not in (None, ""):
+            key = ("status", ctx)
+        else:
             unkeyed.append(c)
             continue
         if key not in latest:

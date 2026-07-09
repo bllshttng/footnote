@@ -80,21 +80,53 @@ def test_failure_wins_over_pending():
 
 
 def test_superseded_cancelled_loses_to_newer_success_is_green():
-    """AC1: ci CANCELLED (earlier) + ci SUCCESS (later) + other HEAD checks
-    SUCCESS -> green, fail count 0."""
+    """AC1: ci CANCELLED (earlier attempt) + ci SUCCESS (later attempt) + other
+    HEAD checks SUCCESS -> green, fail count 0."""
     rollup = [
         {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED",
-         "completedAt": "2026-07-09T10:00:00Z"},
+         "startedAt": "2026-07-09T09:55:00Z", "completedAt": "2026-07-09T10:00:00Z"},
         {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
-         "completedAt": "2026-07-09T10:05:00Z"},
+         "startedAt": "2026-07-09T10:00:00Z", "completedAt": "2026-07-09T10:05:00Z"},
         {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS",
-         "completedAt": "2026-07-09T10:05:00Z"},
+         "startedAt": "2026-07-09T10:00:00Z", "completedAt": "2026-07-09T10:05:00Z"},
     ]
     verdict, code, counts = _status.verdict_for(rollup)
     assert verdict == "green"
     assert code == 0
     assert counts["fail"] == 0
     # total reflects the deduped set (honest check count), not the raw rollup.
+    assert counts["total"] == 2
+
+
+def test_stale_run_completing_later_does_not_hide_latest_fail():
+    """Invariant regression: the latest ATTEMPT is the one that STARTED last,
+    even when a stale superseded run completes later. A fast-failing current
+    run must not be masked by a slow stale SUCCESS - keying on startedAt (not
+    completedAt) keeps the genuine fail."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE",
+         "startedAt": "2026-07-09T10:01:00Z", "completedAt": "2026-07-09T10:02:00Z"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T09:50:00Z", "completedAt": "2026-07-09T10:03:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert code == 1
+    assert counts["total"] == 1
+
+
+def test_checkrun_and_statuscontext_same_name_not_merged():
+    """Invariant regression: a CheckRun `name` and a StatusContext `context`
+    sharing a literal string are DIFFERENT checks and must not be merged - the
+    StatusContext FAILURE must survive beside the newer CheckRun and force red."""
+    rollup = [
+        {"context": "ci", "state": "FAILURE", "createdAt": "2026-07-09T10:00:00Z"},
+        {"name": "ci", "status": "IN_PROGRESS", "conclusion": "",
+         "startedAt": "2026-07-09T10:05:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert code == 1
     assert counts["total"] == 2
 
 
@@ -115,7 +147,7 @@ def test_latest_in_progress_over_earlier_success_is_pending():
     earlier ci SUCCESS completed) -> pending, never green or red."""
     rollup = [
         {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
-         "completedAt": "2026-07-09T10:00:00Z"},
+         "startedAt": "2026-07-09T10:00:00Z", "completedAt": "2026-07-09T10:03:00Z"},
         {"name": "ci", "status": "IN_PROGRESS", "conclusion": "",
          "startedAt": "2026-07-09T10:05:00Z"},
     ]
