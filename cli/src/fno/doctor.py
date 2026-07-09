@@ -31,6 +31,7 @@ Exit code is non-zero only when staleness is **proven**.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -96,6 +97,87 @@ def _source_rev(source: Path) -> Optional[str]:
     from fno import update
 
     return update._source_rev(source)
+
+
+def _deployed_config_keys() -> Optional[frozenset[str]]:
+    """Config-schema surface of the RUNNING (deployed) CLI: the FIELD_META keyset.
+
+    ``FIELD_META`` is CI-enforced-complete (one entry per config model leaf), so
+    its key set is a faithful schema fingerprint. Imported in-process because
+    THIS interpreter IS the deployed CLI. Fail-open to None so a broken import
+    never crashes doctor.
+    """
+    try:
+        from fno.config.registry import FIELD_META
+
+        return frozenset(FIELD_META)
+    except Exception:
+        return None
+
+
+def _parse_field_meta_keys(source_text: str) -> Optional[frozenset[str]]:
+    """Extract ``FIELD_META``'s keys from ``registry.py`` source text via AST.
+
+    Returns None (skip the check) when the text is unparseable OR ``FIELD_META``
+    is not a flat literal of constant string keys. A spread (``{**base, ...}``)
+    or computed-key form cannot be read completely from the AST, and returning a
+    PARTIAL keyset would risk a false 'fresh' (real drift masked because the
+    source set is truncated) - so fail to None instead of guessing.
+    """
+    try:
+        tree = ast.parse(source_text)
+    except (ValueError, SyntaxError):
+        return None
+    for node in ast.walk(tree):
+        targets: list[str] = []
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        elif isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "FIELD_META" not in targets:
+            continue
+        if not isinstance(node.value, ast.Dict):
+            # A bare `FIELD_META: dict[...]` annotation (value None) or a computed
+            # assignment: keep walking to find the real literal rather than
+            # skipping the check. A truly computed-only FIELD_META finds no dict
+            # and falls through to None below.
+            continue
+        keys: set[str] = set()
+        for k in node.value.keys:
+            # k is None for a `**spread` entry; non-Constant for a computed key.
+            if not isinstance(k, ast.Constant) or not isinstance(k.value, str):
+                return None
+            keys.add(k.value)
+        return frozenset(keys)
+    return None
+
+
+def _source_config_keys(source: Optional[Path]) -> Optional[frozenset[str]]:
+    """Config-schema surface of the SOURCE checkout: ``FIELD_META`` keys parsed
+    from its ``registry.py`` at committed ``HEAD``, without importing it.
+
+    Reads the COMMITTED file (``git show HEAD:...``), not the working tree, to
+    match ``_source_rev``'s committed-HEAD semantics: an uncommitted local edit
+    to registry.py must not flip the verdict while the sibling rev signal still
+    reads fresh. Import-free on purpose (a broken source must never crash doctor,
+    and importing the source package would clash with the loaded deployed one).
+    Returns None - fail-open, skip the check - when the source is not a
+    resolvable git checkout, or the committed file is missing/unparseable.
+    """
+    if source is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source), "show", "HEAD:./src/fno/config/registry.py"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return _parse_field_meta_keys(result.stdout)
 
 
 def _probe_installed_verb() -> ProbeResult:
@@ -577,6 +659,8 @@ def _verdict(
     rust_installed_rev: Optional[str] = None,
     rust_source_rev: Optional[str] = None,
     cargo_bin_present: bool = False,
+    deployed_config_keys: Optional[frozenset[str]] = None,
+    source_config_keys: Optional[frozenset[str]] = None,
 ) -> dict[str, Any]:
     """Pure verdict function (no I/O) returning the complete JSON-serializable
     result, so the decision matrix is unit-testable and the output contract is
@@ -587,6 +671,10 @@ def _verdict(
     and they differ. Any missing evidence piece degrades to "not stale" (never
     cry wolf). Rust evidence gaps never upgrade unknown to fresh and never
     block fresh.
+
+    Config-schema drift follows the same full-evidence rule: only when BOTH
+    keysets are known and the source defines keys the deployed CLI lacks is the
+    Python schema proven stale. A deployed CLI AHEAD of source is never stale.
     """
     missing_verbs: list[str] = []
     python_stale = False
@@ -608,6 +696,18 @@ def _verdict(
         # Cannot prove stale; must not cry wolf (and must not claim false fresh).
         status = "unknown"
 
+    # Config-schema drift: the deployed FIELD_META keyset is a schema fingerprint.
+    # Source keys the deployed CLI lacks mean the install predates a config block
+    # and silently mis-mints IDs - a stale the rev/verb signals miss (they read
+    # "unknown" when the install predates the rev marker). Full evidence only;
+    # proven drift upgrades even an "unknown" status to stale.
+    missing_config_keys: list[str] = []
+    if deployed_config_keys is not None and source_config_keys is not None:
+        missing_config_keys = sorted(source_config_keys - deployed_config_keys)
+    if missing_config_keys:
+        python_stale = True
+        status = "stale"
+
     # Rust staleness: requires full evidence. Partial evidence is never stale.
     rust_stale = (
         cargo_bin_present
@@ -625,6 +725,7 @@ def _verdict(
         "python_stale": python_stale,
         "rust_stale": rust_stale,
         "missing_verbs": missing_verbs,
+        "missing_config_keys": missing_config_keys,
         "source_rev": source_rev,
         "installed_rev": marker,
         "rust_binary": rust_binary,
@@ -655,6 +756,20 @@ def _emit_human(
                 f"(missing: {', '.join(result['missing_verbs'])}). "
                 "Run `fno update` (or `fno doctor --fix`)."
             )
+        elif result.get("missing_config_keys"):
+            # Config-schema drift is the more actionable signal (it names a
+            # missing key), so it leads - but a deployed-behind install is usually
+            # ALSO rev-behind, so append the rev delta when known rather than drop
+            # the diagnostic the plain python_stale branch would have shown.
+            keys = result["missing_config_keys"]
+            msg = (
+                f"fno doctor: Python config schema is STALE (deployed is missing "
+                f"{len(keys)} config key(s), e.g. {keys[0]})."
+            )
+            inst, srcrev = result["installed_rev"], result["source_rev"]
+            if inst is not None and srcrev is not None and inst != srcrev:
+                msg += f" Installed rev {inst} != source {srcrev}."
+            out(msg + " Run `fno update` (or `fno doctor --fix`).")
         elif result["python_stale"]:
             out(
                 f"fno doctor: installed fno is behind {src_label} "
@@ -830,6 +945,9 @@ def doctor_command(
     rust_src_rev = _rust_source_rev(src)
     cargo_bin_present = _cargo_bin_present()
 
+    deployed_config_keys = _deployed_config_keys()
+    source_config_keys = _source_config_keys(src)
+
     result = _verdict(
         source_resolved=src is not None,
         source_rev=source_rev,
@@ -839,6 +957,8 @@ def doctor_command(
         rust_installed_rev=rust["revision"],
         rust_source_rev=rust_src_rev,
         cargo_bin_present=cargo_bin_present,
+        deployed_config_keys=deployed_config_keys,
+        source_config_keys=source_config_keys,
     )
     # Advisory front-door fields (x-c267); never change status/exit.
     result.update(_mux_front_door_report())
