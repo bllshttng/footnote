@@ -64,12 +64,21 @@ Step 7:
 
 - **Backfill slot (Step 4b)** -> file a node, never run it.
 - **Handoff slot (Step 6b)** -> skip silently.
-- **Think-worthy follow-up (Steps 3/6)** -> when a follow-up needs design work
-  before it is actionable, file it with `fno backlog idea` and stop there:
-  born-with-why (`config.think_spawn`, `fno.provenance.spawn_think`) dispatches
-  the background `/think` on node birth when armed - so you never prompt "run a
-  think?" and never hand-spawn a second think that would race its dedup.
+- **Keep-going follow-up dispatch (Step 3, x-3360)** -> the autonomous
+  keep-going engine is what makes this loop generate the *next* unit of work
+  instead of only closing the merged one. It runs inside `fno retro run
+  --keep-going` (Step 3): after the surviving carve-outs are filed as nodes, it
+  classifies each and dispatches under a shared per-day firehose ceiling
+  (`config.think_spawn.daily_cap`, counted across every autonomous dispatch):
+  a deferred carve-out (design unclear) -> `fno think dispatch`; an oos-bug
+  carve-out (scoped, design clear) -> a bg `/target <node> no-merge`; anything
+  else -> the filed node only. When the ceiling is hit, remaining follow-ups
+  stay filed as backlog nodes (never dropped) and one cap line is printed. It is
+  a no-op unless `config.keep_going.enabled` is armed, so you never hand-spawn a
+  think/target yourself here - the verb owns it, deterministically and
+  ceiling-bounded.
 - **Self-end** after the Step-7 report: finish the turn, do not wait for input.
+  Each dispatched worker is the next loop iteration; nothing stays resident.
 
 Detect the mode once at the top: autonomous when an `autonomous` argument token
 is present, `POST_MERGE_NONINTERACTIVE=1` is set, or there is no interactive
@@ -248,7 +257,13 @@ going so the inbox prose still lands, but flag it in the report.
 ## Step 3: Mechanical triage harvest
 
 ```bash
-fno retro run --pr-number "$PR" || { echo "post-merge: retro run FAILED - record in report" >&2; RETRO_FAILED=1; }
+# In autonomous mode add --keep-going so the keep-going engine (x-3360)
+# classifies surviving carve-outs and dispatches follow-up /think or /target work
+# under the firehose ceiling. A no-op unless config.keep_going.enabled is armed.
+KEEP_GOING_FLAG=()
+if [[ "$AUTONOMOUS" == "1" ]]; then KEEP_GOING_FLAG=(--keep-going); fi
+# Guarded expansion: under Bash 3.2 + set -u, "${arr[@]}" on an empty array errors.
+fno retro run --pr-number "$PR" "${KEEP_GOING_FLAG[@]+"${KEEP_GOING_FLAG[@]}"}" || { echo "post-merge: retro run FAILED - record in report" >&2; RETRO_FAILED=1; }
 # Processes any retro/.triage-pending sentinels AND explicitly harvests this
 # PR's carve-outs. The bare `retro run` only fires when a sentinel exists; a
 # manual merge with no node<->PR link drops none, so its carve-outs (now stored

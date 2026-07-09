@@ -187,6 +187,18 @@ def _emit_report(report: TriageReport, *, mode: str) -> None:
         elif r.outcome == "failed":
             typer.echo(f"FAILED to land: {r.candidate.title} ({r.error})", err=True)
 
+    for f in getattr(report, "followups", None) or []:
+        if f.outcome == "dispatched":
+            typer.echo(f"keep-going: dispatched {f.arm} for {f.node_id}")
+        elif f.outcome == "failed":
+            typer.echo(
+                f"keep-going: {f.arm} dispatch failed for {f.node_id} "
+                f"(left as a filed node)",
+                err=True,
+            )
+        # 'filed'/'capped' already visible via the created-node line / the single
+        # cap-reached line dispatch_followups prints; no per-node echo needed.
+
     if report.uncited:
         typer.echo(
             f"skipped {len(report.uncited)} uncited candidate(s) "
@@ -607,6 +619,18 @@ def run(
             "repo via `gh repo view`."
         ),
     ),
+    keep_going: bool = typer.Option(
+        False,
+        "--keep-going",
+        help=(
+            "Autonomous keep-going (x-3360): treat this harvest as a no-human "
+            "run so the engine classifies surviving carve-outs and dispatches "
+            "follow-up /think or /target work under the firehose ceiling. A no-op "
+            "unless config.keep_going.enabled is set. Passed by the autonomous "
+            "/fno:pr merged ritual; a real autonomous-mode sentinel triggers the "
+            "engine without it."
+        ),
+    ),
 ) -> None:
     """Consume retro-pending sentinels and file left-out work."""
     from fno._flag_aliases import merge_deprecated_alias
@@ -754,6 +778,15 @@ def run(
                 payload["carveouts_readonly"] = True
         if slug:
             payload["pr_url"] = f"https://github.com/{slug}/pull/{pr}"
+        # x-3360: an autonomous keep-going harvest (the /fno:pr merged ritual
+        # passes --keep-going) has no sentinel, so mark the synthetic payload
+        # autonomous so nodes land active AND the keep-going engine fires. Gated
+        # by config so a stray flag on a keep_going-off install stays a plain run.
+        if keep_going:
+            from fno.retro.keep_going import keep_going_enabled
+
+            if keep_going_enabled(project_root=repo_root):
+                payload["mode"] = "autonomous"
         try:
             existing_nodes = read_graph(graph_json())
         except Exception:

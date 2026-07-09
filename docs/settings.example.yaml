@@ -181,6 +181,9 @@ config:
   auto_continue:
     # Auto-dispatch the next ready node after a PR merges.
     enabled: false
+  keep_going:
+    # Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap).
+    enabled: false
   think_spawn:
     # Born-with-why: spawn/offer a context-carrying /think for a generated idea node.
     enabled: false
