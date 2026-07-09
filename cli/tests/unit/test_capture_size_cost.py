@@ -119,6 +119,31 @@ def test_backlog_done_stamps_cost_from_ledger(tmp_path, monkeypatch):
     assert len(node["cost_sessions"]) == 2
 
 
+def test_backlog_done_does_not_overwrite_existing_cost(tmp_path, monkeypatch):
+    """Fill-only: a node that already carries cost (e.g. from `fno done`) keeps
+    it; backlog done never clobbers a richer prior stamp (codex P2)."""
+    g, ledger = _route_graph(tmp_path, monkeypatch)
+    g.write_text(json.dumps({"entries": [{
+        "id": "ab-cost0001",
+        "title": "Pre-costed",
+        "plan_path": "internal/plans/costed.md",
+        "cost_usd": 9.99,
+        "cost_sessions": [{"session_id": "pre", "cost_usd": 9.99}],
+    }]}) + "\n")
+    ledger.write_text(json.dumps({"entries": [{
+        "plan_path": "internal/plans/costed.md", "cost_usd": 1.20,
+        "sessions": ["sess-a"], "completed": "2026-07-08T10:00:00Z",
+    }]}) + "\n")
+
+    result = runner.invoke(
+        app, ["backlog", "done", "ab-cost0001", "--force", "--reason", "test", "--skip-stamp"]
+    )
+    assert result.exit_code == 0, result.output
+    node = _entries(g)[0]
+    assert node["cost_usd"] == pytest.approx(9.99)  # prior stamp preserved
+    assert node["cost_sessions"] == [{"session_id": "pre", "cost_usd": 9.99}]
+
+
 def test_backlog_done_no_ledger_row_leaves_cost_null(tmp_path, monkeypatch):
     g, _ = _route_graph(tmp_path, monkeypatch)
     _seed_node(g, "internal/plans/uncosted.md")  # ledger stays empty

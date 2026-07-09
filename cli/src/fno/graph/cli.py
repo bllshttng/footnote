@@ -1167,6 +1167,20 @@ def _intake_impl(
         typer.echo(
             f'claimed {claim_id} via {claim_source}: "{spec["title"]}"'
         )
+        # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
+        # this branch returns early, so the append-path projection never runs.
+        try:
+            from fno.graph._intake import _find_node, repo_root
+            from fno.plan._project import project_node_to_plan
+
+            claimed = _find_node(read_graph(_graph_path()), claim_id)
+            if claimed and claimed.get("plan_path"):
+                p = Path(claimed["plan_path"])
+                if not p.is_absolute():
+                    p = Path(repo_root()) / p
+                project_node_to_plan(claimed, p)
+        except Exception as e:  # noqa: BLE001 - additive; never wedge the claim
+            sys.stderr.write(f"warning: post-claim plan projection failed: {e}\n")
         return
 
     new_id_holder: list[Optional[str]] = [None]
@@ -4283,9 +4297,11 @@ def cmd_done(
             already_holder[0] = True
             return entries
         _apply_completion_fields(n)
-        if cost_rollup.get("cost_usd") is not None:
+        # Fill-only: never overwrite a cost a richer path (e.g. `fno done`)
+        # already stamped, and don't drop rows appended during the run.
+        if cost_rollup.get("cost_usd") is not None and not n.get("cost_usd"):
             n["cost_usd"] = cost_rollup["cost_usd"]
-        if cost_rollup.get("cost_sessions"):
+        if cost_rollup.get("cost_sessions") and not n.get("cost_sessions"):
             n["cost_sessions"] = cost_rollup["cost_sessions"]
         # Close any now-all-done ancestor epic (x-33b2): the box is done when its
         # children are, and it carries no PR of its own to close it explicitly.
@@ -5443,12 +5459,14 @@ def cmd_archive(
     now = datetime.now(timezone.utc)
 
     def _split(entries):
-        pool = entries
-        if roadmap_id:
-            pool = [e for e in entries if e.get("roadmap_id") == roadmap_id]
+        # Guard against the FULL graph so an open node in another roadmap that
+        # references one of these terminal nodes (blocker/parent/supersede) is
+        # still protected; only the archive SET is roadmap-restricted.
         to_archive, _remaining_pool, skipped = partition_for_archive(
-            pool, older_than_days, now
+            entries, older_than_days, now
         )
+        if roadmap_id:
+            to_archive = [e for e in to_archive if e.get("roadmap_id") == roadmap_id]
         arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
         remaining = [e for e in entries if e.get("id") not in arch_ids]
         return to_archive, remaining, skipped

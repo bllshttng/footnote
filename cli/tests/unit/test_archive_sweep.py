@@ -135,3 +135,22 @@ def test_get_missing_everywhere_exits_1(tmp_path, monkeypatch):
     _seed(g, [])
     r = runner.invoke(app, ["backlog", "get", "ab-nope0001"])
     assert r.exit_code == 1
+
+
+def test_roadmap_archive_guards_across_roadmaps(tmp_path, monkeypatch):
+    """A --roadmap-id sweep must not archive a done node still referenced by an
+    OPEN node in a DIFFERENT roadmap (codex P2: guard the full graph)."""
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [
+        {"id": "ab-dep00001", "roadmap_id": "rm-A", "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-open0001", "roadmap_id": "rm-B", "plan_path": "p.md", "blocked_by": ["ab-dep00001"]},
+    ])
+    r = runner.invoke(
+        app, ["backlog", "archive", "--apply", "--older-than-days", "0", "--roadmap-id", "rm-A"]
+    )
+    assert r.exit_code == 0, r.output
+    live = {e["id"] for e in json.loads(g.read_text())["entries"]}
+    assert "ab-dep00001" in live  # held: an open node in rm-B still blocks on it
+    assert not archive.exists() or "ab-dep00001" not in {
+        e["id"] for e in json.loads(archive.read_text())["entries"]
+    }
