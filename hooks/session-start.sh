@@ -124,7 +124,7 @@ hydrate_state_provider_context() {
 #    it teaches the agent the verbs the rest of the context will use.
 using_fno_content=""
 if [[ -f "${SCRIPT_DIR}/session-start-using-fno.sh" ]]; then
-    raw_using_fno=$(bash "${SCRIPT_DIR}/session-start-using-fno.sh" 2>/dev/null || echo "")
+    raw_using_fno=$(bash "${SCRIPT_DIR}/session-start-using-fno.sh" 2>/dev/null || true)
     if [[ -n "$raw_using_fno" ]]; then
         using_fno_content=$(echo "$raw_using_fno" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // .additionalContext // empty' 2>/dev/null || echo "$raw_using_fno")
     fi
