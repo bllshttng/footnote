@@ -1410,7 +1410,7 @@ impl View {
         if self.hint {
             let text = " % \" split · hjkl focus · HJKL resize · x close · c tab \
                         · n/p cycle · 1-9 tab · & close-tab · w select · b sideline \
-                        · g grab · / search · s status · d detach · ? all keys";
+                        · g grab · f find · / search · s status · d detach · ? all keys";
             for (i, ch) in text.chars().take(cols).enumerate() {
                 put(cells, i, ch, 0);
             }
@@ -2015,6 +2015,8 @@ const KEY_TABLE: &[&str] = &[
     "  g  grab work (dispatch next ready)     ",
     "  ,  rename tab (empty resets to auto)   ",
     "  /  search scrollback  n/N older/newer  ",
+    "  f  find: goto pane/agent · type filter  ",
+    "     · Tab state · C-n/C-p move · ⏎ goto  ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
 ];
@@ -4843,6 +4845,23 @@ mod tests {
         let text = frame_text(&view.compose());
         assert!(text.contains("fno keys"), "table header present");
         assert!(text.contains("any key dismisses"));
+        // x-653d AC5-HP: the table documents leader+f and its filters.
+        assert!(text.contains("f  find"), "key table documents leader+f");
+        assert!(text.contains("Tab state"), "and its type/Tab/goto filters");
+    }
+
+    #[test]
+    fn client_compose_hint_lists_the_find_chord() {
+        // x-653d AC5-UI: the which-key hint lists `f find` (past the width
+        // budget on a narrow terminal, so composed wide here to see it).
+        let mut view = two_pane_view();
+        view.term = (30, 240);
+        view.hint = true;
+        let text = frame_text(&view.compose());
+        assert!(
+            text.lines().last().unwrap().contains("f find"),
+            "hint lists the navigator chord"
+        );
     }
 
     #[test]
