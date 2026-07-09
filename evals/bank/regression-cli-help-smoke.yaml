@@ -1,0 +1,11 @@
+# Regression tier: the CLI must always start and print help. Grade-only (no
+# worker step) - this measures the fixture directly, so pass^k over it scores
+# the flake rate of the CLI's own startup path.
+id: regression-cli-help-smoke
+tier: regression
+grade:
+  - kind: exit
+    command: "cd cli && uv run fno-py --help"
+    expect: 0
+timeout_minutes: 5
+tags: [smoke]

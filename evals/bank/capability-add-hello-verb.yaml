@@ -1,0 +1,26 @@
+# Capability tier: a hill to climb. The worker must add a working `fno hello`
+# verb from scratch. We currently fail this (the verb does not exist); it stays
+# capability until it saturates, then graduates to regression. The grade is
+# mechanical: the new verb runs and prints the expected string.
+id: capability-add-hello-verb
+tier: capability
+prompt: |
+  Add a new CLI subcommand `fno hello` to the fno Python CLI.
+
+  Requirements:
+  - Running `cd cli && uv run fno-py hello` must exit 0 and print exactly
+    `hello from fno` on stdout.
+  - Wire it into the existing lazy command registry in cli/src/fno/cli.py the
+    same way the other verbs are wired (a `fno.<module>:<app>` entry).
+  - Match the surrounding Typer style; no new dependencies.
+
+  Commit your work. Report your result in the fenced JSON contract.
+grade:
+  - kind: exit
+    command: "cd cli && uv run fno-py hello"
+    expect: 0
+  - kind: grep
+    path: "cli/src/fno/cli.py"
+    pattern: "hello"
+timeout_minutes: 20
+tags: [cli, greenfield]
