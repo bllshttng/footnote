@@ -52,17 +52,16 @@ from fno.graph._constants import RESERVED_PREFIXES
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle. Re-exported
 # here so every existing `from fno.config import read_config_flat` (etc.) caller
-# keeps working unchanged.
-from fno.config_io import (  # noqa: F401  (re-exported for back-compat)
-    _apply_search_ceiling,
-    _deep_merge,
-    _global_settings_path,
-    _load_raw,
-    _prefer_toml,
-    _unwrap_config_dict,
-    config_read_candidates,
-    read_config_flat,
-)
+# keeps working unchanged. The redundant `X as X` aliases are the explicit-reexport
+# idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
+from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
+from fno.config_io import _deep_merge as _deep_merge
+from fno.config_io import _global_settings_path as _global_settings_path
+from fno.config_io import _load_raw as _load_raw
+from fno.config_io import _prefer_toml as _prefer_toml
+from fno.config_io import _unwrap_config_dict as _unwrap_config_dict
+from fno.config_io import config_read_candidates as config_read_candidates
+from fno.config_io import read_config_flat as read_config_flat
 
 _LOG = logging.getLogger(__name__)
 
