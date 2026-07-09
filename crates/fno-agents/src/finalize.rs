@@ -505,9 +505,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
 /// relative to the binary, PYTHONPATH is left untouched, and the installed
 /// `fno` package is used.
 fn py_module(cwd: &Path) -> Command {
-    let mut cmd = Command::new(py_interpreter());
+    let mut cmd = Command::new(py_interpreter(cwd));
     cmd.current_dir(cwd);
-    if let Some(src) = repo_cli_src() {
+    if let Some(src) = repo_cli_src(cwd) {
         let joined = match std::env::var_os("PYTHONPATH") {
             Some(prev) if !prev.is_empty() => {
                 // APPEND (not prepend): cli/src is only a fallback that resolves
@@ -527,11 +527,41 @@ fn py_module(cwd: &Path) -> Command {
     cmd
 }
 
-/// Locate `<repo>/cli/src` by walking up from the running binary until an
-/// ancestor holds `cli/src/fno/__init__.py`. Returns `None` when the binary is
-/// not inside a source checkout (e.g. an installed wheel), so PYTHONPATH stays
-/// unset and the installed package is used instead.
-fn repo_cli_src() -> Option<String> {
+/// A `cli/.venv/bin/python3` under `root`, but ONLY when `root` is genuinely a
+/// footnote source checkout (it also holds `cli/src/fno/__init__.py`). Gating on
+/// the co-located package guards two cases (codex review on the x-b74b PR): a
+/// foreign project `cwd` that happens to carry its own `cli/.venv` without `fno`
+/// installed, and a mis-derived canonical root from a nonstandard git-dir
+/// layout - either would otherwise hand back a venv where `import fno` fails and
+/// silently regress ledger/stamp finalization.
+fn footnote_venv(root: &Path) -> Option<String> {
+    let venv = root.join("cli/.venv/bin/python3");
+    if venv.is_file() && root.join("cli/src/fno/__init__.py").is_file() {
+        return Some(venv.to_string_lossy().into_owned());
+    }
+    None
+}
+
+/// Locate `<repo>/cli/src` (the dir holding `cli/src/fno/__init__.py`). Anchored
+/// on the target PROJECT (`cwd`), NOT the running binary: the DEPLOYED
+/// fno-agents binary lives in `~/.local/bin`, whose ancestors hold no checkout,
+/// so a `current_exe()` walk found neither `cli/src` nor `cli/.venv` and every
+/// deployed-binary finalize dropped its ledger row (x-b74b). `cwd` is the
+/// worktree, which tracks `cli/src`. Falls back to the canonical repo, then to a
+/// `current_exe()` walk (checkout-built binary run outside its repo). `None`
+/// when nothing resolves, so PYTHONPATH stays unset and an installed `fno` is
+/// used.
+fn repo_cli_src(cwd: &Path) -> Option<String> {
+    for anc in cwd.ancestors() {
+        if anc.join("cli/src/fno/__init__.py").is_file() {
+            return Some(anc.join("cli/src").to_string_lossy().into_owned());
+        }
+    }
+    if let Some(root) = crate::paths::canonical_repo_root(cwd) {
+        if root.join("cli/src/fno/__init__.py").is_file() {
+            return Some(root.join("cli/src").to_string_lossy().into_owned());
+        }
+    }
     let exe = std::env::current_exe().ok()?;
     for anc in exe.ancestors() {
         if anc.join("cli/src/fno/__init__.py").is_file() {
@@ -550,16 +580,27 @@ fn repo_cli_src() -> Option<String> {
 /// and its deps. PYTHONPATH entries still precede site-packages, so the
 /// finalize_e2e stub package keeps precedence over the venv's installed `fno`.
 /// Falls back to `python3` when no venv is found (installed-wheel or bare
-/// environment).
-fn py_interpreter() -> String {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return "python3".to_string(),
-    };
-    for anc in exe.ancestors() {
-        let venv = anc.join("cli/.venv/bin/python3");
-        if venv.is_file() {
-            return venv.to_string_lossy().into_owned();
+/// environment). Anchored on `cwd`, then the CANONICAL repo, then a
+/// `current_exe()` walk: a linked worktree has `cli/src` but NO `cli/.venv`, and
+/// bare Homebrew `python3` lacks fno's deps (pydantic, ...), so a worktree
+/// finalize must resolve the canonical checkout's venv (x-b74b) - PYTHONPATH
+/// alone would still fail on the missing dep.
+fn py_interpreter(cwd: &Path) -> String {
+    for anc in cwd.ancestors() {
+        if let Some(v) = footnote_venv(anc) {
+            return v;
+        }
+    }
+    if let Some(root) = crate::paths::canonical_repo_root(cwd) {
+        if let Some(v) = footnote_venv(&root) {
+            return v;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for anc in exe.ancestors() {
+            if let Some(v) = footnote_venv(anc) {
+                return v;
+            }
         }
     }
     "python3".to_string()
@@ -2173,5 +2214,93 @@ mod tests {
         );
         assert_eq!(read_project_id(&f).as_deref(), Some("good"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // x-b74b: from a linked worktree (has cli/src, but cli/.venv is gitignored
+    // so it is NOT checked out) the interpreter must resolve the CANONICAL
+    // repo's venv, and cli/src must anchor on the worktree - neither via
+    // current_exe(). Reproduces the deployed-binary anchor failure.
+    #[test]
+    fn worktree_resolves_canonical_venv_and_own_cli_src() {
+        fn git(cwd: &Path, args: &[&str]) -> bool {
+            Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let canon = tmp.path().join("canon");
+        let wt = tmp.path().join("wt"); // sibling of canon, NOT nested inside it
+        fs::create_dir_all(canon.join("cli/src/fno")).unwrap();
+        fs::write(canon.join("cli/src/fno/__init__.py"), "").unwrap();
+
+        if !git(&canon, &["init", "-q"]) {
+            return; // no git available - nothing to assert
+        }
+        for kv in [
+            "user.email=t@t",
+            "user.name=t",
+            "commit.gpgsign=false",
+            "init.defaultBranch=main",
+        ] {
+            git(
+                &canon,
+                &[
+                    "config",
+                    kv.split('=').next().unwrap(),
+                    kv.split('=').nth(1).unwrap(),
+                ],
+            );
+        }
+        git(&canon, &["add", "-A"]);
+        assert!(git(&canon, &["commit", "-qm", "init"]), "commit failed");
+
+        // Canonical carries the venv; a linked worktree does NOT (gitignored).
+        fs::create_dir_all(canon.join("cli/.venv/bin")).unwrap();
+        fs::write(canon.join("cli/.venv/bin/python3"), "").unwrap();
+
+        assert!(
+            git(&canon, &["worktree", "add", "-q", wt.to_str().unwrap()]),
+            "worktree add failed"
+        );
+        assert!(
+            wt.join("cli/src/fno/__init__.py").is_file(),
+            "wt has cli/src"
+        );
+        assert!(!wt.join("cli/.venv/bin/python3").exists(), "wt lacks venv");
+
+        // canonicalize both sides: git's --path-format=absolute returns the
+        // realpath (/private/var on macOS) while the temp path is /var.
+        let real = |p: &str| fs::canonicalize(p).unwrap();
+        assert_eq!(
+            real(&py_interpreter(&wt)),
+            real(canon.join("cli/.venv/bin/python3").to_str().unwrap())
+        );
+        assert_eq!(
+            real(&repo_cli_src(&wt).unwrap()),
+            real(wt.join("cli/src").to_str().unwrap())
+        );
+    }
+
+    // codex P2: a foreign (non-footnote) project cwd that happens to carry its
+    // own cli/.venv but NO fno package must NOT be selected as the interpreter -
+    // `import fno` would fail. footnote_venv gates on the co-located
+    // cli/src/fno/__init__.py, so this venv is rejected and resolution falls
+    // through (never rooting under the foreign project).
+    #[test]
+    fn foreign_cwd_venv_without_fno_package_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let foreign = tmp.path().join("foreign");
+        fs::create_dir_all(foreign.join("cli/.venv/bin")).unwrap();
+        fs::write(foreign.join("cli/.venv/bin/python3"), "").unwrap();
+        // deliberately NO cli/src/fno/__init__.py -> not a footnote checkout.
+        assert_eq!(footnote_venv(&foreign), None);
+        let interp = py_interpreter(&foreign);
+        assert!(
+            !interp.starts_with(foreign.to_str().unwrap()),
+            "must not pick the foreign venv, got {interp}"
+        );
     }
 }
