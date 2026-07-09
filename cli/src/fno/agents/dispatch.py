@@ -530,7 +530,14 @@ def _followup_path(
             # inside_leg report) is a routing gap, not a death -- do NOT stamp
             # it orphaned (that misleads `fno agents list`). reconcile's
             # `claude logs` probe stays the authority that orphans a dead one.
-            if _inside_leg_is_recent(_current_inside_leg(name), time.time()):
+            #
+            # x-2681: "roster-live-inject-failed" means the control.sock fallback
+            # delivery failed on a session that IS live in the daemon roster --
+            # also a routing gap, never a death, so it takes the same no-stamp
+            # branch (AC6-FR: a roster-live session is never stamped orphaned).
+            if exc.reason == "roster-live-inject-failed" or _inside_leg_is_recent(
+                _current_inside_leg(name), time.time()
+            ):
                 events.emit(
                     "agent_followup_failed",
                     stage="routing-gap",

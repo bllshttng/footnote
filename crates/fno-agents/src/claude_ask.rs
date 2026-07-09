@@ -76,6 +76,10 @@ pub enum OrphanReason {
     NotFound,
     /// Socket exists but a connect probe failed.
     LivenessFailed,
+    /// x-2681: the session is live in the daemon roster but the control.sock
+    /// fallback inject did not confirm -- a delivery failure, NOT a dead
+    /// session, so the orchestration layer must NOT stamp it orphaned.
+    RosterLiveInjectFailed,
 }
 
 impl OrphanReason {
@@ -85,6 +89,7 @@ impl OrphanReason {
             OrphanReason::SocketNull => "socket-null",
             OrphanReason::NotFound => "not-found",
             OrphanReason::LivenessFailed => "liveness-failed",
+            OrphanReason::RosterLiveInjectFailed => "roster-live-inject-failed",
         }
     }
 }
@@ -271,6 +276,20 @@ impl ClaudeHome {
     pub fn jobs_dir_for(&self, short_id: &str) -> PathBuf {
         self.home.join(".claude").join("jobs").join(short_id)
     }
+
+    /// The daemon roster path. Honors `FNO_CLAUDE_DAEMON_DIR` FIRST (a supported
+    /// alt-home / alternate-daemon override, matching `claude_roster::daemon_dir`
+    /// and the deliver path's `load_default`), else `<home>/.claude/daemon`. The
+    /// env-first order keeps the ask-lane roster pre-check reading the SAME roster
+    /// the deliver step resolves, so the fallback never skips in an alt-daemon
+    /// setup; the home-relative fallback keeps it hermetic under a test
+    /// `ClaudeHome`. Byte-parity with Python's `_daemon_dir` (env-first-else-home).
+    pub fn daemon_roster_path(&self) -> PathBuf {
+        if let Some(dir) = std::env::var_os(crate::claude_roster::DAEMON_DIR_ENV) {
+            return PathBuf::from(dir).join("roster.json");
+        }
+        self.home.join(".claude").join("daemon").join("roster.json")
+    }
 }
 
 /// Pointer into the claude session registry for one bg supervisor session
@@ -438,12 +457,20 @@ pub fn use_stdin_for(message: &str) -> bool {
 /// the trailing newline. Key order is fixed: type, message{role, content},
 /// priority. `from_name` is html-attribute-escaped; `message` is inserted raw
 /// into the wrapper then JSON-string-encoded.
-pub fn build_envelope(message: &str, from_name: &str) -> Vec<u8> {
-    let safe_from = html_escape_quote(from_name);
-    let wrapped = format!(
+/// Wrap `message` in the cross-session-message container that marks it as a peer
+/// turn (`build_cross_session_container`). `from_name` is html-attribute-escaped;
+/// `message` is inserted raw. Shared by the BG8 envelope ([`build_envelope`]) and
+/// the x-2681 control.sock ask fallback, so both frame a peer turn identically.
+pub fn build_cross_session_container(message: &str, from_name: &str) -> String {
+    format!(
         "<cross-session-message from-name=\"{}\">\n{}\n</cross-session-message>",
-        safe_from, message
-    );
+        html_escape_quote(from_name),
+        message
+    )
+}
+
+pub fn build_envelope(message: &str, from_name: &str) -> Vec<u8> {
+    let wrapped = build_cross_session_container(message, from_name);
     let content = json_string_ascii(&wrapped);
     let line = format!(
         "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{}}},\"priority\":\"next\"}}\n",
@@ -1174,6 +1201,76 @@ pub fn wait_for_reply(
 /// reply text (`""` when the recipient produced none). The baseline is captured
 /// BEFORE the send so a stale `output.result` cannot impersonate the reply.
 #[allow(clippy::too_many_arguments)]
+/// x-2681: true iff `short_id` is present in the daemon roster under `home`.
+/// Lenient -- a missing/torn/type-drifted roster yields false, never an error. A
+/// cheap pre-check for the control.sock ask fallback; the deliver step's own
+/// connect is the authoritative liveness gate, so roster PRESENCE (not
+/// pid-liveness) is enough. Mirrors `_claude_session_registry.roster_live`.
+fn roster_live(home: &ClaudeHome, short_id: &str) -> bool {
+    match crate::claude_roster::ClaudeRoster::load(&home.daemon_roster_path()) {
+        Ok(roster) => roster.find(short_id).is_some(),
+        Err(_) => false,
+    }
+}
+
+/// x-2681 ask-lane fallback: deliver `message` to a roster-live but socket-null
+/// session over the daemon `control.sock` (the single wire vehicle,
+/// [`crate::mail_inject::deliver_via_control_sock`]), then collect the reply from
+/// the bg jobs-dir. Mirrors Python's `_ask_via_control_sock`:
+///   - inject not confirmed -> `Orphan(RosterLiveInjectFailed)` (a delivery
+///     failure on a LIVE session; the caller must not stamp it orphaned).
+///   - delivered, reply from the jobs-dir tail -> the reply text.
+///   - delivered, no jobs-dir (operator session) -> `Timeout` (delivered, no
+///     reply surface; never fabricate an empty reply -- Open Questions 1/3).
+fn ask_via_control_sock(
+    short_id: &str,
+    message: &str,
+    from_name: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    target_jobs_dir: &Path,
+) -> Result<String, AskError> {
+    // Baseline the reply surface BEFORE inject so a pre-existing terminal state
+    // cannot impersonate this turn's reply.
+    let baseline_updated_at = read_state_json(target_jobs_dir)
+        .ok()
+        .and_then(|s| s.updated_at);
+    let offset = timeline_offset(target_jobs_dir);
+
+    let wrapped = build_cross_session_container(message, from_name);
+    if crate::mail_inject::deliver_via_control_sock(
+        short_id,
+        &wrapped,
+        crate::mail_inject::DEFAULT_ATTEMPTS,
+        crate::mail_inject::DEFAULT_INTERVAL_MS,
+    )
+    .is_err()
+    {
+        return Err(AskError::Orphan {
+            reason: OrphanReason::RosterLiveInjectFailed,
+            short_id: short_id.to_string(),
+        });
+    }
+
+    // Delivered. No jobs-dir (operator session) -> nothing to poll: report
+    // delivered-no-reply rather than spin the full timeout or fabricate a reply.
+    if !target_jobs_dir.exists() {
+        return Err(AskError::Timeout {
+            elapsed_sec: 0.0,
+            short_id: short_id.to_string(),
+        });
+    }
+
+    wait_for_reply(
+        target_jobs_dir,
+        baseline_updated_at.as_deref(),
+        offset,
+        timeout,
+        poll_interval,
+        short_id,
+    )
+}
+
 pub fn ask_followup(
     home: &ClaudeHome,
     claude_short_id: &str,
@@ -1187,6 +1284,22 @@ pub fn ask_followup(
         Some(l) => l,
         None => {
             let reason = classify_orphan_reason(home, claude_short_id);
+            // x-2681: a socket-null session that is live in the daemon roster is
+            // reachable over the daemon control.sock. Fall back before orphaning.
+            // not-found is genuinely dead and never falls back (Locked Decision 5).
+            if reason == OrphanReason::SocketNull && roster_live(home, claude_short_id) {
+                let jd = jobs_dir_override
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| home.jobs_dir_for(claude_short_id));
+                return ask_via_control_sock(
+                    claude_short_id,
+                    message,
+                    from_name,
+                    timeout,
+                    poll_interval,
+                    &jd,
+                );
+            }
             return Err(AskError::Orphan {
                 reason,
                 short_id: claude_short_id.to_string(),
@@ -1195,6 +1308,20 @@ pub fn ask_followup(
     };
 
     if !liveness_probe(&locator.messaging_socket_path) {
+        // Socket exists but is dead. Same control.sock fallback when roster-live.
+        if roster_live(home, claude_short_id) {
+            let jd = jobs_dir_override
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| locator.jobs_dir.clone());
+            return ask_via_control_sock(
+                claude_short_id,
+                message,
+                from_name,
+                timeout,
+                poll_interval,
+                &jd,
+            );
+        }
         return Err(AskError::Orphan {
             reason: OrphanReason::LivenessFailed,
             short_id: claude_short_id.to_string(),
@@ -2030,11 +2157,17 @@ fn followup(
             // failure stays OBSERVABLE (stderr warning + agent_status_stamp_failed
             // event) like Python's, not a silent swallow.
             let now = now_epoch_secs();
+            // x-2681: "roster-live-inject-failed" means the control.sock fallback
+            // delivery failed on a session that IS live in the daemon roster --
+            // a routing gap, never a death, so it takes the same no-stamp branch
+            // as a recent inside-leg report (a roster-live session is never
+            // stamped orphaned).
+            let roster_live_gap = reason == OrphanReason::RosterLiveInjectFailed;
             let mut provably_live = false;
             let mut stamp_warning = String::new();
             if let Err(e) = update_registry(registry_path, |reg| {
                 if let Some(en) = reg.find_mut(name) {
-                    if is_provably_live_report(en.inside_leg.as_ref(), now) {
+                    if roster_live_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
                         provably_live = true;
                     } else {
                         en.status = AgentStatus::Orphaned;
@@ -2098,6 +2231,13 @@ fn followup(
                 OrphanReason::LivenessFailed => format!(
                     ". Socket exists but is unresponsive; try 'claude attach {}' or 'fno agents rm {}'",
                     short_id, name
+                ),
+                // Unreachable here: RosterLiveInjectFailed always routes to the
+                // no-stamp routing-gap branch above. Kept for exhaustiveness with
+                // the same defensive inspect hint Python's dispatch.py `else` uses.
+                OrphanReason::RosterLiveInjectFailed => format!(
+                    ". Inspect with 'fno agents logs {}' or remove via 'fno agents rm {}'",
+                    name, name
                 ),
             };
             let suspended = if reason == OrphanReason::SocketNull {
@@ -3255,5 +3395,114 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // --- x-2681 ask-lane control.sock fallback ---
+
+    // daemon_roster_path reads FNO_CLAUDE_DAEMON_DIR, a process-global. Serialize
+    // the env-touching tests below (cargo runs tests in parallel threads; no
+    // serial_test dep in this crate) so they never observe each other's mutation.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn write_roster(home: &Path, session_uuid: &str) {
+        let daemon = home.join(".claude").join("daemon");
+        fs::create_dir_all(&daemon).unwrap();
+        let body = format!(
+            "{{\"workers\":{{\"w\":{{\"sessionId\":\"{}\",\"pid\":5}}}}}}",
+            session_uuid
+        );
+        fs::write(daemon.join("roster.json"), body).unwrap();
+    }
+
+    #[test]
+    fn build_cross_session_container_wraps_peer_turn() {
+        // Byte-parity with Python's build_cross_session_container.
+        assert_eq!(
+            build_cross_session_container("hello", "fno"),
+            "<cross-session-message from-name=\"fno\">\nhello\n</cross-session-message>"
+        );
+    }
+
+    #[test]
+    fn orphan_reason_roster_live_inject_failed_token() {
+        assert_eq!(
+            OrphanReason::RosterLiveInjectFailed.as_str(),
+            "roster-live-inject-failed"
+        );
+    }
+
+    #[test]
+    fn daemon_roster_path_honors_env_override_first() {
+        // x-2681 / codex P2: the roster pre-check must honor FNO_CLAUDE_DAEMON_DIR
+        // (a supported alt-daemon override) the SAME way the deliver path does, or
+        // the fallback silently skips in an alt-daemon setup.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tmpdir();
+        let ch = ClaudeHome::at(&home);
+        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
+        assert_eq!(
+            ch.daemon_roster_path(),
+            home.join(".claude").join("daemon").join("roster.json")
+        );
+        let alt = tmpdir();
+        std::env::set_var(crate::claude_roster::DAEMON_DIR_ENV, &alt);
+        assert_eq!(ch.daemon_roster_path(), alt.join("roster.json"));
+        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
+    }
+
+    #[test]
+    fn ask_followup_socket_null_roster_live_falls_back_to_control_sock() {
+        // A socket-null session that is present in the daemon roster takes the
+        // control.sock fallback. With no real control.sock the deliver fails and
+        // surfaces the DISTINCT reason (not socket-null) -- which the dispatch
+        // layer routes to the no-stamp branch (AC6-FR: never orphan a live row).
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(crate::claude_roster::DAEMON_DIR_ENV);
+        let home = tmpdir();
+        let sessions = home.join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "1", "abcd1234", "bg", None);
+        write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
+        let ch = ClaudeHome::at(&home);
+        let err = ask_followup(
+            &ch,
+            "abcd1234",
+            "x",
+            "y",
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+            None,
+        )
+        .unwrap_err();
+        match err {
+            AskError::Orphan { reason, .. } => {
+                assert_eq!(reason, OrphanReason::RosterLiveInjectFailed)
+            }
+            other => panic!("expected roster-live-inject-failed orphan, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ask_followup_not_found_never_falls_back_even_if_rostered() {
+        // No session file -> not-found. Even with a matching roster entry,
+        // not-found is genuinely dead and never falls back (Locked Decision 5).
+        let home = tmpdir();
+        fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
+        write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
+        let ch = ClaudeHome::at(&home);
+        let err = ask_followup(
+            &ch,
+            "abcd1234",
+            "x",
+            "y",
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            None,
+        )
+        .unwrap_err();
+        match err {
+            AskError::Orphan { reason, .. } => assert_eq!(reason, OrphanReason::NotFound),
+            other => panic!("expected not-found orphan, got {:?}", other),
+        }
     }
 }

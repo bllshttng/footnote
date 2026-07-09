@@ -652,3 +652,151 @@ def test_ask_followup_via_mcp_orphans_when_jobs_dir_absent(
             timeout=1.0,
             poll_interval=0.05,
         )
+
+
+# ---------------------------------------------------------------------------
+# x-2681: ask-lane control.sock fallback (socket-null + roster-live)
+# ---------------------------------------------------------------------------
+
+_FB_UUID = "abc12345-1111-2222-3333-444455556666"
+
+
+def _write_socket_null_session(tmp_path: Path, short_id: str) -> None:
+    sessions = tmp_path / ".claude" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "20.json").write_text(
+        json.dumps({
+            "messagingSocketPath": None,
+            "jobId": short_id,
+            "kind": "bg",
+            "sessionId": _FB_UUID,
+        }),
+        encoding="utf-8",
+    )
+
+
+def _write_roster(tmp_path: Path, session_uuid: str) -> None:
+    daemon = tmp_path / ".claude" / "daemon"
+    daemon.mkdir(parents=True, exist_ok=True)
+    (daemon / "roster.json").write_text(
+        json.dumps({"workers": {"w": {"sessionId": session_uuid}}}),
+        encoding="utf-8",
+    )
+
+
+def test_ask_followup_control_sock_fallback_delivers_and_returns_reply(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """AC1-HP/AC2-HP: socket-null + roster-live -> control.sock inject, then the
+    reply is collected from the bg jobs-dir."""
+    import fno.agents.dispatch as dispatch_mod
+    from fno.agents.providers.claude import ask_followup
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    short_id = "abc12345"
+    _write_socket_null_session(tmp_path, short_id)
+    _write_roster(tmp_path, _FB_UUID)
+    jobs_dir = tmp_path / ".claude" / "jobs" / short_id
+    _write_state(jobs_dir, state="running", updated_at="T1", result=None)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_inject(recipient: str, text: str) -> bool:
+        captured["recipient"] = recipient
+        captured["text"] = text
+        # The recipient processes the injected turn and replies.
+        _write_state(jobs_dir, state="completed", updated_at="T2",
+                     result="fallback reply")
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _fake_inject)
+
+    reply = ask_followup(
+        claude_short_id=short_id, message="ping?", cwd=Path("/tmp"),
+        from_name="peer", timeout=2.0, poll_interval=0.05,
+    )
+    assert reply == "fallback reply"
+    assert captured["recipient"] == short_id
+    # The question is wrapped as a peer turn, not raw operator input.
+    assert "<cross-session-message" in captured["text"]
+    assert "ping?" in captured["text"]
+
+
+def test_ask_followup_control_sock_fallback_not_delivered_raises_distinct_reason(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """AC6-FR: roster-live but the inject did not confirm -> a distinct reason
+    (roster-live-inject-failed), NOT socket-null, so dispatch never orphan-stamps
+    a live session."""
+    import fno.agents.dispatch as dispatch_mod
+    from fno.agents.providers.claude import ProviderOrphanError, ask_followup
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    short_id = "abc12345"
+    _write_socket_null_session(tmp_path, short_id)
+    _write_roster(tmp_path, _FB_UUID)
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda r, t: False)
+
+    with pytest.raises(ProviderOrphanError) as exc_info:
+        ask_followup(
+            claude_short_id=short_id, message="m", cwd=Path("/tmp"),
+            from_name="peer", timeout=1.0, poll_interval=0.05,
+        )
+    assert exc_info.value.reason == "roster-live-inject-failed"
+
+
+def test_ask_followup_socket_null_not_in_roster_stays_orphan(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """AC3-ERR: socket-null AND absent from the roster -> today's socket-null
+    orphan, and NO control.sock inject is attempted."""
+    import fno.agents.dispatch as dispatch_mod
+    from fno.agents.providers.claude import ProviderOrphanError, ask_followup
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    short_id = "abc12345"
+    _write_socket_null_session(tmp_path, short_id)  # no roster.json written
+
+    calls = {"n": 0}
+
+    def _counting_inject(recipient: str, text: str) -> bool:
+        calls["n"] += 1
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _counting_inject)
+
+    with pytest.raises(ProviderOrphanError) as exc_info:
+        ask_followup(
+            claude_short_id=short_id, message="m", cwd=Path("/tmp"),
+            from_name="peer", timeout=1.0, poll_interval=0.05,
+        )
+    assert exc_info.value.reason == "socket-null"
+    assert calls["n"] == 0, "dead-in-roster session must not attempt control.sock"
+
+
+def test_ask_followup_not_found_never_falls_back_even_if_rostered(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Locked Decision 5: not-found is genuinely dead and never falls back,
+    even if a same-short session happens to sit in the roster."""
+    import fno.agents.dispatch as dispatch_mod
+    from fno.agents.providers.claude import ProviderOrphanError, ask_followup
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".claude" / "sessions").mkdir(parents=True, exist_ok=True)  # no match
+    _write_roster(tmp_path, _FB_UUID)
+
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        dispatch_mod, "_mail_inject_claude",
+        lambda r, t: calls.__setitem__("n", calls["n"] + 1) or True,
+    )
+
+    with pytest.raises(ProviderOrphanError) as exc_info:
+        ask_followup(
+            claude_short_id="abc12345", message="m", cwd=Path("/tmp"),
+            from_name="peer", timeout=1.0, poll_interval=0.05,
+        )
+    assert exc_info.value.reason == "not-found"
+    assert calls["n"] == 0

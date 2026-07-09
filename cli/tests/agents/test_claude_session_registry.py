@@ -429,3 +429,83 @@ def test_resolve_session_uuid_none_when_sessions_dir_absent(tmp_path, monkeypatc
 
     monkeypatch.setenv("HOME", str(tmp_path))  # no .claude tree created
     assert resolve_session_uuid("7c5dcf5d") is None
+
+
+# ---------------------------------------------------------------------------
+# roster_live (x-2681): daemon-roster membership check for the ask fallback
+# ---------------------------------------------------------------------------
+
+_ROSTER_UUID = "abc12345-1111-2222-3333-444455556666"
+
+
+def _write_roster(home: Path, workers: dict) -> Path:
+    daemon = home / ".claude" / "daemon"
+    daemon.mkdir(parents=True, exist_ok=True)
+    path = daemon / "roster.json"
+    path.write_text(json.dumps({"workers": workers}), encoding="utf-8")
+    return path
+
+
+def test_roster_live_true_when_short_id_present(tmp_path, monkeypatch):
+    from fno.agents.providers._claude_session_registry import roster_live
+
+    home = _claude_home_setup(tmp_path, monkeypatch)
+    _write_roster(home, {"w1": {"sessionId": _ROSTER_UUID, "pid": 5}})
+    assert roster_live("abc12345") is True
+
+
+def test_roster_live_false_when_short_id_absent(tmp_path, monkeypatch):
+    from fno.agents.providers._claude_session_registry import roster_live
+
+    home = _claude_home_setup(tmp_path, monkeypatch)
+    _write_roster(home, {"w1": {"sessionId": "deadbeef-1111-2222-3333-444455556666"}})
+    assert roster_live("abc12345") is False
+
+
+def test_roster_live_false_when_roster_missing(tmp_path, monkeypatch):
+    from fno.agents.providers._claude_session_registry import roster_live
+
+    _claude_home_setup(tmp_path, monkeypatch)  # no roster.json written
+    assert roster_live("abc12345") is False
+
+
+def test_roster_live_lenient_on_torn_roster(tmp_path, monkeypatch):
+    """A torn/garbage roster degrades to False, never raises (procStart drift)."""
+    from fno.agents.providers._claude_session_registry import roster_live
+
+    home = _claude_home_setup(tmp_path, monkeypatch)
+    daemon = home / ".claude" / "daemon"
+    daemon.mkdir(parents=True, exist_ok=True)
+    (daemon / "roster.json").write_text("{not json", encoding="utf-8")
+    assert roster_live("abc12345") is False
+
+
+def test_roster_live_honors_daemon_dir_env(tmp_path, monkeypatch):
+    from fno.agents.providers._claude_session_registry import roster_live
+
+    _claude_home_setup(tmp_path, monkeypatch)
+    alt = tmp_path / "altdaemon"
+    alt.mkdir()
+    (alt / "roster.json").write_text(
+        json.dumps({"workers": {"w": {"sessionId": _ROSTER_UUID}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(alt))
+    assert roster_live("abc12345") is True
+
+
+def test_read_state_json_rejects_non_object_json(tmp_path, monkeypatch):
+    """A valid-but-non-object state.json (list/primitive) raises JSONDecodeError,
+    not AttributeError, so callers' `except json.JSONDecodeError` degrades cleanly
+    (gemini review on PR #293)."""
+    import json as _json
+
+    from fno.agents.providers._claude_session_registry import read_state_json
+
+    home = _claude_home_setup(tmp_path, monkeypatch)
+    jobs_dir = home / ".claude" / "jobs" / "abc12345"
+    jobs_dir.mkdir(parents=True)
+    (jobs_dir / "state.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(_json.JSONDecodeError):
+        read_state_json(jobs_dir)
