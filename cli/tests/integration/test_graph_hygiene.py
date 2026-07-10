@@ -278,7 +278,7 @@ def test_hook_blocks_edit_to_graph():
 
 
 def test_hook_allows_edit_to_unrelated_file():
-    """Hook returns decision:approve for Edit targeting an unrelated file."""
+    """Hook returns an empty allow response for an unrelated file."""
     if not HOOK_SCRIPT.exists():
         pytest.skip("graph-write-protect.sh not yet created")
 
@@ -287,11 +287,11 @@ def test_hook_allows_edit_to_unrelated_file():
         "tool_input": {"file_path": "/tmp/foo.txt"},
     }
     response = _invoke_hook(payload)
-    assert response["decision"] == "approve"
+    assert response == {}
 
 
 def test_hook_allows_test_fixture_paths():
-    """Hook returns decision:approve for graph.json paths under test/fixtures."""
+    """Hook returns an empty allow response for test graph fixtures."""
     if not HOOK_SCRIPT.exists():
         pytest.skip("graph-write-protect.sh not yet created")
 
@@ -300,4 +300,4 @@ def test_hook_allows_test_fixture_paths():
         "tool_input": {"file_path": "/path/to/cli/tests/fixtures/graph.json"},
     }
     response = _invoke_hook(payload)
-    assert response["decision"] == "approve"
+    assert response == {}
