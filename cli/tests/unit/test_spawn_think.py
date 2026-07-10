@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.harness_identity import resolve_harness_identity
 from fno.provenance import spawn_think as st
 from fno.provenance.resolver import ResolvedTranscript
 
@@ -440,6 +441,25 @@ def test_presence_interactive_session_is_attended(tmp_path):
     ) == "attended"
 
 
+def test_presence_codex_thread_is_attended(tmp_path):
+    assert st.classify_presence(
+        env={"CODEX_THREAD_ID": "thread-id"}, project_root=tmp_path
+    ) == "attended"
+
+
+def test_presence_codex_spawned_worker_is_away(tmp_path):
+    assert st.classify_presence(
+        env={"CODEX_THREAD_ID": "thread-id", "FNO_AGENT_SELF": "think-x-1-foo"},
+        project_root=tmp_path,
+    ) == "away"
+
+
+def test_presence_gemini_behavior_remains_away(tmp_path):
+    assert st.classify_presence(
+        env={"GEMINI_SESSION_ID": "gemini-id"}, project_root=tmp_path
+    ) == "away"
+
+
 def test_presence_no_signal_defaults_away(tmp_path):
     assert st.classify_presence(env={}, project_root=tmp_path) == "away"
 
@@ -477,6 +497,17 @@ def test_presence_foreign_manifest_ignored(tmp_path):
     assert st.classify_presence(
         env={"CLAUDE_CODE_SESSION_ID": "sid-123"}, project_root=tmp_path
     ) == "attended"
+
+
+def test_codex_identity_never_owns_claude_manifest(tmp_path):
+    fno = tmp_path / ".fno"
+    fno.mkdir()
+    (fno / "target-state.md").write_text(
+        "claude_transcript_id: thread-id\nattended: false\n", encoding="utf-8"
+    )
+    env = {"CODEX_THREAD_ID": "thread-id"}
+    assert st._owned_manifest_attended(tmp_path, env) is None
+    assert st.classify_presence(env=env, project_root=tmp_path) == "attended"
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +576,51 @@ def test_spawn_worker_default_provider_claude_no_model(monkeypatch):
     cmd = cap["cmd"]
     assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "claude"
     assert "--model" not in cmd
+
+
+def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
+    iso, monkeypatch
+):
+    """Codex may own the source conversation without becoming the worker provider."""
+    identity = resolve_harness_identity({"CODEX_THREAD_ID": "codex-thread-123"})
+    assert identity.harness == "codex"
+
+    seen: dict = {}
+
+    def fake_resolve(harness, sid, cwd, **kw):
+        seen["pointer"] = (harness, sid, cwd)
+        return ResolvedTranscript(
+            harness, sid, cwd, True, transcript_path="/live/codex-thread.jsonl"
+        )
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"short_id":"abc123"}'
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(st, "resolve_transcript", fake_resolve)
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    monkeypatch.setattr(st, "_stamp_forward", lambda *a, **kw: None)
+    monkeypatch.setattr(st, "_daily_cap", lambda root: 0)
+
+    res = st.dispatch_conversational(
+        _node(),
+        session_id=identity.session_id,
+        cwd="/tmp/codex-live",
+        harness=identity.harness or "claude",
+        events_path=iso,
+        project_root=iso.parent.parent,
+    )
+
+    assert res.decision == "spawned"
+    assert seen["pointer"] == ("codex", "codex-thread-123", "/tmp/codex-live")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--provider") + 1] == "claude"
+    assert cmd[cmd.index("--substrate") + 1] == "bg"
 
 
 def test_spawn_worker_threads_model_and_provider(monkeypatch):
@@ -1073,4 +1149,3 @@ def test_worker_name_unique_per_conversation():
     assert a.endswith("-sessaaaa") and b.endswith("-sessbbbb")
     # No suffix -> byte-for-byte the prior name (birth/lifecycle unchanged).
     assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "think-x-1-slug"
-

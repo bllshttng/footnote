@@ -40,8 +40,8 @@ def dispatch(
     ),
     session_id: Optional[str] = typer.Option(
         None, "--session-id",
-        help="Live transcript session id (default: ambient $CLAUDE_CODE_SESSION_ID "
-             "/ $CODEX_SESSION_ID / $GEMINI_SESSION_ID).",
+        help="Live transcript session id (default: ambient $CODEX_THREAD_ID / "
+             "$CLAUDE_CODE_SESSION_ID / $CODEX_SESSION_ID / $GEMINI_SESSION_ID).",
     ),
     cwd: Optional[str] = typer.Option(
         None, "--cwd", help="Live session cwd (default: the current working dir)."
@@ -56,8 +56,8 @@ def dispatch(
     ),
     provider: Optional[str] = typer.Option(
         None, "--provider", "-p",
-        help="Provider for the spawned worker (default: claude; the bg substrate is "
-             "claude-only, so a non-claude value fails loud at spawn).",
+        help="Provider for the spawned worker (default: claude; detached /think "
+             "refuses non-claude providers because its bg substrate is Claude-only).",
     ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit the dispatch result as JSON."
@@ -99,11 +99,25 @@ def dispatch(
     prov = _session_provenance()
     sid = (session_id or prov.get("source_session_id") or "").strip()
     live_harness = (harness or prov.get("source_harness") or "claude").strip()
+    if resolved_provider is not None and resolved_provider != "claude":
+        if live_harness == "codex":
+            typer.echo(
+                "codex posture: think source=codex; dispatch=unsupported",
+                err=True,
+            )
+        typer.echo(
+            "fno think dispatch: detached /think uses Claude bg; omit --provider "
+            "to use the Claude fallback; non-Claude headless is a one-shot with "
+            "no live think-session receipt and is not supported by this verb.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if not sid:
         typer.echo(
             "fno think dispatch: no live session id - set --session-id or run "
-            "inside a claude/codex/gemini session ($CLAUDE_CODE_SESSION_ID / "
-            "$CODEX_SESSION_ID / $GEMINI_SESSION_ID). There is nothing to carry "
+            "inside a claude/codex/gemini session ($CODEX_THREAD_ID / "
+            "$CLAUDE_CODE_SESSION_ID / $CODEX_SESSION_ID / $GEMINI_SESSION_ID). "
+            "There is nothing to carry "
             "without a live pointer.",
             err=True,
         )
@@ -143,6 +157,12 @@ def dispatch(
         target["model"] = model
     if resolved_provider is not None:
         target["provider"] = resolved_provider
+
+    if live_harness == "codex":
+        typer.echo(
+            "codex posture: think source=codex; dispatch=claude-bg-fallback",
+            err=True,
+        )
 
     result = dispatch_conversational(
         target, session_id=sid, cwd=live_cwd, harness=live_harness,

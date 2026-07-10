@@ -6,6 +6,9 @@ argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <de
 
 # Abilities Plan
 
+When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
+`codex posture: blueprint plans natively in this thread; auto-launch is Claude bg only, otherwise the node is visibly parked.`
+
 <HARD-GATE>
 NEVER edit ~/.fno/graph.json directly via Edit/Write tools or `jq -i`/`sed -i`.
 ALWAYS use `fno backlog` commands or call `locked_mutate_graph()` from Python.
@@ -1036,7 +1039,7 @@ After a plan is written AND its claimed backlog node is intaked (the final step 
 bash "${SKILL_DIR}/scripts/autolaunch-on-ready.sh" "<plan-path>"
 ```
 
-This is a **no-op unless** `config.target.auto_launch_on_blueprint: true` is set in config.toml (DEFAULT OFF; an absent key reads as off, so existing behavior is unchanged for anyone who has not opted in). When enabled, it fire-and-forget dispatches the claimed node as a fresh `claude --bg` `/target` worker IFF the node is `_status: ready` and not deferred — exactly the work that is "up-next." A `blocked`/`deferred` node, or one still in `idea`, is **parked** (pre-planned future work), never launched. The dispatched run defaults to `no-merge` (it lands a PR for review, not an auto-merge — Locked Decision 4). On dispatch failure the node stays `ready` and the blueprinted plan is intact for a manual `/target bg <node>` retry.
+This is a **no-op unless** `config.target.auto_launch_on_blueprint: true` is set in config.toml (DEFAULT OFF; an absent key reads as off, so existing behavior is unchanged for anyone who has not opted in). When enabled, it fire-and-forget dispatches the claimed node as a fresh `claude --bg` `/target` worker IFF the node is `_status: ready` and not deferred — exactly the work that is "up-next." This auto-launch lane remains Claude-only: a non-Claude environment must report `parked` or `autolaunch-failed` and leave the node ready for an explicit supported dispatch, never pretend it started a native background worker. A `blocked`/`deferred` node, or one still in `idea`, is **parked** (pre-planned future work), never launched. The dispatched run defaults to `no-merge` (it lands a PR for review, not an auto-merge — Locked Decision 4). On dispatch failure the node stays `ready` and the blueprinted plan is intact for a manual `/target bg <node>` retry.
 
 Relay the single decision line it prints (`auto-launched …` / `parked …` / `autolaunch-failed …`) to the user; it is never silent when the gate is ON. This keeps the planning session free to batch more `/think` + `/blueprint` while the dispatched worker runs (the fresh bg process is the only real context "clear"). The gate reuses the existing backlog state model — no new concept — so the developer's own discipline (marking future work `blocked_by`/`deferred`) IS the "only launch what's up-next" control.
 

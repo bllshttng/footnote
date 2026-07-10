@@ -234,6 +234,10 @@ if [ -z "$SESSION_ID" ]; then
   exit "$_EXIT_PARKED"
 fi
 
+# Current manifests record the authoritative owner explicitly. Legacy
+# manifests predate that body field and used the per-run session id directly.
+[ -n "$CLAIM_HOLDER" ] || CLAIM_HOLDER="target-session:$SESSION_ID"
+
 if [ -z "$NODE_ID" ] || [ "$NODE_ID" = "null" ]; then
   echo "parked ${SESSION_ID} reason=\"manifest missing graph_node_id\""
   exit "$_EXIT_PARKED"
@@ -282,8 +286,7 @@ set +o pipefail
 _CLAIM_STATUS_OUT="$(FNO_CLAIMS_ROOT="$HOME" fno claim status "node:$NODE_ID" 2>/dev/null || true)"
 _CLAIM_HOLDER_ACTUAL="$(printf '%s' "$_CLAIM_STATUS_OUT" | jq -r '.holder // ""' 2>/dev/null || true)"
 set -o pipefail
-_EXPECTED_HOLDER="target-session:$SESSION_ID"
-if [ "$_CLAIM_HOLDER_ACTUAL" != "$_EXPECTED_HOLDER" ]; then
+if [ "$_CLAIM_HOLDER_ACTUAL" != "$CLAIM_HOLDER" ]; then
   echo "parked $NODE_ID reason=\"session does not hold node:$NODE_ID (holder='$_CLAIM_HOLDER_ACTUAL')\""
   exit "$_EXIT_PARKED"
 fi
@@ -441,7 +444,7 @@ fi
 # ---------------------------------------------------------------------------
 _RELEASE_RC=0
 FNO_CLAIMS_ROOT="$HOME" fno claim release "node:$NODE_ID" \
-  --holder "target-session:$SESSION_ID" >/dev/null 2>&1 || _RELEASE_RC=$?
+  --holder "$CLAIM_HOLDER" >/dev/null 2>&1 || _RELEASE_RC=$?
 
 if [ "$_RELEASE_RC" -ne 0 ]; then
   # Unwind: restore manifest, release dispatch reservation
@@ -516,7 +519,7 @@ if [ "$_ASK_RC" -ne 0 ] || [ -z "$CHILD_SID" ]; then
   #   (a) re-acquire node:<id> FIRST; capture the rc
   _REACQ_RC=0
   FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:$NODE_ID" \
-    --holder "target-session:$SESSION_ID" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?
+    --holder "$CLAIM_HOLDER" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?
 
   if [ "$_REACQ_RC" -ne 0 ]; then
     # Re-acquire failed: another worker may now hold the claim.
@@ -581,7 +584,7 @@ if [ "$_CHILD_LIVE" -eq 0 ]; then
   #   (a) re-acquire node:<id> FIRST; capture the rc
   _REACQ_RC=0
   FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:$NODE_ID" \
-    --holder "target-session:$SESSION_ID" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?
+    --holder "$CLAIM_HOLDER" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?
 
   if [ "$_REACQ_RC" -ne 0 ]; then
     # Re-acquire failed: another worker may now hold the claim.

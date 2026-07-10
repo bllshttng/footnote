@@ -130,7 +130,9 @@ def list_agents(
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(
-                    node_id, loop_check_ages=loop_check_ages
+                    node_id,
+                    manifest_cwd=entry.cwd,
+                    loop_check_ages=loop_check_ages,
                 )
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:

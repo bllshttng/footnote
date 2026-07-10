@@ -12,6 +12,9 @@ requires:
 
 **One verb on a design.** `/think` routes to the right reasoning flow for the idea in front of you.
 
+When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
+`codex posture: think uses this Codex conversation as the source; dispatch defaults to Claude bg; explicit non-Claude providers are refused.`
+
 | Mode | What runs | Use when |
 |------|-----------|----------|
 | `think` (default) | design exploration + multi-perspective challenge + BDD acceptance criteria | you are shaping a feature and want a reviewable design doc |
@@ -71,7 +74,7 @@ Load [panel.md](references/panel.md) and execute it in full, in this context. Th
 
 ## Step 5: dispatch mode (conversational /think handoff)
 
-You are mid-conversation about an fno-touched node and want a deep `/think` to pick it up off the main thread, carrying THIS conversation as context. One verb hands the node to a background `/think` worker that runs beside this thread in its own agents-view row (on claude it is a fully interactive `claude --bg` session; on codex/gemini it degrades to an autonomous `exec` draft).
+You are mid-conversation about an fno-touched node and want a deep `/think` to pick it up off the main thread, carrying THIS conversation as context. One verb hands the node to a fully interactive `claude --bg` `/think` worker that runs beside this thread in its own agents-view row. Codex and Gemini may supply the source conversation, but this verb does not degrade to a one-shot non-Claude headless draft because that substrate has no live think-session receipt.
 
 This mode is **explicit-only**: it dispatches ONLY when you invoke it. There is no auto-grep detector that volunteers a dispatch when you merely mention a node (the false-positive class that bit prior detectors - the offer-on-detection heuristic is a deliberate later layer).
 
@@ -81,7 +84,7 @@ The whole mechanism is the `fno think dispatch` verb - do NOT hand-assemble a sp
 fno think dispatch <node-id>
 ```
 
-The verb reads `$CLAUDE_CODE_SESSION_ID` + the current cwd as the live transcript pointer, resolves the node in the graph, and routes through the shared dispatch core (reason-scoped dedup token, per-day firehose ceiling, forward stamp, single decision event, strict non-fatality). Relay the verb's output verbatim - it prints the spawned worker's id and an `fno agents watch` hint, or a one-line skip reason (e.g. dedup / daily-cap). If no node token was given, print `dispatch needs a node id: /think dispatch <node-id>` and stop. If the verb exits non-zero, surface its stderr; never fabricate a launch.
+The verb reads the live transcript pointer from the first non-empty marker in this shared precedence: `$CODEX_THREAD_ID` > `$CLAUDE_CODE_SESSION_ID` > `$CODEX_SESSION_ID` > `$GEMINI_SESSION_ID`, plus the current cwd. It resolves the node in the graph and routes through the shared dispatch core (reason-scoped dedup token, per-day firehose ceiling, forward stamp, single decision event, strict non-fatality). The source pointer may therefore identify a Codex conversation, but the `/think` worker still uses the Claude `bg` fallback; an explicit non-Claude provider is refused before spawn. Relay the verb's output verbatim - it prints the spawned worker's id and an `fno agents watch` hint, or a one-line skip reason (e.g. dedup / daily-cap). If no node token was given, print `dispatch needs a node id: /think dispatch <node-id>` and stop. If the verb exits non-zero, surface its stderr; never fabricate a launch.
 
 ## Multi-CLI
 

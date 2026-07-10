@@ -21,6 +21,8 @@ from typing import List, Literal, Optional
 
 import typer
 
+from fno.harness_identity import resolve_harness_identity
+
 cli = typer.Typer(name="graph", help="Feature graph management", no_args_is_help=True)
 
 # Nested triage sub-app: `fno backlog triage <verb>` (or the deprecated
@@ -194,18 +196,9 @@ def _session_provenance(running_cwd: Optional[str] = None) -> dict:
     """
     cwd = running_cwd if running_cwd is not None else os.getcwd()
 
-    session: Optional[str] = None
-    harness: Optional[str] = None
-    sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
-    if sid:
-        session, harness = sid, "claude"
-    else:
-        codex_sid = (os.environ.get("CODEX_SESSION_ID") or "").strip()
-        gemini_sid = (os.environ.get("GEMINI_SESSION_ID") or "").strip()
-        if codex_sid:
-            session, harness = codex_sid, "codex"
-        elif gemini_sid:
-            session, harness = gemini_sid, "gemini"
+    identity = resolve_harness_identity()
+    session = identity.session_id
+    harness = identity.harness
 
     source_node_id: Optional[str] = None
     source_plan_path: Optional[str] = None
@@ -1689,6 +1682,30 @@ def _invoking_session_id() -> Optional[str]:
         return None
 
 
+def _invoking_claim_holder() -> Optional[str]:
+    """Best-effort full holder recorded by the active target manifest.
+
+    Codex uses a unique per-target ``session_id`` for event deduplication while
+    the durable thread id owns its graph/claim lock. Prefer the manifest's
+    explicit ``target_claim_holder``; legacy manifests fall back to the target
+    session id.
+    """
+    try:
+        from fno.graph._intake import repo_root
+
+        state = Path(repo_root()) / ".fno" / "target-state.md"
+        for line in state.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("target_claim_holder:"):
+                value = line.split(":", 1)[1].strip().strip("\"'")
+                if value and value != "null":
+                    return value
+    except Exception:
+        pass
+
+    sid = _invoking_session_id()
+    return f"target-session:{sid}" if sid else None
+
+
 def _release_node_lockfile(node_id: str) -> str:
     """Best-effort release of the ``node:<id>`` fno-claim lockfile.
 
@@ -1736,8 +1753,7 @@ def _release_node_lockfile(node_id: str) -> str:
         # a suspect claim (TTL-unexpired, dead pid) is still owned, so a peer's
         # is left intact and only our own is cleared.
         holder = status.get("holder") or ""
-        sid = _invoking_session_id()
-        mine = bool(sid) and (holder == f"target-session:{sid}" or sid in holder)
+        mine = holder == _invoking_claim_holder()
         if mine:
             release_claim(key, holder=holder, root=root)
             return "released own lockfile"

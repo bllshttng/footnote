@@ -16,15 +16,7 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
-# Env markers that identify the invoking harness, highest priority first. Mirrors
-# _capture_parent_edge() in dispatch.py (the source_harness detector); kept as a
-# small self-contained table here so the resolver carries no heavy import and
-# stays env-injectable for tests. These are external tool env vars (stable).
-_HARNESS_MARKERS: tuple[tuple[str, str], ...] = (
-    ("CLAUDE_CODE_SESSION_ID", "claude"),
-    ("CODEX_SESSION_ID", "codex"),
-    ("GEMINI_SESSION_ID", "gemini"),
-)
+from fno.harness_identity import HARNESS_SESSION_MARKERS
 
 # decision_source vocabulary surfaced in the spawn receipt so a dispatch's
 # provider choice is auditable after the fact. The resolver emits this subset.
@@ -40,18 +32,16 @@ class DispatchFlagError(ValueError):
 def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
     """Return the invoking harness name from env markers, or None if unclear.
 
-    Inference never guesses: it returns a harness only when *exactly one* marker
-    is present. Zero markers (bare shell) or two-plus (a nested/inherited env
-    with e.g. both ``CODEX_SESSION_ID`` and ``GEMINI_SESSION_ID``) are ambiguous
-    and fall through to None, so the caller lands on the builtin default rather
-    than picking the wrong provider.
+    Inference never guesses: it returns a harness only when markers identify
+    exactly one distinct harness. Multiple markers for that same harness (for
+    example Codex's thread id plus its legacy session id) agree; markers naming
+    different harnesses remain ambiguous and fall through to None.
     """
     environ = os.environ if env is None else env
-    present = [
-        harness
-        for marker, harness in _HARNESS_MARKERS
-        if (environ.get(marker) or "").strip()
-    ]
+    present: list[str] = []
+    for marker, harness in HARNESS_SESSION_MARKERS:
+        if (environ.get(marker) or "").strip() and harness not in present:
+            present.append(harness)
     return present[0] if len(present) == 1 else None
 
 

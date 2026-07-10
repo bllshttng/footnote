@@ -8,11 +8,10 @@
 # error into a `session_register_failed` event (AC7-ERR). stdout stays empty
 # so this hook contributes nothing to the session preamble.
 #
-# Provider coverage: claude is fully wired (CLAUDE_SESSION_ID is exported at
-# SessionStart). codex/gemini reuse the same provider-agnostic entry point,
-# but their harnesses do not yet expose a SessionStart hook + session-id env
-# (design Open Question 5); the lookups below are best-effort and no-op when
-# the env var is absent, so this hook is correct today and ready when they do.
+# Provider coverage: Claude wires this hook directly. Codex's shared
+# session-start wrapper invokes it once with CODEX_PLUGIN_ROOT hydrated, so the
+# durable CODEX_THREAD_ID is addressable through fno mail. Gemini remains
+# best-effort and no-ops when its session-id environment is absent.
 set -euo pipefail
 
 REPO_ROOT="${CLAUDE_PROJECT_DIR:-${GEMINI_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
@@ -24,7 +23,7 @@ CLI_DIR="$(cd "$HOOK_DIR/.." && pwd)/cli"
 if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
     PROVIDER="gemini"; SESSION_ID="${GEMINI_SESSION_ID:-}"
 elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
-    PROVIDER="codex"; SESSION_ID="${CODEX_SESSION_ID:-}"
+    PROVIDER="codex"; SESSION_ID="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
 elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
     PROVIDER="claude"; SESSION_ID="${CLAUDE_SESSION_ID:-}"
 else

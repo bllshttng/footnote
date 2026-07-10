@@ -70,6 +70,15 @@ detect_platform() {
 
 PLATFORM=$(detect_platform)
 
+# Claude registers through its dedicated SessionStart hook in hooks.json.
+# Codex uses this shared wrapper as its sole SessionStart entry, so register the
+# addressable thread here exactly once. Supplying CODEX_PLUGIN_ROOT locally also
+# covers the user-config fallback, which sets only FNO_PLATFORM=codex.
+if [[ "$PLATFORM" == "codex" && -f "${SCRIPT_DIR}/register-session-start.sh" ]]; then
+    CODEX_PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-$PLUGIN_ROOT}" \
+        bash "${SCRIPT_DIR}/register-session-start.sh" || true
+fi
+
 hydrate_state_provider_context() {
     [[ -f "$STATE_FILE" ]] || return 0
 

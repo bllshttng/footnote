@@ -13,15 +13,20 @@ from pydantic import AfterValidator
 # (driver codes mw/mt; provider codes cl/cx/gm/ag/hm/oc). The id stays 3
 # dash-segments regardless.
 _SESSION_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[a-z]{0,2}\d+-[0-9a-f]{6}$")
+# Codex exposes its durable thread identity as a canonical lowercase UUID.
+_CODEX_THREAD_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 _ISO8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?Z?)?$")
 
 STATUS_VALUES = {"IN_PROGRESS", "COMPLETE", "BLOCKED"}
 
 
 def _validate_session_id(v: str) -> str:
-    if not _SESSION_ID_RE.match(v):
+    if not (_SESSION_ID_RE.fullmatch(v) or _CODEX_THREAD_ID_RE.fullmatch(v)):
         raise ValueError(
-            f"session_id must match YYYYMMDDTHHMMSSZ-[infix]PID-{{6hex}}, got: {v!r}"
+            "session_id must match YYYYMMDDTHHMMSSZ-[infix]PID-{6hex} "
+            f"or a canonical lowercase Codex thread UUID, got: {v!r}"
         )
     return v
 

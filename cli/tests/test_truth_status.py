@@ -51,6 +51,73 @@ def test_live_recent_fire_is_working(monkeypatch):  # AC1-HP
     assert r["session_id"] == SID
 
 
+def test_codex_thread_claim_joins_to_unique_manifest_session(tmp_path, monkeypatch):
+    thread_id = "019f48e1-e641-7170-9ea9-921f07021967"
+    holder = f"target-session:{thread_id}"
+    _patch_claim(monkeypatch, {"state": "live", "holder": holder})
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir()
+    (state_dir / "target-state.md").write_text(
+        "---\n"
+        f"session_id: {SID}\n"
+        f"codex_thread_id: {thread_id}\n"
+        "---\n"
+        'target_claim_key: "node:x-4a48"\n'
+        f'target_claim_holder: "{holder}"\n'
+    )
+
+    r = ts.resolve_truth_status(
+        "x-4a48", manifest_cwd=str(tmp_path), loop_check_ages={SID: 120}
+    )
+
+    assert r["state"] == "working"
+    assert r["session_id"] == SID
+
+
+def test_manifest_claim_holder_mismatch_is_not_trusted(tmp_path, monkeypatch):
+    thread_id = "019f48e1-e641-7170-9ea9-921f07021967"
+    holder = f"target-session:{thread_id}"
+    _patch_claim(monkeypatch, {"state": "live", "holder": holder})
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir()
+    (state_dir / "target-state.md").write_text(
+        "---\n"
+        f"session_id: {SID}\n"
+        "---\n"
+        'target_claim_key: "node:x-4a48"\n'
+        'target_claim_holder: "target-session:another-thread"\n'
+    )
+
+    r = ts.resolve_truth_status(
+        "x-4a48", manifest_cwd=str(tmp_path), loop_check_ages={SID: 120}
+    )
+
+    assert r["state"] == "waiting"
+    assert r["session_id"] == thread_id
+
+
+def test_same_codex_holder_for_different_node_is_not_joined(tmp_path, monkeypatch):
+    thread_id = "019f48e1-e641-7170-9ea9-921f07021967"
+    holder = f"target-session:{thread_id}"
+    _patch_claim(monkeypatch, {"state": "live", "holder": holder})
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir()
+    (state_dir / "target-state.md").write_text(
+        "---\n"
+        f"session_id: {SID}\n"
+        "---\n"
+        'target_claim_key: "node:x-other"\n'
+        f'target_claim_holder: "{holder}"\n'
+    )
+
+    r = ts.resolve_truth_status(
+        "x-4a48", manifest_cwd=str(tmp_path), loop_check_ages={SID: 120}
+    )
+
+    assert r["state"] == "waiting"
+    assert r["session_id"] == thread_id
+
+
 def test_live_stale_fire_is_waiting(monkeypatch):  # AC3-EDGE
     _patch_claim(monkeypatch, {"state": "live", "holder": HOLDER})
     r = ts.resolve_truth_status(

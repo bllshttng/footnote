@@ -10,7 +10,7 @@ Which footnote skills work out of the box on each CLI driver, which need the loo
 | `HER` | hermes-agent | Python CLI. `~/.hermes/skills/`, `delegate_task` tool, Nix-aware. |
 | `OC` | openclaw | Node CLI. Typed plugin hooks, subprocess-spawn subagents. |
 | `GEM` | Gemini CLI | Partial native support via `process` tool. |
-| `CDX` | Codex CLI | Research-only parity for most skills. |
+| `CDX` | Codex CLI | Native plugin hooks, `CODEX_THREAD_ID`, project custom agents, and `spawn_agent`; explicit sequential fallback when a primitive is unavailable. |
 
 | Status | Meaning |
 |---|---|
@@ -34,12 +34,13 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | Skill | Classification | CC | HER | OC | GEM | CDX | Notes |
 |---|---|---|---|---|---|---|---|
 | audit | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Multi-perspective single-turn analysis. |
+| blueprint | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Mutates a design doc into an execution plan; unsupported auto-launch primitives are reported before work starts. |
 | cache-keepalive | CC-only | OOTB | - | - | - | - | Claude Code prompt-cache mechanism. Not applicable to other drivers. |
 | check-pr | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | One GitHub poll per invocation. |
 | codemap | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Pure Python + tree-sitter. |
 | create-pr | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Mechanical `gh` invocation. |
 | debug | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Hypothesis loop completes within one turn unless chained. |
-| agent | CC-only | OOTB | - | - | - | - | Runner-less front door over the `fno agents` mesh (originally /dispatch; consolidated to /agent; codex/gemini first-class): the model is the runner (a phone has no `!`). One verb router - `spawn` (launch a worker), `handoff` (continue a doc without re-deriving), `discuss` (open a chat thread), `send` (message a peer over the addressed bus, sender-excluded), `chat A B "<seed>"` (the one costed verb: open a live stream-json channel between two claude peers and drive a bounded relay, always-confirm), `watch`/`list`/`logs` (observe), `stop` (terminate). `spawn` normalizes messy input (smart quotes / name / provider / mode), confirms the billed launch (`config.agents.confirm`), runs a genuine `fno agents spawn`, and reports the real short-id (never fabricated); every spawn best-effort captures the worker's full resume UUID. Provider routing: claude builds -> `fno agents spawn` (`claude --bg`, subscription lane); codex/gemini builds -> `fno agents spawn` (exec, autonomous) or `fno agents host` (`-i`, interactive) with a JSON `.short_id` receipt; ask-mode (`ask`/`bare` verb) -> `spawn --once`; passthrough (`/cmd`) is claude-only. `--yolo` is the codex/gemini full-auto opt-in (sandboxed default). Requires `claude --bg` + the `fno agents` daemon (CC-specific); on a driver without them the helpers report the failure and the node stays re-dispatchable (degrade, never fake a launch). |
+| agent | orchestrator | OOTB | - | - | - | OOTB | Provider-native worker front door. Codex build dispatch uses a prose brief with `pane`/exec or `headless`, returns the real JSON receipt, and rejects unsupported slash-command passthrough before spawn; `bg`, `handoff`, and `discuss` retain their documented Claude-only semantics. |
 | distill | stateless | OOTB | partial | partial | partial | partial | Reads Claude Code observations; other drivers need skill-checkpoint parity. |
 | do | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Lightweight single-session executor. Does not emit `<promise>`. |
 | fix | hybrid | OOTB | wrapper | wrapper | wrapper | wrapper | Bounded iteration loop (N iterations). Wrapper restarts between iterations on non-CC. |
@@ -47,15 +48,15 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | mail | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Runner-less front door over the `fno mail` durable mailbox (mirrors /agent): the model is the runner (a phone has no `!`). Verb router - `send`/`reply` (write; normalize.sh strips smart quotes, splits recipient/body, refuses an empty or whitespace-only recipient/body), `unread`/`list`/`view`/`status`/`ack`/`drain` (read/cursor, thin pass-through). Never confirms (messaging is free + async); reports the real msg-id receipt, never fabricated. Provider-neutral: needs only the `fno` binary (the mailbox is shared across claude/codex/gemini), so it runs OOTB on every driver - on a driver without `fno` it fails loud and writes nothing (degrade, never fake a delivery). |
 | megawalk | loop | OOTB | wrapper | wrapper | wrapper | wrapper | Recursively invokes `/target`; wrapper must recurse. |
 | megaspec | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Iterative spec refinement within single session. |
-| operator | orchestrator | OOTB | OOTB | OOTB | OOTB | OOTB | Dispatches waves to subagents; no `<promise>` emission itself. |
-| target | loop | OOTB | wrapper | wrapper | wrapper | wrapper | Emits `<promise>MISSION COMPLETE</promise>`. Requires Stop hook or equivalent wrapper loop. |
+| operator | orchestrator | OOTB | OOTB | OOTB | OOTB | OOTB | Dispatches waves through the driver's subagent primitive. Codex uses project custom agents/`spawn_agent` when available and announces a sequential fallback otherwise. |
+| target | loop | OOTB | wrapper | wrapper | wrapper | OOTB | Emits `<promise>MISSION COMPLETE</promise>`. Claude and Codex continue through native `Stop` hooks; wrapper drivers require external re-invocation. |
 | target (plan-mode front door) | CC-only | OOTB | - | - | - | - | Native Plan Mode -> `/target` Mode 1. The capture hook fires on Claude Code's `ExitPlanMode` PostToolUse; Gemini/Codex have no such tool, so no sidecar is ever written and `/target` behaves exactly as today (no-op degradation). |
-| target (bg-dispatch `bg`) | CC-only | OOTB | - | - | - | - | Phase 2: `/target bg <node...>` and the opt-in ready-gated auto-launch dispatch nodes as fresh `claude --bg` `/target` workers via `fno agents ask --provider claude`. Both require `claude --bg` + the `fno agents` daemon (CC-specific). On a driver without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch); the auto-launch gate defaults OFF everywhere, so `/blueprint` behaves exactly as today. |
+| target (bg-dispatch `bg`) | CC-only | OOTB | - | - | - | - | `/target bg` dispatches fresh `claude --bg` workers and remains Claude-only. Codex build dispatch is a separate prose-brief path through an owned-PTY `pane` or one-shot `headless` spawn; it never masquerades as `claude --bg`. |
 | setup | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Interactive wizard; single conversation. |
 | ship-docs | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Generates architecture + how-to docs. |
-| sigma-review | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Spawns parallel reviewer agents; returns synthesized report. Uses driver-native subagent primitive. |
+| sigma-review | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Spawns reviewer agents through the driver-native primitive. Codex uses project custom agents/`spawn_agent` when available and otherwise announces sequential execution. |
 | spec | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Creates plan folder; no looping. |
-| speculate | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | N parallel worktree variants; driver-native subagent primitive. |
+| speculate | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | N worktree variants via the driver-native subagent primitive; Codex falls back explicitly to sequential execution when `spawn_agent` is unavailable. |
 | tdd | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Red-green-refactor discipline, single session. |
 | think | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Design exploration. |
 | think-tank | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Multi-persona panel; single conversation. |

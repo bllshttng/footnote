@@ -53,6 +53,8 @@ def cli_hooks_cmd(
         gemini=gemini,
         gemini_settings=gemini_settings,
         codex_config=codex_config,
+        codex_hooks_json=None,
+        migrate_legacy_hooks_json=False,
     )
 
 
@@ -61,6 +63,14 @@ def cli_hooks_codex_cmd(
     codex_config: Optional[Path] = typer.Option(
         None, "--codex-config", help="Override the Codex config.toml path."
     ),
+    codex_hooks_json: Optional[Path] = typer.Option(
+        None, "--codex-hooks-json", help="Override the legacy Codex hooks.json path."
+    ),
+    migrate_legacy_hooks_json: bool = typer.Option(
+        False,
+        "--migrate-legacy-hooks-json",
+        help="Back up and remove only footnote-owned legacy JSON SessionStart hooks.",
+    ),
 ) -> None:
     """Wire only the Codex SessionStart hook."""
     _install_cli_hooks(
@@ -68,6 +78,8 @@ def cli_hooks_codex_cmd(
         gemini=False,
         gemini_settings=None,
         codex_config=codex_config,
+        codex_hooks_json=codex_hooks_json,
+        migrate_legacy_hooks_json=migrate_legacy_hooks_json,
     )
 
 
@@ -77,6 +89,8 @@ def _install_cli_hooks(
     gemini: bool,
     gemini_settings: Optional[Path],
     codex_config: Optional[Path],
+    codex_hooks_json: Optional[Path],
+    migrate_legacy_hooks_json: bool,
 ) -> None:
     import os
 
@@ -103,6 +117,7 @@ def _install_cli_hooks(
 
     any_change = False
     needs_trust = False
+    failures: list[str] = []
 
     if gemini:
         gpath = _safe_expand(gemini_settings) if gemini_settings else (
@@ -124,16 +139,36 @@ def _install_cli_hooks(
             (Path(chome).expanduser() if chome else Path.home() / ".codex")
             / "config.toml"
         )
-        res = install_codex_hook(command, config_path=cpath)
-        any_change = any_change or res.changed
-        needs_trust = needs_trust or res.needs_trust
-        if res.note:
-            typer.echo(f"codex: {res.note} ({res.path})")
-        elif res.already_present:
-            typer.echo(f"codex: already wired ({res.path})")
+        legacy_path = (
+            _safe_expand(codex_hooks_json)
+            if codex_hooks_json
+            else cpath.parent / "hooks.json"
+        )
+        res = install_codex_hook(
+            command,
+            config_path=cpath,
+            hooks_json_path=legacy_path,
+            migrate_legacy_hooks_json=migrate_legacy_hooks_json,
+        )
+        if res.error:
+            typer.echo(f"codex: error: {res.error} ({res.path})", err=True)
+            failures.append(res.error)
         else:
-            bak = f"; backed up {res.backup.name}" if res.backup else ""
-            typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
+            any_change = any_change or res.changed
+            needs_trust = needs_trust or res.needs_trust
+            if res.note:
+                legacy_bak = (
+                    f"; backed up {res.legacy_backup.name}" if res.legacy_backup else ""
+                )
+                typer.echo(f"codex: {res.note}{legacy_bak} ({res.path})")
+            elif res.already_present:
+                typer.echo(f"codex: already wired ({res.path})")
+            else:
+                bak = f"; backed up {res.backup.name}" if res.backup else ""
+                typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
+
+    if failures:
+        raise typer.Exit(1)
 
     if needs_trust:
         typer.echo(

@@ -15,6 +15,9 @@ requires:
 
 **Get it done.** From idea to a green, reviewed PR.
 
+When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
+`codex posture: target uses the native Stop loop on the main thread; delegated work uses spawn_agent; bg dispatch is Claude-only.`
+
 ## The spine (happy path - read this first)
 
 ```
@@ -221,7 +224,7 @@ Each line is one of `launched` / `already-running` / `parked` / `skipped-done` /
 - `no-merge` is injected by default (an autonomous worker lands a PR for review, not an auto-merge); pass `--allow-merge` to opt out.
 - A dispatch failure is surfaced and leaves the node `ready`/re-dispatchable; it never reports a launch that did not happen, and never falls back to `-p`/API-credit billing.
 
-Multi-CLI: `bg` requires `claude --bg` + `fno agents`; on a CLI without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch).
+Multi-CLI: `/target bg` preserves its Claude semantics and requires `claude --bg` + `fno agents`; on a CLI without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch). Separate Codex build dispatches use a prose brief through an owned-PTY (`pane`) or one-shot `headless` spawn, never a literal `/target`; unsupported non-Claude slash-command passthrough is rejected before spawn.
 
 **Spawn substrate axis (x-2c27).** `fno agents spawn --substrate <pane|bg|headless>` names one axis - where an off-thread `/target` runs: `pane` (owned-PTY drivable pane; the default), `bg` (detached `claude --bg` thread; what `/target bg` dispatches), `headless` (a one-shot `claude -p` / `codex --exec` / `agy -p`). `/target bg` is the autonomous-dispatch verb because only `bg` is both detached AND able to run the full multi-phase pipeline. For an attended drivable pane use `/agent spawn /target <node>` (substrate `pane`); `headless` (one-shot) does not fit a multi-phase `/target` run and is a `/agent spawn headless` surface for cross-provider one-shots, not a `/target` dispatch verb. `bg` is claude-only; a non-claude `bg` is a hard error pointing to `headless`.
 

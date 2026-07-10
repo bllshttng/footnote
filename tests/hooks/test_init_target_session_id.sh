@@ -3,10 +3,13 @@
 # init-target-state.sh (ab-7303e5d7, GAP-3).
 #
 # Covers:
-#   (a) TARGET_SESSION_ID=preset-key-123 + TARGET_START=1 + TARGET_INPUT set
-#       => written manifest has `session_id: preset-key-123`
-#   (b) No TARGET_SESSION_ID => generated session_id matches the pattern
+#   (a) TARGET_SESSION_ID=preset-key-123 wins over CODEX_THREAD_ID and the
+#       Codex thread is recorded additively in the manifest
+#   (b) No TARGET_SESSION_ID or CODEX_THREAD_ID => generated session_id matches
+#       the pattern
 #       [0-9]{8}T[0-9]{6}Z-[0-9]+-...
+#   (d) No TARGET_SESSION_ID + CODEX_THREAD_ID => per-target session id is
+#       unique while the thread id remains owner metadata
 #
 # Exit codes:
 #   0  all scenarios passed
@@ -59,6 +62,7 @@ _ALL_TMPS+=("$TMP_A")
   TARGET_START=1 \
   TARGET_INPUT="test-session-id-preset" \
   TARGET_SESSION_ID="preset-key-123" \
+  CODEX_THREAD_ID="codex-thread-loses-to-explicit" \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(a): init exited non-zero"
@@ -71,6 +75,11 @@ SESSION_ID_A=$(grep '^session_id:' "$STATE_A" | sed 's/^session_id:[[:space:]]*/
 [[ "$SESSION_ID_A" == "preset-key-123" ]] \
   || fail "(a): expected session_id 'preset-key-123', got '${SESSION_ID_A}'"
 pass "(a): session_id written verbatim as 'preset-key-123'"
+
+CODEX_THREAD_ID_A=$(grep '^codex_thread_id:' "$STATE_A" | sed 's/^codex_thread_id:[[:space:]]*//' | tr -d '\r')
+[[ "$CODEX_THREAD_ID_A" == "codex-thread-loses-to-explicit" ]] \
+  || fail "(a): expected codex_thread_id to be recorded, got '${CODEX_THREAD_ID_A}'"
+pass "(a): TARGET_SESSION_ID wins while codex_thread_id is still recorded"
 
 # Verify the YAML parses and the field matches
 python3 -c "
@@ -101,6 +110,7 @@ _ALL_TMPS+=("$TMP_B")
   HOME="${TMP_B}/home" \
   TARGET_START=1 \
   TARGET_INPUT="test-session-id-generated" \
+  CODEX_THREAD_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(b): init exited non-zero"
@@ -154,6 +164,7 @@ STDERR_C="${TMP_C}/init-stderr.txt"
   HOME="${TMP_C}/home" \
   TARGET_START=1 \
   TARGET_INPUT="test-heredoc-no-subst" \
+  CODEX_THREAD_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>"$STDERR_C") \
   || fail "(c): init exited non-zero"
@@ -172,5 +183,76 @@ if grep -qE "No such command 'start'|init: command not found" "$STDERR_C"; then
 $(cat "$STDERR_C")"
 fi
 pass "(c): init stderr free of command-substitution errors"
+
+# ── (d) CODEX_THREAD_ID owns claims; target session ids stay unique ───
+log "(d): no TARGET_SESSION_ID + CODEX_THREAD_ID => unique target session id"
+
+make_repo TMP_D
+_ALL_TMPS+=("$TMP_D")
+
+(cd "$TMP_D" && \
+  HOME="${TMP_D}/home" \
+  TARGET_START=1 \
+  TARGET_INPUT="test-codex-thread-id" \
+  CODEX_THREAD_ID="019f48e4-codex-thread" \
+  CLAUDE_CODE_SESSION_ID="claude-transcript-stays-separate" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>&1) \
+  || fail "(d): init exited non-zero"
+
+STATE_D="${TMP_D}/.fno/target-state.md"
+[[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
+
+SESSION_ID_D=$(grep '^session_id:' "$STATE_D" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+CODEX_THREAD_ID_D=$(grep '^codex_thread_id:' "$STATE_D" | sed 's/^codex_thread_id:[[:space:]]*//' | tr -d '\r')
+CLAUDE_SESSION_ID_D=$(grep '^claude_session_id:' "$STATE_D" | sed 's/^claude_session_id:[[:space:]]*//' | tr -d '\r')
+echo "$SESSION_ID_D" | grep -qE '^[0-9]{8}T[0-9]{6}Z-cx[0-9]+-[0-9a-f]{6}$' \
+  || fail "(d): expected unique cx-tagged target session_id, got '${SESSION_ID_D}'"
+[[ "$SESSION_ID_D" != "019f48e4-codex-thread" ]] \
+  || fail "(d): stable Codex thread was reused as the target session_id"
+[[ "$CODEX_THREAD_ID_D" == "019f48e4-codex-thread" ]] \
+  || fail "(d): expected codex_thread_id in manifest, got '${CODEX_THREAD_ID_D}'"
+[[ "$CLAUDE_SESSION_ID_D" == "claude-transcript-stays-separate" ]] \
+  || fail "(d): Claude transcript semantics changed, got '${CLAUDE_SESSION_ID_D}'"
+pass "(d): Codex thread remains owner metadata while target session id is unique"
+
+# A successful finalize event is the explicit run boundary for claimless
+# free-text targets. Re-enter the SAME worktree/thread to prove the prior
+# manifest rotates before the next run id is minted.
+mkdir -p "${TMP_D}/.fno"
+printf '%s\n' \
+  "{\"type\":\"session_finalized\",\"data\":{\"session_id\":\"${SESSION_ID_D}\",\"termination_reason\":\"NoWork\",\"ship\":false}}" \
+  > "${TMP_D}/.fno/events.jsonl"
+(cd "$TMP_D" && \
+  HOME="${TMP_D}/home" \
+  TARGET_START=1 \
+  TARGET_INPUT="test-codex-thread-id-second-run" \
+  CODEX_THREAD_ID="019f48e4-codex-thread" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>&1) \
+  || fail "(d): second target init exited non-zero"
+SESSION_ID_E=$(grep '^session_id:' "${TMP_D}/.fno/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+[[ "$SESSION_ID_E" != "$SESSION_ID_D" ]] \
+  || fail "(d): two completed targets in one worktree/thread reused session_id '${SESSION_ID_D}'"
+compgen -G "${TMP_D}/.fno/target-state.terminal.*.md" >/dev/null \
+  || fail "(d): completed claimless target manifest was not archived"
+pass "(d): completed targets in one worktree/thread receive distinct session ids"
+
+# A shipped terminal is also a run boundary (the normal delivery path).
+printf '%s\n' \
+  "{\"type\":\"session_finalized\",\"data\":{\"session_id\":\"${SESSION_ID_E}\",\"termination_reason\":\"DonePRGreen\",\"ship\":true}}" \
+  >> "${TMP_D}/.fno/events.jsonl"
+(cd "$TMP_D" && \
+  HOME="${TMP_D}/home" \
+  TARGET_START=1 \
+  TARGET_INPUT="test-codex-thread-id-third-run" \
+  CODEX_THREAD_ID="019f48e4-codex-thread" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>&1) \
+  || fail "(d): third target init exited non-zero"
+SESSION_ID_F=$(grep '^session_id:' "${TMP_D}/.fno/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+[[ "$SESSION_ID_F" != "$SESSION_ID_E" ]] \
+  || fail "(d): shipped target reused session_id '${SESSION_ID_E}'"
+pass "(d): NoWork and shipped terminal boundaries both rotate claimless runs"
 
 log "All session_id scenarios passed"

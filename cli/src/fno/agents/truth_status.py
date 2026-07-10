@@ -69,6 +69,42 @@ def _session_from_holder(holder: Optional[str]) -> Optional[str]:
     return None
 
 
+def _manifest_session_for_holder(
+    cwd: Optional[str], holder: Optional[str], claim_key: str
+) -> Optional[str]:
+    """Join a claim owner to its per-run target session through the manifest.
+
+    Codex claims are owned by the durable thread id while loop events are keyed
+    by the unique target-run id. Trust the manifest join only when it records
+    the exact claim holder; legacy manifests without ``target_claim_holder``
+    remain valid when their session id is itself the holder.
+    """
+    if not cwd or not holder:
+        return None
+    try:
+        raw = (Path(cwd) / ".fno" / "target-state.md").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+
+    def field(name: str) -> Optional[str]:
+        match = re.search(rf"^{re.escape(name)}\s*:\s*(.*)$", raw, re.MULTILINE)
+        if match is None:
+            return None
+        value = match.group(1).strip().strip("\"'")
+        return value if value and value != "null" else None
+
+    sid = field("session_id")
+    if sid is None:
+        return None
+    recorded_holder = field("target_claim_holder")
+    if recorded_holder is not None:
+        recorded_key = field("target_claim_key")
+        return sid if recorded_holder == holder and recorded_key == claim_key else None
+    return sid if holder == f"{_HOLDER_PREFIX}{sid}" else None
+
+
 def _events_path(events_path: Optional[Path]) -> Path:
     if events_path is not None:
         return events_path
@@ -146,6 +182,7 @@ def build_loop_check_index(
 def resolve_truth_status(
     node_id: Optional[str],
     *,
+    manifest_cwd: Optional[str] = None,
     claims_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
     loop_check_ages: Optional[dict[str, float]] = None,
@@ -179,7 +216,10 @@ def resolve_truth_status(
     root = claims_root if claims_root is not None else claims_root_for(key)
     claim = claim_status(key, root=root)
     cs = claim.get("state")
-    sid = _session_from_holder(claim.get("holder"))
+    holder = claim.get("holder")
+    sid = _manifest_session_for_holder(manifest_cwd, holder, key)
+    if sid is None:
+        sid = _session_from_holder(holder)
 
     if cs == "stale":
         return {

@@ -11,8 +11,7 @@ Acceptance criteria (operator-locked):
          harness="gemini", session=gemini id.
   AC-EDGE-none: when NO session env vars are set -> all three fields are
          None, spawn still succeeds (no raise).
-  AC-EDGE-multi: when both CLAUDE and CODEX vars are set -> claude wins
-         (claude takes precedence per spec).
+  AC-EDGE-multi: when CODEX_THREAD_ID is set with legacy vars -> thread wins.
 """
 from __future__ import annotations
 
@@ -48,6 +47,17 @@ def _make_spawn_result(short_id: str = "ab12cd34"):
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_parent_markers(monkeypatch):
+    for marker in (
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+    ):
+        monkeypatch.delenv(marker, raising=False)
 
 
 @pytest.fixture
@@ -238,15 +248,17 @@ def test_spawn_parent_edge_no_env_vars(workdir_claude, captured_emits, monkeypat
 
 
 # ---------------------------------------------------------------------------
-# AC-EDGE: claude wins when both CLAUDE and CODEX are set
+# AC-EDGE: CODEX_THREAD_ID wins over legacy markers
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_parent_edge_claude_wins_over_codex(workdir_claude, captured_emits, monkeypatch):
-    """AC-EDGE-multi: both CLAUDE_CODE_SESSION_ID and CODEX_SESSION_ID set -> claude wins."""
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-wins-session")
-    monkeypatch.setenv("CODEX_SESSION_ID", "codex-loses-session")
-    monkeypatch.delenv("GEMINI_SESSION_ID", raising=False)
+def test_spawn_parent_edge_codex_thread_wins(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """AC-EDGE-multi: CODEX_THREAD_ID outranks all legacy session markers."""
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-wins-session")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-loses-session")
+    monkeypatch.setenv("CODEX_SESSION_ID", "codex-legacy-loses-session")
 
     from fno.agents.cli import agents_app
     from typer.testing import CliRunner
@@ -263,13 +275,13 @@ def test_spawn_parent_edge_claude_wins_over_codex(workdir_claude, captured_emits
     entries = load_registry()
     entry = next((e for e in entries if e.name == "test-priority"), None)
     assert entry is not None
-    assert entry.spawned_by_session == "claude-wins-session"
-    assert entry.spawned_by_harness == "claude"
+    assert entry.spawned_by_session == "thread-wins-session"
+    assert entry.spawned_by_harness == "codex"
 
     spawned_events = [(k, d) for k, d in captured_emits if k == "agent_spawned"]
     assert len(spawned_events) == 1
-    assert spawned_events[0][1].get("spawned_by_harness") == "claude"
-    assert spawned_events[0][1].get("spawned_by_session") == "claude-wins-session"
+    assert spawned_events[0][1].get("spawned_by_harness") == "codex"
+    assert spawned_events[0][1].get("spawned_by_session") == "thread-wins-session"
 
 
 # ---------------------------------------------------------------------------

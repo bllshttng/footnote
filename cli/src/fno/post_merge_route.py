@@ -15,19 +15,15 @@ from __future__ import annotations
 import os
 from typing import Optional, Tuple
 
+from fno.harness_identity import HARNESS_SESSION_MARKERS
+
 # The injected turn. `autonomous` rides the prompt because neither route has an
 # operator guaranteed present (same contract as the cold dispatch sites).
 WARM_PROMPT = "/fno:pr merged {pr} autonomous"
 
-# The ambient session-id env vars a node's `source_session_id` is stamped from
-# (graph.cli._session_provenance): CLAUDE_CODE_SESSION_ID is the claude value
-# (the dominant convention), with the codex/gemini equivalents and the legacy
-# CLAUDE_SESSION_ID for safety. The self-inject guard must check the SAME set,
-# or a session reconciling its own merged PR would inject the ritual into itself.
-_SELF_SESSION_ENV_VARS = (
-    "CLAUDE_CODE_SESSION_ID",
-    "CODEX_SESSION_ID",
-    "GEMINI_SESSION_ID",
+# The self-inject guard follows the same shared precedence used to stamp node
+# provenance, plus the legacy Claude marker for compatibility.
+_SELF_SESSION_ENV_VARS = tuple(marker for marker, _ in HARNESS_SESSION_MARKERS) + (
     "CLAUDE_SESSION_ID",
 )
 

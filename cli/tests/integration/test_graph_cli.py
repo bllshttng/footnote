@@ -63,7 +63,9 @@ def _read_graph(g: Path) -> list[dict]:
 
 def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
     """AC-HP (x-30f6 2.1): `idea` stamps source_session_id + harness from env, no flag."""
-    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+    for var in (
+        "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "itest-sess-7")
     # cwd without an owned manifest -> session+harness stamped, node/plan null.
@@ -78,7 +80,9 @@ def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
 
 def test_ac_edge_idea_no_env_null_provenance(tmp_graph, tmp_path, monkeypatch):
     """AC-EDGE (x-30f6 2.1): no env -> provenance fields persist as null, no error."""
-    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+    for var in (
+        "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
 

@@ -7,7 +7,7 @@ footnote runs as a host runtime on several AI coding CLIs. This is the public su
 | CLI | Role for footnote | Parallel subagents |
 |---|---|---|
 | Claude Code | Native target. All hooks, all features. | Yes |
-| Codex CLI | Native (skills + `AGENTS.md`). | Sequential |
+| Codex CLI | Native plugin: core workflows, supported lifecycle hooks, `AGENTS.md`, and project custom agents. | Yes where `spawn_agent` is available; explicit sequential fallback otherwise |
 | Gemini CLI | Multi-CLI hook integration. | Sequential |
 | Hermes | Loop-wrapper path. | Sequential |
 | Openclaw | Loop-wrapper path. | Sequential |
@@ -20,7 +20,9 @@ Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Pi, Qoder, Rovo Dev, Trae) are 
 
 - **Skills are portable markdown** and work on every CLI in scope.
 - **The autonomous target loop** runs natively on Claude Code, Codex, and Gemini: a stop-equivalent hook blocks session exit until a `<promise>` tag appears. Hermes and Openclaw use a loop wrapper (`scripts/run-target-loop.sh --driver <name>`), which polls for the same tag. OpenCode is first-class: `fno setup` installs a local-file plugin (`~/.config/opencode/plugins/footnote.js`, no npm needed) that hooks `session.idle`, synthesizes a transcript, and shells `fno-agents loop-check` for the SAME world-gated completion check claude uses (promise scan + PR-for-HEAD + CI green + bots reviewed + no blocking finding). On a non-terminal decision it re-drives the same session in-context via `client.session.prompt`; on a terminal decision loop-check emits the `termination` event itself. loop-check is the sole completion authority, so OpenCode and Claude Code share one gate with no drift. **Antigravity CLI (`agy`)** is native the same way through a different surface: `fno setup` registers a `Stop`-hook adapter (`hooks/agy-target-stop-hook.sh`) in agy's `hooks.json` (`~/.gemini/config/hooks.json`). agy's hooks use Claude-shaped event names but a Gemini-family wire format (camelCase stdin, `decision:"continue"` to keep working, JSON-only stdout), so the adapter synthesizes a claude-shaped transcript from agy's `transcript.jsonl` and shells the SAME `fno-agents loop-check` gate. `fullyIdle == false` keeps the session working until background tasks finish; a missing binary allows the stop (never an unstoppable loop) while a transient gate failure continues and retries.
-- **Parallel subagent dispatch** (`/review sigma`, `/speculate`) needs Claude Code; everywhere else those skills run sequentially.
+- **Codex identity and lifecycle are native:** `CODEX_THREAD_ID` owns target manifests and node claims, while the Codex `Stop` and `PostToolUse` hooks drive target continuation and claim heartbeat/context monitoring. Only the supported Codex event subset is packaged.
+- **Parallel subagent dispatch** (`/review sigma`, `/speculate`, parallel `/do` waves) uses Claude's Agent tool or Codex project custom agents through `spawn_agent`. A Codex surface without that primitive reports the downgrade and runs sequentially; other in-scope CLIs keep their documented sequential or provider-specific path.
+- **Background build dispatch is substrate-specific:** `/target bg` remains Claude-only (`claude --bg`). Codex workers receive prose briefs through an owned-PTY `pane` or one-shot `headless` spawn, never a Claude slash command.
 - **Context file:** footnote makes `AGENTS.md` canonical; `CLAUDE.md` and `GEMINI.md` are one-line stubs that import it, so every CLI inlines identical content.
 
 ## Official CLI documentation

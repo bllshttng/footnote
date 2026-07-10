@@ -41,9 +41,24 @@ HEARTBEAT_TTL="${FNO_CLAIM_HEARTBEAT_TTL:-2h}"
 STDIN="$(cat 2>/dev/null || true)"
 CWD=""
 CUR_CLAUDE_SID=""
+CUR_CODEX_THREAD_ID="${CODEX_THREAD_ID:-}"
+HOOK_SESSION_ID=""
+IS_CODEX_HOOK=0
+_ENV_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
+if [[ "${FNO_PLATFORM:-}" == "codex" || -n "${CODEX_PLUGIN_ROOT:-}" \
+      || -n "$_ENV_CODEX_COMPACT" ]]; then
+  IS_CODEX_HOOK=1
+fi
 if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
   CWD="$(printf '%s' "$STDIN" | jq -r '.cwd // empty' 2>/dev/null)"
-  CUR_CLAUDE_SID="$(printf '%s' "$STDIN" | jq -r '.session_id // empty' 2>/dev/null)"
+  HOOK_SESSION_ID="$(printf '%s' "$STDIN" \
+    | jq -r 'if (.session_id? | type) == "string" then .session_id else empty end' \
+      2>/dev/null)"
+fi
+if [[ "$IS_CODEX_HOOK" -eq 1 ]]; then
+  [[ -n "$_ENV_CODEX_COMPACT" ]] || CUR_CODEX_THREAD_ID="$HOOK_SESSION_ID"
+else
+  CUR_CLAUDE_SID="$HOOK_SESSION_ID"
 fi
 [[ -z "$CWD" ]] && CWD="${CLAUDE_PROJECT_DIR:-$PWD}"
 
@@ -55,22 +70,41 @@ NODE_ID="$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' "$MANIFEST" | h
 [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]] || exit 0
 SESSION_ID="$(sed -n 's/^[[:space:]]*session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 [[ -n "$SESSION_ID" ]] || exit 0
+CLAIM_HOLDER="$(sed -n 's/^[[:space:]]*target_claim_holder:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
+[[ -n "$CLAIM_HOLDER" && "$CLAIM_HOLDER" != "null" ]] \
+  || CLAIM_HOLDER="target-session:$SESSION_ID"
 
 # Identity gate (codex P1): prove the CURRENT running session owns this manifest,
 # not a stale target-state.md a dead session left behind in this worktree. The
-# manifest records the owner's Claude session uuid at init; Claude Code passes
-# the live session's uuid on stdin. A POSITIVE mismatch means a different session
+# manifest records the owner's Claude session uuid and Codex thread id at init;
+# Claude Code passes its live uuid on stdin and Codex exports CODEX_THREAD_ID.
+# A POSITIVE mismatch means a different session
 # is sitting on a stale manifest whose session_id still matches an abandoned
 # (stale/suspect) node claim - the holder gate below would then REVIVE that dead
 # claim and block dispatch from reclaiming the node. This check is pid-independent
 # (the claim's pid arm is unreliable by design - the whole reason this hook
 # exists), so it cannot regress a dead-pid claim the way a state==live gate would.
-# Fail OPEN when either side is unknown (no stdin uuid on a non-Claude harness, or
-# an older manifest without the field): the holder gate still applies, so this
-# only ever ADDS a refusal, never widens refresh.
+# Claude keeps the legacy fail-open behavior when its identity is unavailable.
+# Codex is detected independently from identity; CODEX_THREAD_ID wins, with a
+# string stdin session_id as fallback. Codex fails CLOSED when either current
+# identity or manifest owner is missing: a generic holder proves no ownership.
 MANIFEST_CLAUDE_SID="$(sed -n 's/^[[:space:]]*claude_session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
-if [[ -n "$CUR_CLAUDE_SID" && -n "$MANIFEST_CLAUDE_SID" && "$CUR_CLAUDE_SID" != "$MANIFEST_CLAUDE_SID" ]]; then
+_CUR_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
+if [[ "$IS_CODEX_HOOK" -eq 0 && -n "$CUR_CLAUDE_SID" \
+      && -n "$MANIFEST_CLAUDE_SID" && "$MANIFEST_CLAUDE_SID" != "null" \
+      && "$CUR_CLAUDE_SID" != "$MANIFEST_CLAUDE_SID" ]]; then
   exit 0
+fi
+MANIFEST_CODEX_THREAD_ID="$(sed -n 's/^[[:space:]]*codex_thread_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
+[[ "$MANIFEST_CODEX_THREAD_ID" == "null" ]] && MANIFEST_CODEX_THREAD_ID=""
+if [[ "$IS_CODEX_HOOK" -eq 1 ]]; then
+  [[ -n "$_CUR_CODEX_COMPACT" ]] || exit 0
+  [[ -n "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
+  [[ "$CUR_CODEX_THREAD_ID" == "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
+  if [[ "$CLAIM_HOLDER" != "target-session:$MANIFEST_CODEX_THREAD_ID" \
+        && "$CLAIM_HOLDER" != "target-session:$SESSION_ID" ]]; then
+    exit 0
+  fi
 fi
 
 # Throttle: skip when the stamp is younger than THROTTLE seconds.
@@ -86,13 +120,13 @@ command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
 # Holder gate: refresh ONLY our own claim. A different holder (or no live claim)
 # stamps and returns so we do not re-probe on every tool call.
 HOLDER="$(fno claim status "node:$NODE_ID" --json 2>/dev/null | jq -r '.holder // empty' 2>/dev/null)"
-if [[ "$HOLDER" != "target-session:$SESSION_ID" ]]; then
+if [[ "$HOLDER" != "$CLAIM_HOLDER" ]]; then
   touch "$STAMP" 2>/dev/null || true
   exit 0
 fi
 
 # We hold it: renew the TTL. Best-effort - a failure logs but never blocks.
-if ! fno claim refresh "node:$NODE_ID" --holder "target-session:$SESSION_ID" --ttl "$HEARTBEAT_TTL" >/dev/null 2>&1; then
+if ! fno claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" >/dev/null 2>&1; then
   echo "claim-heartbeat: refresh failed for node:$NODE_ID (non-fatal)" >&2
 fi
 touch "$STAMP" 2>/dev/null || true
