@@ -801,9 +801,11 @@ def test_send_not_in_rust_client_verbs() -> None:
 # US2 (ab-098967b4): send by discovered live-session handle
 # ---------------------------------------------------------------------------
 
-def test_us2_send_by_handle_routes_to_project(runner, tmp_path, monkeypatch):
-    """AC2-HP: a bare <handle> that is a live discovered session (not a
-    registered agent) resolves to its project and rides the --to-project bus."""
+def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
+    """x-605c US3: a bare <handle> that is a live discovered claude session is
+    delivered TO THAT SESSION (live-inject first, durable floor to its canonical
+    handle) -- NOT re-routed to a project. Project anycast stays explicit via
+    --to-project (Locked Decision 3)."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import write_registry
 
@@ -818,20 +820,14 @@ def test_us2_send_by_handle_routes_to_project(runner, tmp_path, monkeypatch):
         pid=123, cwd="/x/abilities", project="fno", status="idle",
     )
     monkeypatch.setattr(discover_mod, "resolve_or_suggest", lambda h, **kw: (fake, []))
+    # Force the live-inject miss so the send deterministically writes the floor.
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *_a: False)
 
-    captured: dict = {}
+    # The removed re-route must NOT fire: a project send is now a hard failure.
+    def _boom(*_a, **_kw):  # pragma: no cover - asserts the path is dead
+        raise AssertionError("claude->project re-route must not fire (LD3)")
 
-    class _Res:
-        delivery = "durable"
-        msg_id = "msg-42"
-        recipient = None
-
-    def fake_to_project(project, message, **kw):
-        captured["project"] = project
-        captured["message"] = message
-        return _Res()
-
-    monkeypatch.setattr(dispatch_mod, "dispatch_send_to_project", fake_to_project)
+    monkeypatch.setattr(dispatch_mod, "dispatch_send_to_project", _boom)
 
     from fno.mail.cli import mail_app
 
@@ -839,10 +835,9 @@ def test_us2_send_by_handle_routes_to_project(runner, tmp_path, monkeypatch):
         mail_app, ["send", "fno-tgt00001", "does advance() resolve cwd?"]
     )
     assert res.exit_code == 0, res.output
-    assert captured["project"] == "fno"
-    assert captured["message"] == "does advance() resolve cwd?"
-    assert "msg-42" in res.output
-    assert "fno-tgt00001" in res.output  # handle echoed in context
+    assert "queued (durable)" in res.output
+    # Addressed to the canonical handle, not a project.
+    assert "claude-uuid-tgt" in res.output
 
 
 def test_us2_unknown_handle_errors_with_suggestions(runner, tmp_path, monkeypatch):
