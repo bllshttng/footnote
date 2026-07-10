@@ -196,6 +196,16 @@ def test_missing_structured_output_unparseable_result_raises(tmp_path, monkeypat
         triage._run_consistency_propose({"candidates": []}, None)
 
 
+def test_direct_proposal_with_stray_result_field_not_misrouted(tmp_path, monkeypatch):
+    # A direct proposal is identified by its priority_changes key, so a stray
+    # string `result` field never triggers envelope-unwrapping that would drop
+    # the real proposal (codex peer, PR #321).
+    direct = {**_prop([{"id": "ab-9", "to": "p1"}]), "result": "not an envelope"}
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, json.dumps(direct)))
+    out = triage._run_consistency_propose({"candidates": []}, None)
+    assert triage._priority_map(out) == {"ab-9": "p1"}
+
+
 def test_result_parses_to_non_dict_raises(tmp_path, monkeypatch):
     # result is valid JSON but not an object (a list): the downstream dict guard
     # rejects it rather than handing a non-dict proposal downstream.

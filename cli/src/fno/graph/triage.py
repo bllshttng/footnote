@@ -235,10 +235,12 @@ def _run_consistency_propose(context: dict, model: Optional[str]) -> dict:
     # `claude -p --output-format json --json-schema` returns an envelope
     # {is_error, structured_output, result, ...}; the schema object lives in
     # `structured_output` (or `result` as its JSON text). A test stub prints the
-    # proposal object directly (no envelope). Unwrap in that order; is_error
-    # first, since an auth/runtime failure carries no schema object.
-    proposal = data  # a stub prints the proposal object directly (no envelope)
-    if isinstance(data, dict):
+    # proposal object directly. Identify a direct proposal by its defining
+    # priority_changes key first, so a stub that happens to carry a `result`
+    # field is never misrouted through envelope-unwrapping; only unwrap when the
+    # key is absent. is_error first there, since a failure carries no schema.
+    proposal = data
+    if isinstance(data, dict) and "priority_changes" not in data:
         if data.get("is_error"):
             raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
         structured, result_text = data.get("structured_output"), data.get("result")
