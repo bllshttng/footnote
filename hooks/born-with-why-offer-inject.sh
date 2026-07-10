@@ -118,13 +118,121 @@ fi
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
 [[ -n "$offer_cmd" ]] || offer_cmd="/think dispatch ${node_id}"
 
-reminder="<system-reminder>
+# The full v1 bare-id reminder. This is the FALLBACK, surfaced verbatim whenever
+# enrichment cannot run or parse (fno unavailable, empty/non-dict node body,
+# titleless node) -- never blank, never truncated JSON (AC2-ERR). It is the ONLY
+# place the v1 "offer is pending" phrasing survives.
+v1_reminder="<system-reminder>
 A born-with-why offer is pending for ${node_id}. Surface it to the operator as a
 yes/no before wrapping up: \"Run \`${offer_cmd}\` now, or skip?\" This is an
 offer, not something that already ran - nothing was spawned.
 </system-reminder>"
 
+reminder="$v1_reminder"
+
+# Enrichment (offer path only). Reuse $node_json captured by the underway guard
+# above -- the offered node is fetched exactly once, ever. One parse emits
+# tab-separated title / <=200-char why-excerpt / domain; whitespace is collapsed
+# first so neither field can carry a tab or newline. Any failure (fno absent, so
+# node_json unset; empty or non-dict body; titleless node) leaves $reminder as
+# the v1 fallback.
+if [[ -n "${node_json:-}" ]]; then
+    enrich=$(printf '%s' "$node_json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if not isinstance(d, dict):
+        sys.exit(1)
+    title = " ".join((d.get("title") or "").split())
+    if not title:
+        sys.exit(1)
+    why = " ".join((d.get("details") or "").split())
+    if len(why) > 200:
+        cut = why[:200].rsplit(" ", 1)[0].rstrip()
+        why = (cut or why[:200]) + "…"
+    domain = (d.get("domain") or "").strip()
+    # Unit separator (non-whitespace): tab is IFS-whitespace, so bash read would
+    # collapse an empty why field and shift domain into it. \x1f never appears in
+    # a node title, so an empty middle field survives intact.
+    sys.stdout.write("\x1f".join([title, why, domain]))
+except Exception:
+    sys.exit(1)
+' 2>/dev/null) || enrich=""
+
+    if [[ -n "$enrich" ]]; then
+        IFS=$'\x1f' read -r e_title e_why e_domain <<<"$enrich"
+
+        # Empty details -> omit the "Why:" clause entirely, no dangling label (AC1-EDGE).
+        why_line=""
+        [[ -n "$e_why" ]] && why_line=" Why: ${e_why}."
+
+        # Second candidate (US3): top-ranked ready node sharing the offered node's
+        # domain (board/rank order, excluding the offered node), else `fno backlog
+        # next`, else none. Every step degrades to empty on failure -> solo offer.
+        cand_id=""
+        cand_title=""
+        if command -v fno >/dev/null 2>&1; then
+            cand_id=$( cd "$REPO_ROOT" && fno backlog ready 2>/dev/null | python3 -c '
+import sys, json
+offered, domain = sys.argv[1], sys.argv[2]
+try:
+    rows = json.load(sys.stdin)
+    if isinstance(rows, list):
+        for r in rows:
+            if not isinstance(r, dict) or r.get("id") == offered:
+                continue
+            if domain and r.get("domain") != domain:
+                continue
+            print(r.get("id") or "")
+            break
+except Exception:
+    pass
+' "$node_id" "$e_domain" 2>/dev/null ) || cand_id=""
+
+            if [[ -z "$cand_id" ]]; then
+                cand_id=$( cd "$REPO_ROOT" && fno backlog next 2>/dev/null | python3 -c '
+import sys, json
+offered = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+    if isinstance(d, dict) and d.get("id") and d.get("id") != offered:
+        print(d["id"])
+except Exception:
+    pass
+' "$node_id" 2>/dev/null ) || cand_id=""
+            fi
+
+            if [[ -n "$cand_id" ]]; then
+                cand_title=$( cd "$REPO_ROOT" && fno backlog get "$cand_id" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(" ".join((d.get("title") or "").split()) if isinstance(d, dict) else "")
+except Exception:
+    pass
+' 2>/dev/null ) || cand_title=""
+                # No title -> drop the candidate (the "Also on deck" shape needs one).
+                [[ -n "$cand_title" ]] || cand_id=""
+            fi
+        fi
+
+        ondeck_line=""
+        [[ -n "$cand_id" ]] && ondeck_line="
+
+Also on deck: ${cand_id} - \"${cand_title}\" (\`/think ${cand_id}\`)."
+
+        reminder="<system-reminder>
+It's about time you think about ${node_id} - \"${e_title}\".${why_line}
+Run \`${offer_cmd}\` now, or skip?${ondeck_line}
+
+This is an offer, not something that already ran - nothing was spawned.
+</system-reminder>"
+    fi
+fi
+
 # jq is a repo invariant for these hooks (session-start.sh uses it unconditionally).
+# All node text reaches JSON only through --arg, so backticks / quotes / $() in a
+# title render literally and never trigger shell expansion (AC2-EDGE).
 jq -n --arg ctx "$reminder" \
     '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
 
