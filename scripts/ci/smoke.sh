@@ -109,7 +109,8 @@ bash tests/skills/test_agent_receipt.sh
 # (co-located with the skill per the design'"'"'s verify commands).
 bash skills/agent/tests/test_normalize.sh
 bash skills/agent/tests/test_confirm.sh
-bash skills/agent/tests/test_auto_worktree.sh'
+bash skills/agent/tests/test_auto_worktree.sh
+bash skills/agent/tests/test_spawn_guard.sh'
     step "mail skill harness (ab-7479fdb2)" "." 'bash skills/mail/tests/test_normalize.sh'
     step "events-discipline lint" "." 'bash scripts/lint/events-discipline.sh'
     step "events-discipline lint self-test" "." 'bash tests/lint/test-events-discipline.sh'
