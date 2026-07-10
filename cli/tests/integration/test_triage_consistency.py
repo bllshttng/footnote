@@ -130,3 +130,76 @@ def test_k1_notes_it_measures_nothing(frozen, monkeypatch):
     r = runner.invoke(app, ["backlog", "triage", "consistency", "--repeat", "1", "--frozen-context", str(frozen)])
     assert r.exit_code == 0
     assert "K=1 measures nothing" in r.output
+
+
+# --- envelope unwrap in _run_consistency_propose (x-0b85559c) ---
+#
+# The dispatch runs a stub that prints an exact payload; these exercise the real
+# unwrap, not a monkeypatched fn. `claude -p --output-format json --json-schema`
+# returns an envelope {is_error, structured_output, result, ...}, not the schema
+# object; returning the envelope is what made the verb report 0 proposals.
+
+def _stub(tmp_path, payload: str, name: str = "stub"):
+    """A stub executable that prints `payload` to stdout (the dispatch reads it)."""
+    data = tmp_path / f"{name}.json"
+    data.write_text(payload)
+    script = tmp_path / f"{name}.sh"
+    script.write_text(f'#!/bin/sh\ncat "{data}"\n')
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_unwrap_structured_output(tmp_path, monkeypatch):
+    # Real envelope: schema object lives in structured_output, not at top level.
+    envelope = json.dumps({
+        "type": "result",
+        "is_error": False,
+        "structured_output": _prop([{"id": "ab-1", "to": "p1"}]),
+        "result": json.dumps(_prop([{"id": "ab-1", "to": "p1"}])),
+    })
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    out = triage._run_consistency_propose({"candidates": []}, None)
+    assert triage._priority_map(out) == {"ab-1": "p1"}  # not the empty envelope
+
+
+def test_unwrap_result_json_string(tmp_path, monkeypatch):
+    # Envelope omits structured_output but carries result as a JSON string.
+    envelope = json.dumps({
+        "is_error": False,
+        "result": json.dumps(_prop([{"id": "ab-2", "to": "p0"}])),
+    })
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    out = triage._run_consistency_propose({"candidates": []}, None)
+    assert triage._priority_map(out) == {"ab-2": "p0"}
+
+
+def test_direct_object_stub_passes_through(tmp_path, monkeypatch):
+    # A stub that prints the proposal object directly (no envelope) is unchanged.
+    direct = _prop([{"id": "ab-3", "to": "p3"}])
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, json.dumps(direct)))
+    out = triage._run_consistency_propose({"candidates": []}, None)
+    assert out == direct
+
+
+def test_is_error_raises_before_unwrap(tmp_path, monkeypatch):
+    envelope = json.dumps({"is_error": True, "result": "auth failed"})
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    with pytest.raises(RuntimeError, match="auth failed"):
+        triage._run_consistency_propose({"candidates": []}, None)
+
+
+def test_missing_structured_output_unparseable_result_raises(tmp_path, monkeypatch):
+    # No structured_output AND result is not JSON: raise ValueError, never {}.
+    envelope = json.dumps({"is_error": False, "result": "not json at all"})
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    with pytest.raises(ValueError):
+        triage._run_consistency_propose({"candidates": []}, None)
+
+
+def test_empty_structured_output_raises_not_silent_zero(tmp_path, monkeypatch):
+    # An underfilled envelope (structured_output missing priority_changes) must
+    # be an errored run, never a silently-completed zero-proposal agreement.
+    envelope = json.dumps({"is_error": False, "structured_output": {}})
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    with pytest.raises(ValueError, match="priority_changes"):
+        triage._run_consistency_propose({"candidates": []}, None)

@@ -232,13 +232,30 @@ def _run_consistency_propose(context: dict, model: Optional[str]) -> dict:
         cmd, input=prompt, capture_output=True, text=True, timeout=300, check=True
     )
     data = json.loads(result.stdout)
-    # claude -p wraps a schema response as the object itself; a stub may print
-    # the proposal directly. An is_error envelope (auth/runtime) surfaces here.
+    # `claude -p --output-format json --json-schema` returns an envelope
+    # {is_error, structured_output, result, ...}; the schema object lives in
+    # `structured_output` (or `result` as its JSON text). A test stub prints the
+    # proposal object directly (no envelope). Unwrap in that order; is_error
+    # first, since an auth/runtime failure carries no schema object.
     if isinstance(data, dict) and data.get("is_error"):
         raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
-    if not isinstance(data, dict):
+    if isinstance(data, dict) and isinstance(data.get("structured_output"), dict):
+        proposal = data["structured_output"]
+    elif isinstance(data, dict) and isinstance(data.get("result"), str):
+        try:
+            proposal = json.loads(data["result"])
+        except json.JSONDecodeError as e:
+            raise ValueError(f"claude -p result is not JSON: {e}") from e
+    else:
+        proposal = data  # a stub prints the proposal object directly (no envelope)
+    if not isinstance(proposal, dict):
         raise ValueError("proposal is not a JSON object")
-    return data
+    # A schema-conforming proposal always carries priority_changes (required in
+    # _CONSISTENCY_SCHEMA), even if empty; its absence is an underfilled envelope
+    # that must count as an errored run, not fold as a silent zero agreement.
+    if "priority_changes" not in proposal:
+        raise ValueError("proposal missing required priority_changes")
+    return proposal
 
 
 def _priority_map(proposal: dict) -> dict[str, object]:
