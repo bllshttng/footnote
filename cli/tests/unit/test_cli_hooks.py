@@ -596,6 +596,7 @@ def test_cli_cli_hooks_exits_nonzero_when_gemini_refuses(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "gemini: error:" in result.output
     assert "left unchanged" in result.output
+    assert "UNTRUSTED" in result.output
 
 
 def test_cli_cli_hooks_no_gemini_writes_only_codex(tmp_path, monkeypatch):

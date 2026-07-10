@@ -168,14 +168,13 @@ def _install_cli_hooks(
                 bak = f"; backed up {res.backup.name}" if res.backup else ""
                 typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
 
-    if failures:
-        raise typer.Exit(1)
-
     if needs_trust:
         typer.echo(
             "\ncodex: the hook is UNTRUSTED until you approve it. Start Codex and "
             "approve the footnote SessionStart hook, then confirm it fires."
         )
+    if failures:
+        raise typer.Exit(1)
     if not any_change:
         typer.echo("\nNothing to do (hooks already wired).")
     return None
