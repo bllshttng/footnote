@@ -430,6 +430,30 @@ else
   fail "ab-ca822421 codex handoff route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
+# Python's pane receipt has no worker-socket short_id. Its real addressable
+# handle is the unique registry name, backed by mux_session + pane_id evidence.
+reset_log
+PANE_RECEIPT='{"name":"handoff-pane","short_id":"","provider":"codex","status":"live","mux_session":"fno-agent-handoff-pane","pane_id":"%7"}'
+OUT="$(MOCK_SPAWN_OUT="$PANE_RECEIPT" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+       run_spawn --name handoff-pane --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
+if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=handoff-pane"* ]] \
+   && [[ "$OUT" == *"mode=spawn"* ]]; then
+  pass "ab-ca822421: empty-id pane receipt -> verified registry-name handle"
+else
+  fail "ab-ca822421 empty-id pane receipt: $OUT"
+fi
+
+# An empty short_id without matching pane evidence remains a hard failure.
+reset_log
+BAD_PANE_RECEIPT='{"name":"other-worker","short_id":"","provider":"codex","status":"live","mux_session":"fno-agent-other","pane_id":"%8"}'
+OUT="$(MOCK_SPAWN_OUT="$BAD_PANE_RECEIPT" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+       run_spawn --name handoff-pane --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
+if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"result=launched"* ]]; then
+  pass "ab-ca822421: mismatched empty-id pane receipt -> failed closed"
+else
+  fail "ab-ca822421 mismatched pane receipt accepted: $OUT"
+fi
+
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json handoff2 gemini)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-doc-gemini --provider gemini --payload-mode handoff --message "$handoff_seed" --mode exec)"

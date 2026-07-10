@@ -464,8 +464,11 @@ line):
 - **`spawn` / `host`**: stdout is JSON
   carrying `{"short_id",...}` (compact or pretty depending on runtime and
   substrate). `.short_id` is parsed with `jq`; `bg` requires a whole-string
-  8-hex id, while the default/pane lane accepts the daemon's identifier-shaped
-  name slug. Empty or malformed ids (even on exit 0) are FAILED.
+  8-hex id. The default/pane lane accepts the runtime's identifier-shaped
+  handle: Rust returns a name-slug `short_id`; Python pane receipts have an
+  empty worker-socket id, so `spawn.sh` uses the receipt's registry `name` only
+  after matching provider/status and requiring both mux session and pane id.
+  Empty, mismatched, or malformed receipts (even on exit 0) are FAILED.
 
 Report only what `spawn.sh` actually captured - a real short-id, or a real reply.
 "No valid receipt" is FAILED, full stop.

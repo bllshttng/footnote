@@ -362,6 +362,25 @@ if [[ "$REPLY" -eq 1 ]]; then
   exit 0
 else
   short_id="$(printf '%s' "$spawn_out" | jq -r '.short_id // empty' 2>/dev/null)"
+  # Python-authored pane rows have no worker socket, so their genuine receipt
+  # carries an empty short_id plus the addressable registry name and concrete
+  # mux coordinates. Accept that handle only when every identity field matches
+  # this launch; a partial/mismatched empty-id receipt still fails closed below.
+  case "$SUBSTRATE" in
+    ""|pane)
+      if [[ -z "$short_id" ]]; then
+        receipt_name="$(printf '%s' "$spawn_out" | jq -r '.name // empty' 2>/dev/null)"
+        receipt_provider="$(printf '%s' "$spawn_out" | jq -r '.provider // empty' 2>/dev/null)"
+        receipt_status="$(printf '%s' "$spawn_out" | jq -r '.status // empty' 2>/dev/null)"
+        mux_session="$(printf '%s' "$spawn_out" | jq -r '.mux_session // empty' 2>/dev/null)"
+        pane_id="$(printf '%s' "$spawn_out" | jq -r '.pane_id // empty' 2>/dev/null)"
+        if [[ "$receipt_name" == "$NAME" && "$receipt_provider" == "$PROVIDER" \
+           && "$receipt_status" == "live" && -n "$mux_session" && -n "$pane_id" ]]; then
+          short_id="$receipt_name"
+        fi
+      fi
+      ;;
+  esac
   # WHOLE-string match (not `grep -qx`, which matches ANY line): a multi-line
   # `.short_id` value - e.g. `{"short_id":"junk\ndeadbeef"}` or a banner leaking
   # into the value - must NOT pass on one of its lines being valid. `[[ =~ ]]`
@@ -370,12 +389,11 @@ else
   #
   # The valid SHAPE depends on the substrate (x-61b7). Only `bg`/`headless` return
   # a real 8-hex session-id prefix (client-side `claude --bg` / one-shot). The
-  # default/`pane` owned-PTY lane is a daemon worker whose short_id is a NAME-SLUG
-  # from derive_short_id() (daemon.rs): up to 8 ascii-alphanumerics of the name,
-  # an optional numeric collision suffix, or a `<base>-<ts>` fallback. The 8-hex
-  # rule wrongly rejected that slug and reported a false `failed` for a live
-  # worker; accept any single-line identifier-shaped token there (empty/torn
-  # still fail - the cardinal guard is intact on every lane).
+  # default/`pane` owned-PTY lane is addressed by an identifier-shaped registry
+  # handle: Rust derives a non-empty name-slug short_id; Python supplies the
+  # verified receipt name above because mux panes own no worker socket. The
+  # 8-hex rule wrongly rejects both shapes, so accept a single-line identifier
+  # there (empty/torn receipts still fail - the cardinal guard remains intact).
   case "$SUBSTRATE" in
     bg|headless) short_id_shape='^[0-9a-f]{8}$' ;;
     *)           short_id_shape='^[A-Za-z0-9_-]{1,40}$' ;;
