@@ -146,18 +146,24 @@ def _write_codex_rollout(codex_dir, *, session_id, cwd):
     _os.utime(f, (mt, mt))
 
 
-def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeypatch, tmp_path):
+def _isolate_codex_discovery(monkeypatch, tmp_path, *, session_id):
     from fno.agents import discover
 
-    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     codex_dir = tmp_path / "codex"
-    _write_codex_rollout(codex_dir, session_id=sid, cwd="/Users/x/proj")
-    # Isolate discovery: empty claude stores, codex points at our rollout.
+    _write_codex_rollout(codex_dir, session_id=session_id, cwd="/Users/x/proj")
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
     monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
     monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(codex_dir))
+
+
+def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeypatch, tmp_path):
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    # US8: no live daemon in the test env -- force the codex live-inject miss so
+    # the send deterministically writes the durable floor (round-trip target).
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
 
     # A claude session sends to the codex handle (codex row is unregistered, so
     # the send falls through registry-unknown into disk resolution).
@@ -166,6 +172,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     )
     assert sent.exit_code == 0, sent.output
     assert "codex-019f48e1" in sent.output
+    assert "queued (durable)" in sent.output
 
     # The codex session drains its own handle and sees the message.
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
@@ -174,3 +181,27 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "codex-019f48e1"
     assert "ack from K" in payload[0]["body"]  # inside the <fno_mail> wrap
+
+
+def test_us8_codex_live_inject_hosted_short_circuits_durable(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    # US8 (node x-d899): a running codex daemon takes the turn LIVE, so the send
+    # reports "delivered (hosted)" and writes NO durable thread.
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: True)
+
+    sent = runner.invoke(
+        app, ["mail", "send", "codex-019f48e1", "ack from K", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "delivered (hosted)" in sent.output
+    assert "queued (durable)" not in sent.output
+
+    # No durable thread was written: drain-self sees nothing for the handle.
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert drained.exit_code == 0, drained.output
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload == []

@@ -1039,6 +1039,20 @@ def cmd_send(
                 model="unknown",
                 to=resolved.short_id,
             )
+
+            # US8 (node x-d899): live-inject-first for codex. If the recipient's
+            # app-server daemon is running and the thread is attached, the turn
+            # lands live; only a miss falls through to the durable floor below.
+            if resolved.agent == "codex":
+                from fno.agents.dispatch import _mail_inject_codex
+
+                if _mail_inject_codex(resolved.session_id, wrapped):
+                    print(
+                        f"delivered (hosted) to {handle} "
+                        f"[live codex session {resolved.handle}]"
+                    )
+                    return
+
             try:
                 th = write_new_thread(
                     recipient=handle,

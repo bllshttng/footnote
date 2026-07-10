@@ -4158,6 +4158,38 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
         return False
 
 
+def _mail_inject_codex(thread_id: str, text: str) -> bool:
+    """Inject ``text`` into a live codex session over the app-server daemon socket
+    via the ``fno-agents mail-inject --provider codex`` verb (US8, node x-d899).
+
+    ``thread_id`` is the codex threadId (full UUID). Returns True only when the
+    daemon accepts the turn; any miss (binary absent, no daemon socket, thread
+    not attached) returns False so the caller writes the durable fallback. The
+    codex app-server daemon only exists when the user runs it
+    (``codex remote-control start``); absent it this is a clean no-op."""
+    import json
+
+    from fno.agents import rust_runtime
+
+    binary = rust_runtime.resolve_installed_binary()
+    if binary is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [str(binary), "mail-inject", "--provider", "codex", "--session", thread_id],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=_MAIL_INJECT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    try:
+        return bool(json.loads(proc.stdout.strip()).get("delivered"))
+    except (ValueError, AttributeError):
+        return False
+
+
 def _deliver_live(
     entry: "AgentEntry",
     body: str,
