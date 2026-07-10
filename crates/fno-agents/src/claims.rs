@@ -111,6 +111,13 @@ pub struct ClaimRecord {
     pub expires_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Owning harness (`codex`/`claude`/`gemini`), resolved from the acquiring
+    /// process's ambient session markers. Additive: absent on pre-change records
+    /// (reads as `None` == unknown, never a parse error) and omitted when no
+    /// marker is present. The legible primitive the dispatch guard reads to tell
+    /// a foreign-harness owner from a native one without parsing the holder id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     /// Opaque; preserved byte-for-byte through idempotent re-acquires.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub metadata: Map<String, Value>,
@@ -682,6 +689,36 @@ fn validate_inputs(key: &str, holder: &str, ttl_ms: Option<i64>) -> Result<(), S
     Ok(())
 }
 
+/// Ambient harness session markers, highest precedence first. Mirrors
+/// `cli/src/fno/harness_identity.py::HARNESS_SESSION_MARKERS` (x-efc7) so the
+/// Rust writer tags a claim with the same harness the Python resolver would.
+const HARNESS_SESSION_MARKERS: &[(&str, &str)] = &[
+    ("CODEX_THREAD_ID", "codex"),
+    ("CLAUDE_CODE_SESSION_ID", "claude"),
+    ("CODEX_SESSION_ID", "codex"),
+    ("GEMINI_SESSION_ID", "gemini"),
+];
+
+/// Resolve the owning harness from the ambient process environment. `None` when
+/// no marker is set (a bare shell / daemon) - the claim then reads as unknown,
+/// never blocking dispatch on a missing tag.
+pub fn resolve_harness() -> Option<String> {
+    resolve_harness_from(|k| std::env::var(k).ok())
+}
+
+/// Testable core of [`resolve_harness`]: `get` supplies each marker's value so
+/// the precedence contract is exercised without mutating process-global env.
+/// A set-but-blank marker is UNSET (matches the Python `.strip()` check), so a
+/// lower-precedence real marker still wins.
+pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    for (marker, harness) in HARNESS_SESSION_MARKERS {
+        if get(marker).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+            return Some((*harness).to_string());
+        }
+    }
+    None
+}
+
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let acquired = now_ms();
     ClaimRecord {
@@ -693,6 +730,7 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         host: hostname(),
         expires_at: opts.ttl_ms.map(|ttl| acquired + ttl),
         reason: opts.reason.clone(),
+        harness: resolve_harness(),
         metadata: opts.metadata.clone().unwrap_or_default(),
     }
 }
@@ -1421,11 +1459,54 @@ mod tests {
             host: "hh".into(),
             expires_at: None,
             reason: Some("why".into()),
+            harness: Some("codex".into()),
             metadata: meta,
         };
         let text = serialize_claim(&rec).unwrap();
         let back = parse_claim_str(&text).unwrap();
         assert_eq!(back, rec);
+    }
+
+    // ---- harness tag (x-3e70) ---------------------------------------------
+
+    // AC6-FR: a claim record written before this change (no `harness` key)
+    // parses with `harness: None` and does not crash.
+    #[test]
+    fn claim_without_harness_key_reads_none() {
+        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\n";
+        let rec = parse_claim_str(yaml).expect("legacy record must parse");
+        assert_eq!(rec.harness, None);
+    }
+
+    // A record WITH a harness key round-trips it back.
+    #[test]
+    fn claim_with_harness_key_round_trips() {
+        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\nharness: codex\n";
+        let rec = parse_claim_str(yaml).expect("record must parse");
+        assert_eq!(rec.harness.as_deref(), Some("codex"));
+        // None is omitted from output entirely (not serialized as null).
+        let none = ClaimRecord { harness: None, ..rec.clone() };
+        assert!(!serialize_claim(&none).unwrap().contains("harness"));
+    }
+
+    #[test]
+    fn resolve_harness_precedence_and_blank_is_unset() {
+        // Highest-precedence marker wins.
+        let both = |k: &str| match k {
+            "CODEX_THREAD_ID" => Some("cx".to_string()),
+            "CLAUDE_CODE_SESSION_ID" => Some("cl".to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_harness_from(both).as_deref(), Some("codex"));
+        // A blank higher-precedence marker is UNSET; a lower real one still wins.
+        let blank_hi = |k: &str| match k {
+            "CODEX_THREAD_ID" => Some("   ".to_string()),
+            "CLAUDE_CODE_SESSION_ID" => Some("cl".to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_harness_from(blank_hi).as_deref(), Some("claude"));
+        // No markers -> None (unknown), never a panic.
+        assert_eq!(resolve_harness_from(|_| None), None);
     }
 
     // ---- liveness classification (contract item 8) ------------------------
@@ -1440,6 +1521,7 @@ mod tests {
             host: host.into(),
             expires_at,
             reason: None,
+            harness: None,
             metadata: Map::new(),
         }
     }
