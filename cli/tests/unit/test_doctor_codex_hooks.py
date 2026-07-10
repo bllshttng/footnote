@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from fno import doctor
@@ -211,4 +212,4 @@ def test_codex_hooks_rejects_mutating_or_unrelated_modes(tmp_path, monkeypatch) 
     result = runner.invoke(app, ["doctor", "--codex-hooks", "--fix"])
 
     assert result.exit_code == 2
-    assert "--codex-hooks may only be combined with --json" in result.output
+    assert "--codex-hooks may only be combined with --json" in unstyle(result.output)
