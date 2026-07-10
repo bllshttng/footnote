@@ -62,7 +62,7 @@ async fn run(args: Vec<String>) -> i32 {
     // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS. Connects to an existing
     // daemon; never lazy-starts one.
     if matches!(verb, "mail-inject") {
-        return fno_agents::mail_inject::run_mail_inject(&args[1..]);
+        return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 
     // `claim` is the HIDDEN debug front over the native claims module

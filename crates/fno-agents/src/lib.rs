@@ -51,6 +51,7 @@ pub mod claude_roster;
 pub mod client;
 pub mod client_verbs;
 pub mod codex_ask;
+pub mod codex_inject;
 pub mod daemon;
 pub mod digest;
 pub mod dispatch_posture;

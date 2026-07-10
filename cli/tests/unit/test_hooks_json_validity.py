@@ -170,3 +170,21 @@ def test_preflight_runner_is_executable() -> None:
     pf = REPO_ROOT / "skills" / "target" / "scripts" / "preflight" / "run-checks.sh"
     assert pf.is_file(), f"preflight runner missing at {pf}"
     assert os.access(pf, os.X_OK), f"preflight runner not executable: {pf}"
+
+
+def test_drain_hook_wired_into_claude_and_codex_sessionstart() -> None:
+    """The cross-harness mail drain must fire for a CLAUDE recipient too.
+
+    Claude's hooks.json invokes individual SessionStart hooks and does NOT call
+    the session-start.sh wrapper (that is codex-hooks.json's entry), so the drain
+    block inside the wrapper never runs for claude. The receive side is only
+    symmetric if inject-mail-drain-session-start.sh is ALSO in claude's array.
+    """
+    claude = HOOKS_JSON.read_text(encoding="utf-8")
+    assert "inject-mail-drain-session-start.sh" in claude, (
+        "claude SessionStart is missing the mail-drain hook: a hand-started "
+        "claude session addressed claude-<id> would never drain its mail"
+    )
+    ss = json.loads(claude)["hooks"]["SessionStart"]
+    cmds = [h["command"] for entry in ss for h in entry.get("hooks", [])]
+    assert any("inject-mail-drain-session-start.sh" in c for c in cmds)

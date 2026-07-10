@@ -92,6 +92,7 @@ PROVIDER_SESSION_ID_FIELDS = {
 }
 
 from fno import paths
+from fno.harness_identity import canonical_handle
 
 # v4 (ab-a171ceb2) is the host_mode forward-compat bump. v5 (inside-out E3.1) is
 # the same kind of bump for the additive `inside_leg` field: structurally
@@ -529,7 +530,7 @@ def register_existing_session(
                 if log_path:
                     entry.log_path = log_path
                 return entries
-        base = name or f"{provider}-{session_id[:8]}"
+        base = name or canonical_handle(provider, session_id)
         taken = {entry.name for entry in entries}
         chosen, suffix = base, 2
         while chosen in taken:

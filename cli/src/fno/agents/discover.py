@@ -90,6 +90,105 @@ def default_name_map_path() -> Path:
     return paths.state_dir() / NAME_MAP_FILENAME
 
 
+# Codex's transcript store is a structural mirror of claude's projects store,
+# one directory over: rollout jsonl under ``~/.codex/sessions/YYYY/MM/DD/`` whose
+# first line is a ``session_meta`` record carrying the session id + cwd verbatim.
+# Reading it makes a hand-started codex session ``fno mail``-able even when it
+# never ran the SessionStart register hook ("whether fno-spawned or not").
+CODEX_SESSIONS_DIR_ENV = "FNO_CODEX_SESSIONS_DIR"
+
+
+def default_codex_sessions_dir() -> Path:
+    """Codex's rollout transcript store on this host (mirror of x-a1d5)."""
+    override = os.environ.get(CODEX_SESSIONS_DIR_ENV)
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~")) / ".codex" / "sessions"
+
+
+def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
+    """``(session_id, cwd)`` from a rollout's first ``session_meta`` line, or None.
+
+    Codex 0.1x writes ``{"type":"session_meta","payload":{"id":...,"cwd":...}}``
+    as line 1 (verified on a real rollout). A file that is unreadable, whose
+    first line is not JSON, or is not a session_meta record is skipped (returns
+    None), never raised — same posture as the claude readers.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            first = fh.readline()
+    except OSError:
+        return None
+    try:
+        rec = json.loads(first)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(rec, dict) or rec.get("type") != "session_meta":
+        return None
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    sid, cwd = payload.get("id"), payload.get("cwd")
+    if not isinstance(sid, str) or not sid:
+        return None
+    return sid, str(cwd or "")
+
+
+def _discover_from_codex(
+    codex_sessions_dir: Path,
+    *,
+    recency_seconds: float,
+    exclude_session_ids: Iterable[str] = (),
+    now: Optional[float] = None,
+) -> list[dict]:
+    """Discover live codex sessions from the rollout store (US2).
+
+    A rollout whose mtime is inside the recency window is treated as live (codex
+    has no live-PID sidecar, so liveness leans on mtime — a false positive is
+    benign: the message waits durably on the bus). Rows are shaped like the
+    claude loops' so the shared dedup/alias pipeline consumes them unchanged;
+    ``pid`` is 0 (no OS handle) and ``agent`` is ``codex``.
+
+    ponytail: full rglob + mtime filter. Runs at send-time (interactive
+    resolution), not in the hot drain path, so O(rollouts) stats is acceptable;
+    prune to recent date-dirs by mtime if a heavy codex user's send drags.
+    """
+    cutoff = (now if now is not None else time.time()) - recency_seconds
+    exclude_sids = {s for s in (exclude_session_ids or ()) if s}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    dated: list[tuple[float, Path]] = []
+    try:
+        for path in codex_sessions_dir.rglob("rollout-*.jsonl"):
+            try:
+                mt = path.stat().st_mtime
+            except OSError:
+                continue  # vanished mid-scan: skip, never abort the whole scan
+            if mt >= cutoff:
+                dated.append((mt, path))
+    except OSError:
+        return rows
+    for _mt, path in sorted(dated, key=lambda t: t[0], reverse=True):
+        meta = _codex_meta(path)
+        if meta is None:
+            continue
+        sid, cwd = meta
+        if sid in seen or sid in exclude_sids:
+            continue
+        seen.add(sid)
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": cwd,
+                "status": None,
+                "agent": "codex",
+            }
+        )
+    return rows
+
+
 @dataclass
 class DiscoveredSession:
     """One live, host-local Claude Code session surfaced in the lane."""
@@ -586,6 +685,7 @@ def resolve_or_suggest(
     limit: int = 3,
     sessions_dir: Optional[Path] = None,
     projects_dir: Optional[Path] = None,
+    codex_sessions_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
@@ -598,23 +698,35 @@ def resolve_or_suggest(
     scan serves both the match and the suggestions. No exclusion: the user
     named a specific live session, so even an adopted one resolves.
     """
+    from fno.harness_identity import canonical_handle
+
     sessions = discover_live_sessions(
         sessions_dir=sessions_dir,
         projects_dir=projects_dir,
+        codex_sessions_dir=codex_sessions_dir,
         name_map_path=name_map_path,
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
     )
+    # Match the friendly handle, the bare hex, OR the cross-harness address
+    # <harness>-<short8> (US3, additive). The harness-prefixed form disambiguates
+    # a shortid collision across harnesses (codex-abcd never resolves a claude
+    # row) and is the SAME string the recipient's drain reads, so a resolved send
+    # is always drainable by its recipient.
     for s in sessions:
-        if handle and (s.handle == handle or s.short_id == handle):
+        if handle and (
+            s.handle == handle
+            or s.short_id == handle
+            or canonical_handle(s.agent, s.session_id) == handle
+        ):
             return s, []
     import difflib
 
     candidates: list[str] = []
     for s in sessions:
-        candidates.append(s.handle)
-        if s.short_id not in candidates:
-            candidates.append(s.short_id)
+        for cand in (s.handle, s.short_id, canonical_handle(s.agent, s.session_id)):
+            if cand not in candidates:
+                candidates.append(cand)
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
 
@@ -622,6 +734,7 @@ def discover_live_sessions(
     *,
     sessions_dir: Optional[Path] = None,
     projects_dir: Optional[Path] = None,
+    codex_sessions_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     exclude_short_ids: Iterable[str] = (),
     exclude_session_ids: Iterable[str] = (),
@@ -695,6 +808,21 @@ def discover_live_sessions(
             if r["short_id"] in exclude:
                 continue
             candidates.append(r)
+
+    # Codex disk-discovery (US2/US4). Unioned ALWAYS — a host can run
+    # live claude AND codex sessions at once, so this is not gated on the claude
+    # sources being empty (unlike the projects fallback above). Dedup on
+    # session_id below folds any overlap. Zero-effect on a host with no codex
+    # store (empty rglob), so claude-only behavior is unchanged.
+    codex_rows = _discover_from_codex(
+        codex_sessions_dir or default_codex_sessions_dir(),
+        recency_seconds=_recency_seconds(),
+        exclude_session_ids=exclude_session_ids,
+    )
+    for r in codex_rows:
+        if r["short_id"] in exclude:
+            continue
+        candidates.append(r)
 
     # Dedup on session_id (Invariant: one row per live sessionId, not per pid).
     by_sid: dict[str, dict] = {}

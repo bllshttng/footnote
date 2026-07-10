@@ -54,6 +54,12 @@ Provider-agnostic fallback: footnote tees each spawned agent's I/O to a per-agen
 
 It is binary-direct (a Python subprocess), NOT a routable `fno agents` verb: it is dispatched via `matches!` in `bin/client.rs` like `version`/`--emit-schema`, so it stays out of the verb-parity lists (`RUST_CLIENT_VERBS` / `CLIENT_VERB_USAGE`).
 
+### `--provider codex`: the codex live rung
+
+`fno-agents mail-inject --provider codex --session <threadId>` (`crates/fno-agents/src/codex_inject.rs`) is the codex sibling of the claude path, called by Python's `_mail_inject_codex`. It connects to the codex app-server daemon socket `$CODEX_HOME/app-server-control/app-server-control.sock`, speaks JSON-RPC text frames over a WebSocket over that Unix socket (the same transport as `logs_client.rs`), does the `initialize`/`initialized` handshake, then sends `turn/start` with the `<fno_mail>` text injected verbatim. Unlike the claude path there is no growth-poll: the `turn/start` RESPONSE is the confirmation. `.result.turn.id` present -> `delivered`; a "thread not found" error -> `thread-not-loaded` (session embedded / not attached) -> durable fallback; socket absent -> `no-daemon`.
+
+**Daemon prerequisite (why it can be a no-op).** A default `codex` TUI runs its app-server IN-PROCESS with no socket on disk, so nothing can inject into it. The socket exists only when a codex app-server daemon is running: install the standalone codex (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`) and run `codex remote-control start` (needs a ChatGPT login) BEFORE launching the codex TUIs, which then auto-attach to it. Absent that daemon, `--provider codex` returns `no-daemon` and `fno mail send` writes the durable floor (drained at the recipient's next SessionStart via `mail drain-self`). End-to-end verification therefore requires the operator's daemon; the wire builders and response classifier are unit-tested correct-by-construction without one.
+
 ### Confirm-by-growth is best-effort
 
 The verb confirms that the recipient transcript grew after the inject, i.e. the injected USER turn was recorded. For the target case (a session idle or blocked at a prompt) the turn records promptly, so growth fires within a poll interval. Two bounded edges remain:

@@ -49,13 +49,23 @@ pub const DEFAULT_INTERVAL_MS: u64 = 250;
 /// keystroke lands; the proven recipe (2026-07-08, CC 2.1.205) used ~0.8s.
 const CR_SETTLE_MS: u64 = 800;
 
+/// Live-inject target harness. `claude` is the default `control.sock` path;
+/// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8).
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum MailInjectProvider {
+    Claude,
+    Codex,
+}
+
 /// Parsed `mail-inject` flags. The turn TEXT is read from STDIN (sidesteps the
 /// argv size limit for envelopes up to the 1 MiB send cap); everything else is a
 /// flag.
 #[derive(Debug, PartialEq)]
 pub struct MailInjectArgs {
-    /// Recipient: full session UUID OR its 8-hex short id (roster accepts either).
+    /// Recipient: full session UUID OR its 8-hex short id (roster accepts either)
+    /// for claude; the codex threadId (full UUID) for codex.
     pub session: String,
+    pub provider: MailInjectProvider,
     pub attempts: u32,
     pub interval_ms: u64,
 }
@@ -64,6 +74,7 @@ pub struct MailInjectArgs {
 /// grammar is unit-tested without a daemon.
 pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut session: Option<String> = None;
+    let mut provider = MailInjectProvider::Claude;
     let mut attempts = DEFAULT_ATTEMPTS;
     let mut interval_ms = DEFAULT_INTERVAL_MS;
     let mut it = rest.iter();
@@ -75,6 +86,18 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                         .ok_or((2, "mail-inject: --session needs a value".to_string()))?
                         .to_string(),
                 );
+            }
+            "--provider" => {
+                provider = match it.next().map(String::as_str) {
+                    Some("claude") => MailInjectProvider::Claude,
+                    Some("codex") => MailInjectProvider::Codex,
+                    _ => {
+                        return Err((
+                            2,
+                            "mail-inject: --provider must be claude or codex".to_string(),
+                        ))
+                    }
+                };
             }
             "--attempts" => {
                 attempts = it.next().and_then(|v| v.parse().ok()).ok_or((
@@ -96,6 +119,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let session = session.ok_or((2, "mail-inject: --session is required".to_string()))?;
     Ok(MailInjectArgs {
         session,
+        provider,
         attempts,
         interval_ms,
     })
@@ -203,12 +227,14 @@ pub fn deliver_via_control_sock(
     Err("not-confirmed")
 }
 
-/// Run `mail-inject`. Reads the turn TEXT from STDIN and delivers it via
-/// [`deliver_via_control_sock`]; emits the single JSON outcome line Python
+/// Run `mail-inject`. Reads the turn TEXT from STDIN and delivers it to the
+/// target harness (`--provider claude` over `control.sock`, default; `codex`
+/// over the app-server daemon, US8); emits the single JSON outcome line Python
 /// parses. Every `not-delivered` reason is a clean signal for Python to write
-/// the durable fallback. The live socket poll is the only untested glue; every
-/// decision it makes is a tested function.
-pub fn run_mail_inject(rest: &[String]) -> i32 {
+/// the durable fallback. The claude delivery stays sync ([`deliver_via_control_sock`]);
+/// codex awaits [`crate::codex_inject::deliver_via_codex_daemon`] on the caller's
+/// runtime (no nested runtime).
+pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
         Err((code, msg)) => {
@@ -223,7 +249,15 @@ pub fn run_mail_inject(rest: &[String]) -> i32 {
         return emit(false, "io-error");
     }
 
-    match deliver_via_control_sock(&args.session, &text, args.attempts, args.interval_ms) {
+    let result = match args.provider {
+        MailInjectProvider::Claude => {
+            deliver_via_control_sock(&args.session, &text, args.attempts, args.interval_ms)
+        }
+        MailInjectProvider::Codex => {
+            crate::codex_inject::deliver_via_codex_daemon(&args.session, &text).await
+        }
+    };
+    match result {
         Ok(()) => emit(true, "delivered"),
         Err(reason) => emit(false, reason),
     }
@@ -307,6 +341,7 @@ mod tests {
     fn parse_args_defaults_and_overrides() {
         let a = parse_args(&argv(&["--session", "a1b2c3d4"])).unwrap();
         assert_eq!(a.session, "a1b2c3d4");
+        assert_eq!(a.provider, MailInjectProvider::Claude);
         assert_eq!(a.attempts, DEFAULT_ATTEMPTS);
         assert_eq!(a.interval_ms, DEFAULT_INTERVAL_MS);
 
@@ -322,6 +357,21 @@ mod tests {
         assert_eq!(b.session, "a1b2c3d4-1111-2222-3333-444455556666");
         assert_eq!(b.attempts, 3);
         assert_eq!(b.interval_ms, 10);
+    }
+
+    #[test]
+    fn parse_args_provider_defaults_claude_and_accepts_codex() {
+        let d = parse_args(&argv(&["--session", "x"])).unwrap();
+        assert_eq!(d.provider, MailInjectProvider::Claude);
+        let c = parse_args(&argv(&["--session", "x", "--provider", "codex"])).unwrap();
+        assert_eq!(c.provider, MailInjectProvider::Codex);
+        // Unknown provider is a usage error.
+        assert_eq!(
+            parse_args(&argv(&["--session", "x", "--provider", "gemini"]))
+                .unwrap_err()
+                .0,
+            2
+        );
     }
 
     #[test]

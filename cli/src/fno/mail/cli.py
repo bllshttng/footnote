@@ -1018,6 +1018,59 @@ def cmd_send(
         from fno.agents import discover as discover_mod
 
         resolved, suggestions = discover_mod.resolve_or_suggest(name)
+
+        # US7(a): a disk-discovered cross-harness session (codex/gemini)
+        # is addressed by its <harness>-<id> handle, NOT routed to a project
+        # inbox — that handle is exactly what the recipient's `drain-self` reads,
+        # so a project-addressed envelope would strand. Write the durable floor
+        # (the codex live rung is US8); the body is <fno_mail>-wrapped so it is
+        # self-recording and a reply can correlate.
+        if resolved is not None and resolved.agent != "claude":
+            from fno.agents.provider_resolve import infer_invoking_harness
+            from fno.harness_identity import canonical_handle
+            from fno.inbox.store import write_new_thread
+            from fno.mail.envelope import wrap_fno_mail
+
+            handle = canonical_handle(resolved.agent, resolved.session_id)
+            wrapped = wrap_fno_mail(
+                message,
+                from_=from_name or "fno",
+                harness=infer_invoking_harness() or "cli",
+                model="unknown",
+                to=resolved.short_id,
+            )
+
+            # US8 (node x-d899): live-inject-first for codex. If the recipient's
+            # app-server daemon is running and the thread is attached, the turn
+            # lands live; only a miss falls through to the durable floor below.
+            if resolved.agent == "codex":
+                from fno.agents.dispatch import _mail_inject_codex
+
+                if _mail_inject_codex(resolved.session_id, wrapped):
+                    print(
+                        f"delivered (hosted) to {handle} "
+                        f"[live codex session {resolved.handle}]"
+                    )
+                    return
+
+            try:
+                th = write_new_thread(
+                    recipient=handle,
+                    sender=from_name or "fno",
+                    kind="send",
+                    body=wrapped,
+                    to_kind="name",
+                    provider_to=resolved.agent,
+                )
+            except (OSError, ValueError, RuntimeError) as exc2:
+                print(f"durable envelope write failed for {handle!r}: {exc2}", file=sys.stderr)
+                raise typer.Exit(code=12) from exc2
+            print(
+                f"{th.thread_id} queued (durable) for {handle} "
+                f"[live {resolved.agent} session {resolved.handle}]"
+            )
+            return
+
         if resolved is not None and resolved.project:
             try:
                 result = dispatch_send_to_project(
@@ -1144,6 +1197,65 @@ def cmd_bus_ack(
         # Forward-only: the id is at or before the current cursor (re-ack / older
         # message). Idempotent no-op, not an error - the cursor never rewinds.
         print(f"cursor for {name!r} already at or past {msg_id}; unchanged")
+
+
+@mail_app.command("drain-self")
+def cmd_drain_self(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit JSON regardless of TTY."
+    ),
+) -> None:
+    """Drain THIS session's own cross-harness inbox and mark it seen (US5).
+
+    The receive side of the a2a relay: a session computes its own handle from
+    the ambient harness env markers (``canonical_handle(harness, session-id)``,
+    the SAME string a sender resolves and the registry registers under), reads
+    its unread bus mail, prints it for injection into the session, then advances
+    its own cursor so nothing re-surfaces next wake. Wired into each harness's
+    SessionStart hook, this is what makes a codex/gemini session actually
+    RECEIVE mail addressed to ``<harness>-<id>`` -- addressability already
+    existed, drainage did not.
+
+    Forward-only + inject-before-ack: a crash between print and ack re-surfaces
+    the message next SessionStart (a harmless repeat), never a loss. No harness
+    identity in env -> silent no-op (nothing to drain), never an error, so the
+    hook is safe on any surface.
+    """
+    from fno.bus.cursor import advance_cursor, scan_unread
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        if json_out:
+            print(json.dumps([]))
+        return
+
+    handle = canonical_handle(ident.harness, ident.session_id)
+    msgs = scan_unread(handle)
+
+    if json_out:
+        print(
+            json.dumps(
+                [
+                    {
+                        "id": m.id, "from": m.from_, "to": m.to,
+                        "kind": m.kind, "ts": m.ts, "body": m.body,
+                    }
+                    for m in msgs
+                ],
+                ensure_ascii=False,
+            )
+        )
+    elif msgs:
+        print(f"[fno mail] {len(msgs)} message(s) for {handle}:")
+        for m in msgs:
+            print(f"\n--- from {m.from_} ({m.ts}) ---")
+            print(m.body.rstrip("\n"))
+
+    # Inject-before-ack: advance the cursor to the last drained id only after
+    # the bodies are out, so a crash re-surfaces rather than drops.
+    if msgs:
+        advance_cursor(handle, msgs[-1].id)
 
 
 @mail_app.command("rebuild-render")
