@@ -581,7 +581,7 @@ elif [[ "$HANDOFF_MODE" -eq 1 ]]; then
       *) emit_error "handoff supports providers claude, codex, gemini; you passed --provider $PROVIDER" ;;
     esac
   else
-    provider="$(resolve_from_config "$agent_name" | head -1 | tr -d '[:space:]')"
+    provider="$(resolve_from_config "$agent_name" | head -1 | tr -d '[:space:]' || true)"
     case "$provider" in
       claude|codex|gemini) : ;;
       *) provider="claude" ;;
