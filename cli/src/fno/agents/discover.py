@@ -94,7 +94,7 @@ def default_name_map_path() -> Path:
 # one directory over: rollout jsonl under ``~/.codex/sessions/YYYY/MM/DD/`` whose
 # first line is a ``session_meta`` record carrying the session id + cwd verbatim.
 # Reading it makes a hand-started codex session ``fno mail``-able even when it
-# never ran the SessionStart register hook ("whether fno-spawned or not", x-d899).
+# never ran the SessionStart register hook ("whether fno-spawned or not").
 CODEX_SESSIONS_DIR_ENV = "FNO_CODEX_SESSIONS_DIR"
 
 
@@ -141,7 +141,7 @@ def _discover_from_codex(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live codex sessions from the rollout store (US2, x-d899).
+    """Discover live codex sessions from the rollout store (US2).
 
     A rollout whose mtime is inside the recency window is treated as live (codex
     has no live-PID sidecar, so liveness leans on mtime — a false positive is
@@ -809,7 +809,7 @@ def discover_live_sessions(
                 continue
             candidates.append(r)
 
-    # Codex disk-discovery (US2/US4, x-d899). Unioned ALWAYS — a host can run
+    # Codex disk-discovery (US2/US4). Unioned ALWAYS — a host can run
     # live claude AND codex sessions at once, so this is not gated on the claude
     # sources being empty (unlike the projects fallback above). Dedup on
     # session_id below folds any overlap. Zero-effect on a host with no codex

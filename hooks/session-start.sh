@@ -206,7 +206,7 @@ if [[ -f "${SCRIPT_DIR}/setup-nudge-session-start.sh" ]]; then
     fi
 fi
 
-# 6. cross-harness mail drain (US5, x-d899) — deliver this session's own a2a
+# 6. cross-harness mail drain (US5) — deliver this session's own a2a
 #    mail. Drains the durable bus for messages addressed to this session's
 #    <harness>-<id> handle so a codex/gemini session RECEIVES `fno mail send`,
 #    not just becomes addressable. Silent when empty / no harness identity.

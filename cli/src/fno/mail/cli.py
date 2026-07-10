@@ -1019,7 +1019,7 @@ def cmd_send(
 
         resolved, suggestions = discover_mod.resolve_or_suggest(name)
 
-        # US7(a), x-d899: a disk-discovered cross-harness session (codex/gemini)
+        # US7(a): a disk-discovered cross-harness session (codex/gemini)
         # is addressed by its <harness>-<id> handle, NOT routed to a project
         # inbox — that handle is exactly what the recipient's `drain-self` reads,
         # so a project-addressed envelope would strand. Write the durable floor

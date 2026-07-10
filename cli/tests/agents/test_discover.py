@@ -585,7 +585,7 @@ def test_x_a1d5_exclude_adopted_session_by_full_id(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# US2/US4 (x-d899): codex disk-discovery — a hand-started codex session is
+# US2/US4: codex disk-discovery — a hand-started codex session is
 # mail-able even without the registry hook. US3: cross-harness resolution.
 # --------------------------------------------------------------------------
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SessionStart hook: drain THIS session's own cross-harness mail (US5, x-d899).
+# SessionStart hook: drain THIS session's own cross-harness mail (US5).
 #
 # The receive side of the a2a relay. `fno mail drain-self` computes this
 # session's <harness>-<id> handle from the ambient env markers and prints any
