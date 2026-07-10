@@ -66,6 +66,28 @@ _block_if_canonical() {
     _block "Canonical ${branch:-checkout} is shared; edit blocked before it lands. For a footnote target, run \`fno target start <node>\`, then continue in a relocated or new Codex session from the \`worktree=\` path in its receipt. Or use Codex Worktree mode or Handoff before retrying."
 }
 
+_target_directory() {
+    local target="$1" link parent hops=0
+    while [[ -L "$target" ]]; do
+        hops=$((hops + 1))
+        [[ $hops -le 40 ]] || return 1
+        link="$(readlink "$target" 2>/dev/null)" || return 1
+        if [[ "$link" == /* ]]; then
+            target="$link"
+        else
+            target="$(dirname "$target")/$link"
+        fi
+    done
+
+    [[ -d "$target" ]] || target="$(dirname "$target")"
+    while [[ ! -d "$target" ]]; do
+        parent="$(dirname "$target")"
+        [[ "$parent" != "$target" ]] || return 1
+        target="$parent"
+    done
+    cd "$target" 2>/dev/null && pwd -P
+}
+
 _block_if_canonical "$CWD"
 [[ -n "$PATCH_COMMAND" ]] || _approve
 
@@ -81,15 +103,7 @@ while IFS= read -r line; do
             else
                 target="$CWD/$path"
             fi
-            target_dir="$target"
-            [[ -d "$target_dir" ]] || target_dir="$(dirname "$target_dir")"
-            while [[ ! -d "$target_dir" ]]; do
-                parent="$(dirname "$target_dir")"
-                [[ "$parent" != "$target_dir" ]] || break
-                target_dir="$parent"
-            done
-            [[ -d "$target_dir" ]] || continue
-            target_dir="$(cd "$target_dir" 2>/dev/null && pwd -P)" || continue
+            target_dir="$(_target_directory "$target")" || continue
             _block_if_canonical "$target_dir"
             ;;
     esac
