@@ -1188,7 +1188,10 @@ def _drain_hook_wired(hooks_json: Optional[Path] = None) -> Optional[bool]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return None
-    starts = ((data.get("hooks") or {}).get("SessionStart") or []) if isinstance(data, dict) else []
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    starts = hooks.get("SessionStart") if isinstance(hooks, dict) else None
+    if not isinstance(starts, list):
+        starts = []
     cmds: list[str] = []
     for h in starts:
         for c in (h.get("hooks") or []) if isinstance(h, dict) else []:
@@ -1256,7 +1259,9 @@ def _stale_dead_letters(
         for m in unread:
             ts = _parse_bus_ts(getattr(m, "ts", ""))
             if ts is not None and ts <= cutoff:
-                out.append({"handle": handle, "msg_id": m.id, "ts": m.ts})
+                out.append(
+                    {"handle": handle, "msg_id": getattr(m, "id", ""), "ts": getattr(m, "ts", "")}
+                )
     return out
 
 

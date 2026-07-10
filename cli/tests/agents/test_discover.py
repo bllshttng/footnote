@@ -807,3 +807,58 @@ def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
     )
     sessions = discover.discover_live_sessions(registry_path=reg, **_empty_seams(tmp_path))
     assert [s.session_id for s in sessions] == [sid]
+
+
+def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
+    """codex review: an orphaned/exited registry row must NOT resolve as live."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-dead", provider="claude", cwd="/x", log_path="/tmp/d.log",
+                claude_short_id="deadd00d", claude_session_uuid="deadd00d-1111-2222-3333-444444444444",
+                status="orphaned",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    resolved, _ = discover.resolve_or_suggest(
+        "claude-deadd00d", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert resolved is None
+
+
+def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
+    """codex review: short_id must be the authoritative claude_short_id (jobId),
+    not the uuid's first 8 hex, when the two differ."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-foo", provider="claude", cwd="/x", log_path="/tmp/f.log",
+                claude_short_id="j0b1d001",  # jobId
+                claude_session_uuid="aaaabbbb-1111-2222-3333-444444444444",  # uuid[:8]=aaaabbbb
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    # Resolves by the jobId short handle...
+    by_job, _ = discover.resolve_or_suggest(
+        "j0b1d001", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert by_job is not None
+    assert by_job.short_id == "j0b1d001"
+    assert by_job.session_id == "aaaabbbb-1111-2222-3333-444444444444"
+    # ...and by the canonical handle derived from the uuid.
+    by_canon, _ = discover.resolve_or_suggest(
+        "claude-aaaabbbb", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert by_canon is not None

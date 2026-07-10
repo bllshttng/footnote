@@ -189,6 +189,11 @@ def _discover_from_codex(
     return rows
 
 
+# Terminal AgentStatus values (mirrors registry.AgentStatus): a row in one of
+# these is dead, so it must not surface as a live discovery result.
+_DEAD_REGISTRY_STATUSES = frozenset({"orphaned", "failed", "exited", "permanent_dead"})
+
+
 def _discover_from_roster(*, exclude_session_ids: Iterable[str] = ()) -> list[dict]:
     """Live claude sessions from the daemon roster (US1, x-605c).
 
@@ -230,17 +235,28 @@ def _discover_from_registry(
         provider = getattr(e, "provider", None)
         if provider not in PROVIDER_SESSION_ID_FIELDS:
             continue
+        # A dead/orphaned row must never resolve as a live recipient: mail would
+        # queue to a handle nobody drains, and doctor's dead-letter check (which
+        # reads this discovery) would count it live and miss the strand.
+        if getattr(e, "status", None) in _DEAD_REGISTRY_STATUSES:
+            continue
         if provider == "claude":
+            # session_id keeps the full uuid for dedup/canonical identity, but
+            # short_id MUST be the authoritative jobId -- claude_short_id and the
+            # uuid's first 8 hex are distinct fields that can differ, and the
+            # jobId is what `fno mail send <short>` and mail-inject key on.
             sid = getattr(e, "claude_session_uuid", None) or getattr(e, "claude_short_id", None)
+            short = getattr(e, "claude_short_id", None) or (sid[:8] if sid else None)
         else:
-            sid = e.session_id
+            sid = getattr(e, "session_id", None)
+            short = sid[:8] if sid else None
         if not sid or sid in exclude or sid in seen:
             continue
         seen.add(sid)
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": short,
                 "pid": 0,
                 "cwd": getattr(e, "cwd", "") or "",
                 "status": None,

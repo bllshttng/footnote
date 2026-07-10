@@ -1049,7 +1049,10 @@ def cmd_send(
 
             injected = False
             if resolved.agent == "claude":
-                injected = _mail_inject_claude(resolved.short_id, wrapped)
+                # mail-inject accepts the full UUID or the 8-hex short (roster
+                # resolves either); pass the collision-proof UUID, matching the
+                # codex path and dispatch's uuid-preference.
+                injected = _mail_inject_claude(resolved.session_id, wrapped)
             elif resolved.agent == "codex":
                 injected = _mail_inject_codex(resolved.session_id, wrapped)
             if injected:
