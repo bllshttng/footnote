@@ -265,28 +265,17 @@ fi
 # ---------------------------------------------------------------------------
 echo "check-event-schema-parity: diffing against on-disk schemas..."
 
-# Load on-disk Branch A (Python branch)
-DISK_BRANCH_A="$("$PYTHON3" -c "
+# x-2901: events-v3.json is a SINGLE envelope now (the W7 oneOf split-brain is
+# retired). Both emitters diff against the same on-disk envelope. compare_json
+# strips doc-only keys ($schema/title/$comment/description), so passing the whole
+# file is equivalent to passing just its envelope object.
+DISK_ENVELOPE="$("$PYTHON3" -c "
 import json, sys
 schema = json.load(open(sys.argv[1]))
-branches = schema.get('oneOf', [])
-branch_a = next((b for b in branches if 'type' in b.get('required', [])), None)
-if branch_a is None:
-    print('ERROR: events-v3.json has no Branch A (required=[type])', file=sys.stderr)
+if 'oneOf' in schema:
+    print('ERROR: events-v3.json still has a oneOf; expected the single unified envelope', file=sys.stderr)
     sys.exit(1)
-print(json.dumps(branch_a))
-" "$EVENTS_V3")"
-
-# Load on-disk Branch B (Rust branch)
-DISK_BRANCH_B="$("$PYTHON3" -c "
-import json, sys
-schema = json.load(open(sys.argv[1]))
-branches = schema.get('oneOf', [])
-branch_b = next((b for b in branches if 'kind' in b.get('required', [])), None)
-if branch_b is None:
-    print('ERROR: events-v3.json has no Branch B (required=[kind])', file=sys.stderr)
-    sys.exit(1)
-print(json.dumps(branch_b))
+print(json.dumps(schema))
 " "$EVENTS_V3")"
 
 # Load on-disk status-v1
@@ -294,8 +283,8 @@ DISK_STATUS="$("$PYTHON3" -c "import json,sys; print(json.dumps(json.load(open(s
 
 DRIFT_FOUND=false
 
-# Compare Python envelope against Branch A
-if ! compare_json "python-envelope vs events-v3.json Branch A" "$PYTHON_ENVELOPE" "$DISK_BRANCH_A"; then
+# Compare Python envelope against the single on-disk envelope
+if ! compare_json "python-envelope vs events-v3.json" "$PYTHON_ENVELOPE" "$DISK_ENVELOPE"; then
     DRIFT_FOUND=true
 fi
 
@@ -304,7 +293,7 @@ if [[ "$RUST_AVAILABLE" == "true" ]]; then
     RUST_ENVELOPE="$("$PYTHON3" -c "import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d['envelope']))" "$RUST_SCHEMA_JSON")"
     RUST_STATUS="$("$PYTHON3" -c "import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d['status']))" "$RUST_SCHEMA_JSON")"
 
-    if ! compare_json "rust-envelope vs events-v3.json Branch B" "$RUST_ENVELOPE" "$DISK_BRANCH_B"; then
+    if ! compare_json "rust-envelope vs events-v3.json" "$RUST_ENVELOPE" "$DISK_ENVELOPE"; then
         DRIFT_FOUND=true
     fi
     if ! compare_json "rust-status vs status-v1.json" "$RUST_STATUS" "$DISK_STATUS"; then
@@ -364,6 +353,44 @@ PYEOF
 rm -rf "$_COLLISION_TMPDIR"
 if [[ $_COLLISION_STATUS -ne 0 ]]; then
     exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Step 6: Registry completeness (x-2901)
+# ---------------------------------------------------------------------------
+# schema.yaml is the single cross-language name registry now that the
+# events-v3.json kind enum is retired. Every KNOWN_EVENT_KINDS entry (Rust
+# event_kinds) MUST be documented in schema.yaml, so adding a kind to the Rust
+# const without documenting it here reds the gate (two-place sync). This is a
+# SUBSET check, not equality: schema.yaml legitimately also holds Python event
+# types and Rust loop-runtime `type` events (pr_watch_*, recovery_*) that never
+# get a KNOWN_EVENT_KINDS entry. Skipped in test-rust mode (the selftest injects
+# synthetic emit-schemas but not a schema.yaml).
+if [[ "$RUST_AVAILABLE" == "true" && -z "$TEST_RUST_SCHEMA" ]]; then
+    echo "check-event-schema-parity: checking registry completeness (KNOWN_EVENT_KINDS subset of schema.yaml)..."
+    SCHEMA_YAML="$REPO_ROOT/cli/src/fno/events/schema.yaml"
+    _REGISTRY_STATUS=0
+    RUST_SCHEMA_JSON="$RUST_SCHEMA_JSON" SCHEMA_YAML="$SCHEMA_YAML" "$PYTHON3" - <<'PYEOF' || _REGISTRY_STATUS=$?
+import json, os, sys
+try:
+    import yaml
+except ImportError:
+    print("WARN: PyYAML unavailable; skipping registry-completeness check", file=sys.stderr)
+    sys.exit(0)
+rust_kinds = set(json.loads(os.environ["RUST_SCHEMA_JSON"]).get("event_kinds", []))
+schema = yaml.safe_load(open(os.environ["SCHEMA_YAML"], encoding="utf-8"))
+names = {e["name"] for e in schema.get("event_types", [])}
+missing = sorted(rust_kinds - names)
+if missing:
+    print("REGISTRY DRIFT: KNOWN_EVENT_KINDS entries missing from schema.yaml event_types:")
+    for n in missing:
+        print(f"  {n}")
+    sys.exit(1)
+print("  registry: OK")
+PYEOF
+    if [[ $_REGISTRY_STATUS -ne 0 ]]; then
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------
