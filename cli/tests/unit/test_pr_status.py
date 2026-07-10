@@ -178,12 +178,58 @@ def test_dedup_single_entry_per_name_is_unchanged():
     assert counts["total"] == 2
 
 
-def test_timestampless_group_keeps_last_seen_deterministic():
-    """Errors: a whole name-group with no timestamps keeps the last-seen entry
-    (deterministic, order = gh's order). Last-seen FAILURE -> red."""
+def test_timestampless_tie_is_fail_closed_pass_then_fail():
+    """Tie (both timestampless): a FAILURE seen after a SUCCESS of the same name
+    keeps the fail -> red."""
     rollup = [
         {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
         {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"},
+    ]
+    verdict, _, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert counts["total"] == 1
+
+
+def test_timestampless_tie_is_fail_closed_fail_then_pass():
+    """Invariant regression (codex peer, x-8332): a FAILURE seen BEFORE a
+    same-name SUCCESS with equal/missing timestamps must NOT be dropped. The old
+    `>=` last-seen rule returned green here (hid the fail); fail-closed -> red."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert code == 1
+    assert counts["total"] == 1
+
+
+def test_newer_success_before_older_superseded_fail_is_green():
+    """Regression (gemini HIGH / codex P1 on PR #316): the fail-preservation
+    branch must fire ONLY on a true tie. A newer SUCCESS seen BEFORE an older
+    superseded FAILURE of the same name must keep the SUCCESS -> green; the
+    strictly-older fail loses (else it re-hides as a false red, the x-e858 bug)."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T10:05:00Z"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED",
+         "startedAt": "2026-07-09T10:00:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "green"
+    assert code == 0
+    assert counts["fail"] == 0
+    assert counts["total"] == 1
+
+
+def test_equal_timestamp_tie_preserves_fail():
+    """Tie on EQUAL (present) startedAt: a same-name FAILURE before a SUCCESS is
+    preserved -> red, regardless of order."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE",
+         "startedAt": "2026-07-09T10:00:00Z"},
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+         "startedAt": "2026-07-09T10:00:00Z"},
     ]
     verdict, _, counts = _status.verdict_for(rollup)
     assert verdict == "red"
