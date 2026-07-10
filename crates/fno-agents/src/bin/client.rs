@@ -615,29 +615,34 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
 }
 
 /// Invoking-harness env markers, highest priority first. Mirror of Python
-/// `provider_resolve._HARNESS_MARKERS`; the `harness_marker_table_matches_python`
-/// test fails if the two tables drift (AC4).
+/// `harness_identity.HARNESS_SESSION_MARKERS`; cross-language drift is caught by
+/// the pytest `test_harness_markers_match_client_rs`, which reads this const from
+/// source (the Rust unit test only guards Rust-internal edits).
 const HARNESS_MARKERS: &[(&str, &str)] = &[
+    ("CODEX_THREAD_ID", "codex"),
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_SESSION_ID", "codex"),
     ("GEMINI_SESSION_ID", "gemini"),
 ];
 
 /// Infer the dispatch provider when `--provider` is absent, mirroring Python
-/// `resolve_dispatch_provider`: exactly one present marker picks its harness;
-/// zero or >=2 (ambiguous) fall through to the builtin `claude`. Never guesses.
-/// `lookup` is injectable so tests don't touch process-global env.
+/// `infer_invoking_harness`: resolve when the present markers name exactly one
+/// *distinct* harness. Multiple markers for the same harness (Codex's thread id
+/// plus its legacy session id) agree; markers naming different harnesses, or
+/// none, fall through to the builtin `claude`. Never guesses. `lookup` is
+/// injectable so tests don't touch process-global env.
 fn infer_dispatch_provider(lookup: impl Fn(&str) -> Option<String>) -> &'static str {
-    // Exactly-one-present without a heap collect: short-circuit as soon as a
-    // second marker appears (a second `.next()` being `Some` means ambiguous).
-    let mut present = HARNESS_MARKERS
-        .iter()
-        .filter(|(marker, _)| lookup(marker).is_some_and(|v| !v.trim().is_empty()))
-        .map(|(_, harness)| *harness);
-    match present.next() {
-        Some(harness) if present.next().is_none() => harness,
-        _ => "claude",
+    let mut inferred: Option<&'static str> = None;
+    for (marker, harness) in HARNESS_MARKERS {
+        if lookup(marker).is_some_and(|v| !v.trim().is_empty()) {
+            match inferred {
+                None => inferred = Some(harness),
+                Some(h) if h == *harness => {}
+                Some(_) => return "claude", // two distinct harnesses -> ambiguous
+            }
+        }
     }
+    inferred.unwrap_or("claude")
 }
 
 /// Route a codex `ask` to the client-side `codex exec` path, bypassing the
@@ -2221,7 +2226,7 @@ mod tests {
             infer_dispatch_provider(env_of(&[("CODEX_SESSION_ID", "   ")])),
             "claude"
         );
-        // Two-plus markers are ambiguous -> builtin default, never a guess.
+        // Markers naming DIFFERENT harnesses are ambiguous -> builtin default.
         assert_eq!(
             infer_dispatch_provider(env_of(&[
                 ("CODEX_SESSION_ID", "x"),
@@ -2229,15 +2234,27 @@ mod tests {
             ])),
             "claude"
         );
+        // Two markers for the SAME harness agree (Codex thread id + legacy
+        // session id) -> resolves that harness, not ambiguous. Mirrors Python.
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[
+                ("CODEX_THREAD_ID", "t"),
+                ("CODEX_SESSION_ID", "s"),
+            ])),
+            "codex"
+        );
     }
 
     #[test]
-    fn harness_marker_table_matches_python() {
-        // Mirror of provider_resolve._HARNESS_MARKERS (ordering is load-bearing:
-        // it is the priority list). Fails if the Rust table drifts from Python.
+    fn harness_marker_table_is_expected() {
+        // Guards Rust-internal edits to HARNESS_MARKERS (ordering is load-bearing:
+        // it is the priority list). Cross-language parity with Python is enforced
+        // by the pytest test_harness_markers_match_client_rs, which reads this
+        // const from source rather than a hard-coded mirror.
         assert_eq!(
             HARNESS_MARKERS,
             &[
+                ("CODEX_THREAD_ID", "codex"),
                 ("CLAUDE_CODE_SESSION_ID", "claude"),
                 ("CODEX_SESSION_ID", "codex"),
                 ("GEMINI_SESSION_ID", "gemini"),
