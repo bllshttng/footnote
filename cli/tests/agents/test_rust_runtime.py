@@ -529,6 +529,37 @@ def test_rust_client_verbs_match_client_rs() -> None:
     )
 
 
+def test_harness_markers_match_client_rs() -> None:
+    """Rust HARNESS_MARKERS mirrors Python HARNESS_SESSION_MARKERS, order included.
+
+    The Rust unit test only checks the Rust const against a hard-coded Rust
+    literal, so a drift on the Python side leaves both suites green while the two
+    runtimes infer different harnesses. This reads the actual Rust source and
+    asserts the (env_var, harness) sequences equal Python's canonical table --
+    order is load-bearing (it is the priority list). Skipped when the crate
+    source is absent (installed sdist test env without the workspace).
+    """
+    import re
+
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    repo_root = _find_repo_root(Path(__file__).resolve().parent)
+    if repo_root is None:
+        pytest.skip("crates/fno-agents/src/bin/client.rs not present in this checkout")
+    client_rs = repo_root / "crates" / "fno-agents" / "src" / "bin" / "client.rs"
+
+    src = client_rs.read_text()
+    block = re.search(r"const HARNESS_MARKERS[^=]*=\s*&\[(.*?)\];", src, re.DOTALL)
+    assert block, "HARNESS_MARKERS const not found in client.rs"
+    rust_pairs = re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))
+
+    assert rust_pairs == [tuple(p) for p in HARNESS_SESSION_MARKERS], (
+        "HARNESS_MARKERS is out of sync between Rust and Python.\n"
+        f"  client.rs: {rust_pairs}\n"
+        f"  harness_identity.HARNESS_SESSION_MARKERS: {list(HARNESS_SESSION_MARKERS)}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Unconditional `ask` auto-routing (ab-73da4ac2).
 #

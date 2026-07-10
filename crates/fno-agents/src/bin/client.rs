@@ -614,6 +614,37 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
     Some(outcome.exit_code)
 }
 
+/// Invoking-harness env markers, highest priority first. Mirror of Python
+/// `harness_identity.HARNESS_SESSION_MARKERS`; cross-language drift is caught by
+/// the pytest `test_harness_markers_match_client_rs`, which reads this const from
+/// source (the Rust unit test only guards Rust-internal edits).
+const HARNESS_MARKERS: &[(&str, &str)] = &[
+    ("CODEX_THREAD_ID", "codex"),
+    ("CLAUDE_CODE_SESSION_ID", "claude"),
+    ("CODEX_SESSION_ID", "codex"),
+    ("GEMINI_SESSION_ID", "gemini"),
+];
+
+/// Infer the dispatch provider when `--provider` is absent, mirroring Python
+/// `infer_invoking_harness`: resolve when the present markers name exactly one
+/// *distinct* harness. Multiple markers for the same harness (Codex's thread id
+/// plus its legacy session id) agree; markers naming different harnesses, or
+/// none, fall through to the builtin `claude`. Never guesses. `lookup` is
+/// injectable so tests don't touch process-global env.
+fn infer_dispatch_provider(lookup: impl Fn(&str) -> Option<String>) -> &'static str {
+    let mut inferred: Option<&'static str> = None;
+    for (marker, harness) in HARNESS_MARKERS {
+        if lookup(marker).is_some_and(|v| !v.trim().is_empty()) {
+            match inferred {
+                None => inferred = Some(harness),
+                Some(h) if h == *harness => {}
+                Some(_) => return "claude", // two distinct harnesses -> ambiguous
+            }
+        }
+    }
+    inferred.unwrap_or("claude")
+}
+
 /// Route a codex `ask` to the client-side `codex exec` path, bypassing the
 /// daemon (ab-0429c6e1). Returns `Some(exit_code)` when the target is codex
 /// (resolved from an existing registry row, else the `--provider` flag), or
@@ -694,17 +725,13 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         return Some(2);
     }
 
-    // Resolve provider from --provider flag (no existing row since collision check passed).
+    // Resolve provider: explicit --provider > invoking-harness inference >
+    // builtin `claude` (mirrors Python's resolve_dispatch_provider). A missing
+    // flag no longer exits 2 -- that was the bg/headless split-brain vs pane,
+    // which already infers via the Python re-exec.
     let provider = match provider_param {
         Some(p) => p,
-        None => {
-            eprintln!(
-                "provider is required to spawn a new agent {}; pass --provider one of: {}",
-                py_repr(name),
-                known_providers_csv()
-            );
-            return Some(2);
-        }
+        None => infer_dispatch_provider(|k| std::env::var(k).ok()),
     };
 
     let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -2159,6 +2186,80 @@ mod tests {
         assert!(verb_usage("loop").unwrap().starts_with("loop run"));
         assert!(verb_usage("loop-check").unwrap().starts_with("loop-check"));
         assert!(verb_usage("definitely-not-a-verb").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // x-9112: bg/headless provider inference parity with Python
+    // -----------------------------------------------------------------------
+
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(m, _)| *m == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn maybe_run_spawn_infers_provider_from_single_marker() {
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[("CLAUDE_CODE_SESSION_ID", "abc")])),
+            "claude"
+        );
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[("CODEX_SESSION_ID", "abc")])),
+            "codex"
+        );
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[("GEMINI_SESSION_ID", "abc")])),
+            "gemini"
+        );
+    }
+
+    #[test]
+    fn maybe_run_spawn_infers_provider_defaults_claude_when_ambiguous() {
+        // Zero markers -> builtin default.
+        assert_eq!(infer_dispatch_provider(env_of(&[])), "claude");
+        // Whitespace-only marker is treated as absent.
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[("CODEX_SESSION_ID", "   ")])),
+            "claude"
+        );
+        // Markers naming DIFFERENT harnesses are ambiguous -> builtin default.
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[
+                ("CODEX_SESSION_ID", "x"),
+                ("GEMINI_SESSION_ID", "y"),
+            ])),
+            "claude"
+        );
+        // Two markers for the SAME harness agree (Codex thread id + legacy
+        // session id) -> resolves that harness, not ambiguous. Mirrors Python.
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[
+                ("CODEX_THREAD_ID", "t"),
+                ("CODEX_SESSION_ID", "s"),
+            ])),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn harness_marker_table_is_expected() {
+        // Guards Rust-internal edits to HARNESS_MARKERS (ordering is load-bearing:
+        // it is the priority list). Cross-language parity with Python is enforced
+        // by the pytest test_harness_markers_match_client_rs, which reads this
+        // const from source rather than a hard-coded mirror.
+        assert_eq!(
+            HARNESS_MARKERS,
+            &[
+                ("CODEX_THREAD_ID", "codex"),
+                ("CLAUDE_CODE_SESSION_ID", "claude"),
+                ("CODEX_SESSION_ID", "codex"),
+                ("GEMINI_SESSION_ID", "gemini"),
+            ]
+        );
     }
 
     #[test]
