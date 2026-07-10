@@ -138,15 +138,24 @@ reminder="$v1_reminder"
 # the v1 fallback.
 if [[ -n "${node_json:-}" ]]; then
     enrich=$(printf '%s' "$node_json" | python3 -c '
-import sys, json
+import sys, json, re
+# Node title/details are free text (organic capture from transcripts), embedded
+# inside the hook-owned <system-reminder> wrapper. jq --arg keeps the JSON valid
+# but does NOT neutralize a literal </system-reminder> in that text, so a node
+# could break out of the reminder and inject context into the next prompt. Defang
+# the reminder delimiter (open/close, case- and whitespace-insensitive) before it
+# is embedded; the real wrapper is added in bash, after this.
+_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
+def defang(s):
+    return _TAG.sub(r"[\1system-reminder]", s)
 try:
     d = json.load(sys.stdin)
     if not isinstance(d, dict):
         sys.exit(1)
-    title = " ".join((d.get("title") or "").split())
+    title = defang(" ".join((d.get("title") or "").split()))
     if not title:
         sys.exit(1)
-    why = " ".join((d.get("details") or "").split())
+    why = defang(" ".join((d.get("details") or "").split()))
     if len(why) > 200:
         cut = why[:200].rsplit(" ", 1)[0].rstrip()
         why = (cut or why[:200]) + "…"
@@ -204,10 +213,12 @@ except Exception:
 
             if [[ -n "$cand_id" ]]; then
                 cand_title=$( cd "$REPO_ROOT" && fno backlog get "$cand_id" 2>/dev/null | python3 -c '
-import sys, json
+import sys, json, re
+_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 try:
     d = json.load(sys.stdin)
-    print(" ".join((d.get("title") or "").split()) if isinstance(d, dict) else "")
+    t = " ".join((d.get("title") or "").split()) if isinstance(d, dict) else ""
+    print(_TAG.sub(r"[\1system-reminder]", t))
 except Exception:
     pass
 ' 2>/dev/null ) || cand_title=""
