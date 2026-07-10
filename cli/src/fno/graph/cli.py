@@ -147,6 +147,77 @@ def _briefs_dir() -> Path:
     return BRIEFS_DIR
 
 
+# -- relatedness sidecar (`fno backlog relatedness build|get`) --
+# A node-to-node relatedness map read by x-9ed6's offer path and /triage.
+# Sidecar, not a graph mutation, so `build` writes unconditionally.
+
+_relatedness_cli = typer.Typer(
+    name="relatedness",
+    help="Node-to-node relatedness map (sidecar next to graph.json).",
+    no_args_is_help=True,
+)
+
+
+def _relatedness_path() -> Path:
+    from fno.paths import relatedness_json
+    return relatedness_json()
+
+
+@_relatedness_cli.command("build")
+def cmd_relatedness_build(
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Restrict the corpus to this project."),
+    judge: bool = typer.Option(False, "--judge", help="Haiku pairwise refinement (v2, opt-in); v1 is deterministic-only."),
+    top_k: int = typer.Option(5, "--top-k", "-K", help="Edges persisted per node."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the built map as JSON."),
+) -> None:
+    """Build the relatedness sidecar from graph signals (read-only on the graph)."""
+    from fno.graph.store import read_graph
+    from fno.graph import relatedness as _r
+
+    entries = read_graph(_graph_path())
+    if project is not None:
+        entries = [e for e in entries if e.get("project") == project]
+    mapping = _r.build_map(entries, k=top_k)
+    if judge:
+        # Degrade, never abort: v1 has no judge layer, so note and write the
+        # deterministic map (AC6 posture - LLM absence never blocks the write).
+        typer.echo("note: --judge (haiku refinement) not implemented in v1; wrote deterministic map.", err=True)
+    path = _relatedness_path()
+    _r.write_map(path, mapping)
+    if json_output:
+        typer.echo(json.dumps(mapping, indent=2))
+    else:
+        edges = sum(len(v) for v in mapping.values())
+        typer.echo(f"relatedness: {len(mapping)} nodes, {edges} edges -> {path}")
+
+
+@_relatedness_cli.command("get")
+def cmd_relatedness_get(
+    node_id: str = typer.Argument(..., help="Node id to fetch related nodes for."),
+    top_k: int = typer.Option(5, "--top-k", "-K", help="Max related nodes to return."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit a JSON array."),
+) -> None:
+    """Print the top related nodes for one node (the x-9ed6 consumer API).
+
+    No map -> exit non-zero, empty stdout (the caller's fallback signal).
+    Present map, no edges -> exit 0, empty list. The two are distinct (AC3).
+    """
+    from fno.graph import relatedness as _r
+
+    try:
+        edges = _r.get_related(_relatedness_path(), node_id, k=top_k)
+    except _r.NoMapError:
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(json.dumps(edges, indent=2))
+    else:
+        for r in edges:
+            typer.echo(f"{r['id']}\t{r['score']}\t{r['reason']}")
+
+
+cli.add_typer(_relatedness_cli, name="relatedness")
+
+
 # -- shared node construction --
 
 _NodeFields = dict
