@@ -13,9 +13,14 @@
 //!   meta-event. An oversized event must never silently truncate or vanish.
 //! - **FIFO per-emitter ordering**: each emission is open-`O_APPEND`-write-close.
 //!   A single event line stays well under `PIPE_BUF` (4096B; the cap keeps it
-//!   under 600B with the `ts`/`kind` framing), so the append is atomic at the
-//!   kernel level. Cross-emitter ordering (Python <-> Rust interleaving) is
+//!   under 600B with the `ts`/`type`/`data` framing), so the append is atomic at
+//!   the kernel level. Cross-emitter ordering (Python <-> Rust interleaving) is
 //!   unspecified by design; consumers filter by `source` when ordering matters.
+//!
+//! Envelope (x-2901): the unified line is `{ts, type, source, data:{...}}` -
+//! the same shape the Python/fno emitter and the Rust loop runtime already
+//! write. The retired `{ts, kind, <flat fields>}` shape is read-tolerated by
+//! `subscribe`/`digest` during the mixed-binary window; nothing emits it here.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -65,8 +70,9 @@ impl EventEmitter {
     }
 
     /// Emit `kind` with a structured payload. The payload must serialize to a
-    /// JSON object; `ts` (wall-clock RFC3339), `kind`, and `source` are merged
-    /// in by the emitter and override any same-named payload keys.
+    /// JSON object; the emitter frames it as `{ts, type: kind, source, data}`
+    /// (wall-clock RFC3339 `ts`), so payload keys live under `data` and never
+    /// collide with the envelope fields.
     ///
     /// Returns `Ok(())` on a successful append. An oversized payload is NOT an
     /// error to the caller: the meta-event is written and `Ok(())` returned, so
@@ -106,10 +112,16 @@ impl EventEmitter {
         self.write_line(kind, fields)
     }
 
-    fn write_line(&self, kind: &str, mut obj: Map<String, Value>) -> Result<(), EmitError> {
+    fn write_line(&self, event_type: &str, payload: Map<String, Value>) -> Result<(), EmitError> {
+        // Unified envelope (x-2901): the payload nests under `data`, the kind is
+        // stamped as `type`. The 500B cap is measured on `payload` before this
+        // framing (in emit/emit_fields), so nesting never changes which events
+        // are dropped.
+        let mut obj = Map::new();
         obj.insert("ts".into(), Value::String(now_rfc3339()));
-        obj.insert("kind".into(), Value::String(kind.to_string()));
+        obj.insert("type".into(), Value::String(event_type.to_string()));
         obj.insert("source".into(), Value::String(self.source.clone()));
+        obj.insert("data".into(), Value::Object(payload));
         let mut line = serde_json::to_string(&Value::Object(obj))
             .map_err(|e| EmitError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         line.push('\n');
@@ -226,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_line_with_ts_kind_source() {
+    fn emits_line_with_ts_type_source_data() {
         let path = temp_events_path("basic");
         let em = EventEmitter::new(&path, "daemon");
         em.emit("daemon_started", &json!({"pid": 4242, "version": "0.1.0"}))
@@ -235,9 +247,10 @@ mod tests {
         let lines = read_lines(&path);
         assert_eq!(lines.len(), 1);
         let l = &lines[0];
-        assert_eq!(l["kind"], "daemon_started");
+        assert_eq!(l["type"], "daemon_started");
         assert_eq!(l["source"], "daemon");
-        assert_eq!(l["pid"], 4242);
+        assert_eq!(l["data"]["pid"], 4242);
+        assert!(l.get("kind").is_none(), "no legacy kind field");
         assert!(l["ts"].as_str().unwrap().ends_with('Z'));
         assert!(l["ts"].as_str().unwrap().starts_with("20"));
         std::fs::remove_file(&path).ok();
@@ -253,9 +266,9 @@ mod tests {
         let lines = read_lines(&path);
         assert_eq!(lines.len(), 1, "exactly one line: the meta-event");
         let l = &lines[0];
-        assert_eq!(l["kind"], "event_payload_too_large");
-        assert_eq!(l["intended_kind"], "agent_spawned");
-        assert!(l["size"].as_u64().unwrap() > MAX_EVENT_PAYLOAD_BYTES as u64);
+        assert_eq!(l["type"], "event_payload_too_large");
+        assert_eq!(l["data"]["intended_kind"], "agent_spawned");
+        assert!(l["data"]["size"].as_u64().unwrap() > MAX_EVENT_PAYLOAD_BYTES as u64);
         std::fs::remove_file(&path).ok();
     }
 
@@ -267,7 +280,10 @@ mod tests {
             em.emit("tick", &json!({"seq": i})).unwrap();
         }
         let lines = read_lines(&path);
-        let seqs: Vec<u64> = lines.iter().map(|l| l["seq"].as_u64().unwrap()).collect();
+        let seqs: Vec<u64> = lines
+            .iter()
+            .map(|l| l["data"]["seq"].as_u64().unwrap())
+            .collect();
         assert_eq!(seqs, (0..10).collect::<Vec<_>>());
         std::fs::remove_file(&path).ok();
     }
@@ -278,8 +294,9 @@ mod tests {
         let em = EventEmitter::new(&path, "worker:wkA");
         em.emit("heartbeat", &Value::Null).unwrap();
         let lines = read_lines(&path);
-        assert_eq!(lines[0]["kind"], "heartbeat");
+        assert_eq!(lines[0]["type"], "heartbeat");
         assert_eq!(lines[0]["source"], "worker:wkA");
+        assert_eq!(lines[0]["data"], json!({}));
         std::fs::remove_file(&path).ok();
     }
 
