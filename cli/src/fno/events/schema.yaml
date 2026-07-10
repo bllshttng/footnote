@@ -33,13 +33,14 @@ envelope:
       description: "Event type name; must match an entry in event_types"
     source:
       type: string
-      # W7 additive: 'daemon' added for Rust fno-agents supervisor. 'worker:<id>'
-      # pattern sources (Rust per-agent workers) are validated by events-v3.json
-      # branch B pattern ^(daemon|worker:.+)$; the enum here covers the common
-      # fixed-string sources only. The bash validator builds a regex from this enum,
-      # so worker:<id> is checked at the parity-script layer, not here.
-      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff]
-      description: "Producer identity; consumers route on this. See events-v3.json branch B for worker:<id> pattern sources."
+      # x-2901: single unified envelope. 'active-backlog' added (real emitter at
+      # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
+      # pattern sources, validated by both the Python and bash validators via the
+      # `patterns` list below (previously only the parity-script layer checked them).
+      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog]
+      patterns:
+        - '^(worker|stream-worker):.+$'
+      description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
     data:
       type: object
       description: "Per-type payload; see event_types[].data"
@@ -2385,6 +2386,80 @@ event_types:
           type: integer
           description: "Entries dropped by _validate_proposal (unknown id, cycle, invalid priority, missing reason). Today's silent fail-open becomes a visible number."
     consumers: [fno backlog triage health]
+
+# ---------------------------------------------------------------------------
+# x-2901: daemon kinds present in KNOWN_EVENT_KINDS but previously undocumented
+# here. schema.yaml is now the single cross-language name registry (the
+# events-v3.json kind enum was retired), so the parity gate asserts every
+# KNOWN_EVENT_KINDS entry appears here. Documented sources: [daemon] keeps the
+# python collision-exclusion bucket honest (_collect_event_types drops
+# daemon/subagent-only names); the real envelope source varies (dispatch_deferred
+# emits from megawalk, active_backlog_task_crashed from active-backlog).
+# ---------------------------------------------------------------------------
+
+  - name: active_backlog_task_crashed
+    description: "The active-backlog dispatch task panicked/exited unexpectedly; the daemon logged it and continues."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        error:
+          type: string
+
+  - name: daemon_exe_fingerprint_unavailable
+    description: "The daemon could not read its own executable fingerprint (staleness self-check degraded to fail-open)."
+    sources: [daemon]
+    data:
+      required: []
+      properties: {}
+
+  - name: dispatch_deferred
+    description: "A cross-harness dispatch was deferred because the node is owned by a different harness (dispatch-posture guard)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        node_id:
+          type: string
+        owner_harness:
+          type: string
+        dispatcher_harness:
+          type: string
+
+  - name: screen_state_change
+    description: "A scrape sweep observed an agent's on-screen verdict change (badge set or cleared). Consumed by the mux subscribe overlay."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        state:
+          type: string
+        rule:
+          type: string
+        seq:
+          type: integer
+        cleared:
+          type: boolean
+
+  - name: startup_reconcile_done
+    description: "The daemon's startup reconcile sweep completed successfully."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        count:
+          type: integer
+
+  - name: startup_reconcile_failed
+    description: "The daemon's startup reconcile sweep raised an error; the daemon continues fail-open."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        error:
+          type: string
 
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.

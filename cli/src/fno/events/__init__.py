@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json as _json
+import re as _re
 import time as _time
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,9 @@ EVENT_TYPES: dict[str, dict[str, Any]] | None
 ENVELOPE_REQUIRED: list[str]
 MAX_DATA_BYTES: int
 ALLOWED_SOURCES: set[str]
+# x-2901: per-agent worker sources (worker:<id>, stream-worker:<id>) validate by
+# regex, not enum membership. Compiled from envelope.properties.source.patterns.
+ALLOWED_SOURCE_PATTERNS: list[Any]
 ALLOWED_GATES: set[str]
 _schema_load_error: SchemaUnavailableError | None = None
 
@@ -87,6 +91,10 @@ try:
     ENVELOPE_REQUIRED = SCHEMA["envelope"]["required"]
     MAX_DATA_BYTES = SCHEMA.get("limits", {}).get("max_data_bytes", 65536)
     ALLOWED_SOURCES = set(SCHEMA["envelope"]["properties"]["source"]["enum"])
+    ALLOWED_SOURCE_PATTERNS = [
+        _re.compile(p)
+        for p in SCHEMA["envelope"]["properties"]["source"].get("patterns", [])
+    ]
     ALLOWED_GATES = set(SCHEMA.get("gates", []))
 except SchemaUnavailableError as _exc:
     SCHEMA = None
@@ -94,6 +102,7 @@ except SchemaUnavailableError as _exc:
     ENVELOPE_REQUIRED = []
     MAX_DATA_BYTES = 65536
     ALLOWED_SOURCES = set()
+    ALLOWED_SOURCE_PATTERNS = []
     ALLOWED_GATES = set()
     _schema_load_error = _exc
 
@@ -117,10 +126,14 @@ def validate(event: dict[str, Any]) -> None:
     for field in ENVELOPE_REQUIRED:
         if field not in event:
             raise ValidationError(f"event missing required field: {field}")
-    if event["source"] not in ALLOWED_SOURCES:
+    source = event["source"]
+    if source not in ALLOWED_SOURCES and not any(
+        p.match(source) for p in ALLOWED_SOURCE_PATTERNS
+    ):
         raise ValidationError(
-            f"unknown source: {event['source']!r} "
-            f"(allowed: {sorted(ALLOWED_SOURCES)})"
+            f"unknown source: {source!r} "
+            f"(allowed: {sorted(ALLOWED_SOURCES)} "
+            f"or patterns {[p.pattern for p in ALLOWED_SOURCE_PATTERNS]})"
         )
 
     type_name = event["type"]
@@ -577,6 +590,7 @@ def append_event(
 __all__ = [
     "ALLOWED_GATES",
     "ALLOWED_SOURCES",
+    "ALLOWED_SOURCE_PATTERNS",
     "ENVELOPE_REQUIRED",
     "EVENT_TYPES",
     "MAX_DATA_BYTES",
