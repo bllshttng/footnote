@@ -749,6 +749,22 @@ impl Queue for MegawalkQueue {
                 extra_env.push(("MODEL_FLAG".to_string(), format!("--model {m}")));
             }
 
+            // ── harness-aware dispatch guard (x-3e70) ─────────────────────────
+            // Defer to a foreign harness that owns / is working this node before
+            // claiming it: a claim tagged with another harness (even suspect), or
+            // a codex/gemini branch/worktree for the node before its claim lands.
+            // Stops the default-claude stampede onto a codex-owned node (observed
+            // 2026-07-09). Yielding is safe: once the owner's claim goes live the
+            // `fno backlog next` live-claim filter excludes the node and the walk
+            // resumes. Best-effort probe; degrades to native dispatch on error.
+            let own_h = crate::claims::resolve_harness();
+            let own = own_h.as_deref().unwrap_or("claude");
+            let probe_cwd = std::env::current_dir().unwrap_or_default();
+            if let Some(foreign) = crate::dispatch_posture::foreign_owner_of(&id, own, &probe_cwd) {
+                crate::dispatch_posture::emit_dispatch_deferred(&id, &foreign, own, &probe_cwd);
+                return Ok(None);
+            }
+
             let session_key = gen_session_key();
 
             // ── acquire the node claim ────────────────────────────────────────
