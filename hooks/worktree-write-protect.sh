@@ -3,7 +3,7 @@
 set -uo pipefail
 
 _approve() {
-    printf '%s\n' '{"decision":"approve","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+    printf '%s\n' '{}'
     exit 0
 }
 
@@ -27,18 +27,25 @@ _block() {
 
 PAYLOAD="$(cat)"
 CWD=""
+PATCH_COMMAND=""
 if command -v jq >/dev/null 2>&1; then
     CWD="$(printf '%s' "$PAYLOAD" | jq -er '.cwd | select(type == "string" and length > 0)' 2>/dev/null || true)"
+    PATCH_COMMAND="$(printf '%s' "$PAYLOAD" | jq -er '.tool_input.command | select(type == "string" and length > 0)' 2>/dev/null || true)"
 elif command -v python3 >/dev/null 2>&1; then
-    CWD="$(printf '%s' "$PAYLOAD" | python3 -c '
+    _json_field() {
+        printf '%s' "$PAYLOAD" | python3 -c '
 import json, sys
 try:
-    value = json.load(sys.stdin).get("cwd")
+    payload = json.load(sys.stdin)
+    value = payload.get("cwd") if sys.argv[1] == "cwd" else payload.get("tool_input", {}).get("command")
     if isinstance(value, str) and value:
         print(value)
 except Exception:
     pass
-' 2>/dev/null || true)"
+' "$1" 2>/dev/null || true
+    }
+    CWD="$(_json_field cwd)"
+    PATCH_COMMAND="$(_json_field command)"
 else
     _approve
 fi
@@ -49,9 +56,43 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$HOOK_DIR/helpers/check-impl-location.sh"
 [[ -f "$HELPER" ]] || _approve
 
-LOCATION="$(cd "$CWD" && bash "$HELPER" 2>/dev/null)" || _approve
-VERDICT="$(printf '%s\n' "$LOCATION" | sed -n 's/^verdict=//p' | head -1)"
-[[ "$VERDICT" == "canonical-protected" ]] || _approve
+_block_if_canonical() {
+    local dir="$1" location verdict branch
+    location="$(cd "$dir" && bash "$HELPER" 2>/dev/null)" || return
+    verdict="$(printf '%s\n' "$location" | sed -n 's/^verdict=//p' | head -1)"
+    [[ "$verdict" == "canonical-protected" ]] || return
 
-BRANCH="$(printf '%s\n' "$LOCATION" | sed -n 's/^branch=//p' | head -1)"
-_block "Canonical ${BRANCH:-checkout} is shared; edit blocked before it lands. For a footnote target, run \`fno target start <node>\`, then continue in a relocated or new Codex session from the \`worktree=\` path in its receipt. Or use Codex Worktree mode or Handoff before retrying."
+    branch="$(printf '%s\n' "$location" | sed -n 's/^branch=//p' | head -1)"
+    _block "Canonical ${branch:-checkout} is shared; edit blocked before it lands. For a footnote target, run \`fno target start <node>\`, then continue in a relocated or new Codex session from the \`worktree=\` path in its receipt. Or use Codex Worktree mode or Handoff before retrying."
+}
+
+_block_if_canonical "$CWD"
+[[ -n "$PATCH_COMMAND" ]] || _approve
+
+while IFS= read -r line; do
+    case "$line" in
+        "*** Add File: "*|"*** Update File: "*|"*** Delete File: "*|"*** Move to: "*)
+            path="${line#*: }"
+            path="${path%$'\r'}"
+            [[ -n "$path" ]] || continue
+
+            if [[ "$path" == /* ]]; then
+                target="$path"
+            else
+                target="$CWD/$path"
+            fi
+            target_dir="$target"
+            [[ -d "$target_dir" ]] || target_dir="$(dirname "$target_dir")"
+            while [[ ! -d "$target_dir" ]]; do
+                parent="$(dirname "$target_dir")"
+                [[ "$parent" != "$target_dir" ]] || break
+                target_dir="$parent"
+            done
+            [[ -d "$target_dir" ]] || continue
+            target_dir="$(cd "$target_dir" 2>/dev/null && pwd -P)" || continue
+            _block_if_canonical "$target_dir"
+            ;;
+    esac
+done <<< "$PATCH_COMMAND"
+
+_approve

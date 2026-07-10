@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/graph-write-protect.sh",
+            "command": "${PLUGIN_ROOT}/hooks/graph-write-protect.sh",
             "statusMessage": "checking fno state surfaces"
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CODEX_PLUGIN_ROOT}/hooks/worktree-write-protect.sh",
+            "command": "bash ${PLUGIN_ROOT}/hooks/worktree-write-protect.sh",
             "statusMessage": "checking worktree location"
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/git-protection.py",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/git-protection.py",
             "statusMessage": "checking git guardrails"
           }
         ]
@@ -39,11 +39,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+            "command": "${PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
           },
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh"
+            "command": "${PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh"
           }
         ]
       }
@@ -53,11 +53,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-stop-hook.sh"
+            "command": "${PLUGIN_ROOT}/hooks/target-stop-hook.sh"
           },
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
+            "command": "${PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
           }
         ]
       }
@@ -68,11 +68,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CODEX_PLUGIN_ROOT}/hooks/context-monitor.js"
+            "command": "node ${PLUGIN_ROOT}/hooks/context-monitor.js"
           },
           {
             "type": "command",
-            "command": "bash ${CODEX_PLUGIN_ROOT}/hooks/claim-heartbeat.sh"
+            "command": "bash ${PLUGIN_ROOT}/hooks/claim-heartbeat.sh"
           }
         ]
       }
@@ -82,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-subagent-guard.sh"
+            "command": "${PLUGIN_ROOT}/hooks/target-subagent-guard.sh"
           }
         ]
       }
@@ -92,7 +92,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-subagent-guard.sh"
+            "command": "${PLUGIN_ROOT}/hooks/target-subagent-guard.sh"
           }
         ]
       }
@@ -102,11 +102,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CODEX_PLUGIN_ROOT}/scripts/save-session.py"
+            "command": "python3 ${PLUGIN_ROOT}/scripts/save-session.py"
           },
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/arm-handoff-precompact.sh"
+            "command": "${PLUGIN_ROOT}/hooks/arm-handoff-precompact.sh"
           }
         ]
       }
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
+            "command": "${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
           }
         ]
       }
@@ -127,7 +127,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${CODEX_PLUGIN_ROOT}/hooks/session-start.sh"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/session-start.sh"
           }
         ]
       }
