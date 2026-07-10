@@ -53,7 +53,7 @@ Tasks are independent when:
 - Same phase prefix (02a, 02b)
 
 **Algorithm:**
-1. Build dependency graph from phase files
+1. Build dependency graph from task `depends_on`
 2. Topological sort to identify waves
 3. Within each wave, check for file conflicts
 4. If conflicts exist, wave is sequential

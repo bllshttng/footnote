@@ -17,8 +17,7 @@ happen to carry a foreign wave.
 
 The session project is the executing plan's project:
 
-- folder plan: `project:` in `00-INDEX.md` frontmatter
-- single-doc plan: `project:` in the doc frontmatter
+- the plan's `project:` frontmatter field
 - fallback: the `project` of the backlog node in `.fno/target-state.md`'s
   `plan_path` (resolve with `fno backlog get <node> --field project`)
 

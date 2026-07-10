@@ -29,7 +29,7 @@ or test-heavy enough that a deleted test file should fail loud.
 
 ## Declaring in Full Mode
 
-Put the block in `00-INDEX.md` frontmatter, before any stamp fields
+Put the block in the plan's frontmatter, before any stamp fields
 (`status:`, `shipped_at:`, `urls:`, `session_ids:`). The `/blueprint`
 template already does this:
 
@@ -100,7 +100,7 @@ nearest 5. Going above ~30 usually means the plan should be split.
 ### Validator warns about an unknown predicate
 
 ```
-WARN: 00-INDEX.md: kill_criteria entry scope_creep: predicate
+WARN: plan.md: kill_criteria entry scope_creep: predicate
 `files_outside(src) > 5` not in known vocabulary (engine will log
 WARN and skip at runtime)
 ```
@@ -118,7 +118,7 @@ The validator's known vocabulary is `iteration [>=] N`,
 ### Validator errors
 
 ```
-ERROR: 00-INDEX.md: kill_criteria entry 2 missing required field `predicate`
+ERROR: plan.md: kill_criteria entry 2 missing required field `predicate`
 ```
 
 Every entry needs all three fields: `name`, `predicate`, `reason`. The

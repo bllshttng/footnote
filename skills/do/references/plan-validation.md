@@ -11,7 +11,7 @@ fi
 
 If the validator isn't available (or the variable isn't set), do a manual structural check:
 
-1. **Acceptance criteria coverage** - Does every AC in 00-INDEX.md have at least one task referencing it across the phase files?
+1. **Acceptance criteria coverage** - Does every AC in the plan have at least one task referencing it?
 2. **Task file references** - Does every task reference at least one file to modify? Tasks with no file targets are too vague to execute.
 3. **Orphan tasks** - Are there tasks with no acceptance criteria at all? Flag them.
 4. **Dependency sanity** - Does any task reference a file that's only created in a later phase? That's a dependency error.

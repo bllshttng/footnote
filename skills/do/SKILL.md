@@ -15,7 +15,7 @@ requires:
 | Mode | What runs | Use when |
 |------|-----------|----------|
 | `flat` (default) | lightweight single-session executor: read the plan, make the changes, verify, done | a focused plan: a bug fix, a 1-session feature, a single `.md` plan |
-| `waves` (alias `operator`) | wave orchestration: validate the strategy, run waves sequential/parallel, dispatch TDD subagents, verify from a fresh perspective | a multi-phase plan folder with a `00-INDEX.md` execution strategy |
+| `waves` (alias `operator`) | wave orchestration: validate the strategy, run waves sequential/parallel, dispatch TDD subagents, verify from a fresh perspective | a multi-phase plan whose Execution Strategy declares `- wave:` entries |
 
 This is a **router**, not a monolith. It parses the first argument token as a mode, announces the resolved mode, then loads that mode's body and follows it in this same context. It never calls another skill at runtime (it dispatches subagents via the Task/Agent tool and loads mode bodies via Read).
 
@@ -67,26 +67,23 @@ The default mode `flat` takes a **plan path**. The `waves` mode (and its one-rel
 
 ### 2a. Wave-declaration notice (flat on a wave plan)
 
-Before executing, check whether the resolved plan declares waves. A plan "declares waves" when its `00-INDEX.md` (folder plan) or its single-doc body (lean plan) carries an Execution Strategy with `- wave:` entries - the same wave declarations target's blueprint treats as the source of truth. If it does, print a one-line notice and **proceed flat anyway** (flat is never silently upgraded to parallel):
+Before executing, check whether the resolved plan declares waves. A plan "declares waves" when its single-doc body carries an Execution Strategy with `- wave:` entries - the same wave declarations target's blueprint treats as the source of truth. If it does, print a one-line notice and **proceed flat anyway** (flat is never silently upgraded to parallel):
 
 ```bash
-PLAN_ARG="$1"  # the plan path resolved in Step 1
-INDEX=""
-if [[ -d "$PLAN_ARG" && -f "$PLAN_ARG/00-INDEX.md" ]]; then INDEX="$PLAN_ARG/00-INDEX.md"
-elif [[ -f "$PLAN_ARG" ]]; then INDEX="$PLAN_ARG"; fi
-if [[ -n "$INDEX" ]]; then
+PLAN_ARG="$1"  # the single .md plan path resolved in Step 1
+if [[ -f "$PLAN_ARG" ]]; then
   # grep -c prints "0" AND exits 1 on zero matches, so `|| echo 0` would
   # append a second line ("0\n0") and break the numeric test. `|| true`
   # keeps grep's own single-line count; ${WAVES:-0} covers a grep error
   # (exit 2, no output).
-  WAVES=$(grep -cE '^[[:space:]]*-[[:space:]]*wave:' "$INDEX" 2>/dev/null || true)
+  WAVES=$(grep -cE '^[[:space:]]*-[[:space:]]*wave:' "$PLAN_ARG" 2>/dev/null || true)
   if [[ "${WAVES:-0}" -gt 0 ]]; then
     echo "notice: this plan declares $WAVES waves; run \`/do waves $PLAN_ARG\` to parallelize. Proceeding flat."
   fi
 fi
 ```
 
-Defensive: a malformed or absent `00-INDEX.md` yields zero waves and prints no notice - flat proceeds without crashing.
+Defensive: an absent plan file or one with no wave entries yields zero waves and prints no notice - flat proceeds without crashing.
 
 ### 2b. Run the flat executor
 
@@ -94,7 +91,7 @@ Load [flat.md](references/flat.md) and execute it in full, in this context. That
 
 ## Step 3: waves mode (wave orchestration)
 
-Load [waves.md](references/waves.md) and execute it in full, in this context. That body is the canonical wave-orchestration flow: validate the plan structure, load the execution strategy from `00-INDEX.md`, optimize parallelism from the file ownership map, run waves in sequential/parallel mode, dispatch per-task executors (archer / frontend-executor) via Task/Agent, verify from a fresh perspective, and report completion.
+Load [waves.md](references/waves.md) and execute it in full, in this context. That body is the canonical wave-orchestration flow: validate the plan structure, load the execution strategy from the plan's Execution Strategy section, optimize parallelism from the file ownership map, run waves in sequential/parallel mode, dispatch per-task executors (archer / frontend-executor) via Task/Agent, verify from a fresh perspective, and report completion.
 
 **Self-containment (no recursion).** The router loads the waves flow **inline via Read** and follows it here. It never re-invokes a skill to reach wave orchestration; per-task work is dispatched via the Task/Agent tool.
 

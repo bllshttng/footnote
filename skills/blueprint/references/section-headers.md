@@ -3,7 +3,7 @@
 `/blueprint`-generated plans use a fixed set of top-level `##` headers. Two things depend on this:
 
 1. **Humans** browsing a plan in Obsidian or GitHub can navigate by section.
-2. **Backlog wikilinks** (`plan_path: internal/.../00-INDEX.md#wave-3-component-2-profile-sweep-nh-first`) resolve to a specific shippable unit by hashing into the slug-form of the header. Without a stable header, the link silently breaks.
+2. **Backlog wikilinks** (`plan_path: internal/.../2026-04-29-feature-name.md#wave-3-component-2-profile-sweep-nh-first`) resolve to a specific shippable unit by hashing into the slug-form of the header. Without a stable header, the link silently breaks.
 
 `scripts/validate-plan.sh` enforces the wave-header subset via `validate_wave_section_headers()`. Other headers are convention, not validated, but emitted into the single plan doc by the mutation script ([`../scripts/mutate_doc.py`](../scripts/mutate_doc.py)) for consistency.
 
@@ -74,7 +74,7 @@ A backlog node can target a specific wave inside a multi-wave plan by appending 
 
 ```bash
 fno backlog intake \
-  --plan-path "internal/etl/plans/2026-04-29-florida-ahca-etl/00-INDEX.md#wave-1-schema-migrations" \
+  --plan-path "internal/etl/plans/2026-04-29-florida-ahca-etl.md#wave-1-schema-migrations" \
   --title "FL AHCA v1: Wave 1 schema migrations"
 ```
 
