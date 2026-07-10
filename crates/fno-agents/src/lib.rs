@@ -733,10 +733,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "screen_state_change",
 ];
 
-/// Build the Branch B (Rust/fno-agents) envelope JSON Schema and the
+/// Build the unified (x-2901) events.jsonl envelope JSON Schema and the
 /// `status-v1` AgentState schema as static JSON objects.
 ///
-/// This mirrors `schemas/events-v3.json` Branch B and
+/// This mirrors `schemas/events-v3.json` (single envelope) and
 /// `schemas/status-v1.json`. The hand-rolled approach is
 /// chosen to avoid pulling in `schemars`; it MUST be accompanied by the
 /// struct-drift unit test in `src/bin/client.rs` that asserts every
@@ -754,26 +754,31 @@ pub fn emit_schema_json() -> serde_json::Value {
     use serde_json::json;
     json!({
         "envelope": {
-            "$comment": "Branch B: Rust/fno-agents supervisor envelope. Emitted by crates/fno-agents/src/events.rs.",
+            "$comment": "Unified events.jsonl envelope (x-2901). Emitted by crates/fno-agents/src/events.rs; structurally equal to schemas/events-v3.json after doc-key stripping (the parity gate diffs them).",
             "type": "object",
-            "required": ["ts", "kind", "source"],
+            "required": ["ts", "type", "source", "data"],
             "properties": {
                 "ts": {
                     "type": "string",
                     "description": "UTC RFC3339 timestamp with millisecond precision and Z suffix"
                 },
-                "kind": {
+                "type": {
                     "type": "string",
-                    "enum": KNOWN_EVENT_KINDS,
-                    "description": "Event kind name from KNOWN_EVENT_KINDS"
+                    "description": "Event type name; the daemon kinds live in KNOWN_EVENT_KINDS (see event_kinds below)"
                 },
                 "source": {
                     "type": "string",
-                    "pattern": "^(daemon|worker:.+)$",
-                    "description": "Producer identity: 'daemon' or 'worker:<short_id>'"
+                    "anyOf": [
+                        { "enum": ["abi-loop", "active-backlog", "backlog", "daemon", "hook", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
+                        { "pattern": "^(worker|stream-worker):.+$" }
+                    ],
+                    "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"
+                },
+                "data": {
+                    "type": "object",
+                    "description": "Per-type payload object"
                 }
             },
-            "not": { "required": ["type"] },
             "additionalProperties": true
         },
         "status": {
