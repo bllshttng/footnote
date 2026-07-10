@@ -59,6 +59,8 @@ fno setup wizard --advanced # also surfaces the advanced settings
 
 Both walk the same schema-derived question plan and write through the validated config writer, so a typo or an out-of-range value is rejected, not silently stored.
 
+The terminal wizard also offers, defaulting to No, to wire footnote's SessionStart context into Codex and Gemini user config. You can do the same later with `fno setup cli-hooks`.
+
 ### Reading and editing config directly
 
 ```bash

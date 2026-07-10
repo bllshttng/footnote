@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import tomllib
+import typer
 from typer.testing import CliRunner
 
 from fno.config import schema_gen
-from fno.setup_cli import PROJECT_SCOPED_KEYS, run_wizard
+from fno.setup_cli import PROJECT_SCOPED_KEYS, offer_cli_hooks, run_wizard
 
 
 def _always_fields():
@@ -281,3 +283,49 @@ def test_cli_wizard_advanced_surfaces_more_fields(tmp_path, monkeypatch):
     stdin = "\n" * (len(advanced) * 2 + 4)
     res = CliRunner().invoke(app, ["wizard", "--advanced"], input=stdin)
     assert res.exit_code == 0, res.output
+
+
+def test_cli_hook_offer_decline_is_inert():
+    calls = []
+
+    result = offer_cli_hooks(
+        confirm_fn=lambda _message: False,
+        install_fn=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert result is False
+    assert calls == []
+
+
+def test_cli_hook_offer_accepts_combined_installer():
+    calls = []
+
+    result = offer_cli_hooks(
+        confirm_fn=lambda _message: True,
+        install_fn=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert result is True
+    assert calls == [
+        {
+            "codex": True,
+            "gemini": True,
+            "gemini_settings": None,
+            "codex_config": None,
+            "codex_hooks_json": None,
+            "migrate_legacy_hooks_json": False,
+        }
+    ]
+
+
+def test_cli_hook_offer_propagates_installer_failure():
+    def fail_install(**_kwargs):
+        raise typer.Exit(1)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        offer_cli_hooks(
+            confirm_fn=lambda _message: True,
+            install_fn=fail_install,
+        )
+
+    assert exc_info.value.exit_code == 1

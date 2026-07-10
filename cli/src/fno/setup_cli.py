@@ -98,6 +98,8 @@ def _install_cli_hooks(
 
     try:
         entry = _paths.resolve_plugin_script("hooks/session-start.sh")
+        if not entry.is_file():
+            raise FileNotFoundError(entry)
     except Exception as exc:  # noqa: BLE001 - surface a clear message, never trace
         typer.echo(
             f"error: could not locate the installed footnote hooks dir ({exc}). "
@@ -126,7 +128,8 @@ def _install_cli_hooks(
         res = install_gemini_hook(command, settings_path=gpath)
         any_change = any_change or res.changed
         if res.note:
-            typer.echo(f"gemini: {res.note} ({res.path})")
+            typer.echo(f"gemini: error: {res.note} ({res.path})", err=True)
+            failures.append(res.note)
         elif res.already_present:
             typer.echo(f"gemini: already wired ({res.path})")
         else:
@@ -167,17 +170,38 @@ def _install_cli_hooks(
                 bak = f"; backed up {res.backup.name}" if res.backup else ""
                 typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
 
-    if failures:
-        raise typer.Exit(1)
-
     if needs_trust:
         typer.echo(
             "\ncodex: the hook is UNTRUSTED until you approve it. Start Codex and "
             "approve the footnote SessionStart hook, then confirm it fires."
         )
+    if failures:
+        raise typer.Exit(1)
     if not any_change:
         typer.echo("\nNothing to do (hooks already wired).")
-    raise typer.Exit(0)
+    return None
+
+
+def offer_cli_hooks(
+    *,
+    confirm_fn: Callable[[str], bool],
+    install_fn: Callable[..., None] = _install_cli_hooks,
+) -> bool:
+    """Offer the existing combined Codex/Gemini SessionStart installer."""
+    if not confirm_fn(
+        "Wire footnote SessionStart context into Codex and Gemini user config?"
+    ):
+        return False
+
+    install_fn(
+        codex=True,
+        gemini=True,
+        gemini_settings=None,
+        codex_config=None,
+        codex_hooks_json=None,
+        migrate_legacy_hooks_json=False,
+    )
+    return True
 
 
 @app.command("plan")
@@ -519,6 +543,9 @@ def wizard_cmd(
     # a starship module and/or a portable bash/zsh segment. Opt-in, default No;
     # only appends on explicit yes. Engine-neutral - starship is not assumed.
     offer_prompt_provenance(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
+
+    typer.echo("\nCodex/Gemini SessionStart context hooks:")
+    offer_cli_hooks(confirm_fn=rules_confirm_fn)
 
     # Optional capstone: wire the /fno:* slash commands into the agent CLIs on
     # PATH. A CLI-only install has the binary but not the slash commands; this

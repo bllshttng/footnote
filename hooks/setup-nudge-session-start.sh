@@ -19,5 +19,5 @@ fi
 cat <<'EOF'
 ## First-run setup
 
-No fno config found yet. Run `fno setup wizard` (terminal) or `/fno:setup` (in a Claude Code session) to configure. Optional - defaults work, so `/fno:target "..."` runs without it.
+No fno config found yet. Run `fno setup wizard` (terminal) or `/fno:setup` (in a Claude Code session) to configure. For Codex/Gemini SessionStart context, the wizard offers hook wiring or you can run `fno setup cli-hooks` directly. Optional - defaults work, so `/fno:target "..."` runs without it.
 EOF

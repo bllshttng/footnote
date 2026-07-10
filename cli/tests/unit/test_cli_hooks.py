@@ -549,6 +549,82 @@ def test_cli_cli_hooks_writes_both(tmp_path, monkeypatch):
     assert str(fake_entry) in json.loads(gset.read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
 
 
+def test_install_cli_hooks_core_returns_after_success(tmp_path, monkeypatch):
+    import fno.paths as paths
+    from fno.setup_cli import _install_cli_hooks
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    result = _install_cli_hooks(
+        codex=True,
+        gemini=True,
+        gemini_settings=tmp_path / "gemini" / "settings.json",
+        codex_config=tmp_path / "codex" / "config.toml",
+        codex_hooks_json=None,
+        migrate_legacy_hooks_json=False,
+    )
+
+    assert result is None
+
+
+def test_cli_cli_hooks_refuses_missing_plugin_hook(tmp_path, monkeypatch):
+    import fno.paths as paths
+    from fno.setup_cli import app
+
+    missing_entry = tmp_path / "missing-plugin" / "hooks" / "session-start.sh"
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: missing_entry)
+    gemini_settings = tmp_path / "gemini" / "settings.json"
+    codex_config = tmp_path / "codex" / "config.toml"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "cli-hooks",
+            "--gemini-settings",
+            str(gemini_settings),
+            "--codex-config",
+            str(codex_config),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "could not locate the installed footnote hooks dir" in result.output
+    assert not gemini_settings.exists()
+    assert not codex_config.exists()
+
+
+def test_cli_cli_hooks_exits_nonzero_when_gemini_refuses(tmp_path, monkeypatch):
+    import fno.paths as paths
+    from fno.setup_cli import app
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    gemini_settings = tmp_path / "gemini" / "settings.json"
+    gemini_settings.parent.mkdir(parents=True)
+    gemini_settings.write_text("{malformed")
+    result = CliRunner().invoke(
+        app,
+        [
+            "cli-hooks",
+            "--gemini-settings",
+            str(gemini_settings),
+            "--codex-config",
+            str(tmp_path / "codex" / "config.toml"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "gemini: error:" in result.output
+    assert "left unchanged" in result.output
+    assert "UNTRUSTED" in result.output
+
+
 def test_cli_cli_hooks_no_gemini_writes_only_codex(tmp_path, monkeypatch):
     import fno.paths as paths
 
