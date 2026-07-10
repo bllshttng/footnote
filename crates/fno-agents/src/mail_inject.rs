@@ -208,7 +208,8 @@ fn confirm_with_cr_retry<T: crate::claude_attach::ControlTransport>(
 /// raw substring to search for.
 fn escaped_marker(marker: &str) -> String {
     let s = serde_json::to_string(marker).unwrap_or_default();
-    s.get(1..s.len().saturating_sub(1))
+    s.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
         .unwrap_or("")
         .to_string()
 }
