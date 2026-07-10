@@ -549,6 +549,27 @@ def test_cli_cli_hooks_writes_both(tmp_path, monkeypatch):
     assert str(fake_entry) in json.loads(gset.read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
 
 
+def test_install_cli_hooks_core_returns_after_success(tmp_path, monkeypatch):
+    import fno.paths as paths
+    from fno.setup_cli import _install_cli_hooks
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    result = _install_cli_hooks(
+        codex=True,
+        gemini=True,
+        gemini_settings=tmp_path / "gemini" / "settings.json",
+        codex_config=tmp_path / "codex" / "config.toml",
+        codex_hooks_json=None,
+        migrate_legacy_hooks_json=False,
+    )
+
+    assert result is None
+
+
 def test_cli_cli_hooks_no_gemini_writes_only_codex(tmp_path, monkeypatch):
     import fno.paths as paths
 
