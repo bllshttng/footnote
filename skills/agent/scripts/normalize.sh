@@ -559,18 +559,34 @@ except Exception:
     pass' "$1" 2>/dev/null || true
 }
 
-if [[ "$HANDOFF_MODE" -eq 1 || "$DISCUSS_MODE" -eq 1 ]]; then
-  # handoff/discuss are claude-only in v1 (codex/gemini interactive is `drive`/
-  # `host -i`; their handoff is a deferred prose-brief follow-up). An EXPLICIT
-  # non-claude --provider is a loud error; otherwise force claude WITHOUT
-  # consulting config routing - a derived <verb>-* name that config routes to
-  # codex/gemini must NOT break a claude-only verb the user never asked to route
-  # elsewhere (codex P2, PR #501).
+if [[ "$DISCUSS_MODE" -eq 1 ]]; then
+  # discuss remains claude-only: codex/gemini interactive sessions use `drive`/
+  # `host -i`. An explicit non-claude provider is a loud error; otherwise force
+  # claude without consulting config routing.
   if [[ -n "$PROVIDER" && "$PROVIDER" != "claude" ]]; then
-    vmode="handoff"; [[ "$DISCUSS_MODE" -eq 1 ]] && vmode="discuss"
-    emit_error "$vmode is claude-only in v1; you passed --provider $PROVIDER. Drop it (claude is implied) or use 'drive'/'host -i' for a codex/gemini interactive session"
+    emit_error "discuss is claude-only; you passed --provider $PROVIDER. Drop it (claude is implied) or use 'drive'/'host -i' for a codex/gemini interactive session"
   fi
   provider="claude"
+elif [[ "$HANDOFF_MODE" -eq 1 ]]; then
+  # Handoff is a provider-neutral prose continuation supported on the three
+  # verified first-class CLIs. Honor normal explicit -> config -> claude routing
+  # within that allowlist. A user's explicit unsupported choice is an error;
+  # an unrelated configured provider falls back to the safe legacy default.
+  if [[ -n "$PROVIDER" ]]; then
+    if ! is_valid_provider "$PROVIDER"; then
+      emit_error "invalid provider '$PROVIDER'; valid: ${VALID_PROVIDERS// /, }"
+    fi
+    case "$PROVIDER" in
+      claude|codex|gemini) provider="$PROVIDER" ;;
+      *) emit_error "handoff supports providers claude, codex, gemini; you passed --provider $PROVIDER" ;;
+    esac
+  else
+    provider="$(resolve_from_config "$agent_name" | head -1 | tr -d '[:space:]')"
+    case "$provider" in
+      claude|codex|gemini) : ;;
+      *) provider="claude" ;;
+    esac
+  fi
 elif [[ -n "$PROVIDER" ]]; then
   if ! is_valid_provider "$PROVIDER"; then
     emit_error "invalid provider '$PROVIDER'; valid: ${VALID_PROVIDERS// /, }"
@@ -629,7 +645,7 @@ case "$payload_mode" in
     message="$msg"
     ;;
   handoff)
-    # claude-only continuation seed: the doc IS the plan; do not re-derive it.
+    # Provider-neutral continuation seed: the doc IS the plan; do not re-derive it.
     # The standing GUARDRAIL keeps a fire-from-phone continuation from
     # autonomously taking outward/irreversible actions (prompt-level in v1; the
     # harness-level gate is a deferred follow-up). NO /target, NO no-merge token.

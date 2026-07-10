@@ -1,6 +1,6 @@
 ---
 name: agent
-description: "Dispatch and message background agent workers from a runner-less surface (phone / Happy app). One router over the shipped `fno agents` mesh: spawn (launch a build worker), handoff (continue a doc without re-deriving a plan), discuss (open a daemon-managed chat thread), send (message a peer over the bus), watch/list/logs (observe), stop (terminate). Normalizes messy input (smart quotes, name, provider, mode), confirms billed launches, and reports the real receipt - never a fabricated one. Works for claude, codex, and gemini (handoff/discuss are claude-only in v1). Use when: 'spawn a worker for ab-XXXX', 'hand off this doc to a worker', 'open a discussion thread', 'send a peer a message', 'run /target in the background', 'ask codex <question>', 'list/watch/stop my agents'."
+description: "Dispatch and message background agent workers from a runner-less surface (phone / Happy app). One router over the shipped `fno agents` mesh: spawn (launch a build worker), handoff (continue a doc without re-deriving a plan), discuss (open a daemon-managed chat thread), send (message a peer over the bus), watch/list/logs (observe), stop (terminate). Normalizes messy input (smart quotes, name, provider, mode), confirms billed launches, and reports the real receipt - never a fabricated one. Works for claude, codex, and gemini (discuss is claude-only). Use when: 'spawn a worker for ab-XXXX', 'hand off this doc to a worker', 'open a discussion thread', 'send a peer a message', 'run /target in the background', 'ask codex <question>', 'list/watch/stop my agents'."
 argument-hint: "<verb> [args]  |  [ask|handoff|discuss] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [as <name>] [merge]"
 metadata:
   internal: false
@@ -47,7 +47,7 @@ focused core:
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
 | `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-2c27): default `pane` (owned-PTY drivable); trailing `bg` -> detached `claude --bg` thread; trailing `headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
-| `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (claude `--bg`, continuation seed, NO `/target`) | free (claude subscription) |
+| `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
 | `discuss [seed]` | normalize `--discuss` + honest-receipt (free lane) | `fno agents spawn` (claude `--bg`, verbatim chat seed, NO `/target`) | free (claude subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno mail send` (the addressed jsonl bus, sender-excluded) | free |
 | `chat A B "..."` | normalize + **always-confirm** + honest-receipt | `fno agents chat` (stream-json adopt + switchboard relay) | **Agent SDK plan credit / turn** |
@@ -224,8 +224,8 @@ the real node.
 - **ask** (`ask`/`bare` verb): a one-shot question. The prompt is sent verbatim.
 - **handoff** (`--handoff`): a doc path becomes a continuation seed (read the doc,
   continue from where it left off, do NOT re-derive a plan) + a standing
-  guardrail against autonomous outward/irreversible actions. claude-only, NO
-  `/target`, NO `no-merge`. See the `handoff` section.
+  guardrail against autonomous outward/irreversible actions. Supports Claude,
+  Codex, and Gemini; NO `/target`, NO `no-merge`. See the `handoff` section.
 - **discuss** (`--discuss`): a verbatim conversational seed -> a daemon-managed
   interactive claude thread. claude-only, NO `/target`. See the `discuss` section.
 - **passthrough** (leading `/`): the explicit command, verbatim. claude-only;
@@ -480,15 +480,17 @@ safe (the registry same-name guard catches it).
 
 ---
 
-## `handoff <doc>` - continue a doc without re-deriving (claude-only)
+## `handoff <doc>` - continue a doc without re-deriving
 
 `handoff` exists because `build` (`/target`) is the wrong frame for a handoff. A
 `/target` worker re-derives think->plan->do and loops until a PR is green - but a
 handoff document already IS the plan, and a handoff is often multi-thread,
 mostly-non-code continuation work that never produces a single green PR. So
-`handoff` spawns a **plain claude `--bg` thread** (no `/target`, no loop-grade
-"refuse to stop" guarantee) seeded to read the doc and continue from where it
-left off. A handoff that is really a feature build still goes through `build`.
+`handoff` spawns a **plain autonomous worker** on Claude, Codex, or Gemini (no
+`/target`, no loop-grade "refuse to stop" guarantee) seeded to read the doc and
+continue from where it left off. The default substrate is the owned-PTY `pane`;
+an explicitly selected substrate keeps the normal spawn semantics. A handoff
+that is really a feature build still goes through `build`.
 
 It also injects a **standing guardrail**: the seed bars the worker from
 autonomously taking outward-facing or irreversible actions (emails, deploys,
@@ -502,28 +504,31 @@ do not imply the worker is sandboxed from outward actions.
 
 1. **NORMALIZE.** Strip the leading `handoff` verb; pass the rest as the doc path.
    Run `normalize.sh --input "<doc-path>" --handoff` (carry `--provider`/`as
-   <name>` only if given; handoff is claude-only, so a non-claude provider is a
-   loud error from normalize). It emits `payload_mode=handoff` and a `message`
+   <name>`/`model <name>`/`yolo`/substrate only if given). Provider resolution is
+   explicit -> configured -> Claude, constrained to Claude/Codex/Gemini. It emits
+   `payload_mode=handoff` and a `message`
    that is the continuation seed (path + "do not re-derive" + GUARDRAIL +
-   PR-for-review). On `status=error` (empty path, non-claude provider), STOP and
-   report the `error=` line.
+   PR-for-review). On `status=error` (empty path or explicit unsupported
+   provider), STOP and report the `error=` line.
 2. **VALIDATE the doc path (best-effort).** If the path is **absolute** and does
    not exist, STOP and report the real missing path - never boot a worker pointed
    at nothing (AC5-ERR). If it is **relative**, you cannot reliably check it here
    (the worker's cwd may differ); proceed but note in REPORT that it must resolve
    at the worker's cwd, and prefer an absolute path.
-3. **SPAWN.** Run the genuine wire (claude `--bg`, the seed verbatim):
+3. **SPAWN.** Run the genuine autonomous wire with the seed verbatim:
 
    ```bash
-   bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider claude \
-     --message "$message" --mode exec --payload-mode handoff [--cwd "<cwd>"]
+   bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
+     --message "$message" --mode exec --payload-mode handoff [--cwd "<cwd>"] \
+     [--model "$model"] [--yolo] [--substrate "$substrate"]
    ```
 
 4. **REPORT** the real receipt exactly as the `spawn` section's REPORT does
    (`result=launched ... mode=exec` -> quote the real `short_id`, give `fno agents
    logs <name>` / `fno agents watch <name>`; `result=failed` -> FAILED with the
-   real reason, no fabricated short-id). Note it is a continuation thread, not a
-   refuse-to-stop loop, and that the outward-action guardrail is prompt-level.
+   real reason, no fabricated short-id). Note it is a single autonomous
+   continuation worker, not an interactive thread or refuse-to-stop loop, and
+   that the outward-action guardrail is prompt-level.
 
 ---
 

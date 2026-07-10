@@ -40,7 +40,7 @@ SELF=""                # caller's own claim holder (target_claim_holder). Lets
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
 MODEL=""               # exact model name, forwarded as `spawn --model` (each
                        # provider's own --model). Empty = provider default.
-PAYLOAD_MODE="build"   # build | ask | passthrough (ask -> spawn --once)
+PAYLOAD_MODE="build"   # build | ask | handoff | discuss | passthrough
 SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
                        # (JSON receipt); headless -> one-shot (reply receipt).
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
