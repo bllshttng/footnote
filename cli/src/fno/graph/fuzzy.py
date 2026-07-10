@@ -1,8 +1,10 @@
 """Fuzzy id and domain matching for graph entries.
 
-Pure functions: no file I/O, no side effects. Callers pass already-loaded
-entries (from `read_graph()`) and get back a discriminated result dataclass
-the CLI can format into a user-facing message.
+Near-pure: callers pass already-loaded entries (from `read_graph()`) and get
+back a discriminated result dataclass the CLI can format into a user-facing
+message. The one exception is `resolve_node`'s bare-hex tier, which consults
+the fail-open, lru-cached `node_id_prefix()` (file I/O) to re-prefix; the import
+is call-time so the module stays import-pure.
 
 Two public functions:
     resolve_id(query, entries, *, git_branch) -> IdMatch
