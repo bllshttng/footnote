@@ -46,9 +46,12 @@ case "$1 $2" in
     shift 2  # drop "worktree ensure"; parse "--repo R --name N"
     repo=""; wtname=""
     while [[ $# -gt 0 ]]; do
+      # `shift; shift` (not `shift 2`) so a value-less trailing flag can't
+      # wedge the loop re-seeing the same flag -- malformed input falls through
+      # to the git-C check below and fail-safes empty, like the real verb.
       case "$1" in
-        --repo) repo="$2"; shift 2 ;;
-        --name) wtname="$2"; shift 2 ;;
+        --repo) repo="${2:-}"; shift; shift ;;
+        --name) wtname="${2:-}"; shift; shift ;;
         *) shift ;;
       esac
     done
