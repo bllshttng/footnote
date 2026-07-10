@@ -30,11 +30,18 @@ PROVIDER=""
 MESSAGE=""
 NODE=""
 CWD=""
+SELF_HANDOFF=0         # set to 1 when a live node claim is the caller's own
+SELF=""                # caller's own claim holder (target_claim_holder). When a
+                       # node's live claim is held by SELF, a spawn is the caller
+                       # handing off its OWN node (proceed) - not a foreign
+                       # collision (refuse). Mirrors /target self-handoff.
 # Routing inputs (codex/gemini first-class dispatch, ab-417ab20f). Defaults keep
 # the legacy claude path equivalent: exec + build -> claude resolves to `spawn`
 # (Group 1 ab-8b3e4fe0: ask never creates), so an old caller that passes none
 # of these still launches a persistent claude bg peer.
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
+MODEL=""               # exact model name, forwarded as `spawn --model` (each
+                       # provider's own --model). Empty = provider default.
 PAYLOAD_MODE="build"   # build | ask | passthrough (ask -> spawn --once)
 SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
                        # (JSON receipt); headless -> one-shot (reply receipt).
@@ -65,8 +72,10 @@ while [[ $# -gt 0 ]]; do
     --provider)     PROVIDER="${2:-}"; shift 2 ;;
     --message)      MESSAGE="${2:-}"; shift 2 ;;
     --node)         NODE="${2:-}"; shift 2 ;;
+    --self)         SELF="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --cwd)          CWD="${2:-}"; shift 2 ;;
     --mode)         MODE="${2:-}"; shift 2 ;;
+    --model)        MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
     --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO=1; shift ;;
@@ -148,11 +157,25 @@ if [[ -n "$NODE" ]]; then
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
       if [[ "$reason" == "live-claim" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
+        # Self-handoff: the live claim is the CALLER's own (holder == --self), so
+        # this spawn is a deliberate reassignment of the caller's own node, not a
+        # foreign double-launch. Proceed (mirrors /target self-handoff); the
+        # caller's stale claim TTL-expires as it idles. Guard 2's dispatch
+        # reservation is intentionally not held here.
+        if [[ -n "$SELF" && "$holder" == "$SELF" ]]; then
+          printf 'note=self-handoff reason="caller holds node:%s (%s); reassigning to %s"\n' "$NODE" "$holder" "$NAME" >&2
+          SELF_HANDOFF=1
+        else
+          printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
+          exit 0
+        fi
       else
         printf 'result=already-running name=%s reason="a peer dispatcher holds %s (racing launch)"\n' "$NAME" "$RES_KEY"
+        exit 0
       fi
-      exit 0 ;;
+      # A self-handoff falls through to the spawn (the caller reassigns its own
+      # node); every other already-running path has exited above.
+      [[ "$SELF_HANDOFF" == 1 ]] || exit 0 ;;
     corrupted)
       fail "node:$NODE claim is corrupted; force-release or repair before dispatching" ;;
     dispatchable)
@@ -285,6 +308,7 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 [[ "$FRESH" -eq 1 ]] && cmd+=(--fresh)
 [[ "$HERE" -eq 1 ]] && cmd+=(--here)
 [[ "$YOLO" -eq 1 ]] && cmd+=(--yolo)
+[[ -n "$MODEL" ]] && cmd+=(--model "$MODEL")
 [[ -n "$PERMISSION_MODE" ]] && cmd+=(--permission-mode "$PERMISSION_MODE")
 # x-2c27: an explicit substrate emits --substrate (the canonical selector) and
 # supersedes the --once alias; otherwise the ask lane keeps --once.

@@ -71,6 +71,20 @@ ok 'live-claim -> already-running' "$(field "$out")" 'already-running'
 has 'live-claim holder text' "$out" 'live worker holds node:x-7777 (target-session:owner)'
 no  'live-claim did NOT spawn' "$(calllog)" 'agents spawn --provider'
 
+# --- self-handoff: live claim is the CALLER's own -> PROCEED to spawn ---------
+# --self matches .holder, so it is a deliberate reassignment, not a collision.
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder":"target-session:owner"}' \
+  run --name w2h --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
+ok  'self-handoff -> launched not refused' "$(field "$out")" 'launched'
+has 'self-handoff spawned' "$(calllog)" 'agents spawn --provider'
+no  'self-handoff not already-running' "$out" 'already-running'
+
+# --- self-handoff with a DIFFERENT holder -> still refuse (foreign) -----------
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder":"target-session:someone-else"}' \
+  run --name w2f --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
+ok  'foreign holder + --self -> still already-running' "$(field "$out")" 'already-running'
+no  'foreign holder did NOT spawn' "$(calllog)" 'agents spawn --provider'
+
 # --- reservation-held already-running -> NO spawn ----------------------------
 out="$(STUB_VERDICT='{"verdict":"already-running","reason":"reservation-held"}' \
   run --name w3 --provider claude --message '/target x' --node "$NODE")"

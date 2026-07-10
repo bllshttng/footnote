@@ -155,6 +155,42 @@ out="$(run 'ab-99999999 codex as worker')"
 check_eq   'codex as worker -> provider codex' "$(field "$out" provider)" 'codex'
 check_eq   'codex as worker -> name worker'    "$(field "$out" name)" 'worker'
 
+# --- provider barewords beyond codex|gemini (data-driven from VALID_PROVIDERS) -
+out="$(run 'ab-99999999 opencode')"
+check_eq   'opencode -> provider=opencode'     "$(field "$out" provider)" 'opencode'
+out="$(run 'ab-99999999 agy')"
+check_eq   'agy -> provider=agy'               "$(field "$out" provider)" 'agy'
+# an unsupported harness bareword stays task text (not a provider)
+out="$(run 'ab-99999999 hermes')"
+check_eq   'hermes not a spawn provider'       "$(field "$out" provider)" 'claude'
+check_contains 'hermes stays in message'       "$(field "$out" message)" 'hermes'
+
+# --- model <name> two-word posture -------------------------------------------
+out="$(run 'ab-99999999 model opus')"
+check_eq   'model opus -> model=opus'          "$(field "$out" model)" 'opus'
+check_contains     'model opus keeps node in message' "$(field "$out" message)" 'ab-99999999'
+check_not_contains 'model opus stripped from message' "$(field "$out" message)" 'opus'
+out="$(run 'ab-99999999 codex model gpt-5')"
+check_eq   'codex model gpt-5 -> model=gpt-5'   "$(field "$out" model)" 'gpt-5'
+check_eq   'codex model gpt-5 -> provider codex' "$(field "$out" provider)" 'codex'
+# a model name that is a bareword after the model keyword is the value, not task text
+out="$(run 'ab-99999999 model sonnet as worker')"
+check_eq   'model sonnet as worker -> model'    "$(field "$out" model)" 'sonnet'
+check_eq   'model sonnet as worker -> name'     "$(field "$out" name)" 'worker'
+# dash-flag --model wins (idempotent fill), no short -m overload
+out="$(run 'ab-99999999' --model haiku)"
+check_eq   '--model haiku -> model=haiku'       "$(field "$out" model)" 'haiku'
+out="$(run 'ab-99999999' -m)"
+check_eq   '-m is allow-merge not model'        "$(field "$out" allow_merge)" '1'
+check_eq   '-m leaves model empty'              "$(field "$out" model)" ''
+# dangling `model` with nothing after = error
+out="$(run 'ab-44444444 model')"
+check_eq   'dangling model is error'            "$(field "$out" status)" 'error'
+# mid-task `model` stays task text (right-anchored run)
+out="$(run 'model the user data carefully')"
+check_contains 'mid-task model stays in message' "$(field "$out" message)" 'model the user data carefully'
+check_eq   'mid-task model leaves model empty'  "$(field "$out" model)" ''
+
 # --- mid-task `as` stays task text -------------------------------------------
 out="$(run 'refactor the module as a plugin')"
 check_eq   'mid-task as keeps default name' "$(field "$out" name)" "$(field "$(run 'refactor the module as a plugin')" name)"

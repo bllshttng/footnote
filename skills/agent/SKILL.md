@@ -1,7 +1,7 @@
 ---
 name: agent
 description: "Dispatch and message background agent workers from a runner-less surface (phone / Happy app). One router over the shipped `fno agents` mesh: spawn (launch a build worker), handoff (continue a doc without re-deriving a plan), discuss (open a daemon-managed chat thread), send (message a peer over the bus), watch/list/logs (observe), stop (terminate). Normalizes messy input (smart quotes, name, provider, mode), confirms billed launches, and reports the real receipt - never a fabricated one. Works for claude, codex, and gemini (handoff/discuss are claude-only in v1). Use when: 'spawn a worker for ab-XXXX', 'hand off this doc to a worker', 'open a discussion thread', 'send a peer a message', 'run /target in the background', 'ask codex <question>', 'list/watch/stop my agents'."
-argument-hint: "<verb> [args]  |  [ask|handoff|discuss] <ab-xxxxxxxx | feature | doc-path | /command> [codex|gemini] [drive] [yolo] [as <name>] [merge]"
+argument-hint: "<verb> [args]  |  [ask|handoff|discuss] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [as <name>] [merge]"
 metadata:
   internal: false
 requires:
@@ -60,7 +60,10 @@ focused core:
 Everything outside this set (`drive`/`grid`/`attach`/`resume`/`reconcile`/`rm`/
 `ack`/`promote`/`host` bare) stays raw `fno agents X`. The capability matrix at
 `docs/provider-command-matrix.md` remains the per-verb provider-support truth;
-this skill reflects it, never duplicates it.
+this skill reflects it, never duplicates it. For the full surface map - which
+verbs are human-facing vs machine-internal (out of scope for this router by
+design) vs exploratory channel infra - see
+[references/fno-agents-surface.md](references/fno-agents-surface.md).
 
 > `chat` is the only costed verb: it opens a live real-time channel and every
 > hop spends Agent SDK plan credit (isolated from your interactive subscription),
@@ -106,7 +109,7 @@ never corrupt it. The user types barewords or natural language; you map them to
 the structured fields. The canonical form:
 
 ```
-[ask] <task> [codex|gemini] [drive] [yolo] [as <name>] [merge]
+[ask] <task> [provider] [drive] [yolo] [model <name>] [as <name>] [merge]
 ```
 
 The angle brackets are placeholder notation, not literal syntax. Infer the
@@ -118,10 +121,16 @@ see below):
 - **`ask`** (alias `bare`, optional, LEADING verb after `spawn`): ask-mode -
   send the prompt verbatim, no `/target` wrap. Strip it before normalizing
   (pass `--ask`). "just ask" / "one-shot" / "quick question" map here.
-- **provider** (optional, trailing bareword): `codex` | `gemini`. `spawn ab-X
-  codex` -> provider `codex`. Default resolves from config -> `claude`. "on
-  codex" / "with gemini" map here. Quotes protect a trailing word that is
-  ambiguously a provider.
+- **provider** (optional, trailing bareword): any non-claude harness in the
+  supported set - today `codex`, `gemini`, `agy`, `opencode`, with more coming.
+  `spawn ab-X codex` -> provider `codex`; `spawn ab-X opencode` -> `opencode`.
+  Default resolves from config -> `claude`. "on codex" / "with gemini" map here.
+  The set is not hardcoded here: normalize matches any bareword in its
+  `VALID_PROVIDERS` (which mirrors the Rust `KNOWN_PROVIDERS` source of truth),
+  so a new harness needs no grammar edit. `docs/provider-command-matrix.md` is
+  the per-provider capability truth. Quotes protect a trailing word that is
+  ambiguously a provider. (megawalk drivers like `hermes`/`openclaw` are a
+  different axis, not `spawn` providers.)
 - **`drive`** (alias `interactive`, optional): route codex/gemini to a drivable
   `host` session instead of an autonomous `spawn`. No-op for claude. "drive it"
   / "interactive" map here.
@@ -135,6 +144,13 @@ see below):
   for claude. "full auto" / "no sandbox" / "unsandboxed" map here. (To make full
   yolo the standing default for a provider instead of per-launch, set
   `config.agents.<provider>.headless_yolo: true`.)
+- **`model <name>`** (optional): exact model for the worker, plumbed to `fno
+  agents spawn --model` (each provider's own `--model`). Two-word posture so a
+  model name that is not a posture word is read as the value: `spawn ab-X model
+  opus`, `spawn ab-X codex model gpt-5`. "on opus" / "use sonnet" map here (name
+  the model after `model`). Default = the provider's default. There is NO short
+  flag: `-m` is `--allow-merge`, so a bare `-m opus` would set merge, not the
+  model - always write `model <name>`.
 - **`as <name>`** (optional): explicit agent name. Default is derived
   (`<verb>-<node-id>-<slug>` / `<verb>-<slug>`). "call it X" / "name it X" map here.
 - **`merge`** (optional): do NOT inject the no-merge intent. Default injects it
@@ -148,10 +164,11 @@ sits mid-task ("spawn the node that will merge two branches") stays task text an
 does NOT silently set the posture. A bare `as` with no name after it is an error.
 
 **Dash-flags still work (undocumented back-compat).** A desktop scripter's
-existing `--yolo` / `-n <name>` / `-m` / `-i` / `-y` invocations are canonicalized
-to the same fields (`-y`/`--yes` is accepted and ignored - the free lanes no
-longer confirm, see CONFIRM). A genuinely unknown dash-flag fails loud. Dashless
-is the only form you advertise; never instruct a user to type a dash.
+existing `--yolo` / `-n <name>` / `-m` / `--model <name>` / `-i` / `-y`
+invocations are canonicalized to the same fields (`-y`/`--yes` is accepted and
+ignored - the free lanes no longer confirm, see CONFIRM). `--model` has no short
+form (`-m` is `--allow-merge`). A genuinely unknown dash-flag fails loud.
+Dashless is the only form you advertise; never instruct a user to type a dash.
 
 ### Flow: NORMALIZE -> RESOLVE -> VALIDATE -> CONFIRM -> SPAWN -> REPORT
 
@@ -283,10 +300,23 @@ so even a delegated `next`/`all` is never a silent surprise.
 
 - **Node must resolve.** If `node` is non-empty, run `fno backlog get "$node"`.
   If it exits non-zero or returns no `.id`, STOP and tell the user. Do NOT spawn.
-- **Collision pre-check (read-only).** If `node` is non-empty, run
-  `fno claim status "node:$node" --json` and inspect `.state`. If `live`, a
-  worker already holds this node - tell the user (point at `fno agents logs
-  $name`) and do NOT spawn a second loop. (`spawn.sh` re-checks atomically too.)
+- **Collision pre-check (read-only), with a self-handoff exception.** If `node`
+  is non-empty, run `fno claim status "node:$node" --json` and inspect `.state`
+  and `.holder`. If `live`, decide whether the holder is a FOREIGN worker or
+  YOURSELF handing off your own node:
+  - **Self-handoff** (holder == your own claim): read your own holder from the
+    session manifest - `sed -n 's/^target_claim_holder: *"\?\([^"]*\)"\?/\1/p'
+    .fno/target-state.md` (empty if you hold no target claim). If it equals
+    `.holder`, this is a deliberate reassignment of YOUR node, not a collision -
+    mirror `/target` self-handoff: PROCEED with the spawn and pass `--self
+    "<holder>"` to `spawn.sh` (below) so its atomic re-check does not refuse.
+    Your stale claim TTL-expires as you idle.
+  - **Foreign collision** (holder is someone else, or you hold no claim): a
+    worker already holds this node - tell the user (point at `fno agents logs
+    $name`) and do NOT spawn a second loop.
+
+  (`spawn.sh` re-checks atomically too: it treats a `live-claim` whose holder
+  matches `--self` as a self-handoff and refuses any other.)
 
 A free-form / ask payload (`node` empty) skips the node checks.
 
@@ -340,10 +370,15 @@ and parses the receipt deterministically:
 ```bash
 bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
   --message "$message" --mode "$mode" --payload-mode "$payload_mode" \
-  [--substrate "$substrate"] [--yolo] [--node "$node"] [--cwd "<cwd source, see below>"]
+  [--model "$model"] [--substrate "$substrate"] [--yolo] [--node "$node"] [--self "$self_holder"] [--cwd "<cwd source, see below>"]
 ```
 
-Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
+Pass `--self "$self_holder"` only for a confirmed self-handoff (your
+`target_claim_holder` matched the live `.holder` in the collision pre-check); it
+lets the atomic re-check proceed instead of refusing your own node. Pass
+`--model "$model"` only when normalize emitted a non-empty `model`
+(spawn.sh forwards it to `fno agents spawn --model`; omit it for the provider
+default). Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
 only when normalize emitted a non-empty `substrate` (`bg` -> a detached `claude
 --bg` thread; `headless` -> a one-shot `claude -p` / `codex --exec` / `agy -p`);
 an empty `substrate` is the default `pane` (owned-PTY) and the flag is omitted.
