@@ -237,10 +237,15 @@ CLAIM_TTL="${_CLAIM_TTL_RAW:-2h}"
 # a claude worker of the same name). Unknown/no-marker defaults to `claude`,
 # which both preserves the legacy claude lineage and stays distinct from a codex
 # lineage's name.
-if [ -n "${CODEX_THREAD_ID:-}" ]; then _HARNESS="codex"
-elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then _HARNESS="claude"
-elif [ -n "${CODEX_SESSION_ID:-}" ]; then _HARNESS="codex"
-elif [ -n "${GEMINI_SESSION_ID:-}" ]; then _HARNESS="gemini"
+# Default-then-strip (whitespace-only markers count as unset, matching the
+# Rust/Python resolvers' .trim()/.strip()); the `:-` default keeps the `//`
+# expansion safe under `set -u` on an unset marker.
+_cx_m="${CODEX_THREAD_ID:-}"; _cl_m="${CLAUDE_CODE_SESSION_ID:-}"
+_cs_m="${CODEX_SESSION_ID:-}"; _gm_m="${GEMINI_SESSION_ID:-}"
+if [ -n "${_cx_m//[[:space:]]/}" ]; then _HARNESS="codex"
+elif [ -n "${_cl_m//[[:space:]]/}" ]; then _HARNESS="claude"
+elif [ -n "${_cs_m//[[:space:]]/}" ]; then _HARNESS="codex"
+elif [ -n "${_gm_m//[[:space:]]/}" ]; then _HARNESS="gemini"
 else _HARNESS="claude"
 fi
 

@@ -47,9 +47,12 @@ fn branch_harness(branch: &str) -> Option<&'static str> {
 /// The foreign-harness owner of a worktree path, e.g. a cwd under
 /// `~/.codex/worktrees` -> `codex`.
 fn cwd_harness(cwd: &str) -> Option<&'static str> {
-    if cwd.contains("/.codex/") {
+    // Component match (not a substring) so `~/.codex` with no trailing slash
+    // still hits and an unrelated `.codexbar` dir never does.
+    let path = Path::new(cwd);
+    if path.components().any(|c| c.as_os_str() == ".codex") {
         Some("codex")
-    } else if cwd.contains("/.gemini/") {
+    } else if path.components().any(|c| c.as_os_str() == ".gemini") {
         Some("gemini")
     } else {
         None

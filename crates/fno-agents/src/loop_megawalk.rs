@@ -759,7 +759,7 @@ impl Queue for MegawalkQueue {
             // resumes. Best-effort probe; degrades to native dispatch on error.
             let own_h = crate::claims::resolve_harness();
             let own = own_h.as_deref().unwrap_or("claude");
-            let probe_cwd = std::env::current_dir().unwrap_or_default();
+            let probe_cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
             if let Some(foreign) = crate::dispatch_posture::foreign_owner_of(&id, own, &probe_cwd) {
                 crate::dispatch_posture::emit_dispatch_deferred(&id, &foreign, own, &probe_cwd);
                 return Ok(None);
