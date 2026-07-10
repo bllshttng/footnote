@@ -30,11 +30,9 @@ PROVIDER=""
 MESSAGE=""
 NODE=""
 CWD=""
-SELF_HANDOFF=0         # set to 1 when a live node claim is the caller's own
-SELF=""                # caller's own claim holder (target_claim_holder). When a
-                       # node's live claim is held by SELF, a spawn is the caller
-                       # handing off its OWN node (proceed) - not a foreign
-                       # collision (refuse). Mirrors /target self-handoff.
+SELF=""                # caller's own claim holder (target_claim_holder). Lets
+                       # the collision pre-check tell a self-held claim (route to
+                       # the sanctioned handoff) from a foreign one (refuse).
 # Routing inputs (codex/gemini first-class dispatch, ab-417ab20f). Defaults keep
 # the legacy claude path equivalent: exec + build -> claude resolves to `spawn`
 # (Group 1 ab-8b3e4fe0: ask never creates), so an old caller that passes none
@@ -157,31 +155,25 @@ if [[ -n "$NODE" ]]; then
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
       if [[ "$reason" == "live-claim" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        # Self-handoff: the live claim is the CALLER's own (holder == --self), so
-        # this spawn is a deliberate reassignment of the caller's own node, not a
-        # foreign double-launch. RELEASE the caller's claim so the successor's
-        # `fno target init` acquires a FREE claim cleanly - otherwise it is born
-        # blocked and only recovers once the claim TTL-expires (codex P1). Unlike
-        # /target self-handoff we cannot emit a `delegated` event (that names the
-        # child session, which a bg spawn mints itself), so the clean release IS
-        # the handoff signal. Release is by holder-string match, not PID, so this
-        # subprocess can do it; best-effort (a refused release falls back to the
-        # stale-claim recovery the successor's init already performs).
+        # Self-handoff: the live claim is the CALLER's own (holder == --self).
+        # Distinguish it from a foreign collision, but do NOT spawn and do NOT
+        # release the claim here. A node claim can be released ONLY by the two
+        # sanctioned sites (handoff.sh / `fno backlog unclaim`, holder-verified);
+        # a helper subprocess release is a locked-down authority violation
+        # (ab-588326a7). And a bg spawn cannot emit the `delegated` event a clean
+        # takeover needs (it does not control the successor's session id), so
+        # merely proceeding would spawn a worker that is born contested while the
+        # caller still holds a live claim. The honest move is to route the caller
+        # to the sanctioned handoff rather than reassign from the wrong layer.
         if [[ -n "$SELF" && "$holder" == "$SELF" ]]; then
-          fno claim release "node:$NODE" --holder "$SELF" >/dev/null 2>&1 || true
-          printf 'note=self-handoff reason="released caller claim on node:%s (%s); reassigning to %s"\n' "$NODE" "$holder" "$NAME" >&2
-          SELF_HANDOFF=1
+          printf 'result=self-handoff name=%s reason="you already hold node:%s (%s); /agent cannot reassign it from here. Hand off via /target self-handoff (archives state, emits the delegated event, releases the claim atomically), or run '"'"'fno backlog unclaim %s'"'"' then re-dispatch."\n' "$NAME" "$NODE" "$holder" "$NODE"
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
-          exit 0
         fi
       else
         printf 'result=already-running name=%s reason="a peer dispatcher holds %s (racing launch)"\n' "$NAME" "$RES_KEY"
-        exit 0
       fi
-      # A self-handoff falls through to the spawn (the caller reassigns its own
-      # node); every other already-running path has exited above.
-      [[ "$SELF_HANDOFF" == 1 ]] || exit 0 ;;
+      exit 0 ;;
     corrupted)
       fail "node:$NODE claim is corrupted; force-release or repair before dispatching" ;;
     dispatchable)

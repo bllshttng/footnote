@@ -71,14 +71,16 @@ ok 'live-claim -> already-running' "$(field "$out")" 'already-running'
 has 'live-claim holder text' "$out" 'live worker holds node:x-7777 (target-session:owner)'
 no  'live-claim did NOT spawn' "$(calllog)" 'agents spawn --provider'
 
-# --- self-handoff: live claim is the CALLER's own -> PROCEED to spawn ---------
-# --self matches .holder, so it is a deliberate reassignment, not a collision.
+# --- self-handoff: live claim is the CALLER's own -> guide, do NOT spawn ------
+# --self matches .holder: distinct receipt routing to the sanctioned handoff.
+# spawn.sh must NOT spawn and must NOT release the claim (authority is locked to
+# handoff.sh / `fno backlog unclaim`, ab-588326a7).
 out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder":"target-session:owner"}' \
   run --name w2h --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
-ok  'self-handoff -> launched not refused' "$(field "$out")" 'launched'
-has 'self-handoff spawned' "$(calllog)" 'agents spawn --provider'
-has 'self-handoff released caller claim' "$(calllog)" 'claim release node:x-7777 --holder target-session:owner'
-no  'self-handoff not already-running' "$out" 'already-running'
+ok  'self-handoff -> self-handoff receipt' "$(field "$out")" 'self-handoff'
+has 'self-handoff routes to sanctioned path' "$out" 'fno backlog unclaim'
+no  'self-handoff did NOT spawn' "$(calllog)" 'agents spawn --provider'
+no  'self-handoff did NOT release the node claim' "$(calllog)" 'claim release'
 
 # --- self-handoff with a DIFFERENT holder -> still refuse (foreign) -----------
 out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder":"target-session:someone-else"}' \
