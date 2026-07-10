@@ -1485,7 +1485,10 @@ mod tests {
         let rec = parse_claim_str(yaml).expect("record must parse");
         assert_eq!(rec.harness.as_deref(), Some("codex"));
         // None is omitted from output entirely (not serialized as null).
-        let none = ClaimRecord { harness: None, ..rec.clone() };
+        let none = ClaimRecord {
+            harness: None,
+            ..rec.clone()
+        };
         assert!(!serialize_claim(&none).unwrap().contains("harness"));
     }
 
