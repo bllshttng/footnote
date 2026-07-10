@@ -65,7 +65,7 @@ gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
 id = "approval_prompt"
 state = "blocked"
 priority = 986
-region = "bottom_non_empty_lines(14)"
+region = "bottom_non_empty_lines(20)"
 gate = { all = [
   { any = [
     { contains = "Would you like to run the following command?" },

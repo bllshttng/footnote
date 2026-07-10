@@ -1894,7 +1894,11 @@ mod tests {
             Environment: local\n\
             $ touch /tmp/a/very/long/path/that\n\
               /wraps/across/multiple/terminal\n\
-              /rows\n\
+              /rows/with/additional/arguments\n\
+              /that/keep/wrapping/on/a\n\
+              /very/narrow/terminal/and\n\
+              /push/the/question/farther\n\
+              /from/the/confirmation/footer\n\
             \u{203a} 1. Yes, proceed (y)\n\
               2. Yes, and don't ask again for commands\n\
                  that start with the captured command\n\
