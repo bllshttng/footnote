@@ -17,6 +17,19 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
+# The addressable cross-harness handle is ``<harness>-<first8>``. This ONE
+# function is the single source of truth for that string: the send-resolve path
+# (discover), the registry row name (register_existing_session), and the
+# receive-side drain (mail drain-self) all call it. If any two computed it
+# differently, a durably-queued message would address one handle while its
+# recipient drained another and silently strand on the bus (the plan's one true
+# silent failure). ``session_id[:8]`` matches the registry's historical slice so
+# already-registered rows keep the same name.
+def canonical_handle(harness: str, session_id: str) -> str:
+    """The cross-harness address ``<harness>-<first8-of-session-id>``."""
+    return f"{harness}-{session_id[:8]}"
+
+
 @dataclass(frozen=True)
 class HarnessIdentity:
     """The resolved session id and its harness, or two ``None`` values."""
