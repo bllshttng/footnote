@@ -35,6 +35,19 @@ from typing import Any
 
 import yaml
 
+
+class _IndentDumper(yaml.Dumper):
+    """Emit indented block-lists (`  - item`), not PyYAML's default indentless
+    ones (`- item` flush-left). The plan-frontmatter reader `_stamp.parse_frontmatter`
+    only consumes block-list children that lead with whitespace, so flush-left
+    lists (kill_criteria/waves) read as malformed and skip the graph->doc
+    projection. Indenting converges output on the single on-disk shape the
+    reader already round-trips."""
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, False)
+
+
 # ---------------------------------------------------------------------------
 # Add cli/src to sys.path so we can import fno.plan.*
 # ---------------------------------------------------------------------------
@@ -385,7 +398,7 @@ def _build_execution_strategy(sections: OrderedDict[str, str]) -> str:
         "tasks": tasks,
     }
 
-    yaml_block = yaml.dump(waves_yaml, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    yaml_block = yaml.dump(waves_yaml, Dumper=_IndentDumper, default_flow_style=False, sort_keys=False, allow_unicode=True)
     return f"```yaml\n{yaml_block}```"
 
 
@@ -420,7 +433,7 @@ def _build_patterns_to_reuse() -> str:
 
 def _serialize_frontmatter(fm: dict[str, Any]) -> str:
     """Serialize frontmatter dict back to YAML string (without delimiters)."""
-    return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True).rstrip("\n")
+    return yaml.dump(fm, Dumper=_IndentDumper, default_flow_style=False, sort_keys=False, allow_unicode=True).rstrip("\n")
 
 
 def _reconstruct_doc(

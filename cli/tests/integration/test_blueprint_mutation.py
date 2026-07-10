@@ -178,6 +178,51 @@ class TestAC1HPGreenfield:
 
 
 # ---------------------------------------------------------------------------
+# W2 (x-408f / ab-638f9066): projectable frontmatter block-lists
+# The reader _stamp.parse_frontmatter only consumes INDENTED block-list
+# children; mutate_doc must emit indented lists so blueprint-mutated plans stay
+# parseable and projectable.
+# ---------------------------------------------------------------------------
+
+
+class TestProjectableFrontmatter:
+    def _mutate(self, tmp_path):
+        doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
+        result = _run_mutate(doc, "--mode", "greenfield")
+        assert result.returncode == 0, result.stderr
+        return doc
+
+    def test_kill_criteria_list_is_indented(self, tmp_path):
+        """AC1: each kill_criteria mapping item's '- ' is indented >=1 space
+        under the key, matching the reader's leading-whitespace child test."""
+        doc = self._mutate(tmp_path)
+        lines = doc.read_text(encoding="utf-8").splitlines()
+        kc_idx = next(i for i, ln in enumerate(lines) if ln.rstrip() == "kill_criteria:")
+        item = lines[kc_idx + 1]
+        assert item.startswith(" ") and item.lstrip().startswith("- "), \
+            f"kill_criteria list item not indented: {item!r}"
+
+    def test_stamp_parse_reads_mutated_plan(self, tmp_path):
+        """AC3: _stamp.parse_frontmatter reads the mutated plan without a
+        ValueError and captures kill_criteria as a RawBlock."""
+        from fno.plan._stamp import RawBlock, parse_frontmatter
+        doc = self._mutate(tmp_path)
+        fields, _, _ = parse_frontmatter(doc.read_text(encoding="utf-8"))
+        assert isinstance(fields.get("kill_criteria"), RawBlock)
+
+    def test_project_node_to_plan_succeeds(self, tmp_path, capsys):
+        """AC2: a freshly blueprint-mutated plan projects (returns True) with no
+        'plan projection skipped' warning on stderr."""
+        from fno.plan._project import project_node_to_plan
+        doc = self._mutate(tmp_path)
+        node = {"priority": "p1", "type": "feature", "blocked_by": [], "project": "fno"}
+        result = project_node_to_plan(node, doc)
+        captured = capsys.readouterr()
+        assert "plan projection skipped" not in captured.err
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
 # AC1-HP: brownfield happy path
 # ---------------------------------------------------------------------------
 

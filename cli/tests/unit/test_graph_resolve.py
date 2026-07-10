@@ -104,6 +104,60 @@ def test_tier3_uppercase_hex_is_not_bare_hex():
     assert m.kind == "none"
 
 
+# -- resolve_node: tier 3 config-aware bare-hex re-prefix (x-408f) ------------
+
+
+def test_tier3_config_prefix_resolves(monkeypatch):
+    # AC1: on a repo configured with a non-legacy prefix, a bare hex re-prefixes
+    # with the configured prefix, not a hardcoded ab-.
+    monkeypatch.setattr("fno.graph._constants.node_id_prefix", lambda: "x-")
+    entries = [_node("x-4af4", "liveness", slug="liveness")]
+    m = resolve_node("4af4", entries)
+    assert m.kind == "exact"
+    assert m.id == "x-4af4"
+
+
+def test_tier3_legacy_ab_still_resolves_under_configured_prefix(monkeypatch):
+    # AC2 back-compat: even when the repo is configured (x-), a legacy ab-<8hex>
+    # id still resolves via the ab- fallback (mixed-format graphs).
+    monkeypatch.setattr("fno.graph._constants.node_id_prefix", lambda: "x-")
+    m = resolve_node("994222ee", ENTRIES)
+    assert m.kind == "exact"
+    assert m.id == "ab-994222ee"
+
+
+def test_tier3_no_match_names_candidates_tried(monkeypatch):
+    # AC3: a bare hex matching no key under either prefix returns none, naming
+    # both candidates it tried.
+    monkeypatch.setattr("fno.graph._constants.node_id_prefix", lambda: "x-")
+    m = resolve_node("deadbeef", [_node("x-0000", "nope")])
+    assert m.kind == "none"
+    assert "x-deadbeef" in m.note
+    assert "ab-deadbeef" in m.note
+
+
+def test_tier3_ambiguous_prefers_configured_prefix(monkeypatch):
+    # Boundary: a bare hex that is an exact key under BOTH the configured prefix
+    # and ab- resolves to the configured one deterministically (never a silent
+    # legacy pick).
+    monkeypatch.setattr("fno.graph._constants.node_id_prefix", lambda: "x-")
+    entries = [_node("ab-4af4", "legacy"), _node("x-4af4", "configured")]
+    m = resolve_node("4af4", entries)
+    assert m.kind == "exact"
+    assert m.id == "x-4af4"
+
+
+def test_tier3_config_load_failure_fails_open_to_legacy(monkeypatch):
+    # AC4: if load_settings() raises, node_id_prefix() fails open to ab- and the
+    # legacy bare-hex path still resolves (no crash).
+    def _boom():
+        raise RuntimeError("malformed config")
+    monkeypatch.setattr("fno.config.load_settings", _boom)
+    m = resolve_node("994222ee", ENTRIES)
+    assert m.kind == "exact"
+    assert m.id == "ab-994222ee"
+
+
 # -- resolve_node: boundaries ------------------------------------------------
 
 
