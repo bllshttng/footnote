@@ -570,6 +570,34 @@ def test_install_cli_hooks_core_returns_after_success(tmp_path, monkeypatch):
     assert result is None
 
 
+def test_cli_cli_hooks_exits_nonzero_when_gemini_refuses(tmp_path, monkeypatch):
+    import fno.paths as paths
+    from fno.setup_cli import app
+
+    fake_entry = tmp_path / "plugin" / "hooks" / "session-start.sh"
+    fake_entry.parent.mkdir(parents=True)
+    fake_entry.write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: fake_entry)
+
+    gemini_settings = tmp_path / "gemini" / "settings.json"
+    gemini_settings.parent.mkdir(parents=True)
+    gemini_settings.write_text("{malformed")
+    result = CliRunner().invoke(
+        app,
+        [
+            "cli-hooks",
+            "--gemini-settings",
+            str(gemini_settings),
+            "--codex-config",
+            str(tmp_path / "codex" / "config.toml"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "gemini: error:" in result.output
+    assert "left unchanged" in result.output
+
+
 def test_cli_cli_hooks_no_gemini_writes_only_codex(tmp_path, monkeypatch):
     import fno.paths as paths
 

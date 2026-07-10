@@ -126,7 +126,8 @@ def _install_cli_hooks(
         res = install_gemini_hook(command, settings_path=gpath)
         any_change = any_change or res.changed
         if res.note:
-            typer.echo(f"gemini: {res.note} ({res.path})")
+            typer.echo(f"gemini: error: {res.note} ({res.path})", err=True)
+            failures.append(res.note)
         elif res.already_present:
             typer.echo(f"gemini: already wired ({res.path})")
         else:

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import tomllib
+import typer
 from typer.testing import CliRunner
 
 from fno.config import schema_gen
@@ -314,3 +316,16 @@ def test_cli_hook_offer_accepts_combined_installer():
             "migrate_legacy_hooks_json": False,
         }
     ]
+
+
+def test_cli_hook_offer_propagates_installer_failure():
+    def fail_install(**_kwargs):
+        raise typer.Exit(1)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        offer_cli_hooks(
+            confirm_fn=lambda _message: True,
+            install_fn=fail_install,
+        )
+
+    assert exc_info.value.exit_code == 1
