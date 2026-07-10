@@ -8,33 +8,34 @@
 //! dispatched via `matches!` in `client.rs`, like `version`/`--emit-schema`, so it
 //! stays out of the verb-parity lists (`RUST_CLIENT_VERBS` / `CLIENT_VERB_USAGE`).
 //!
-//! Reuses the G1 substrate end to end: roster resolution
-//! ([`crate::claude_roster`]) -> `control.sock` + `control.key`, then the attach
-//! handshake + `op:'reply'` inject ([`crate::claude_attach`] /
-//! [`crate::claude_drive`]). The `<fno_mail>` envelope is rendered Python-side (the
-//! single renderer, shared by the codex/gemini + relay paths) and injected
-//! verbatim here, so this verb is a dumb transport.
+//! Reuses the G1 substrate for roster resolution ([`crate::claude_roster`]) ->
+//! `control.sock` + `control.key` and the attach handshake
+//! ([`crate::claude_attach`]). Post-attach the socket is a RAW keystroke pipe, so
+//! the turn is bracketed-PASTED as raw bytes and submitted with a wire-level CR --
+//! NOT an `op:'reply'` JSON frame, which would land (auth key included) as literal
+//! text in the recipient input box, unsent (node x-178e). The `<fno_mail>` envelope is
+//! rendered Python-side (the single renderer, shared by the codex/gemini + relay
+//! paths) and injected verbatim here, so this verb is a dumb transport.
 //!
-//! Delivery confirm = the recipient transcript GREW after the inject, i.e. the
-//! injected USER turn was recorded. This is strictly stronger than the
-//! pre-unification claude path, which reported "delivered" on socket-write success
-//! with no landing check at all. For the TARGET case -- a session idle/blocked at
-//! a prompt -- the injected turn is recorded promptly, so growth fires within a
-//! poll interval.
+//! Delivery confirm = the injected turn's `<fno_mail>` open tag appears in the
+//! recipient transcript AFTER the inject (content match, [`confirm_content_after`]).
+//! A submitted turn is recorded verbatim; an unsent input box records nothing. This
+//! replaces the earlier transcript-GROWTH proxy, which false-confirmed on a BUSY
+//! recipient whose transcript grows continuously from an unrelated turn (node
+//! x-178e).
 //!
-//! ponytail: growth-confirm is a best-effort proxy with two bounded edges. (1) A
-//! BUSY recipient (mid tool call) queues the injected turn; if it is not recorded
-//! within the poll budget we report not-confirmed and Python writes the durable
-//! fallback, yet the queued inject still lands later -- a bounded DOUBLE delivery.
-//! (2) A concurrent unrelated turn could false-positive a confirm. Hard
-//! exactly-once would need recipient-side msg_id dedup on the <fno_mail> envelope
-//! (follow-up); the bounded duplicate is the accepted tradeoff for live-first.
+//! ponytail: content-confirm still has one bounded edge -- a BUSY recipient may
+//! queue the injected turn past the poll budget; we report not-confirmed and Python
+//! writes the durable fallback, yet the queued paste still lands later, a bounded
+//! DOUBLE delivery. Hard exactly-once needs recipient-side msg_id dedup on the
+//! envelope (follow-up); the bounded duplicate is the accepted live-first tradeoff.
 
-use std::io::Read;
+use std::io::{self, BufRead, Read, Seek};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
-use crate::claude_drive::{find_transcript, inject_reply, transcript_len, DriveError};
+use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
 use crate::claude_roster::{read_control_key, ClaudeRoster};
 
 /// Default transcript-growth poll budget: 40 * 250ms = 10s. A live blocked
@@ -48,6 +49,13 @@ pub const DEFAULT_INTERVAL_MS: u64 = 250;
 /// paste needs to register in the recipient input box before the Enter
 /// keystroke lands; the proven recipe (2026-07-08, CC 2.1.205) used ~0.8s.
 const CR_SETTLE_MS: u64 = 800;
+
+/// Interval multiple at which the confirm loop re-sends the wire-level CR. The
+/// initial CR (from `inject_with_submit`) can be swallowed mid-paste by a BUSY
+/// recipient streaming a turn, leaving the envelope sitting unsent; re-Entering
+/// every ~2s (8 * 250ms) lands it once the recipient drains. Idempotent: a bare
+/// Enter on an empty/already-submitted input box is a no-op in CC.
+const CR_RESUBMIT_EVERY: u32 = 8;
 
 /// Live-inject target harness. `claude` is the default `control.sock` path;
 /// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8).
@@ -143,31 +151,106 @@ fn emit(delivered: bool, reason: &str) -> i32 {
     outcome_exit(delivered)
 }
 
-/// Inject the envelope, settle, then send the wire-level CR submit as a SEPARATE
-/// `op:'reply'` carrying only `"\r"`. The daemon has no wire-level submit: the
-/// envelope text lands in the recipient input box unsent, so without this the
-/// transcript never grows and delivery demotes to durable. The CR is a distinct
-/// reply, NOT `\r` appended to the envelope text -- an embedded `\r` is part of
-/// the paste, only a separate reply is the Enter keystroke. `"\r"` is not a
-/// detach sentinel, so the guarded builder passes it untouched. Extracted so the
-/// two-reply sequence is unit-testable against a `Fake` transport (settle=ZERO).
+/// Bracketed-paste guards (xterm DEC mode 2004): the recipient TUI treats
+/// everything between them as ONE paste event. Required because a `<fno_mail>`
+/// envelope is multi-line (`open_tag\nbody\n</fno_mail>`), and a raw multi-line
+/// write without them submits line-by-line -- the recipient records the open tag
+/// alone (enough to satisfy the content confirm) while the body arrives as
+/// separate input, dropping the message. Contract: `docs/architecture/fno-agents-deliver-gate.md`.
+const PASTE_BEGIN: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
+
+/// Paste the envelope as RAW BYTES on the ATTACHED transport -- wrapped in
+/// bracketed-paste guards so a multi-line body lands as ONE paste -- settle, then
+/// send a separate raw `\r` byte as the Enter. Post-attach the `control.sock` is a
+/// raw keystroke pipe (node x-178e): an `op:'reply'` JSON write here lands its
+/// frames -- auth key included -- as literal text in the recipient input box,
+/// unsent. So we type the turn exactly as a human would: paste, then a wire-level
+/// CR. The CR is a distinct write, NOT `\r` appended to the paste -- an embedded
+/// `\r` is paste content, only a separate keystroke is the Enter. Refuses text
+/// carrying a detach sentinel before any write. Extracted so the raw sequence is
+/// unit-testable against a `Fake` transport (settle=ZERO).
 fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
     transport: &mut T,
-    short: &str,
     text: &str,
-    auth: Option<&str>,
     settle: Duration,
 ) -> Result<(), DriveError> {
-    inject_reply(transport, short, text, auth, None)?;
+    if contains_detach_sentinel(text) {
+        return Err(DriveError::UnsafeText);
+    }
+    transport
+        .send_line(&format!("{PASTE_BEGIN}{text}{PASTE_END}"))
+        .map_err(|e| DriveError::Io(e.to_string()))?;
     std::thread::sleep(settle);
-    inject_reply(transport, short, "\r", auth, None)
+    transport
+        .send_line("\r")
+        .map_err(|e| DriveError::Io(e.to_string()))
+}
+
+/// Poll `confirmed` (a content check on the recipient transcript), re-sending the
+/// raw wire-level CR every `CR_RESUBMIT_EVERY` intervals so a CR the busy recipient
+/// swallowed mid-paste gets re-Entered once it drains. `Ok(())` on a confirmed
+/// landing, `Err("not-confirmed")` on budget exhaustion. Extracted from the
+/// transport + transcript so the retry cadence is unit-testable against a `Fake`
+/// (interval=ZERO). Re-send errors are ignored: it is best-effort, and a dead
+/// transport fails the confirm anyway.
+fn confirm_with_cr_retry<T: crate::claude_attach::ControlTransport>(
+    transport: &mut T,
+    attempts: u32,
+    interval: Duration,
+    mut confirmed: impl FnMut() -> bool,
+) -> Result<(), &'static str> {
+    for i in 0..attempts.max(1) {
+        if confirmed() {
+            return Ok(());
+        }
+        std::thread::sleep(interval);
+        if (i + 1) % CR_RESUBMIT_EVERY == 0 {
+            let _ = transport.send_line("\r");
+        }
+    }
+    Err("not-confirmed")
+}
+
+/// The escaped form of `marker` as it appears inside a transcript JSONL line: the
+/// injected turn is stored as a JSON string, so quotes/backslashes in the marker
+/// are escaped there too. Strip the surrounding quotes `serde_json` adds, leaving a
+/// raw substring to search for.
+fn escaped_marker(marker: &str) -> String {
+    let s = serde_json::to_string(marker).unwrap_or_default();
+    s.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Confirm the injected turn LANDED by CONTENT, not transcript growth: scan lines
+/// appended after `since_byte` for the injected turn's `marker` (its `<fno_mail>`
+/// open tag). A submitted turn is recorded verbatim; an unsent input box records
+/// nothing, and a busy recipient's unrelated growth never carries our marker -- so
+/// this rejects the growth-only false positive (node x-178e). `since_byte` is a
+/// prior full-file length, hence a clean line boundary.
+fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Result<bool> {
+    let escaped = escaped_marker(marker);
+    if escaped.is_empty() {
+        return Ok(false);
+    }
+    let mut file = std::fs::File::open(path)?;
+    file.seek(io::SeekFrom::Start(since_byte))?;
+    for line in io::BufReader::new(file).lines() {
+        if line?.contains(&escaped) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Deliver `text` to `session` over the daemon `control.sock`: resolve the
-/// recipient on the roster, attach, inject the envelope + wire-level CR submit,
-/// and confirm the recipient transcript grew. `Ok(())` == delivered (transcript
-/// grew after the inject); `Err(reason)` is a clean not-delivered signal whose
-/// value IS the `mail-inject` JSON `reason` token.
+/// recipient on the roster, attach, paste the envelope + wire-level CR submit, and
+/// confirm by CONTENT that the injected turn landed in the recipient transcript.
+/// `Ok(())` == delivered (the `<fno_mail>` marker appeared after the inject);
+/// `Err(reason)` is a clean not-delivered signal whose value IS the `mail-inject`
+/// JSON `reason` token.
 ///
 /// The SINGLE control.sock wire implementation (Locked Decision 1, node
 /// x-2681): both the `mail-inject` verb (`fno mail send`) and the Rust ask-lane
@@ -202,29 +285,27 @@ pub fn deliver_via_control_sock(
     {
         return Err("attach-failed");
     }
-    // Baseline the transcript AFTER attach, immediately before inject, so attach
-    // side-effects cannot be mistaken for our turn landing (codex peer P2); only
-    // post-inject growth counts.
+    // Baseline the transcript byte-length AFTER attach, immediately before inject,
+    // so attach side-effects cannot be mistaken for our turn landing (codex peer
+    // P2); the content confirm scans only lines appended past this offset.
     let baseline = transcript_len(&transcript);
-    inject_with_submit(
-        &mut transport,
-        &short,
-        text,
-        auth.as_deref(),
-        Duration::from_millis(CR_SETTLE_MS),
-    )
-    .map_err(|e| match e {
-        DriveError::UnsafeText => "unsafe-text",
-        _ => "io-error",
+    // The injected turn's opening line -- its `<fno_mail>` open tag -- is the
+    // content marker the confirm greps for; it is recorded verbatim once the turn
+    // submits.
+    let marker = text.lines().next().unwrap_or(text);
+    inject_with_submit(&mut transport, text, Duration::from_millis(CR_SETTLE_MS)).map_err(|e| {
+        match e {
+            DriveError::UnsafeText => "unsafe-text",
+            _ => "io-error",
+        }
     })?;
 
-    for _ in 0..attempts.max(1) {
-        if transcript_len(&transcript) > baseline {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(interval_ms));
-    }
-    Err("not-confirmed")
+    confirm_with_cr_retry(
+        &mut transport,
+        attempts,
+        Duration::from_millis(interval_ms),
+        || confirm_content_after(&transcript, marker, baseline).unwrap_or(false),
+    )
 }
 
 /// Run `mail-inject`. Reads the turn TEXT from STDIN and delivers it to the
@@ -268,9 +349,11 @@ mod tests {
     use super::*;
     use crate::claude_attach::ControlTransport;
     use crate::claude_drive::DETACH_SENTINELS;
-    use std::io;
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Write};
+    use std::path::PathBuf;
 
-    /// Records every line written, so a test can assert the two-reply sequence.
+    /// Records every raw byte-write, so a test can assert the paste + CR sequence.
     struct Fake {
         sent: Vec<String>,
     }
@@ -288,43 +371,117 @@ mod tests {
         parts.iter().map(|s| s.to_string()).collect()
     }
 
+    fn tmp_transcript(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mailinj-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("t.jsonl")
+    }
+
     #[test]
-    fn inject_with_submit_sends_envelope_then_separate_cr() {
+    fn inject_with_submit_bracketed_pastes_then_separate_cr() {
         let mut t = Fake { sent: Vec::new() };
-        inject_with_submit(
-            &mut t,
-            "a1b2c3d4",
-            "hello MARKER",
-            Some("deadbeef"),
-            Duration::ZERO,
-        )
-        .unwrap();
-        assert_eq!(t.sent.len(), 2, "envelope inject + wire-level CR submit");
-
-        let envelope: serde_json::Value = serde_json::from_str(t.sent[0].trim()).unwrap();
-        assert_eq!(envelope["text"], "hello MARKER");
-
-        // The submit is a SEPARATE op:reply carrying ONLY the CR -- not appended
-        // to the envelope text.
-        let cr: serde_json::Value = serde_json::from_str(t.sent[1].trim()).unwrap();
-        assert_eq!(cr["op"], "reply");
-        assert_eq!(cr["short"], "a1b2c3d4");
-        assert_eq!(cr["text"], "\r");
-        assert_eq!(cr["auth"], "deadbeef");
+        let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-178e\">\nhi MARKER\n</fno_mail>";
+        inject_with_submit(&mut t, envelope, Duration::ZERO).unwrap();
+        // The multi-line envelope is ONE bracketed paste, then a SEPARATE wire-level
+        // CR -- not `\r` appended to the paste. Bracketed-paste guards keep the
+        // embedded newlines from submitting the body line-by-line.
+        assert_eq!(
+            t.sent,
+            vec![
+                format!("{PASTE_BEGIN}{envelope}{PASTE_END}"),
+                "\r".to_string()
+            ]
+        );
+        // The paste carries the RAW envelope verbatim, NEVER an op:'reply' JSON frame
+        // (the x-178e bug): no `op` key, and the control auth key is never typed in.
+        assert!(t.sent[0].contains(envelope), "envelope pasted verbatim");
+        assert!(
+            !t.sent[0].contains("\"op\""),
+            "envelope must be raw bytes, not a JSON op"
+        );
+        assert!(
+            !t.sent[0].contains("auth"),
+            "raw paste must never carry the control auth key"
+        );
     }
 
     #[test]
     fn inject_with_submit_refuses_unsafe_envelope_and_writes_nothing() {
         let mut t = Fake { sent: Vec::new() };
-        let err = inject_with_submit(
-            &mut t,
-            "a1b2c3d4",
-            DETACH_SENTINELS[0],
-            None,
-            Duration::ZERO,
-        );
+        let err = inject_with_submit(&mut t, DETACH_SENTINELS[0], Duration::ZERO);
         assert!(matches!(err, Err(DriveError::UnsafeText)));
-        assert!(t.sent.is_empty(), "unsafe envelope must not submit or CR");
+        assert!(t.sent.is_empty(), "unsafe envelope must not paste or CR");
+    }
+
+    #[test]
+    fn busy_recipient_gets_raw_paste_then_retried_crs() {
+        let mut t = Fake { sent: Vec::new() };
+        inject_with_submit(&mut t, "hi MARKER", Duration::ZERO).unwrap();
+        // Confirm never fires -> the loop exhausts its budget, re-Entering a raw CR
+        // once per CR_RESUBMIT_EVERY window.
+        let attempts = 2 * CR_RESUBMIT_EVERY; // two resubmit windows
+        let r = confirm_with_cr_retry(&mut t, attempts, Duration::ZERO, || false);
+        assert_eq!(r, Err("not-confirmed"));
+        // paste + initial CR (inject_with_submit) + one CR per resubmit window.
+        assert_eq!(t.sent.len() as u32, 2 + attempts / CR_RESUBMIT_EVERY);
+        // Every write after the paste is a bare raw CR -- no JSON, no auth.
+        for line in &t.sent[1..] {
+            assert_eq!(line, "\r");
+        }
+    }
+
+    #[test]
+    fn confirm_stops_on_landing_without_extra_cr() {
+        let mut t = Fake { sent: Vec::new() };
+        let mut calls = 0;
+        let r = confirm_with_cr_retry(&mut t, 40, Duration::ZERO, || {
+            calls += 1;
+            calls >= 2
+        });
+        assert_eq!(r, Ok(()));
+        assert!(
+            t.sent.is_empty(),
+            "landing before a resubmit window sends no CR"
+        );
+    }
+
+    #[test]
+    fn content_confirm_rejects_growth_and_accepts_the_landed_envelope() {
+        let path = tmp_transcript("content");
+        let mut f = File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"older"}}}}"#
+        )
+        .unwrap();
+        let baseline = transcript_len(&path);
+        let marker = "<fno_mail from=\"a1b2c3d4\" node=\"x-178e\">";
+
+        // A BUSY recipient GROWS the transcript with unrelated output -> growth
+        // alone must NOT confirm.
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":"streaming something else"}}}}"#
+        )
+        .unwrap();
+        assert!(
+            !confirm_content_after(&path, marker, baseline).unwrap(),
+            "growth without the marker must not confirm"
+        );
+
+        // The injected turn lands verbatim (JSON-escaped) -> confirm by content.
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"{}\nhi\n</fno_mail>"}}}}"#,
+            escaped_marker(marker)
+        )
+        .unwrap();
+        assert!(
+            confirm_content_after(&path, marker, baseline).unwrap(),
+            "the landed envelope confirms delivery"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
