@@ -27,7 +27,13 @@ ok()  { if [[ "$2" == "$3" ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); pri
 has() { if printf '%s' "$2" | grep -qF "$3"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); printf 'FAIL: %s (%q not in %q)\n' "$1" "$3" "$2"; fi; }
 no()  { if printf '%s' "$2" | grep -qF "$3"; then FAIL=$((FAIL+1)); printf 'FAIL: %s (%q UNEXPECTEDLY in %q)\n' "$1" "$3" "$2"; else PASS=$((PASS+1)); fi; }
 
-# --- stub fno: claim/agents probes pass, spawn emits a valid 8-hex receipt ----
+# --- stub fno: claim/agents probes pass, spawn emits a valid 8-hex receipt.
+# `worktree ensure` (x-73ca) mirrors the real verb's contract (cli/src/fno/
+# worktree_cli/cli.py): path on stdout + exit 0 on success, NOTHING on failure,
+# so spawn.sh reads $wt empty and falls back to repo root. The mechanism itself
+# (origin/main base, branch reuse) is tested in test_worktree_ensure.py; this
+# hermetic stub only needs the happy path + the two fail-safe branches the
+# caller's logic depends on (stray-dir refusal, idempotent reuse). ----------
 STUBDIR="$TMP/bin"; mkdir -p "$STUBDIR"
 cat > "$STUBDIR/fno" <<'STUB'
 #!/usr/bin/env bash
@@ -36,6 +42,34 @@ case "$1 $2" in
   "agents list")         printf '{"agents":[]}\n'; exit 0 ;;
   "agents spawn"|"agents host") printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
   "claim release")       exit 0 ;;
+  "worktree ensure")
+    shift 2  # drop "worktree ensure"; parse "--repo R --name N"
+    repo=""; wtname=""
+    while [[ $# -gt 0 ]]; do
+      # `shift; shift` (not `shift 2`) so a value-less trailing flag can't
+      # wedge the loop re-seeing the same flag -- malformed input falls through
+      # to the git-C check below and fail-safes empty, like the real verb.
+      case "$1" in
+        --repo) repo="${2:-}"; shift; shift ;;
+        --name) wtname="${2:-}"; shift; shift ;;
+        *) shift ;;
+      esac
+    done
+    top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || exit 1
+    # main-checkout-only gate: a linked worktree (git-dir != git-common-dir) has
+    # no business nesting another -> refuse (test 4's already-isolated cwd).
+    gdir="$(git -C "$top" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
+    common="$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    [[ -n "$gdir" && "$gdir" == "$common" ]] || exit 1
+    wt="$HOME/conductor/workspaces/$(basename "$top")/$wtname"
+    if [[ -d "$wt" ]]; then
+      # reuse our own worktree; never clobber a stray dir (test 5's decoy).
+      git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        && { printf '%s\n' "$wt"; exit 0; } || exit 1
+    fi
+    mkdir -p "$(dirname "$wt")"
+    git -C "$top" worktree add "$wt" -b "feature/$wtname" >/dev/null 2>&1 || exit 1
+    printf '%s\n' "$wt"; exit 0 ;;
   *)                     exit 0 ;;
 esac
 STUB
@@ -63,16 +97,17 @@ ok   "code-payload exit 0" "$rc" "0"
 has  "code-payload launched" "$out" "result=launched"
 # cwd value is double-quoted in the receipt (a path with spaces must not split fields).
 has  "code-payload cwd in receipt" "$out" "cwd=\"$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo\""
-has  "code-payload worktree note" "$err" "auto-worktree: created"
+has  "code-payload worktree note" "$err" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: worktree dir not created"; }
 # branch must be the fresh feature branch, not the protected default.
 br="$(git -C "$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo" branch --show-current)"
 ok   "code-payload on feature branch" "$br" "feature/spawn-x-9c4c-demo"
 
-# 2. re-spawn of the same node -> reuse, no error, no second worktree.
+# 2. re-spawn of the same node -> reuse (ensure is idempotent), no second
+#    worktree. spawn.sh emits the same `auto-worktree: <path>` note either way;
+#    the reuse guarantee is structural (one worktree, not two).
 out2="$(run_spawn "/target no-merge x-9c4c")"; err2="$(cat "$TMP/err")"
-has  "re-spawn reuses" "$err2" "auto-worktree: reusing"
-no   "re-spawn no add" "$err2" "auto-worktree: created"
+has  "re-spawn note" "$err2" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"
 cnt="$(git -C "$REPO" worktree list | grep -c "spawn-x-9c4c-demo")"
 ok   "re-spawn single worktree" "$cnt" "1"
 
@@ -105,7 +140,10 @@ out5="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-blocked-de
 err5="$(cat "$TMP/err5")"
 ok   "fail-safe exit 0" "$rc5" "0"
 has  "fail-safe still launched" "$out5" "result=launched"
-has  "fail-safe note" "$err5" "is not a worktree"
+# ensure refuses the stray dir -> empty stdout -> spawn.sh stays in repo root and
+# emits NO worktree note (isolation is best-effort; the launch is never blocked).
+no   "fail-safe no worktree note" "$err5" "auto-worktree:"
+no   "fail-safe no cwd field" "$out5" "cwd="
 
 # 6. --cwd a SUBDIR of a main checkout -> still detected as a main checkout and
 #    worktree'd (the git-common-dir is returned relative to the subdir; the cd+
@@ -115,7 +153,7 @@ out6="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-subdir-dem
   --provider claude --message "/target x-sub" --node "x-sub" \
   --cwd "$REPO/src/deep" 2>"$TMP/err6")"
 err6="$(cat "$TMP/err6")"
-has  "subdir worktree'd" "$err6" "auto-worktree: created"
+has  "subdir worktree'd" "$err6" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-subdir-demo"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-subdir-demo" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: subdir cwd not worktree'd"; }
 
 # 7. codex/gemini BUILD payload reaches spawn.sh as a PROSE brief (no /target
@@ -127,7 +165,7 @@ out7="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-codex-buil
   --message "Implement backlog node x-cdx following AGENTS.md. Commit and open a pull request for review; do not merge it." \
   --cwd "$REPO" 2>"$TMP/err7")"
 err7="$(cat "$TMP/err7")"
-has  "codex-build worktree'd" "$err7" "auto-worktree: created"
+has  "codex-build worktree'd" "$err7" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-codex-build"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-codex-build" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: codex build prose payload not worktree'd"; }
 
 # 8. ask payload (one-shot question, any provider) -> NOT code-writing, no worktree.
