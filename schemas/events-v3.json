@@ -83,6 +83,7 @@
             "agent_deliver_injected",
             "agent_deliver_demoted",
             "active_backlog_task_crashed",
+            "dispatch_deferred",
             "event_payload_too_large",
             "inside_leg_report",
             "inside_leg_report_dropped",

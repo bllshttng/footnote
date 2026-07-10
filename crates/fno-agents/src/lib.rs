@@ -703,6 +703,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // loop-stream events via Journal::append, NOT daemon emits, so they are
     // exempt from this registry by design.
     "active_backlog_task_crashed",
+    // Harness-aware dispatch guard (walker-emitted, x-3e70): the shared node
+    // chokepoint deferred a node to a foreign harness that owns / is working it
+    // (a foreign-tagged claim, a codex/gemini branch, or a foreign worktree)
+    // instead of default-spawning a claude worker. Unlike the journal-based
+    // active_backlog decision events above, this is an EventEmitter emit, so it
+    // is a first-class registered kind.
+    "dispatch_deferred",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook
