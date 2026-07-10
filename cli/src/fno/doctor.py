@@ -1014,6 +1014,21 @@ def _emit_human(
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
+    dl = result.get("dead_letter") or {}
+    if dl.get("drain_hook_wired") is False:
+        out(
+            "fno doctor: a2a drain-self SessionStart hook is NOT wired; durable "
+            "mail to this claude env will strand (senders see 'queued' forever). "
+            "Wire inject-mail-drain-session-start.sh into hooks.json SessionStart."
+        )
+    stale = dl.get("stale_unread") or []
+    if stale:
+        handles = ", ".join(sorted({s["handle"] for s in stale}))
+        out(
+            f"fno doctor: {len(stale)} unread a2a message(s) stranded on the bus "
+            f"for a dead handle ({handles}); no live session will ever drain them."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -1134,6 +1149,130 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
         out(f"fno doctor: codex hooks: run `{command}` to wire the preferred TOML hook.")
 
 
+# --------------------------------------------------------------------------
+# Dead-letter visibility (US7, x-605c): the durable floor is silent quicksand
+# if a recipient's drain is unwired -- senders see `queued (durable)` + exit 0
+# forever. Two advisory findings, never blocking: (a) a claude env whose
+# `drain-self` SessionStart hook is not wired, (b) unread bus mail past a
+# threshold addressed to a handle with no live session.
+# --------------------------------------------------------------------------
+
+_DEAD_LETTER_AGE_HOURS = 24.0
+# The canonical a2a handle form <harness>-<short8>; only these are drainable
+# recipients, so only these can dead-letter (a project name never does).
+_A2A_HANDLE_RE = re.compile(r"^(?:claude|codex|gemini)-[0-9a-fA-F]{6,}$")
+
+
+def _plugin_hooks_json() -> Optional[Path]:
+    """Locate the claude plugin's hooks.json (CLAUDE_PLUGIN_ROOT, else source)."""
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if root:
+        p = Path(root) / "hooks" / "hooks.json"
+        if p.exists():
+            return p
+    src = _resolve_source(None)
+    if src is not None:
+        p = src / "hooks" / "hooks.json"
+        if p.exists():
+            return p
+    return None
+
+
+def _drain_hook_wired(hooks_json: Optional[Path] = None) -> Optional[bool]:
+    """True/False if the claude ``drain-self`` SessionStart hook is/isn't wired;
+    ``None`` when the hooks config can't be located (advisory -- don't guess)."""
+    path = hooks_json or _plugin_hooks_json()
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    starts = hooks.get("SessionStart") if isinstance(hooks, dict) else None
+    if not isinstance(starts, list):
+        starts = []
+    cmds: list[str] = []
+    for h in starts:
+        for c in (h.get("hooks") or []) if isinstance(h, dict) else []:
+            if isinstance(c, dict):
+                cmds.append(str(c.get("command", "")))
+    return any("mail-drain" in c or "drain-self" in c for c in cmds)
+
+
+def _live_a2a_handles() -> set[str]:
+    """Every address a live session answers to (handle, short, canonical)."""
+    out: set[str] = set()
+    try:
+        from fno.agents import discover
+        from fno.harness_identity import canonical_handle
+
+        for s in discover.discover_live_sessions():
+            out.update({s.handle, s.short_id, canonical_handle(s.agent, s.session_id)})
+    except Exception:  # noqa: BLE001 — discovery is best-effort here
+        pass
+    return out
+
+
+def _parse_bus_ts(ts: str) -> Optional[object]:
+    from datetime import datetime, timezone
+
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _stale_dead_letters(
+    *,
+    max_age_hours: float = _DEAD_LETTER_AGE_HOURS,
+    now: Optional[object] = None,
+    live_handles: Optional[set[str]] = None,
+) -> list[dict]:
+    """Unread bus mail older than ``max_age_hours`` addressed to a handle with no
+    live session. One scan collects the dead handle-recipients; ``scan_unread``
+    then applies the per-recipient cursor so only genuinely-undrained mail counts."""
+    from datetime import datetime, timedelta, timezone
+
+    from fno.bus.cursor import scan_unread
+    from fno.bus.log import iter_messages
+
+    live = live_handles if live_handles is not None else _live_a2a_handles()
+    ref = now or datetime.now(tz=timezone.utc)
+    cutoff = ref - timedelta(hours=max_age_hours)
+
+    dead_recips: set[str] = set()
+    try:
+        for m in iter_messages(warn=False):
+            to = getattr(m, "to", "") or ""
+            if _A2A_HANDLE_RE.match(to) and to not in live:
+                dead_recips.add(to)
+    except Exception:  # noqa: BLE001 — a torn bus contributes no findings
+        return []
+
+    out: list[dict] = []
+    for handle in sorted(dead_recips):
+        try:
+            unread = scan_unread(handle, warn=False)
+        except Exception:  # noqa: BLE001
+            continue
+        for m in unread:
+            ts = _parse_bus_ts(getattr(m, "ts", ""))
+            if ts is not None and ts <= cutoff:
+                out.append(
+                    {"handle": handle, "msg_id": getattr(m, "id", ""), "ts": getattr(m, "ts", "")}
+                )
+    return out
+
+
+def _dead_letter_report() -> dict:
+    """Advisory dead-letter findings for `fno doctor` (US7). Never blocks."""
+    return {
+        "drain_hook_wired": _drain_hook_wired(),
+        "stale_unread": _stale_dead_letters(),
+    }
+
+
 def doctor_command(
     fix: bool = typer.Option(
         False,
@@ -1226,6 +1365,10 @@ def doctor_command(
     # weeks with zero signal; the verdict derives from tick recency (ground
     # truth), never from config alone. Never changes status/exit.
     result["pr_watch"] = _pr_watch_liveness()
+
+    # Advisory dead-letter visibility (US7): an unwired drain hook + stale bus
+    # mail to a dead handle are silent quicksand. Never changes status/exit.
+    result["dead_letter"] = _dead_letter_report()
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).

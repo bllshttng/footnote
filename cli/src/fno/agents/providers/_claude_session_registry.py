@@ -131,6 +131,49 @@ def roster_live(short_id: str) -> bool:
     return False
 
 
+def roster_sessions() -> list[dict]:
+    """Live claude sessions from the daemon roster, shaped for discover (x-605c).
+
+    Each ``workers[*]`` row yields a discover-compatible dict
+    ``{session_id, short_id, pid, cwd, status, agent}``. Lenient like
+    :func:`roster_live`: a missing/torn/type-drifted roster yields ``[]`` and
+    never raises. Roster PRESENCE surfaces the row -- the ``mail-inject`` connect
+    is the authoritative liveness gate, so a stale row costs one failed inject and
+    a durable floor, never a wrong delivery. A bg worker leaves no pid-sidecar, so
+    this is the only source that surfaces it (the send-resolve bug this fixes)."""
+    try:
+        raw = json.loads((_daemon_dir() / "roster.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, UnicodeDecodeError):
+        return []
+    workers = raw.get("workers") if isinstance(raw, dict) else None
+    if not isinstance(workers, dict):
+        return []
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for w in workers.values():
+        if not isinstance(w, dict):
+            continue
+        sid = w.get("sessionId")
+        if not isinstance(sid, str) or not sid or sid in seen:
+            continue
+        seen.add(sid)
+        try:
+            pid = int(w.get("pid"))
+        except (TypeError, ValueError):
+            pid = 0
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid.split("-")[0],
+                "pid": pid,
+                "cwd": str(w.get("cwd") or ""),
+                "status": None,
+                "agent": "claude",
+            }
+        )
+    return rows
+
+
 def locate_session(short_id: str) -> Optional[SessionLocator]:
     """Find the bg session whose ``jobId`` matches ``short_id``.
 

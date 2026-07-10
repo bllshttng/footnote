@@ -687,3 +687,178 @@ def test_ac2_edge_harness_prefix_disambiguation(tmp_path):
     )
     assert resolved is not None
     assert resolved.agent == "codex"  # codex- prefix picks the codex row, not claude
+
+
+# --------------------------------------------------------------------------
+# x-605c: daemon-roster (US1) + fno-agents registry (US2) resolution sources
+# --------------------------------------------------------------------------
+
+
+def _write_roster(daemon_dir: Path, workers: dict[str, dict]) -> None:
+    daemon_dir.mkdir(parents=True, exist_ok=True)
+    (daemon_dir / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": workers}), encoding="utf-8"
+    )
+
+
+def _empty_seams(tmp_path: Path) -> dict:
+    """discover seams that make every disk source contribute zero rows, so a
+    test isolates the roster/registry sources under test."""
+    return dict(
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=tmp_path / "no-codex",
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil({}),
+        project_resolver=lambda c: None,
+    )
+
+
+def test_us1_roster_source_resolves_bg_worker(tmp_path, monkeypatch):
+    """US1/AC1-HP: a rostered bg worker (no pid-sidecar) resolves by handle."""
+    use_tmpdir(monkeypatch, tmp_path)
+    daemon = tmp_path / "daemon"
+    _write_roster(
+        daemon,
+        {
+            "9a063cd3": {
+                "sessionId": "9a063cd3-69d4-415a-ada5-649b0164189c",
+                "pid": 4242,
+                "cwd": "/Users/x/code/proj",
+            }
+        },
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    resolved, _ = discover.resolve_or_suggest("claude-9a063cd3", **_empty_seams(tmp_path))
+    assert resolved is not None
+    assert resolved.agent == "claude"
+    assert resolved.short_id == "9a063cd3"
+    assert resolved.session_id == "9a063cd3-69d4-415a-ada5-649b0164189c"
+
+
+def test_us1_torn_roster_yields_zero_rows(tmp_path, monkeypatch):
+    """AC2-ERR: a torn roster contributes no rows and never raises."""
+    use_tmpdir(monkeypatch, tmp_path)
+    daemon = tmp_path / "daemon"
+    daemon.mkdir(parents=True, exist_ok=True)
+    (daemon / "roster.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    resolved, suggestions = discover.resolve_or_suggest(
+        "claude-9a063cd3", **_empty_seams(tmp_path)
+    )
+    assert resolved is None
+    assert suggestions == []
+
+
+def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
+    """US2/AC2-HP: a registry row named x-foo resolves by its claude-<short8>."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-foo",
+                provider="claude",
+                cwd="/Users/x/code/proj",
+                log_path="/tmp/x-foo.log",
+                claude_short_id="9a063cd3",
+                claude_session_uuid="9a063cd3-69d4-415a-ada5-649b0164189c",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    resolved, _ = discover.resolve_or_suggest(
+        "claude-9a063cd3", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert resolved is not None
+    assert resolved.short_id == "9a063cd3"
+    # Resolves without the registered name; the bare short id also works.
+    by_short, _ = discover.resolve_or_suggest(
+        "9a063cd3", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert by_short is not None
+
+
+def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
+    """AC1-EDGE: one session present in registry AND roster yields exactly one row."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    daemon = tmp_path / "daemon"
+    _write_roster(daemon, {"9a063cd3": {"sessionId": sid, "pid": 4242, "cwd": "/x"}})
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-foo",
+                provider="claude",
+                cwd="/x",
+                log_path="/tmp/x.log",
+                claude_short_id="9a063cd3",
+                claude_session_uuid=sid,
+            )
+        ],
+        path=reg,
+    )
+    sessions = discover.discover_live_sessions(registry_path=reg, **_empty_seams(tmp_path))
+    assert [s.session_id for s in sessions] == [sid]
+
+
+def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
+    """codex review: an orphaned/exited registry row must NOT resolve as live."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-dead", provider="claude", cwd="/x", log_path="/tmp/d.log",
+                claude_short_id="deadd00d", claude_session_uuid="deadd00d-1111-2222-3333-444444444444",
+                status="orphaned",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    resolved, _ = discover.resolve_or_suggest(
+        "claude-deadd00d", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert resolved is None
+
+
+def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
+    """codex review: short_id must be the authoritative claude_short_id (jobId),
+    not the uuid's first 8 hex, when the two differ."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-foo", provider="claude", cwd="/x", log_path="/tmp/f.log",
+                claude_short_id="j0b1d001",  # jobId
+                claude_session_uuid="aaaabbbb-1111-2222-3333-444444444444",  # uuid[:8]=aaaabbbb
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    # Resolves by the jobId short handle...
+    by_job, _ = discover.resolve_or_suggest(
+        "j0b1d001", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert by_job is not None
+    assert by_job.short_id == "j0b1d001"
+    assert by_job.session_id == "aaaabbbb-1111-2222-3333-444444444444"
+    # ...and by the canonical handle derived from the uuid.
+    by_canon, _ = discover.resolve_or_suggest(
+        "claude-aaaabbbb", registry_path=reg, **_empty_seams(tmp_path)
+    )
+    assert by_canon is not None

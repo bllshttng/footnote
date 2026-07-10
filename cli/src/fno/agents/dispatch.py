@@ -3977,21 +3977,22 @@ def _build_mail_ctx(
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
     ``from`` is the sender's short 8-hex sessionId (or the bare ``from_name`` when
-    the caller is unregistered). ``model`` is unknown today (AgentEntry carries no
-    model field) so it is reported ``"unknown"`` -- never fabricated, matching the
-    durable envelope's existing "do not invent a model" stance.
+    the caller is unregistered). ``model`` is the invoking session's real model,
+    resolved from its own transcript store (x-605c); an unresolvable model floors
+    to ``"unknown"`` -- never fabricated.
 
     ``to`` and ``node`` are OPTIONAL envelope attributes (omitted when None).
     ``to`` is the recipient's short id -- set for a directed ``fno mail send`` so
     the recipient can tell a directed turn from a broadcast. ``node`` (the sender's
     backlog node) stays None: dispatch has no truthful source for it today."""
+    from fno.agents.self_stamp import resolve_self_model
     from fno.mail.envelope import harness_for_provider
 
     from_ = from_session.split("-")[0] if from_session else from_name
     return _MailCtx(
         from_=from_,
         harness=harness_for_provider(provider_from),
-        model="unknown",
+        model=resolve_self_model(),
         to=to or None,
     )
 

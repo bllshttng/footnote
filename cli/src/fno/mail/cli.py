@@ -825,6 +825,7 @@ def cmd_send(
         dispatch_send,
         dispatch_send_to_project,
     )
+    from fno.agents.self_stamp import resolve_self_model, stamp_from
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
@@ -960,7 +961,7 @@ def cmd_send(
                 content,
                 provider=provider,
                 cwd=workdir,
-                from_name=from_name or "fno",
+                from_name=stamp_from(from_name),
                 any_=any_live,
             )
         except DispatchAskError as exc:
@@ -1000,7 +1001,7 @@ def cmd_send(
             message=message,
             provider=provider,
             cwd=workdir,
-            from_name=from_name or "fno",
+            from_name=stamp_from(from_name),
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
@@ -1019,13 +1020,15 @@ def cmd_send(
 
         resolved, suggestions = discover_mod.resolve_or_suggest(name)
 
-        # US7(a): a disk-discovered cross-harness session (codex/gemini)
-        # is addressed by its <harness>-<id> handle, NOT routed to a project
-        # inbox — that handle is exactly what the recipient's `drain-self` reads,
-        # so a project-addressed envelope would strand. Write the durable floor
-        # (the codex live rung is US8); the body is <fno_mail>-wrapped so it is
-        # self-recording and a reply can correlate.
-        if resolved is not None and resolved.agent != "claude":
+        # x-605c US3: ANY handle-resolved session is delivered TO THAT SESSION,
+        # live-inject first with a durable floor addressed to its canonical handle
+        # -- that handle is exactly what the recipient's `drain-self` reads, so a
+        # resolved send is always drainable by construction. Claude injects over
+        # control.sock (`mail-inject`); codex over the app-server daemon (US8). The
+        # old claude->project re-route is gone; project anycast stays explicit via
+        # --to-project. The body is <fno_mail>-wrapped with a truthful from/model
+        # so the recipient can reply with `fno mail send <from>`.
+        if resolved is not None:
             from fno.agents.provider_resolve import infer_invoking_harness
             from fno.harness_identity import canonical_handle
             from fno.inbox.store import write_new_thread
@@ -1034,29 +1037,35 @@ def cmd_send(
             handle = canonical_handle(resolved.agent, resolved.session_id)
             wrapped = wrap_fno_mail(
                 message,
-                from_=from_name or "fno",
+                from_=stamp_from(from_name),
                 harness=infer_invoking_harness() or "cli",
-                model="unknown",
+                model=resolve_self_model(),
                 to=resolved.short_id,
             )
 
-            # US8 (node x-d899): live-inject-first for codex. If the recipient's
-            # app-server daemon is running and the thread is attached, the turn
-            # lands live; only a miss falls through to the durable floor below.
-            if resolved.agent == "codex":
-                from fno.agents.dispatch import _mail_inject_codex
+            # Live-inject-first, per harness. A hosted confirmation returns
+            # immediately; any miss falls through to the durable floor below.
+            from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
 
-                if _mail_inject_codex(resolved.session_id, wrapped):
-                    print(
-                        f"delivered (hosted) to {handle} "
-                        f"[live codex session {resolved.handle}]"
-                    )
-                    return
+            injected = False
+            if resolved.agent == "claude":
+                # mail-inject accepts the full UUID or the 8-hex short (roster
+                # resolves either); pass the collision-proof UUID, matching the
+                # codex path and dispatch's uuid-preference.
+                injected = _mail_inject_claude(resolved.session_id, wrapped)
+            elif resolved.agent == "codex":
+                injected = _mail_inject_codex(resolved.session_id, wrapped)
+            if injected:
+                print(
+                    f"delivered (hosted) to {handle} "
+                    f"[live {resolved.agent} session {resolved.handle}]"
+                )
+                return
 
             try:
                 th = write_new_thread(
                     recipient=handle,
-                    sender=from_name or "fno",
+                    sender=stamp_from(from_name),
                     kind="send",
                     body=wrapped,
                     to_kind="name",
@@ -1071,37 +1080,10 @@ def cmd_send(
             )
             return
 
-        if resolved is not None and resolved.project:
-            try:
-                result = dispatch_send_to_project(
-                    resolved.project,
-                    message,
-                    provider=provider,
-                    cwd=workdir,
-                    from_name=from_name or "fno",
-                    any_=any_live,
-                )
-            except DispatchAskError as exc2:
-                print(str(exc2), file=sys.stderr)
-                raise typer.Exit(code=exc2.exit_code) from exc2
-            ctx = f"[live session {resolved.handle} -> project {resolved.project}]"
-            if result.delivery == "hosted":
-                print(f"{result.msg_id} delivered (hosted) to {result.recipient} {ctx}")
-            elif result.recipient is not None:
-                print(f"{result.msg_id} queued (durable) for {result.recipient} {ctx}")
-            else:
-                print(f"{result.msg_id} queued (durable) for {ctx}")
-            return
-
         # AC2-ERR: not a registered agent, not a discovered handle. Error with
         # the closest live-session handles, sending nothing.
         hint = ""
-        if resolved is not None and not resolved.project:
-            hint = (
-                f" (live session {resolved.handle} found but its project could "
-                f"not be resolved; retry with --to-project)"
-            )
-        elif suggestions:
+        if suggestions:
             hint = f" Closest live sessions: {', '.join(suggestions)}."
         print(
             f"unknown agent or live-session handle: {name!r}.{hint}",
