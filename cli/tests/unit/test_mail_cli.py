@@ -85,3 +85,41 @@ def test_rebuild_render_regenerates_from_log(runner, mailbox):
     payload = json.loads(res.stdout.strip().splitlines()[-1])
     assert payload["threads"] == 1
     assert list(inbox.glob("*.md"))  # render regenerated from the canonical log
+
+
+# ---------------------------------------------------------------------------
+# US5 / AC2-HP: a session drains its OWN cross-harness inbox and acks it
+# ---------------------------------------------------------------------------
+
+def _seed_bus_message(*, to: str, from_: str, body: str):
+    """Append one durable bus envelope addressed to <to> (bypasses resolution)."""
+    from fno.inbox.store import write_new_thread
+
+    return write_new_thread(
+        recipient=to, sender=from_, kind="send", body=body, to_kind="name"
+    )
+
+
+def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
+    # A live codex session with this thread id -> own handle codex-019f48e1.
+    monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
+    _seed_bus_message(to="codex-019f48e1", from_="claude-web", body="ack from K")
+
+    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout.strip().splitlines()[-1])
+    assert [m["body"] for m in payload] == ["ack from K"]
+    assert payload[0]["to"] == "codex-019f48e1"
+
+    # Ack advanced the cursor: a second drain sees nothing (not re-surfaced).
+    again = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert json.loads(again.stdout.strip().splitlines()[-1]) == []
+
+
+def test_drain_self_no_harness_env_is_noop(runner, mailbox, monkeypatch):
+    for var in ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
+                "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    res = runner.invoke(app, ["mail", "drain-self"])
+    assert res.exit_code == 0
+    assert res.stdout.strip() == ""

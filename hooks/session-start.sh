@@ -206,6 +206,15 @@ if [[ -f "${SCRIPT_DIR}/setup-nudge-session-start.sh" ]]; then
     fi
 fi
 
+# 6. cross-harness mail drain (US5, x-d899) — deliver this session's own a2a
+#    mail. Drains the durable bus for messages addressed to this session's
+#    <harness>-<id> handle so a codex/gemini session RECEIVES `fno mail send`,
+#    not just becomes addressable. Silent when empty / no harness identity.
+mail_content=""
+if [[ -f "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" ]]; then
+    mail_content=$(bash "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" 2>/dev/null || echo "")
+fi
+
 # ── Combine context ───────────────────────────────────────────────────
 # Newline-separate non-empty blocks so the agent sees each preamble as
 # its own section rather than one wall of text.
@@ -224,6 +233,7 @@ append_section "$vision_content"
 append_section "$whoami_content"
 append_section "$hygiene_content"
 append_section "$nudge_content"
+append_section "$mail_content"
 
 # Self-heal a defunct target manifest (x-4af4) before anything reads it, so a
 # dead target-state.md can no longer auto-lock an attended /think. Advisory.

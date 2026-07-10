@@ -1146,6 +1146,65 @@ def cmd_bus_ack(
         print(f"cursor for {name!r} already at or past {msg_id}; unchanged")
 
 
+@mail_app.command("drain-self")
+def cmd_drain_self(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit JSON regardless of TTY."
+    ),
+) -> None:
+    """Drain THIS session's own cross-harness inbox and mark it seen (US5).
+
+    The receive side of the a2a relay: a session computes its own handle from
+    the ambient harness env markers (``canonical_handle(harness, session-id)``,
+    the SAME string a sender resolves and the registry registers under), reads
+    its unread bus mail, prints it for injection into the session, then advances
+    its own cursor so nothing re-surfaces next wake. Wired into each harness's
+    SessionStart hook, this is what makes a codex/gemini session actually
+    RECEIVE mail addressed to ``<harness>-<id>`` -- addressability already
+    existed, drainage did not.
+
+    Forward-only + inject-before-ack: a crash between print and ack re-surfaces
+    the message next SessionStart (a harmless repeat), never a loss. No harness
+    identity in env -> silent no-op (nothing to drain), never an error, so the
+    hook is safe on any surface.
+    """
+    from fno.bus.cursor import advance_cursor, scan_unread
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        if json_out:
+            print(json.dumps([]))
+        return
+
+    handle = canonical_handle(ident.harness, ident.session_id)
+    msgs = scan_unread(handle)
+
+    if json_out:
+        print(
+            json.dumps(
+                [
+                    {
+                        "id": m.id, "from": m.from_, "to": m.to,
+                        "kind": m.kind, "ts": m.ts, "body": m.body,
+                    }
+                    for m in msgs
+                ],
+                ensure_ascii=False,
+            )
+        )
+    elif msgs:
+        print(f"[fno mail] {len(msgs)} message(s) for {handle}:")
+        for m in msgs:
+            print(f"\n--- from {m.from_} ({m.ts}) ---")
+            print(m.body.rstrip("\n"))
+
+    # Inject-before-ack: advance the cursor to the last drained id only after
+    # the bodies are out, so a crash re-surfaces rather than drops.
+    if msgs:
+        advance_cursor(handle, msgs[-1].id)
+
+
 @mail_app.command("rebuild-render")
 def cmd_rebuild_render(
     recipient: Optional[str] = typer.Argument(
