@@ -70,6 +70,7 @@ bash tests/hooks/test_manifest_immutable.sh
 bash tests/hooks/test_graph_write_protect.sh
 bash tests/hooks/test_init_target_session_id.sh
 bash tests/hooks/test_agy_stop_hook.sh'
+    step "born-with-why offer inject hook harness" "." 'bash tests/hooks/test_born_with_why_offer_inject.sh'
     step "ship-phase PR->node link verify guard (x-e106)" "." 'bash tests/target/test_ship_phase_link_verify.sh'
     step "docs-before-ship phase-ordering guard (ab-2e4a09f1)" "." 'bash tests/test-docs-before-ship.sh'
     step ".fno/ dir-hygiene harness (ab-d5a984f6)" "." 'python3 tests/metrics/test_completion_summary_path.py
