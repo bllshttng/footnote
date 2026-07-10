@@ -42,7 +42,7 @@ if ! declare -F drive_authority_active >/dev/null 2>&1; then
 fi
 
 _approve() {
-    printf '%s\n' '{"decision":"approve","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+    printf '%s\n' '{}'
     exit 0
 }
 _block() {

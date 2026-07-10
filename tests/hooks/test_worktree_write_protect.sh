@@ -180,7 +180,11 @@ fi
 PYTHON_ONLY_BIN="$TMP_BASE/python-only-bin"
 mkdir -p "$PYTHON_ONLY_BIN"
 for command_name in bash cat dirname git head python3 sed; do
-    ln -s "$(command -v "$command_name")" "$PYTHON_ONLY_BIN/$command_name"
+    command_path="$(command -v "$command_name")"
+    if [[ "$command_name" == "python3" ]]; then
+        command_path="$(python3 -c 'import sys; print(sys.executable)')"
+    fi
+    ln -s "$command_path" "$PYTHON_ONLY_BIN/$command_name"
 done
 PYTHON_ONLY_OUTPUT="$(payload "$CANONICAL" | PATH="$PYTHON_ONLY_BIN" "$PYTHON_ONLY_BIN/bash" "$GUARD")"
 if printf '%s' "$PYTHON_ONLY_OUTPUT" | jq -e '

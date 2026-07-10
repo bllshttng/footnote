@@ -18,14 +18,14 @@ fail() { FAIL=$((FAIL+1)); printf '[gwp] FAIL: %s\n' "$*" >&2; }
 
 [[ -f "$GUARD" ]] || { fail "guard not found at $GUARD"; exit 1; }
 
-# decision_of PAYLOAD -> prints "block" or "approve"
+# decision_of PAYLOAD -> prints "block" or "approve" (empty object == allow)
 decision_of() {
   local out; out=$(printf '%s' "$1" | bash "$GUARD" 2>/dev/null)
   if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$out" | jq -r '.decision // "MISSING"' 2>/dev/null
+    printf '%s' "$out" | jq -r 'if type == "object" and length == 0 then "approve" else .decision // "MISSING" end' 2>/dev/null
   else
     if printf '%s' "$out" | grep -q '"block"'; then echo block
-    elif printf '%s' "$out" | grep -q '"approve"'; then echo approve
+    elif [[ "$out" == "{}" ]]; then echo approve
     else echo MISSING; fi
   fi
 }
@@ -72,8 +72,8 @@ done
 expect_env "AC1-ERR: jq+python3 absent -> block" block "$_STUB" \
   '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.json","old_string":"a","new_string":"b"}}'
 # And with python3 present, the same payload parses and blocks normally.
-PY_BIN=$(command -v python3 2>/dev/null || true)
-if [[ -n "$PY_BIN" ]]; then
+PY_BIN=$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || true)
+if [[ -x "$PY_BIN" ]]; then
   PY_DIR=$(dirname "$PY_BIN")
   expect_env "AC1-ERR: python3 fallback -> block" block "$_STUB:$PY_DIR" \
     '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.json","old_string":"a","new_string":"b"}}'
@@ -116,6 +116,8 @@ expect "fixture graph.json editable" approve \
 # ── Extra: unrelated Edit (no token) approved ─────────────────────────────────
 expect "unrelated Edit approved" approve \
   '{"tool_name":"Edit","tool_input":{"file_path":"/proj/src/main.py","old_string":"a","new_string":"b"}}'
+_ALLOW_OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/src/main.py"}}' | bash "$GUARD")
+if [[ "$_ALLOW_OUT" == "{}" ]]; then pass "Codex allow response is an empty object"; else fail "Codex allow response: $_ALLOW_OUT"; fi
 # ── Extra: cp ONTO graph.json (destination) blocked; cp FROM graph.json approved
 expect "cp onto graph.json blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"cp /tmp/forged.json ~/.fno/graph.json"}}'
