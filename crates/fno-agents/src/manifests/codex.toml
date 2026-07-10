@@ -57,6 +57,26 @@ priority = 100
 region = "bottom_non_empty_lines(1)"
 gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
 
+# Answerable command/edit approvals (x-f498). Codex 0.144.1 renders a borderless
+# numbered menu and commits the choice on a bare digit. Require both the exact
+# question and the live selector marker so model-printed lists cannot inject an
+# answer into the composer. Gemini remains unchanged until it can be captured.
+[[rule]]
+id = "approval_prompt"
+state = "blocked"
+priority = 986
+region = "bottom_non_empty_lines(14)"
+gate = { all = [
+  { any = [
+    { contains = "Would you like to run the following command?" },
+    { contains = "Would you like to make the following edits?" },
+  ] },
+  { line_regex = '^\s*\x{203a}\s*[0-9]\.\s' },
+] }
+[rule.answer]
+option = '^\s*\x{203a}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*$'
+send = "digit"
+
 # Answerable numbered prompt (x-5103). Codex's trust prompt renders a borderless
 # numbered menu ("› 1. Yes, continue" / "  2. No, quit") - the selected row
 # carries a "›" (U+203A) marker, unselected rows are digit-only. Validated

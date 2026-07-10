@@ -1833,6 +1833,80 @@ mod tests {
         assert!(ans.is_none(), "no live menu -> not answerable");
     }
 
+    // x-f498: Codex 0.144.1 renders command approval as a borderless numbered
+    // menu and commits a bare digit. This screen was captured from the live TUI.
+    #[test]
+    fn xf498_bundled_codex_command_approval_is_answerable() {
+        let m = bundled("codex");
+        let screen = "Would you like to run the following command?\n\n\
+            Environment: local\n\n\
+            $ touch /tmp/fno-x-f498-approval-capture\n\n\
+            \u{203a} 1. Yes, proceed (y)\n\
+              2. Yes, and don't ask again for commands that start with `touch /tmp/fno-x-f498-approval-capture` (p)\n\
+              3. No, and tell Codex what to do differently (esc)\n\n\
+            Press enter to confirm or esc to cancel";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(v.rule_id, "approval_prompt");
+        assert_eq!(v.state, "blocked");
+        let ans = ans.expect("codex command approval is answerable");
+        assert_eq!(ans.options.len(), 3);
+        assert_eq!(ans.options[0].label, "Yes, proceed (y)");
+        assert_eq!(ans.options[0].keystroke, b"1");
+        assert_eq!(ans.options[2].idx, "3");
+        assert_eq!(ans.options[2].keystroke, b"3");
+    }
+
+    #[test]
+    fn xf498_codex_model_printed_list_is_not_a_false_command_approval() {
+        let m = bundled("codex");
+        let screen = "Here is an example. Would you like to run the following command?\n\
+            1. Yes, proceed\n  2. No, cancel\n\u{203a} ";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_ne!(v.rule_id, "approval_prompt");
+        assert!(ans.is_none(), "no marked live menu -> not answerable");
+    }
+
+    #[test]
+    fn xf498_bundled_codex_edit_approval_is_answerable() {
+        let m = bundled("codex");
+        let screen = "Added .fno-x-f498-edit-capture (+1 -0)\n\
+            1 +CAPTURE\n\n\
+            Would you like to make the following edits?\n\n\
+            \u{203a} 1. Yes, proceed (y)\n\
+              2. Yes, and don't ask again for these files (a)\n\
+              3. No, and tell Codex what to do differently (esc)\n\n\
+            Press enter to confirm or esc to cancel";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(v.rule_id, "approval_prompt");
+        let ans = ans.expect("codex edit approval is answerable");
+        assert_eq!(ans.options.len(), 3);
+        assert_eq!(
+            ans.options[1].label,
+            "Yes, and don't ask again for these files (a)"
+        );
+        assert_eq!(ans.options[2].keystroke, b"3");
+    }
+
+    #[test]
+    fn xf498_codex_approval_survives_narrow_terminal_wrapping() {
+        let m = bundled("codex");
+        let screen = "Would you like to run the following command?\n\
+            Environment: local\n\
+            $ touch /tmp/a/very/long/path/that\n\
+              /wraps/across/multiple/terminal\n\
+              /rows\n\
+            \u{203a} 1. Yes, proceed (y)\n\
+              2. Yes, and don't ask again for commands\n\
+                 that start with the captured command\n\
+                 on this narrow terminal (p)\n\
+              3. No, and tell Codex what to do\n\
+                 differently (esc)\n\
+            Press enter to confirm or esc to cancel";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(v.rule_id, "approval_prompt");
+        assert!(ans.is_some());
+    }
+
     // x-5103: the bundled gemini trust_prompt is answerable on a real (validated)
     // BOXED radio ("│ ● 1. Trust folder … │"); the option regex consumes the box
     // border (│ U+2502) + radio marker (● U+25CF) and the trailing border.
