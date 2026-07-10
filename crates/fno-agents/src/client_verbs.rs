@@ -1809,6 +1809,9 @@ pub fn run_claim(args: &[String]) -> i32 {
                 if let Some(r) = rec.reason {
                     out.insert("reason".into(), Value::String(r));
                 }
+                if let Some(h) = rec.harness {
+                    out.insert("harness".into(), Value::String(h));
+                }
                 if !rec.metadata.is_empty() {
                     out.insert("metadata".into(), Value::Object(rec.metadata));
                 }

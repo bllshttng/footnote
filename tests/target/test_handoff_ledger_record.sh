@@ -77,7 +77,7 @@ case "\$1 \$2" in
   "agents spawn")
     printf '{"name":"tgt-child","short_id":"cx-abc123","provider":"claude","status":"live"}\n' ;;
   "agents list")
-    printf '{"agents":[{"name":"tgt-${NODE_ID:3:8}-g2","status":"live"}]}\n' ;;
+    printf '{"agents":[{"name":"tgt-${NODE_ID:3:8}-claude-g2","status":"live"}]}\n' ;;
   *) exit 0 ;;
 esac
 ABIEOF
@@ -104,6 +104,8 @@ OUT=$(
       PATH="${BIN_DIR}:${PATH}" \
       FNO_DIR="$FNO_DIR" \
       FNO_AGENTS_BIN="${BIN_DIR}/fno-agents" \
+      CLAUDE_CODE_SESSION_ID="hsess-claude" \
+      CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       bash "$HANDOFF" --boundary blueprint-do 2>"${TMP_DIR}/handoff.stderr"
 ) || RC=$?
 

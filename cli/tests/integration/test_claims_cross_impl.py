@@ -406,9 +406,19 @@ def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
     # And Python parses it as PID-liveness.
     rec = read_claim_file(path)
     assert rec.expires_at is None
-    # Semantic YAML parity: yaml.safe_load sees the exact field set.
+    # Semantic YAML parity: yaml.safe_load sees the exact base field set. The
+    # additive `harness` tag (x-3e70) is present only when the acquiring process
+    # carries a session marker (a codex/claude/gemini session), absent otherwise
+    # (bare CI), so it is excluded from the exact-set check rather than asserted.
     data = yaml.safe_load(text)
-    assert set(data) == {"schema_version", "key", "holder", "acquired_at", "pid", "host"}
+    assert set(data) - {"harness"} == {
+        "schema_version",
+        "key",
+        "holder",
+        "acquired_at",
+        "pid",
+        "host",
+    }
 
 
 # --------------------------------------------------------------------------

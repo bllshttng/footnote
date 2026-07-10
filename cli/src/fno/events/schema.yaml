@@ -1786,6 +1786,9 @@ event_types:
         generation:
           type: integer
           description: "Generation number of the successor session (parent is N-1; first handoff produces generation 2)."
+        harness:
+          type: string
+          description: "Owning harness of the delegating (parent) lineage (codex/claude/gemini). Namespaces the successor name (tgt-<node>-<harness>-gN) and scopes the generation count per (node, harness) so two harnesses cannot collide on one registry name (x-3e70). Absent on pre-change events."
     consumers: [hooks/megawalk-stop-hook.sh, operator]
 
   - name: handoff_failed

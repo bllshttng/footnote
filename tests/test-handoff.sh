@@ -160,6 +160,10 @@ trap 'rm -rf "$TMPDIR_BASE"' EXIT
 NODE_ID="ab-12345678"
 SESSION_ID="20260605T120000Z-12345-abc"
 PLAN_REL="plan.md"
+# x-3e70: the successor name is tgt-<node>-<harness>-gN. run_handoff pins the
+# harness env deterministically to this value so the expected names below are
+# stable regardless of the harness the test itself runs under.
+TEST_HARNESS="claude"
 
 make_sandbox() {
   local name="$1"
@@ -207,7 +211,7 @@ EOF
   printf '{"name": "tgt-x", "short_id": "abc123", "provider": "claude", "status": "live"}\n' > "$sbx/scenario/abi-ask-out"
   # Default list output: shows the agent as live after spawn
   # Will be overridden per scenario
-  printf '{"agents":[{"name":"tgt-%s-g2","status":"live"}]}\n' "${NODE_ID:3:8}" > "$sbx/scenario/abi-list-out"
+  printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live"}]}\n' "${NODE_ID:3:8}" "$TEST_HARNESS" > "$sbx/scenario/abi-list-out"
 
   # Write the expected holder into scenario dir so the stub can read it
   echo "target-session:${SESSION_ID}" > "$sbx/scenario/expected-holder"
@@ -339,6 +343,8 @@ run_handoff() {
       FNO_DIR=".fno" \
       HANDOFF_VERIFY_TIMEOUT="${HANDOFF_VERIFY_TIMEOUT:-10}" \
       HANDOFF_VERIFY_INTERVAL="${HANDOFF_VERIFY_INTERVAL:-1}" \
+      CLAUDE_CODE_SESSION_ID="test-claude-sid" \
+      CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
       bash "$SCRIPT" --boundary "$boundary" "$@" 2>&1
     )
@@ -350,6 +356,8 @@ run_handoff() {
       FNO_DIR=".fno" \
       HANDOFF_VERIFY_TIMEOUT="${HANDOFF_VERIFY_TIMEOUT:-10}" \
       HANDOFF_VERIFY_INTERVAL="${HANDOFF_VERIFY_INTERVAL:-1}" \
+      CLAUDE_CODE_SESSION_ID="test-claude-sid" \
+      CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
       bash "$SCRIPT" --boundary "$boundary" 2>&1
     )
@@ -547,8 +555,8 @@ echo "=== Scenario 6: generation cap ==="
 SBX="$(make_sandbox s6)"
 # 3 delegated events -> child_gen = 2 + 3 = 5; cap=4; refuse
 for i in 1 2 3; do
-  printf '{"ts":"2026-06-05T12:0%d:00Z","type":"delegated","source":"target","data":{"node_id":"%s","from_session":"sess%d","to_session":"tgt-%s-g%d","boundary":"blueprint-do","generation":%d}}\n' \
-    "$i" "$NODE_ID" "$i" "${NODE_ID:3:8}" "$((i+1))" "$((i+1))" \
+  printf '{"ts":"2026-06-05T12:0%d:00Z","type":"delegated","source":"target","data":{"node_id":"%s","from_session":"sess%d","to_session":"tgt-%s-%s-g%d","boundary":"blueprint-do","generation":%d,"harness":"%s"}}\n' \
+    "$i" "$NODE_ID" "$i" "${NODE_ID:3:8}" "$TEST_HARNESS" "$((i+1))" "$((i+1))" "$TEST_HARNESS" \
     >> "$SBX/.fno/events.jsonl"
 done
 

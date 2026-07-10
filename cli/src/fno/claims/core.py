@@ -45,6 +45,7 @@ from .io import (
     serialize_claim,
 )
 from .staleness import classify, now_ms
+from ..harness_identity import resolve_harness_identity
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -144,6 +145,11 @@ def _make_claim(
         pid=pid if pid is not None else os.getpid(),
         host=host if host is not None else socket.gethostname(),
         reason=reason,
+        # x-3e70: tag the claim with the acquiring harness so the dispatch guard
+        # can read a foreign owner off the claim. This is the PRODUCTION writer
+        # (`fno claim` forwards to this Python CLI), kept in lockstep with the
+        # Rust make_claim resolver via the shared harness_identity markers.
+        harness=resolve_harness_identity().harness,
         metadata=metadata or {},
     )
 

@@ -86,6 +86,7 @@ class Claim(BaseModel):
     pid: int
     host: str
     reason: Optional[str] = None
+    harness: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("key")
@@ -136,6 +137,8 @@ class Claim(BaseModel):
             out["expires_at"] = self.expires_at
         if self.reason is not None:
             out["reason"] = self.reason
+        if self.harness is not None:
+            out["harness"] = self.harness
         if self.metadata:
             out["metadata"] = self.metadata
         return out

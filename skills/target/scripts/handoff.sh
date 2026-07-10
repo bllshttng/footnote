@@ -229,6 +229,26 @@ CLAIM_HOLDER="$(_parse_body_field "$STATE_FILE" "target_claim_holder")"
 _CLAIM_TTL_RAW="$(_parse_body_field "$STATE_FILE" "target_claim_ttl")"
 CLAIM_TTL="${_CLAIM_TTL_RAW:-2h}"
 
+# Owning harness of THIS (parent) session, from the ambient session markers in
+# the same precedence order as cli/src/fno/harness_identity.py (x-efc7). The
+# successor name is namespaced by it (tgt-<node>-<harness>-gN) so two dispatchers
+# on different harnesses cannot collide on one registry name (x-3e70: codex's
+# self-handoff died on `agent tgt-fc7-g2 already exists` after abi-loop dispatched
+# a claude worker of the same name). Unknown/no-marker defaults to `claude`,
+# which both preserves the legacy claude lineage and stays distinct from a codex
+# lineage's name.
+# Default-then-strip (whitespace-only markers count as unset, matching the
+# Rust/Python resolvers' .trim()/.strip()); the `:-` default keeps the `//`
+# expansion safe under `set -u` on an unset marker.
+_cx_m="${CODEX_THREAD_ID:-}"; _cl_m="${CLAUDE_CODE_SESSION_ID:-}"
+_cs_m="${CODEX_SESSION_ID:-}"; _gm_m="${GEMINI_SESSION_ID:-}"
+if [ -n "${_cx_m//[[:space:]]/}" ]; then _HARNESS="codex"
+elif [ -n "${_cl_m//[[:space:]]/}" ]; then _HARNESS="claude"
+elif [ -n "${_cs_m//[[:space:]]/}" ]; then _HARNESS="codex"
+elif [ -n "${_gm_m//[[:space:]]/}" ]; then _HARNESS="gemini"
+else _HARNESS="claude"
+fi
+
 if [ -z "$SESSION_ID" ]; then
   echo "parked null reason=\"manifest missing session_id\""
   exit "$_EXIT_PARKED"
@@ -299,12 +319,18 @@ if [ -f "$SENTINEL" ]; then
 fi
 
 # Generation cap check
-# child_gen = 2 + (count of `delegated` events for this node_id in events.jsonl)
+# child_gen = 2 + (count of THIS harness's `delegated` events for this node_id).
+# Scoping the count to (node, harness) keeps each lineage's generation monotonic
+# and its cap independent - a codex lineage's handoffs never consume a claude
+# lineage's budget (x-3e70). Pre-change events carry no harness field and so do
+# not match, which is correct: their names lacked the harness infix too, so a
+# reset count can never re-mint an existing name.
 _PRIOR_COUNT=0
 if [ -f "$EVENTS_FILE" ]; then
   set +o pipefail
   _PRIOR_COUNT="$(grep '"type":"delegated"' "$EVENTS_FILE" 2>/dev/null \
     | grep "\"node_id\":\"${NODE_ID}\"" 2>/dev/null \
+    | grep "\"harness\":\"${_HARNESS}\"" 2>/dev/null \
     | wc -l | tr -d ' ' || echo 0)"
   set -o pipefail
 fi
@@ -398,7 +424,7 @@ delegated remaining pipeline work to generation ${CHILD_GEN}.
 The successor session should re-enter via: /fno:target ${NODE_ID}
 with the same worktree, branch, and .fno/ state as this session.
 
-Successor name: tgt-${NODE_ID:3:8}-g${CHILD_GEN}
+Successor name: tgt-${NODE_ID:3:8}-${_HARNESS}-g${CHILD_GEN}
 BRIEFEOF
 fi
 
@@ -472,9 +498,11 @@ fi
 # ---------------------------------------------------------------------------
 # Step 6: Spawn successor
 # ---------------------------------------------------------------------------
-# Child name: tgt-<node-8hex-suffix>-g<child_gen>
+# Child name: tgt-<node-8hex-suffix>-<harness>-g<child_gen>. The harness infix
+# namespaces the name by the parent lineage so two dispatchers on different
+# harnesses cannot collide on one registry name (x-3e70).
 _NODE_8HEX="${NODE_ID:3:8}"
-CHILD_NAME="tgt-${_NODE_8HEX}-g${CHILD_GEN}"
+CHILD_NAME="tgt-${_NODE_8HEX}-${_HARNESS}-g${CHILD_GEN}"
 
 # Build command: inject no-merge when auto_merge_approved != true
 SPAWN_FLAGS=""
@@ -627,7 +655,7 @@ fi
 
 # 8a. Emit delegated event
 _emit_event "delegated" \
-  "{\"node_id\":\"$NODE_ID\",\"from_session\":\"$SESSION_ID\",\"to_session\":\"$CHILD_NAME\",\"child_session\":\"$CHILD_SID\",\"boundary\":\"$BOUNDARY\",\"generation\":$CHILD_GEN}"
+  "{\"node_id\":\"$NODE_ID\",\"from_session\":\"$SESSION_ID\",\"to_session\":\"$CHILD_NAME\",\"child_session\":\"$CHILD_SID\",\"boundary\":\"$BOUNDARY\",\"generation\":$CHILD_GEN,\"harness\":\"$_HARNESS\"}"
 
 # 8b. Emit session_satisfied (trigger=delegated)
 # Compute gate_state_hash from archived manifest (sha256 of the file, or "none")
