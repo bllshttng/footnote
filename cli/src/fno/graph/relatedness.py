@@ -43,11 +43,18 @@ class NoMapError(Exception):
     """
 
 
+def _keep(t: str) -> bool:
+    # Drop stopwords, sub-3-char fragments, and pure-digit tokens: date parts
+    # ("04", "19", "2026") and ids in details are high-frequency noise that
+    # would rank nodes by shared dates instead of shared meaning.
+    return len(t) >= 3 and not t.isdigit() and t not in _STOPWORDS
+
+
 def _tokens(e: Entry) -> frozenset[str]:
     text = " ".join(
         v for f in ("title", "slug", "details") if isinstance((v := e.get(f)), str)
     ).lower()
-    return frozenset(t for t in _TOKEN_RE.findall(text) if t not in _STOPWORDS)
+    return frozenset(t for t in _TOKEN_RE.findall(text) if _keep(t))
 
 
 def _epic_key(e: Entry) -> Optional[str]:

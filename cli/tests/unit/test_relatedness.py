@@ -58,6 +58,15 @@ def test_build_map_skips_malformed_rows():
 
 # --- AC4-EDGE: empty / single-node graph is a clean no-op ---
 
+def test_build_map_ignores_dates_and_short_tokens():
+    # Two nodes sharing only a date string + short fragments must NOT be related
+    # (dates are noise); a real shared term must.
+    a = _node("a", title="04 19 2026 v1 db", domain="ops")
+    b = _node("b", title="04 19 2026 v1 db", domain="billing")
+    m = R.build_map([a, b])
+    assert m["a"] == [] and m["b"] == []
+
+
 def test_build_map_empty_graph():
     assert R.build_map([]) == {}
 
@@ -125,3 +134,55 @@ def test_archive_holds_back_referenced_and_recent():
     skip_reasons = {e["id"]: e["_skip"] for e in skipped}
     assert skip_reasons["done-old-ref"] == "referenced-by-open-node"
     assert skip_reasons["done-young"] == "too-recent"
+
+
+# --- CLI boundary: build then get round-trip + exit-code contract (AC2/AC3) ---
+
+def _wire_paths(tmp_path, monkeypatch, entries):
+    """Point both the graph read and the sidecar write at tmp_path."""
+    import json as _json
+    from fno.graph import cli as _cli
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(_json.dumps({"entries": entries}))
+    sidecar = tmp_path / "relatedness.json"
+    monkeypatch.setattr(_cli, "_graph_path", lambda: graph)
+    monkeypatch.setattr(_cli, "_relatedness_path", lambda: sidecar)
+    return sidecar
+
+
+def test_cli_build_then_get(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from fno.graph.cli import _relatedness_cli
+
+    _wire_paths(tmp_path, monkeypatch, [
+        _node("a", title="nightly groomer relatedness", domain="code"),
+        _node("b", title="nightly groomer rank", domain="code"),
+    ])
+    runner = CliRunner()
+    assert runner.invoke(_relatedness_cli, ["build"]).exit_code == 0
+    res = runner.invoke(_relatedness_cli, ["get", "a", "-J"])
+    assert res.exit_code == 0
+    assert '"id": "b"' in res.stdout
+
+
+def test_cli_get_no_map_exits_nonzero_empty(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from fno.graph.cli import _relatedness_cli
+
+    _wire_paths(tmp_path, monkeypatch, [])  # no build run -> no sidecar
+    res = CliRunner().invoke(_relatedness_cli, ["get", "a"])
+    assert res.exit_code != 0
+    assert res.stdout.strip() == ""
+
+
+def test_cli_get_no_edges_exits_zero(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from fno.graph.cli import _relatedness_cli
+
+    _wire_paths(tmp_path, monkeypatch, [_node("solo", title="lonely", domain="code")])
+    runner = CliRunner()
+    runner.invoke(_relatedness_cli, ["build"])
+    res = runner.invoke(_relatedness_cli, ["get", "solo", "-J"])
+    assert res.exit_code == 0
+    assert res.stdout.strip() == "[]"
