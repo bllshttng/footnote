@@ -1018,6 +1018,45 @@ def cmd_send(
         from fno.agents import discover as discover_mod
 
         resolved, suggestions = discover_mod.resolve_or_suggest(name)
+
+        # US7(a), x-d899: a disk-discovered cross-harness session (codex/gemini)
+        # is addressed by its <harness>-<id> handle, NOT routed to a project
+        # inbox — that handle is exactly what the recipient's `drain-self` reads,
+        # so a project-addressed envelope would strand. Write the durable floor
+        # (the codex live rung is US8); the body is <fno_mail>-wrapped so it is
+        # self-recording and a reply can correlate.
+        if resolved is not None and resolved.agent != "claude":
+            from fno.agents.provider_resolve import infer_invoking_harness
+            from fno.harness_identity import canonical_handle
+            from fno.inbox.store import write_new_thread
+            from fno.mail.envelope import wrap_fno_mail
+
+            handle = canonical_handle(resolved.agent, resolved.session_id)
+            wrapped = wrap_fno_mail(
+                message,
+                from_=from_name or "fno",
+                harness=infer_invoking_harness() or "cli",
+                model="unknown",
+                to=resolved.short_id,
+            )
+            try:
+                th = write_new_thread(
+                    recipient=handle,
+                    sender=from_name or "fno",
+                    kind="send",
+                    body=wrapped,
+                    to_kind="name",
+                    provider_to=resolved.agent,
+                )
+            except (OSError, ValueError, RuntimeError) as exc2:
+                print(f"durable envelope write failed for {handle!r}: {exc2}", file=sys.stderr)
+                raise typer.Exit(code=12) from exc2
+            print(
+                f"{th.thread_id} queued (durable) for {handle} "
+                f"[live {resolved.agent} session {resolved.handle}]"
+            )
+            return
+
         if resolved is not None and resolved.project:
             try:
                 result = dispatch_send_to_project(

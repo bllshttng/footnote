@@ -123,3 +123,54 @@ def test_drain_self_no_harness_env_is_noop(runner, mailbox, monkeypatch):
     res = runner.invoke(app, ["mail", "drain-self"])
     assert res.exit_code == 0
     assert res.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# US7(a) / AC1-HP + AC2-HP: send to a DISK-DISCOVERED codex session (never
+# registered) is addressed to its handle and drained by drain-self. Full round.
+# ---------------------------------------------------------------------------
+
+def _write_codex_rollout(codex_dir, *, session_id, cwd):
+    import json as _json
+    import os as _os
+    import time as _time
+
+    day = codex_dir / "2026" / "07" / "09"
+    day.mkdir(parents=True, exist_ok=True)
+    f = day / f"rollout-2026-07-09T00-00-00-{session_id}.jsonl"
+    f.write_text(
+        _json.dumps({"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}) + "\n",
+        encoding="utf-8",
+    )
+    mt = _time.time() - 5.0
+    _os.utime(f, (mt, mt))
+
+
+def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeypatch, tmp_path):
+    from fno.agents import discover
+
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    codex_dir = tmp_path / "codex"
+    _write_codex_rollout(codex_dir, session_id=sid, cwd="/Users/x/proj")
+    # Isolate discovery: empty claude stores, codex points at our rollout.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(codex_dir))
+
+    # A claude session sends to the codex handle (codex row is unregistered, so
+    # the send falls through registry-unknown into disk resolution).
+    sent = runner.invoke(
+        app, ["mail", "send", "codex-019f48e1", "ack from K", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "codex-019f48e1" in sent.output
+
+    # The codex session drains its own handle and sees the message.
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert drained.exit_code == 0, drained.output
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and payload[0]["to"] == "codex-019f48e1"
+    assert "ack from K" in payload[0]["body"]  # inside the <fno_mail> wrap
