@@ -57,16 +57,21 @@ run() {  # run a leg best-effort; a failure is logged, never aborts the rest.
 
 echo "== nightly-groom $TS (dry_run=$DRY_RUN age=${AGE}d) =="
 
-run "relatedness build" $FNO backlog relatedness build
-
 if [[ "$DRY_RUN" == 1 ]]; then
   run "archive (dry-run)"   $FNO backlog archive --older-than-days "$AGE"
   run "reconcile (dry-run)" $FNO backlog reconcile --dry-run
-  MAINTAIN_OUT="$($FNO backlog maintain 2>&1)" || true
+  MAINTAIN_OUT="$($FNO backlog maintain 2>&1 || true)"
+  # Do NOT build in dry-run: build writes the PRODUCTION sidecar, which would
+  # change offer/triage results on a supposed review-only run.
+  echo ">> relatedness build: skipped in --dry-run (would overwrite the production sidecar)"
 else
   run "archive --apply"   $FNO backlog archive --apply --older-than-days "$AGE"
   run "reconcile --apply" $FNO backlog reconcile
-  MAINTAIN_OUT="$($FNO backlog maintain --apply 2>&1)" || true
+  MAINTAIN_OUT="$($FNO backlog maintain --apply 2>&1 || true)"
+  # Build LAST, after the mutating legs, so the map reflects the post-groom
+  # graph - nodes archived this run are gone from the corpus, not left as
+  # dangling edges until the next build.
+  run "relatedness build" $FNO backlog relatedness build
 fi
 echo "$MAINTAIN_OUT"
 

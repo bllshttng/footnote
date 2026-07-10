@@ -129,7 +129,7 @@ def write_map(path: Path, mapping: dict[str, list[dict[str, Any]]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(mapping, indent=2) + "\n")
         os.replace(tmp, str(path))
     except Exception:
@@ -150,7 +150,10 @@ def get_related(path: Path, node_id: str, k: Optional[int] = None) -> list[dict[
     if not path.exists():
         raise NoMapError(f"no relatedness map at {path}")
     try:
-        mapping = json.loads(path.read_text())
+        # A corrupt/unreadable map RAISES (distinct from "no edges") so callers
+        # fall back correctly - do not degrade to an empty map here. ValueError
+        # covers json.JSONDecodeError and UnicodeDecodeError.
+        mapping = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise NoMapError(f"unreadable relatedness map at {path}: {exc}") from exc
     edges = mapping.get(node_id, [])
