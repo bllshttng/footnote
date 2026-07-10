@@ -116,6 +116,18 @@ else
     fail "missing parsers did not allow: $NO_PARSER_OUTPUT"
 fi
 
+PYTHON_ONLY_BIN="$TMP_BASE/python-only-bin"
+mkdir -p "$PYTHON_ONLY_BIN"
+for command_name in bash cat dirname git head python3 sed; do
+    ln -s "$(command -v "$command_name")" "$PYTHON_ONLY_BIN/$command_name"
+done
+PYTHON_ONLY_OUTPUT="$(payload "$CANONICAL" | PATH="$PYTHON_ONLY_BIN" "$PYTHON_ONLY_BIN/bash" "$GUARD")"
+if [[ "$(printf '%s' "$PYTHON_ONLY_OUTPUT" | jq -r '.decision')" == "block" ]]; then
+    pass "python3 fallback blocks canonical main without jq"
+else
+    fail "python3 fallback did not block: $PYTHON_ONLY_OUTPUT"
+fi
+
 NO_HELPER_DIR="$TMP_BASE/no-helper"
 mkdir -p "$NO_HELPER_DIR"
 cp "$GUARD" "$NO_HELPER_DIR/guard.sh"

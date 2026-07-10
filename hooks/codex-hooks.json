@@ -13,6 +13,16 @@
         ]
       },
       {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CODEX_PLUGIN_ROOT}/hooks/worktree-write-protect.sh",
+            "statusMessage": "checking worktree location"
+          }
+        ]
+      },
+      {
         "matcher": "^Bash$",
         "hooks": [
           {

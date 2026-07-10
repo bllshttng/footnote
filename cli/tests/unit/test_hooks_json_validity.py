@@ -140,6 +140,25 @@ def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
         pytest.fail("codex-hooks.json references missing files:\n  " + "\n  ".join(failures))
 
 
+def test_codex_hooks_block_canonical_edit_tools() -> None:
+    data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
+    registrations = data["hooks"]["PreToolUse"]
+    worktree_guard = [
+        registration
+        for registration in registrations
+        if registration.get("matcher") == "Edit|Write"
+        and any(
+            hook.get("command")
+            == "bash ${CODEX_PLUGIN_ROOT}/hooks/worktree-write-protect.sh"
+            for hook in registration.get("hooks", [])
+        )
+    ]
+    assert len(worktree_guard) == 1, (
+        "Codex apply_patch exposes Edit and Write matcher aliases; exactly one "
+        "PreToolUse registration must route them through the worktree guard"
+    )
+
+
 def test_local_codex_marketplace_points_at_repo_plugin_root() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(

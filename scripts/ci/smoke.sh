@@ -68,6 +68,7 @@ bash tests/lib/test_cost_tracker_sh_parity.sh'
     step "loop-check shim + immutable manifest harness (ab-d0337fbc)" "." 'bash tests/hooks/test_loop_check_shim.sh
 bash tests/hooks/test_manifest_immutable.sh
 bash tests/hooks/test_graph_write_protect.sh
+bash tests/hooks/test_worktree_write_protect.sh
 bash tests/hooks/test_init_target_session_id.sh
 bash tests/hooks/test_agy_stop_hook.sh'
     step "born-with-why offer inject hook harness" "." 'bash tests/hooks/test_born_with_why_offer_inject.sh'
