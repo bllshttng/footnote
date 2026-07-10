@@ -156,9 +156,11 @@ async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), &'static
         .await
         .map_err(|_| "io-error")?;
 
-    sink.send(Message::Text(turn_start_request_json(thread_id, text).into()))
-        .await
-        .map_err(|_| "io-error")?;
+    sink.send(Message::Text(
+        turn_start_request_json(thread_id, text).into(),
+    ))
+    .await
+    .map_err(|_| "io-error")?;
     let resp = read_until_id(&mut stream, &serde_json::json!(1)).await?;
     classify_turn_start_response(&resp)
 }
@@ -227,10 +229,7 @@ mod tests {
     #[test]
     fn classify_thread_not_loaded_on_thread_error() {
         let raw = r#"{"id":1,"error":{"code":-32000,"message":"thread not found"}}"#;
-        assert_eq!(
-            classify_turn_start_response(raw),
-            Err("thread-not-loaded")
-        );
+        assert_eq!(classify_turn_start_response(raw), Err("thread-not-loaded"));
     }
 
     #[test]
