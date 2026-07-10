@@ -665,6 +665,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
         node_cwd=str(cand.repo_dir) if cand.repo_dir else None,
         spawn=_cold_spawn,
         source_session_id=getattr(cand, "source_session_id", None),
+        source_harness=getattr(cand, "source_harness", None),
     )
 
 

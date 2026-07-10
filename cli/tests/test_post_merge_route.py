@@ -112,3 +112,73 @@ class TestInjectPrMerged:
         delivered, reason = inject_pr_merged("aaaa-bbbb", 7)
         assert delivered is False
         assert reason.startswith("inject-error")
+
+
+class _FakeEntry:
+    def __init__(self, provider, codex_session_id, status="live"):
+        self.provider = provider
+        self.codex_session_id = codex_session_id
+        self.status = status
+
+
+def _patch_registry(monkeypatch, entries):
+    import fno.agents.registry as reg
+
+    monkeypatch.setattr(reg, "load_registry", lambda *a, **k: entries)
+
+
+class TestCodexWarmRoute:
+    """x-c4dd: codex-shipped nodes warm-route to their live registered panel via
+    the shared _deliver_live vehicle, injecting the RAW command (mail=None)."""
+
+    def test_resolve_codex_live_registered_panel(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-123", "live")])
+        assert resolve_warm_session("cx-123", "codex") == "cx-123"
+
+    def test_resolve_codex_no_panel_is_none(self, monkeypatch):
+        _patch_registry(monkeypatch, [])
+        assert resolve_warm_session("cx-123", "codex") is None
+
+    def test_resolve_codex_exited_panel_is_none(self, monkeypatch):
+        _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-123", "exited")])
+        assert resolve_warm_session("cx-123", "codex") is None
+
+    def test_resolve_gemini_always_cold(self, monkeypatch):
+        # No live-inject vehicle yet (US9): gemini cold-paths regardless.
+        _patch_registry(monkeypatch, [_FakeEntry("gemini", "gm-1", "live")])
+        assert resolve_warm_session("gm-1", "gemini") is None
+
+    def test_inject_codex_delivers_raw_via_deliver_live(self, monkeypatch):
+        entry = _FakeEntry("codex", "cx-9", "live")
+        _patch_registry(monkeypatch, [entry])
+        sent = {}
+        import fno.agents.dispatch as dispatch
+
+        def _fake_deliver(e, body, from_name="fno", mail=None):
+            sent["args"] = (e, body, mail)
+            return True
+
+        monkeypatch.setattr(dispatch, "_deliver_live", _fake_deliver)
+        delivered, reason = inject_pr_merged("cx-9", 42, "codex")
+        assert (delivered, reason) == (True, "delivered")
+        # RAW command, no <fno_mail> envelope: mail is None so it lands verbatim.
+        assert sent["args"][0] is entry
+        assert sent["args"][1] == "/fno:pr merged 42 autonomous"
+        assert sent["args"][2] is None
+
+    def test_inject_codex_no_panel_is_not_live(self, monkeypatch):
+        _patch_registry(monkeypatch, [])
+        assert inject_pr_merged("cx-9", 42, "codex") == (False, "not-live")
+
+    def test_inject_codex_deliver_false_is_not_live(self, monkeypatch):
+        _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-9", "live")])
+        import fno.agents.dispatch as dispatch
+
+        monkeypatch.setattr(dispatch, "_deliver_live", lambda *a, **k: False)
+        assert inject_pr_merged("cx-9", 42, "codex") == (False, "not-live")
+
+    def test_inject_gemini_unsupported(self, monkeypatch):
+        delivered, reason = inject_pr_merged("gm-1", 42, "gemini")
+        assert delivered is False
+        assert reason.startswith("unsupported-harness")

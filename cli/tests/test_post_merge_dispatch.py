@@ -392,15 +392,17 @@ class _WarmInject:
         self.reason = reason
         self.calls: list[tuple[str, int]] = []
 
-    def __call__(self, session_id: str, pr_number: int):
-        self.calls.append((session_id, pr_number))
+    def __call__(self, session_id: str, pr_number: int, source_harness=None):
+        self.calls.append((session_id, pr_number, source_harness))
         return (self.delivered, self.reason)
 
 
 def _patch_resolver(monkeypatch, result):
     import fno.post_merge_route as pmr
 
-    monkeypatch.setattr(pmr, "resolve_warm_session", lambda sid: result)
+    monkeypatch.setattr(
+        pmr, "resolve_warm_session", lambda sid, harness=None: result
+    )
 
 
 def test_warm_delivery_skips_cold_and_marks(tmp_path, monkeypatch):
@@ -414,7 +416,7 @@ def test_warm_delivery_skips_cold_and_marks(tmp_path, monkeypatch):
         spawn=spawn, source_session_id="sess-live-1", warm_inject=warm,
     )
     assert res.outcome == "routed-warm"
-    assert warm.calls == [("sess-live-1", 7)]
+    assert warm.calls == [("sess-live-1", 7, None)]
     assert spawn.calls == []
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW1").exists()
 
@@ -500,7 +502,7 @@ def test_warm_resolver_error_degrades_to_cold(tmp_path, monkeypatch):
     """A resolver crash must never break the dispatch (fallback floor)."""
     import fno.post_merge_route as pmr
 
-    def _boom(sid):
+    def _boom(sid, harness=None):
         raise RuntimeError("resolver exploded")
 
     monkeypatch.setattr(pmr, "resolve_warm_session", _boom)
@@ -512,3 +514,29 @@ def test_warm_resolver_error_degrades_to_cold(tmp_path, monkeypatch):
     assert res.outcome == "dispatched"
     assert res.detail is not None and res.detail.startswith("cold: warm-error")
     assert len(spawn.calls) == 1
+
+
+def test_source_harness_threads_to_resolver_and_inject(tmp_path, monkeypatch):
+    """x-c4dd: the harness selects the live vehicle. dispatch passes
+    source_harness to BOTH the resolver and the inject seam, so a codex-shipped
+    node warm-routes to its own panel instead of cold-spawning a claude worker."""
+    import fno.post_merge_route as pmr
+
+    seen = {}
+
+    def _resolver(sid, harness=None):
+        seen["resolver"] = (sid, harness)
+        return sid  # live
+
+    monkeypatch.setattr(pmr, "resolve_warm_session", _resolver)
+    warm = _WarmInject(delivered=True)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        9, dedup_key="shaWH", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="codex-sess", source_harness="codex",
+        warm_inject=warm,
+    )
+    assert res.outcome == "routed-warm"
+    assert seen["resolver"] == ("codex-sess", "codex")
+    assert warm.calls == [("codex-sess", 9, "codex")]
+    assert spawn.calls == []

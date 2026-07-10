@@ -53,6 +53,9 @@ class PrCandidate:
     # The node's originating session id (warm-route target for the post-merge
     # ritual). None when the node predates provenance stamping.
     source_session_id: Optional[str] = None
+    # The originating session's harness (claude|codex|gemini): selects which
+    # live vehicle the warm route uses. None -> claude (back-compat default).
+    source_harness: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +182,7 @@ def discover_open_prs(entries: list[dict]) -> list[PrCandidate]:
                     repo_dir=repo_dir,
                     repo_slug=slug,
                     source_session_id=node.get("source_session_id") or None,
+                    source_harness=node.get("source_harness") or None,
                 )
             )
     return candidates
