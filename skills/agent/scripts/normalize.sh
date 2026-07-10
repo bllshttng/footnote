@@ -22,6 +22,7 @@
 #   node=<ab-XXXXXXXX>         (empty when the payload is a free-form feature)
 #   name=<agent name>
 #   provider=<claude|codex|gemini>
+#   model=<exact model name>   (empty unless `model <name>` / --model given)
 #   message=<final message to pass verbatim to the spawn/host verb>
 #
 # Locked decisions honored:
@@ -31,12 +32,18 @@
 
 set -uo pipefail
 
-VALID_PROVIDERS="claude codex gemini"
+# Mirrors the Rust KNOWN_PROVIDERS source of truth (crates/fno-agents provider.rs):
+# the set `fno agents spawn --provider` accepts. Widen both together. (hermes /
+# openclaw are megawalk drivers, a different axis, not spawn providers.)
+VALID_PROVIDERS="claude codex gemini agy opencode"
 
 INPUT=""
 NAME=""
 NAME_SET=0         # 1 = -n/--name was passed (even if empty -> empty-name error)
 PROVIDER=""
+MODEL=""           # exact model name forwarded to `fno agents spawn --model`
+                   # (each provider's own --model). Dashless: `model <name>`.
+                   # No short flag: `-m` is taken by --allow-merge.
 ALLOW_MERGE=0
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
@@ -74,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --input)          INPUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -n|--name)        NAME="${2:-}"; NAME_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --provider)       PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -m|--allow-merge) ALLOW_MERGE=1; shift ;;
     -y|--yes)         YES=1; shift ;;
     -i|--interactive) MODE="interactive"; shift ;;
@@ -147,14 +155,32 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       _end=$(( _i - 1 ))
       continue
     fi
+    # `model <name>` binds the token AFTER `model` as the exact model name,
+    # verbatim - same left-peek shape as `as <name>` so a model name that is
+    # not a posture word (opus/sonnet/gpt-5) is consumed as the value, not as
+    # task text. A dash-flag `--model` already wins (idempotent fill).
+    if (( _i >= 1 )) && [[ "$(printf '%s' "${_toks[$((_i-1))]}" | tr '[:upper:]' '[:lower:]')" == "model" ]]; then
+      [[ -z "$MODEL" ]] && MODEL="$_t"
+      _end=$(( _i - 1 ))
+      continue
+    fi
     _lt=$(printf '%s' "$_t" | tr '[:upper:]' '[:lower:]')
+    # A provider bareword is any non-claude token in VALID_PROVIDERS (which
+    # mirrors the Rust KNOWN_PROVIDERS source of truth), so a newly-supported
+    # harness needs no parser edit - just widen VALID_PROVIDERS. claude is the
+    # default and stays task text (matching the historical codex|gemini arm).
+    # Inline string-membership, not is_valid_provider(): that fn is defined
+    # later in the file and is not yet in scope during this top-level parse.
+    if [[ "$_lt" != claude && " $VALID_PROVIDERS " == *" $_lt "* ]]; then
+      [[ -z "$PROVIDER" ]] && PROVIDER="$_lt"; _end=$_i; continue
+    fi
     case "$_lt" in
-      codex|gemini)        [[ -z "$PROVIDER" ]] && PROVIDER="$_lt"; _end=$_i ;;
       yolo|auto)           YOLO=1; _end=$_i ;;
       merge)               ALLOW_MERGE=1; _end=$_i ;;
       interactive|drive)   [[ "$MODE" == "exec" ]] && MODE="interactive"; _end=$_i ;;
       bg|headless)         [[ -z "$SUBSTRATE" ]] && SUBSTRATE="$_lt"; _end=$_i ;;
       as)                  emit_error "'as' is a name keyword with no name after it; write 'as <name>' or drop it" ;;
+      model)               emit_error "'model' is a keyword with no name after it; write 'model <name>' or drop it" ;;
       *)                   break ;;  # task-text boundary (the run ends here)
     esac
   done
@@ -222,7 +248,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--ask|-P|--project|-f|--force)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--ask|-P|--project|-f|--force)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
@@ -680,6 +706,7 @@ printf 'resolved_cwd=%s\n' "$RESOLVED_CWD"
 printf 'shape_hint=%s\n' "$shape_hint"
 printf 'name=%s\n' "$agent_name"
 printf 'provider=%s\n' "$provider"
+printf 'model=%s\n' "$MODEL"
 printf 'mode=%s\n' "$MODE"
 # x-2c27: the spawn substrate (empty=pane default). The SKILL forwards a
 # non-empty value to `spawn.sh --substrate`; bg -> claude --bg thread,

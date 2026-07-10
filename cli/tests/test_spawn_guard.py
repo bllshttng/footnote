@@ -225,13 +225,21 @@ def test_malformed_ttl_fails_closed(claims_tmp):
     assert claim_status("dispatch:x-4444")["state"] == "free"
 
 
-# --- AC1-UI: discoverability (Python-registered, not Rust-shadowed) ----------
+# --- AC1-UI: reachable (Python-registered, not Rust-shadowed) ----------------
+# spawn-guard is a machine verb (spawn.sh calls it, not a human), so x-4ce9
+# hides it from `fno agents --help`. The original discoverability concern was
+# routing - that it stays Python-registered and is not shadowed by the Rust
+# runtime - which `hidden=True` preserves: the verb is still invokable, just
+# unlisted. Assert reachability by invocation, and that it is intentionally
+# absent from the group listing.
 
 
-def test_spawn_guard_listed_in_agents_help(claims_tmp):
-    res = runner.invoke(agents_app, ["--help"])
-    assert res.exit_code == 0
-    assert "spawn-guard" in res.output
+def test_spawn_guard_hidden_but_reachable(claims_tmp):
+    listing = runner.invoke(agents_app, ["--help"])
+    assert listing.exit_code == 0
+    assert "spawn-guard" not in listing.output  # hidden from the human listing
+    own = runner.invoke(agents_app, ["spawn-guard", "--help"])
+    assert own.exit_code == 0  # still Python-registered + invokable
 
 
 # --- x-4652: orphaned dispatch reservation reaps (already-correct path) -------

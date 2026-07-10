@@ -30,11 +30,16 @@ PROVIDER=""
 MESSAGE=""
 NODE=""
 CWD=""
+SELF=""                # caller's own claim holder (target_claim_holder). Lets
+                       # the collision pre-check tell a self-held claim (route to
+                       # the sanctioned handoff) from a foreign one (refuse).
 # Routing inputs (codex/gemini first-class dispatch, ab-417ab20f). Defaults keep
 # the legacy claude path equivalent: exec + build -> claude resolves to `spawn`
 # (Group 1 ab-8b3e4fe0: ask never creates), so an old caller that passes none
 # of these still launches a persistent claude bg peer.
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
+MODEL=""               # exact model name, forwarded as `spawn --model` (each
+                       # provider's own --model). Empty = provider default.
 PAYLOAD_MODE="build"   # build | ask | passthrough (ask -> spawn --once)
 SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
                        # (JSON receipt); headless -> one-shot (reply receipt).
@@ -65,8 +70,10 @@ while [[ $# -gt 0 ]]; do
     --provider)     PROVIDER="${2:-}"; shift 2 ;;
     --message)      MESSAGE="${2:-}"; shift 2 ;;
     --node)         NODE="${2:-}"; shift 2 ;;
+    --self)         SELF="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --cwd)          CWD="${2:-}"; shift 2 ;;
     --mode)         MODE="${2:-}"; shift 2 ;;
+    --model)        MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
     --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO=1; shift ;;
@@ -148,7 +155,21 @@ if [[ -n "$NODE" ]]; then
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
       if [[ "$reason" == "live-claim" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
+        # Self-handoff: the live claim is the CALLER's own (holder == --self).
+        # Distinguish it from a foreign collision, but do NOT spawn and do NOT
+        # release the claim here. A node claim can be released ONLY by the two
+        # sanctioned sites (handoff.sh / `fno backlog unclaim`, holder-verified);
+        # a helper subprocess release is a locked-down authority violation
+        # (ab-588326a7). And a bg spawn cannot emit the `delegated` event a clean
+        # takeover needs (it does not control the successor's session id), so
+        # merely proceeding would spawn a worker that is born contested while the
+        # caller still holds a live claim. The honest move is to route the caller
+        # to the sanctioned handoff rather than reassign from the wrong layer.
+        if [[ -n "$SELF" && "$holder" == "$SELF" ]]; then
+          printf 'result=self-handoff name=%s reason="you already hold node:%s (%s); /agent cannot reassign it from here. Hand off via /target self-handoff (archives state, emits the delegated event, releases the claim atomically), or run '"'"'fno backlog unclaim %s'"'"' then re-dispatch."\n' "$NAME" "$NODE" "$holder" "$NODE"
+        else
+          printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
+        fi
       else
         printf 'result=already-running name=%s reason="a peer dispatcher holds %s (racing launch)"\n' "$NAME" "$RES_KEY"
       fi
@@ -285,6 +306,7 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 [[ "$FRESH" -eq 1 ]] && cmd+=(--fresh)
 [[ "$HERE" -eq 1 ]] && cmd+=(--here)
 [[ "$YOLO" -eq 1 ]] && cmd+=(--yolo)
+[[ -n "$MODEL" ]] && cmd+=(--model "$MODEL")
 [[ -n "$PERMISSION_MODE" ]] && cmd+=(--permission-mode "$PERMISSION_MODE")
 # x-2c27: an explicit substrate emits --substrate (the canonical selector) and
 # supersedes the --once alias; otherwise the ask lane keeps --once.

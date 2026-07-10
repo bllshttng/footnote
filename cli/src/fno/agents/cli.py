@@ -614,7 +614,7 @@ def cmd_spawn(
         sys.stdout.flush()
 
 
-@agents_app.command("spawn-guard")
+@agents_app.command("spawn-guard", hidden=True)
 def cmd_spawn_guard(
     node_id: str = typer.Argument(
         ..., help="Backlog node id; the node:<id> claim is probed (Guard 1)."
@@ -1277,7 +1277,7 @@ def cmd_ping() -> None:
     typer.echo("(not yet implemented; planned for a future story)")
 
 
-@agents_app.command("drive-authority")
+@agents_app.command("drive-authority", hidden=True)
 def cmd_drive_authority(
     json_out: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
 ) -> None:
@@ -1489,7 +1489,7 @@ agents_app.command("resume")(_cmd_resume)
 # ---------------------------------------------------------------------------
 
 
-@agents_app.command("gate")
+@agents_app.command("gate", hidden=True)
 def cmd_gate(
     provider: str = typer.Argument("", help="(retired at G4)"),
     probe: bool = typer.Option(False, "--probe", hidden=True),
