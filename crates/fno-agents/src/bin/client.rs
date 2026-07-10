@@ -628,15 +628,15 @@ const HARNESS_MARKERS: &[(&str, &str)] = &[
 /// zero or >=2 (ambiguous) fall through to the builtin `claude`. Never guesses.
 /// `lookup` is injectable so tests don't touch process-global env.
 fn infer_dispatch_provider(lookup: impl Fn(&str) -> Option<String>) -> &'static str {
-    let present: Vec<&'static str> = HARNESS_MARKERS
+    // Exactly-one-present without a heap collect: short-circuit as soon as a
+    // second marker appears (a second `.next()` being `Some` means ambiguous).
+    let mut present = HARNESS_MARKERS
         .iter()
         .filter(|(marker, _)| lookup(marker).is_some_and(|v| !v.trim().is_empty()))
-        .map(|(_, harness)| *harness)
-        .collect();
-    if present.len() == 1 {
-        present[0]
-    } else {
-        "claude"
+        .map(|(_, harness)| *harness);
+    match present.next() {
+        Some(harness) if present.next().is_none() => harness,
+        _ => "claude",
     }
 }
 
