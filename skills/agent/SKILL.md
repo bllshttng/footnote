@@ -308,9 +308,13 @@ so even a delegated `next`/`all` is never a silent surprise.
     session manifest - `sed -n 's/^target_claim_holder: *"\?\([^"]*\)"\?/\1/p'
     .fno/target-state.md` (empty if you hold no target claim). If it equals
     `.holder`, this is a deliberate reassignment of YOUR node, not a collision -
-    mirror `/target` self-handoff: PROCEED with the spawn and pass `--self
-    "<holder>"` to `spawn.sh` (below) so its atomic re-check does not refuse.
-    Your stale claim TTL-expires as you idle.
+    PROCEED with the spawn and pass `--self "<holder>"` to `spawn.sh` (below).
+    spawn.sh then RELEASES your claim so the successor's `fno target init`
+    acquires a free claim cleanly. (Unlike `/target` self-handoff, a bg spawn
+    cannot emit a `delegated` event - it does not control the successor's
+    session id - so the clean release IS the handoff signal; a refused release
+    falls back to the successor's own stale-claim recovery once you idle.) Stop
+    working the node after handing off.
   - **Foreign collision** (holder is someone else, or you hold no claim): a
     worker already holds this node - tell the user (point at `fno agents logs
     $name`) and do NOT spawn a second loop.
@@ -375,7 +379,8 @@ bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
 
 Pass `--self "$self_holder"` only for a confirmed self-handoff (your
 `target_claim_holder` matched the live `.holder` in the collision pre-check); it
-lets the atomic re-check proceed instead of refusing your own node. Pass
+lets the atomic re-check proceed AND releases your claim so the successor takes
+over cleanly instead of refusing your own node. Pass
 `--model "$model"` only when normalize emitted a non-empty `model`
 (spawn.sh forwards it to `fno agents spawn --model`; omit it for the provider
 default). Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"`

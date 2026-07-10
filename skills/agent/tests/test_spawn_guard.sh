@@ -77,6 +77,7 @@ out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder"
   run --name w2h --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
 ok  'self-handoff -> launched not refused' "$(field "$out")" 'launched'
 has 'self-handoff spawned' "$(calllog)" 'agents spawn --provider'
+has 'self-handoff released caller claim' "$(calllog)" 'claim release node:x-7777 --holder target-session:owner'
 no  'self-handoff not already-running' "$out" 'already-running'
 
 # --- self-handoff with a DIFFERENT holder -> still refuse (foreign) -----------

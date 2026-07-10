@@ -159,11 +159,17 @@ if [[ -n "$NODE" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
         # Self-handoff: the live claim is the CALLER's own (holder == --self), so
         # this spawn is a deliberate reassignment of the caller's own node, not a
-        # foreign double-launch. Proceed (mirrors /target self-handoff); the
-        # caller's stale claim TTL-expires as it idles. Guard 2's dispatch
-        # reservation is intentionally not held here.
+        # foreign double-launch. RELEASE the caller's claim so the successor's
+        # `fno target init` acquires a FREE claim cleanly - otherwise it is born
+        # blocked and only recovers once the claim TTL-expires (codex P1). Unlike
+        # /target self-handoff we cannot emit a `delegated` event (that names the
+        # child session, which a bg spawn mints itself), so the clean release IS
+        # the handoff signal. Release is by holder-string match, not PID, so this
+        # subprocess can do it; best-effort (a refused release falls back to the
+        # stale-claim recovery the successor's init already performs).
         if [[ -n "$SELF" && "$holder" == "$SELF" ]]; then
-          printf 'note=self-handoff reason="caller holds node:%s (%s); reassigning to %s"\n' "$NODE" "$holder" "$NAME" >&2
+          fno claim release "node:$NODE" --holder "$SELF" >/dev/null 2>&1 || true
+          printf 'note=self-handoff reason="released caller claim on node:%s (%s); reassigning to %s"\n' "$NODE" "$holder" "$NAME" >&2
           SELF_HANDOFF=1
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"

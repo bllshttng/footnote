@@ -186,6 +186,10 @@ check_eq   '-m leaves model empty'              "$(field "$out" model)" ''
 # dangling `model` with nothing after = error
 out="$(run 'ab-44444444 model')"
 check_eq   'dangling model is error'            "$(field "$out" status)" 'error'
+# an inline --model dash-flag surviving in BUILD task text fails loud (defensive
+# flag-vocabulary scan), not a silent drop of the override
+out="$(run 'ab-99999999 --model opus')"
+check_eq   'inline --model in task text is error' "$(field "$out" status)" 'error'
 # mid-task `model` stays task text (right-anchored run)
 out="$(run 'model the user data carefully')"
 check_contains 'mid-task model stays in message' "$(field "$out" message)" 'model the user data carefully'

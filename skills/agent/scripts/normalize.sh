@@ -248,7 +248,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--ask|-P|--project|-f|--force)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--ask|-P|--project|-f|--force)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
