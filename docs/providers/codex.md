@@ -38,6 +38,15 @@ footnote's CLI-created worktrees under `~/conductor/workspaces/` are still used 
 `/fno:target` and background dispatch. They are separate from Codex app managed
 worktrees.
 
+The native plugin blocks `Edit`/`Write` tool calls from a canonical protected
+checkout (`main`, `master`, or detached HEAD) before `apply_patch` lands. For a
+footnote target, run `fno target start <node>` and read the `worktree=` path in
+its receipt, then continue the task from that path in a new or handed-off Codex
+session. Running the command does not relocate the current app thread. Alternatively,
+switch to Codex Worktree mode or use Handoff before retrying the edit. Both Codex-
+managed and CLI-created linked worktrees are allowed regardless of their directory
+base.
+
 ## Local-Development Fallback
 
 For older Codex builds or CLI-only sessions where plugin-bundled hooks are unavailable,

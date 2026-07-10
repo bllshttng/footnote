@@ -91,12 +91,12 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
             "hooks": [
                 {
                     "type": "command",
-                    "command": "env FNO_PLATFORM=codex ${CODEX_PLUGIN_ROOT}/hooks/session-start.sh",
+                    "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/session-start.sh",
                 }
             ],
         }
     ]
-    resolved = hooks[0]["hooks"][0]["command"].replace("${CODEX_PLUGIN_ROOT}", str(REPO_ROOT))
+    resolved = hooks[0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(REPO_ROOT))
     assert str(REPO_ROOT / "hooks" / "session-start.sh") in resolved
 
 
@@ -124,7 +124,8 @@ def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
     }
     assert set(data["hooks"]).isdisjoint(copied_claude_only)
 
-    placeholder = re.compile(r"\$\{CODEX_PLUGIN_ROOT(:-[^}]*)?\}")
+    assert "${CODEX_PLUGIN_ROOT}" not in CODEX_HOOKS_JSON.read_text(encoding="utf-8")
+    placeholder = re.compile(r"\$\{PLUGIN_ROOT(:-[^}]*)?\}")
     failures: list[str] = []
     for event, registrations in data["hooks"].items():
         for reg in registrations:
@@ -138,6 +139,25 @@ def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
                     failures.append(f"{event}: missing path {path}")
     if failures:
         pytest.fail("codex-hooks.json references missing files:\n  " + "\n  ".join(failures))
+
+
+def test_codex_hooks_block_canonical_edit_tools() -> None:
+    data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
+    registrations = data["hooks"]["PreToolUse"]
+    worktree_guard = [
+        registration
+        for registration in registrations
+        if registration.get("matcher") == "Edit|Write"
+        and any(
+            hook.get("command")
+            == "bash ${PLUGIN_ROOT}/hooks/worktree-write-protect.sh"
+            for hook in registration.get("hooks", [])
+        )
+    ]
+    assert len(worktree_guard) == 1, (
+        "Codex apply_patch exposes Edit and Write matcher aliases; exactly one "
+        "PreToolUse registration must route them through the worktree guard"
+    )
 
 
 def test_local_codex_marketplace_points_at_repo_plugin_root() -> None:

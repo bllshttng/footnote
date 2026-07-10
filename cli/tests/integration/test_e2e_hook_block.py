@@ -6,8 +6,8 @@ hooks/graph-write-protect.sh fed a synthesized PreToolUse JSON payload
 on stdin. This exercises the hook payload contract and verifies:
 
 - Edit/Write of `~/.fno/graph.json` returns decision="block".
-- Test-fixture paths (`/tests/`, `/fixtures/`) bypass the block.
-- Non-Edit/Write tools always approve.
+- Test-fixture paths (`/tests/`, `/fixtures/`) bypass the block with `{}`.
+- Non-Edit/Write tools emit the Codex no-op response `{}`.
 - The block reason mentions `fno backlog`.
 - graph.json on disk is unchanged when the block fires (the hook itself
   doesn't write to disk; the block decision is what stops the tool).
@@ -98,7 +98,7 @@ def test_hook_approves_non_graph_paths():
         "tool_input": {"file_path": "/tmp/some-other-file.txt"},
     }
     result = _invoke_hook(payload)
-    assert result["decision"] == "approve"
+    assert result == {}
 
 
 def test_hook_approves_non_edit_tools_even_on_graph_json():
@@ -109,8 +109,8 @@ def test_hook_approves_non_edit_tools_even_on_graph_json():
             "tool_input": {"file_path": f"{home}/.fno/graph.json"},
         }
         result = _invoke_hook(payload)
-        assert result["decision"] == "approve", (
-            f"{tool} on graph.json should approve (read-only intent), got {result}"
+        assert result == {}, (
+            f"{tool} on graph.json should allow with an empty response, got {result}"
         )
 
 
@@ -126,7 +126,7 @@ def test_hook_approves_test_fixture_paths():
         },
     }
     result = _invoke_hook(payload)
-    assert result["decision"] == "approve", (
+    assert result == {}, (
         f"test fixture path must be allowed, got {result}"
     )
 
@@ -134,7 +134,7 @@ def test_hook_approves_test_fixture_paths():
 def test_hook_approves_when_payload_is_missing_fields():
     """Robustness: a malformed/empty payload must not crash; default approve."""
     result = _invoke_hook({})
-    assert result["decision"] == "approve"
+    assert result == {}
 
 
 # ---------------------------------------------------------------------------
