@@ -53,6 +53,23 @@ The three **(typer, hidden)** verbs are the only machine verbs that used to show
 
 A verb with zero shell call sites is *not-yet-wired*, not dead: cutting requires proving no shell call site **and** no internal dispatch **and** no forward intent. The channel verbs fail that test (forward intent is explicit), so they stay.
 
+## The a2a reply contract (x-605c)
+
+Agent-to-agent mail is a protocol, not a transport the caller reasons about. It has exactly two halves:
+
+- **Inbound is self-addressed.** A message lands as `<fno_mail from="H" harness="..." model="...">body`. `H` is the sender's canonical handle (`<harness>-<short8>`), the ONE string its `mail drain-self` cursor also reads.
+- **Reply by handle.** Run `fno mail send H "..."`. Never inspect `harness`/`model` to pick a transport; the CLI resolves `H`. The outbound envelope auto-stamps the *invoking* session's own handle + real model (from its transcript store), so the reply is itself self-addressed.
+
+**Resolution ladder** (`discover.resolve_or_suggest`, one scan serving match + suggestions):
+
+1. **fno-agents registry** - a named worker (`x-d899-us8-build`) also answers to its `<provider>-<short8>` handle.
+2. **claude daemon roster** (`~/.claude/daemon/roster.json`) - a `claude --bg` worker leaves no pid-sidecar, so the roster is the only source that surfaces it. Presence is enough; the `mail-inject` connect is the authoritative liveness gate.
+3. **disk sessions** - live `~/.claude/sessions/<pid>.json` sidecars, else the transcript store.
+4. **codex rollouts** - hand-started codex sessions from `~/.codex/sessions`.
+5. **durable bus floor** - a handle that resolves but whose live inject misses gets a durable envelope addressed to its canonical handle; the recipient's SessionStart `drain-self` picks it up. The universal floor: no live rung is ever required for a message to eventually land.
+
+A handle-resolved send is session-addressed: live-inject first (claude over `control.sock`, codex over the app-server daemon), durable floor to the canonical handle on a miss. Project anycast is only ever explicit via `--to-project`.
+
 ## Why `hide` over an `internal` namespace
 
 Hiding a typer command (`hidden=True`) is one line per command and zero call-site churn - the verb still dispatches, it just leaves the `--help` listing. Moving verbs under an `fno agents internal <verb>` namespace would rewrite every hook/script/crate/test call site for no user-visible gain. Live-internal verbs (`loop-check` and friends the loop depends on) stay reachable; they are simply not advertised.
