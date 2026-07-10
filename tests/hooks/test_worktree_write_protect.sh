@@ -144,6 +144,14 @@ assert_block \
     "$(payload "$LINKED" "*** Begin Patch
 *** Update File: canonical-readme-link
 *** End Patch")"
+mkdir -p "$LINK_CANONICAL/subdir"
+ln -s ../README.md "$LINK_CANONICAL/subdir/final-link"
+ln -s "$LINK_CANONICAL/subdir" "$LINKED/canonical-dir-alias"
+assert_block \
+    "linked worktree cannot patch canonical checkout through a relative symlink chain" \
+    "$(payload "$LINKED" "*** Begin Patch
+*** Update File: canonical-dir-alias/final-link
+*** End Patch")"
 git -C "$LINKED" checkout -q --detach
 assert_allow "detached linked worktree allows" "$(payload "$LINKED")"
 

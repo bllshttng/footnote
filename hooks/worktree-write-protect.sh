@@ -85,7 +85,7 @@ _target_directory() {
         [[ "$parent" != "$target" ]] || return 1
         target="$parent"
     done
-    cd "$target" 2>/dev/null && pwd -P
+    cd -P "$target" 2>/dev/null && pwd -P
 }
 
 _block_if_canonical "$CWD"
