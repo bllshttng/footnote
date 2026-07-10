@@ -232,13 +232,33 @@ def _run_consistency_propose(context: dict, model: Optional[str]) -> dict:
         cmd, input=prompt, capture_output=True, text=True, timeout=300, check=True
     )
     data = json.loads(result.stdout)
-    # claude -p wraps a schema response as the object itself; a stub may print
-    # the proposal directly. An is_error envelope (auth/runtime) surfaces here.
-    if isinstance(data, dict) and data.get("is_error"):
-        raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
-    if not isinstance(data, dict):
+    # `claude -p --output-format json --json-schema` returns an envelope
+    # {is_error, structured_output, result, ...}; the schema object lives in
+    # `structured_output` (or `result` as its JSON text). A test stub prints the
+    # proposal object directly. Identify a direct proposal by its defining
+    # priority_changes key first, so a stub that happens to carry a `result`
+    # field is never misrouted through envelope-unwrapping; only unwrap when the
+    # key is absent. is_error first there, since a failure carries no schema.
+    proposal = data
+    if isinstance(data, dict) and "priority_changes" not in data:
+        if data.get("is_error"):
+            raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
+        structured, result_text = data.get("structured_output"), data.get("result")
+        if isinstance(structured, dict):
+            proposal = structured
+        elif isinstance(result_text, str):
+            try:
+                proposal = json.loads(result_text)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"claude -p result is not JSON: {e}") from e
+    if not isinstance(proposal, dict):  # non-dict data, or result parsed to a non-dict
         raise ValueError("proposal is not a JSON object")
-    return data
+    # A schema-conforming proposal always carries priority_changes (required in
+    # _CONSISTENCY_SCHEMA), even if empty; its absence is an underfilled envelope
+    # that must count as an errored run, not fold as a silent zero agreement.
+    if "priority_changes" not in proposal:
+        raise ValueError("proposal missing required priority_changes")
+    return proposal
 
 
 def _priority_map(proposal: dict) -> dict[str, object]:
