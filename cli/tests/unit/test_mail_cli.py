@@ -205,3 +205,107 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload == []
+
+
+# ---------------------------------------------------------------------------
+# x-605c US3 / AC1-HP + AC1-FR: send to a ROSTERED claude bg worker is
+# handle-addressed (live-inject first, durable floor to its canonical handle);
+# the old claude->project re-route is gone. US4/AC3-HP: the envelope carries the
+# invoking session's real from + model.
+# ---------------------------------------------------------------------------
+
+
+def _isolate_claude_roster(monkeypatch, tmp_path, *, session_id):
+    """Only the daemon roster resolves: empty disk sources + a fixture roster
+    holding one rostered claude bg worker (no pid-sidecar)."""
+    from fno.agents import discover
+
+    empty = tmp_path / "empty"
+    empty.mkdir(exist_ok=True)
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty))
+    daemon = tmp_path / "daemon"
+    daemon.mkdir(parents=True, exist_ok=True)
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": {
+            session_id[:8]: {"sessionId": session_id, "pid": 4242, "cwd": "/Users/x/proj"}
+        }}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+
+def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    # Force the claude live-inject miss so the send writes the durable floor.
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+
+    sent = runner.invoke(
+        app, ["mail", "send", "claude-9a063cd3", "hi bg worker", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "claude-9a063cd3" in sent.output
+    assert "queued (durable)" in sent.output
+
+    # The bg worker drains its own handle and sees the message (stamp == drain key).
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert drained.exit_code == 0, drained.output
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and payload[0]["to"] == "claude-9a063cd3"
+    assert "hi bg worker" in payload[0]["body"]
+
+
+def test_us3_rostered_claude_hosted_short_circuits_durable(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
+
+    sent = runner.invoke(
+        app, ["mail", "send", "claude-9a063cd3", "hi", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "delivered (hosted)" in sent.output
+    assert "queued (durable)" not in sent.output
+
+    # No durable thread was written.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload == []
+
+
+def test_ac3_hp_envelope_carries_real_from_and_model(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    recipient_sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=recipient_sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+
+    # The SENDER is a claude session with its own transcript carrying a model.
+    from fno.agents import discover
+
+    sender_sid = "abcd1234-1111-2222-3333-444444444444"
+    projects = tmp_path / "sender-projects"
+    (projects / "-Users-x-proj").mkdir(parents=True, exist_ok=True)
+    (projects / "-Users-x-proj" / f"{sender_sid}.jsonl").write_text(
+        json.dumps({"message": {"model": "claude-opus-4-8"}}) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sender_sid)
+
+    # No --from-name: from + model are auto-stamped from the invoking session.
+    sent = runner.invoke(app, ["mail", "send", "claude-9a063cd3", "hello"])
+    assert sent.exit_code == 0, sent.output
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
+    assert 'from="claude-abcd1234"' in body
+    assert 'model="claude-opus-4-8"' in body
