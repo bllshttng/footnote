@@ -754,15 +754,20 @@ impl Queue for MegawalkQueue {
             // claiming it: a claim tagged with another harness (even suspect), or
             // a codex/gemini branch/worktree for the node before its claim lands.
             // Stops the default-claude stampede onto a codex-owned node (observed
-            // 2026-07-09). Yielding is safe: once the owner's claim goes live the
-            // `fno backlog next` live-claim filter excludes the node and the walk
-            // resumes. Best-effort probe; degrades to native dispatch on error.
+            // 2026-07-09). Pause (not Ok(None), which run_loop reads as a drained
+            // backlog and terminates a multi-node megawalk): a pause is resumable
+            // and legible - once the owner's claim goes live the `fno backlog next`
+            // live-claim filter excludes the node and the resumed walk proceeds.
+            // Best-effort probe; degrades to native dispatch on any read error.
             let own_h = crate::claims::resolve_harness();
             let own = own_h.as_deref().unwrap_or("claude");
             let probe_cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
             if let Some(foreign) = crate::dispatch_posture::foreign_owner_of(&id, own, &probe_cwd) {
                 crate::dispatch_posture::emit_dispatch_deferred(&id, &foreign, own, &probe_cwd);
-                return Ok(None);
+                return Err(LoopError::Pause {
+                    policy: "foreign_harness_owner".to_string(),
+                    detail: format!("node {id} owned by harness '{foreign}'"),
+                });
             }
 
             let session_key = gen_session_key();
