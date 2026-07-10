@@ -31,10 +31,11 @@ Entry = dict
 # but explicit module constants are clearer and one fewer indirection.)
 _AB_FULL_HEX_RE = re.compile(r"[0-9a-f]{8}")
 _AB_PARTIAL_HEX_RE = re.compile(r"[0-9a-f]{4,7}")
-# A bare node-id shape: exactly 8 lowercase hex, no `ab-`, no hyphen. The
-# autocorrect-neutral phone path (iOS rewrites `ab-` and the hyphen). Exactly 8
-# so a 10-char hex string is NOT mistaken for an id (ab-f82e8083, AC4-ERR).
-_BARE_HEX_RE = re.compile(r"[0-9a-f]{8}")
+# A bare node-id shape: 4-8 lowercase hex, no prefix, no hyphen. The
+# autocorrect-neutral phone path (iOS rewrites `ab-` and the hyphen). Bounded
+# 4-8 so a 10-char hex string is NOT mistaken for an id (AC4-ERR); the range
+# spans the legacy width 8 and configured widths (setup offers 4).
+_BARE_HEX_RE = re.compile(r"[0-9a-f]{4,8}")
 
 
 _KNOWN_BRANCH_PREFIXES = (
@@ -293,7 +294,8 @@ def resolve_node(query: Optional[str], entries: list[Entry]) -> IdMatch:
     Order (stop at the first hit):
       1. exact ``ab-{8hex}`` id.
       2. exact slug -> its ab-id (slugs are globally unique).
-      3. bare 8-lowercase-hex -> re-prefix ``ab-`` and match an exact id.
+      3. bare 4-8 lowercase-hex -> re-prefix (configured prefix, then ``ab-``)
+         and match an exact id.
     Returns kind="exact" on a hit, else kind="none" (so the caller escalates to
     the describe-it tier). Never fuzzy-matches.
     """
@@ -322,18 +324,29 @@ def resolve_node(query: Optional[str], entries: list[Entry]) -> IdMatch:
                 note=f"exact slug '{q}' -> {e.get('id')}",
             )
 
-    # Tier 3: bare 8-hex -> re-prefix to a canonical id, then match exactly.
+    # Tier 3: bare hex -> re-prefix and match exactly. Try the configured node
+    # id prefix first (so a repo on `x-`/4hex seeds `4af4` -> `x-4af4`), then
+    # legacy `ab-` for back-compat with mixed-format graphs. Configured-first
+    # makes an ambiguous hex (a key under both) resolve deterministically.
     if _BARE_HEX_RE.fullmatch(q):
-        cand = f"ab-{q}"
-        for e in entries:
-            if e.get("id") == cand:
-                return IdMatch(
-                    kind="exact", id=cand, candidates=(e,),
-                    note=f"bare hex '{q}' -> {cand}",
-                )
+        # ponytail: call-time import keeps the module import-pure; node_id_prefix
+        # does file I/O (load_settings) and already fails open to `ab-`.
+        from fno.graph._constants import node_id_prefix
+        prefixes = list(dict.fromkeys((node_id_prefix(), "ab-")))
+        ids = {e.get("id") for e in entries}
+        for p in prefixes:
+            cand = f"{p}{q}"
+            if cand in ids:
+                for e in entries:
+                    if e.get("id") == cand:
+                        return IdMatch(
+                            kind="exact", id=cand, candidates=(e,),
+                            note=f"bare hex '{q}' -> {cand}",
+                        )
+        tried = ", ".join(f"{p}{q}" for p in prefixes)
         return IdMatch(
             kind="none",
-            note=f"no node with id '{cand}' (re-prefixed from bare hex '{q}')",
+            note=f"no node matching bare hex '{q}' (tried: {tried})",
         )
 
     return IdMatch(
