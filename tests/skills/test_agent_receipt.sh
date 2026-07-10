@@ -422,10 +422,10 @@ handoff_seed='Read /tmp/handoff.md and continue from where it left off. GUARDRAI
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json handoff1 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-doc --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=handoff1"* ]] \
-   && [[ "$OUT" == *"mode=exec"* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
+   && [[ "$OUT" == *"mode=spawn"* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
    && grep -qF -- "$handoff_seed" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
-  pass "ab-ca822421: codex handoff -> autonomous spawn exec with seed verbatim"
+  pass "ab-ca822421: codex handoff -> autonomous spawn with seed verbatim"
 else
   fail "ab-ca822421 codex handoff route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
@@ -434,9 +434,9 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json handoff2 gemini)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-doc-gemini --provider gemini --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=handoff2"* ]] \
-   && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
+   && [[ "$OUT" == *"mode=spawn"* ]] && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
-  pass "ab-ca822421: gemini handoff -> autonomous spawn exec parity"
+  pass "ab-ca822421: gemini handoff -> autonomous spawn parity"
 else
   fail "ab-ca822421 gemini handoff route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi

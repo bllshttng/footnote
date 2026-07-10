@@ -436,10 +436,13 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
 
 - `result=launched ... mode=exec ...` -> a background worker launched. Quote the
   **real** `short_id` and give `fno agents logs <name>` + `fno agents trace <name>`.
+- `result=launched ... mode=spawn ...` -> an autonomously seeded handoff worker
+  launched through the provider's spawn lane. The default Rust substrate is a
+  drivable pane; this is not a one-shot reply or a refuse-to-stop loop.
 - `result=launched ... mode=interactive ...` -> a drivable session **staged, NOT
   running yet**. Give `fno agents grid <name>` (or `fno agents drive <name>
   --mode interactive`). Note: no proactive push when it waits on input.
-- `result=replied ...` (codex/gemini **ask** only) -> the one-shot returned its
+- `result=replied ...` (a one-shot ask or explicit headless substrate) -> the one-shot returned its
   answer synchronously; the **reply follows the outcome line** and IS the
   deliverable. Relay it (preview ~15 lines; full reply in `fno agents logs <name>`).
 - `result=already-running ...` -> a worker already exists for this node/name; no
@@ -454,15 +457,15 @@ sniffing output (Group 1 ab-8b3e4fe0 moved claude creation off `ask` onto
 `spawn`, so claude takes the JSON `.short_id` family below, not a bare 8-hex
 line):
 
-- **`spawn --once`** (codex/gemini ask-mode): a **client-side one-shot**
+- **`spawn --once` / `--substrate headless`**: a **client-side one-shot**
   (`codex exec` / `gemini -p`). stdout is the model REPLY verbatim, not a
   short-id. Success = exit 0 AND a non-empty reply; an empty reply (even on
   exit 0) is FAILED, never a fabricated answer.
-- **`spawn` / `host`** (claude `--bg`, codex/gemini build): stdout is JSON
-  carrying `{"short_id",...}` (one compact line from the client-side claude
-  spawn, pretty multi-line from the codex/gemini daemon). `.short_id` is parsed
-  with `jq` and validated whole-string 8-hex; empty/missing/non-8-hex (even on
-  exit 0) is FAILED.
+- **`spawn` / `host`**: stdout is JSON
+  carrying `{"short_id",...}` (compact or pretty depending on runtime and
+  substrate). `.short_id` is parsed with `jq`; `bg` requires a whole-string
+  8-hex id, while the default/pane lane accepts the daemon's identifier-shaped
+  name slug. Empty or malformed ids (even on exit 0) are FAILED.
 
 Report only what `spawn.sh` actually captured - a real short-id, or a real reply.
 "No valid receipt" is FAILED, full stop.
@@ -489,22 +492,24 @@ mostly-non-code continuation work that never produces a single green PR. So
 `handoff` spawns a **plain autonomous worker** on Claude, Codex, or Gemini (no
 `/target`, no loop-grade "refuse to stop" guarantee) seeded to read the doc and
 continue from where it left off. The default substrate is the owned-PTY `pane`;
-an explicitly selected substrate keeps the normal spawn semantics. A handoff
-that is really a feature build still goes through `build`.
+the worker starts autonomously and can later be driven through the provider's
+supported pane tools. A handoff that is really a feature build still goes
+through `build`.
 
 It also injects a **standing guardrail**: the seed bars the worker from
 autonomously taking outward-facing or irreversible actions (emails, deploys,
 merges, publishing, contacting third parties) and tells it to STOP and surface
 them via `<help reason="outward-action" evidence="...">` for human confirmation.
 This is **prompt-level** enforcement in v1 (the model obeying the seed), observed
-via `watch`; a harness-level tool gate is a deferred follow-up. Say so honestly -
-do not imply the worker is sandboxed from outward actions.
+through provider-supported logs or pane tools; a harness-level tool gate is a
+deferred follow-up. Say so honestly - do not imply the worker is sandboxed from
+outward actions.
 
 ### Flow: NORMALIZE -> VALIDATE -> SPAWN -> REPORT (no confirm: free lane)
 
 1. **NORMALIZE.** Strip the leading `handoff` verb; pass the rest as the doc path.
    Run `normalize.sh --input "<doc-path>" --handoff` (carry `--provider`/`as
-   <name>`/`model <name>`/`yolo`/substrate only if given). Provider resolution is
+   <name>`/`model <name>`/`yolo` only if given). Provider resolution is
    explicit -> configured -> Claude, constrained to Claude/Codex/Gemini. It emits
    `payload_mode=handoff` and a `message`
    that is the continuation seed (path + "do not re-derive" + GUARDRAIL +
@@ -520,15 +525,15 @@ do not imply the worker is sandboxed from outward actions.
    ```bash
    bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
      --message "$message" --mode exec --payload-mode handoff [--cwd "<cwd>"] \
-     [--model "$model"] [--yolo] [--substrate "$substrate"]
+     [--model "$model"] [--yolo]
    ```
 
 4. **REPORT** the real receipt exactly as the `spawn` section's REPORT does
-   (`result=launched ... mode=exec` -> quote the real `short_id`, give `fno agents
-   logs <name>` / `fno agents watch <name>`; `result=failed` -> FAILED with the
-   real reason, no fabricated short-id). Note it is a single autonomous
-   continuation worker, not an interactive thread or refuse-to-stop loop, and
-   that the outward-action guardrail is prompt-level.
+   (`result=launched ... mode=spawn` -> quote the real `short_id` and always give
+   `fno agents logs <name>` plus `grid`/`drive` for the default pane;
+   `result=failed` -> FAILED with the real reason, no fabricated short-id). Note
+   it is an autonomously seeded, drivable continuation worker, not a
+   refuse-to-stop loop, and that the outward-action guardrail is prompt-level.
 
 ---
 

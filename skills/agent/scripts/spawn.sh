@@ -397,7 +397,9 @@ else
   # the value (like hint/trace): a path with spaces must not split the receipt's
   # space-separated key=value fields.
   wt_field=""; [[ -n "$AUTO_WT" ]] && wt_field=" cwd=\"$AUTO_WT\""
-  printf 'result=launched short_id=%s name=%s mode=exec%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
-    "$short_id" "$NAME" "$wt_field" "$NAME" "$NAME"
+  report_mode="exec"
+  [[ "$PAYLOAD_MODE" == "handoff" ]] && report_mode="spawn"
+  printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
+    "$short_id" "$NAME" "$report_mode" "$wt_field" "$NAME" "$NAME"
 fi
 exit 0
