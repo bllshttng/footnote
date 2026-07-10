@@ -638,7 +638,7 @@ def schema(
     # Both share the write/check/echo plumbing below.
     if toml:
         rendered = schema_gen.render_example_toml()
-        target = _repo_root() / "docs" / "settings.example.toml"
+        target = _repo_root() / "docs" / "config.example.toml"
         regen = "fno config schema --toml --write"
     else:
         rendered = schema_gen.render_markdown()
