@@ -582,3 +582,108 @@ def test_x_a1d5_exclude_adopted_session_by_full_id(tmp_path, monkeypatch):
     procs = [_claude_proc(4242, "/Users/x/code/proj")]
     sessions = _run_projects(tmp_path, projects, procs, exclude_session_ids={sid})
     assert sessions == []
+
+
+# --------------------------------------------------------------------------
+# US2/US4 (x-d899): codex disk-discovery — a hand-started codex session is
+# mail-able even without the registry hook. US3: cross-harness resolution.
+# --------------------------------------------------------------------------
+
+
+def _write_codex_rollout(codex_dir, *, session_id, cwd, mtime_age=5.0, meta=True):
+    """Write a rollout jsonl whose first line is a session_meta record."""
+    day = codex_dir / "2026" / "07" / "09"
+    day.mkdir(parents=True, exist_ok=True)
+    f = day / f"rollout-2026-07-09T00-00-00-{session_id}.jsonl"
+    if meta:
+        line = {"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}
+    else:
+        line = {"type": "turn_context", "payload": {"nope": 1}}
+    f.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    mt = time.time() - mtime_age
+    os.utime(f, (mt, mt))
+    return f
+
+
+def _run_codex(tmp_path, codex_dir, **kw):
+    """Discover with empty claude stores + fake psutil so only codex rows surface."""
+    return discover.discover_live_sessions(
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex_dir,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=kw.pop("project_resolver", lambda c: None),
+        **kw,
+    )
+
+
+def test_us2_codex_rollout_surfaces_live_session(tmp_path):
+    codex = tmp_path / "codex"
+    _write_codex_rollout(
+        codex, session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+        cwd="/Users/x/proj", mtime_age=5.0,
+    )
+    sessions = _run_codex(tmp_path, codex)
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.agent == "codex"
+    assert s.session_id == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    assert s.short_id == "019f48e1"
+    assert s.cwd == "/Users/x/proj"
+
+
+def test_us2_codex_stale_rollout_not_surfaced(tmp_path):
+    codex = tmp_path / "codex"
+    _write_codex_rollout(
+        codex, session_id="019f48e1-dead", cwd="/x", mtime_age=10_000.0,
+    )
+    assert _run_codex(tmp_path, codex) == []
+
+
+def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id="019f48e1-nometa", cwd="/x", meta=False)
+    _write_codex_rollout(
+        codex, session_id="019abcde-good", cwd="/y", mtime_age=3.0,
+    )
+    sessions = _run_codex(tmp_path, codex)
+    assert [s.short_id for s in sessions] == ["019abcde"]
+
+
+def test_us3_resolve_cross_harness_handle(tmp_path):
+    codex = tmp_path / "codex"
+    _write_codex_rollout(
+        codex, session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", cwd="/x",
+    )
+    resolved, suggestions = discover.resolve_or_suggest(
+        "codex-019f48e1",
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda c: None,
+    )
+    assert resolved is not None
+    assert resolved.agent == "codex"
+    assert resolved.session_id == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+
+
+def test_ac2_edge_harness_prefix_disambiguation(tmp_path):
+    # A claude session and a codex session whose shortids both start abcd1234.
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id="abcd1234-codex-side", cwd="/x")
+    projects = tmp_path / "claude-projects"
+    _write_transcript(projects, cwd="/Users/y/repo", session_id="abcd1234-cccc-dddd")
+    resolved, _ = discover.resolve_or_suggest(
+        "codex-abcd1234",
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=projects,
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakeProcsPsutil(procs={4242: (["claude"], "/Users/y/repo")}),
+        project_resolver=lambda c: None,
+    )
+    assert resolved is not None
+    assert resolved.agent == "codex"  # codex- prefix picks the codex row, not claude

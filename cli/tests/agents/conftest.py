@@ -18,6 +18,10 @@ def _isolate_session_discovery(monkeypatch, tmp_path_factory):
 
     empty = tmp_path_factory.mktemp("empty-claude-sessions")
     monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    # Codex disk-discovery (x-d899) is pure mtime, not psutil-gated, so it would
+    # read the developer's real ~/.codex/sessions unless isolated here.
+    empty_codex = tmp_path_factory.mktemp("empty-codex-sessions")
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty_codex))
 
 
 @pytest.fixture(autouse=True)
