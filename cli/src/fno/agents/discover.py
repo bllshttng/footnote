@@ -189,6 +189,67 @@ def _discover_from_codex(
     return rows
 
 
+def _discover_from_roster(*, exclude_session_ids: Iterable[str] = ()) -> list[dict]:
+    """Live claude sessions from the daemon roster (US1, x-605c).
+
+    A ``claude --bg`` worker leaves no pid-sidecar and is dropped from the live
+    process scan, so the roster is the ONLY source that surfaces it -- the exact
+    handle that failed to resolve at send time. Lenient by construction (the
+    reader returns ``[]`` on any roster read/parse failure)."""
+    from fno.agents.providers._claude_session_registry import roster_sessions
+
+    exclude = {s for s in (exclude_session_ids or ()) if s}
+    return [r for r in roster_sessions() if r["session_id"] not in exclude]
+
+
+def _discover_from_registry(
+    registry_path: Optional[Path] = None,
+    *,
+    exclude_session_ids: Iterable[str] = (),
+) -> list[dict]:
+    """Registered fno-agent sessions, resolvable by canonical handle (US2, x-605c).
+
+    A spawned worker registered under a name (e.g. ``x-d899-us8-build``) also
+    answers to its ``<provider>-<short8>`` handle, because its provider session id
+    is surfaced as a discover row. The provider -> id mapping is
+    ``PROVIDER_SESSION_ID_FIELDS`` (the single source of truth also read by the
+    resume path), so a new harness needs a field there, not a resolver edit. For
+    claude the row carries the FULL session uuid when known so it dedups against
+    the roster/disk rows for the same session; ``short_id`` stays the 8-hex jobId
+    the inject verb addresses."""
+    from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS, load_registry
+
+    exclude = {s for s in (exclude_session_ids or ()) if s}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    try:
+        entries = load_registry(registry_path)
+    except Exception:  # noqa: BLE001 — a torn/version-drifted registry contributes no rows
+        return rows
+    for e in entries:
+        provider = getattr(e, "provider", None)
+        if provider not in PROVIDER_SESSION_ID_FIELDS:
+            continue
+        if provider == "claude":
+            sid = getattr(e, "claude_session_uuid", None) or getattr(e, "claude_short_id", None)
+        else:
+            sid = e.session_id
+        if not sid or sid in exclude or sid in seen:
+            continue
+        seen.add(sid)
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": getattr(e, "cwd", "") or "",
+                "status": None,
+                "agent": provider,
+            }
+        )
+    return rows
+
+
 @dataclass
 class DiscoveredSession:
     """One live, host-local Claude Code session surfaced in the lane."""
@@ -687,6 +748,7 @@ def resolve_or_suggest(
     projects_dir: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
 ) -> tuple[Optional[DiscoveredSession], list[str]]:
@@ -705,6 +767,7 @@ def resolve_or_suggest(
         projects_dir=projects_dir,
         codex_sessions_dir=codex_sessions_dir,
         name_map_path=name_map_path,
+        registry_path=registry_path,
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
     )
@@ -736,6 +799,7 @@ def discover_live_sessions(
     projects_dir: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
     exclude_short_ids: Iterable[str] = (),
     exclude_session_ids: Iterable[str] = (),
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
@@ -820,6 +884,23 @@ def discover_live_sessions(
         exclude_session_ids=exclude_session_ids,
     )
     for r in codex_rows:
+        if r["short_id"] in exclude:
+            continue
+        candidates.append(r)
+
+    # Daemon roster + fno-agents registry (US1/US2, x-605c). Unioned ALWAYS,
+    # like the codex source: a rostered bg worker (no pid-sidecar) or a named
+    # registered session must resolve alongside live disk sessions. Dedup on
+    # session_id below folds any overlap. Both readers are lenient -> zero rows
+    # (never an error) when the roster/registry is absent, so claude-only hosts
+    # are unchanged.
+    for r in _discover_from_roster(exclude_session_ids=exclude_session_ids):
+        if r["short_id"] in exclude:
+            continue
+        candidates.append(r)
+    for r in _discover_from_registry(
+        registry_path, exclude_session_ids=exclude_session_ids
+    ):
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
