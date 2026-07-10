@@ -32,6 +32,27 @@ def test_ac3_edge_session_id_valid_accepted():
     assert instance.session_id == "20260421T093631Z-97817-920dac"
 
 
+def test_session_id_accepts_canonical_codex_thread_uuid():
+    Schema = load_schema("target")
+    sid = "019f48e1-e641-7170-9ea9-921f07021967"
+    assert Schema(session_id=sid).session_id == sid
+
+
+@pytest.mark.parametrize(
+    "sid",
+    [
+        "codex-thread",
+        "019f48e1-e641-7170-9ea9",
+        "019f48e1-e641-7170-9ea9-921f0702196g",
+        "019F48E1-E641-7170-9EA9-921F07021967",
+    ],
+)
+def test_session_id_rejects_noncanonical_codex_thread_strings(sid):
+    Schema = load_schema("target")
+    with pytest.raises(ValidationError):
+        Schema(session_id=sid)
+
+
 @pytest.mark.parametrize(
     "sid",
     [
