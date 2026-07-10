@@ -1,109 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema",
-  "$comment": "W7: This oneOf is a documented bridge between the Python (type+data) and Rust (kind+flat) envelope shapes. The two emitters genuinely diverge today; collapsing the union to a single branch (envelope unification) is deferred follow-up work. See docs/architecture/events-schema-contract.md.",
+  "$comment": "x-2901: the W7 oneOf split-brain is retired. Both emitters (Python/fno and Rust/fno-agents) now write this single envelope {ts, type, source, data}. The legacy Rust {ts, kind, <flat>} shape is no longer valid on the wire; subscribe/digest keep a read-side kind/flat fallback for the mixed-binary + rotated-history window (an old daemon binary keeps writing kind lines until fno restart). See docs/architecture/events-schema-contract.md.",
   "title": "events.jsonl line (v3)",
-  "description": "One line of events.jsonl. Validates against either the Python/fno envelope (Branch A) or the Rust/fno-agents supervisor envelope (Branch B).",
-  "oneOf": [
-    {
-      "$comment": "Branch A: Python/fno envelope. Field: type (not kind). Payload nested under data.",
-      "type": "object",
-      "required": ["ts", "type", "source", "data"],
-      "properties": {
-        "ts": {
-          "type": "string",
-          "description": "UTC RFC3339 timestamp (e.g. 2026-05-07T09:30:42Z)"
-        },
-        "type": {
-          "type": "string",
-          "description": "Event type name from events-schema.yaml event_types"
-        },
-        "source": {
-          "type": "string",
-          "enum": ["target", "megawalk", "megatron", "abi-loop", "hook", "subagent", "migration", "test", "backlog", "daemon", "observer", "skill_diff"],
-          "description": "Producer identity for the Python/fno emitter"
-        },
-        "data": {
-          "type": "object",
-          "description": "Per-type payload object"
-        }
-      },
-      "not": {
-        "required": ["kind"]
-      },
-      "additionalProperties": true
+  "description": "One line of events.jsonl. The unified Python/fno + Rust/fno-agents envelope: type (not kind), payload nested under data.",
+  "type": "object",
+  "required": ["ts", "type", "source", "data"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "description": "UTC RFC3339 timestamp (e.g. 2026-05-07T09:30:42Z)"
     },
-    {
-      "$comment": "Branch B: Rust/fno-agents supervisor envelope. Field: kind (not type). Payload fields flattened at top level.",
-      "type": "object",
-      "required": ["ts", "kind", "source"],
-      "properties": {
-        "ts": {
-          "type": "string",
-          "description": "UTC RFC3339 timestamp with milliseconds and Z suffix (e.g. 2026-05-07T09:30:42.123Z)"
+    "type": {
+      "type": "string",
+      "description": "Event type name from events-schema.yaml event_types"
+    },
+    "source": {
+      "type": "string",
+      "anyOf": [
+        {
+          "enum": ["abi-loop", "active-backlog", "backlog", "daemon", "hook", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"]
         },
-        "kind": {
-          "type": "string",
-          "enum": [
-            "agent_spawned",
-            "agent_stopped",
-            "agent_exited",
-            "agent_removed",
-            "agent_inconsistent",
-            "agent_ask_done",
-            "agent_create_no_session",
-            "agent_orphan_reaped",
-            "agent_orphan_state_archived",
-            "agent_row_reaped",
-            "bg_worker_terminal_stopped",
-            "agent_spawn_failed",
-            "agent_stop_error",
-            "agent_spawn_cwd_fallback",
-            "agent_stream_claim_unavailable",
-            "channel_registered",
-            "daemon_started",
-            "daemon_exited",
-            "daemon_idle_pending_exit",
-            "daemon_shutting_down",
-            "daemon_state",
-            "daemon_recovery_error",
-            "daemon_exe_fingerprint_unavailable",
-            "drive_attached",
-            "drive_detached",
-            "drive_crashed",
-            "drive_force_close_timeout",
-            "drive_keystroke_stepped",
-            "drive_refused_busy_elsewhere",
-            "drive_takeover_after_stale",
-            "drive_watch_input_rejected",
-            "reconcile_deferred",
-            "reconcile_done",
-            "reconcile_error",
-            "startup_reconcile_done",
-            "startup_reconcile_failed",
-            "agent_deliver_injected",
-            "agent_deliver_demoted",
-            "active_backlog_task_crashed",
-            "dispatch_deferred",
-            "event_payload_too_large",
-            "inside_leg_report",
-            "inside_leg_report_dropped",
-            "inside_leg_completed",
-            "inside_leg_report_buffered",
-            "inside_leg_buffer_flushed",
-            "screen_state_change"
-          ],
-          "description": "Event kind name from the Rust KNOWN_EVENT_KINDS constant. Closed enum; kept in lockstep with the constant by the cross-language parity gate (compare_json diffs this set against fno-agents --emit-schema)."
-        },
-        "source": {
-          "type": "string",
-          "pattern": "^(daemon|worker:.+)$",
-          "description": "Producer identity: 'daemon' for the supervisor daemon, 'worker:<id>' for a per-agent worker process"
+        {
+          "pattern": "^(worker|stream-worker):.+$"
         }
-      },
-      "not": {
-        "required": ["type"]
-      },
-      "additionalProperties": true
+      ],
+      "description": "Producer identity: a fixed-string source from the enum, or a per-agent worker (worker:<id> / stream-worker:<id>). Derived from the real EventEmitter::new call sites."
+    },
+    "data": {
+      "type": "object",
+      "description": "Per-type payload object"
     }
-  ]
+  },
+  "additionalProperties": true
 }
