@@ -47,6 +47,7 @@ plan_path: ""
 ---
 # Mission
 graph_node_id: x-a166
+target_claim_holder: "target-session:20260707T203700Z-cl55246-f3fe72"
 EOF
 
   local bindir="${TMP_DIR}/bin"
@@ -110,6 +111,16 @@ set_manifest_claude_identity_null() {
     { print }
   ' "${CWD}/.fno/target-state.md" > "${CWD}/.fno/target-state.codex.md"
   mv "${CWD}/.fno/target-state.codex.md" "${CWD}/.fno/target-state.md"
+}
+
+set_manifest_codex_claim_holder() {
+  awk '
+    /^[[:space:]]*target_claim_holder:/ {
+      print "target_claim_holder: \"target-session:019f48e4-owner-thread\""; next
+    }
+    { print }
+  ' "${CWD}/.fno/target-state.md" > "${CWD}/.fno/target-state.codex-holder.md"
+  mv "${CWD}/.fno/target-state.codex-holder.md" "${CWD}/.fno/target-state.md"
 }
 
 run_hook_codex_plugin_sid() {
@@ -217,7 +228,8 @@ teardown_env
 
 # ── T9: Codex identity match -> refresh ──────────────────────────────────────
 setup_env
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+set_manifest_codex_claim_holder
+export STUB_HOLDER="target-session:019f48e4-owner-thread"
 run_hook_codex "019f48e4-owner-thread" >/dev/null 2>&1
 if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
   pass "T9 CODEX_THREAD_ID == manifest codex_thread_id -> refresh"
@@ -228,7 +240,8 @@ teardown_env
 
 # ── T10: Codex identity mismatch -> NO refresh ───────────────────────────────
 setup_env
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+set_manifest_codex_claim_holder
+export STUB_HOLDER="target-session:019f48e4-owner-thread"
 run_hook_codex "019f48e4-different-thread" >/dev/null 2>&1
 if grep -q "claim refresh" "$CALLLOG"; then
   fail "T10 revived a Codex claim from a different thread"
@@ -239,7 +252,8 @@ teardown_env
 
 # ── T11: Realistic Codex payload must not trip the Claude guard ───────────
 setup_env
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+set_manifest_codex_claim_holder
+export STUB_HOLDER="target-session:019f48e4-owner-thread"
 run_hook_codex_sid "019f48e4-owner-thread" >/dev/null 2>&1
 if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
   pass "T11 Codex stdin session_id routes through Codex ownership"
@@ -251,7 +265,7 @@ teardown_env
 # ── T12: Current Codex + legacy manifest must fail closed ───────────────
 setup_env
 drop_manifest_codex_identity
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_HOLDER="target-session:019f48e4-owner-thread"
 run_hook_codex_sid "019f48e4-owner-thread" >/dev/null 2>&1
 if [[ -s "$CALLLOG" ]]; then
   fail "T12 legacy manifest reached claim status/refresh under current Codex identity"
@@ -263,7 +277,8 @@ teardown_env
 # ── T13: Codex stdin fallback mismatch must fail closed ─────────────────────
 setup_env
 set_manifest_claude_identity_null
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+set_manifest_codex_claim_holder
+export STUB_HOLDER="target-session:019f48e4-owner-thread"
 run_hook_codex_plugin_sid "019f48e4-different-thread" >/dev/null 2>&1
 if [[ -s "$CALLLOG" ]]; then
   fail "T13 Codex stdin fallback mismatch refreshed a stale foreign holder"
@@ -275,7 +290,8 @@ teardown_env
 # ── T14: Codex stdin fallback match remains refreshable ──────────────────────
 setup_env
 set_manifest_claude_identity_null
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+set_manifest_codex_claim_holder
+export STUB_HOLDER="target-session:019f48e4-owner-thread"
 run_hook_codex_plugin_sid "019f48e4-owner-thread" >/dev/null 2>&1
 if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
   pass "T14 Codex stdin session fallback match refreshes owner"
@@ -287,12 +303,32 @@ teardown_env
 # ── T15: Identified Codex with no usable identity fails closed ────────────────
 setup_env
 set_manifest_claude_identity_null
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+set_manifest_codex_claim_holder
+export STUB_HOLDER="target-session:019f48e4-owner-thread"
 run_hook_codex_plugin_no_sid >/dev/null 2>&1
 if [[ -s "$CALLLOG" ]]; then
   fail "T15 identity-less Codex hook refreshed a stale foreign holder"
 else
   pass "T15 identity-less Codex hook fails closed"
+fi
+teardown_env
+
+# ── T16: Explicit target session override remains refreshable ────────────────
+setup_env
+awk '
+  /^[[:space:]]*session_id:/ { print "session_id: explicit-target-session"; next }
+  /^[[:space:]]*target_claim_holder:/ {
+    print "target_claim_holder: \"target-session:explicit-target-session\""; next
+  }
+  { print }
+' "${CWD}/.fno/target-state.md" > "${CWD}/.fno/target-state.explicit.md"
+mv "${CWD}/.fno/target-state.explicit.md" "${CWD}/.fno/target-state.md"
+export STUB_HOLDER="target-session:explicit-target-session"
+run_hook_codex "019f48e4-owner-thread" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166 --holder target-session:explicit-target-session" "$CALLLOG"; then
+  pass "T16 explicit TARGET_SESSION_ID claim owner remains refreshable"
+else
+  fail "T16 explicit target session claim did not refresh"
 fi
 teardown_env
 

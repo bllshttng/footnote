@@ -69,6 +69,32 @@ def test_idle_target_worker_shows_working(tmp_path, monkeypatch, _patch_claude):
     assert rows["target-x-4a48-fleet-status"]["live_status"] == "Working (loop 2m ago)"
 
 
+def test_target_worker_passes_manifest_cwd_to_truth_resolver(
+    tmp_path, monkeypatch, _patch_claude
+):
+    use_tmpdir(monkeypatch, tmp_path)
+    worker_cwd = str(tmp_path / "worker")
+    write_registry(
+        [
+            _claude(
+                "target-x-4a48-fleet-status",
+                short_id="s1",
+                cwd=worker_cwd,
+            )
+        ]
+    )
+    _patch_claude({"s1": {"live_status": "Idle"}})
+    seen = {}
+
+    def _resolve(nid, **kwargs):
+        seen.update(kwargs)
+        return {"state": "waiting", "last_loop_check_age_s": None}
+
+    monkeypatch.setattr(truth_status, "resolve_truth_status", _resolve)
+    _rows(monkeypatch, tmp_path)
+    assert seen["manifest_cwd"] == worker_cwd
+
+
 def test_harness_working_never_overridden(tmp_path, monkeypatch, _patch_claude):
     """Locked Decision 1 — a harness Working is authoritative; resolver unused."""
     use_tmpdir(monkeypatch, tmp_path)

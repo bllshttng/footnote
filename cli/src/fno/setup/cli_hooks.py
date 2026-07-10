@@ -126,6 +126,15 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _load_json_object(path: Path) -> dict[str, Any]:
+    """Load a JSON file whose root must be an object."""
+    text = path.read_text(encoding="utf-8")
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise json.JSONDecodeError("expected a JSON object", text, 0)
+    return data
+
+
 def _is_footnote_codex_command(command: str) -> bool:
     """Classify only footnote-owned Codex SessionStart commands."""
     if _HOOK_SUFFIX not in command:
@@ -270,7 +279,7 @@ def inspect_codex_hooks(
 
     if hooks_json_path.exists():
         try:
-            parsed_json = json.loads(hooks_json_path.read_text(encoding="utf-8"))
+            parsed_json = _load_json_object(hooks_json_path)
             json_session_commands = _session_start_commands(
                 parsed_json, source="hooks.json"
             )
@@ -436,7 +445,7 @@ def _migrate_legacy_codex_hooks(
     Returns ``(backup, removed_count, foreign_session_start_remains)``. The
     caller invokes this only after the inspector has established valid JSON.
     """
-    data = json.loads(hooks_json_path.read_text(encoding="utf-8"))
+    data = _load_json_object(hooks_json_path)
     hooks = data.get("hooks", {})
     groups = hooks.get("SessionStart", [])
     kept_groups: list[Any] = []

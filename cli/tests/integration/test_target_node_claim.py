@@ -122,7 +122,13 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
         line for line in log.read_text().splitlines() if "claim acquire" in line
     )
 
-    assert f"session_id: {thread_id}" in state
+    manifest_session_id = next(
+        line.split(":", 1)[1].strip()
+        for line in state.splitlines()
+        if line.startswith("session_id:")
+    )
+    assert manifest_session_id != thread_id
+    assert "-cx" in manifest_session_id
     assert f"codex_thread_id: {thread_id}" in state
     assert graph["session_id"] == thread_id
     assert f'--holder target-session:{thread_id}' in acquire

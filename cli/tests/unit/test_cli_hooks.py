@@ -435,6 +435,37 @@ def test_codex_inspector_returns_malformed_diagnostics(tmp_path, malformed):
     assert str(config if malformed == "toml" else legacy) in diagnostics.errors[0]
 
 
+@pytest.mark.parametrize("root", ["[]", "null", '"string"'])
+def test_codex_inspector_rejects_non_object_json_roots(tmp_path, root):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    legacy.write_text(root)
+
+    diagnostics = inspect_codex_hooks(config_path=config, hooks_json_path=legacy)
+
+    assert diagnostics.state == "malformed"
+    assert diagnostics.errors
+    assert "expected a JSON object" in diagnostics.errors[0]
+
+
+def test_codex_migration_does_not_mutate_non_object_json(tmp_path):
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "hooks.json"
+    legacy.write_text("[]")
+
+    result = install_codex_hook(
+        CMD,
+        config_path=config,
+        hooks_json_path=legacy,
+        migrate_legacy_hooks_json=True,
+    )
+
+    assert result.error
+    assert not result.changed
+    assert legacy.read_text() == "[]"
+    assert not legacy.with_name("hooks.json.fno-bak").exists()
+
+
 def test_codex_malformed_toml_is_not_modified(tmp_path):
     config = tmp_path / "config.toml"
     legacy = tmp_path / "hooks.json"

@@ -968,6 +968,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Scenario 19: Codex claim owner differs from the unique target-run session id
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 19: Codex thread-owned claim handoff ==="
+SBX="$(make_sandbox s19)"
+CODEX_HOLDER="target-session:019f48e1-e641-7170-9ea9-921f07021967"
+sed -i.bak \
+  "s|target_claim_holder: \"target-session:${SESSION_ID}\"|target_claim_holder: \"${CODEX_HOLDER}\"|" \
+  "$SBX/.fno/target-state.md"
+rm -f "$SBX/.fno/target-state.md.bak"
+printf '%s\n' "$CODEX_HOLDER" > "$SBX/scenario/expected-holder"
+run_handoff "$SBX" "blueprint-do"
+check_exit "codex-holder: exits 0" "0" "$handoff_rc"
+check_contains "codex-holder: delegates successfully" "delegated" "$output"
+check_contains "codex-holder: release uses recorded thread owner" \
+  "--holder ${CODEX_HOLDER}" "$(cat "$SBX/call-log")"
+check_not_contains "codex-holder: release never substitutes run id" \
+  "claim release node:${NODE_ID} --holder target-session:${SESSION_ID}" \
+  "$(cat "$SBX/call-log")"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

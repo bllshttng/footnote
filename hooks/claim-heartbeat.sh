@@ -70,6 +70,9 @@ NODE_ID="$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' "$MANIFEST" | h
 [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]] || exit 0
 SESSION_ID="$(sed -n 's/^[[:space:]]*session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 [[ -n "$SESSION_ID" ]] || exit 0
+CLAIM_HOLDER="$(sed -n 's/^[[:space:]]*target_claim_holder:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
+[[ -n "$CLAIM_HOLDER" && "$CLAIM_HOLDER" != "null" ]] \
+  || CLAIM_HOLDER="target-session:$SESSION_ID"
 
 # Identity gate (codex P1): prove the CURRENT running session owns this manifest,
 # not a stale target-state.md a dead session left behind in this worktree. The
@@ -98,6 +101,10 @@ if [[ "$IS_CODEX_HOOK" -eq 1 ]]; then
   [[ -n "$_CUR_CODEX_COMPACT" ]] || exit 0
   [[ -n "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
   [[ "$CUR_CODEX_THREAD_ID" == "$MANIFEST_CODEX_THREAD_ID" ]] || exit 0
+  if [[ "$CLAIM_HOLDER" != "target-session:$MANIFEST_CODEX_THREAD_ID" \
+        && "$CLAIM_HOLDER" != "target-session:$SESSION_ID" ]]; then
+    exit 0
+  fi
 fi
 
 # Throttle: skip when the stamp is younger than THROTTLE seconds.
@@ -113,13 +120,13 @@ command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
 # Holder gate: refresh ONLY our own claim. A different holder (or no live claim)
 # stamps and returns so we do not re-probe on every tool call.
 HOLDER="$(fno claim status "node:$NODE_ID" --json 2>/dev/null | jq -r '.holder // empty' 2>/dev/null)"
-if [[ "$HOLDER" != "target-session:$SESSION_ID" ]]; then
+if [[ "$HOLDER" != "$CLAIM_HOLDER" ]]; then
   touch "$STAMP" 2>/dev/null || true
   exit 0
 fi
 
 # We hold it: renew the TTL. Best-effort - a failure logs but never blocks.
-if ! fno claim refresh "node:$NODE_ID" --holder "target-session:$SESSION_ID" --ttl "$HEARTBEAT_TTL" >/dev/null 2>&1; then
+if ! fno claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" >/dev/null 2>&1; then
   echo "claim-heartbeat: refresh failed for node:$NODE_ID (non-fatal)" >&2
 fi
 touch "$STAMP" 2>/dev/null || true

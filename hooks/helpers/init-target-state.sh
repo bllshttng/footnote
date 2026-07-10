@@ -536,10 +536,56 @@ if [[ -f "$STATE_FILE" ]]; then
   # could SIGPIPE the upstream sed under `set -o pipefail` (gemini medium).
   _STALE_STATUS=$(sed -n '/^status:[[:space:]]*/{s/^status:[[:space:]]*//p;q;}' "$STATE_FILE" | xargs 2>/dev/null || true)
   _STALE_CLAIM_KEY=$(sed -n '/^target_claim_key:[[:space:]]*/{s/^target_claim_key:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)
+  _STALE_SESSION_ID=$(sed -n '/^session_id:[[:space:]]*/{s/^session_id:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)
   _STALE_REASON=""
   case "${_STALE_STATUS:-}" in
     COMPLETE|BLOCKED|ABORTED) _STALE_REASON="status $_STALE_STATUS" ;;
   esac
+  # Claimless free-text and plan runs have no lock whose release can delimit a
+  # completed run. A successful terminal-complete finalization is the durable
+  # boundary: archive only when the project event log records this exact
+  # manifest session with a completed reason. Budget/stuck finalizations remain
+  # resumable, and malformed or unreadable logs preserve the manifest.
+  if [[ -z "$_STALE_REASON" && -z "$_STALE_CLAIM_KEY" \
+        && -n "$_STALE_SESSION_ID" && -f "$STATE_DIR/events.jsonl" \
+        && -x "$(command -v python3 2>/dev/null || true)" ]]; then
+    if python3 - "$STATE_DIR/events.jsonl" "$_STALE_SESSION_ID" <<'PYEOF'
+import json
+import sys
+
+path, session_id = sys.argv[1:]
+try:
+    lines = open(path, encoding="utf-8", errors="replace")
+except OSError:
+    raise SystemExit(1)
+with lines:
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        data = event.get("data") if isinstance(event, dict) else None
+        if (
+            event.get("type") == "session_finalized"
+            and isinstance(data, dict)
+            and data.get("session_id") == session_id
+            and data.get("termination_reason")
+            in {
+                "DonePRGreen",
+                "DoneAdvisory",
+                "DoneBatched",
+                "DoneAwaitingMerge",
+                "DonePlanned",
+                "NoWork",
+            }
+        ):
+            raise SystemExit(0)
+raise SystemExit(1)
+PYEOF
+    then
+      _STALE_REASON="finalized session $_STALE_SESSION_ID"
+    fi
+  fi
   if [[ -z "$_STALE_REASON" && -n "$_STALE_CLAIM_KEY" ]]; then
     # `fno claim status --json` is single-line; parse `state`. The reap decision
     # is now two-factor (x-ba4b), because a not-live claim ALONE is not proof the
@@ -580,7 +626,7 @@ if [[ -f "$STATE_FILE" ]]; then
     mv "$STATE_FILE" "$_ARCHIVE_PATH"
     echo "target: prior session ($_STALE_REASON); archived to $(basename "$_ARCHIVE_PATH"); writing fresh state" >&2
   fi
-  unset _STALE_STATUS _STALE_CLAIM_KEY _STALE_REASON _CLAIM_STATE _ARCHIVE_PATH
+  unset _STALE_STATUS _STALE_CLAIM_KEY _STALE_SESSION_ID _STALE_REASON _CLAIM_STATE _ARCHIVE_PATH
 fi
 
 # ── Scratchpad scaffolding ────────────────────────────────────────────
@@ -690,8 +736,10 @@ if [[ ! -f "$STATE_FILE" ]]; then
 
   # session_id: {UTC-timestamp}-{infix}{PPID}-{6 hex chars of /dev/urandom}
   # ab-7303e5d7: TARGET_SESSION_ID is the absolute override (megawalk walkers
-  # pre-assign it). Otherwise a Codex thread id is already a durable session
-  # identity and is used verbatim. The generated path remains the fallback.
+  # pre-assign it). Otherwise mint one id per target run. CODEX_THREAD_ID is a
+  # durable conversation/claim-owner identity, but reusing it as session_id
+  # would collide with prior loop termination and finalize events when the same
+  # Codex conversation runs a second target.
   #
   # Provenance infix lives glued to the pid INSIDE segment 2 (never a 4th
   # dash-segment - 3 segments is load-bearing for split('-')[0] consumers). Driver
@@ -699,19 +747,21 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # and is used verbatim; the self-mint path below glues the 2-char PROVIDER code so
   # a direct/bg claude session reads {ts}-cl{pid}-{6hex}. Unknown/empty provider ->
   # no infix (preserves the legacy {ts}-{pid}-{6hex} shape; never a hard error).
-  case "$PROVIDER" in
-    claude)   _prov_infix="cl" ;;
-    codex)    _prov_infix="cx" ;;
-    gemini)   _prov_infix="gm" ;;
-    agy)      _prov_infix="ag" ;;
-    hermes)   _prov_infix="hm" ;;
-    opencode) _prov_infix="oc" ;;
-    *)        _prov_infix="" ;;
-  esac
+  if [[ -n "$_codex_thread_compact" ]]; then
+    _prov_infix="cx"
+  else
+    case "$PROVIDER" in
+      claude)   _prov_infix="cl" ;;
+      codex)    _prov_infix="cx" ;;
+      gemini)   _prov_infix="gm" ;;
+      agy)      _prov_infix="ag" ;;
+      hermes)   _prov_infix="hm" ;;
+      opencode) _prov_infix="oc" ;;
+      *)        _prov_infix="" ;;
+    esac
+  fi
   if [[ -n "${TARGET_SESSION_ID:-}" ]]; then
     local_session_id="$TARGET_SESSION_ID"
-  elif [[ -n "$_codex_thread_compact" ]]; then
-    local_session_id="$_codex_thread_raw"
   else
     local_sid_entropy="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo "")"
     if [[ -n "$local_sid_entropy" ]]; then
@@ -719,6 +769,13 @@ if [[ ! -f "$STATE_FILE" ]]; then
     else
       local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${RANDOM:-0}${RANDOM:-0}"
     fi
+  fi
+  if [[ -n "${TARGET_SESSION_ID:-}" ]]; then
+    claim_owner_id="$TARGET_SESSION_ID"
+  elif [[ -n "$_codex_thread_compact" ]]; then
+    claim_owner_id="$_codex_thread_raw"
+  else
+    claim_owner_id="$local_session_id"
   fi
 
   # ── Mission context ───────────────────────────────────────────────
@@ -845,7 +902,7 @@ PYEOF
 )
   fi
 
-  if [[ -n "$_NODE_ID" && -n "$local_session_id" ]]; then
+  if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
     # Does THIS session own the node? Set by either claim layer; graph_node_id
     # is decided once from it below, so a transient legacy failure no longer
     # nulls a node the modern `fno claim` won.
@@ -868,10 +925,10 @@ PYEOF
         _ROADMAP_TASKS="${REPO_ROOT}/scripts/roadmap-tasks.py"
         _CLAIM_LOG="$STATE_DIR/.init-claim.log"
         if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" \
-            --locked-by "$local_session_id" 2>"$_CLAIM_LOG" >/dev/null; then
+            --locked-by "$claim_owner_id" 2>"$_CLAIM_LOG" >/dev/null; then
           _NODE_OWNED=1
           rm -f "$_CLAIM_LOG"
-          echo "target: graph node $_NODE_ID claimed for session $local_session_id" >&2
+          echo "target: graph node $_NODE_ID claimed for session $claim_owner_id" >&2
         else
           # Transient legacy failure (usually the SessionStart reconcile holding
           # the graph flock): best-effort only; `fno claim` below is authoritative.
@@ -888,7 +945,7 @@ PYEOF
     # fno claim acquire (global TTL lock; authoritative mutex)
     if command -v fno >/dev/null 2>&1; then
       _CLAIM_KEY="node:${_NODE_ID}"
-      _CLAIM_HOLDER="target-session:${local_session_id}"
+      _CLAIM_HOLDER="target-session:${claim_owner_id}"
       _CLAIM_TTL="${TARGET_CLAIM_TTL:-2h}"
       # Durable session pid for the hybrid liveness pid-arm (ab-cc5553f2): the
       # nearest `claude` ancestor outlives the transient init subprocess, so an
