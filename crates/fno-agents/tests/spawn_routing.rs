@@ -1020,16 +1020,20 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane() {
     );
 }
 
-/// AC6-CLIENT (bg): `spawn --substrate bg` without --provider must exit 2. A
-/// detached thread cannot infer a harness, so provider stays required on the
-/// client-side bg/headless lane (maybe_run_spawn), unlike the pane substrate.
+/// x-9112: `spawn --substrate bg` without --provider no longer exits 2 with a
+/// "provider is required" error - it INFERS the invoking harness, mirroring
+/// Python's resolve_dispatch_provider (and the pane arm). Proven deterministically
+/// here via a single CODEX_SESSION_ID marker: inference resolves codex, which then
+/// hits the bg-is-claude-only guard (exit 2, but for the claude-only reason, not a
+/// missing-provider one). Other harness markers are removed so the ambient session
+/// running the test suite can't make the env ambiguous.
 #[test]
-fn client_spawn_bg_no_provider_exits_2() {
+fn client_spawn_bg_no_provider_infers_harness() {
     let home_dir = tmpdir("cli-spawn-noprov-home");
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_spawn_bg_no_provider_exits_2: binary not found at {:?}",
+            "skipping client_spawn_bg_no_provider_infers_harness: binary not found at {:?}",
             bin
         );
         return;
@@ -1040,21 +1044,18 @@ fn client_spawn_bg_no_provider_exits_2() {
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
+        .env("CODEX_SESSION_ID", "test-sid") // exactly one marker -> codex inferred
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("GEMINI_SESSION_ID")
         .output()
         .expect("failed to run fno-agents");
 
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "bg spawn without --provider must exit 2, got {:?}; stderr: {}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr)
-    );
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // Inference landed on codex -> the bg-claude-only guard, NOT the old
+    // "provider is required" rejection.
     assert!(
-        stderr.contains("provider"),
-        "stderr must mention 'provider': {}",
-        stderr
+        stderr.contains("claude-only") && !stderr.contains("provider is required"),
+        "missing --provider on bg must infer the harness (codex here), not reject: {stderr}"
     );
 }
 
