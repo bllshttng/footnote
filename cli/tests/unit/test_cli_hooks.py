@@ -570,6 +570,32 @@ def test_install_cli_hooks_core_returns_after_success(tmp_path, monkeypatch):
     assert result is None
 
 
+def test_cli_cli_hooks_refuses_missing_plugin_hook(tmp_path, monkeypatch):
+    import fno.paths as paths
+    from fno.setup_cli import app
+
+    missing_entry = tmp_path / "missing-plugin" / "hooks" / "session-start.sh"
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: missing_entry)
+    gemini_settings = tmp_path / "gemini" / "settings.json"
+    codex_config = tmp_path / "codex" / "config.toml"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "cli-hooks",
+            "--gemini-settings",
+            str(gemini_settings),
+            "--codex-config",
+            str(codex_config),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "could not locate the installed footnote hooks dir" in result.output
+    assert not gemini_settings.exists()
+    assert not codex_config.exists()
+
+
 def test_cli_cli_hooks_exits_nonzero_when_gemini_refuses(tmp_path, monkeypatch):
     import fno.paths as paths
     from fno.setup_cli import app

@@ -98,6 +98,8 @@ def _install_cli_hooks(
 
     try:
         entry = _paths.resolve_plugin_script("hooks/session-start.sh")
+        if not entry.is_file():
+            raise FileNotFoundError(entry)
     except Exception as exc:  # noqa: BLE001 - surface a clear message, never trace
         typer.echo(
             f"error: could not locate the installed footnote hooks dir ({exc}). "
