@@ -433,6 +433,16 @@ def graph_archive_json() -> Path:
     return graph_json().parent / "graph-archive.json"
 
 
+def relatedness_json() -> Path:
+    """Return the path to relatedness.json (node-to-node relatedness sidecar).
+
+    A sibling of graph.json (like graph-archive.json) so it follows any
+    ``config.paths.graph_json`` override and is inherently shared across
+    worktrees. Regenerable artifact, never part of graph.json.
+    """
+    return graph_json().parent / "relatedness.json"
+
+
 def ledger_json() -> Path:
     """Return the path to ledger.json.
 
