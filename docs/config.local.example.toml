@@ -1,14 +1,14 @@
-# footnote LOCAL settings starter  ->  copy to <project>/.fno/config.toml
+# footnote LOCAL config starter  ->  copy to <project>/.fno/config.toml
 #
 # Project-local config holds the per-project deltas that override your global
 # ~/.fno/config.toml. Keep machine-wide preferences in global (see
-# settings.global.example.toml); keep what is unique to THIS repo here. Any key
+# config.global.example.toml); keep what is unique to THIS repo here. Any key
 # may live in either file.
 #
 # config.toml is flat: top-level scalars and [blocks], no wrapper. Opinionated
 # QUICKSTART - absent keys fall back to their code defaults, so this file stays
 # small on purpose. For every available setting + its default, see
-# docs/settings.example.toml. Once copied, .fno/config.toml is gitignored.
+# docs/config.example.toml. Once copied, .fno/config.toml is gitignored.
 
 [project]
 id = "my-project"        # short id for this repo (used in ledger + labels)

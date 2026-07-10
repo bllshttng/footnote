@@ -78,14 +78,14 @@ def test_example_toml_is_deterministic_and_valid() -> None:
 
 
 def test_committed_example_toml_is_fresh() -> None:
-    """docs/settings.example.toml must equal the generator's output.
+    """docs/config.example.toml must equal the generator's output.
 
     Regenerate with `fno config schema --toml --write`.
     """
-    example = _repo_root() / "docs" / "settings.example.toml"
+    example = _repo_root() / "docs" / "config.example.toml"
     committed = example.read_text(encoding="utf-8")
     assert committed == schema_gen.render_example_toml(), (
-        "docs/settings.example.toml is stale; run "
+        "docs/config.example.toml is stale; run "
         "`fno config schema --toml --write`"
     )
 

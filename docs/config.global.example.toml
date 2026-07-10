@@ -1,15 +1,15 @@
-# footnote GLOBAL settings starter  ->  copy to ~/.fno/config.toml
+# footnote GLOBAL config starter  ->  copy to ~/.fno/config.toml
 #
 # Global config is the baseline shared by EVERY footnote project on this
 # machine. Each project's .fno/config.toml is deep-merged on top, so a project
 # overrides only the keys it needs. Any key may live in either file; the split
-# between this file and settings.local.example.toml is the typical home, not a
+# between this file and config.local.example.toml is the typical home, not a
 # rule.
 #
 # This is an opinionated QUICKSTART with recommended values. Absent keys fall
 # back to their code defaults (every one of the ~100 settings has a default),
 # so you only keep the lines you actually want to change. For the COMPLETE list
-# of every setting and its code default, see docs/settings.example.toml.
+# of every setting and its code default, see docs/config.example.toml.
 #
 # config.toml is flat: top-level scalars and [blocks], no wrapper. Code defaults
 # for the opt-in features below are `false`; the lines here turn on the safe
