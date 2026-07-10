@@ -4745,6 +4745,7 @@ def cmd_reconcile(
                         source_session_id=(
                             (_pm_node or {}).get("source_session_id")
                         ),
+                        source_harness=((_pm_node or {}).get("source_harness")),
                     )
                     if not json_out:
                         if _pm.outcome == "routed-warm":

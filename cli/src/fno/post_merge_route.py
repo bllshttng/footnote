@@ -33,54 +33,122 @@ def _current_session_ids() -> set[str]:
     return {v for k in _SELF_SESSION_ENV_VARS if (v := (os.environ.get(k) or "").strip())}
 
 
-def resolve_warm_session(source_session_id: Optional[str]) -> Optional[str]:
-    """Map a node's originating session id to a live local CC session id.
+def _entry_is_live(entry) -> bool:
+    """A registry row is reachable when its status is a live-ish projection.
+    ``status`` may be an ``AgentStatus`` enum or a raw string; normalize both."""
+    status = getattr(entry, "status", "")
+    val = getattr(status, "value", status)
+    return str(val).lower() in {"live", "idle", "busy", "ready"}
 
-    Returns the session id only when a live, identity-checked (pid +
-    ``procStart`` create-time) local session matches. ``None`` for a missing
-    id, the currently-running session (never self-inject the ritual into the
-    session executing this code), a dead/reused pid, or any resolver error --
-    every ``None`` means "take the cold path".
+
+def _live_codex_registry_entry(session_id: str):
+    """A live codex registry row addressable as ``session_id``, PREFERRING one
+    that carries a live transport (``mux``), or ``None``.
+
+    A codex pane row (``mux_spawn``) holds the pane's id in ``claude_session_uuid``
+    plus a ``mux`` ref but NO ``codex_session_id``, while a SessionStart-registered
+    row has ``codex_session_id`` but no transport. Matching only ``codex_session_id``
+    would select the transportless row, and ``_deliver_live`` on a row with no
+    ``mux`` falls through to the daemon path and cold-spawns instead of PaneSending
+    into the panel (codex peer P2, PR #328). So match EITHER id field and prefer
+    the transport-bearing row. Function-local import keeps this a leaf."""
+    try:
+        from fno.agents.registry import load_registry
+
+        matches = [
+            e
+            for e in load_registry()
+            if getattr(e, "provider", None) == "codex"
+            and _entry_is_live(e)
+            and session_id
+            in (
+                getattr(e, "codex_session_id", None),
+                getattr(e, "claude_session_uuid", None),
+            )
+        ]
+    except Exception:
+        return None
+    if not matches:
+        return None
+    return next((e for e in matches if getattr(e, "mux", None)), matches[0])
+
+
+def resolve_warm_session(
+    source_session_id: Optional[str], source_harness: Optional[str] = None
+) -> Optional[str]:
+    """Map a node's originating ``(session_id, harness)`` to a live, reachable
+    peer, or ``None`` to take the cold path.
+
+    ``source_harness`` selects the liveness probe: ``claude`` (default) matches a
+    live local CC session via disk discovery; ``codex`` matches a live codex row
+    in the agent registry holding this threadId (the shipping panel). ``gemini``
+    has no live-inject vehicle yet (US9) so it always cold-paths. A missing id,
+    the currently-running session (never self-inject), or any resolver error is
+    ``None``.
     """
     sid = (source_session_id or "").strip()
     if not sid:
         return None
     if sid in _current_session_ids():
         return None
-    try:
-        from fno.agents.discover import discover_live_sessions
+    harness = (source_harness or "claude").strip().lower()
+    if harness == "claude":
+        try:
+            from fno.agents.discover import discover_live_sessions
 
-        for s in discover_live_sessions():
-            if s.session_id == sid:
-                return sid
-    except Exception:
+            for s in discover_live_sessions():
+                if s.session_id == sid:
+                    return sid
+        except Exception:
+            return None
         return None
+    if harness == "codex":
+        return sid if _live_codex_registry_entry(sid) is not None else None
+    # gemini / unknown harness: no live-inject vehicle yet -> cold path.
     return None
 
 
-def inject_pr_merged(session_id: str, pr_number: int) -> Tuple[bool, str]:
-    """Live-inject the ritual command into ``session_id``. Never raises.
+def inject_pr_merged(
+    session_id: str, pr_number: int, source_harness: Optional[str] = None
+) -> Tuple[bool, str]:
+    """Live-inject the ritual command into the originating peer. Never raises.
 
-    Returns ``(delivered, reason)``. A busy recipient queues the injected turn
-    (answer-queue semantics); when it is not recorded within the inject's
-    growth-confirm budget the outcome is ``queue-timeout`` and the caller cold
-    dispatches -- the queued turn may still land later, the same bounded
-    double-delivery the mail-inject vehicle already documents and accepts.
+    Injects the RAW ``/fno:pr merged`` command (NOT an ``<fno_mail>`` envelope)
+    so the peer EXECUTES it rather than treating it as chat. ``claude`` uses the
+    control.sock reply (a busy recipient queues the turn -> ``queue-timeout`` ->
+    cold dispatch, the queued turn may still land later: a bounded double-
+    delivery the vehicle already accepts). ``codex`` reaches its live panel via
+    the shared ``_deliver_live`` vehicle (``_mux_pane_send`` for a mux pane, the
+    daemon RPC otherwise) with ``mail=None`` so the command lands verbatim. Any
+    miss returns ``(False, reason)`` and the caller cold-dispatches.
     """
-    try:
-        from fno.relay.roundtrip import (
-            INJECT_CONFIRMED,
-            INJECT_UNCONFIRMED,
-            submit_via_control_reply,
-        )
+    command = WARM_PROMPT.format(pr=pr_number)
+    harness = (source_harness or "claude").strip().lower()
+    if harness == "claude":
+        try:
+            from fno.relay.roundtrip import (
+                INJECT_CONFIRMED,
+                INJECT_UNCONFIRMED,
+                submit_via_control_reply,
+            )
 
-        outcome = submit_via_control_reply(
-            session_id, WARM_PROMPT.format(pr=pr_number)
-        )
-    except Exception as exc:  # inject failure is a routing signal, never fatal
-        return False, f"inject-error: {exc}"[:120]
-    if outcome == INJECT_CONFIRMED:
-        return True, "delivered"
-    if outcome == INJECT_UNCONFIRMED:
-        return False, "queue-timeout"
-    return False, "not-live"
+            outcome = submit_via_control_reply(session_id, command)
+        except Exception as exc:  # inject failure is a routing signal, never fatal
+            return False, f"inject-error: {exc}"[:120]
+        if outcome == INJECT_CONFIRMED:
+            return True, "delivered"
+        if outcome == INJECT_UNCONFIRMED:
+            return False, "queue-timeout"
+        return False, "not-live"
+    if harness == "codex":
+        entry = _live_codex_registry_entry(session_id)
+        if entry is None:
+            return False, "not-live"
+        try:
+            from fno.agents.dispatch import _deliver_live
+
+            delivered = _deliver_live(entry, command, from_name="fno", mail=None)
+        except Exception as exc:
+            return False, f"inject-error: {exc}"[:120]
+        return (True, "delivered") if delivered else (False, "not-live")
+    return False, f"unsupported-harness:{harness}"

@@ -971,7 +971,8 @@ def dispatch_post_merge_ritual(
     canonical_root: Optional[Path] = None,
     spawn: Optional[Callable[[int, str], str]] = None,
     source_session_id: Optional[str] = None,
-    warm_inject: Optional[Callable[[str, int], "tuple[bool, str]"]] = None,
+    source_harness: Optional[str] = None,
+    warm_inject: Optional[Callable[[str, int, Optional[str]], "tuple[bool, str]"]] = None,
 ) -> PostMergeDispatchResult:
     """Dispatch a bg ``/fno:pr merged <n>`` worker at most once per merge.
 
@@ -994,7 +995,10 @@ def dispatch_post_merge_ritual(
     ``source_session_id`` (the merged node's originating session) arms the
     warm route: a live inject of the ritual into that session, tried under
     the same lock/marker, so exactly one of {warm inject, cold spawn} runs
-    per merge. ``warm_inject`` is a test seam.
+    per merge. ``source_harness`` (claude|codex|gemini) selects which live
+    vehicle reaches it, so a codex/gemini-shipped node routes warm to its own
+    panel instead of always cold-spawning a claude worker. ``warm_inject`` is a
+    test seam.
     """
     if not auto_run:
         return PostMergeDispatchResult("disabled", pr_number)
@@ -1061,10 +1065,10 @@ def dispatch_post_merge_ritual(
         try:
             from fno.post_merge_route import inject_pr_merged, resolve_warm_session
 
-            warm_sid = resolve_warm_session(source_session_id)
+            warm_sid = resolve_warm_session(source_session_id, source_harness)
             if warm_sid is not None:
                 _inject = warm_inject if warm_inject is not None else inject_pr_merged
-                delivered, reason = _inject(warm_sid, pr_number)
+                delivered, reason = _inject(warm_sid, pr_number, source_harness)
                 if delivered:
                     _persist_marker()
                     return PostMergeDispatchResult(
