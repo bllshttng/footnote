@@ -115,10 +115,19 @@ class TestInjectPrMerged:
 
 
 class _FakeEntry:
-    def __init__(self, provider, codex_session_id, status="live"):
+    def __init__(
+        self,
+        provider,
+        codex_session_id=None,
+        status="live",
+        claude_session_uuid=None,
+        mux=None,
+    ):
         self.provider = provider
         self.codex_session_id = codex_session_id
         self.status = status
+        self.claude_session_uuid = claude_session_uuid
+        self.mux = mux
 
 
 def _patch_registry(monkeypatch, entries):
@@ -182,3 +191,37 @@ class TestCodexWarmRoute:
         delivered, reason = inject_pr_merged("gm-1", 42, "gemini")
         assert delivered is False
         assert reason.startswith("unsupported-harness")
+
+    def test_resolve_codex_pane_row_via_uuid(self, monkeypatch):
+        # A codex pane row (mux_spawn) holds its id in claude_session_uuid + a
+        # mux ref and has NO codex_session_id; it must still resolve (PR #328).
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        pane = _FakeEntry(
+            "codex", None, "live", claude_session_uuid="cx-p",
+            mux={"session": "m", "pane_id": 1},
+        )
+        _patch_registry(monkeypatch, [pane])
+        assert resolve_warm_session("cx-p", "codex") == "cx-p"
+
+    def test_inject_prefers_transport_bearing_pane_row(self, monkeypatch):
+        # Both a transportless id-row and a mux pane row match the same id;
+        # inject must pick the mux row so _deliver_live PaneSends into the panel
+        # instead of falling through to the daemon path (codex peer P2).
+        idle = _FakeEntry("codex", "cx-x", "live")  # codex_session_id, no mux
+        pane = _FakeEntry(
+            "codex", None, "live", claude_session_uuid="cx-x",
+            mux={"session": "m", "pane_id": 1},
+        )
+        _patch_registry(monkeypatch, [idle, pane])
+        import fno.agents.dispatch as dispatch
+
+        sent = {}
+
+        def _fake_deliver(e, body, from_name="fno", mail=None):
+            sent["entry"] = e
+            return True
+
+        monkeypatch.setattr(dispatch, "_deliver_live", _fake_deliver)
+        delivered, _ = inject_pr_merged("cx-x", 7, "codex")
+        assert delivered is True
+        assert sent["entry"] is pane  # the transport-bearing row, not idle

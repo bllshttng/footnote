@@ -42,22 +42,35 @@ def _entry_is_live(entry) -> bool:
 
 
 def _live_codex_registry_entry(session_id: str):
-    """The live registry row for a codex panel holding ``session_id`` (its
-    threadId), or ``None``. This is the shipping panel we can reach via the
-    shared ``_deliver_live`` vehicle. Function-local import keeps this a leaf."""
+    """A live codex registry row addressable as ``session_id``, PREFERRING one
+    that carries a live transport (``mux``), or ``None``.
+
+    A codex pane row (``mux_spawn``) holds the pane's id in ``claude_session_uuid``
+    plus a ``mux`` ref but NO ``codex_session_id``, while a SessionStart-registered
+    row has ``codex_session_id`` but no transport. Matching only ``codex_session_id``
+    would select the transportless row, and ``_deliver_live`` on a row with no
+    ``mux`` falls through to the daemon path and cold-spawns instead of PaneSending
+    into the panel (codex peer P2, PR #328). So match EITHER id field and prefer
+    the transport-bearing row. Function-local import keeps this a leaf."""
     try:
         from fno.agents.registry import load_registry
 
-        for e in load_registry():
-            if (
-                getattr(e, "provider", None) == "codex"
-                and getattr(e, "codex_session_id", None) == session_id
-                and _entry_is_live(e)
-            ):
-                return e
+        matches = [
+            e
+            for e in load_registry()
+            if getattr(e, "provider", None) == "codex"
+            and _entry_is_live(e)
+            and session_id
+            in (
+                getattr(e, "codex_session_id", None),
+                getattr(e, "claude_session_uuid", None),
+            )
+        ]
     except Exception:
         return None
-    return None
+    if not matches:
+        return None
+    return next((e for e in matches if getattr(e, "mux", None)), matches[0])
 
 
 def resolve_warm_session(
