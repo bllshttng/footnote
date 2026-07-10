@@ -237,18 +237,19 @@ def _run_consistency_propose(context: dict, model: Optional[str]) -> dict:
     # `structured_output` (or `result` as its JSON text). A test stub prints the
     # proposal object directly (no envelope). Unwrap in that order; is_error
     # first, since an auth/runtime failure carries no schema object.
-    if isinstance(data, dict) and data.get("is_error"):
-        raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
-    if isinstance(data, dict) and isinstance(data.get("structured_output"), dict):
-        proposal = data["structured_output"]
-    elif isinstance(data, dict) and isinstance(data.get("result"), str):
-        try:
-            proposal = json.loads(data["result"])
-        except json.JSONDecodeError as e:
-            raise ValueError(f"claude -p result is not JSON: {e}") from e
-    else:
-        proposal = data  # a stub prints the proposal object directly (no envelope)
-    if not isinstance(proposal, dict):
+    proposal = data  # a stub prints the proposal object directly (no envelope)
+    if isinstance(data, dict):
+        if data.get("is_error"):
+            raise RuntimeError(f"claude -p error: {data.get('result') or data.get('error')}")
+        structured, result_text = data.get("structured_output"), data.get("result")
+        if isinstance(structured, dict):
+            proposal = structured
+        elif isinstance(result_text, str):
+            try:
+                proposal = json.loads(result_text)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"claude -p result is not JSON: {e}") from e
+    if not isinstance(proposal, dict):  # non-dict data, or result parsed to a non-dict
         raise ValueError("proposal is not a JSON object")
     # A schema-conforming proposal always carries priority_changes (required in
     # _CONSISTENCY_SCHEMA), even if empty; its absence is an underfilled envelope

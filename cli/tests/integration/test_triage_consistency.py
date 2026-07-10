@@ -196,6 +196,15 @@ def test_missing_structured_output_unparseable_result_raises(tmp_path, monkeypat
         triage._run_consistency_propose({"candidates": []}, None)
 
 
+def test_result_parses_to_non_dict_raises(tmp_path, monkeypatch):
+    # result is valid JSON but not an object (a list): the downstream dict guard
+    # rejects it rather than handing a non-dict proposal downstream.
+    envelope = json.dumps({"is_error": False, "result": json.dumps([1, 2, 3])})
+    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    with pytest.raises(ValueError, match="not a JSON object"):
+        triage._run_consistency_propose({"candidates": []}, None)
+
+
 def test_empty_structured_output_raises_not_silent_zero(tmp_path, monkeypatch):
     # An underfilled envelope (structured_output missing priority_changes) must
     # be an errored run, never a silently-completed zero-proposal agreement.
