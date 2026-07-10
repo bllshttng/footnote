@@ -11,9 +11,9 @@
 //! Reuses the G1 substrate for roster resolution ([`crate::claude_roster`]) ->
 //! `control.sock` + `control.key` and the attach handshake
 //! ([`crate::claude_attach`]). Post-attach the socket is a RAW keystroke pipe, so
-//! the turn is PASTED as raw bytes and submitted with a wire-level CR -- NOT an
-//! `op:'reply'` JSON frame, which would land (auth key included) as literal text
-//! in the recipient input box, unsent (node x-178e). The `<fno_mail>` envelope is
+//! the turn is bracketed-PASTED as raw bytes and submitted with a wire-level CR --
+//! NOT an `op:'reply'` JSON frame, which would land (auth key included) as literal
+//! text in the recipient input box, unsent (node x-178e). The `<fno_mail>` envelope is
 //! rendered Python-side (the single renderer, shared by the codex/gemini + relay
 //! paths) and injected verbatim here, so this verb is a dumb transport.
 //!
@@ -151,14 +151,24 @@ fn emit(delivered: bool, reason: &str) -> i32 {
     outcome_exit(delivered)
 }
 
-/// Paste the envelope as RAW BYTES on the ATTACHED transport, settle, then send a
-/// separate raw `\r` byte as the Enter. Post-attach the `control.sock` is a raw
-/// keystroke pipe (node x-178e): an `op:'reply'` JSON write here lands its frames
-/// -- auth key included -- as literal text in the recipient input box, unsent. So
-/// we type the turn exactly as a human would: paste, then a wire-level CR. The CR
-/// is a distinct write, NOT `\r` appended to the paste -- an embedded `\r` is paste
-/// content, only a separate keystroke is the Enter. Refuses text carrying a detach
-/// sentinel before any write. Extracted so the raw two-write sequence is
+/// Bracketed-paste guards (xterm DEC mode 2004): the recipient TUI treats
+/// everything between them as ONE paste event. Required because a `<fno_mail>`
+/// envelope is multi-line (`open_tag\nbody\n</fno_mail>`), and a raw multi-line
+/// write without them submits line-by-line -- the recipient records the open tag
+/// alone (enough to satisfy the content confirm) while the body arrives as
+/// separate input, dropping the message. Contract: `docs/architecture/fno-agents-deliver-gate.md`.
+const PASTE_BEGIN: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
+
+/// Paste the envelope as RAW BYTES on the ATTACHED transport -- wrapped in
+/// bracketed-paste guards so a multi-line body lands as ONE paste -- settle, then
+/// send a separate raw `\r` byte as the Enter. Post-attach the `control.sock` is a
+/// raw keystroke pipe (node x-178e): an `op:'reply'` JSON write here lands its
+/// frames -- auth key included -- as literal text in the recipient input box,
+/// unsent. So we type the turn exactly as a human would: paste, then a wire-level
+/// CR. The CR is a distinct write, NOT `\r` appended to the paste -- an embedded
+/// `\r` is paste content, only a separate keystroke is the Enter. Refuses text
+/// carrying a detach sentinel before any write. Extracted so the raw sequence is
 /// unit-testable against a `Fake` transport (settle=ZERO).
 fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
     transport: &mut T,
@@ -169,7 +179,7 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
         return Err(DriveError::UnsafeText);
     }
     transport
-        .send_line(text)
+        .send_line(&format!("{PASTE_BEGIN}{text}{PASTE_END}"))
         .map_err(|e| DriveError::Io(e.to_string()))?;
     std::thread::sleep(settle);
     transport
@@ -368,14 +378,23 @@ mod tests {
     }
 
     #[test]
-    fn inject_with_submit_pastes_raw_bytes_then_separate_cr() {
+    fn inject_with_submit_bracketed_pastes_then_separate_cr() {
         let mut t = Fake { sent: Vec::new() };
         let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-178e\">\nhi MARKER\n</fno_mail>";
         inject_with_submit(&mut t, envelope, Duration::ZERO).unwrap();
-        // Raw paste, then a SEPARATE wire-level CR -- not `\r` appended to the paste.
-        assert_eq!(t.sent, vec![envelope.to_string(), "\r".to_string()]);
-        // The paste is RAW bytes, NEVER an op:'reply' JSON frame (the x-178e bug):
-        // no `op` key, and the control auth key is never typed into the recipient.
+        // The multi-line envelope is ONE bracketed paste, then a SEPARATE wire-level
+        // CR -- not `\r` appended to the paste. Bracketed-paste guards keep the
+        // embedded newlines from submitting the body line-by-line.
+        assert_eq!(
+            t.sent,
+            vec![
+                format!("{PASTE_BEGIN}{envelope}{PASTE_END}"),
+                "\r".to_string()
+            ]
+        );
+        // The paste carries the RAW envelope verbatim, NEVER an op:'reply' JSON frame
+        // (the x-178e bug): no `op` key, and the control auth key is never typed in.
+        assert!(t.sent[0].contains(envelope), "envelope pasted verbatim");
         assert!(
             !t.sent[0].contains("\"op\""),
             "envelope must be raw bytes, not a JSON op"
