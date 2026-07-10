@@ -335,16 +335,15 @@ def resolve_node(query: Optional[str], entries: list[Entry]) -> IdMatch:
         # does file I/O (load_settings) and already fails open to `ab-`.
         from fno.graph._constants import node_id_prefix
         prefixes = list(dict.fromkeys((node_id_prefix(), "ab-")))
-        ids = {e.get("id") for e in entries}
+        by_id = {e.get("id"): e for e in entries if e.get("id")}
         for p in prefixes:
             cand = f"{p}{q}"
-            if cand in ids:
-                for e in entries:
-                    if e.get("id") == cand:
-                        return IdMatch(
-                            kind="exact", id=cand, candidates=(e,),
-                            note=f"bare hex '{q}' -> {cand}",
-                        )
+            e = by_id.get(cand)
+            if e is not None:
+                return IdMatch(
+                    kind="exact", id=cand, candidates=(e,),
+                    note=f"bare hex '{q}' -> {cand}",
+                )
         tried = ", ".join(f"{p}{q}" for p in prefixes)
         return IdMatch(
             kind="none",
