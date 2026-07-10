@@ -299,8 +299,8 @@ def _read_one_frame(sock: socket.socket, *, timeout: float = 2.0) -> dict:
             f"no deliver frame arrived within {timeout}s: the "
             f"register/send_to_channel round-trip did not deliver"
         )
-    line, _, _ = buf.partition(b"\n")
-    assert line, "push connection closed without a deliver frame"
+    line, sep, _ = buf.partition(b"\n")
+    assert sep == b"\n", "push connection closed without a complete deliver frame"
     return json.loads(line.decode("utf-8"))
 
 
@@ -324,22 +324,26 @@ class TestSidecarChannelDelivery:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         conn.settimeout(2.0)
         conn.connect(str(sock_path))
-        conn.sendall(
-            (
-                json.dumps(
-                    {
-                        "op": "register_channel",
-                        "session_id": session_id,
-                        "channel_name": "test-channel",
-                        "pid": os.getpid(),
-                    }
-                )
-                + "\n"
-            ).encode("utf-8")
-        )
-        ack = _read_one_frame(conn)
-        assert ack == {"ok": True}, f"register_channel failed: {ack}"
-        return conn
+        try:
+            conn.sendall(
+                (
+                    json.dumps(
+                        {
+                            "op": "register_channel",
+                            "session_id": session_id,
+                            "channel_name": "test-channel",
+                            "pid": os.getpid(),
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            ack = _read_one_frame(conn)
+            assert ack == {"ok": True}, f"register_channel failed: {ack}"
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     def test_send_to_registered_channel_delivers(self, short_home: Path) -> None:
         """AC1-HP: a registered channel receives the pushed envelope,
@@ -371,7 +375,11 @@ class TestSidecarChannelDelivery:
             if conn_a is not None:
                 conn_a.close()
             proc.terminate()
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     def test_empty_meta_envelope_round_trips(self, short_home: Path) -> None:
         """AC1-EDGE: an envelope built with meta=None (collapsing to {})
@@ -398,4 +406,8 @@ class TestSidecarChannelDelivery:
             if conn_a is not None:
                 conn_a.close()
             proc.terminate()
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
