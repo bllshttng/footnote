@@ -342,7 +342,12 @@ def _discover_open_pr_count() -> int:
         if not gpath.exists():
             return 0
         entries = read_graph(gpath)
-        return len(discover_open_prs(entries))
+        # Match the tick's grace window so the status count reflects what is
+        # actually watched (done-at-PR-green nodes stay watched through merge).
+        import datetime
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return len(discover_open_prs(entries, now_iso=now_iso))
     except Exception:
         return 0
 
