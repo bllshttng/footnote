@@ -976,7 +976,13 @@ def advance(
         from fno.adapters.providers.loader import load_providers
         from fno.adapters.providers.runtime_state import evaluate_quota_defer
 
-        provider_id = provider or load_providers().active or ""
+        # Match the SAME provider precedence the spawn below uses
+        # (eff_provider = provider arg -> node pin -> active default), so the
+        # quota decision evaluates the provider the worker will actually run on,
+        # not a mismatched active record (x-5d3e review).
+        provider_id = (
+            provider or node.get("provider") or load_providers().active or ""
+        )
         decision = evaluate_quota_defer(provider_id, priority=node.get("priority"))
     except Exception:  # noqa: BLE001 - a quota read must never wedge advance
         decision = None

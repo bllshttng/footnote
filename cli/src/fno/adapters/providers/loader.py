@@ -445,6 +445,16 @@ def save_providers(
     # If existing was read from a legacy wrapped file, lift its config.* keys up
     # so the written config.toml is single-shape (never a mixed config: + flat).
     existing = _flatten_config(existing)
+    # Preserve provider subkeys this write path does not rebuild (quota, combos,
+    # failover, agents, ...). Rebuilding providers_block from only records+active
+    # would otherwise silently drop them, so e.g. `fno providers use` after an
+    # operator set config.providers.quota.defer_dispatch would turn quota
+    # deferral back off (x-5d3e review). Rebuilt keys win; everything else rides.
+    old_providers = existing.get("providers")
+    if isinstance(old_providers, dict):
+        for key, val in old_providers.items():
+            if key not in ("records", "active"):
+                providers_block.setdefault(key, val)
     existing["providers"] = providers_block
 
     target.parent.mkdir(parents=True, exist_ok=True)

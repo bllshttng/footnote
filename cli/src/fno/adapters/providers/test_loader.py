@@ -471,6 +471,44 @@ class TestSaveProviders:
         assert "providers" in data
         assert len(data["providers"]["records"]) == 1
 
+    def test_save_preserves_provider_subkeys(self, tmp_path: Path, monkeypatch):
+        """save_providers keeps provider subkeys it does not rebuild (x-5d3e).
+
+        A normal provider edit (use/add/remove) must not silently drop
+        config.providers.quota / combos / failover - rebuilding the block from
+        only records+active would turn an operator's defer_dispatch back off.
+        """
+        from fno.adapters.providers.loader import save_providers
+        from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
+
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+
+        existing = tmp_path / ".fno" / "config.toml"
+        _write_settings(
+            existing,
+            {
+                "config": {
+                    "providers": {
+                        "records": [],
+                        "quota": {"defer_dispatch": True, "defer_threshold_pct": 80},
+                        "combos": {"c1": {"providers": ["a"]}},
+                    }
+                }
+            },
+        )
+
+        record = ProviderRecord(
+            id="a", name="A", cli="claude", auth="oauth_dir",
+            credentials_source=Path("~/.claude"),
+        )
+        save_providers(ProvidersConfig(records=[record], active="a"), scope="project")
+
+        data = tomllib.loads(existing.read_text())
+        assert data["providers"]["quota"] == {"defer_dispatch": True, "defer_threshold_pct": 80}
+        assert data["providers"]["combos"] == {"c1": {"providers": ["a"]}}
+        assert data["providers"]["active"] == "a"
+
     def test_save_global_scope(self, tmp_path: Path, monkeypatch):
         """save_providers with scope='global' writes to home/.fno/settings.yaml."""
         from fno.adapters.providers.loader import save_providers
