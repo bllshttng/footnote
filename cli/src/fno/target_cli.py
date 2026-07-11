@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -729,6 +730,69 @@ def _is_linked_worktree(cwd: Path) -> bool:
     return _abs(gdir) != _abs(common)
 
 
+def _foreign_live_holder(node_id: str) -> Optional[dict]:
+    """Claim info for ``node:<id>`` iff a DIFFERENT live/suspect session holds
+    it, else None (free / dead / ours).
+
+    Read-only and never raises: any probe failure degrades to None so ``start``
+    behaves exactly as before the guard when the claim system is unreadable.
+    Liveness is pid-based (``classify``), so a busy owner whose TTL lapsed still
+    reads live - that is what lets the caller park a second session instead of
+    telling it the owner went idle.
+    """
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+    from fno.claims.session_pid import resolve_session_pid
+
+    # node: claims live under $HOME, not the default root -- claims_root_for(key)
+    # routes there; a bare claim_status(key) would read the wrong tree as free.
+    key = f"node:{node_id}"
+    try:
+        info = claim_status(key, root=claims_root_for(key))
+    except Exception:
+        return None
+    if info.get("state") not in ("live", "suspect"):
+        return None
+    # Ours by declared identity. A driver-run claude session sets
+    # TARGET_SESSION_ID; a codex session has no TARGET_SESSION_ID, so
+    # init-target-state.sh makes its raw CODEX_THREAD_ID the claim owner. Match
+    # either -- the durable-pid arm below only resolves a claude ancestor, so
+    # codex parity (a same-thread re-run is not foreign) depends on this arm.
+    holder = info.get("holder")
+    for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
+        own_id = os.environ.get(env_var)
+        if own_id and holder == f"target-session:{own_id}":
+            return None
+    # Ours by durable session pid + host (a bare interactive re-run with no TSID).
+    # An uncapturable own pid on a live foreign-looking claim reads as foreign
+    # (park, never share) -- the conservative direction.
+    try:
+        own_pid = resolve_session_pid(from_pid=os.getpid())
+        own_host = socket.gethostname()  # can raise OSError in sandboxes
+    except Exception:
+        own_pid = own_host = None
+    if own_pid and info.get("pid") == own_pid and info.get("host") == own_host:
+        return None
+    return info  # foreign + live/suspect -> caller refuses
+
+
+def _print_foreign_holder_park(node_id: str, info: dict, wt_path: Path) -> None:
+    """Loud park naming the live holder so a second session does not assume the
+    node went idle. Both start exits call this so the message is identical."""
+    holder = info.get("holder", "unknown")
+    pid = info.get("pid", "?")
+    host = info.get("host", "?")
+    typer.echo(
+        f"fno target start: node {node_id} is held by a live session\n"
+        f"  {holder} (pid={pid}, host={host}).\n"
+        f"  Refusing to share its worktree at {wt_path} "
+        f"(would corrupt a shared git index).\n"
+        f"  If this is your session, cd {wt_path} to continue it;\n"
+        f"  otherwise wait for it to release the claim, or pick another node.",
+        err=True,
+    )
+
+
 @target_app.command()
 def start(
     node: str = typer.Argument(
@@ -763,8 +827,15 @@ def start(
     """
     cwd = Path.cwd()
 
-    # Boundary: already isolated -> no-op, create nothing (x-45e6 case).
+    # Boundary: already isolated -> no-op, create nothing (x-45e6 case). But
+    # first refuse if a DIFFERENT live session holds this node's claim: this cwd
+    # is that session's worktree and sharing its git index corrupts the build.
     if _is_linked_worktree(cwd):
+        node_id = _resolve_node_id(node)
+        holder = _foreign_live_holder(node_id)
+        if holder is not None:
+            _print_foreign_holder_park(node_id, holder, cwd)
+            raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
         return
 
@@ -822,6 +893,12 @@ def start(
     manifest = wt_path / ".fno" / "target-state.md"
     fno_state = "healed" if healed else "ok"
     if manifest.exists() and not manifest.is_symlink():
+        # A manifest means init ran, so the claim is set - refuse if a DIFFERENT
+        # live session owns it rather than presenting its worktree as usable.
+        holder = _foreign_live_holder(node)
+        if holder is not None:
+            _print_foreign_holder_park(node, holder, wt_path)
+            raise typer.Exit(code=1)
         typer.echo(
             f"worktree={wt_path}  .fno={fno_state}  base=origin/main  "
             f"node=already-claimed"
