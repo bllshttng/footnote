@@ -31,7 +31,7 @@ Docs are advisory (control-plane step 6, ab-f8e5f214): there is no docs pre-gate
 
 ```bash
 PR_NUMBER=$(sed -n 's/^pr_number:[[:space:]]*//p' .fno/target-state.md | xargs)
-RESULT=$(fno pr merge --invoker=target "$PR_NUMBER")
+RESULT=$(fno pr merge "$PR_NUMBER")
 OUTCOME=$(echo "$RESULT" | jq -r '.outcome')
 ```
 
@@ -42,7 +42,7 @@ State update rules per outcome:
 | `merged` | Append `$PR_NUMBER` to `merged_prs` |
 | `queued` | Append `$PR_NUMBER` to `merge_auto_queued` |
 | `failed` | Append `{pr: $PR_NUMBER, reason: ...}` to `merge_failed` (NOT a target failure - PR exists) |
-| `skipped` | No state change (auto-merge disabled for this invoker) |
+| `skipped` | No state change (auto-merge disabled: `enabled: false`) |
 
 A `failed` outcome does NOT block the promise. The PR was created successfully; merge failure is post-hoc.
 
