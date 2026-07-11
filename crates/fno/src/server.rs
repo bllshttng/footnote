@@ -735,6 +735,15 @@ struct Core {
     /// non-goal, Locked Decision 7). Orphan ids from reaped panes are inert
     /// (never re-matched); no GC.
     seen: HashSet<u64>,
+    /// (x-0090) Live attach panes: `attach_id -> pane`. Lifetime = pane
+    /// lifetime, never persisted (server death kills panes; the bg agent
+    /// re-surfaces watch-only next session). Lets `AttachAgent` reconcile
+    /// row-to-tab identity: a second attach for a mapped id focuses the
+    /// existing pane instead of minting a duplicate tab, and `agent_rows()`
+    /// presents the mapped watch-only row pane-hosted. Swept eagerly on pane
+    /// teardown; `agent_rows()` also checks `panes` liveness lazily so a stale
+    /// entry can never present a dead pane.
+    attached: HashMap<String, u64>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -1077,6 +1086,10 @@ impl Core {
         self.claims.remove(&pid);
         self.claim_eligible.remove(&pid);
         self.touch_last_emit.remove(&pid);
+        // (x-0090) Drop any attach mapping onto the dead pane so a re-attach
+        // spawns fresh rather than focusing a corpse (the lazy `panes` check in
+        // `agent_rows()` is the belt to this eager suspenders - Discretion 3).
+        self.attached.retain(|_, p| *p != pid);
         if let Some(tx) = self.pane_watch.remove(&pid) {
             // Last observable tick before the sender drops: a watcher that
             // reads it sees `exited`; one blocked in `changed()` sees the
@@ -1823,18 +1836,36 @@ impl Core {
                     (squad, Some(*pane), a.exited || pane_dead)
                 }
                 None => {
-                    // Watch-only (paneless) rows have no membership to match on,
-                    // so fall back to cwd - now tested against ANY of the squad's
-                    // origins (exact or child), not a single canonical_cwd, so a
-                    // multi-origin squad still claims a worker under any of its
-                    // paths (change #5, AC2-EDGE).
-                    let squad = self
-                        .session
-                        .squads
-                        .iter()
-                        .find(|s| s.owns_path(&a.cwd))
-                        .map(|s| s.id);
-                    (squad, None, a.exited)
+                    // (x-0090) A watch-only row whose attach maps to a LIVE pane
+                    // in this session presents pane-hosted (`find_pane` -> squad,
+                    // `pane_id: Some`), so `agent_hit` sends `FocusPane` on the
+                    // next click - no duplicate row, no second tab. The lazy
+                    // `panes` liveness filter means a stale mapping (pane reaped
+                    // between ticks) can never present a dead pane; it falls
+                    // through to the watch-only cwd match below (AC1-FR revert).
+                    let attached_pane = a
+                        .attach_id
+                        .as_deref()
+                        .and_then(|id| self.attached.get(id).copied())
+                        .filter(|p| self.panes.contains_key(p))
+                        .and_then(|p| self.session.find_pane(p).map(|(sid, _)| (sid, p)));
+                    match attached_pane {
+                        Some((sid, p)) => (Some(sid), Some(p), a.exited),
+                        // Watch-only (paneless) rows have no membership to match
+                        // on, so fall back to cwd - tested against ANY of the
+                        // squad's origins (exact or child), not a single
+                        // canonical_cwd, so a multi-origin squad still claims a
+                        // worker under any of its paths (change #5, AC2-EDGE).
+                        None => {
+                            let squad = self
+                                .session
+                                .squads
+                                .iter()
+                                .find(|s| s.owns_path(&a.cwd))
+                                .map(|s| s.id);
+                            (squad, None, a.exited)
+                        }
+                    }
                 }
             };
             out.push(AgentRow {
@@ -1875,8 +1906,10 @@ impl Core {
     /// a client-side `FocusPane`, so it rides this for free), never a
     /// per-pass level check - AC2-EDGE requires that parking on a pane while
     /// it is `Working` never marks a later `Done` seen, only a fresh focus
-    /// action does. `Command::AttachAgent` has no call to this: it always
-    /// spawns a brand-new pane_id, which can't already be `Done`. A no-op
+    /// action does. (x-0090) `Command::AttachAgent`'s reconcile-focus arm now
+    /// calls this too: a second attach onto an already-mapped `Done` pane is a
+    /// focus, so it clears unseen like FocusPane; the spawn arm mints a
+    /// brand-new pane_id that can't already be `Done`, a no-op. A no-op
     /// when `pid`'s current badge isn't `Done`.
     fn mark_seen_if_done(&mut self, pid: u64) {
         // Read `self.agents` directly rather than `self.agent_rows()`: the
@@ -2664,10 +2697,49 @@ impl Core {
                     self.notice(client_id, "no such agent");
                     return Flow::Continue;
                 }
-                // Spawn `claude attach <id>` as a new tab in the sender's squad
-                // (mirrors NewTab): the claude supervisor PTYs the detached bg
-                // session into this pane. cwd is the squad's, like a new tab -
-                // attach connects by id, so the dir is cosmetic.
+                // (x-0090) Reconcile: an id already mapped to a LIVE pane focuses
+                // it instead of minting a duplicate tab (Locked 3; AC2-HP). A
+                // stale mapping (pane reaped between reap and here) is dropped and
+                // falls through to a fresh spawn. Single-threaded core loop, so
+                // click 2 sees click 1's insert (AC2-FR double-action guard).
+                if let Some(&pid) = self.attached.get(&id) {
+                    if self.panes.contains_key(&pid) {
+                        if let Some((sid, ti)) = self.session.find_pane(pid) {
+                            let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
+                            self.set_view(client_id, sid, tid);
+                            if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                                tab.focus = pid;
+                            }
+                            // The focus arm clears a Done pane's unseen bit, like
+                            // FocusPane - AttachAgent is no longer spawn-only.
+                            self.mark_seen_if_done(pid);
+                            self.push_layout(true);
+                            return Flow::Continue;
+                        }
+                    }
+                    self.attached.remove(&id);
+                }
+                // Resolve the OWNING squad (Locked 2): the first squad whose
+                // `owns_path` matches the watch-only row's registry cwd, so the
+                // attach lands where the agent lives, not the viewer's squad;
+                // fall back to the viewed squad for an orphan (AC1-EDGE).
+                let owner = self
+                    .agents
+                    .iter()
+                    .find(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id))
+                    .map(|a| a.cwd.clone())
+                    .and_then(|cwd| {
+                        self.session
+                            .squads
+                            .iter()
+                            .find(|s| s.owns_path(&cwd))
+                            .map(|s| s.id)
+                    })
+                    .unwrap_or(view.0);
+                // Spawn `claude attach <id>` as a new tab in the owning squad: the
+                // claude supervisor PTYs the detached bg session into this pane.
+                // cwd is the squad's, like a new tab - attach connects by id, so
+                // the dir is cosmetic.
                 let (rows, cols) = self
                     .clients
                     .iter()
@@ -2676,7 +2748,7 @@ impl Core {
                     .unwrap_or((vp.rows, vp.cols));
                 let squad_cwd = self
                     .session
-                    .squad(view.0)
+                    .squad(owner)
                     .map(|s| s.canonical_cwd().to_string())
                     .unwrap_or_default();
                 let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
@@ -2688,7 +2760,7 @@ impl Core {
                     }
                 };
                 let tid = self.session.mint_tab_id();
-                let Some(squad) = self.session.squad_mut(view.0) else {
+                let Some(squad) = self.session.squad_mut(owner) else {
                     return Flow::Continue;
                 };
                 squad.tabs.push(Tab {
@@ -2697,7 +2769,11 @@ impl Core {
                     root: Node::Leaf(pid),
                     focus: pid,
                 });
-                self.set_view(client_id, view.0, tid);
+                // Record the reconcile mapping AFTER the spawn+model mutation
+                // succeed (PTY-first: a failed spawn returned above, writing no
+                // entry - AC1-ERR leaves the row watch-only).
+                self.attached.insert(id, pid);
+                self.set_view(client_id, owner, tid);
                 self.push_layout(true);
                 Flow::Continue
             }
@@ -3492,6 +3568,7 @@ async fn serve(
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         client_count: client_count_tx,
         seen: HashSet::new(),
+        attached: HashMap::new(),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -5251,6 +5328,75 @@ mod tests {
     }
 
     #[test]
+    fn attach_reconcile_focuses_mapped_pane_no_second_tab() {
+        // x-0090 AC2-HP / AC2-FR: an attach_id already mapped to a live pane
+        // focuses it, never mints a second tab. The seeded (pane + map entry)
+        // stands in for a successful first attach (the real spawn needs a live
+        // `claude`), so the live command under test is attach #2 - and a third
+        // is still a focus, covering the double-action guard.
+        let (mut core, client_id, _p1, p2, _rx) = seen_test_core();
+        core.agents = vec![bg_row("spawn-fix-c3d4", "/tmp/seen", Some("deadbee1"))];
+        core.attached.insert("deadbee1".into(), p2);
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::AttachAgent("deadbee1".into()));
+        assert_eq!(
+            core.panes.len(),
+            panes_before,
+            "reconcile-focus spawns no new pane"
+        );
+        // The view jumped to the mapped pane's tab (p2 is tab id 2).
+        assert_eq!(core.client_view(client_id), Some((1, 2)), "view follows p2");
+
+        core.command(client_id, Command::AttachAgent("deadbee1".into()));
+        assert_eq!(
+            core.panes.len(),
+            panes_before,
+            "a second action stays a focus - exactly one pane"
+        );
+    }
+
+    #[test]
+    fn agent_rows_presents_mapped_watch_only_pane_hosted() {
+        // x-0090 AC1-HP (presentation): a watch-only row whose attach maps to a
+        // live pane renders pane-hosted under the pane's squad, with attach_id
+        // dropped - so agent_hit sends FocusPane, not a duplicate AttachAgent.
+        let (mut core, _client_id, _p1, p2, _rx) = seen_test_core();
+        core.agents = vec![bg_row("spawn-fix-c3d4", "/tmp/seen", Some("deadbee1"))];
+        core.attached.insert("deadbee1".into(), p2);
+
+        let rows = core.agent_rows();
+        let row = rows.iter().find(|r| r.name == "spawn-fix-c3d4").unwrap();
+        assert_eq!(row.pane_id, Some(p2), "presents pane-hosted");
+        assert_eq!(row.squad, Some(1), "under the pane's squad");
+        assert_eq!(row.attach_id, None, "attach target dropped on a pane row");
+    }
+
+    #[test]
+    fn reap_sweeps_attach_map_and_row_reverts_to_watch_only() {
+        // x-0090 AC1-FR: killing the mapped pane sweeps the map (eager) AND the
+        // lazy `panes` liveness check reverts the row to watch-only attachable,
+        // so a next click re-attaches into a fresh pane rather than a corpse.
+        let (mut core, _client_id, _p1, p2, _rx) = seen_test_core();
+        core.agents = vec![bg_row("spawn-fix-c3d4", "/tmp/seen", Some("deadbee1"))];
+        core.attached.insert("deadbee1".into(), p2);
+
+        core.reap_pane(p2);
+        assert!(
+            !core.attached.values().any(|&p| p == p2),
+            "eager sweep drops the dead pane's mapping"
+        );
+        let rows = core.agent_rows();
+        let row = rows.iter().find(|r| r.name == "spawn-fix-c3d4").unwrap();
+        assert_eq!(row.pane_id, None, "reverts to watch-only");
+        assert_eq!(
+            row.attach_id.as_deref(),
+            Some("deadbee1"),
+            "re-attachable after the pane dies"
+        );
+    }
+
+    #[test]
     fn card_ready_gate_only_passes_ready_cards() {
         // x-a496 (codex peer review): a targeted dispatch only proceeds for a
         // READY card named by id or slug; blocked / in-flight / unknown ids are
@@ -5646,6 +5792,7 @@ mod tests {
             touch_emit_failures: Arc::new(AtomicU64::new(0)),
             client_count: watch::channel(0).0,
             seen: HashSet::new(),
+            attached: HashMap::new(),
         }
     }
 
