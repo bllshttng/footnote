@@ -369,11 +369,14 @@ def cmd_reply(
     from_project: Optional[str] = typer.Option(None, "--from", help="Sender project (overrides settings.yaml)"),
     json_out: bool = typer.Option(False, "--json", "-J", help="Print {msg_id, thread_path} as JSON"),
 ) -> None:
-    """Reply to a thread (thin wrapper for `send --reply-to`).
+    """Reply to a message, routed by the answered message's lane.
 
-    Looks up ``to_msg`` in the sender's own inbox to find the original sender,
-    then appends to that thread file (if it exists in the recipient's inbox)
-    or creates a new thread linked via ``replies_to``.
+    Looks ``to_msg`` up on the durable bus. A name-lane message (``to_kind ==
+    "name"``) is answered by sending back to its original sender -- no re-typed
+    handle -- with the correlation threaded via ``in_reply_to`` (and the wire
+    ``reply_to`` attr). Any other target falls through to the thread-store reply
+    (append to the existing thread, or a ``replies_to``-linked new thread). A
+    ``to_msg`` absent from the bus is a hard error.
     """
     kind = _validate_kind(kind)
     sender = _resolve_from(from_project)
