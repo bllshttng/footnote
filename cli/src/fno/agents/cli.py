@@ -1179,6 +1179,50 @@ def cmd_logs(
         raise typer.Exit(code=result.exit_code)
 
 
+@agents_app.command("peek")
+def cmd_peek(
+    handle: str = typer.Argument(
+        ..., help="Peer handle (same as `fno mail send`: alias, hex short-id, or <harness>-<short8>)."
+    ),
+    lines: int = typer.Option(
+        15, "--lines", "-n", help="Show the last N transcript records (default 15; 0 for none)."
+    ),
+    follow: bool = typer.Option(
+        False, "--follow", "-f", help="Stream new records as the peer emits them (read-only)."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit JSON-Lines rows instead of human lines."
+    ),
+) -> None:
+    """Observe a peer read-only — the twin of `fno mail send`.
+
+    Resolves ``<handle>`` through the same union resolver mail send uses, so any
+    peer you can message you can observe. Prefers normalized status events when
+    present, else tails the peer's on-disk transcript (claude/codex). Never
+    writes anything the peer reads. Exit 13 = unknown peer, 1 = known peer whose
+    harness has no reader yet, 0 = observed (or "no activity yet").
+    """
+    from fno.agents.peek import peek
+    from fno.paths import state_dir
+
+    if lines < 0:
+        sys.stderr.write(f"--lines must be >= 0 (got {lines})\n")
+        raise typer.Exit(code=2)
+
+    events_path = state_dir() / "events.jsonl"
+    rc = peek(
+        handle,
+        lines=lines,
+        follow=follow,
+        json_out=json_out,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        events_path=events_path if events_path.exists() else None,
+    )
+    if rc != 0:
+        raise typer.Exit(code=rc)
+
+
 @agents_app.command("whoami")
 def cmd_whoami(
     json_out: bool = typer.Option(

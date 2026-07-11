@@ -198,6 +198,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # RSS via psutil, over the same union the gate counts. Python-only by
     # design (LD8): no daemon involvement, no Rust port, never auto-routes.
     "top",
+    # x-05da: the read-only observe leg (twin of `fno mail send`). Reads a
+    # peer's on-disk transcript / status events via fno.agents.peek. No Rust
+    # client port, so it must never auto-route to the daemon.
+    "peek",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
