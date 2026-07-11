@@ -540,3 +540,104 @@ def test_source_harness_threads_to_resolver_and_inject(tmp_path, monkeypatch):
     assert seen["resolver"] == ("codex-sess", "codex")
     assert warm.calls == [("codex-sess", 9, "codex")]
     assert spawn.calls == []
+
+
+# --- Wave 3 (x-7930): notify the origin session on a cold-dispatched merge ---
+
+
+class _Notify:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls: list[tuple] = []
+
+    def __call__(self, session_id, pr_number, source_harness, cold_reason):
+        self.calls.append((session_id, pr_number, source_harness, cold_reason))
+        if self.fail:
+            raise RuntimeError("mail boom")
+
+
+def test_cold_dispatch_notifies_origin_once(tmp_path, monkeypatch):
+    """AC2-HP: a cold-dispatched merge sends exactly one origin mail; a re-tick
+    (marker exists) sends none."""
+    _patch_resolver(monkeypatch, None)  # origin not live -> cold path
+    notify = _Notify()
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN1", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-origin", source_harness="claude",
+        warm_inject=_WarmInject(), notify_origin=notify,
+    )
+    assert res.outcome == "dispatched"
+    assert notify.calls == [("sess-origin", 7, "claude", "no-live-source-session")]
+
+    # Re-tick: marker exists -> already-dispatched -> no second mail.
+    second = dispatch_post_merge_ritual(
+        7, dedup_key="shaN1", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-origin", source_harness="claude",
+        warm_inject=_WarmInject(), notify_origin=notify,
+    )
+    assert second.outcome == "already-dispatched"
+    assert len(notify.calls) == 1
+
+
+def test_routed_warm_sends_no_origin_mail(tmp_path, monkeypatch):
+    """Locked #5: the warm route ran the ritual in the live origin already, so
+    no advisory mail is sent."""
+    _patch_resolver(monkeypatch, "sess-live")
+    notify = _Notify()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN2", auto_run=True, canonical_root=tmp_path,
+        spawn=_Spawn(), source_session_id="sess-live",
+        warm_inject=_WarmInject(delivered=True), notify_origin=notify,
+    )
+    assert res.outcome == "routed-warm"
+    assert notify.calls == []
+
+
+def test_no_source_session_no_origin_mail(tmp_path):
+    """AC2-EDGE: no source_session_id -> no mail attempted, no error."""
+    notify = _Notify()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN3", auto_run=True, canonical_root=tmp_path,
+        spawn=_Spawn(), source_session_id=None, notify_origin=notify,
+    )
+    assert res.outcome == "dispatched"
+    assert notify.calls == []
+
+
+def test_default_notifier_addresses_origin_session_durably(monkeypatch):
+    """The default notifier addresses the origin by canonical handle and routes
+    through the durable name-lane send (resolved=None: the cold path is already
+    a warm-miss, so the durable bus is the floor)."""
+    import fno.graph._reconcile as rec
+
+    seen = {}
+
+    def _fake_send(message, *, from_name, resolved, recipient, provider, **kw):
+        seen.update(
+            message=message, from_name=from_name, resolved=resolved,
+            recipient=recipient, provider=provider,
+        )
+
+    monkeypatch.setattr("fno.mail.cli._name_lane_send", _fake_send)
+    rec._notify_origin_merged("abcdef1234567890", 42, "claude", "no-live-source-session")
+    assert seen["recipient"] == "claude-abcdef12"  # canonical_handle
+    assert seen["resolved"] is None  # durable floor, no live resolution
+    assert seen["provider"] == "claude"
+    assert seen["from_name"] == "fno"
+    assert "PR #42 merged" in seen["message"]
+
+
+def test_origin_mail_failure_keeps_marker_and_dispatch(tmp_path, monkeypatch):
+    """AC2-ERR: a mail failure never breaks the dispatch or withholds the marker."""
+    _patch_resolver(monkeypatch, None)
+    notify = _Notify(fail=True)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN4", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-origin",
+        warm_inject=_WarmInject(), notify_origin=notify,
+    )
+    assert res.outcome == "dispatched"
+    assert len(notify.calls) == 1
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaN4").exists()

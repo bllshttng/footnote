@@ -973,6 +973,7 @@ def dispatch_post_merge_ritual(
     source_session_id: Optional[str] = None,
     source_harness: Optional[str] = None,
     warm_inject: Optional[Callable[[str, int, Optional[str]], "tuple[bool, str]"]] = None,
+    notify_origin: Optional[Callable[[str, int, Optional[str], str], None]] = None,
 ) -> PostMergeDispatchResult:
     """Dispatch a bg ``/fno:pr merged <n>`` worker at most once per merge.
 
@@ -1092,6 +1093,17 @@ def dispatch_post_merge_ritual(
             # robust auto-retry belongs to the pr_watch fast-follow (x-47be Q3).
             return PostMergeDispatchResult("spawn-failed", pr_number, detail=str(exc)[:200])
         _persist_marker()
+        # Advisory: tell the origin session its PR merged. Cold path only (the
+        # warm route already reached a live origin by running the ritual there),
+        # inside the marker-guarded section so it fires at most once per merge
+        # SHA. Best-effort: a mail failure must never break the dispatch or
+        # withhold the marker -- the ritual hand-off is the load-bearing act.
+        if source_session_id:
+            _notify = notify_origin if notify_origin is not None else _notify_origin_merged
+            try:
+                _notify(source_session_id, pr_number, source_harness, cold_reason)
+            except Exception as exc:  # noqa: BLE001 - advisory, never fatal
+                _emit_origin_notify_failed(pr_number, source_session_id, str(exc)[:200], node_cwd)
         return PostMergeDispatchResult(
             "dispatched", pr_number, short_id=short_id, detail=f"cold: {cold_reason}"
         )
@@ -1100,6 +1112,49 @@ def dispatch_post_merge_ritual(
             claims.release_claim(lock_key, holder, root=canonical)
         except Exception:
             pass  # lock is TTL-bounded; a failed release recovers on its own
+
+
+def _notify_origin_merged(
+    session_id: str,
+    pr_number: int,
+    source_harness: Optional[str],
+    cold_reason: str,
+) -> None:
+    """Send one durable ``fno mail`` to the origin session of a cold-dispatched
+    merge. The cold path means the warm route already MISSED (the origin is not
+    live-reachable), so the durable bus is the correct delivery floor -- a live
+    origin would have been reached by the warm inject and this send is skipped.
+
+    Function-local imports follow the ``_spawn_post_merge_worker`` pattern: a
+    module-level ``fno.mail`` / ``fno.config`` import here would re-enter the
+    config<->graph cycle and freeze ``read_graph``'s GRAPH_JSON fallback.
+    """
+    from fno.harness_identity import canonical_handle
+    from fno.mail.cli import _name_lane_send
+
+    harness = source_harness or "claude"
+    recipient = canonical_handle(harness, session_id)
+    msg = (
+        f"PR #{pr_number} merged; the post-merge ritual was cold-dispatched "
+        f"(you were not live: {cold_reason}). A bg worker ran /fno:pr merged; "
+        f"continue your loop."
+    )
+    _name_lane_send(msg, from_name="fno", resolved=None, recipient=recipient, provider=harness)
+
+
+def _emit_origin_notify_failed(
+    pr_number: int, session_id: str, error: str, node_cwd: Optional[str]
+) -> None:
+    """A failed origin-notify is never silent (AC1-UI). The mail is advisory and
+    the marker is already written, so a stderr diagnostic (the module's own
+    best-effort idiom, cf. the human_touch emit) is the right surface -- a new
+    registered event kind would be schema-parity overhead for an advisory miss.
+    """
+    print(
+        f"pr-watch: origin-notify failed for PR #{pr_number} "
+        f"(session {session_id[:8]}): {error}; merge dispatch unaffected",
+        file=sys.stderr,
+    )
 
 
 def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:
