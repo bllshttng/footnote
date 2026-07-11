@@ -231,6 +231,8 @@ def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path
         with (locks_dir / "model.json.lock").open("a") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             data = json.loads(path.read_text()) if path.exists() else {}
+            if not isinstance(data, dict):
+                raise ValueError("model state is not an object")
             variants = data.setdefault("variant", {})
             if not isinstance(variants, dict):
                 raise ValueError("variant is not an object")

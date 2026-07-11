@@ -51,7 +51,8 @@ def test_pane_argv_threads_effort_and_unset_is_noop():
     )
 
 
-def test_opencode_variant_write_and_corrupt_degrade(tmp_path, capsys):
+@pytest.mark.parametrize("corrupt", ["{", "[]", "null"])
+def test_opencode_variant_write_and_corrupt_degrade(tmp_path, capsys, corrupt):
     state = tmp_path / "model.json"
     state.write_text(json.dumps({"variant": {"other/model": "low"}}))
     apply_opencode_variant("opencode/glm-4.7-free", "high", state_path=state)
@@ -59,7 +60,7 @@ def test_opencode_variant_write_and_corrupt_degrade(tmp_path, capsys):
         "other/model": "low",
         "opencode/glm-4.7-free": "high",
     }
-    state.write_text("{")
+    state.write_text(corrupt)
     before = state.read_bytes()
     apply_opencode_variant("opencode/glm-4.7-free", "high", state_path=state)
     assert state.read_bytes() == before
