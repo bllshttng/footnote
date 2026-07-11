@@ -814,6 +814,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
 
   cat > "$local_temp" << EOF
 ---
+fno_id: $local_session_id
 session_id: $local_session_id
 created_at: $TIMESTAMP
 input: "${escaped_input}"

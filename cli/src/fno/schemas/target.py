@@ -4,7 +4,7 @@ from __future__ import annotations
 import warnings
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fno.schemas.common import (
     SessionId,
@@ -85,6 +85,20 @@ class TargetState(BaseModel):
 
     model_config = {"extra": "allow"}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_fno_id(cls, data: Any) -> Any:
+        """Back-fill fno_id from the legacy session_id key (one-release alias).
+
+        The target-minted id is renamed fno_id; manifests dual-write both keys
+        for one release and readers resolve fno_id-first. A pre-rename manifest
+        carries only session_id, so populate fno_id from it here when absent.
+        Mirrors the claude_transcript_id -> claude_session_id rename.
+        """
+        if isinstance(data, dict) and not data.get("fno_id") and data.get("session_id"):
+            data = {**data, "fno_id": data["session_id"]}
+        return data
+
     @field_validator("clean_passed", "goal_verification_passed", "browser_testing_passed", mode="before")
     @classmethod
     def _coerce_gate_field(cls, v: Any, info: Any) -> bool:
@@ -148,7 +162,9 @@ class TargetState(BaseModel):
     # values. Previously accepted via extra="allow"; now a modeled field.
     provenance_nonce: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{16}$")
 
-    # Session tracking
+    # Session tracking. fno_id is the canonical target-minted id; session_id is
+    # the legacy mirror kept for one release (back-filled by _backfill_fno_id).
+    fno_id: Optional[SessionId] = None
     session_id: Optional[SessionId] = None
     sessions: List[str] = Field(default_factory=list)
     owner_pid: Optional[int] = None

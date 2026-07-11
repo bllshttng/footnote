@@ -99,8 +99,9 @@ def _utc_now_iso() -> str:
 def resolve_session_id(repo_root: Path) -> Optional[str]:
     """Resolve the active target session id, or None if unresolvable.
 
-    Order: the live ``target-state.md`` frontmatter ``session_id``, then the
-    ``$CLAUDECODE_SESSION_ID`` env var. None means the caller records the
+    Order: the live ``target-state.md`` frontmatter ``fno_id`` (legacy
+    ``session_id`` fallback), then the ``$CLAUDECODE_SESSION_ID`` env var.
+    None means the caller records the
     carve-out unscoped (capture is never lost over a missing session).
     """
     import os
@@ -111,7 +112,7 @@ def resolve_session_id(repo_root: Path) -> Optional[str]:
             from fno.state.io import read_frontmatter
 
             fm, _ = read_frontmatter(state_path)
-            sid = fm.get("session_id")
+            sid = fm.get("fno_id") or fm.get("session_id")
             if sid is not None and str(sid).strip() and str(sid).strip() != "null":
                 return str(sid).strip()
         except Exception:

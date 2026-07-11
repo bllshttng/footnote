@@ -32,6 +32,24 @@ def test_ac3_edge_session_id_valid_accepted():
     assert instance.session_id == "20260421T093631Z-97817-920dac"
 
 
+def test_fno_id_backfilled_from_legacy_session_id():
+    """AC1-HP boundary: a pre-rename manifest (session_id only) back-fills fno_id."""
+    Schema = load_schema("target")
+    instance = Schema(session_id="20260421T093631Z-97817-920dac")
+    assert instance.fno_id == "20260421T093631Z-97817-920dac"
+    assert instance.session_id == "20260421T093631Z-97817-920dac"
+
+
+def test_fno_id_wins_when_both_present():
+    """fno_id is canonical: an explicit fno_id is never clobbered by session_id."""
+    Schema = load_schema("target")
+    instance = Schema(
+        fno_id="20260421T093631Z-cl97817-920dac",
+        session_id="20260101T000000Z-11111-aaaaaa",
+    )
+    assert instance.fno_id == "20260421T093631Z-cl97817-920dac"
+
+
 def test_session_id_accepts_canonical_codex_thread_uuid():
     Schema = load_schema("target")
     sid = "019f48e1-e641-7170-9ea9-921f07021967"
