@@ -237,12 +237,21 @@ def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path
             if not isinstance(variants, dict):
                 raise ValueError("variant is not an object")
             variants[model] = effort
-            with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
-                json.dump(data, tmp, separators=(",", ":"))
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                tmp_path = Path(tmp.name)
-            os.replace(tmp_path, path)
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
+                    json.dump(data, tmp, separators=(",", ":"))
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    tmp_path = Path(tmp.name)
+                os.replace(tmp_path, path)
+                tmp_path = None
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         print(f"warning: could not set opencode effort variant: {exc}", file=sys.stderr)
 

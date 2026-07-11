@@ -148,6 +148,15 @@ def test_opencode_variant_is_not_written_before_collision_check(tmp_path, monkey
     assert applied == []
 
 
+def test_opencode_variant_cleans_temp_file_when_replace_fails(tmp_path, monkeypatch):
+    from fno.agents import mux_spawn
+
+    state = tmp_path / "model.json"
+    monkeypatch.setattr(mux_spawn.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("no space")))
+    apply_opencode_variant("provider/model", "high", state_path=state)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["locks"]
+
+
 def test_claude_python_build_argv_threads_effort():
     from fno.agents.providers.claude import _build_argv
 
