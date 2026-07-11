@@ -681,6 +681,106 @@ def build_skill_scoreboard(
     }
 
 
+# ── provider-outcome attribution (x-140c) ───────────────────────────────────
+#
+# What does a shipped PR cost on each provider/model, and whose work bounces
+# most after shipping. One more group-by on the same fold: reuses
+# _SHIPPED_TERMINALS, _node_outcome, and the coverage-honesty rule. The
+# numerator deliberately includes wedge spend - a provider that wedges half
+# its runs shows a proportionally higher cost per outcome, which is the
+# signal quota-aware dispatch needs.
+
+
+def build_provider_scoreboard(
+    rows: list[dict],
+    graph_nodes: list[dict],
+    *,
+    since_days: int,
+    now: datetime,
+) -> dict:
+    """Group in-window execution rows by (provider_id, model) and attribute
+    spend to outcomes. Pure; no I/O.
+
+    Only `type == "execution"` rows count: the ledger's ~2k backfill entries
+    carry session-scoped costs and would silently inflate both coverage and
+    spend. Rows without provider_id land in a visible "unattributed" bucket,
+    never dropped and never guessed from model."""
+    cutoff = now - timedelta(days=since_days)
+
+    def _in_window(ts_raw) -> bool:
+        dt = _parse_ts(ts_raw)
+        return dt is not None and cutoff <= dt <= now
+
+    windowed = [r for r in rows if r.get("type") == "execution" and _in_window(r.get("completed"))]
+    total = len(windowed)
+    if total == 0:
+        return {"state": "no_data", "since_days": since_days, "rows": 0}
+
+    by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
+    fixes: dict[str, list[dict]] = {}
+    for n in graph_nodes:
+        origin = n.get("caused_by")
+        if origin:
+            fixes.setdefault(origin, []).append(n)
+    # Same W4 gate as _survival/build_skill_scoreboard: without causal
+    # telemetry, "no fix found" is indistinguishable from "no revert data
+    # yet", so bounce degrades to n/a instead of a fake 0%.
+    w4_available = any(("reverted" in n) or n.get("caused_by") for n in graph_nodes)
+
+    buckets: dict[tuple[str, str], dict] = {}
+    attributed = 0
+    for r in windowed:
+        provider = r.get("provider_id") or "unattributed"
+        if provider != "unattributed":
+            attributed += 1
+        b = buckets.setdefault(
+            (provider, r.get("model") or "unknown"),
+            {"runs": 0, "shipped": 0, "shipped_linked": 0, "bounced": 0,
+             "spend": 0.0, "iterations": [], "nids": set(), "nid_rows": 0},
+        )
+        b["runs"] += 1
+        b["spend"] += _num(r.get("cost_usd"))
+        nid = r.get("graph_node_id")
+        if nid:
+            b["nids"].add(nid)
+            b["nid_rows"] += 1
+        if _is_shipped_reason(r.get("termination_reason")):
+            b["shipped"] += 1
+            it = _num_opt(r.get("iterations"))
+            if it is not None:
+                b["iterations"].append(it)
+            if nid and w4_available and nid in by_id:
+                b["shipped_linked"] += 1
+                if _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes) in ("bounced", "reverted"):
+                    b["bounced"] += 1
+
+    out_rows = []
+    for (provider, model), b in buckets.items():
+        out_rows.append(
+            {
+                "provider": provider,
+                "model": model,
+                "runs": b["runs"],
+                "shipped": b["shipped"],
+                "spend_usd": round(b["spend"], 2),
+                "cost_per_shipped_usd": round(b["spend"] / b["shipped"], 2) if b["shipped"] else None,
+                "bounce_rate_pct": _pct(b["bounced"], b["shipped_linked"]) if b["shipped_linked"] else None,
+                "shipped_linked": b["shipped_linked"],
+                "median_iterations": _percentile(b["iterations"], 50),
+                "retry_rows": b["nid_rows"] - len(b["nids"]),
+            }
+        )
+    # Per-provider sub-rows stay contiguous for the renderer; unattributed last.
+    out_rows.sort(key=lambda x: (x["provider"] == "unattributed", x["provider"], -x["spend_usd"], x["model"]))
+
+    return {
+        "state": "ok",
+        "since_days": since_days,
+        "coverage": {"rows": total, "attributed_pct": _pct(attributed, total)},
+        "rows": out_rows,
+    }
+
+
 # ── session-efficiency fold (x-c284) ─────────────────────────────────────────
 #
 # Grades the PROCESS, not just the terminal state: a session that ships
