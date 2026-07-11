@@ -54,7 +54,9 @@ def _derive_status(data: dict) -> str:
         return "deferred"
     if data.get("blocked_by"):
         return "blocked"
-    if data.get("locked_by"):
+    # locked_by-first; tolerate a raw pre-rename dict passed straight in (not via
+    # the store normalize) that still carries only the legacy session_id.
+    if data.get("locked_by") or data.get("session_id"):
         return "claimed"
     if not data.get("plan_path"):
         return "idea"

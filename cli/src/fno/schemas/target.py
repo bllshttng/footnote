@@ -110,12 +110,22 @@ class TargetState(BaseModel):
         if not isinstance(data, dict):
             return data
         data = dict(data)
+        # Canonical wins: when the harness field is set it is authoritative and
+        # syncs its legacy alias (so a conflicting legacy value can't leak);
+        # otherwise adopt the legacy value.
         for new, old in (("harness", "provider"), ("harness_mode", "provider_mode")):
-            if not data.get(new) and data.get(old):
-                data[new] = data[old]
-            elif not data.get(old) and data.get(new):
+            if data.get(new):
                 data[old] = data[new]
-        if not data.get("harness_session_id"):
+            elif data.get(old):
+                data[new] = data[old]
+        if data.get("harness_session_id"):
+            # canonical present: sync the matching per-provider legacy key so a
+            # reader of the old name still resolves it after alias removal.
+            h = str(data.get("harness") or "").lower()
+            legacy_key = {"claude": "claude_session_id", "codex": "codex_thread_id"}.get(h)
+            if legacy_key and not data.get(legacy_key):
+                data[legacy_key] = data["harness_session_id"]
+        else:
             for legacy in ("claude_session_id", "codex_thread_id"):
                 v = data.get(legacy)
                 if v and str(v).strip() and str(v).strip().lower() != "null":

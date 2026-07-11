@@ -62,6 +62,18 @@ def test_harness_supersedes_and_backfills_provider():
     assert inst.harness_session_id == "abc-123"
 
 
+def test_harness_wins_conflict_and_syncs_legacy():
+    """Canonical harness is authoritative: a conflicting legacy provider is
+    overwritten, and the matching per-provider session key is synced."""
+    Schema = load_schema("target")
+    inst = Schema.model_validate({
+        "harness": "claude", "provider": "codex",  # conflict
+        "harness_session_id": "sync-me",
+    })
+    assert inst.harness == "claude"
+    assert inst.provider == "claude"  # legacy synced from canonical, not left "codex"
+
+
 def test_harness_session_prefers_codex_thread_over_null_claude():
     """harness_session_id picks the non-null per-provider key (codex here)."""
     Schema = load_schema("target")
