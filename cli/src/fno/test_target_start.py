@@ -489,6 +489,23 @@ def test_foreign_live_holder_uncapturable_pid_parks(monkeypatch):
     assert target_cli._foreign_live_holder("N") == status
 
 
+def test_foreign_live_holder_gethostname_raises_parks(monkeypatch):
+    # Contract: never raises. socket.gethostname() can OSError in a sandbox ->
+    # own identity is uncapturable -> a foreign live claim parks (AC2-FR).
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:A", "pid": 555, "host": "h",
+    }
+    _wire_claim(monkeypatch, status, own_pid=555)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+
+    def boom():
+        raise OSError("no hostname in sandbox")
+
+    monkeypatch.setattr(target_cli.socket, "gethostname", boom)
+    assert target_cli._foreign_live_holder("N") == status
+
+
 def test_foreign_live_holder_freetext_reads_free(monkeypatch):
     # AC2-EDGE: a free-text arg keys node:<text>, reads free, never false-refuses.
     seen = {}

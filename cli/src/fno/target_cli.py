@@ -762,9 +762,10 @@ def _foreign_live_holder(node_id: str) -> Optional[dict]:
     # (park, never share) -- the conservative direction.
     try:
         own_pid = resolve_session_pid(from_pid=os.getpid())
+        own_host = socket.gethostname()  # can raise OSError in sandboxes
     except Exception:
-        own_pid = None
-    if own_pid and info.get("pid") == own_pid and info.get("host") == socket.gethostname():
+        own_pid = own_host = None
+    if own_pid and info.get("pid") == own_pid and info.get("host") == own_host:
         return None
     return info  # foreign + live/suspect -> caller refuses
 
