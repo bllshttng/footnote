@@ -316,11 +316,20 @@ class _FireResult:
         self.rc = rc
 
 
+def _arm_auto_run(repo_dir):
+    """Arm the post_merge.auto_run opt-in for a repo dir. _default_dispatch_ritual
+    now honors it (x-7930): a bare tmp_path defaults auto_run off -> 'disabled'."""
+    cfg = repo_dir / ".fno" / "config.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("[post_merge]\nauto_run = true\n")
+
+
 def test_default_dispatch_ritual_cold_fire_ok_marks(tmp_path, monkeypatch):
     """The daemon's real adapter: a successful headless fire is a completed
     hand-off (dispatched, marker set)."""
     from fno.pr_watch._dispatch import _default_dispatch_ritual
 
+    _arm_auto_run(tmp_path)
     fired: list = []
 
     def fire(verb, pr, repo_dir, *, model=None):
@@ -341,6 +350,8 @@ def test_default_dispatch_ritual_cold_fire_notok_no_marker(tmp_path):
     generic dispatcher tests only assert at the seam)."""
     from fno.pr_watch._dispatch import _default_dispatch_ritual
 
+    _arm_auto_run(tmp_path)
+
     def fire(verb, pr, repo_dir, *, model=None):
         return _FireResult(ok=False, rc=1)
 
@@ -351,6 +362,27 @@ def test_default_dispatch_ritual_cold_fire_notok_no_marker(tmp_path):
     assert not (tmp_path / ".fno" / "post-merge-dispatched" / "shaD2").exists()
 
 
+def test_default_dispatch_ritual_respects_auto_run_off(tmp_path):
+    """x-7930 / codex P1: pr-watch must honor the post_merge.auto_run opt-in that
+    reconcile honors. A `ready` repo that never armed auto_run must NOT auto-run
+    /fno:pr merged + the canonical sync when pr-watch merely enables. No config
+    -> auto_run off -> disabled, nothing fired, no marker."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    fired: list = []
+
+    def fire(verb, pr, repo_dir, *, model=None):
+        fired.append(pr)
+        return _FireResult(ok=True)
+
+    res = _default_dispatch_ritual(
+        _Cand(7, tmp_path, source_session_id=None), _Obs(merge_sha="shaOFF"), fire
+    )
+    assert res.outcome == "disabled"
+    assert fired == []
+    assert not (tmp_path / ".fno" / "post-merge-dispatched" / "shaOFF").exists()
+
+
 def test_cross_detector_one_handoff_per_sha(tmp_path):
     """US3: reconcile (via canonical_root) and the daemon adapter (via node_cwd)
     converge on the SAME per-SHA marker under one canonical, so a merge both
@@ -359,6 +391,7 @@ def test_cross_detector_one_handoff_per_sha(tmp_path):
 
     canonical = tmp_path / "canon"
     canonical.mkdir()
+    _arm_auto_run(canonical)
 
     # Detector A: reconcile-style call (its own canonical_root + merge_sha).
     spawn_a = _Spawn(short_id="A")

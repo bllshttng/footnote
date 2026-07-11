@@ -43,6 +43,14 @@ def _make_obs(
     )
 
 
+def _arm_auto_run(repo_dir: Path) -> None:
+    """Arm post_merge.auto_run for a repo dir. _default_dispatch_ritual honors it
+    (x-7930): a bare tmp_path defaults auto_run off -> dispatch is 'disabled'."""
+    cfg = repo_dir / ".fno" / "config.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("[post_merge]\nauto_run = true\n")
+
+
 def _make_candidate(
     node_id: str = "x-abc12345",
     pr_number: int = 1,
@@ -616,6 +624,7 @@ class TestTickOrchestrator:
             "parked": None,
         })
 
+        _arm_auto_run(tmp_path)
         candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
         obs_map = {1: _make_obs(1, "MERGED", merged=True)}
         deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map, merge_ready=True)
@@ -745,6 +754,7 @@ class TestTickOrchestrator:
             "parked": None,
         })
 
+        _arm_auto_run(tmp_path)
         candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
         obs_map = {1: _make_obs(1, "MERGED", merged=True)}
         deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map,
@@ -770,6 +780,50 @@ class TestTickOrchestrator:
         failed_events = [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"]
         assert len(failed_events) == 1
         assert failed_events[0]["data"]["retries"] == 1
+
+    def test_merge_auto_run_off_parks_not_retries(self, tmp_path):
+        """x-7930 / codex P1: a 'disabled' dispatch (auto_run opt-in off) is a
+        deliberate no-op, NOT a failure: park 'auto-run-disabled', no retry, no
+        failure event, no notify."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+
+        # No _arm_auto_run: tmp_path has no config -> auto_run defaults off.
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        obs_map = {1: _make_obs(1, "MERGED", merged=True)}
+        deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map, merge_ready=True)
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+        # Fresh store to see the tick's persisted writes (the in-memory instance
+        # above caches; test_merge_observed_fires_merged re-reads the same way).
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["parked"] == "auto-run-disabled"
+        assert entry["merge_dispatched"] is False
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"] == []
+        skipped = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
+        assert any(e["data"].get("reason") == "auto-run-disabled" for e in skipped)
+        assert deps["notifications"] == []
 
     def test_retry_exhaustion_parks(self, tmp_path):
         """AC1-FR: 3 consecutive failures -> parked{reason:retries-exhausted} + notify."""

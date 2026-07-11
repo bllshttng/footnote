@@ -559,6 +559,17 @@ def _run_tick(
                             emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
                         skipped += 1
                         continue
+                    if pm is not None and pm.outcome == "disabled":
+                        # auto_run opt-in is off: a deliberate no-op, NOT a
+                        # failure. Park so the tick stops re-deciding it (a done
+                        # node stays in the discovery window for max_age_days);
+                        # no retry, no failure notify. If the operator later
+                        # arms auto_run, the past merge is handled manually.
+                        entry["parked"] = "auto-run-disabled"
+                        store.set(key, entry)
+                        emit("pr_watch_skipped", {"pr": pr, "reason": "auto-run-disabled"})
+                        skipped += 1
+                        continue
                     dispatch_ok = pm is not None and pm.outcome in (
                         "dispatched", "routed-warm",
                     )
@@ -653,6 +664,20 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
     """
     from fno.graph._reconcile import dispatch_post_merge_ritual
 
+    # Honor the post_merge.auto_run opt-in, same as reconcile (graph/cli.py):
+    # a `ready` verdict means "configured + active", NOT "operator armed
+    # automatic dispatch". Without this gate, enabling pr-watch would auto-run
+    # /fno:pr merged + the canonical sync_command on a repo that never opted in.
+    # Fail closed (no dispatch) on a config-load error, matching reconcile.
+    auto_run = False
+    if cand.repo_dir is not None:
+        try:
+            from fno.config import load_settings_for_repo
+
+            auto_run = bool(load_settings_for_repo(Path(cand.repo_dir)).post_merge.auto_run)
+        except Exception:  # noqa: BLE001 - fail closed
+            auto_run = False
+
     def _cold_spawn(pr_number: int, cwd: str) -> str:
         # Post-merge workers honor config.post_merge.model (default sonnet);
         # fail open to the sonnet default on a config-load failure, mirroring
@@ -673,7 +698,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
     return dispatch_post_merge_ritual(
         cand.pr_number,
         dedup_key=getattr(obs, "merge_sha", None),
-        auto_run=True,
+        auto_run=auto_run,
         node_cwd=str(cand.repo_dir) if cand.repo_dir else None,
         spawn=_cold_spawn,
         source_session_id=getattr(cand, "source_session_id", None),
