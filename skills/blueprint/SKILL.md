@@ -17,13 +17,16 @@ Direct edits are blocked by the PreToolUse hook AND detected via hash sidecar.
 
 Create implementation plans scaled to the task.
 
-## Plan Claims Ingestion (MANDATORY when input is an ab-id)
+## Plan Claims Ingestion (MANDATORY when input is a node id)
 
 Before any other classifier runs, check if the argument is an existing graph
-node ID. The pattern `^ab-[0-9a-f]{8}$` is unambiguous and never collides
-with file paths or raw descriptions, so this check is cheap and goes first.
+node ID. `parse-claims-arg.sh` recognizes the config-agnostic node-id shape
+`^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$` - the configured `id_prefix`/`id_hex_width`
+(e.g. `x-8af8`) and the legacy `ab-<8hex>` alike, never a hard-coded `ab-` only.
+A node id never collides with file paths or raw descriptions, so this check is
+cheap and goes first.
 
-When the argument matches, the rendered plan MUST declare `claims: ab-XXX`
+When the argument matches, the rendered plan MUST declare `claims: <node-id>`
 in its frontmatter so `fno backlog intake` updates the existing idea-state
 node in place rather than creating a duplicate (see
 `cli/src/fno/graph/_intake.py::_resolve_claim`). Without the claim,
@@ -563,11 +566,28 @@ fi
    - Detection: check if the user's input references a design doc path, and if
      that doc has a `## Discovery` or `## Assumptions` section
 
-3. **Write** plan to `{quick_path}/YYYY-MM-DD-{slug}.md`. If a design doc
-   was supplied, run the **Executor Lock Transcription** step (top of this
-   file) before writing the plan body so the parser's output can be inlined
-   into the plan's frontmatter as `executor: <value>`. Empty parser output
-   leaves the frontmatter without an `executor:` field, falling through to
+3. **Write** the plan.
+
+   - **A design doc was supplied** (mutate-in-place, the common path): keep its
+     existing path unchanged - `mutate_doc.py` writes back to the same file
+     (`os.replace` onto the resolved path), so an already-node-bearing name is
+     preserved as-is and the `-<node-id>` suffix is never dropped or duplicated
+     into `…-x-8af8-x-8af8.md` (US4). Do NOT rename a supplied doc.
+   - **Creating fresh** (no design doc): write to `{quick_path}/YYYY-MM-DD-{slug}.md`,
+     but when this is **node-seeded** (`$CLAIMS_ID` set, e.g. a direct
+     `/blueprint x-8af8` with no prior `/think`), append the node id to the name:
+     `{quick_path}/YYYY-MM-DD-{slug}-$CLAIMS_ID.md`. `/blueprint` is the first
+     artifact author on the direct path and cannot lean on `/think`'s save rule,
+     so it must produce the node-bearing name itself. First **reuse if claimed**:
+     if a plans-dir file already carries `$CLAIMS_ID` in its frontmatter or ends
+     `-$CLAIMS_ID.md`, finalize into it instead of minting a second file. The
+     raw-prose (no `$CLAIMS_ID`) case stays id-less here and is renamed at intake
+     (step 3b-bis).
+
+   If a design doc was supplied, run the **Executor Lock Transcription** step
+   (top of this file) before writing the plan body so the parser's output can be
+   inlined into the plan's frontmatter as `executor: <value>`. Empty parser
+   output leaves the frontmatter without an `executor:` field, falling through to
    runtime surface inference.
 
 3a. **Collision check** (skip if `no-collision-check` modifier or `--no-collision-check` flag)

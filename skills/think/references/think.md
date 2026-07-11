@@ -146,6 +146,26 @@ impact - "internal: refactor X" decisions are not heads-up material.
   declared in any peer's `surfaces:` list, the change is internal by
   definition and no message goes out.
 
+### 1d-bis. Backlog dedup (unconditional, all repo types)
+
+Before schema work or approach exploration - and **regardless of whether the
+repo is database-backed** - check whether this work already exists. Checking for
+a duplicate node/plan/PR has nothing to do with whether the repo has a database,
+so this runs on **every** `/think`, including non-DB repos (footnote itself). It
+used to live inside the DB-gated Step 1e, so a non-DB repo skipped it wholesale
+and duplicates only surfaced retroactively after ship (x-8af8).
+
+```bash
+fno backlog find "<feature keywords>"                                    # title tokens + one-line summary
+gh pr list --state all --search "<feature keywords>" 2>/dev/null || true  # advisory; skips silently if gh is unauth/missing
+```
+
+If a node, plan, or open PR already covers this ground, surface the match to the
+operator **before** design begins - consolidate (`/blueprint ... --claims <id>`),
+narrow scope, or supersede - rather than filing a duplicate. The graph dedup
+(`fno backlog find`) is the hard requirement; the `gh pr list` search is
+best-effort and skips silently when `gh` is unauthenticated or absent.
+
 ### 1e. Schema Reconciliation (DB-backed repos)
 
 When the repo is database-backed, ground the design against the real schema
@@ -179,9 +199,9 @@ when no DB is reachable. It never echoes the connection string.
 
 **Reconcile.** Read the `## Database Schema` section from `.fno/codemap.md`:
 
-1. **Backlog dedup.** Run `fno backlog find "<feature keywords>"` (title
-   tokens plus the one-line summary, not the full design text) to surface any
-   existing node that already covers this ground.
+1. **Backlog dedup already ran** unconditionally in Step 1d-bis; carry its
+   verdict into the terminal summary below. Do not re-run it here (this step is
+   now purely DB-schema reconciliation).
 2. **Decide the touched surface.** List the tables / enums / constraints this
    feature reads or writes. A feature in a DB-backed repo that touches no
    tables records "no schema surface" and proceeds without a forced citation
@@ -613,7 +633,10 @@ Document any pitfalls that could affect the implementation plan. Examples:
 Finalize the doc drafted incrementally from Step 3 (or write it now if the flow
 was short enough to skip the skeleton).
 
-Save to: `{plansDirectory}/YYYY-MM-DD-<feature-name>.md` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/config.toml` → `config.plans.full_path`)
+Save to `{plansDirectory}/` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/config.toml` → `config.plans.full_path`). The filename depends on whether this `/think` is node-seeded:
+
+- **Node-seeded** (`/think <node-id>`): save `YYYY-MM-DD-<feature-slug>-<full-node-id>.md` - the canonical node id is the filename suffix so a roadmap base keyed on the node id can find the doc (`/think x-8af8` → `…-x-8af8.md`; the configured prefix/width is preserved verbatim, never re-prefixed). First **reuse if claimed**: if a plans-dir file already carries this node in its frontmatter (`claims:`/`graph_node_id:`) or already ends `-<node-id>.md`, finalize INTO that file instead of minting a second one (a pre-created roadmap stub is the doc's home; a re-dispatch after a slug edit reuses the same doc). An empty slug degrades to `YYYY-MM-DD-<node-id>.md`, never a dangling `--<node-id>.md`.
+- **Raw prose** (no node): keep the id-less `YYYY-MM-DD-<feature-slug>.md`. If `/blueprint` later intakes it and assigns a node id, its step 3b-bis renames the artifact to carry the id and repoints `plan_path` - so the final invariant (id in both filename and `plan_path`) is reached either way.
 
 Stamp the resolved type into the doc's frontmatter as
 `deliverable_type: feature | bug | investigation` (Step 1f).
