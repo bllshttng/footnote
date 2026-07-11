@@ -1,0 +1,12 @@
+{
+  "ts": "2026-07-10T22:10:00.000Z",
+  "v": 1,
+  "type": "run_summary",
+  "source": "target",
+  "from": "claude:sess-abc123",
+  "model": "claude-sonnet-5",
+  "node": "prj-0001",
+  "run": "tgt-prj-0001-claude-g1",
+  "outcome": "SUCCESS",
+  "data": { "tasks_started": 2, "tasks_done": 2, "tasks_failed": 0, "termination_reason": "DonePRGreen", "pr_url": "https://example.test/pr/1" }
+}
