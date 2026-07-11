@@ -4180,6 +4180,7 @@ mod tests {
             attach_id: None,
             external: false,
             seen: false,
+            tab: None,
         };
         assert!(
             matches!(agent_hit(&hosted), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
@@ -4908,6 +4909,7 @@ mod tests {
             attach_id: None,
             external: false,
             seen: false,
+            tab: None,
         };
         // A watch-only bg row with a claude jobId: a click attaches it.
         let bg_attach = AgentRow {
@@ -4921,6 +4923,7 @@ mod tests {
             attach_id: Some("c19cd2c3".into()),
             external: false,
             seen: false,
+            tab: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -4934,6 +4937,7 @@ mod tests {
             attach_id: None,
             external: false,
             seen: false,
+            tab: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // display order: squad 1 (row1), its 2 tabs (rows2-3), its agent
@@ -4969,6 +4973,7 @@ mod tests {
                 attach_id: None,
                 external: false,
                 seen: false,
+                tab: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -5215,6 +5220,7 @@ mod tests {
                     attach_id: None,
                     external: false,
                     seen: false,
+                    tab: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -5227,6 +5233,7 @@ mod tests {
                     attach_id: None,
                     external: false,
                     seen: false,
+                    tab: None,
                 },
                 AgentRow {
                     squad: None,
@@ -5239,6 +5246,7 @@ mod tests {
                     attach_id: None,
                     external: false,
                     seen: false,
+                    tab: None,
                 },
             ],
             focus_node: None,
@@ -5299,6 +5307,7 @@ mod tests {
                 attach_id: None,
                 external: false,
                 seen: false,
+                tab: None,
             }
         }
         let mut view = two_pane_view();
@@ -5405,6 +5414,7 @@ mod tests {
                     attach_id: None,
                     external: false,
                     seen: false,
+                    tab: None,
                 },
                 AgentRow {
                     squad: None,
@@ -5417,6 +5427,7 @@ mod tests {
                     attach_id: Some("ab12cd34".into()),
                     external: true,
                     seen: false,
+                    tab: None,
                 },
                 AgentRow {
                     squad: None,
@@ -5429,6 +5440,7 @@ mod tests {
                     attach_id: None,
                     external: false,
                     seen: false,
+                    tab: None,
                 },
             ],
             focus_node: None,
@@ -5678,6 +5690,7 @@ mod tests {
             attach_id: attach_id.map(Into::into),
             external: false,
             seen: false,
+            tab: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -5957,6 +5970,7 @@ mod tests {
             attach_id: None,
             external: false,
             seen: false,
+            tab: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -5998,6 +6012,7 @@ mod tests {
                 attach_id: None,
                 external: false,
                 seen: true,
+                tab: None,
             },
             AgentRow {
                 squad: Some(2),
@@ -6010,6 +6025,7 @@ mod tests {
                 attach_id: None,
                 external: false,
                 seen: false,
+                tab: None,
             },
         ];
         let rows = v.nav_rows();
@@ -6086,6 +6102,7 @@ mod tests {
             attach_id: None,
             external: false,
             seen: false,
+            tab: None,
         }];
         let idx = v
             .nav_rows()
@@ -6439,6 +6456,7 @@ mod tests {
             attach_id: None,
             external: false,
             seen: false,
+            tab: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -6589,6 +6607,7 @@ mod tests {
             attach_id: None,
             external: false,
             seen: false,
+            tab: None,
         }
     }
 

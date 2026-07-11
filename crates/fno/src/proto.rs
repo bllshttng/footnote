@@ -123,7 +123,12 @@ use crate::tree::{Dir, Rect, TabId};
 /// v23: `AgentRow.seen` - server-side per-pane seen bit (x-4328), set when the
 /// operator focuses a `Done` pane, cleared when it leaves `Done`; distinguishes
 /// a looked-at finished agent (`Idle`) from one still surfaced (`DoneUnseen`).
-pub const PROTO_VERSION: u32 = 23;
+/// v24: `AgentRow.tab` - the `TabId` hosting a pane-hosted row (x-0090), so the
+/// agents-first sideline renders a tab-ordinal suffix (client derives the
+/// ordinal from the Layout). `#[serde(default)]` keeps a v23 reader
+/// wire-tolerant. Parallel-branch hazard: if another mux branch takes v24
+/// first, the second-to-merge re-bumps (same rule as the v17/v18/v20 churn).
+pub const PROTO_VERSION: u32 = 24;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -444,6 +449,14 @@ pub struct AgentRow {
     /// pre-feature `done == unseen`).
     #[serde(default)]
     pub seen: bool,
+    /// (v24, x-0090) The tab hosting this row's pane, for the agents-first
+    /// sideline: the client derives the display ordinal from the `Layout` it
+    /// already holds (a `TabId`, not a precomputed ordinal, so a closed tab
+    /// recomputes correctly - Discretion 2). `Some` only on a pane-hosted row
+    /// (`pane_id: Some`); a watch-only row has no tab. `#[serde(default)]`
+    /// keeps a v23 reader wire-tolerant (`None` -> no ordinal suffix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<TabId>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1557,6 +1570,7 @@ mod tests {
                         attach_id: None,
                         external: false,
                         seen: false,
+                        tab: None,
                     },
                     AgentRow {
                         squad: None,
@@ -1569,6 +1583,7 @@ mod tests {
                         attach_id: None,
                         external: false,
                         seen: false,
+                        tab: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),

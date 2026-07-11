@@ -1814,89 +1814,149 @@ impl Core {
         named
     }
 
-    /// Join the registry-derived agent set to this server's live state (4a-G2,
-    /// the fact-badge lattice): a mux-hosted row (this session) renders under
-    /// its pane's squad, and a missing/dead pane forces `exited` REGARDLESS of
-    /// any live-TTL badge (fact beats report - AC2-EDGE, and the reason a dead
-    /// row can never resurrect: the pane set is authoritative here, AC2-FR). A
-    /// row hosted in ANOTHER session is skipped (that session's server renders
-    /// it). Non-pane rows (bg/headless/daemon-worker) are watch-only, matched
-    /// to a squad by canonical cwd (exact or child path), else the catch-all
-    /// (`squad: None`).
+    /// The sideline row set as a PANE UNION (x-0090, Locked 5): every live pane
+    /// in every squad/tab is a row, in (squad, tab, pane) order, carrying its
+    /// `tab` so the client renders a tab-ordinal suffix. A pane is enriched from
+    /// the registry entry that hosts it - `mux == (this session, pane)`, or a
+    /// watch-only row whose `attach_id` reconciles to it (x-0090 attach map) -
+    /// else it is a bare pane labelled from its `PaneEntry` (Discretion 5). One
+    /// row per entity: a registry agent merged onto a pane never also renders
+    /// watch-only. Truly paneless registry rows (bg/headless/daemon/roster)
+    /// append AFTER the pane rows, matched to a squad by cwd (exact or child) or
+    /// the `squad: None` catch-all. The fact-badge lattice is unchanged: a dead
+    /// pane forces `exited` over any live-TTL badge (fact beats report).
     fn agent_rows(&self) -> Vec<AgentRow> {
-        let mut out = Vec::with_capacity(self.agents.len());
-        for a in &self.agents {
-            let (squad, pane_id, exited) = match &a.mux {
+        let mut out = Vec::new();
+        // Which registry agents a pane row already claimed (so they don't
+        // double-render as watch-only). Indexed like `self.agents`.
+        let mut consumed = vec![false; self.agents.len()];
+
+        // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
+        //    pane order). Iterating the tree (not `self.agents`) is what makes a
+        //    bare shell pane a first-class row.
+        for squad in &self.session.squads {
+            for tab in &squad.tabs {
+                for pid in tree::leaves(&tab.root) {
+                    // The registry entry hosting this pane, if any: a
+                    // same-session mux match, else a watch-only row the attach
+                    // map reconciled onto this pane (x-0090). First match wins.
+                    let matched = self.agents.iter().position(|a| match &a.mux {
+                        Some((sess, pane)) => sess == &self.session_name && *pane == pid,
+                        None => a
+                            .attach_id
+                            .as_deref()
+                            .and_then(|id| self.attached.get(id))
+                            .copied()
+                            == Some(pid),
+                    });
+                    // A tree leaf reaped from `panes` (dying) forces `exited`,
+                    // the same fact-beats-report rule the old join used.
+                    let pane_dead = !self.panes.contains_key(&pid);
+                    let row = match matched {
+                        Some(i) => {
+                            consumed[i] = true;
+                            let a = &self.agents[i];
+                            let exited = a.exited || pane_dead;
+                            AgentRow {
+                                squad: Some(squad.id),
+                                name: a.name.clone(),
+                                pane_id: Some(pid),
+                                badge: if exited { None } else { a.badge },
+                                reason: if exited { None } else { a.reason.clone() },
+                                exited,
+                                answerable: if exited { None } else { a.answerable.clone() },
+                                // A pane-hosted row focuses its pane; the attach
+                                // target never rides it (wire contract).
+                                attach_id: None,
+                                external: a.external,
+                                tab: Some(tab.id),
+                                seen: self.seen.contains(&pid),
+                            }
+                        }
+                        None => {
+                            // Bare pane: labelled from its own entry (node > cmd
+                            // > cwd-basename > "shell"), matching the navigator's
+                            // pane labels (v22) so the two agree.
+                            let e = self.panes.get(&pid);
+                            AgentRow {
+                                squad: Some(squad.id),
+                                name: pane_label(
+                                    e.and_then(|e| e.node.as_deref()),
+                                    e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                    e.and_then(|e| e.cmd.as_deref()),
+                                ),
+                                pane_id: Some(pid),
+                                badge: None,
+                                reason: None,
+                                exited: pane_dead,
+                                answerable: None,
+                                attach_id: None,
+                                external: false,
+                                tab: Some(tab.id),
+                                seen: self.seen.contains(&pid),
+                            }
+                        }
+                    };
+                    out.push(row);
+                }
+            }
+        }
+
+        // 2. Watch-only appendix: registry rows no pane claimed.
+        for (i, a) in self.agents.iter().enumerate() {
+            if consumed[i] {
+                continue;
+            }
+            match &a.mux {
                 Some((sess, pane)) => {
-                    if *sess != self.session_name {
+                    // A row hosted in ANOTHER session is that server's to render.
+                    if sess != &self.session_name {
                         continue;
                     }
-                    let squad = self.session.find_pane(*pane).map(|(sid, _)| sid);
-                    let pane_dead = !self.panes.contains_key(pane);
-                    (squad, Some(*pane), a.exited || pane_dead)
+                    // A same-session mux row whose pane left the tree entirely
+                    // (fully reaped) is a dangling exited row - preserve the old
+                    // behaviour (`find_pane` -> None squad, `exited`).
+                    out.push(AgentRow {
+                        squad: self.session.find_pane(*pane).map(|(sid, _)| sid),
+                        name: a.name.clone(),
+                        pane_id: Some(*pane),
+                        badge: None,
+                        reason: None,
+                        exited: true,
+                        answerable: None,
+                        attach_id: None,
+                        external: a.external,
+                        tab: None,
+                        seen: self.seen.contains(pane),
+                    });
                 }
                 None => {
-                    // (x-0090) A watch-only row whose attach maps to a LIVE pane
-                    // in this session presents pane-hosted (`find_pane` -> squad,
-                    // `pane_id: Some`), so `agent_hit` sends `FocusPane` on the
-                    // next click - no duplicate row, no second tab. The lazy
-                    // `panes` liveness filter means a stale mapping (pane reaped
-                    // between ticks) can never present a dead pane; it falls
-                    // through to the watch-only cwd match below (AC1-FR revert).
-                    let attached_pane = a
-                        .attach_id
-                        .as_deref()
-                        .and_then(|id| self.attached.get(id).copied())
-                        .filter(|p| self.panes.contains_key(p))
-                        .and_then(|p| self.session.find_pane(p).map(|(sid, _)| (sid, p)));
-                    match attached_pane {
-                        Some((sid, p)) => (Some(sid), Some(p), a.exited),
-                        // Watch-only (paneless) rows have no membership to match
-                        // on, so fall back to cwd - tested against ANY of the
-                        // squad's origins (exact or child), not a single
-                        // canonical_cwd, so a multi-origin squad still claims a
-                        // worker under any of its paths (change #5, AC2-EDGE).
-                        None => {
-                            let squad = self
-                                .session
-                                .squads
-                                .iter()
-                                .find(|s| s.owns_path(&a.cwd))
-                                .map(|s| s.id);
-                            (squad, None, a.exited)
-                        }
-                    }
+                    // Truly paneless (bg/headless/daemon/roster). Its attach map
+                    // pointed at no live pane (else a pane row claimed it), so it
+                    // stays watch-only attachable - the AC1-FR revert.
+                    let squad = self
+                        .session
+                        .squads
+                        .iter()
+                        .find(|s| s.owns_path(&a.cwd))
+                        .map(|s| s.id);
+                    out.push(AgentRow {
+                        squad,
+                        name: a.name.clone(),
+                        pane_id: None,
+                        badge: if a.exited { None } else { a.badge },
+                        reason: if a.exited { None } else { a.reason.clone() },
+                        exited: a.exited,
+                        answerable: if a.exited { None } else { a.answerable.clone() },
+                        attach_id: if a.exited { None } else { a.attach_id.clone() },
+                        external: a.external,
+                        tab: None,
+                        // A watch-only row has no pane to focus, so it is always
+                        // unseen.
+                        seen: false,
+                    });
                 }
-            };
-            out.push(AgentRow {
-                squad,
-                name: a.name.clone(),
-                pane_id,
-                // Exit beats badge, structurally: no path renders `working`
-                // over a dead pane.
-                badge: if exited { None } else { a.badge },
-                reason: if exited { None } else { a.reason.clone() },
-                exited,
-                // An exited pane is unanswerable; drop any stale payload with
-                // the badge (x-c929).
-                answerable: if exited { None } else { a.answerable.clone() },
-                // The attach target rides ONLY a live watch-only row: a
-                // pane-hosted row focuses its pane instead (wire contract), and
-                // a terminal session can't be attached (its supervisor row is
-                // being reaped). Drop it in both cases, like the badge.
-                attach_id: if exited || pane_id.is_some() {
-                    None
-                } else {
-                    a.attach_id.clone()
-                },
-                // Roster provenance (x-0a2e) rides through as-is; the pane fact
-                // above already forced `exited` for a dead pane, so the client's
-                // exited glyph stays senior over the external marker (AC2-EDGE).
-                external: a.external,
-                // (x-4328) A watch-only row (`pane_id: None`) has nothing to
-                // focus, so it is always unseen.
-                seen: pane_id.is_some_and(|p| self.seen.contains(&p)),
-            });
+            }
         }
         out
     }
@@ -5394,6 +5454,52 @@ mod tests {
             Some("deadbee1"),
             "re-attachable after the pane dies"
         );
+    }
+
+    #[test]
+    fn agent_rows_union_covers_merged_bare_and_watch_only() {
+        // x-0090 US2: agent_rows() is a pane union. seen_test_core gives squad 1
+        // with p1 in tab 1 and p2 in tab 2 (both bare `/bin/cat` panes). Enrich
+        // p1 from the registry, leave p2 bare, add one paneless watch-only row.
+        let (mut core, _c, p1, p2, _rx) = seen_test_core();
+        core.agents = vec![
+            agent_in("test", p1, Some(AgentBadge::Working), false),
+            bg_row("spawn-fix-c3d4", "/elsewhere", Some("deadbee1")),
+        ];
+        let rows = core.agent_rows();
+        // Pane rows first in (tab, pane) order, watch-only appended last.
+        assert_eq!(rows.len(), 3, "two pane rows + one watch-only");
+
+        // Merged row: named + badged from the registry, carries its tab ref.
+        assert_eq!(rows[0].pane_id, Some(p1));
+        assert_eq!(rows[0].name, "w", "registry name wins on a merged row");
+        assert_eq!(rows[0].badge, Some(AgentBadge::Working));
+        assert_eq!(rows[0].tab, Some(1));
+        assert_eq!(rows[0].attach_id, None, "a pane row never carries attach");
+
+        // Bare pane: labelled from its own entry (cwd basename here), no badge.
+        assert_eq!(rows[1].pane_id, Some(p2));
+        assert_eq!(rows[1].name, "seen", "bare pane labelled from PaneEntry");
+        assert_eq!(rows[1].badge, None);
+        assert_eq!(rows[1].tab, Some(2));
+
+        // Watch-only appended last: paneless, orphan squad, still attachable.
+        assert_eq!(rows[2].pane_id, None, "watch-only has no pane");
+        assert_eq!(rows[2].name, "spawn-fix-c3d4");
+        assert_eq!(rows[2].squad, None, "cwd matches no squad -> orphan");
+        assert_eq!(rows[2].attach_id.as_deref(), Some("deadbee1"));
+        assert_eq!(rows[2].tab, None);
+    }
+
+    #[test]
+    fn agent_rows_one_row_per_entity_no_watch_only_double() {
+        // x-0090 Invariant: a registry row merged onto a pane never ALSO renders
+        // watch-only. A bg row that IS pane-hosted this session appears once.
+        let (mut core, _c, p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Done), false)];
+        let rows = core.agent_rows();
+        let hits = rows.iter().filter(|r| r.name == "w").count();
+        assert_eq!(hits, 1, "the merged agent renders exactly once");
     }
 
     #[test]
