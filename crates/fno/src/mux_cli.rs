@@ -27,7 +27,7 @@
 
 use std::ffi::OsString;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
@@ -1982,40 +1982,71 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
         return EXIT_BLOCK_UNAVAILABLE;
     }
 
-    // 2. Cap the excerpt (command line + head of output) and stage it in a temp
-    //    file for `--block-excerpt-file` (avoids arg-length limits + quoting).
+    // 2. Cap the excerpt (command line + head of output). Piped via stdin below,
+    //    so no world-readable temp file is ever staged (CWE-377; gemini/codex
+    //    review) and there is nothing to clean up.
     let excerpt = cap_excerpt(&text, ANNOTATE_EXCERPT_CAP);
-    let tmp = match write_temp_excerpt(&excerpt) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("fno mux block: cannot stage excerpt: {e}");
-            return EXIT_ERROR;
-        }
-    };
+
+    // 2b. Resolve the --from pane's cwd so `fno annotate add` records the finding
+    //     into THAT worktree's .fno/events.jsonl - the one loop-check reads for
+    //     the node - not the caller's cwd (codex P1: a mismatched cwd lands the
+    //     durable finding in the wrong project and never gates). Best-effort: on
+    //     a PaneLs miss inherit the caller cwd (the mail inject still lands).
+    let pane_cwd = pane_cwd_via_ls(&sock, &session, parsed.from);
 
     // 3. Shell the Python core (`fno annotate add`) via this binary's own `fno`
     //    entrypoint (the Rust shim forwards `annotate` to the wheel CLI), so the
-    //    finding recording + claim-holder delivery ladder lives in one place.
+    //    finding recording + claim-holder delivery ladder lives in one place. The
+    //    excerpt rides stdin (`--block-excerpt-file -`), never a temp file.
     let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
-    let status = std::process::Command::new(&fno)
-        .args([
-            OsString::from("annotate"),
-            OsString::from("add"),
-            OsString::from("--node"),
-            OsString::from(&parsed.node),
-            OsString::from("--message"),
-            OsString::from(&parsed.message),
-            OsString::from("--block-excerpt-file"),
-            tmp.clone().into_os_string(),
-        ])
-        .status();
-    let _ = std::fs::remove_file(&tmp);
-    match status {
+    let mut cmd = std::process::Command::new(&fno);
+    cmd.args([
+        OsString::from("annotate"),
+        OsString::from("add"),
+        OsString::from("--node"),
+        OsString::from(&parsed.node),
+        OsString::from("--message"),
+        OsString::from(&parsed.message),
+        OsString::from("--block-excerpt-file"),
+        OsString::from("-"),
+    ])
+    .stdin(std::process::Stdio::piped());
+    if let Some(cwd) = pane_cwd {
+        cmd.current_dir(cwd);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("fno mux block: cannot run `fno annotate add`: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        // A broken pipe (child exited early) is not fatal: the child's own exit
+        // code below is the authority on what happened.
+        let _ = stdin.write_all(excerpt.as_bytes());
+    }
+    match child.wait() {
         Ok(s) => s.code().unwrap_or(EXIT_ERROR),
         Err(e) => {
             eprintln!("fno mux block: cannot run `fno annotate add`: {e}");
             EXIT_ERROR
         }
+    }
+}
+
+/// Resolve `pane`'s cwd via a `PaneLs` round-trip. Returns `None` on any miss
+/// (unreachable server, pane absent, empty cwd) so the caller degrades to the
+/// inherited cwd rather than failing the annotation outright.
+fn pane_cwd_via_ls(sock: &Path, session: &str, pane: u64) -> Option<String> {
+    match control_roundtrip(sock, session, ControlVerb::PaneLs) {
+        Ok(ServerMsg::PaneList { panes }) => panes
+            .into_iter()
+            .find(|p| p.pane_id == pane)
+            .map(|p| p.cwd)
+            .filter(|c| !c.is_empty()),
+        _ => None,
     }
 }
 
@@ -2031,16 +2062,6 @@ fn cap_excerpt(text: &str, cap: usize) -> String {
         end -= 1;
     }
     format!("{}\n... [truncated to {cap} bytes]", &text[..end])
-}
-
-/// Stage `excerpt` in a uniquely-named temp file and return its path. Uniqueness
-/// is process+pane-id derived (no `Math.random`); the caller removes it after
-/// the shell-out.
-fn write_temp_excerpt(excerpt: &str) -> std::io::Result<PathBuf> {
-    let name = format!("fno-annotate-{}.txt", std::process::id());
-    let path = std::env::temp_dir().join(name);
-    std::fs::write(&path, excerpt)?;
-    Ok(path)
 }
 
 /// `fno mux block <verb> ...`: route the block verb family. `pipe` (x-fe8f)

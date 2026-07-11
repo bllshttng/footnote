@@ -172,6 +172,10 @@ def list_findings(
     resolved: set[str] = set()
     findings: dict[str, dict[str, Any]] = {}
     for ev in _scan(events_path):
+        # A valid-JSON but non-object line (a bare list/number) must be skipped,
+        # not crash on .get (gemini review). _scan already drops unparseable lines.
+        if not isinstance(ev, dict):
+            continue
         etype = ev.get("type")
         data = ev.get("data") or {}
         fid = data.get("finding_id")

@@ -130,6 +130,38 @@ def test_empty_text_refused_writes_nothing(events_path, claimed_node):
     assert _read_events(events_path) == []
 
 
+def test_list_skips_non_dict_json_lines(events_path):
+    """A valid-JSON but non-object line (bare list/number) is skipped, not a crash."""
+    events_path.write_text(
+        "[1,2,3]\n"
+        "123\n"
+        '{"ts":"t","type":"review_finding","source":"observer",'
+        '"data":{"finding_id":"ok","node":"x","text":"real"}}\n'
+    )
+    findings = core.list_findings("x", events_path=events_path)
+    assert len(findings) == 1 and findings[0]["finding_id"] == "ok"
+
+
+def test_add_reads_excerpt_from_stdin(tmp_path, monkeypatch):
+    """`--block-excerpt-file -` reads the excerpt from stdin (no temp file)."""
+    from typer.testing import CliRunner
+
+    from fno.annotate.cli import annotate_app
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "c"))
+
+    result = CliRunner().invoke(
+        annotate_app,
+        ["add", "--node", "x-s", "-m", "see block", "--block-excerpt-file", "-"],
+        input="$ cmd\noutput line\n",
+    )
+    assert result.exit_code == 0, result.output
+    events = _read_events(tmp_path / ".fno" / "events.jsonl")
+    assert events[0]["data"]["block_excerpt"] == "$ cmd\noutput line\n"
+
+
 def test_resolve_clears_and_is_idempotent(events_path, tmp_path, monkeypatch):
     """Invariant: only explicit resolve clears; second resolve is a warning no-op."""
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "c"))

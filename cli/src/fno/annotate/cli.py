@@ -37,7 +37,9 @@ def add(
     node: str = typer.Option(..., "--node", help="The backlog node the finding is against."),
     block_cmd: str = typer.Option(None, "--block-cmd", help="The annotated block's command line."),
     block_excerpt_file: str = typer.Option(
-        None, "--block-excerpt-file", help="Path to a file holding the block excerpt."
+        None,
+        "--block-excerpt-file",
+        help="Path to a file holding the block excerpt, or '-' to read it from stdin.",
     ),
 ) -> None:
     """Record a finding and attempt live delivery to the claim holder.
@@ -46,7 +48,13 @@ def add(
     to stdout and a receipt line to stderr.
     """
     excerpt = None
-    if block_excerpt_file:
+    if block_excerpt_file == "-":
+        # Stdin: the mux porcelain pipes the excerpt here instead of staging a
+        # world-readable temp file (CWE-377; gemini/codex review).
+        import sys
+
+        excerpt = sys.stdin.read()
+    elif block_excerpt_file:
         from pathlib import Path
 
         try:
