@@ -38,6 +38,18 @@ def state_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return target
 
 
+@pytest.fixture(autouse=True)
+def _isolate_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch the real macOS Keychain in tests (would leak a dev's token).
+
+    Default to 'no keychain blobs'; a test that wants a Keychain token opts in
+    by re-patching _read_claude_keychain_blobs.
+    """
+    import fno.adapters.providers.usage as usage_mod
+
+    monkeypatch.setattr(usage_mod, "_read_claude_keychain_blobs", lambda cfg: [])
+
+
 def _claude_record(creds: Path) -> ProviderRecord:
     return ProviderRecord(
         id="claude-primary",
@@ -114,10 +126,11 @@ class TestProbeFailOpen:
         monkeypatch.setitem(usage_mod._PROBES, "claude", boom)
         assert probe_usage(_claude_record(tmp_path)) is None
 
-    def test_claude_probe_parses_windows(
+    def test_claude_probe_parses_real_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # AC1-HP shape: a well-formed endpoint payload becomes a snapshot.
+        # Verified /api/oauth/usage shape (x-6bcf): top-level five_hour/seven_day
+        # objects with utilization (0-100) + an ISO-8601 resets_at string.
         (tmp_path / ".credentials.json").write_text(
             json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
         )
@@ -131,16 +144,80 @@ class TestProbeFailOpen:
                 return False
 
             def read(self):  # noqa: ANN001
-                return json.dumps(
-                    {"windows": [{"label": "5h", "used_pct": 87.5, "resets_at": 5000.0}]}
-                ).encode()
+                return json.dumps({
+                    "five_hour": {"utilization": 9.0, "resets_at": "2026-07-12T02:09:59+00:00"},
+                    "seven_day": {"utilization": 69.0, "resets_at": "2026-07-12T10:59:59+00:00"},
+                    "seven_day_opus": None,
+                }).encode()
 
         monkeypatch.setattr(usage_mod.urllib.request, "urlopen", lambda *a, **k: _Resp())
         snap = probe_usage(_claude_record(tmp_path), now=1000.0)
         assert snap is not None
-        assert snap.provider_id == "claude-primary"
-        assert snap.windows[0].label == "5h"
-        assert snap.windows[0].used_pct == 87.5
+        labels = {w.label: w.used_pct for w in snap.windows}
+        assert labels == {"5h": 9.0, "weekly": 69.0}
+        # resets_at parsed from ISO to epoch.
+        import datetime as _dt
+        assert snap.windows[0].resets_at == _dt.datetime.fromisoformat("2026-07-12T02:09:59+00:00").timestamp()
+
+    def test_claude_probe_skips_stale_token_then_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A stale scoped Keychain token 401s; the probe tries the next candidate.
+        import urllib.error
+
+        import fno.adapters.providers.usage as usage_mod
+
+        monkeypatch.setattr(
+            usage_mod, "_read_claude_keychain_blobs",
+            lambda cfg: [
+                json.dumps({"claudeAiOauth": {"accessToken": "stale"}}),
+                json.dumps({"claudeAiOauth": {"accessToken": "live"}}),
+            ],
+        )
+
+        class _Resp:
+            def __enter__(self):  # noqa: ANN001
+                return self
+
+            def __exit__(self, *a):  # noqa: ANN001
+                return False
+
+            def read(self):  # noqa: ANN001
+                return json.dumps({"five_hour": {"utilization": 5.0, "resets_at": "2026-07-12T02:00:00+00:00"}}).encode()
+
+        def _fetch(req, timeout):  # noqa: ANN001
+            if "stale" in req.headers.get("Authorization", ""):
+                raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+            return _Resp()
+
+        # No file token (empty dir) so only the two keychain tokens are tried.
+        rec = ProviderRecord(id="c", name="c", cli="claude", auth="oauth_dir", credentials_source=tmp_path)
+        monkeypatch.setattr(usage_mod.urllib.request, "urlopen", _fetch)
+        snap = probe_usage(rec, now=1000.0)
+        assert snap is not None
+        assert snap.windows[0].used_pct == 5.0
+
+    def test_codex_probe_parses_real_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Verified codex shape (x-6bcf): an event_msg line with rate_limits at
+        # payload.rate_limits; each window has used_percent + an ABSOLUTE resets_at.
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        (sessions / "s.jsonl").write_text(json.dumps({
+            "timestamp": "2026-07-11T14:11:44",
+            "type": "event_msg",
+            "payload": {"rate_limits": {
+                "primary": {"used_percent": 4.0, "window_minutes": 300, "resets_at": 1783807404},
+                "secondary": {"used_percent": 5.0, "window_minutes": 10080, "resets_at": 1784372823},
+            }},
+        }) + "\n")
+        rec = ProviderRecord(id="cx", name="cx", cli="codex", auth="oauth_dir", credentials_source=tmp_path)
+        snap = probe_usage(rec, now=1000.0)
+        assert snap is not None
+        assert snap.source == "session-events"
+        got = {w.label: (w.used_pct, w.resets_at) for w in snap.windows}
+        assert got == {"5h": (4.0, 1783807404.0), "weekly": (5.0, 1784372823.0)}
 
 
 # ---------------------------------------------------------------------------
