@@ -753,10 +753,16 @@ def _foreign_live_holder(node_id: str) -> Optional[dict]:
         return None
     if info.get("state") not in ("live", "suspect"):
         return None
-    # Ours by declared identity (driver-run sessions set TARGET_SESSION_ID).
-    tsid = os.environ.get("TARGET_SESSION_ID")
-    if tsid and info.get("holder") == f"target-session:{tsid}":
-        return None
+    # Ours by declared identity. A driver-run claude session sets
+    # TARGET_SESSION_ID; a codex session has no TARGET_SESSION_ID, so
+    # init-target-state.sh makes its raw CODEX_THREAD_ID the claim owner. Match
+    # either -- the durable-pid arm below only resolves a claude ancestor, so
+    # codex parity (a same-thread re-run is not foreign) depends on this arm.
+    holder = info.get("holder")
+    for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
+        own_id = os.environ.get(env_var)
+        if own_id and holder == f"target-session:{own_id}":
+            return None
     # Ours by durable session pid + host (a bare interactive re-run with no TSID).
     # An uncapturable own pid on a live foreign-looking claim reads as foreign
     # (park, never share) -- the conservative direction.

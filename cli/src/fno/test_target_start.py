@@ -456,6 +456,31 @@ def test_foreign_live_holder_ours_by_tsid(monkeypatch):
     assert target_cli._foreign_live_holder("N") is None
 
 
+def test_foreign_live_holder_ours_by_codex_thread(monkeypatch):
+    # Codex parity: a codex session's claim owner is its CODEX_THREAD_ID (no
+    # TARGET_SESSION_ID), so a same-thread re-run must NOT be seen as foreign.
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:thread-abc", "pid": 1, "host": "h",
+    }
+    _wire_claim(monkeypatch, status)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-abc")
+    assert target_cli._foreign_live_holder("N") is None
+
+
+def test_foreign_live_holder_different_codex_thread_is_foreign(monkeypatch):
+    # A DIFFERENT codex thread's live claim is still foreign -> refuse.
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:thread-OTHER", "pid": 999, "host": "h",
+    }
+    _wire_claim(monkeypatch, status, own_pid=None)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-abc")
+    assert target_cli._foreign_live_holder("N") == status
+
+
 def test_foreign_live_holder_ours_by_pid_host(monkeypatch):
     # Bare interactive re-run: durable pid + host match -> not foreign.
     status = {
