@@ -58,20 +58,24 @@ region = "bottom_non_empty_lines(1)"
 gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
 
 # Answerable command/edit approvals (x-f498). Codex 0.144.1 renders a borderless
-# numbered menu and commits the choice on a bare digit. Require both the exact
-# question and the live selector marker so model-printed lists cannot inject an
-# answer into the composer. Gemini remains unchanged until it can be captured.
+# numbered menu and commits the choice on a bare digit. The menu/footer stay in
+# the small fingerprinted answer region while the question is detected anywhere
+# on the visible screen, so a heavily wrapped command cannot push it out. The
+# marked selector + approval-specific footer keep model-printed or other numbered
+# menus from becoming answerable. Gemini remains unchanged until live capture.
 [[rule]]
 id = "approval_prompt"
 state = "blocked"
 priority = 986
 region = "bottom_non_empty_lines(20)"
 gate = { all = [
-  { any = [
-    { contains = "Would you like to run the following command?" },
-    { contains = "Would you like to make the following edits?" },
-  ] },
   { line_regex = '^\s*\x{203a}\s*[0-9]\.\s' },
+  { contains = "Press enter to confirm or esc to cancel" },
+] }
+context_region = "whole_recent"
+context_gate = { any = [
+  { contains = "Would you like to run the following command?" },
+  { contains = "Would you like to make the following edits?" },
 ] }
 [rule.answer]
 option = '^\s*\x{203a}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*$'

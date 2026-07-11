@@ -8,9 +8,11 @@
 //!
 //! A manifest is a priority-ordered list of [`ManifestRule`]s. Each rule names a
 //! text [`Region`] of the screen and a recursive boolean [`Gate`] over that
-//! region's text. [`Manifest::evaluate`] returns the highest-priority matching
-//! rule's `state` (and its `skip_state_update` flag) - so a "yes" buried in
-//! scrollback never out-votes a live-region rule that out-prioritizes it.
+//! region's text, plus an optional context region/gate for surrounding evidence
+//! that should not expand the answer fingerprint window. [`Manifest::evaluate`]
+//! returns the highest-priority matching rule's `state` (and its
+//! `skip_state_update` flag) - so a "yes" buried in scrollback never out-votes a
+//! live-region rule that out-prioritizes it.
 //!
 //! Scope: E6.2 built the parser + region vocabulary + gate evaluator + priority
 //! arbiter; E6.3 added the bundled `claude.toml`/`codex.toml`/`gemini.toml` rule
@@ -408,12 +410,12 @@ impl AnswerGrammar {
     }
 }
 
-/// One detection rule: when `gate` matches `region`'s text, the agent is in
-/// `state`. `priority` arbitrates between simultaneously-matching rules (highest
-/// wins). `skip_state_update` marks a rule whose match means "hold the current
-/// state, don't update it" - e.g. claude's ctrl+o transcript pager, which must
-/// not flip a working agent to idle. `answer` (x-c929) is the optional grammar
-/// that makes a `blocked` prompt answerable from the queue.
+/// One detection rule: when `gate` matches `region` and the optional contextual
+/// gate also matches, the agent is in `state`. `priority` arbitrates between
+/// simultaneously-matching rules (highest wins). `skip_state_update` marks a
+/// rule whose match means "hold the current state, don't update it" - e.g.
+/// claude's ctrl+o transcript pager, which must not flip a working agent to idle.
+/// `answer` (x-c929) makes a `blocked` prompt answerable from the queue.
 #[derive(Debug, Clone)]
 pub struct ManifestRule {
     pub id: String,
@@ -422,10 +424,29 @@ pub struct ManifestRule {
     pub region: Region,
     pub skip_state_update: bool,
     pub gate: Gate,
+    context: Option<(Region, Gate)>,
     answer: Option<AnswerGrammar>,
 }
 
 impl ManifestRule {
+    /// Match the rule's live answer region plus any wider contextual guard.
+    /// The returned text is always the primary region: answer extraction and
+    /// fingerprinting stay scoped to the small menu window even when detection
+    /// needs context elsewhere on the visible screen.
+    fn matched_region_text(&self, screen: &ScreenView) -> Option<String> {
+        let text = self.region.extract(screen);
+        if !self.gate.matches(&text) {
+            return None;
+        }
+        if let Some((region, gate)) = &self.context {
+            let context = region.extract(screen);
+            if !gate.matches(&context) {
+                return None;
+            }
+        }
+        Some(text)
+    }
+
     /// Enumerate this rule's answerable options from `region_text`, fail-closed.
     /// Returns `None` (blocked-but-not-answerable) unless the rule carries an
     /// `[answer]` grammar AND the region yields a clean numbered menu: >=1
@@ -549,6 +570,23 @@ impl ManifestRule {
             field: "gate".to_string(),
         })?;
         let gate = Gate::parse(gate_val, &id, 0)?;
+        let context = match (v.get("context_region"), v.get("context_gate")) {
+            (None, None) => None,
+            (Some(region), Some(gate)) => {
+                let region = region.as_str().ok_or_else(|| ManifestError::Field {
+                    rule: id.clone(),
+                    field: "context_region".to_string(),
+                })?;
+                Some((Region::parse(region, &id)?, Gate::parse(gate, &id, 0)?))
+            }
+            _ => {
+                return Err(ManifestError::Field {
+                    rule: id.clone(),
+                    field: "context_region and context_gate (must be provided together)"
+                        .to_string(),
+                })
+            }
+        };
         // Optional `[rule.answer]` (x-c929): parsed here so its blocked-only /
         // bottom-N-region constraints fail loud alongside every other field.
         let answer = match v.get("answer") {
@@ -566,6 +604,8 @@ impl ManifestRule {
                 "region",
                 "skip_state_update",
                 "gate",
+                "context_region",
+                "context_gate",
                 "answer",
             ];
             if let Some(unknown) = table.keys().find(|k| !ALLOWED.contains(&k.as_str())) {
@@ -582,6 +622,7 @@ impl ManifestRule {
             region,
             skip_state_update,
             gate,
+            context,
             answer,
         })
     }
@@ -676,8 +717,7 @@ impl Manifest {
     /// the engine never guesses).
     pub fn evaluate(&self, screen: &ScreenView) -> Option<Verdict<'_>> {
         self.rules.iter().find_map(|rule| {
-            let text = rule.region.extract(screen);
-            rule.gate.matches(&text).then_some(Verdict {
+            rule.matched_region_text(screen).map(|_| Verdict {
                 rule_id: &rule.id,
                 state: &rule.state,
                 skip_state_update: rule.skip_state_update,
@@ -695,10 +735,7 @@ impl Manifest {
         screen: &ScreenView,
     ) -> Option<(Verdict<'_>, Option<AnswerablePrompt>)> {
         self.rules.iter().find_map(|rule| {
-            let text = rule.region.extract(screen);
-            if !rule.gate.matches(&text) {
-                return None;
-            }
+            let text = rule.matched_region_text(screen)?;
             let answerable = rule.extract_answer(&text);
             Some((
                 Verdict {
@@ -1627,6 +1664,45 @@ mod tests {
         assert_eq!(ans.fingerprint, *blake3::hash(screen.as_bytes()).as_bytes());
     }
 
+    #[test]
+    fn answer_rule_can_gate_context_outside_the_answer_region() {
+        let m = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "approval"
+            state = "blocked"
+            priority = 10
+            region = "bottom_non_empty_lines(4)"
+            gate = { line_regex = '^\s*\x{203a}\s*[0-9]\.\s' }
+            context_region = "whole_recent"
+            context_gate = { contains = "Would you like to run the following command?" }
+            [rule.answer]
+            option = '^\s*\x{203a}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*$'
+            send = "digit"
+            "#,
+        )
+        .unwrap();
+        let wrapped = (0..30)
+            .map(|i| format!("wrapped command row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let screen = format!(
+            "Would you like to run the following command?\n{wrapped}\n\
+             \u{203a} 1. Yes, proceed\n  2. Always allow\n  3. No, cancel\n  Press enter to confirm"
+        );
+        let (v, ans) = m.evaluate_answerable(&view(&screen)).unwrap();
+        assert_eq!(v.rule_id, "approval");
+        let ans = ans.expect("context gate detects the question; bottom region extracts the menu");
+        assert_eq!(ans.options.len(), 3);
+        assert_eq!(ans.region_lines, 4);
+
+        let no_question = format!(
+            "unrelated output\n{wrapped}\n\
+             \u{203a} 1. Yes, proceed\n  2. Always allow\n  3. No, cancel\n  Press enter to confirm"
+        );
+        assert!(m.evaluate_answerable(&view(&no_question)).is_none());
+    }
+
     // AC3-ERR: duplicated indices are not a clean 1..N run -> None (fail closed).
     #[test]
     fn xc929_extract_answer_rejects_duplicate_indices() {
@@ -1890,23 +1966,18 @@ mod tests {
     #[test]
     fn xf498_codex_approval_survives_narrow_terminal_wrapping() {
         let m = bundled("codex");
-        let screen = "Would you like to run the following command?\n\
-            Environment: local\n\
-            $ touch /tmp/a/very/long/path/that\n\
-              /wraps/across/multiple/terminal\n\
-              /rows/with/additional/arguments\n\
-              /that/keep/wrapping/on/a\n\
-              /very/narrow/terminal/and\n\
-              /push/the/question/farther\n\
-              /from/the/confirmation/footer\n\
-            \u{203a} 1. Yes, proceed (y)\n\
-              2. Yes, and don't ask again for commands\n\
-                 that start with the captured command\n\
-                 on this narrow terminal (p)\n\
-              3. No, and tell Codex what to do\n\
-                 differently (esc)\n\
-            Press enter to confirm or esc to cancel";
-        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        let wrapped = (0..40)
+            .map(|i| format!("wrapped command row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let screen = format!(
+            "Would you like to run the following command?\nEnvironment: local\n{wrapped}\n\
+             \u{203a} 1. Yes, proceed (y)\n\
+               2. Yes, and don't ask again (p)\n\
+               3. No, and tell Codex what to do differently (esc)\n\
+             Press enter to confirm or esc to cancel"
+        );
+        let (v, ans) = m.evaluate_answerable(&view(&screen)).unwrap();
         assert_eq!(v.rule_id, "approval_prompt");
         assert!(ans.is_some());
     }
