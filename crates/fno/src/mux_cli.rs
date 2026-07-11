@@ -27,7 +27,7 @@
 
 use std::ffi::OsString;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::proto::{
@@ -1659,9 +1659,9 @@ fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
-        .ok_or_else(|| "block needs a verb: pipe".to_string())?;
+        .ok_or_else(|| "block needs a verb: pipe | annotate".to_string())?;
     if verb != "pipe" {
-        return Err(format!("unknown block verb: {verb} (pipe)"));
+        return Err(format!("unknown block verb: {verb} (pipe | annotate)"));
     }
     let mut session = None;
     let mut json = false;
@@ -1742,7 +1742,7 @@ fn control_roundtrip(sock: &Path, session: &str, verb: ControlVerb) -> Result<Se
 /// in the target pane's input. Porcelain over `pane read --block` + `pane
 /// send` - no new capability, one verb. Trailing newlines are stripped so the
 /// pipe fills the input line and never submits it.
-pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
+fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
     let parsed = match parse_block_args(args) {
         Ok(p) => p,
         Err(e) => {
@@ -1854,6 +1854,211 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
         );
     }
     EXIT_OK
+}
+
+// ---------------------------------------------------------------------------
+// `fno mux block annotate` - operator review-finding capture porcelain (x-f8d4)
+// ---------------------------------------------------------------------------
+
+/// Cap for the block excerpt carried into the finding: the command line + head
+/// of output. A truncated excerpt is worse than none for a reviewer (same
+/// contract as `pipe_block_gate`), so the block itself must be complete; this
+/// cap only bounds how much of a large completed block rides into the event.
+const ANNOTATE_EXCERPT_CAP: usize = 2048;
+
+/// A parsed `block annotate` invocation. Pure-parse struct, mirrors
+/// [`ParsedBlockPipe`]. `node` carries the backlog node the finding is scoped
+/// to (the caller supplies the pane's server-tracked `FNO_NODE`, surfaced to
+/// the mux client as `Layout::focus_node`); the porcelain never guesses it.
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedBlockAnnotate {
+    session: Option<String>,
+    from: u64,
+    block: BlockSel,
+    node: String,
+    message: String,
+}
+
+/// Parse the tokens after `mux block annotate` into a [`ParsedBlockAnnotate`].
+/// Pure, so the grammar is unit-testable without a socket. `--node` and `-m`
+/// are required; a missing `--node` is the "specify the node" refusal (a
+/// non-agent pane has no provenance to resolve, so the caller must name it).
+fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String> {
+    // args[0] is the "annotate" verb (block() already routed on it).
+    let mut session = None;
+    let mut from = None;
+    let mut block = BlockSel::Last;
+    let mut node = None;
+    let mut message = None;
+    let mut i = 1;
+    while i < args.len() {
+        let tok = args[i]
+            .to_str()
+            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
+        match tok {
+            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
+            "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
+            "--node" => node = Some(flag_value(args, &mut i, "--node")?),
+            "--message" | "-m" => message = Some(flag_value(args, &mut i, "--message")?),
+            other => return Err(format!("unknown argument: {other}")),
+        }
+        i += 1;
+    }
+    let message = message.ok_or("block annotate needs -m <text>")?;
+    if message.trim().is_empty() {
+        return Err("block annotate: --message is empty".to_string());
+    }
+    Ok(ParsedBlockAnnotate {
+        session,
+        from: from.ok_or("block annotate needs --from <pane>")?,
+        block,
+        node: node.ok_or(
+            "block annotate needs --node <id> (a pane's node cannot be guessed; \
+             pass the node whose work this pane holds)",
+        )?,
+        message,
+    })
+}
+
+/// `fno mux block annotate --from <pane> [--block last|<seq>] -m <text> --node
+/// <id> [--session]`: read a COMPLETED block from the source pane and record it
+/// as an operator review finding against `--node` via `fno annotate add`.
+/// Unlike `block pipe` there is NO target-idle guard (nothing enters a
+/// recipient PTY - delivery is a mail inject the daemon queues); it reuses the
+/// same typed-block gate (an open/truncated/markerless block refuses) and caps
+/// the excerpt. Shells the Python core (Locked Decision 4: routing lives there,
+/// not duplicated in Rust) and propagates its receipt + exit code.
+fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
+    let parsed = match parse_block_annotate(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let session = resolve_session(parsed.session.as_deref(), env_session);
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_USAGE;
+        }
+    };
+
+    // 1. Read the source block. EXIT_BLOCK_UNAVAILABLE propagates verbatim.
+    let (text, meta) = match control_roundtrip(
+        &sock,
+        &session,
+        ControlVerb::PaneRead {
+            pane: parsed.from,
+            lines: None,
+            block: Some(parsed.block),
+        },
+    ) {
+        Ok(ServerMsg::PaneText { text, block, .. }) => (text, block),
+        Ok(ServerMsg::Err { code, msg }) => {
+            eprintln!("fno mux block: {msg}");
+            return if code == err_code::BLOCK_UNAVAILABLE {
+                EXIT_BLOCK_UNAVAILABLE
+            } else {
+                EXIT_ERROR
+            };
+        }
+        Ok(other) => {
+            eprintln!("fno mux block: unexpected server reply: {other:?}");
+            return EXIT_ERROR;
+        }
+        Err(e) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    // 1b. AC1-ERR: only a completed, typed, untruncated block annotates; an
+    //     open/truncated/markerless block refuses (a partial excerpt misleads
+    //     the reviewer the same way a partial pipe does).
+    if let Err(why) = pipe_block_gate(meta.as_ref()) {
+        eprintln!("fno mux block: {why}");
+        return EXIT_BLOCK_UNAVAILABLE;
+    }
+
+    // 2. Cap the excerpt (command line + head of output) and stage it in a temp
+    //    file for `--block-excerpt-file` (avoids arg-length limits + quoting).
+    let excerpt = cap_excerpt(&text, ANNOTATE_EXCERPT_CAP);
+    let tmp = match write_temp_excerpt(&excerpt) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux block: cannot stage excerpt: {e}");
+            return EXIT_ERROR;
+        }
+    };
+
+    // 3. Shell the Python core (`fno annotate add`) via this binary's own `fno`
+    //    entrypoint (the Rust shim forwards `annotate` to the wheel CLI), so the
+    //    finding recording + claim-holder delivery ladder lives in one place.
+    let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
+    let status = std::process::Command::new(&fno)
+        .args([
+            OsString::from("annotate"),
+            OsString::from("add"),
+            OsString::from("--node"),
+            OsString::from(&parsed.node),
+            OsString::from("--message"),
+            OsString::from(&parsed.message),
+            OsString::from("--block-excerpt-file"),
+            tmp.clone().into_os_string(),
+        ])
+        .status();
+    let _ = std::fs::remove_file(&tmp);
+    match status {
+        Ok(s) => s.code().unwrap_or(EXIT_ERROR),
+        Err(e) => {
+            eprintln!("fno mux block: cannot run `fno annotate add`: {e}");
+            EXIT_ERROR
+        }
+    }
+}
+
+/// Keep the head of `text` within `cap` bytes on a char boundary, appending a
+/// truncation marker when it was cut. The head is the command line + start of
+/// output - a reviewer needs the top of a block, not its tail.
+fn cap_excerpt(text: &str, cap: usize) -> String {
+    if text.len() <= cap {
+        return text.to_string();
+    }
+    let mut end = cap;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n... [truncated to {cap} bytes]", &text[..end])
+}
+
+/// Stage `excerpt` in a uniquely-named temp file and return its path. Uniqueness
+/// is process+pane-id derived (no `Math.random`); the caller removes it after
+/// the shell-out.
+fn write_temp_excerpt(excerpt: &str) -> std::io::Result<PathBuf> {
+    let name = format!("fno-annotate-{}.txt", std::process::id());
+    let path = std::env::temp_dir().join(name);
+    std::fs::write(&path, excerpt)?;
+    Ok(path)
+}
+
+/// `fno mux block <verb> ...`: route the block verb family. `pipe` (x-fe8f)
+/// pipes a completed block into another pane's input; `annotate` (x-f8d4)
+/// records it as an operator review finding.
+pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
+    match args.first().and_then(|a| a.to_str()) {
+        Some("pipe") => block_pipe(args, env_session),
+        Some("annotate") => block_annotate(args, env_session),
+        Some(v) => {
+            eprintln!("fno mux block: unknown block verb: {v} (pipe | annotate)");
+            EXIT_USAGE
+        }
+        None => {
+            eprintln!("fno mux block: block needs a verb: pipe | annotate");
+            EXIT_USAGE
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2453,6 +2658,93 @@ mod tests {
                 force: true,
             })
         );
+    }
+
+    // -- block annotate (x-f8d4) --------------------------------------------
+
+    #[test]
+    fn block_annotate_parses_required_flags() {
+        assert_eq!(
+            parse_block_annotate(&os(&[
+                "annotate",
+                "--from",
+                "3",
+                "--node",
+                "x-1",
+                "-m",
+                "off-by-one",
+            ])),
+            Ok(ParsedBlockAnnotate {
+                session: None,
+                from: 3,
+                block: BlockSel::Last,
+                node: "x-1".into(),
+                message: "off-by-one".into(),
+            })
+        );
+        // --block seq + --session + long --message.
+        assert_eq!(
+            parse_block_annotate(&os(&[
+                "annotate",
+                "--from",
+                "3",
+                "--block",
+                "7",
+                "--session",
+                "work",
+                "--node",
+                "x-2",
+                "--message",
+                "fix it",
+            ])),
+            Ok(ParsedBlockAnnotate {
+                session: Some("work".into()),
+                from: 3,
+                block: BlockSel::Seq(7),
+                node: "x-2".into(),
+                message: "fix it".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn block_annotate_usage_errors() {
+        // AC2-ERR: a missing --node is a refusal (no guessing the pane's node).
+        assert!(parse_block_annotate(&os(&["annotate", "--from", "3", "-m", "x"])).is_err());
+        // Missing --from, missing -m, empty -m, unknown flag all refuse.
+        assert!(parse_block_annotate(&os(&["annotate", "--node", "x-1", "-m", "x"])).is_err());
+        assert!(parse_block_annotate(&os(&["annotate", "--from", "3", "--node", "x-1"])).is_err());
+        assert!(parse_block_annotate(&os(&[
+            "annotate", "--from", "3", "--node", "x-1", "-m", "  "
+        ]))
+        .is_err());
+        assert!(parse_block_annotate(&os(&[
+            "annotate", "--from", "3", "--node", "x-1", "-m", "x", "--oops",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn block_verb_dispatch_rejects_unknown() {
+        // The verb enumeration now carries both verbs.
+        let e = parse_block_args(&os(&["rerun"])).unwrap_err();
+        assert!(
+            e.contains("annotate"),
+            "verb list must enumerate annotate: {e}"
+        );
+    }
+
+    #[test]
+    fn cap_excerpt_keeps_head_and_marks_truncation() {
+        assert_eq!(cap_excerpt("short", 2048), "short"); // under cap: verbatim
+        let big = "x".repeat(3000);
+        let capped = cap_excerpt(&big, 2048);
+        assert!(capped.starts_with(&"x".repeat(2048)));
+        assert!(capped.contains("truncated to 2048 bytes"));
+        // char-boundary safe on multibyte input.
+        let multi = "é".repeat(2000); // 2 bytes each -> 4000 bytes
+        let c = cap_excerpt(&multi, 2048);
+        assert!(c.is_char_boundary(c.len().min(2048)));
     }
 
     #[test]
