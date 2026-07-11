@@ -119,3 +119,8 @@
 {"expect":"invalid","reason":"executor_resolved missing required resolved","event":{"ts":"2026-07-08T00:00:00Z","type":"executor_resolved","source":"target","data":{"tier":"default"}}}
 {"expect":"valid","reason":"triage_applied with one priority move and one drop","event":{"ts":"2026-07-08T00:00:00Z","type":"triage_applied","source":"backlog","data":{"applied":{"priority_changes":1,"dependencies":0,"duplicates_flagged":0,"deferred":0},"priority_moves":[{"id":"ab-1","from":"p2","to":"p1"}],"proposed":2,"dropped":1}}}
 {"expect":"invalid","reason":"triage_applied missing required dropped","event":{"ts":"2026-07-08T00:00:00Z","type":"triage_applied","source":"backlog","data":{"applied":{},"proposed":0}}}
+{"expect":"valid","reason":"unified daemon agent_spawned (x-2901)","event":{"ts":"2026-07-10T12:00:00Z","type":"agent_spawned","source":"daemon","data":{"name":"wkA","short_id":"abc123","provider":"claude","pid":4242}}}
+{"expect":"valid","reason":"unified worker: pattern source (x-2901)","event":{"ts":"2026-07-10T12:00:01Z","type":"agent_spawned","source":"worker:wkA","data":{"name":"wkA"}}}
+{"expect":"valid","reason":"unified stream-worker: pattern source (x-2901)","event":{"ts":"2026-07-10T12:00:02Z","type":"agent_spawned","source":"stream-worker:abc","data":{"short_id":"abc"}}}
+{"expect":"valid","reason":"unified active-backlog enum source (x-2901)","event":{"ts":"2026-07-10T12:00:03Z","type":"active_backlog_task_crashed","source":"active-backlog","data":{"error":"panic in dispatch"}}}
+{"expect":"invalid","reason":"legacy Branch B flat kind envelope retired (no type)","event":{"ts":"2026-07-10T12:00:04Z","kind":"agent_spawned","source":"daemon","name":"wkA","pid":42}}
