@@ -1850,9 +1850,12 @@ impl Core {
                                 == Some(pid)
                         }
                     });
-                    // A tree leaf reaped from `panes` (dying) forces `exited`,
-                    // the same fact-beats-report rule the old join used.
-                    let pane_dead = !self.panes.contains_key(&pid);
+                    // One lookup: liveness AND the bare-pane label read the same
+                    // entry (a tree leaf reaped from `panes` is dying, so it
+                    // forces `exited` - the fact-beats-report rule the old join
+                    // used).
+                    let pane_entry = self.panes.get(&pid);
+                    let pane_dead = pane_entry.is_none();
                     let row = match matched {
                         Some(i) => {
                             consumed[i] = true;
@@ -1879,7 +1882,7 @@ impl Core {
                             // Bare pane: labelled from its own entry (node > cmd
                             // > cwd-basename > "shell"), matching the navigator's
                             // pane labels (v22) so the two agree.
-                            let e = self.panes.get(&pid);
+                            let e = pane_entry;
                             AgentRow {
                                 squad: Some(squad.id),
                                 name: pane_label(
