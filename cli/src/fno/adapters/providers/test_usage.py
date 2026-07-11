@@ -225,6 +225,20 @@ class TestProbeFailOpen:
 # ---------------------------------------------------------------------------
 
 
+def test_iso_to_epoch_handles_z_suffix() -> None:
+    # gemini review: Py<3.11 fromisoformat rejects a trailing 'Z'.
+    from datetime import datetime, timezone
+
+    from fno.adapters.providers.usage import _iso_to_epoch
+
+    expected = datetime(2026, 7, 12, 2, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert _iso_to_epoch("2026-07-12T02:00:00Z") == expected
+    assert _iso_to_epoch("2026-07-12T02:00:00+00:00") == expected
+    assert _iso_to_epoch(1234567890) == 1234567890.0
+    assert _iso_to_epoch("garbage") is None
+    assert _iso_to_epoch(None) is None
+
+
 class TestSnapshotStorage:
     def test_write_read_roundtrip(self, state_path: Path) -> None:
         snap = _snap("p1", UsageWindow("5h", 50.0, 9000.0), probed_at=1000.0)

@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -171,7 +172,7 @@ def _read_claude_keychain_blobs(config_dir: Path | None) -> list[str]:
     ordering). Returns BOTH when both exist (a stale scoped + a live unscoped is
     the observed reality). Non-darwin or a denied access prompt yields [].
     """
-    if os.uname().sysname != "Darwin":
+    if sys.platform != "darwin":
         return []
     account = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
     services: list[str] = []
@@ -203,8 +204,10 @@ def _iso_to_epoch(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str) and value:
+        # Py<3.11's fromisoformat rejects a trailing 'Z'; normalize to +00:00.
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
-            return datetime.fromisoformat(value).timestamp()
+            return datetime.fromisoformat(normalized).timestamp()
         except ValueError:
             return None
     return None
