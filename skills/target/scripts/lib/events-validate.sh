@@ -159,17 +159,34 @@ validate_event() {
         fi
     done
 
-    # source allowed?
-    local src allowed_pattern
+    # source allowed? Enum match first, then the worker regex patterns (x-2901:
+    # worker:<id> / stream-worker:<id> are pattern sources, not enum members).
+    local src allowed_pattern src_patterns src_ok pat
     src=$(jq -r '.source' <<<"$payload" 2>/dev/null)
     allowed_pattern=$(jq -r '.envelope.properties.source.enum | join("|")' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
     if [[ -z "$allowed_pattern" ]]; then
         _ev_warn "schema malformed: envelope.source.enum missing"
         return 2
     fi
-    # Anchor with ^...$ for exact match.
-    if ! [[ "$src" =~ ^(${allowed_pattern})$ ]]; then
-        _ev_warn "unknown source: $src (allowed: $(echo "$allowed_pattern" | tr '|' ',' ))"
+    src_ok=0
+    # Anchor with ^...$ for exact enum match.
+    if [[ "$src" =~ ^(${allowed_pattern})$ ]]; then
+        src_ok=1
+    else
+        # patterns are already anchored in the schema; test each as a regex.
+        src_patterns=$(jq -r '.envelope.properties.source.patterns[]? // empty' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+        if [[ -n "$src_patterns" ]]; then
+            while IFS= read -r pat; do
+                [[ -z "$pat" ]] && continue
+                if [[ "$src" =~ $pat ]]; then
+                    src_ok=1
+                    break
+                fi
+            done <<<"$src_patterns"
+        fi
+    fi
+    if [[ "$src_ok" -ne 1 ]]; then
+        _ev_warn "unknown source: $src (allowed: $(echo "$allowed_pattern" | tr '|' ',' ) or patterns)"
         return 1
     fi
 
