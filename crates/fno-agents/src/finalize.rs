@@ -233,25 +233,29 @@ const RUN_SUMMARY_DATA_CAP: usize = 500;
 /// tasks_failed counts task_done events whose outcome is FAILED - the gap
 /// (tasks_started > tasks_done) is what exposes a crashed executor (AC2-FR).
 fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
+    use std::io::BufRead;
     let (mut started, mut done, mut failed) = (0u64, 0u64, 0u64);
-    if let Ok(content) = fs::read_to_string(project_events) {
-        for line in content.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if v.get("run").and_then(|r| r.as_str()) != Some(run) {
-                continue;
-            }
-            match v.get("type").and_then(|t| t.as_str()) {
-                Some("task_started") => started += 1,
-                Some("task_done") => {
-                    done += 1;
-                    if v.get("outcome").and_then(|o| o.as_str()) == Some("FAILED") {
-                        failed += 1;
+    // Stream line-by-line and reuse one buffer: events.jsonl grows to the
+    // rotation cap, so reading it whole would balloon memory (gemini review).
+    if let Ok(file) = fs::File::open(project_events) {
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                if v.get("run").and_then(|r| r.as_str()) == Some(run) {
+                    match v.get("type").and_then(|t| t.as_str()) {
+                        Some("task_started") => started += 1,
+                        Some("task_done") => {
+                            done += 1;
+                            if v.get("outcome").and_then(|o| o.as_str()) == Some("FAILED") {
+                                failed += 1;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
             }
+            line.clear();
         }
     }
     (started, done, failed)
