@@ -174,14 +174,29 @@ def _normalize_lock_fields(entries: list[dict]) -> None:
     for e in entries:
         if not isinstance(e, dict):
             continue
-        resolved = e["locked_by"] if "locked_by" in e else e.get("session_id")
-        e["locked_by"] = resolved
-        e["session_id"] = resolved
-        # A cleared owner must not retain a holder identity: clear the US6
-        # harness stamp whenever the lock is unset, so EVERY owner-clearing path
-        # (unclaim, done, defer, supersede, auto-failure) drops it uniformly and
-        # a later re-claim can never route to a stale holder.
-        if resolved is None:
+        # Legacy node (pre-rename): the session_id key IS the lock owner; adopt
+        # it so a locked_by key exists going forward.
+        if "locked_by" not in e:
+            e["locked_by"] = e.get("session_id")
+        resolved = e.get("locked_by")
+        if resolved:
+            # Claimed: session_id mirrors the canonical lock owner for the
+            # one-release window (locked_by wins over any divergent session_id).
+            e["session_id"] = resolved
+        elif not e.get("completed_at"):
+            # Released and not done (unclaim / defer / supersede / auto-failure):
+            # drop the stale mirror so no consumer reads a dead owner. Keying on
+            # locked_by (not session_id) means status is already correct; this
+            # just keeps the mirror honest.
+            e["session_id"] = None
+        # else: done with no active lock - leave session_id, which carries
+        # done-time work/cost provenance (done/cli.py:_apply_rollup), a distinct
+        # meaning from the lock. A done node never derives 'claimed' (completed_at
+        # wins), so this is never read as a live lock.
+        if not resolved:
+            # A cleared owner must not retain a holder identity: drop the US6
+            # harness stamp whenever the lock is unset, so a later re-claim can
+            # never route to a stale holder.
             e["locked_by_harness"] = None
             e["locked_by_harness_session"] = None
 
