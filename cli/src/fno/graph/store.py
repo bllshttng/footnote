@@ -174,10 +174,13 @@ def _normalize_lock_fields(entries: list[dict]) -> None:
     for e in entries:
         if not isinstance(e, dict):
             continue
-        # Legacy node (pre-rename): the session_id key IS the lock owner; adopt
-        # it so a locked_by key exists going forward.
+        # Legacy node (pre-rename): on a LIVE node the session_id key IS the
+        # lock owner, so adopt it. On a DONE node session_id is work/cost
+        # provenance (done/cli.py:_apply_rollup), NOT a lock - adopting it would
+        # make locked_by truthy and mirror it back over a force-overwrite, so
+        # leave locked_by unset there.
         if "locked_by" not in e:
-            e["locked_by"] = e.get("session_id")
+            e["locked_by"] = None if e.get("completed_at") else e.get("session_id")
         resolved = e.get("locked_by")
         if resolved:
             # Claimed: session_id mirrors the canonical lock owner for the
