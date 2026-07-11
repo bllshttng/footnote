@@ -93,6 +93,32 @@ def _lookup_node(node_ref: str) -> Optional[dict]:
     return None
 
 
+def _resolve_provider_id() -> Optional[str]:
+    """The provider record a default dispatch would run on (the active one).
+
+    Best-effort: an unconfigured / unreadable providers block yields None, which
+    reads as UNKNOWN headroom and proceeds (fail-open)."""
+    try:
+        from fno.adapters.providers.loader import load_providers
+
+        return load_providers().active
+    except Exception:  # noqa: BLE001 - a config read must never block a dispatch
+        return None
+
+
+def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Optional[float]) -> None:
+    """Emit the single quota_deferred decision event. Non-fatal (AC1-UI)."""
+    try:
+        from fno.events import _build, append_event
+
+        data: dict = {"node_id": node_id, "provider": provider, "headroom": state}
+        if retry_at is not None:
+            data["retry_at"] = retry_at
+        append_event(_build("quota_deferred", "backlog", data))
+    except Exception:  # noqa: BLE001 - a telemetry write must never block dispatch
+        pass
+
+
 def _dispatch_one(
     *, session: str, node: Optional[str], project: Optional[str]
 ) -> dict:
@@ -102,6 +128,8 @@ def _dispatch_one(
         node_id = rec.get("id") if rec else node
         slug = rec.get("slug") if rec else None
         cwd = (rec.get("_resolved_cwd") or rec.get("cwd")) if rec else None
+        priority = rec.get("priority") if rec else None
+        explicit = True  # explicit --node is a human verb; never quota-defers (LD#5)
     else:
         try:
             picked = _next_node(project)
@@ -112,6 +140,26 @@ def _dispatch_one(
         node_id = picked["id"]
         slug = picked.get("slug")
         cwd = picked.get("_resolved_cwd") or picked.get("cwd")
+        priority = picked.get("priority")
+        explicit = False
+
+    # 1b. Quota-aware defer (x-5d3e). Only the ambient/autonomous default
+    #     selection defers; an explicit --node dispatch always fires (LD#5).
+    #     Fail-open: defer_dispatch off, p0, or UNKNOWN headroom -> proceed.
+    if not explicit:
+        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+
+        decision = evaluate_quota_defer(_resolve_provider_id() or "", priority=priority)
+        if decision is not None:
+            _emit_quota_deferred(node_id, decision.provider_id, decision.state.value, decision.retry_at)
+            return {
+                "outcome": "quota-deferred",
+                "node": node_id,
+                "slug": slug or "",
+                "provider": decision.provider_id,
+                "headroom": decision.state.value,
+                "retry_at": decision.retry_at,
+            }
 
     # 2. Boot-window dedup (mirrors advance()): a node already being worked
     #    (live node:<id>) or already mid-dispatch (live dispatch:<id>) is NOT

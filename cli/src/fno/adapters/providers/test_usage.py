@@ -238,3 +238,134 @@ class TestHeadroom:
         h = headroom("p1", now=1000.0)
         assert h.state is HeadroomState.EXHAUSTED
         assert h.resets_at is not None and h.resets_at > 1000.0
+
+
+# ---------------------------------------------------------------------------
+# evaluate_quota_defer: the dispatcher decision core (US3: AC2-HP, AC2-FR, LD)
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateQuotaDefer:
+    def _quota(self, monkeypatch, **kw) -> None:
+        from fno.adapters.providers import loader
+        from fno.adapters.providers.model import QuotaConfig
+
+        cfg = QuotaConfig(**kw)
+        monkeypatch.setattr(loader, "load_quota_config", lambda *a, **k: cfg)
+
+    def test_off_by_default_never_defers(self, state_path: Path, monkeypatch) -> None:
+        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+
+        self._quota(monkeypatch, defer_dispatch=False)
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
+        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+
+    def test_p0_never_defers(self, state_path: Path, monkeypatch) -> None:
+        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+
+        self._quota(monkeypatch, defer_dispatch=True)
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
+        assert evaluate_quota_defer("p1", priority="p0", now=1000.0) is None
+
+    def test_exhausted_defers_with_retry_at(self, state_path: Path, monkeypatch) -> None:
+        # AC2-HP core: exhausted -> defer, retry_at == the window reset.
+        from fno.adapters.providers.runtime_state import HeadroomState, evaluate_quota_defer
+
+        self._quota(monkeypatch, defer_dispatch=True)
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
+        d = evaluate_quota_defer("p1", priority="p2", now=1000.0)
+        assert d is not None
+        assert d.state is HeadroomState.EXHAUSTED
+        assert d.retry_at == 9e18
+
+    def test_low_within_horizon_defers(self, state_path: Path, monkeypatch) -> None:
+        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+
+        self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60, defer_threshold_pct=90.0)
+        # reset in 30 min (< 60 horizon), 95% -> LOW -> defer.
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 1800), probed_at=1000.0), now=1000.0)
+        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is not None
+
+    def test_low_outside_horizon_proceeds(self, state_path: Path, monkeypatch) -> None:
+        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+
+        self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60)
+        # reset in 2h (> 60 horizon), 95% -> LOW but too far -> proceed.
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 7200), probed_at=1000.0), now=1000.0)
+        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+
+    def test_unknown_never_strands(self, state_path: Path, monkeypatch) -> None:
+        # AC2-FR: a deferred node whose snapshot ages out degrades to UNKNOWN,
+        # which never defers -> the next tick dispatches (deferral cannot outlive
+        # the evidence). No fresh snapshot -> UNKNOWN -> None. refresh_usage will
+        # try to probe; with no provider record it returns None, staying UNKNOWN.
+        from fno.adapters.providers import loader
+        from fno.adapters.providers.model import ProvidersConfig
+        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+
+        self._quota(monkeypatch, defer_dispatch=True)
+        monkeypatch.setattr(loader, "load_providers", lambda *a, **k: ProvidersConfig(records=[]))
+        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+
+
+class TestDispatchOneQuotaDefer:
+    def test_default_selection_defers_and_emits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AC2-HP + AC1-UI: the default-selection dispatcher tick defers an
+        # exhausted node with a visible receipt AND one decision event.
+        import json as _json
+
+        from fno.adapters.providers import loader
+        from fno.adapters.providers.model import QuotaConfig
+        import fno.dispatch as dispatch_mod
+
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
+        )
+        monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda: "p1")
+        monkeypatch.setattr(
+            dispatch_mod, "_next_node", lambda project: {"id": "ab-9f", "slug": "x", "priority": "p2"}
+        )
+        import time as _t
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=_t.time()))
+
+        verdict = dispatch_mod._dispatch_one(session="s", node=None, project=None)
+        assert verdict["outcome"] == "quota-deferred"
+        assert verdict["node"] == "ab-9f"
+        assert verdict["provider"] == "p1"
+        assert verdict["retry_at"] == 9e18
+        # One decision event landed.
+        events = (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
+        rows = [_json.loads(l) for l in events if l.strip()]
+        deferred = [r for r in rows if r["type"] == "quota_deferred"]
+        assert len(deferred) == 1
+        assert deferred[0]["data"]["provider"] == "p1"
+
+    def test_explicit_node_never_defers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # LD#5: an explicit --node dispatch is a human verb and always fires,
+        # so it must not even consult quota. Proven by making the dispatch reach
+        # the spawn boundary (patched to a sentinel outcome).
+        from fno.adapters.providers import loader
+        from fno.adapters.providers.model import QuotaConfig
+        import fno.dispatch as dispatch_mod
+
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
+        )
+        monkeypatch.setattr(dispatch_mod, "_lookup_node", lambda n: {"id": n, "slug": "x", "priority": "p2"})
+        # Exhausted snapshot present, but explicit path must ignore it.
+        import time as _t
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=_t.time()))
+
+        # Force the downstream claim path to short-circuit so we only assert we
+        # did NOT quota-defer: a live dispatch reservation yields already-dispatching.
+        monkeypatch.setattr(dispatch_mod, "_claim_is_live", lambda key: True)
+        verdict = dispatch_mod._dispatch_one(session="s", node="ab-77", project=None)
+        assert verdict["outcome"] != "quota-deferred"

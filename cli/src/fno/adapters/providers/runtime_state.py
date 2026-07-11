@@ -938,6 +938,66 @@ def headroom(
     return Headroom(HeadroomState.OK, None)
 
 
+@dataclasses.dataclass(frozen=True)
+class QuotaDeferDecision:
+    """A dispatcher's verdict that a node should be held for quota reasons."""
+
+    provider_id: str
+    state: HeadroomState  # EXHAUSTED or LOW
+    retry_at: float | None
+
+
+def evaluate_quota_defer(
+    provider_id: str,
+    *,
+    priority: str | None = None,
+    now: float | None = None,
+) -> QuotaDeferDecision | None:
+    """Return a defer decision for an autonomous dispatch, or None to proceed.
+
+    Fail-open and opt-in (Locked Decisions 1/4/5/6):
+    - ``defer_dispatch`` off (the default) -> never defers.
+    - ``p0`` -> never defers.
+    - EXHAUSTED -> defer with the reset as ``retry_at``.
+    - LOW with a reset within ``defer_horizon_minutes`` -> defer.
+    - OK / UNKNOWN, or no provider, or LOW with a distant/absent reset ->
+      proceed (None). UNKNOWN never defers: absence of data is not trouble.
+
+    This is the ONE probe site the dispatcher owns: it refreshes the snapshot
+    (probe-on-stale) before consulting headroom, so the ~1-minute tick pays at
+    most one HTTP call per provider per TTL. Callers gate on autonomy: explicit
+    human dispatch verbs must not call this (Locked Decision 5).
+    """
+    if now is None:
+        now = time.time()
+    if not provider_id:
+        return None
+    from fno.adapters.providers.loader import load_quota_config
+
+    quota = load_quota_config()
+    if not quota.defer_dispatch:
+        return None
+    if (priority or "").strip().lower() == "p0":
+        return None
+
+    # Probe-on-stale so the decision uses fresh data (the dispatcher tick is
+    # not latency-sensitive, unlike combo rotation which reads cache only).
+    refresh_usage(provider_id, ttl_seconds=quota.probe_ttl_seconds, now=now)
+    h = headroom(
+        provider_id,
+        now=now,
+        ttl_seconds=quota.probe_ttl_seconds,
+        threshold_pct=quota.defer_threshold_pct,
+    )
+    if h.state is HeadroomState.EXHAUSTED:
+        return QuotaDeferDecision(provider_id, h.state, h.resets_at)
+    if h.state is HeadroomState.LOW and h.resets_at is not None:
+        horizon = quota.defer_horizon_minutes * 60
+        if horizon > 0 and h.resets_at <= now + horizon:
+            return QuotaDeferDecision(provider_id, h.state, h.resets_at)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Combo cursor: read (lock-free, eventual consistency) + advance (locked).
 #
