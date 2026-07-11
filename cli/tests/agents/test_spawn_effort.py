@@ -164,3 +164,19 @@ def test_codex_python_create_threads_effort(monkeypatch, tmp_path):
     )
     argv = captured["argv"]
     assert argv[1:3] == ["-c", "model_reasoning_effort=high"]
+
+
+def test_claude_python_headless_threads_effort(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from fno.agents.providers import claude
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout="reply", stderr="")
+
+    monkeypatch.setattr(claude, "_subprocess_run", fake_run)
+    result = claude.headless_create("hi", tmp_path, effort="high")
+    assert captured["argv"] == ["claude", "-p", "--effort", "high", "hi"]
+    assert result.stdout == "reply"

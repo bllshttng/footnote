@@ -168,6 +168,46 @@ def _build_argv(
     return argv
 
 
+def headless_create(
+    message: str,
+    cwd: Path,
+    timeout: Optional[int] = None,
+    model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> ProviderResult:
+    """Run a one-shot ``claude -p`` without creating a background session."""
+    argv = ["claude", "-p"]
+    if permission_mode:
+        argv += ["--permission-mode", permission_mode]
+    if effort:
+        argv += ["--effort", effort]
+    if model:
+        argv += ["--model", model]
+    argv.append(message)
+    started = time.monotonic()
+    try:
+        result = _subprocess_run(
+            argv,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProviderSubprocessError(124, f"claude -p timed out after {exc.timeout}s") from exc
+    except FileNotFoundError as exc:
+        raise ProviderSubprocessError(127, f"claude CLI not found: {exc}") from exc
+    if result.returncode != 0:
+        raise ProviderSubprocessError(result.returncode, result.stderr or "")
+    return ProviderResult(
+        exit_code=0,
+        stdout=result.stdout or "",
+        stderr=result.stderr or "",
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
 def bg_create(
     name: str,
     message: str,

@@ -607,6 +607,7 @@ def cmd_spawn(
                 model=model,
                 permission_mode=permission_mode,
                 effort=effort,
+                headless=substrate == "headless",
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)

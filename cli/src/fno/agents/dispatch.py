@@ -1762,6 +1762,7 @@ def dispatch_spawn(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    headless: bool = False,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -1806,7 +1807,7 @@ def dispatch_spawn(
 
     # 3a. claude + --once -> refused immediately (before acquiring the lock,
     # since there is no state to protect).
-    if provider == "claude" and once:
+    if provider == "claude" and once and not headless:
         raise DispatchAskError(
             f"--once is not supported for provider 'claude' "
             f"(claude peers are persistent bg threads; use plain spawn)",
@@ -1876,6 +1877,28 @@ def dispatch_spawn(
 
                 # 4b. claude plain spawn.
                 if provider == "claude":
+                    if headless:
+                        from fno.agents.providers import claude as claude_mod
+
+                        try:
+                            result = claude_mod.headless_create(
+                                message=message,
+                                cwd=cwd,
+                                timeout=timeout,
+                                model=model,
+                                permission_mode=permission_mode
+                                or ("bypassPermissions" if yolo else None),
+                                effort=effort,
+                            )
+                        except claude_mod.ProviderSubprocessError as exc:
+                            raise DispatchAskError(str(exc), exit_code=exc.exit_code) from exc
+                        return SpawnResult(
+                            kind="once",
+                            name=name,
+                            provider="claude",
+                            short_id="",
+                            reply=result.stdout,
+                        )
                     result = _claude_create_path(
                         name=name,
                         message=message,
