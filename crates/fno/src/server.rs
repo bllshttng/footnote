@@ -1842,12 +1842,13 @@ impl Core {
                     // map reconciled onto this pane (x-0090). First match wins.
                     let matched = self.agents.iter().position(|a| match &a.mux {
                         Some((sess, pane)) => sess == &self.session_name && *pane == pid,
-                        None => a
-                            .attach_id
-                            .as_deref()
-                            .and_then(|id| self.attached.get(id))
-                            .copied()
-                            == Some(pid),
+                        None => {
+                            a.attach_id
+                                .as_deref()
+                                .and_then(|id| self.attached.get(id))
+                                .copied()
+                                == Some(pid)
+                        }
                     });
                     // A tree leaf reaped from `panes` (dying) forces `exited`,
                     // the same fact-beats-report rule the old join used.

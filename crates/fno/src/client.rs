@@ -902,12 +902,18 @@ impl View {
                 }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
+                // (x-0090) A pane-hosted agent names its tab with a `·N` ordinal,
+                // coherent with the sideline; a watch-only row has no tab.
+                let label = match a.tab.and_then(|tid| self.tab_ordinal(a.squad, tid)) {
+                    Some(n) => format!("{} › {} ·{n}", s.name, a.name),
+                    None => format!("{} › {}", s.name, a.name),
+                };
                 out.push(NavRow {
-                    label: format!("{} › {}", s.name, a.name),
+                    label,
                     state: nav_agent_state(a),
-                    // Switch to the agent's squad first when it is not active,
-                    // so the following FocusPane lands there (AgentRow carries no
-                    // tab id, so the server resolves the pane's tab on focus).
+                    // Switch to the agent's squad first when it is not active, so
+                    // the following FocusPane lands there (the server resolves the
+                    // pane's tab on focus; the ordinal is display-only).
                     goto_squad: cross(s.id),
                     goto_tab: None,
                     hit: agent_hit(a),
@@ -5750,7 +5756,11 @@ mod tests {
         // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
         // section headers, and clamp (no wrap) at both ends.
         let v = unified_rows_view();
-        assert_eq!(v.selector_down(3), 5, "j from the footer skips '~ elsewhere'");
+        assert_eq!(
+            v.selector_down(3),
+            5,
+            "j from the footer skips '~ elsewhere'"
+        );
         assert_eq!(v.selector_down(6), 8, "j skips '~ work queue'");
         assert_eq!(v.selector_down(10), 10, "clamp at the last row");
         assert_eq!(v.selector_up(5), 3, "k skips '~ elsewhere' upward");
@@ -5963,6 +5973,87 @@ mod tests {
                 "missing {want:?} in {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn nav_rows_agent_label_carries_tab_ordinal() {
+        // x-0090 US4: a pane-hosted agent's nav label names its tab with a `·N`
+        // ordinal (fixture tab id 1 is the 2nd tab -> ·2), coherent with the
+        // sideline; a watch-only row (no tab) carries none.
+        let mut v = two_pane_view();
+        v.layout.agents = vec![
+            AgentRow {
+                squad: Some(1),
+                name: "build".into(),
+                pane_id: Some(10),
+                badge: Some(AgentBadge::Working),
+                reason: None,
+                exited: false,
+                answerable: None,
+                attach_id: None,
+                external: false,
+                seen: false,
+                cwd_base: None,
+                tab: Some(1),
+            },
+            AgentRow {
+                squad: Some(1),
+                name: "watcher".into(),
+                pane_id: None,
+                badge: None,
+                reason: None,
+                exited: false,
+                answerable: None,
+                attach_id: Some("deadbee1".into()),
+                external: false,
+                seen: false,
+                cwd_base: None,
+                tab: None,
+            },
+        ];
+        let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
+        assert!(
+            labels.iter().any(|l| l == "footnote › build ·2"),
+            "pane row names its tab: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "footnote › watcher"),
+            "watch-only row has no ordinal: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn squad_rollup_bare_pane_folds_to_idle() {
+        // x-0090 US4: the pane-union adds bare panes to the agent set; a bare
+        // pane (badge None) folds to Idle so it never overrides a blocked
+        // sibling in the x-d140 collapsed-squad rollup (Ord-min over states).
+        let row = |name: &str, pane, badge| AgentRow {
+            squad: Some(1),
+            name: name.into(),
+            pane_id: Some(pane),
+            badge,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tab: None,
+        };
+        let bare = row("zsh", 10, None);
+        let blocked = row("claude", 11, Some(AgentBadge::Blocked));
+        assert_eq!(nav_agent_state(&bare), PaneState::Idle);
+        let worst = [&bare, &blocked]
+            .iter()
+            .map(|a| nav_agent_state(a))
+            .min()
+            .unwrap();
+        assert_eq!(
+            worst,
+            PaneState::Blocked,
+            "blocked wins; the bare pane folds to Idle"
+        );
     }
 
     #[test]
@@ -7054,10 +7145,7 @@ mod tests {
         });
         v.selector = Some(0);
         selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
-        assert!(
-            v.move_pick.is_none(),
-            "no destination squad -> no picker"
-        );
+        assert!(v.move_pick.is_none(), "no destination squad -> no picker");
     }
 
     #[tokio::test]
