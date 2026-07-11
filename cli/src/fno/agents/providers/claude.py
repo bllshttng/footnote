@@ -180,11 +180,13 @@ def headless_create(
     argv = ["claude", "-p"]
     if permission_mode:
         argv += ["--permission-mode", permission_mode]
-    if effort:
-        argv += ["--effort", effort]
+    else:
+        argv.append("--dangerously-skip-permissions")
     if model:
         argv += ["--model", model]
-    argv.append(message)
+    if effort:
+        argv += ["--effort", effort]
+    argv.append(message or "hello")
     started = time.monotonic()
     try:
         result = _subprocess_run(

@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 from fno.agents.dispatch import DispatchAskError
 from fno.agents.mux_spawn import (
@@ -17,6 +18,22 @@ from fno.agents.mux_spawn import (
 )
 
 CWD = Path("/tmp")
+
+
+@pytest.fixture
+def runner():
+    return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_harness_markers(monkeypatch):
+    for marker in (
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+    ):
+        monkeypatch.delenv(marker, raising=False)
 
 
 @pytest.mark.parametrize(
@@ -179,5 +196,103 @@ def test_claude_python_headless_threads_effort(monkeypatch, tmp_path):
 
     monkeypatch.setattr(claude, "_subprocess_run", fake_run)
     result = claude.headless_create("hi", tmp_path, effort="high")
-    assert captured["argv"] == ["claude", "-p", "--effort", "high", "hi"]
+    assert captured["argv"] == [
+        "claude",
+        "-p",
+        "--dangerously-skip-permissions",
+        "--effort",
+        "high",
+        "hi",
+    ]
     assert result.stdout == "reply"
+
+
+def _stub_pane_path(monkeypatch):
+    from fno.agents import mux_spawn, spawn_gate
+
+    received = {}
+
+    class Gate:
+        def release(self):
+            pass
+
+    def fake_dispatch(**kwargs):
+        received.update(kwargs)
+        return mux_spawn.MuxSpawnResult(
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            session="session",
+            pane_id=1,
+            child_pid=None,
+            session_uuid=None,
+        )
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *args, **kwargs: Gate())
+    monkeypatch.setattr(mux_spawn, "resolve_provenance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    return received
+
+
+def test_cli_threads_effort_to_pane_dispatch(runner, monkeypatch):
+    received = _stub_pane_path(monkeypatch)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "worker", "hi", "--provider", "claude", "--effort", "high"],
+    )
+    assert result.exit_code == 0, result.output
+    assert received["effort"] == "high"
+
+
+def test_cli_rejects_unmappable_effort_before_spawn(runner, monkeypatch):
+    received = _stub_pane_path(monkeypatch)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "worker", "hi", "--provider", "codex", "--effort", "xhigh"],
+    )
+    assert result.exit_code == 2
+    assert "codex supports" in result.output
+    assert received == {}
+
+
+def test_cli_threads_effort_to_bg_dispatch(runner, monkeypatch):
+    from fno.agents import dispatch, spawn_gate
+
+    received = {}
+
+    class Gate:
+        def release(self):
+            pass
+
+    def fake_dispatch(**kwargs):
+        received.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created",
+            name=kwargs["name"],
+            provider="claude",
+            short_id="abcd1234",
+        )
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *args, **kwargs: Gate())
+    monkeypatch.setattr(dispatch, "dispatch_spawn", fake_dispatch)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn",
+            "worker",
+            "hi",
+            "--provider",
+            "claude",
+            "--substrate",
+            "bg",
+            "--effort",
+            "high",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert received["effort"] == "high"

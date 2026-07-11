@@ -2718,6 +2718,24 @@ mod tests {
         assert_eq!(eq["permission_mode"], "plan");
     }
 
+    #[test]
+    fn spawn_forwards_effort_flag() {
+        let (_method, params) = build_request(
+            "spawn",
+            &[
+                "wk".to_string(),
+                "--provider".to_string(),
+                "codex".to_string(),
+                "--substrate".to_string(),
+                "headless".to_string(),
+                "--effort".to_string(),
+                "high".to_string(),
+            ],
+        )
+        .expect("--effort must parse");
+        assert_eq!(params["effort"], "high");
+    }
+
     /// ab-3ff64151 AC1 (Rust-path parity): `agents ask` accepts the phone shorts
     /// `-p`/`-c`/`-t` and the global `-Y`, building the byte-identical request
     /// the long flags would. This is the cross-language parity guard from the
