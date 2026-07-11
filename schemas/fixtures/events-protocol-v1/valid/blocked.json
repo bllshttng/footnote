@@ -1,0 +1,13 @@
+{
+  "ts": "2026-07-10T22:02:00.000Z",
+  "v": 1,
+  "type": "blocked",
+  "source": "target",
+  "from": "claude:sess-abc123",
+  "model": "claude-sonnet-5",
+  "node": "prj-0001",
+  "task": "2.2",
+  "run": "tgt-prj-0001-claude-g1",
+  "parent": "claude:sess-parent99",
+  "data": { "reason": "missing migration blocker", "evidence": "see plan section 3" }
+}

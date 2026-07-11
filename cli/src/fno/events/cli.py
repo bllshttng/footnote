@@ -10,6 +10,11 @@ import typer
 
 cli = typer.Typer(name="event", help="emit and audit events", no_args_is_help=True)
 
+# Documented cap for truncatable x-dbaf family data strings (title/reason/evidence/
+# termination_reason). Mirrors the Rust RUN_SUMMARY_DATA_CAP; keeps a runaway
+# reason from bloating an events.jsonl line while still landing the event.
+_PROTOCOL_DATA_STR_CAP = 500
+
 
 @cli.callback()
 def _event_callback(
@@ -46,6 +51,186 @@ def _detect_source(state_path: Path) -> str:
     return "test"
 
 
+def _read_manifest_fields(state_path: Path) -> dict[str, str]:
+    """Best-effort parse of ``session_id`` + ``graph_node_id`` from a
+    target-state.md. Substring scan (not a YAML parse) to stay cheap; a missing
+    or unreadable manifest yields ``{}`` so the caller falls back to flags only.
+    """
+    fields: dict[str, str] = {}
+    try:
+        text = state_path.read_text(encoding="utf-8")
+    except OSError:
+        return fields
+    for line in text.splitlines():
+        stripped = line.strip()
+        for key in ("session_id", "graph_node_id"):
+            prefix = f"{key}:"
+            if stripped.startswith(prefix):
+                val = stripped[len(prefix):].strip().strip('"').strip()
+                if val and val != "null":
+                    fields.setdefault(key, val)
+    return fields
+
+
+def _stamp_protocol_envelope(
+    state_path: Path,
+    *,
+    node: Optional[str],
+    task: Optional[str],
+    run: Optional[str],
+    parent: Optional[str],
+    outcome: Optional[str],
+    project: Optional[str],
+) -> dict:
+    """Assemble the extended-envelope fields for an x-dbaf status-breakpoint
+    event. Work coordinates fall back to the manifest; identity (from/model) is
+    stamped ONLY for a real session producer and omitted entirely otherwise
+    (a bare-shell producer never fakes an empty handle). ``None`` values are
+    dropped by ``_build`` so 'omit' means absent, not null.
+    """
+    from fno.events import PROTOCOL_FAMILY_VERSION
+
+    manifest = _read_manifest_fields(state_path)
+    env: dict = {
+        "v": PROTOCOL_FAMILY_VERSION,
+        "run": run or manifest.get("session_id"),
+        "node": node or manifest.get("graph_node_id"),
+        "task": task,
+        # Resolve lineage HERE so `parent` lands in the durable envelope for every
+        # family event (the contract's "parent when spawned" field), not just on
+        # the push path - pull observers route/filter on it too (codex P2). The
+        # push then reuses event["parent"] rather than re-resolving.
+        "parent": _resolve_parent_handle(parent),
+        "outcome": outcome,
+        "project": project,
+    }
+    # Identity: session producers only. resolve_harness_identity() returns no
+    # session for cron / CI / a bare shell, so from/model stay unset there.
+    try:
+        from fno.agents.self_stamp import resolve_self_model
+        from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+        ident = resolve_harness_identity()
+        if ident.session_id and ident.harness:
+            env["from"] = canonical_handle(ident.harness, ident.session_id)
+            env["model"] = resolve_self_model()
+    except Exception:
+        pass
+    try:
+        import socket
+
+        env["host"] = socket.gethostname() or None
+    except Exception:
+        pass
+    return env
+
+
+def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
+    """Resolve the parent spawn-lineage handle, or None (no lineage -> no push).
+
+    An explicit ``--parent`` wins. Otherwise best-effort: find this session's
+    own registry row and read its ``spawned_by_*`` edge. Any miss (no ambient
+    identity, no row, no edge, malformed registry) returns None so the push
+    silently skips - a top-level target has no parent and must not push.
+    """
+    if explicit:
+        return explicit
+    try:
+        from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS, load_registry
+        from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+        ident = resolve_harness_identity()
+        if not (ident.session_id and ident.harness):
+            return None
+        # Match this session's row by STORED IDENTITY, not by name==handle: a
+        # spawned row usually carries a caller-provided display name (e.g.
+        # tgt-<node>-<harness>-gN), so a handle-equality check would miss it and
+        # the push would silently skip (codex P1). The per-provider session field
+        # may hold the full id or its first-8 (claude stores the short), so both
+        # variants are accepted; a canonically-named row still matches too.
+        my_handle = canonical_handle(ident.harness, ident.session_id)
+        session_field = PROVIDER_SESSION_ID_FIELDS.get(ident.harness)
+        sid_variants = {ident.session_id, ident.session_id[:8]}
+        for entry in load_registry():
+            same_session = (
+                entry.provider == ident.harness
+                and session_field is not None
+                and getattr(entry, session_field, None) in sid_variants
+            )
+            if entry.name == my_handle or same_session:
+                if entry.spawned_by_session and entry.spawned_by_harness:
+                    return canonical_handle(entry.spawned_by_harness, entry.spawned_by_session)
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def _push_to_parent(
+    parent: str,
+    *,
+    event_type: str,
+    run: Optional[str],
+    node: Optional[str],
+    reason: Optional[str],
+) -> bool:
+    """Push a blocked/run_summary notice to the parent via ``fno mail send``.
+
+    `fno mail send` writes the envelope durably BEFORE attempting live delivery,
+    so the push is at-least-once for free (AC1-FR); the events.jsonl record was
+    already written independently by the caller. Non-fatal: any failure logs one
+    stderr note and returns False.
+    """
+    msg = f"[fno:{event_type}] run={run or '?'}"
+    if node:
+        msg += f" node={node}"
+    if reason:
+        msg += f": {reason}"
+    try:
+        result = subprocess.run(
+            ["fno", "mail", "send", parent, msg],
+            check=False, capture_output=True, timeout=20,
+        )
+    except FileNotFoundError:
+        typer.echo("push: note: fno unavailable, skipped parent push", err=True)
+        return False
+    except Exception as exc:  # noqa: BLE001 - push must never wedge the emit
+        typer.echo(f"push: note: parent push failed (non-fatal): {exc}", err=True)
+        return False
+    if result.returncode != 0:
+        typer.echo(
+            f"push: note: parent push failed (non-fatal): "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}",
+            err=True,
+        )
+        return False
+    return True
+
+
+@cli.command("push-parent")
+def push_parent(
+    event_type: str = typer.Option(..., "--type", "-t", help="blocked | run_summary"),
+    run: Optional[str] = typer.Option(None, "--run", help="target-run id referenced in the notice"),
+    node: Optional[str] = typer.Option(None, "--node", help="backlog node id"),
+    reason: Optional[str] = typer.Option(None, "--reason", "-R", help="one-line reason / termination"),
+    parent: Optional[str] = typer.Option(None, "--parent", help="explicit parent handle (else registry-resolved)"),
+) -> None:
+    """Push a status-breakpoint notice to the parent handle (x-dbaf push leg).
+
+    The Rust ``finalize`` shells this for ``run_summary`` (it emits the
+    events.jsonl line natively, so it cannot ride the emit-CLI auto-push). No
+    spawn lineage -> silent skip. Always exits 0: the push is non-fatal and the
+    pull leg (events.jsonl) never depends on it.
+    """
+    handle = _resolve_parent_handle(parent)
+    if not handle:
+        typer.echo("push: no parent lineage; skipped")
+        raise typer.Exit(code=0)
+    ok = _push_to_parent(handle, event_type=event_type, run=run, node=node, reason=reason)
+    typer.echo("pushed" if ok else "push-skipped")
+    raise typer.Exit(code=0)
+
+
 @cli.command()
 def emit(
     ctx: typer.Context,
@@ -55,6 +240,24 @@ def emit(
         "--data",
         "-d",
         help="JSON object string for the event's data envelope",
+    ),
+    node: Optional[str] = typer.Option(
+        None, "--node", help="backlog node id (x-dbaf family; envelope coordinate)"
+    ),
+    task: Optional[str] = typer.Option(
+        None, "--task", help="task id within the plan (x-dbaf family; envelope coordinate)"
+    ),
+    run: Optional[str] = typer.Option(
+        None, "--run", help="target-run id, the dedup identity (x-dbaf family; manifest fallback)"
+    ),
+    parent: Optional[str] = typer.Option(
+        None, "--parent", help="parent spawn-lineage handle (x-dbaf family; when spawned)"
+    ),
+    outcome: Optional[str] = typer.Option(
+        None, "--outcome", help="return-contract outcome (x-dbaf family; task_done/run_summary only)"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", help="project the work belongs to (x-dbaf family; envelope coordinate)"
     ),
     payload: Optional[str] = typer.Option(
         None,
@@ -86,7 +289,7 @@ def emit(
     # Lazy imports keep top-level `fno --help` cold-path fast and avoid
     # paying PyYAML schema-load cost when the user is invoking an
     # unrelated subcommand.
-    from fno.events import _build, append_event, ValidationError
+    from fno.events import _build, append_event, PROTOCOL_FAMILY_TYPES, ValidationError
 
     if data is not None and payload is not None:
         typer.echo(
@@ -133,8 +336,27 @@ def emit(
     resolved_state = state_path if state_path is not None else default_state
     resolved_source = source if source is not None else _detect_source(resolved_state)
 
+    envelope = None
+    if type_ in PROTOCOL_FAMILY_TYPES:
+        # Truncate the free-text data strings to the documented cap (AC2-EDGE,
+        # Boundaries) so an oversized reason/title lands truncated rather than
+        # rejected; envelope fields are bounded by construction.
+        for _k in ("title", "reason", "evidence", "termination_reason"):
+            _v = data_dict.get(_k)
+            if isinstance(_v, str) and len(_v) > _PROTOCOL_DATA_STR_CAP:
+                data_dict[_k] = _v[:_PROTOCOL_DATA_STR_CAP]
+        envelope = _stamp_protocol_envelope(
+            resolved_state,
+            node=node,
+            task=task,
+            run=run,
+            parent=parent,
+            outcome=outcome,
+            project=project,
+        )
+
     try:
-        event = _build(type_, resolved_source, data_dict)
+        event = _build(type_, resolved_source, data_dict, envelope=envelope)
     except ValidationError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)
@@ -146,6 +368,22 @@ def emit(
     except Exception as exc:
         typer.echo(f"error: failed to append event: {exc}", err=True)
         raise typer.Exit(code=1)
+
+    # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
+    # lineage exists. Fired AFTER the durable append so the events.jsonl record
+    # is independent of the push (AC1-FR). No lineage -> silent skip.
+    # (run_summary is normally pushed by Rust finalize's native emit; a
+    # CLI-emitted one pushes here too for uniformity.)
+    if type_ in ("blocked", "run_summary"):
+        _parent = event.get("parent")  # already resolved into the envelope above
+        if _parent:
+            _push_to_parent(
+                _parent,
+                event_type=type_,
+                run=event.get("run"),
+                node=event.get("node"),
+                reason=data_dict.get("reason") or data_dict.get("termination_reason"),
+            )
 
     json_mode = bool(ctx.obj and ctx.obj.get("json", False))
     if json_mode:

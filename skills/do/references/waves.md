@@ -375,6 +375,23 @@ Task {N.M}: {task title}"
 harder, break `git bisect`, and prevent granular reverts. The review phase
 and PR are more effective when each task has its own commit.
 
+**Status-breakpoint emit (x-dbaf, best-effort).** Right after each task's return
+is parsed, emit its boundary event so observers can track the run. `task_started`
+already fired from `resolve-executor.sh` at dispatch; `run_summary` fires from
+`finalize` at the terminal. Emit the middle boundary (one non-fatal line):
+
+```bash
+# task_done with the parsed outcome (SUCCESS | DONE_WITH_CONCERNS | FAILED):
+python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary task_done \
+  --task "{N.M}" --outcome "{status}" --data '{"commit":"{sha}","concerns":{k}}'
+# blocked on a RESULT: BLOCKED return (or a <help> distress emission):
+python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary blocked \
+  --task "{N.M}" --data '{"reason":"{why}"}'
+```
+
+`--run`/`--node` fall back to the manifest. Never gate on the emit; a failure
+prints one stderr note and the wave continues.
+
 ### 3c. Wave-End Scratchpad Note
 
 After all tasks in a wave return SUCCESS, write a wave summary note to the

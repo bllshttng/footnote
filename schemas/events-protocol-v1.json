@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema",
+  "$id": "https://fno.sh/schemas/events-protocol-v1.json",
+  "title": "fno a2a status-breakpoint event (protocol family v1)",
+  "description": "One events.jsonl line for the four task-boundary event types (task_started, task_done, blocked, run_summary). Self-contained (no internal references) so third-party observers validate against it without running fno. Routable fields live at envelope level; only type-specific payload stays in data. Stability: additive-only within v:1; a breaking change bumps v.",
+  "type": "object",
+  "required": ["ts", "v", "type", "source", "run", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "ts": {
+      "type": "string",
+      "description": "UTC RFC3339 timestamp (e.g. 2026-07-10T22:00:00.000Z)."
+    },
+    "v": {
+      "const": 1,
+      "description": "Wire version of the protocol family. Additive-only within v:1; a breaking change bumps this."
+    },
+    "type": {
+      "enum": ["task_started", "task_done", "blocked", "run_summary"],
+      "description": "The event kind."
+    },
+    "source": {
+      "description": "Producer identity; consumers route on this. A fixed-string source, or a per-agent worker.",
+      "oneOf": [
+        {
+          "enum": ["target", "megawalk", "megatron", "abi-loop", "hook", "subagent", "migration", "test", "backlog", "daemon", "observer", "skill_diff", "active-backlog"]
+        },
+        {
+          "type": "string",
+          "pattern": "^(worker|stream-worker):.+$"
+        }
+      ]
+    },
+    "from": {
+      "type": "string",
+      "description": "Sender canonical handle (harness:session). Present on session producers only; a non-session producer (cron, bare shell) omits it entirely."
+    },
+    "model": {
+      "type": "string",
+      "description": "Sender's own model string, or 'unknown'. Present on session producers only; omitted otherwise."
+    },
+    "host": {
+      "type": "string",
+      "description": "Emitting host."
+    },
+    "project": {
+      "type": "string",
+      "description": "Project the work belongs to."
+    },
+    "node": {
+      "type": "string",
+      "description": "Backlog node id the work is for. Example values use placeholder ids (e.g. prj-0001)."
+    },
+    "task": {
+      "type": "string",
+      "description": "Task id within the plan. Omitted for a flat quick-plan with no task ids."
+    },
+    "run": {
+      "type": "string",
+      "description": "Target-run id (the target-minted session id). The dedup identity: consumers dedup on (run, task, type). Distinct from the harness session id."
+    },
+    "parent": {
+      "type": "string",
+      "description": "Spawn-lineage handle of the parent, when this run was spawned by another agent."
+    },
+    "outcome": {
+      "enum": ["SUCCESS", "DONE_WITH_CONCERNS", "FAILED", "BLOCKED"],
+      "description": "Return-contract outcome. Present only on task_done and run_summary."
+    },
+    "data": {
+      "type": "object",
+      "description": "Per-type payload; see the protocol spec for per-type fields."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "enum": ["task_done", "run_summary"] } } },
+      "then": { "required": ["outcome"] }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["task_started", "blocked"] } } },
+      "then": { "not": { "required": ["outcome"] } }
+    }
+  ]
+}

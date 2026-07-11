@@ -61,6 +61,26 @@ def test_default_tier(stub_fno):
     assert '"tier":"default"' in log.read_text()
 
 
+def test_task_started_emitted_at_dispatch_boundary(stub_fno):
+    """x-dbaf: resolve-executor.sh is the per-task dispatch boundary, so it also
+    emits task_started with the title + resolved executor (best-effort)."""
+    env, log = stub_fno
+    r = _run(
+        env,
+        {
+            "TASK_ID": "2.1",
+            "TASK_TITLE": "build the thing",
+            "TARGET_RUN": "R1",
+            "NODE_ID": "prj-0001",
+            "TASK_FILES": "src/App.tsx",
+        },
+    )
+    assert r.stdout.strip() == "impeccable"  # routing contract unchanged
+    payload = log.read_text()
+    assert '"title":"build the thing"' in payload
+    assert '"executor":"impeccable"' in payload
+
+
 def test_warn_fallback_flagged(stub_fno):
     env, log = stub_fno
     r = _run(env, {"TASK_EXEC": "bogus"})

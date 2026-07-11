@@ -731,6 +731,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // verdict was stored/refreshed/cleared on a hook-less mux row, or a
     // provider's manifest failed to load.
     "screen_state_change",
+    // NOTE: the a2a status-breakpoint kinds (task_started/task_done/blocked/
+    // run_summary, x-dbaf) are NOT registered here. They are Python-defined in
+    // cli/src/fno/events/schema.yaml; the parity gate partitions names (a kind
+    // in both the Python schema and this Rust registry is a COLLISION). finalize
+    // emits run_summary via a custom envelope writer (not the registered
+    // `.emit()` path), so the production-emit-kind guard does not require it.
 ];
 
 /// Build the unified (x-2901) events.jsonl envelope JSON Schema and the

@@ -35,6 +35,11 @@ AUTO_ROUTE_FRONTEND="${AUTO_ROUTE_FRONTEND:-true}"
 # emits with empty strings.
 TASK_ID="${TASK_ID:-}"
 PLAN_PATH="${PLAN_PATH:-}"
+# x-dbaf status-breakpoint coordinates for the task_started emit. All best-effort:
+# empty TARGET_RUN/NODE_ID fall back to the manifest inside `fno event emit`.
+TARGET_RUN="${TARGET_RUN:-}"
+NODE_ID="${NODE_ID:-}"
+TASK_TITLE="${TASK_TITLE:-}"
 
 # KNOWN_EXECUTORS holds canonical names only. Aliases are normalized before
 # the validation check (normalize_alias runs first), so adding an alias
@@ -91,6 +96,22 @@ json_escape() {
     s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
     printf '%s' "$s"
+}
+
+# x-dbaf task_started boundary: this script IS the dispatch chokepoint (it runs
+# once per task, right before the executor is invoked), so it is the natural
+# emit site. Same non-corrupting contract as emit_resolution: runs after the
+# stdout executor value is printed, swallows fno's output, never fails dispatch.
+emit_task_started() {
+    local resolved="$1"
+    command -v fno >/dev/null 2>&1 || return 0
+    local data
+    data="$(printf '{"title":"%s","executor":"%s"}' \
+        "$(json_escape "$TASK_TITLE")" "$(json_escape "$resolved")")"
+    if ! fno event emit -t task_started -d "$data" \
+        --run "$TARGET_RUN" --node "$NODE_ID" --task "$TASK_ID" >/dev/null 2>&1; then
+        echo "resolve-executor: note: task_started emit failed (non-fatal)" >&2
+    fi
 }
 
 tier_for() {
@@ -155,6 +176,7 @@ resolve() {
     local warn_bool="false"
     [[ "$warn_fired" -eq 1 ]] && warn_bool="true"
     emit_resolution "$value" "$(tier_for "$source")" "$warn_bool"
+    emit_task_started "$value"
 }
 
 resolve

@@ -221,6 +221,155 @@ fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> 
     seen
 }
 
+// ── a2a status-breakpoint run_summary (x-dbaf) ──────────────────────────────
+
+/// Payload cap for the run_summary `data` object (mirrors events.rs
+/// MAX_EVENT_PAYLOAD_BYTES). run_summary is lean by construction, but honoring
+/// the cap keeps the Rust path's behavior identical to the daemon EventEmitter.
+const RUN_SUMMARY_DATA_CAP: usize = 500;
+
+/// Count the run's task ticks in events.jsonl. Correlates on the envelope-level
+/// `run` (the target-run id), so a co-located second run's events never mix in.
+/// tasks_failed counts task_done events whose outcome is FAILED - the gap
+/// (tasks_started > tasks_done) is what exposes a crashed executor (AC2-FR).
+fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
+    use std::io::BufRead;
+    let (mut started, mut done, mut failed) = (0u64, 0u64, 0u64);
+    // Stream line-by-line and reuse one buffer: events.jsonl grows to the
+    // rotation cap, so reading it whole would balloon memory (gemini review).
+    if let Ok(file) = fs::File::open(project_events) {
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                if v.get("run").and_then(|r| r.as_str()) == Some(run) {
+                    match v.get("type").and_then(|t| t.as_str()) {
+                        Some("task_started") => started += 1,
+                        Some("task_done") => {
+                            done += 1;
+                            if v.get("outcome").and_then(|o| o.as_str()) == Some("FAILED") {
+                                failed += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            line.clear();
+        }
+    }
+    (started, done, failed)
+}
+
+/// Append a pre-built extended envelope as one events.jsonl line (O_APPEND,
+/// create-if-missing). Non-fatal: a write failure logs and returns, never
+/// wedging finalize. Kept local to finalize (not loopcheck's fixed-envelope
+/// writer) because run_summary carries envelope-level routable fields.
+fn append_envelope(path: &Path, envelope: &Value) {
+    use std::io::Write;
+    let Ok(mut line) = serde_json::to_string(envelope) else {
+        eprintln!("finalize: failed to serialize run_summary");
+        return;
+    };
+    line.push('\n');
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                eprintln!(
+                    "finalize: run_summary write to {} failed: {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => eprintln!("finalize: run_summary open {} failed: {e}", path.display()),
+    }
+}
+
+/// Build + emit the run_summary terminal event to both event logs. Best-effort
+/// throughout: emission never changes the exit code or holds session_finalized.
+#[allow(clippy::too_many_arguments)]
+fn emit_run_summary(
+    project_events: &Path,
+    global_events: &Path,
+    run: &str,
+    node: Option<&str>,
+    ship: bool,
+    reason: &str,
+    pr_url: Option<&str>,
+) {
+    let (started, done, failed) = count_run_tasks(project_events, run);
+    // Terminal reason -> return-contract outcome: a ship terminal is SUCCESS
+    // (DONE_WITH_CONCERNS if any task failed); a non-ship terminal (Budget /
+    // NoProgress / Interrupted) is FAILED.
+    let outcome = if !ship {
+        "FAILED"
+    } else if failed > 0 {
+        "DONE_WITH_CONCERNS"
+    } else {
+        "SUCCESS"
+    };
+    let mut data = json!({
+        "tasks_started": started,
+        "tasks_done": done,
+        "tasks_failed": failed,
+        "termination_reason": reason,
+    });
+    if let Some(url) = pr_url {
+        data["pr_url"] = json!(url);
+    }
+    // Honor the payload cap (AC2-EDGE, Rust path): oversized data -> the small
+    // meta-event, so an auditor sees the drop rather than a silently huge line.
+    let payload_len = serde_json::to_string(&data).map(|s| s.len()).unwrap_or(0);
+    if payload_len > RUN_SUMMARY_DATA_CAP {
+        data = json!({"intended_kind": "run_summary", "size": payload_len});
+    }
+    let mut env = json!({
+        "ts": now_rfc3339_utc(),
+        "v": 1,
+        "type": "run_summary",
+        "source": "target",
+        "run": run,
+        "outcome": outcome,
+        "data": data,
+    });
+    if let Some(n) = node {
+        env["node"] = json!(n);
+    }
+    append_envelope(project_events, &env);
+    if project_events != global_events {
+        append_envelope(global_events, &env);
+    }
+}
+
+/// Push leg for run_summary (x-dbaf): notify the parent handle. run_summary
+/// emits natively above, so the push shells the Python resolver (`fno event
+/// push-parent`) rather than reimplementing registry lookup + mail in Rust.
+/// Best-effort: a missing `fno` / no spawn lineage is a silent skip; the
+/// events.jsonl line already landed independently (AC1-FR). `fno` (not a bare
+/// interpreter) is safe to shell - a PATH miss just skips.
+fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
+    let mut cmd = Command::new("fno");
+    cmd.args([
+        "event",
+        "push-parent",
+        "--type",
+        "run_summary",
+        "--run",
+        run,
+        "--reason",
+        reason,
+    ]);
+    if let Some(n) = node {
+        cmd.args(["--node", n]);
+    }
+    if let Err(e) = cmd.output() {
+        eprintln!("finalize: run_summary parent push skipped (non-fatal): {e}");
+    }
+}
+
 // ── public entry ────────────────────────────────────────────────────────────
 
 /// `fno-agents finalize ...`. Returns a process exit code: 0 for the normal
@@ -464,6 +613,23 @@ pub fn run_finalize(args: &[String]) -> i32 {
             Err(e) => eprintln!("finalize: terminal-stop marker failed (non-fatal): {e}"),
         }
     }
+
+    // ── a2a status-breakpoint run_summary (x-dbaf) ──────────────────────────
+    // One per-run terminal summary carrying task counts + termination reason,
+    // in the extended envelope. Best-effort; the pull leg (events.jsonl) is
+    // authoritative and the push leg (task 1.4) rides it. gh is shelled for the
+    // PR url only on a ship terminal.
+    let run_summary_pr = if ship { gh_pr_url(&cwd) } else { None };
+    emit_run_summary(
+        &project_events,
+        &global_events,
+        &session_id,
+        m.graph_node_id.as_deref(),
+        ship,
+        &reason,
+        run_summary_pr.as_deref(),
+    );
+    push_run_summary_to_parent(&session_id, m.graph_node_id.as_deref(), &reason);
 
     // ── emit terminal event ────────────────────────────────────────────────
     let mut data = json!({
@@ -2309,5 +2475,68 @@ mod tests {
             !interp.starts_with(foreign.to_str().unwrap()),
             "must not pick the foreign venv, got {interp}"
         );
+    }
+
+    // ── x-dbaf run_summary ──────────────────────────────────────────────────
+
+    #[test]
+    fn count_run_tasks_correlates_on_run_and_flags_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        fs::write(
+            &events,
+            "{\"type\":\"task_started\",\"run\":\"R1\",\"data\":{}}\n\
+             {\"type\":\"task_started\",\"run\":\"R1\",\"data\":{}}\n\
+             {\"type\":\"task_done\",\"run\":\"R1\",\"outcome\":\"SUCCESS\",\"data\":{}}\n\
+             {\"type\":\"task_done\",\"run\":\"R1\",\"outcome\":\"FAILED\",\"data\":{}}\n\
+             {\"type\":\"task_started\",\"run\":\"OTHER\",\"data\":{}}\n\
+             not json\n",
+        )
+        .unwrap();
+        // R1: 2 started, 2 done, 1 failed; the OTHER-run line and the junk line
+        // are ignored.
+        assert_eq!(count_run_tasks(&events, "R1"), (2, 2, 1));
+    }
+
+    #[test]
+    fn emit_run_summary_writes_extended_envelope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        // pre-seed one started with no matching done -> exposes the gap (AC2-FR).
+        fs::write(
+            &events,
+            "{\"type\":\"task_started\",\"run\":\"R9\",\"data\":{}}\n",
+        )
+        .unwrap();
+        emit_run_summary(
+            &events,
+            &events,
+            "R9",
+            Some("prj-0001"),
+            true,
+            "DonePRGreen",
+            None,
+        );
+        let content = fs::read_to_string(&events).unwrap();
+        let last: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        assert_eq!(last["type"], "run_summary");
+        assert_eq!(last["v"], 1);
+        assert_eq!(last["run"], "R9");
+        assert_eq!(last["node"], "prj-0001");
+        assert_eq!(last["outcome"], "SUCCESS");
+        assert_eq!(last["data"]["tasks_started"], 1);
+        assert_eq!(last["data"]["tasks_done"], 0);
+        assert_eq!(last["data"]["termination_reason"], "DonePRGreen");
+    }
+
+    #[test]
+    fn emit_run_summary_non_ship_is_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        emit_run_summary(&events, &events, "R2", None, false, "NoProgress", None);
+        let content = fs::read_to_string(&events).unwrap();
+        let ev: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        assert_eq!(ev["outcome"], "FAILED");
+        assert!(ev.get("node").is_none(), "no node -> omitted, not null");
     }
 }

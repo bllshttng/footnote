@@ -96,6 +96,14 @@ try:
         for p in SCHEMA["envelope"]["properties"]["source"].get("patterns", [])
     ]
     ALLOWED_GATES = set(SCHEMA.get("gates", []))
+    # a2a status-breakpoint family (x-dbaf): types carrying the extended envelope.
+    _family = SCHEMA.get("protocol_family", {})
+    PROTOCOL_FAMILY_TYPES = set(_family.get("types", []))
+    PROTOCOL_FAMILY_VERSION = _family.get("version", 1)
+    PROTOCOL_ENVELOPE_ALLOWED = set(_family.get("envelope", {}).get("allowed", []))
+    PROTOCOL_ENVELOPE_REQUIRED = list(_family.get("envelope", {}).get("required", []))
+    PROTOCOL_OUTCOME_ENUM = set(_family.get("outcome", {}).get("enum", []))
+    PROTOCOL_OUTCOME_ON = set(_family.get("outcome", {}).get("present_on", []))
 except SchemaUnavailableError as _exc:
     SCHEMA = None
     EVENT_TYPES = None
@@ -104,6 +112,12 @@ except SchemaUnavailableError as _exc:
     ALLOWED_SOURCES = set()
     ALLOWED_SOURCE_PATTERNS = []
     ALLOWED_GATES = set()
+    PROTOCOL_FAMILY_TYPES = set()
+    PROTOCOL_FAMILY_VERSION = 1
+    PROTOCOL_ENVELOPE_ALLOWED = set()
+    PROTOCOL_ENVELOPE_REQUIRED = []
+    PROTOCOL_OUTCOME_ENUM = set()
+    PROTOCOL_OUTCOME_ON = set()
     _schema_load_error = _exc
 
 
@@ -152,6 +166,44 @@ def validate(event: dict[str, Any]) -> None:
         if field not in data:
             raise ValidationError(
                 f"event type {type_name} missing required data field: {field}"
+            )
+
+    # a2a status-breakpoint family (x-dbaf): the extended envelope. Routable
+    # fields live at envelope level; additionalProperties:false for this family
+    # ONLY (legacy types keep today's tolerance). Enforced pre-lock so a
+    # malformed emit rejects before touching events.jsonl.
+    if type_name in PROTOCOL_FAMILY_TYPES:
+        for field in PROTOCOL_ENVELOPE_REQUIRED:
+            if field not in event:
+                raise ValidationError(
+                    f"event type {type_name} missing required envelope field: {field}"
+                )
+        extra = set(event) - PROTOCOL_ENVELOPE_ALLOWED
+        if extra:
+            raise ValidationError(
+                f"event type {type_name} has unknown envelope field(s): "
+                f"{sorted(extra)} (allowed: {sorted(PROTOCOL_ENVELOPE_ALLOWED)})"
+            )
+        if event.get("v") != PROTOCOL_FAMILY_VERSION:
+            raise ValidationError(
+                f"event type {type_name} envelope v must be "
+                f"{PROTOCOL_FAMILY_VERSION} (got {event.get('v')!r})"
+            )
+        has_outcome = "outcome" in event
+        if type_name in PROTOCOL_OUTCOME_ON:
+            if not has_outcome:
+                raise ValidationError(
+                    f"event type {type_name} requires envelope field: outcome"
+                )
+            if event["outcome"] not in PROTOCOL_OUTCOME_ENUM:
+                raise ValidationError(
+                    f"unknown {type_name} outcome: {event['outcome']!r} "
+                    f"(allowed: {sorted(PROTOCOL_OUTCOME_ENUM)})"
+                )
+        elif has_outcome:
+            raise ValidationError(
+                f"event type {type_name} must not carry envelope field outcome "
+                f"(allowed only on {sorted(PROTOCOL_OUTCOME_ON)})"
             )
 
     if type_name == "phase_transition" and data.get("gate_bearing") and not data.get("gate"):
@@ -255,8 +307,20 @@ def _ts_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _build(type_name: str, source: str, data: dict[str, Any]) -> dict[str, Any]:
+def _build(
+    type_name: str,
+    source: str,
+    data: dict[str, Any],
+    envelope: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     event = {"ts": _ts_now(), "type": type_name, "source": source, "data": data}
+    if envelope:
+        # Extra top-level routable fields (x-dbaf protocol family). A None value
+        # means "omit" (a non-session producer drops from/model entirely rather
+        # than faking an empty string), so it is never written.
+        for k, v in envelope.items():
+            if v is not None:
+                event[k] = v
     validate(event)
     return event
 
