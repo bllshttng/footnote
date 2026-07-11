@@ -295,4 +295,37 @@ def available_provider_kinds(
             locked = False
         if not locked:
             kinds.append(kind)
+
+    # Quota-aware ordering (x-5d3e): stably demote a kind whose provider
+    # records are ALL exhausted below kinds that still have headroom, so an
+    # `alternate` agent prefers a provider that can actually serve. UNKNOWN
+    # keeps its place (no snapshot -> order unchanged, backward compatible).
+    # Cache-only read (no probe - review dispatch stays latency-clean).
+    # Fail-open: any read error leaves the rotation order untouched.
+    try:
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+        by_kind: dict[str, list[str]] = {}
+        for record in records:
+            by_kind.setdefault(record.cli, []).append(record.id)
+
+        def _kind_exhausted(kind: str) -> bool:
+            ids = by_kind.get(kind, [])
+            # No record for the kind (e.g. the claude fallback) is UNKNOWN,
+            # never exhausted. A kind is exhausted only when EVERY record of
+            # that kind is exhausted (one account with headroom keeps it up).
+            return bool(ids) and all(
+                headroom(pid).state is HeadroomState.EXHAUSTED for pid in ids
+            )
+
+        reordered = sorted(kinds, key=lambda k: 1 if _kind_exhausted(k) else 0)
+        if reordered != kinds:
+            log.info(
+                "cross-model: demoted exhausted provider(s) below available "
+                "headroom for lane routing"
+            )
+        kinds = reordered
+    except Exception as exc:  # noqa: BLE001 - a headroom read never breaks resolution
+        log.debug("cross-model: headroom reorder skipped: %s", exc)
+
     return kinds
