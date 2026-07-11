@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import logging
+import time
 from typing import Any, Callable, Literal, Union
 
 from fno.adapters.providers.error_taxonomy import classify_error
@@ -194,7 +195,6 @@ def dispatch_with_combo(
         HeadroomState,
         advance_cursor,
         headroom,
-        is_in_cooldown,
         read_cursor,
         read_state,
         update_provider_health,
@@ -269,15 +269,24 @@ def dispatch_with_combo(
 
     for provider_id in providers:
         quota_exhausted = hr[provider_id].state is HeadroomState.EXHAUSTED
-        if is_in_cooldown(provider_id) or quota_exhausted:
+        # Read state ONCE per iteration and derive the cooldown from it, instead
+        # of is_in_cooldown() (one read) + read_state() (a second read of the
+        # same file) on the skip branch. Kept per-iteration (not hoisted before
+        # the loop) so a cooldown expiring mid-loop - while an earlier fn() ran -
+        # is still seen on the next provider (AC3.3). Fail-open on a bad read.
+        try:
+            health = read_state().provider_health.get(provider_id)
+        except Exception:  # noqa: BLE001 - a corrupt state read never wedges dispatch
+            health = None
+        rlu = health.rate_limited_until if health is not None else None
+        in_cooldown = rlu is not None and rlu > time.time()
+        if in_cooldown or quota_exhausted:
             # Track the soonest eligibility time for the QueueExhausted hint,
             # from the reactive cooldown (rate_limited_until) AND the predictive
             # quota reset (headroom.resets_at). A cooldown/quota skip does NOT
             # advance the cursor (post-review fix / AC2-EDGE).
-            state = read_state()
-            health = state.provider_health.get(provider_id)
-            if health is not None and health.rate_limited_until is not None:
-                _track_retry(health.rate_limited_until)
+            if rlu is not None:
+                _track_retry(rlu)
             if quota_exhausted:
                 _track_retry(hr[provider_id].resets_at)
             continue

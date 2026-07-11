@@ -231,17 +231,31 @@ def required_bot_headroom_check() -> list[dict]:
         cli_kind = _bot_provider_cli(bot)
         if cli_kind is None:
             continue
-        for provider_id in by_cli.get(cli_kind, []):
+        provider_ids = by_cli.get(cli_kind, [])
+        if not provider_ids:
+            continue
+        # Warn only when EVERY provider of the kind is exhausted: one healthy
+        # account (multi-account) keeps the gate un-wedged, so warning on a
+        # single exhausted account would be a false positive. Mirrors the
+        # lane-routing rule (a kind is exhausted only if all its records are).
+        exhausted: list[tuple[str, Optional[float]]] = []
+        for provider_id in provider_ids:
             try:
                 h = headroom(provider_id)
             except Exception:  # noqa: BLE001
-                continue
+                # An unreadable provider is UNKNOWN, not exhausted - it keeps
+                # the kind from counting as fully-exhausted (fail-open).
+                exhausted = []
+                break
             if h.state is HeadroomState.EXHAUSTED:
-                warnings.append(
-                    {"bot": bot, "provider": provider_id, "retry_at": h.resets_at}
-                )
-                _emit_required_bot_exhausted(bot, provider_id, h.resets_at)
-                break  # one warning per bot is enough
+                exhausted.append((provider_id, h.resets_at))
+            else:
+                exhausted = []
+                break
+        if exhausted and len(exhausted) == len(provider_ids):
+            provider_id, retry_at = exhausted[0]
+            warnings.append({"bot": bot, "provider": provider_id, "retry_at": retry_at})
+            _emit_required_bot_exhausted(bot, provider_id, retry_at)
     return warnings
 
 

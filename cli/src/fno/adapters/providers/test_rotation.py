@@ -645,28 +645,22 @@ class TestDispatchAllCooldown:
 # ---------------------------------------------------------------------------
 
 class TestDispatchMidIterationCooldownExpiry:
-    def test_per_step_cooldown_recheck(self, combos_env: Path, monkeypatch):
-        """is_in_cooldown is called for EVERY provider in the loop, no upfront snapshot."""
-        from fno.adapters.providers import rotation as rotation_mod
+    def test_per_step_cooldown_recheck(self, combos_env: Path):
+        """Cooldown is read from fresh state per provider, no upfront snapshot.
+
+        The loop reads runtime state once per iteration (x-5d3e review fix:
+        replaces the is_in_cooldown()+read_state() double-read) and derives the
+        cooldown from it. A cooled provider is skipped; the next serves.
+        """
+        from fno.adapters.providers.error_taxonomy import ErrorRule
         from fno.adapters.providers.rotation import (
             CallOutcome,
             dispatch_with_combo,
         )
+        from fno.adapters.providers.runtime_state import update_provider_health
 
-        # Track cooldown calls; mock to flip from True to False between calls.
-        cooldown_calls: list[str] = []
-
-        def fake_is_in_cooldown(pid: str, now=None) -> bool:
-            cooldown_calls.append(pid)
-            # First call to 'a' returns True; if 'a' would be re-checked
-            # (it shouldn't be), this returns False on subsequent calls.
-            return pid == "a" and cooldown_calls.count("a") == 1
-
-        # Patch the function in the rotation namespace where it's looked up.
-        # rotation imports it lazily inside dispatch_with_combo, so patch
-        # the source module.
-        from fno.adapters.providers import runtime_state
-        monkeypatch.setattr(runtime_state, "is_in_cooldown", fake_is_in_cooldown)
+        # Seed 'a' in a real provider-level cooldown (fallback order [a,b,c]).
+        update_provider_health("a", ErrorRule(status=401, cooldown_ms=60_000))
 
         attempts: list[str] = []
 
@@ -675,11 +669,10 @@ class TestDispatchMidIterationCooldownExpiry:
             return CallOutcome(success=True, payload=pid)
 
         out = dispatch_with_combo("fb", fn)
-        # 'a' cooldowned (skipped), 'b' attempted and succeeded.
-        # Per-step: cooldown checked once for 'a' and once for 'b'.
-        assert cooldown_calls == ["a", "b"]
+        # 'a' cooled -> skipped; 'b' attempted and succeeded; 'c' never reached.
         assert attempts == ["b"]
         assert isinstance(out, CallOutcome)
+        assert out.payload == "b"
 
 
 # ---------------------------------------------------------------------------

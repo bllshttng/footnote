@@ -883,18 +883,6 @@ class Headroom:
     resets_at: float | None = None
 
 
-def _provider_rate_limited_until(provider_id: str, now: float) -> float | None:
-    """Return an active provider-level rate_limited_until, or None. Lock-free."""
-    state_path = _resolve_state_path()
-    raw = _read_disk_payload(state_path)
-    if raw is None:
-        return None
-    health = _parse_state_payload(raw).get(provider_id)
-    if health is None or health.rate_limited_until is None:
-        return None
-    return health.rate_limited_until if health.rate_limited_until > now else None
-
-
 def headroom(
     provider_id: str,
     *,
@@ -911,11 +899,25 @@ def headroom(
     - OK: a fresh snapshot whose binding windows are all below threshold (a
       window already reset never binds, so a stale 100% that has since reset
       reads OK - AC1-EDGE).
+
+    Reads the state payload ONCE and derives both the provider-level lock and
+    the usage snapshot from it (one disk read per call, not two - this is on the
+    dispatch/lane-routing hot path). Fail-open: an unreadable state file reads
+    as UNKNOWN.
     """
     if now is None:
         now = time.time()
-    rlu = _provider_rate_limited_until(provider_id, now)
-    snap = read_usage(provider_id, ttl_seconds=ttl_seconds, now=now)
+    try:
+        raw = _read_disk_payload(_resolve_state_path())
+    except Exception:  # noqa: BLE001 - a corrupt state read never breaks dispatch
+        raw = None
+    health = _parse_state_payload(raw).get(provider_id) if raw else None
+    rlu = None
+    if health is not None and health.rate_limited_until is not None:
+        rlu = health.rate_limited_until if health.rate_limited_until > now else None
+    snap = _parse_usage_payload(raw).get(provider_id) if raw else None
+    if snap is not None and snap.probed_at < now - ttl_seconds:
+        snap = None  # stale snapshot reads as absent (same TTL as read_usage)
 
     binding = [w for w in (snap.windows if snap else ()) if w.resets_at > now]
     exhausted = [w for w in binding if w.used_pct >= 100.0]
