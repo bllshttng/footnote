@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import fcntl
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -24,8 +25,11 @@ from fno.adapters.providers.model import (
     ProviderConfigError,
     ProviderRecord,
     ProvidersConfig,
+    QuotaConfig,
 )
 from fno.state.io import atomic_write
+
+logger = logging.getLogger(__name__)
 
 
 def _global_settings_path() -> Path:
@@ -319,6 +323,42 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     return {}
 
 
+def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
+    """Read config.providers.quota from project-local or global settings.
+
+    Same precedence as load_combos (project-local wins over global). Returns
+    all-defaults when no quota block exists. Fail-safe like the autonomous
+    opt-in blocks (ActiveBacklogConfig): a malformed block degrades to defaults
+    rather than raising out of a dispatch decision - the dangerous direction
+    for an opt-in autonomous feature is silently-enabled, and defaults are off.
+    """
+    if repo_root is None:
+        repo_root = Path(os.environ.get("PWD", os.getcwd()))
+
+    candidates = [
+        repo_root / ".fno" / "config.toml",
+        _global_settings_path(),
+    ]
+    for path in candidates:
+        data = _read_parsed(path)
+        block = _extract_providers_block(data)
+        if block is None:
+            continue
+        quota_raw = block.get("quota")
+        if quota_raw is None:
+            return QuotaConfig()
+        if not isinstance(quota_raw, dict):
+            return QuotaConfig()
+        try:
+            return QuotaConfig.model_validate(quota_raw)
+        except pydantic.ValidationError as exc:
+            logger.warning(
+                "config.providers.quota malformed (%s); using defaults", exc
+            )
+            return QuotaConfig()
+    return QuotaConfig()
+
+
 def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
     """Read config.providers from project-local or global settings.yaml.
 
@@ -405,6 +445,16 @@ def save_providers(
     # If existing was read from a legacy wrapped file, lift its config.* keys up
     # so the written config.toml is single-shape (never a mixed config: + flat).
     existing = _flatten_config(existing)
+    # Preserve provider subkeys this write path does not rebuild (quota, combos,
+    # failover, agents, ...). Rebuilding providers_block from only records+active
+    # would otherwise silently drop them, so e.g. `fno providers use` after an
+    # operator set config.providers.quota.defer_dispatch would turn quota
+    # deferral back off (x-5d3e review). Rebuilt keys win; everything else rides.
+    old_providers = existing.get("providers")
+    if isinstance(old_providers, dict):
+        for key, val in old_providers.items():
+            if key not in ("records", "active"):
+                providers_block.setdefault(key, val)
     existing["providers"] = providers_block
 
     target.parent.mkdir(parents=True, exist_ok=True)

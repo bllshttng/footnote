@@ -911,12 +911,23 @@ def advance(
     """
     ev_path = events_path if events_path is not None else _events_path(project_root)
 
-    def skip(reason: str, *, node_id: Optional[str] = None, detail: Optional[str] = None) -> AdvanceResult:
+    def skip(
+        reason: str,
+        *,
+        node_id: Optional[str] = None,
+        detail: Optional[str] = None,
+        provider: Optional[str] = None,
+        retry_at: Optional[float] = None,
+    ) -> AdvanceResult:
         data: dict = {"reason": reason}
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         if node_id:
             data["node_id"] = node_id
+        if provider:
+            data["provider"] = provider
+        if retry_at is not None:
+            data["retry_at"] = retry_at
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
@@ -954,6 +965,34 @@ def advance(
     #    same-process re-run AND a peer whose reservation already exists.
     if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
         return skip("already-claimed", node_id=node_id)
+
+    # 4b. Quota-aware defer (x-5d3e). advance IS an autonomous path, so it may
+    #     defer when the resolved provider has no headroom and defer_dispatch is
+    #     on. Fail-open + opt-in: off by default, p0 never defers, UNKNOWN never
+    #     defers. The node stays in ready (skip mutates nothing); the next tick
+    #     after the reset dispatches it. Never fatal - a defer read failure just
+    #     proceeds to dispatch.
+    try:
+        from fno.adapters.providers.loader import load_providers
+        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+
+        # Match the SAME provider precedence the spawn below uses
+        # (eff_provider = provider arg -> node pin -> active default), so the
+        # quota decision evaluates the provider the worker will actually run on,
+        # not a mismatched active record (x-5d3e review).
+        provider_id = (
+            provider or node.get("provider") or load_providers().active or ""
+        )
+        decision = evaluate_quota_defer(provider_id, priority=node.get("priority"))
+    except Exception:  # noqa: BLE001 - a quota read must never wedge advance
+        decision = None
+    if decision is not None:
+        return skip(
+            "quota-deferred",
+            node_id=node_id,
+            provider=decision.provider_id,
+            retry_at=decision.retry_at,
+        )
 
     # 5. Reserve dispatch:<id> (O_EXCL dedup + boot-window bridge token).
     from fno.claims.core import ClaimHeldByOther, acquire_claim

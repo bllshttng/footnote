@@ -1234,3 +1234,69 @@ and either remove the markers or correct the values.
   one-shot CLI dispatch; separate concern
 - Other CLI adapters: `gemini.py`, `glm.py`, `openclaw.py` (separate
   plans, one per CLI)
+
+## Quota-aware dispatch
+
+Rotation (above) is **reactive**: a call fails, the error taxonomy classifies
+it, and backoff cools the loser down. Quota-aware dispatch adds a **predictive**
+layer that reads remaining-quota + reset time *before* a dispatch decision, so
+the system can defer, reroute, or warn instead of burning a failed call to learn
+what a probe could have told it. It is advisory and fail-open: when quota data
+is absent or stale, behavior is byte-for-byte the reactive baseline.
+
+### Layers
+
+- **Probe** (`adapters/providers/usage.py`): `probe_usage(record)` returns a
+  `UsageSnapshot` (per-window `used_pct` clamped to [0,100] + `resets_at` epoch)
+  or `None`. Claude reads its OAuth usage endpoint; codex reads the `rate_limits`
+  payload in its most recent session events. Both are `[VERIFY-AT-IMPL]` and
+  fail-open - any failure (endpoint drift, 401, timeout, missing files) is
+  `None`, never a raise, and never logs a token. Other CLIs are `None` in v1.
+- **Snapshot cache**: an additive `usage` field on `provider-runtime-state.json`
+  under the existing `.update.lock` (no schema bump - the `model_locks`
+  precedent). Every existing writer carries it through so a health/cursor write
+  never drops it. A snapshot older than `probe_ttl_seconds` reads as absent.
+- **Headroom predicate** (`runtime_state.headroom`): `OK | LOW | EXHAUSTED |
+  UNKNOWN`. A window whose `resets_at` is already past never binds (its limit
+  has reset even if the snapshot is stale). No data is `UNKNOWN`, which orders
+  **with** `OK` - absence of a probe is not evidence of trouble.
+
+### Consumers
+
+- **Combo rotation** (`rotation.dispatch_with_combo`): an `EXHAUSTED` member is
+  skipped like a cooldown (its reset feeds the `QueueExhausted.retry_after`
+  hint); non-exhausted members are stably ordered `OK`/`UNKNOWN` before `LOW`.
+  Cache-only (no probe - dispatch stays latency-clean).
+- **Node dispatcher** (`dispatch._dispatch_one`, `backlog.advance`): with
+  `defer_dispatch` on, a ready node whose resolved provider is `EXHAUSTED` (or
+  `LOW` with a reset inside `defer_horizon_minutes`) is **not** dispatched - a
+  `quota-deferred` receipt + one decision event, node left in `ready`, the first
+  tick after the reset dispatches it. `p0` and explicit human dispatch verbs
+  always fire. This is the one probe site (refresh-on-stale).
+- **Lane routing** (review panel `alternate` selection): a kind whose records
+  are all `EXHAUSTED` is stably demoted below kinds with headroom. Explicit
+  per-agent pins and role→provider config mappings are never overridden.
+- **Promise-time warning** (`fno providers required-bot-check`): read-only,
+  warns when a `config.review` required-bot's provider is `EXHAUSTED`, naming
+  the reset, so a coming review-gate wedge surfaces immediately.
+
+### CLI
+
+- `fno providers usage [--json/-J] [--refresh]` - per-provider windows (used %,
+  resets-in). `--refresh` forces a probe past the TTL cache.
+- `fno providers list` gains a compact `headroom=` column.
+- `fno providers required-bot-check [--json]` - the pre-promise early warning.
+
+### Config (`config.providers.quota`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `defer_dispatch` | `false` | opt-in: autonomous paths may defer on quota |
+| `defer_threshold_pct` | `90` | worst-window used % that marks `LOW` |
+| `probe_ttl_seconds` | `300` | snapshot freshness window |
+| `defer_horizon_minutes` | `60` | only defer on `LOW` when the reset is this close |
+
+Probing and display are always on; only the autonomous *deferral* is gated,
+matching the opt-in posture of `backlog advance` and auto-merge. Cost-to-finish
+routing is out of scope for v1; the headroom seam is where cost data plugs in
+later.

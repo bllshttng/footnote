@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import logging
+import time
 from typing import Any, Callable, Literal, Union
 
 from fno.adapters.providers.error_taxonomy import classify_error
@@ -189,10 +190,11 @@ def dispatch_with_combo(
     # for the Combo type. loader.load_combos already does the same trick
     # (imports Combo from rotation inside the function body).
     from fno.adapters.providers.failover import record_success
-    from fno.adapters.providers.loader import load_combos
+    from fno.adapters.providers.loader import load_combos, load_quota_config
     from fno.adapters.providers.runtime_state import (
+        HeadroomState,
         advance_cursor,
-        is_in_cooldown,
+        headroom,
         read_cursor,
         read_state,
         update_provider_health,
@@ -219,6 +221,32 @@ def dispatch_with_combo(
         providers_hash = None
         providers = list(combo.providers)
 
+    # Quota-aware ordering (x-5d3e): read each member's cached headroom once
+    # (no probe - dispatch never adds HTTP latency), then stably demote LOW
+    # members below OK/UNKNOWN. UNKNOWN orders WITH OK (Locked Decision 9: no
+    # probe is not evidence of trouble). EXHAUSTED members are skipped in the
+    # loop below like a cooldown. With no usage snapshots seeded every member
+    # is UNKNOWN, so the order and behavior are byte-identical to pre-x-5d3e.
+    quota = load_quota_config()
+    hr = {
+        pid: headroom(
+            pid,
+            ttl_seconds=quota.probe_ttl_seconds,
+            threshold_pct=quota.defer_threshold_pct,
+        )
+        for pid in providers
+    }
+
+    def _rank(pid: str) -> int:
+        st = hr[pid].state
+        if st is HeadroomState.LOW:
+            return 1
+        if st is HeadroomState.EXHAUSTED:
+            return 2
+        return 0  # OK / UNKNOWN
+
+    providers = sorted(providers, key=_rank)  # stable: rotation order kept per rank
+
     def _maybe_advance() -> None:
         """Advance cursor when a slot was actually served. No-op for non-RR."""
         if providers_hash is not None:
@@ -232,16 +260,35 @@ def dispatch_with_combo(
     last_outcome: CallOutcome | None = None
     soonest_retry: float | None = None
 
+    def _track_retry(candidate: float | None) -> None:
+        nonlocal soonest_retry
+        if candidate is None:
+            return
+        if soonest_retry is None or candidate < soonest_retry:
+            soonest_retry = candidate
+
     for provider_id in providers:
-        if is_in_cooldown(provider_id):
-            # Track soonest-expiring cooldown for the QueueExhausted hint.
-            # Cooldown-skip does NOT advance the cursor - that's the
-            # post-review fix.
-            state = read_state()
-            health = state.provider_health.get(provider_id)
-            if health is not None and health.rate_limited_until is not None:
-                if soonest_retry is None or health.rate_limited_until < soonest_retry:
-                    soonest_retry = health.rate_limited_until
+        quota_exhausted = hr[provider_id].state is HeadroomState.EXHAUSTED
+        # Read state ONCE per iteration and derive the cooldown from it, instead
+        # of is_in_cooldown() (one read) + read_state() (a second read of the
+        # same file) on the skip branch. Kept per-iteration (not hoisted before
+        # the loop) so a cooldown expiring mid-loop - while an earlier fn() ran -
+        # is still seen on the next provider (AC3.3). Fail-open on a bad read.
+        try:
+            health = read_state().provider_health.get(provider_id)
+        except Exception:  # noqa: BLE001 - a corrupt state read never wedges dispatch
+            health = None
+        rlu = health.rate_limited_until if health is not None else None
+        in_cooldown = rlu is not None and rlu > time.time()
+        if in_cooldown or quota_exhausted:
+            # Track the soonest eligibility time for the QueueExhausted hint,
+            # from the reactive cooldown (rate_limited_until) AND the predictive
+            # quota reset (headroom.resets_at). A cooldown/quota skip does NOT
+            # advance the cursor (post-review fix / AC2-EDGE).
+            if rlu is not None:
+                _track_retry(rlu)
+            if quota_exhausted:
+                _track_retry(hr[provider_id].resets_at)
             continue
         outcome = fn(provider_id)
         last_outcome = outcome

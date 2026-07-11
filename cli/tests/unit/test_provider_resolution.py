@@ -260,3 +260,44 @@ def test_available_kinds_includes_unlocked_codex(
     # gem-1 locked out -> excluded; codex-pro available.
     kinds = available_provider_kinds(is_locked_out=lambda rid: rid == "gem-1")
     assert kinds == ["claude", "codex"]
+
+
+# ---- x-5d3e: quota-aware lane routing prefers a provider with headroom ----
+
+def test_available_kinds_demotes_exhausted_provider(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An EXHAUSTED kind is stably demoted below one with headroom, so an
+    `alternate` agent routes to the provider that can actually serve (US4)."""
+    import time
+
+    from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
+    from fno.adapters.providers.runtime_state import write_usage_snapshot
+    from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+    from fno.review.provider_resolution import resolve_agent_provider
+
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+    records = [
+        ProviderRecord(id="codex-pro", name="Codex", cli="codex", auth="api_key", env={"OPENAI_API_KEY": "x"}),
+        ProviderRecord(id="gem-1", name="Gemini", cli="gemini", auth="api_key", env={"GEMINI_API_KEY": "x"}),
+    ]
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda repo_root=None: ProvidersConfig(records=records, active=None),
+    )
+    now = time.time()
+    # codex exhausted (100%, future reset); gemini has headroom (10%).
+    write_usage_snapshot(UsageSnapshot("codex-pro", (UsageWindow("5h", 100.0, now + 3600),), now, "t"), now=now)
+    write_usage_snapshot(UsageSnapshot("gem-1", (UsageWindow("5h", 10.0, now + 3600),), now, "t"), now=now)
+
+    kinds = available_provider_kinds(is_locked_out=lambda _id: False)
+    assert kinds == ["claude", "gemini", "codex"]  # exhausted codex demoted last
+
+    # An `alternate` agent (implementer=claude) now prefers gemini over codex.
+    rp = resolve_agent_provider(
+        "code_reviewer",
+        agent_providers={},  # empty -> curated default routes correctness agents to alternate
+        implementer_provider="claude",
+        available_providers=kinds,
+    )
+    assert rp.provider == "gemini"

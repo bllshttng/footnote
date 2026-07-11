@@ -1863,14 +1863,20 @@ event_types:
       properties:
         reason:
           type: string
-          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown]
-          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2)."
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred]
+          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on (x-5d3e), so it stays ready until the reset."
         node_id:
           type: string
-          description: "The candidate next node, when a reason references one (already-claimed)."
+          description: "The candidate next node, when a reason references one (already-claimed, quota-deferred)."
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance."
+        provider:
+          type: string
+          description: "The resolved provider record id whose quota drove a quota-deferred skip (x-5d3e)."
+        retry_at:
+          type: number
+          description: "Unix epoch seconds of the provider's window reset on a quota-deferred skip (x-5d3e)."
         detail:
           type: string
           description: "Optional human-readable detail (e.g. the next-error message), truncated."
@@ -1891,6 +1897,48 @@ event_types:
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance."
+    consumers: [operator]
+
+  - name: quota_deferred
+    description: "Emitted by an autonomous dispatcher (mux grab / active-backlog tick) when a ready node is NOT dispatched because its resolved provider has no quota headroom (EXHAUSTED, or LOW with a reset inside the defer horizon). Quota-aware dispatch (x-5d3e). The node is left untouched in ready; the first tick after retry_at dispatches it. Advisory + opt-in (config.providers.quota.defer_dispatch); p0 and explicit human verbs never defer."
+    sources: [backlog]
+    data:
+      required: [node_id, provider, headroom]
+      properties:
+        node_id:
+          type: string
+          description: "The ready node held back this tick."
+        provider:
+          type: string
+          description: "The resolved provider record id whose quota drove the defer."
+        headroom:
+          type: string
+          enum: [exhausted, low]
+          description: "The headroom state that triggered the defer."
+        retry_at:
+          type: number
+          description: "Unix epoch seconds of the binding window's reset; the tick after this dispatches the node."
+    consumers: [operator]
+
+  - name: quota_required_bot_exhausted
+    description: "Emitted at the pre-promise checkpoint (x-5d3e US5) when a config.review required-bot's provider snapshot is EXHAUSTED with a known reset. Surfaces the coming review-gate wedge immediately (with the reset time) instead of the gate hanging silently for hours. Advisory + read-only; in attended mode the skill also raises a <help> tag with the same facts."
+    sources: [backlog, target]
+    data:
+      required: [bot, provider, headroom]
+      properties:
+        bot:
+          type: string
+          description: "The required-bot GitHub login whose provider is exhausted."
+        provider:
+          type: string
+          description: "The provider record id backing that bot."
+        headroom:
+          type: string
+          enum: [exhausted]
+          description: "Always exhausted (the only state that warns here)."
+        retry_at:
+          type: number
+          description: "Unix epoch seconds of the provider's window reset."
     consumers: [operator]
 
   - name: think_spawned
