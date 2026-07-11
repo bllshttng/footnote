@@ -735,6 +735,73 @@ def _print_thread_summary(h: ThreadHandle) -> None:
 # send/inbox/ack and inbox unread/ack verbs (the one messaging namespace).
 
 
+def _name_lane_send(
+    message: str,
+    *,
+    from_name: Optional[str],
+    resolved,
+    recipient: Optional[str] = None,
+    provider: Optional[str] = None,
+    to_short: Optional[str] = None,
+    reply_to: Optional[str] = None,
+) -> None:
+    """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
+    ``mail reply``. When ``resolved`` (a live ``DiscoveredSession``) is set:
+    live-inject-first, durable floor on miss, addressed to its canonical handle.
+    When ``resolved`` is None: durable-only, addressed to ``recipient`` (a reply
+    to an offline sender). ``reply_to`` stamps BOTH the wire ``reply_to`` attr and
+    the bus ``in_reply_to`` from ONE msg-id -- never one set, the other null.
+    Exits 12 on a durable-floor write failure."""
+    from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
+    from fno.agents.provider_resolve import infer_invoking_harness
+    from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.harness_identity import canonical_handle
+    from fno.inbox.store import write_new_thread
+    from fno.mail.envelope import wrap_fno_mail
+
+    if resolved is not None:
+        recipient = canonical_handle(resolved.agent, resolved.session_id)
+        provider = resolved.agent
+        to_short = resolved.short_id
+
+    wrapped = wrap_fno_mail(
+        message,
+        from_=stamp_from(from_name),
+        harness=infer_invoking_harness() or "cli",
+        model=resolve_self_model(),
+        to=to_short,
+        reply_to=reply_to,
+    )
+
+    injected = False
+    if resolved is not None:
+        if provider == "claude":
+            injected = _mail_inject_claude(resolved.session_id, wrapped)
+        elif provider == "codex":
+            injected = _mail_inject_codex(resolved.session_id, wrapped)
+
+    live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
+    corr = f" re:{reply_to}" if reply_to else ""
+    if injected:
+        print(f"delivered (hosted) to {recipient}{live}{corr}")
+        return
+
+    try:
+        th = write_new_thread(
+            recipient=recipient,
+            sender=stamp_from(from_name),
+            kind="send",
+            body=wrapped,
+            to_kind="name",
+            provider_to=provider,
+            replies_to=reply_to,
+        )
+    except (OSError, ValueError, RuntimeError) as exc2:
+        print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
+        raise typer.Exit(code=12) from exc2
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr}")
+
+
 @mail_app.command("send")
 def cmd_send(
     name: str | None = typer.Argument(
@@ -1029,55 +1096,9 @@ def cmd_send(
         # --to-project. The body is <fno_mail>-wrapped with a truthful from/model
         # so the recipient can reply with `fno mail send <from>`.
         if resolved is not None:
-            from fno.agents.provider_resolve import infer_invoking_harness
-            from fno.harness_identity import canonical_handle
-            from fno.inbox.store import write_new_thread
-            from fno.mail.envelope import wrap_fno_mail
-
-            handle = canonical_handle(resolved.agent, resolved.session_id)
-            wrapped = wrap_fno_mail(
-                message,
-                from_=stamp_from(from_name),
-                harness=infer_invoking_harness() or "cli",
-                model=resolve_self_model(),
-                to=resolved.short_id,
-            )
-
-            # Live-inject-first, per harness. A hosted confirmation returns
-            # immediately; any miss falls through to the durable floor below.
-            from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
-
-            injected = False
-            if resolved.agent == "claude":
-                # mail-inject accepts the full UUID or the 8-hex short (roster
-                # resolves either); pass the collision-proof UUID, matching the
-                # codex path and dispatch's uuid-preference.
-                injected = _mail_inject_claude(resolved.session_id, wrapped)
-            elif resolved.agent == "codex":
-                injected = _mail_inject_codex(resolved.session_id, wrapped)
-            if injected:
-                print(
-                    f"delivered (hosted) to {handle} "
-                    f"[live {resolved.agent} session {resolved.handle}]"
-                )
-                return
-
-            try:
-                th = write_new_thread(
-                    recipient=handle,
-                    sender=stamp_from(from_name),
-                    kind="send",
-                    body=wrapped,
-                    to_kind="name",
-                    provider_to=resolved.agent,
-                )
-            except (OSError, ValueError, RuntimeError) as exc2:
-                print(f"durable envelope write failed for {handle!r}: {exc2}", file=sys.stderr)
-                raise typer.Exit(code=12) from exc2
-            print(
-                f"{th.thread_id} queued (durable) for {handle} "
-                f"[live {resolved.agent} session {resolved.handle}]"
-            )
+            # Live-inject-first with a durable floor addressed to the resolved
+            # session's canonical handle. Shared with the name-lane reply path.
+            _name_lane_send(message, from_name=from_name, resolved=resolved)
             return
 
         # AC2-ERR: not a registered agent, not a discovered handle. Error with
