@@ -102,7 +102,10 @@ pub fn classify(v: &Value) -> Option<Transition> {
         // that is not a row transition, so require `name` and skip otherwise.
         "screen_state_change" => {
             let name = payload.get("name").and_then(|x| x.as_str())?;
-            let cleared = payload.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
+            let cleared = payload
+                .get("cleared")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(false);
             let state = if cleared {
                 "idle".to_string()
             } else {

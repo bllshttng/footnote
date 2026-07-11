@@ -6098,10 +6098,9 @@ done
         assert_eq!(rep.state, state::InsideLegState::Working);
 
         let events = read_events(&home);
-        assert!(events
-            .iter()
-            .any(|e| e["type"] == "inside_leg_report_dropped"
-                && e["data"]["reason"] == "stale_seq"));
+        assert!(events.iter().any(
+            |e| e["type"] == "inside_leg_report_dropped" && e["data"]["reason"] == "stale_seq"
+        ));
         std::fs::remove_dir_all(home.root()).ok();
     }
 
