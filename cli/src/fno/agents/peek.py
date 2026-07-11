@@ -309,13 +309,16 @@ def _follow_records(
     stderr,
     *,
     is_live: Optional[Callable[[], bool]] = None,
+    json_out: bool = False,
     poll_interval: float = 0.5,
     idle_polls_before_liveness: int = 4,
 ) -> None:
     """Stream new parsed records as the transcript grows.
 
     Reads only complete lines (a mid-write partial waits for its completion,
-    never corrupts a record). Exits cleanly when the file rotates/disappears
+    never corrupts a record). ``json_out`` keeps followed records in JSON-Lines
+    so a stream started with ``--json`` stays parseable. Exits cleanly when the
+    file rotates/disappears
     (peer ended + cleaned up) or, after a stretch of no growth, when
     ``is_live()`` reports the peer gone (AC1-FR: no infinite spin).
     KeyboardInterrupt is trapped by the caller.
@@ -343,7 +346,7 @@ def _follow_records(
                     if isinstance(rec, dict):
                         record = parse(rec)
                         if record is not None:
-                            stdout.write(_render(record) + "\n")
+                            _emit_record(stdout, record, json_out)
                             if hasattr(stdout, "flush"):
                                 stdout.flush()
                 continue
@@ -373,6 +376,25 @@ def _follow_records(
 
 def _render(record: Record) -> str:
     return f"{record.role}: {record.text}"
+
+
+def _emit_record(out, record: Record, json_out: bool) -> None:
+    """Write one record in the caller's mode. ``--json`` stays JSON-Lines
+    everywhere (initial tail AND followed records) so a consumer never trips
+    over a human line mid-stream."""
+    if json_out:
+        out.write(json.dumps({"role": record.role, "text": record.text}) + "\n")
+    else:
+        out.write(_render(record) + "\n")
+
+
+def _emit_no_activity(out, json_out: bool) -> None:
+    """Emit the idle state as a JSON status row under ``--json`` (else a line),
+    so ``peek --json`` on an idle peer is still parseable JSON-Lines."""
+    if json_out:
+        out.write(json.dumps({"status": "no activity yet"}) + "\n")
+    else:
+        out.write("no activity yet\n")
 
 
 def _default_resolve(handle: str):
@@ -447,17 +469,13 @@ def peek(
         return EXIT_UNSUPPORTED
 
     if not records and not follow:
-        out.write("no activity yet\n")
+        _emit_no_activity(out, json_out)
         return EXIT_OK
 
-    if json_out:
-        for rec in records:
-            out.write(json.dumps({"role": rec.role, "text": rec.text}) + "\n")
-    else:
-        for rec in records:
-            out.write(_render(rec) + "\n")
-        if not records:
-            out.write("no activity yet\n")
+    for rec in records:
+        _emit_record(out, rec, json_out)
+    if not records:
+        _emit_no_activity(out, json_out)
 
     if follow:
         # Re-resolve the transcript path for the follow loop (records above came
@@ -474,6 +492,7 @@ def peek(
                 out,
                 err,
                 is_live=is_live,
+                json_out=json_out,
             )
         except KeyboardInterrupt:
             return EXIT_OK  # AC1-FR: clean Ctrl-C, no traceback

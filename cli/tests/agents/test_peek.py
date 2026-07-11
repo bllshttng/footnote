@@ -16,6 +16,7 @@ from fno.agents.peek import (
     ObserveUnsupported,
     Record,
     _codex_rollout_path,
+    _emit_record,
     _read_complete_lines,
     peek,
     recent_records,
@@ -183,6 +184,28 @@ def test_peek_json_emits_rows(tmp_path):
     assert rc == 0
     rows = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
     assert {"role": "assistant", "text": "done"} in rows
+
+
+def test_peek_json_idle_is_still_json(tmp_path):
+    """P2 (gemini): --json on an idle peer emits a JSON status row, not the
+    human 'no activity yet' string that would break a JSONL consumer."""
+    sess = _Session()  # no transcript
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek("w", json_out=True, stdout=out, stderr=err, resolve=lambda h: (sess, []), projects_root=tmp_path)
+    assert rc == 0
+    rows = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    assert {"status": "no activity yet"} in rows
+
+
+def test_emit_record_json_vs_human():
+    """P2 (gemini): followed records honor --json — the single emit path both
+    the initial tail and the follow loop use stays JSON under json_out."""
+    out = io.StringIO()
+    _emit_record(out, Record(role="assistant", text="hi"), json_out=True)
+    assert json.loads(out.getvalue().strip()) == {"role": "assistant", "text": "hi"}
+    out = io.StringIO()
+    _emit_record(out, Record(role="assistant", text="hi"), json_out=False)
+    assert out.getvalue().strip() == "assistant: hi"
 
 
 def test_peek_follow_exits_when_peer_not_live(tmp_path):
