@@ -54,6 +54,22 @@ def test_locked_by_wins_when_both_present_and_differ():
     assert out["session_id"] == "new-owner"
 
 
+def test_clearing_owner_clears_harness_stamp():
+    """P2: any path that clears locked_by drops the harness stamp at normalize,
+    so a re-claim can never route to a stale holder."""
+    e = {
+        "id": "ab-clr00001", "locked_by": "owner-1",
+        "locked_by_harness": "claude", "locked_by_harness_session": "uuid-1",
+    }
+    # Simulate a clear path (defer/done/unclaim) that only nulls locked_by.
+    e["locked_by"] = None
+    out = _apply_graph_defaults([e])[0]
+    assert out["locked_by"] is None
+    assert out["session_id"] is None
+    assert out["locked_by_harness"] is None
+    assert out["locked_by_harness_session"] is None
+
+
 def test_ac7_edge_mixed_version_round_trip(tmp_path):
     """AC7-EDGE: legacy node (session_id only) round-trips through a mutation
     with locked_by == original session_id and status still 'claimed'."""

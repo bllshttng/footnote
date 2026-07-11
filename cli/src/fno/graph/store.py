@@ -177,6 +177,13 @@ def _normalize_lock_fields(entries: list[dict]) -> None:
         resolved = e["locked_by"] if "locked_by" in e else e.get("session_id")
         e["locked_by"] = resolved
         e["session_id"] = resolved
+        # A cleared owner must not retain a holder identity: clear the US6
+        # harness stamp whenever the lock is unset, so EVERY owner-clearing path
+        # (unclaim, done, defer, supersede, auto-failure) drops it uniformly and
+        # a later re-claim can never route to a stale holder.
+        if resolved is None:
+            e["locked_by_harness"] = None
+            e["locked_by_harness_session"] = None
 
 
 def canonicalize_entries(entries: list[dict]) -> list[dict]:
