@@ -501,29 +501,75 @@ def _plans_output_dir() -> Path:
     return plans_content_dir()
 
 
-def _think_output_path(node_id: str, slug: str = "") -> str:
-    """Resolve where the headless /think worker writes its design doc (x-ff83 W1).
+def _frontmatter_claims_node(path: Path, node_id: str) -> bool:
+    """True iff ``path``'s YAML frontmatter ``claims:``/``graph_node_id:`` == node_id.
 
-    Writes ``<plans-dir>/YYYY-MM-DD-<slug>.md`` (matching interactive /think) so
-    ``/blueprint <that-path>`` mutates it in place - no manual relocate from a
-    briefs/ sidecar. Falls back to ``briefs_dir()/think-<node-id>.md`` with a
-    visible warning (AC1-ERR) when the plans dir is unresolvable, so a broken
-    settings lookup never wedges the spawn. Returns "" only if even briefs is
-    unresolvable (a missing path just omits the write-instruction line).
+    Reads only the frontmatter block, never the body (a design doc often quotes
+    an id in prose or a fenced example, which is not an authoritative claim).
     """
-    tail = (slug or node_id).strip("-") or node_id
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    fm = text[: end if end != -1 else 2000]
+    for line in fm.splitlines():
+        m = re.match(r"^(?:claims|graph_node_id):\s*(.+?)\s*$", line)
+        if m and m.group(1).strip().strip("\"'") == node_id:
+            return True
+    return False
+
+
+def _find_node_doc(pdir: Path, node_id: str) -> Optional[Path]:
+    """The plans-dir doc that already belongs to ``node_id``, or None.
+
+    A bounded plans-dir scan (never a graph walk). A file whose frontmatter
+    *claims* the node wins over one that merely *ends* ``-<node_id>.md`` - the
+    claim is the stronger signal (a pre-created roadmap stub is the doc's home).
+    First match in sorted order is deterministic; two files claiming one node is
+    pre-existing corruption, flagged for separate cleanup, not resolved here.
+    """
+    try:
+        candidates = sorted(pdir.glob("????-??-??-*.md"))
+    except OSError:
+        return None
+    by_name: Optional[Path] = None
+    for f in candidates:
+        if _frontmatter_claims_node(f, node_id):
+            return f
+        if by_name is None and f.name.endswith(f"-{node_id}.md"):
+            by_name = f
+    return by_name
+
+
+def _think_output_path(node_id: str, slug: str = "") -> str:
+    """Resolve where the headless /think worker writes its design doc (x-8af8).
+
+    The filename ALWAYS ends ``-<node_id>.md`` so a roadmap base keyed on the
+    node id can find it. Resolution is node-id-first: reuse a file that already
+    claims the node, else a prior ``-<node_id>.md`` doc, else mint
+    ``<plans-dir>/YYYY-MM-DD-<slug>-<node_id>.md`` (empty slug ->
+    ``<date>-<node_id>.md``). Keying reuse on the stable node id, not the mutable
+    slug, keeps a re-dispatch after a slug edit idempotent. Falls back to
+    ``briefs_dir()/think-<node-id>.md`` with a visible warning (AC1-ERR) when the
+    plans dir is unresolvable. Returns "" only if even briefs is unresolvable.
+    """
     from datetime import datetime, timezone
 
     try:
         pdir = _plans_output_dir()
-        # AC1-EDGE: a re-dispatch reuses this slug's existing date-slug doc
-        # rather than minting a second file under today's (different) date.
-        # Anchor to the YYYY-MM-DD- prefix so `slug` does not spuriously match a
-        # file whose slug merely ENDS with `-slug` (e.g. awesome-slug); gemini PR#149.
-        existing = sorted(pdir.glob(f"????-??-??-{tail}.md"))
+        # 1-2: reuse this node's existing doc (frontmatter claim, else a prior
+        #      node-id-suffixed mint) rather than minting a duplicate.
+        existing = _find_node_doc(pdir, node_id)
         if existing:
-            return str(existing[0])
+            return str(existing)
+        # 3: mint. Empty slug degrades to <date>-<node_id>.md, never a dangling
+        #    <date>--<node_id>.md.
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        s = (slug or "").strip("-")
+        tail = f"{s}-{node_id}" if s else node_id
         return str(pdir / f"{date}-{tail}.md")
     except Exception as exc:  # noqa: BLE001 - degrade to briefs, never wedge the spawn
         try:

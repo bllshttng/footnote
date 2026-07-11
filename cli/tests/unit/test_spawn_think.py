@@ -344,8 +344,8 @@ def test_away_spawns_and_stamps_node(iso, monkeypatch, patch_spawn):
     assert len(stamp_calls) == 1
     nid, sess, root, output_path = stamp_calls[0]
     assert (nid, sess, root) == ("x-2222aaaa", "deadbeef", iso.parent.parent)
-    # x-ff83 W1: doc lands in plans-dir on the date-slug convention (not a briefs sidecar).
-    assert output_path and output_path.endswith("-born-with-why.md")
+    # x-ff83 W1: doc lands in plans-dir; x-8af8: filename ends -<node-id>.md.
+    assert output_path and output_path.endswith("-born-with-why-x-2222aaaa.md")
     assert "plans" in output_path
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "think_spawned"
@@ -362,7 +362,7 @@ def test_away_prompt_carries_output_path(iso, monkeypatch, patch_spawn):
                          events_path=iso, project_root=iso.parent.parent)
     prompt = spawn_calls[0][1]
     assert "WRITE YOUR /think OUTPUT" in prompt
-    assert "-born-with-why.md" in prompt
+    assert "-born-with-why-x-2222aaaa.md" in prompt
 
 
 def test_away_spawn_failure_skips_no_stamp(iso, monkeypatch, patch_spawn):
@@ -652,7 +652,7 @@ def test_maybe_spawn_threads_node_pins(iso, monkeypatch, patch_spawn):
 
 
 def test_think_output_path_honors_plansdirectory(monkeypatch, tmp_path):
-    """AC1-HP: settings.local.json plansDirectory wins; file is date-slug named."""
+    """AC-HP (x-8af8): plansDirectory wins; filename ends -<node-id>.md."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     local = tmp_path / ".claude"
     local.mkdir()
@@ -660,36 +660,72 @@ def test_think_output_path_honors_plansdirectory(monkeypatch, tmp_path):
     import re
     out = st._think_output_path("x-2222aaaa", "my-slug")
     assert str(tmp_path / "internal" / "fno" / "plans") in out
-    # date-slug named YYYY-MM-DD-<slug>.md
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-my-slug\.md", Path(out).name)
+    # node-id-suffixed YYYY-MM-DD-<slug>-<node-id>.md
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-my-slug-x-2222aaaa\.md", Path(out).name)
 
 
 def test_think_output_path_falls_back_to_config_plans_dir(monkeypatch, tmp_path):
-    """AC1-HP: no settings.local -> config.plans_dir default, still in plans-dir."""
+    """AC-HP: no settings.local -> config.plans_dir default, still in plans-dir."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     out = st._think_output_path("x-2222aaaa", "my-slug")
-    assert out.endswith("-my-slug.md")
+    assert out.endswith("-my-slug-x-2222aaaa.md")
     assert "plans" in out
 
 
-def test_think_output_path_reuses_existing_doc_on_redispatch(monkeypatch, tmp_path):
-    """AC1-EDGE: a re-dispatch reuses this slug's existing doc, not a new date file."""
+def test_think_output_path_suffix_carries_configured_prefix(monkeypatch, tmp_path):
+    """AC-EDGE: a configured (non ab-) prefix/width is preserved verbatim in the
+    suffix - fixtures for x-2157-like and x-8b89-like nodes end -x-2157.md / -x-8b89.md."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    assert st._think_output_path("x-2157", "feat-a").endswith("-feat-a-x-2157.md")
+    assert st._think_output_path("x-8b89", "feat-b").endswith("-feat-b-x-8b89.md")
+
+
+def test_think_output_path_reuses_existing_node_doc_on_redispatch(monkeypatch, tmp_path):
+    """AC-EDGE: a re-dispatch reuses this node's existing doc keyed on the node id,
+    not a fresh date file - and is stable across a slug edit between dispatches."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     plans = tmp_path / ".fno" / "plans"
     plans.mkdir(parents=True)
-    prior = plans / "2020-01-01-my-slug.md"
+    prior = plans / "2020-01-01-old-slug-x-2222aaaa.md"
     prior.write_text("# earlier dispatch\n")
-    # A different slug that merely ENDS with -my-slug must NOT be reused (gemini PR#149).
-    (plans / "2020-01-01-awesome-my-slug.md").write_text("# unrelated\n")
+    # The slug changed to my-slug since the first dispatch; the node id is stable,
+    # so the prior doc is reused rather than minting a second file (idempotent).
     out = st._think_output_path("x-2222aaaa", "my-slug")
-    assert out == str(prior)  # reused, not a fresh today-dated file, not the over-match
+    assert out == str(prior)
+
+
+def test_think_output_path_reuses_frontmatter_claiming_stub(monkeypatch, tmp_path):
+    """AC-FR: a pre-created stub whose frontmatter claims the node is the doc's
+    home even though its name carries no node-id suffix (reuse-if-claimed)."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    plans = tmp_path / ".fno" / "plans"
+    plans.mkdir(parents=True)
+    stub = plans / "2020-01-01-hand-created-stub.md"
+    stub.write_text("---\nclaims: x-2222aaaa\nstatus: design\n---\n# stub\n")
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out == str(stub)
+
+
+def test_think_output_path_claim_beats_name_suffix(monkeypatch, tmp_path):
+    """A frontmatter claim outranks a mere name-suffix match for the same node."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    plans = tmp_path / ".fno" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2020-01-01-suffix-x-2222aaaa.md").write_text("# name match only\n")
+    claimed = plans / "2020-02-02-the-real-home.md"
+    claimed.write_text("---\ngraph_node_id: x-2222aaaa\n---\n# claimed\n")
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out == str(claimed)
 
 
 def test_think_output_path_empty_slug_uses_node_id(monkeypatch, tmp_path):
-    """AC3-ERR analogue: an empty slug degrades to the node id, never a bare date-.md."""
+    """AC-EDGE: an empty slug degrades to <date>-<node_id>.md, never a dangling
+    <date>--<node_id>.md."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    import re
     out = st._think_output_path("x-2222aaaa", "")
     assert out.endswith("-x-2222aaaa.md")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-x-2222aaaa\.md", Path(out).name)
 
 
 def test_think_output_path_unresolvable_falls_back_to_briefs(monkeypatch, tmp_path, capsys):
