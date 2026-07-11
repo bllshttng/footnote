@@ -509,7 +509,10 @@ def _frontmatter_claims_node(path: Path, node_id: str) -> bool:
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        # An unreadable candidate reads as "does not claim" - log so a mint
+        # that should have reused it is debuggable, not a silent skip.
+        _LOG.debug("spawn_think: claim scan skipped unreadable %s: %s", path, exc)
         return False
     if not text.startswith("---"):
         return False
@@ -533,7 +536,10 @@ def _find_node_doc(pdir: Path, node_id: str) -> Optional[Path]:
     """
     try:
         candidates = sorted(pdir.glob("????-??-??-*.md"))
-    except OSError:
+    except OSError as exc:
+        # A glob failure reads as "no existing doc" -> a fresh mint. Log so the
+        # reuse-vs-mint decision is debuggable rather than a silent duplicate.
+        _LOG.debug("spawn_think: plans-dir scan failed for %s: %s", pdir, exc)
         return None
     by_name: Optional[Path] = None
     for f in candidates:
