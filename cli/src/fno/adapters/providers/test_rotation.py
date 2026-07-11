@@ -848,3 +848,96 @@ class TestDispatchCursorAdvancesOnlyOnServedCalls:
         # Cursor advanced once (only for b's served slot).
         assert (cursor.cursor_index, cursor.consecutive_use_count) == (0, 1)
 
+
+
+# ---------------------------------------------------------------------------
+# Quota-aware ordering + skip (x-5d3e US2: AC2-EDGE + Locked Decision 9)
+# ---------------------------------------------------------------------------
+
+class TestDispatchWithComboQuota:
+    def _seed(self, provider_id: str, used_pct: float, resets_at: float) -> None:
+        import time
+
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        now = time.time()
+        write_usage_snapshot(
+            UsageSnapshot(
+                provider_id=provider_id,
+                windows=(UsageWindow("5h", used_pct, resets_at),),
+                probed_at=now,
+                source="test",
+            ),
+            now=now,
+        )
+
+    def test_all_members_exhausted_returns_soonest_retry(self, combos_env: Path):
+        # AC2-EDGE: every combo member exhausted with different reset times ->
+        # QueueExhausted with retry_after == the soonest reset.
+        from fno.adapters.providers.rotation import (
+            CallOutcome,
+            QueueExhausted,
+            dispatch_with_combo,
+        )
+
+        import time as _t
+        base = _t.time() + 3600
+        self._seed("a", 100.0, base + 300)
+        self._seed("b", 100.0, base + 100)  # soonest
+        self._seed("c", 100.0, base + 500)
+
+        seen: list[str] = []
+
+        def fn(pid: str) -> CallOutcome:
+            seen.append(pid)
+            return CallOutcome(success=True)
+
+        out = dispatch_with_combo("fb", fn)
+        assert isinstance(out, QueueExhausted)
+        assert out.retry_after == base + 100
+        assert seen == []  # every member skipped, fn never called
+
+    def test_low_member_demoted_below_ok(self, combos_env: Path):
+        # OK/UNKNOWN order before LOW: 'a' is LOW (95%), 'b'/'c' OK -> the
+        # fallback order [a,b,c] is stably repartitioned to [b,c,a] so the
+        # first served provider is 'b', not the demoted 'a'.
+        from fno.adapters.providers.rotation import (
+            CallOutcome,
+            dispatch_with_combo,
+        )
+
+        import time as _t
+        future = _t.time() + 3600
+        self._seed("a", 95.0, future)  # LOW (>= default 90 threshold)
+        self._seed("b", 10.0, future)  # OK
+        self._seed("c", 10.0, future)  # OK
+
+        seen: list[str] = []
+
+        def fn(pid: str) -> CallOutcome:
+            seen.append(pid)
+            return CallOutcome(success=True, payload=pid)
+
+        out = dispatch_with_combo("fb", fn)
+        assert isinstance(out, CallOutcome)
+        assert out.payload == "b"
+        assert seen == ["b"]
+
+    def test_no_snapshots_is_unchanged_order(self, combos_env: Path):
+        # Locked Decision 9 / backward-compat: with no usage data every member
+        # is UNKNOWN (rank 0), so the fallback order [a,b,c] is preserved.
+        from fno.adapters.providers.rotation import (
+            CallOutcome,
+            dispatch_with_combo,
+        )
+
+        seen: list[str] = []
+
+        def fn(pid: str) -> CallOutcome:
+            seen.append(pid)
+            return CallOutcome(success=True, payload=pid)
+
+        out = dispatch_with_combo("fb", fn)
+        assert isinstance(out, CallOutcome)
+        assert seen == ["a"]
