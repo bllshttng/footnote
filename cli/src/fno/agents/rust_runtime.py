@@ -628,6 +628,16 @@ def make_agents_group_cls() -> type:
         def make_context(self, info_name, args, parent=None, **extra):  # type: ignore[no-untyped-def]
             if args and args[0] not in ("-h", "--help"):
                 verb = args[0]
+                # config.agents.defaults injection runs at the seam, BEFORE the
+                # route/fork, so a bare `spawn` inherits the operator's defaults
+                # on both the Rust route and the Python dispatch (x-de9d US8).
+                # A bad config never bricks spawning: the helper returns args
+                # unchanged on a load failure (an unknown config provider still
+                # exits 2 by design).
+                if verb == "spawn":
+                    from fno.agents.spawn_defaults import inject_spawn_defaults
+
+                    args = inject_spawn_defaults(args)
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any

@@ -70,6 +70,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `target.defaults.max_iterations` | int | `40` | advanced | Session-input default: max pipeline iterations. |
 | `agents.a2a.auto` | bool | `true` | advanced | Allow agents to auto-open agent-to-agent threads. |
 | `agents.a2a.turn_ceiling` | int | `6` | advanced | Max turns in an agent-to-agent thread. |
+| `agents.defaults.provider` | str | `` | advanced | Default provider for bare `fno agents spawn` / `/agent spawn` (claude/codex/gemini/agy/opencode); an explicit -p flag wins, empty = unset (harness inference then claude). Validated at the spawn seam. |
+| `agents.defaults.model` | str | `` | advanced | Default model for bare spawns, forwarded as --model; an explicit -m flag wins, empty = unset (provider default). Passthrough (provider CLIs own model names). |
+| `agents.defaults.effort` | str | `` | advanced | Default reasoning effort for bare spawns (minimal|low|medium|high|xhigh|max); an explicit --effort wins, empty = unset. Config-sourced effort degrades open on providers with no effort surface (gemini/agy). |
 | `agents.confirm` | str | `auto` | never | Agent-launch confirmation policy (auto/always/never). |
 | `agents.dead_row_grace` | int | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
 | `agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
