@@ -127,3 +127,4 @@
 {"expect":"invalid","reason":"non-string source rejected cleanly not TypeError (x-2901)","event":{"ts":"2026-07-10T12:00:05Z","type":"agent_spawned","source":123,"data":{}}}
 {"expect":"valid","reason":"quota_deferred happy path (x-5d3e)","event":{"ts":"2026-07-11T17:00:00Z","type":"quota_deferred","source":"backlog","data":{"node_id":"ab-2222bbbb","provider":"claude-primary","headroom":"exhausted","retry_at":1789000000.0}}}
 {"expect":"valid","reason":"advance_skipped quota-deferred reason (x-5d3e)","event":{"ts":"2026-07-11T17:00:01Z","type":"advance_skipped","source":"backlog","data":{"reason":"quota-deferred","node_id":"ab-3333cccc","provider":"claude-primary","retry_at":1789000000.0}}}
+{"expect":"valid","reason":"quota_required_bot_exhausted (x-5d3e)","event":{"ts":"2026-07-11T17:00:02Z","type":"quota_required_bot_exhausted","source":"target","data":{"bot":"chatgpt-codex-connector","provider":"codex-pro","headroom":"exhausted","retry_at":1789000000.0}}}

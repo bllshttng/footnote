@@ -179,6 +179,122 @@ def usage_providers(
 
 
 # ---------------------------------------------------------------------------
+# required-bot-check (quota-aware dispatch, x-5d3e US5)
+# ---------------------------------------------------------------------------
+
+# Map a required-bot GitHub login (substring match) to the provider CLI kind
+# that backs it, so we can look up that provider's headroom. Advisory only: an
+# unmappable bot is silently skipped (fail-open).
+_REQUIRED_BOT_CLI: dict[str, str] = {
+    "codex": "codex",   # chatgpt-codex-connector
+    "gemini": "gemini",  # gemini-code-assist
+    "claude": "claude",
+}
+
+
+def _bot_provider_cli(bot: str) -> Optional[str]:
+    low = bot.lower()
+    for needle, cli_kind in _REQUIRED_BOT_CLI.items():
+        if needle in low:
+            return cli_kind
+    return None
+
+
+def required_bot_headroom_check() -> list[dict]:
+    """Return one dict per required-bot whose provider is EXHAUSTED.
+
+    Read-only + fail-open (x-5d3e US5): reads the CACHED snapshot only (never
+    probes at promise time), unions config.review.github_apps + required_bots,
+    maps each bot to a provider record via its CLI kind, and reports those whose
+    headroom is EXHAUSTED. Any read failure yields an empty list - a telemetry
+    read must never block a promise. Each returned dict emits one
+    ``quota_required_bot_exhausted`` decision event as a side effect (AC3-HP).
+    """
+    try:
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+        from fno.config import load_settings
+
+        settings = load_settings()
+        review = settings.review
+        bots = list(dict.fromkeys([*(review.github_apps or []), *(review.required_bots or [])]))
+        if not bots:
+            return []
+        config = load_providers(repo_root=_get_repo_root())
+        by_cli: dict[str, list[str]] = {}
+        for rec in config.records:
+            by_cli.setdefault(rec.cli, []).append(rec.id)
+    except Exception:  # noqa: BLE001 - a promise-time read must never raise
+        return []
+
+    warnings: list[dict] = []
+    for bot in bots:
+        cli_kind = _bot_provider_cli(bot)
+        if cli_kind is None:
+            continue
+        for provider_id in by_cli.get(cli_kind, []):
+            try:
+                h = headroom(provider_id)
+            except Exception:  # noqa: BLE001
+                continue
+            if h.state is HeadroomState.EXHAUSTED:
+                warnings.append(
+                    {"bot": bot, "provider": provider_id, "retry_at": h.resets_at}
+                )
+                _emit_required_bot_exhausted(bot, provider_id, h.resets_at)
+                break  # one warning per bot is enough
+    return warnings
+
+
+def _emit_required_bot_exhausted(bot: str, provider: str, retry_at: Optional[float]) -> None:
+    """Emit the single decision event for a required-bot exhaustion. Non-fatal."""
+    try:
+        from fno.events import _build, append_event
+
+        data: dict = {"bot": bot, "provider": provider, "headroom": "exhausted"}
+        if retry_at is not None:
+            data["retry_at"] = retry_at
+        append_event(_build("quota_required_bot_exhausted", "target", data))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@cli.command("required-bot-check")
+def required_bot_check_cmd(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON list of exhausted required-bot providers."
+    ),
+) -> None:
+    """Warn (pre-promise) if a required review bot's provider is out of quota.
+
+    Read-only, advisory, exit 0 always: names each exhausted bot/provider and
+    the reset time so a coming review-gate wedge surfaces now instead of hours
+    later. Prints nothing when every required bot has headroom (or none are
+    configured). The attended <help> tag is raised by the target skill.
+    """
+    import json as _json
+
+    warnings = required_bot_headroom_check()
+    if json_output:
+        typer.echo(_json.dumps(warnings))
+        return
+    if not warnings:
+        return
+    now = _resolve_time()
+    for w in warnings:
+        reset = _fmt_resets_in(w["retry_at"], now) if w.get("retry_at") else "unknown"
+        typer.echo(
+            f"required-bot {w['bot']}: provider {w['provider']} EXHAUSTED, "
+            f"review gate will wedge until reset ({reset})"
+        )
+
+
+def _resolve_time() -> float:
+    import time as _time
+
+    return _time.time()
+
+
+# ---------------------------------------------------------------------------
 # show
 # ---------------------------------------------------------------------------
 

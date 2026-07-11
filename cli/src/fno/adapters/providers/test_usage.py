@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.adapters.providers import loader
 from fno.adapters.providers.error_taxonomy import ErrorRule
 from fno.adapters.providers.model import ProviderRecord
 from fno.adapters.providers.runtime_state import (
@@ -247,7 +248,6 @@ class TestHeadroom:
 
 class TestEvaluateQuotaDefer:
     def _quota(self, monkeypatch, **kw) -> None:
-        from fno.adapters.providers import loader
         from fno.adapters.providers.model import QuotaConfig
 
         cfg = QuotaConfig(**kw)
@@ -299,7 +299,6 @@ class TestEvaluateQuotaDefer:
         # which never defers -> the next tick dispatches (deferral cannot outlive
         # the evidence). No fresh snapshot -> UNKNOWN -> None. refresh_usage will
         # try to probe; with no provider record it returns None, staying UNKNOWN.
-        from fno.adapters.providers import loader
         from fno.adapters.providers.model import ProvidersConfig
         from fno.adapters.providers.runtime_state import evaluate_quota_defer
 
@@ -316,7 +315,6 @@ class TestDispatchOneQuotaDefer:
         # exhausted node with a visible receipt AND one decision event.
         import json as _json
 
-        from fno.adapters.providers import loader
         from fno.adapters.providers.model import QuotaConfig
         import fno.dispatch as dispatch_mod
 
@@ -350,7 +348,6 @@ class TestDispatchOneQuotaDefer:
         # LD#5: an explicit --node dispatch is a human verb and always fires,
         # so it must not even consult quota. Proven by making the dispatch reach
         # the spawn boundary (patched to a sentinel outcome).
-        from fno.adapters.providers import loader
         from fno.adapters.providers.model import QuotaConfig
         import fno.dispatch as dispatch_mod
 
@@ -369,3 +366,68 @@ class TestDispatchOneQuotaDefer:
         monkeypatch.setattr(dispatch_mod, "_claim_is_live", lambda key: True)
         verdict = dispatch_mod._dispatch_one(session="s", node="ab-77", project=None)
         assert verdict["outcome"] != "quota-deferred"
+
+
+# ---------------------------------------------------------------------------
+# Required-bot promise-time exhaustion warning (US5: AC3-HP)
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredBotHeadroomCheck:
+    def test_exhausted_required_bot_warns_and_emits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+        import time as _t
+        from types import SimpleNamespace
+
+        from fno.adapters.providers import cli as pcli
+        from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
+
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+        monkeypatch.chdir(tmp_path)
+        # Config: one required bot backed by codex.
+        review = SimpleNamespace(github_apps=["chatgpt-codex-connector"], required_bots=None)
+        monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: SimpleNamespace(review=review))
+        rec = ProviderRecord(id="codex-pro", name="Codex", cli="codex", auth="api_key", env={"OPENAI_API_KEY": "x"})
+        monkeypatch.setattr(pcli, "load_providers", lambda *a, **k: ProvidersConfig(records=[rec]))
+        monkeypatch.setattr(pcli, "_get_repo_root", lambda: tmp_path)
+
+        now = _t.time()
+        write_usage_snapshot(_snap("codex-pro", UsageWindow("5h", 100.0, now + 3600), probed_at=now), now=now)
+
+        warnings = pcli.required_bot_headroom_check()
+        assert len(warnings) == 1
+        assert warnings[0]["bot"] == "chatgpt-codex-connector"
+        assert warnings[0]["provider"] == "codex-pro"
+        # AC3-HP: one decision event emitted naming bot + provider + reset.
+        rows = [
+            _json.loads(l)
+            for l in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
+            if l.strip()
+        ]
+        ev = [r for r in rows if r["type"] == "quota_required_bot_exhausted"]
+        assert len(ev) == 1
+        assert ev[0]["data"]["bot"] == "chatgpt-codex-connector"
+        assert ev[0]["data"]["retry_at"] == now + 3600
+
+    def test_healthy_required_bot_is_quiet(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as _t
+        from types import SimpleNamespace
+
+        from fno.adapters.providers import cli as pcli
+        from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
+
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+        monkeypatch.chdir(tmp_path)
+        review = SimpleNamespace(github_apps=["chatgpt-codex-connector"], required_bots=None)
+        monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: SimpleNamespace(review=review))
+        rec = ProviderRecord(id="codex-pro", name="Codex", cli="codex", auth="api_key", env={"OPENAI_API_KEY": "x"})
+        monkeypatch.setattr(pcli, "load_providers", lambda *a, **k: ProvidersConfig(records=[rec]))
+        monkeypatch.setattr(pcli, "_get_repo_root", lambda: tmp_path)
+
+        now = _t.time()
+        write_usage_snapshot(_snap("codex-pro", UsageWindow("5h", 20.0, now + 3600), probed_at=now), now=now)
+        assert pcli.required_bot_headroom_check() == []
