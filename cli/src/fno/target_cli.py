@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -729,6 +730,62 @@ def _is_linked_worktree(cwd: Path) -> bool:
     return _abs(gdir) != _abs(common)
 
 
+def _foreign_live_holder(node_id: str) -> Optional[dict]:
+    """Claim info for ``node:<id>`` iff a DIFFERENT live/suspect session holds
+    it, else None (free / dead / ours).
+
+    Read-only and never raises: any probe failure degrades to None so ``start``
+    behaves exactly as before the guard when the claim system is unreadable.
+    Liveness is pid-based (``classify``), so a busy owner whose TTL lapsed still
+    reads live - that is what lets the caller park a second session instead of
+    telling it the owner went idle.
+    """
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+    from fno.claims.session_pid import resolve_session_pid
+
+    # node: claims live under $HOME, not the default root -- claims_root_for(key)
+    # routes there; a bare claim_status(key) would read the wrong tree as free.
+    key = f"node:{node_id}"
+    try:
+        info = claim_status(key, root=claims_root_for(key))
+    except Exception:
+        return None
+    if info.get("state") not in ("live", "suspect"):
+        return None
+    # Ours by declared identity (driver-run sessions set TARGET_SESSION_ID).
+    tsid = os.environ.get("TARGET_SESSION_ID")
+    if tsid and info.get("holder") == f"target-session:{tsid}":
+        return None
+    # Ours by durable session pid + host (a bare interactive re-run with no TSID).
+    # An uncapturable own pid on a live foreign-looking claim reads as foreign
+    # (park, never share) -- the conservative direction.
+    try:
+        own_pid = resolve_session_pid(from_pid=os.getpid())
+    except Exception:
+        own_pid = None
+    if own_pid and info.get("pid") == own_pid and info.get("host") == socket.gethostname():
+        return None
+    return info  # foreign + live/suspect -> caller refuses
+
+
+def _print_foreign_holder_park(node_id: str, info: dict, wt_path: Path) -> None:
+    """Loud park naming the live holder so a second session does not assume the
+    node went idle. Both start exits call this so the message is identical."""
+    holder = info.get("holder", "unknown")
+    pid = info.get("pid", "?")
+    host = info.get("host", "?")
+    typer.echo(
+        f"fno target start: node {node_id} is held by a live session\n"
+        f"  {holder} (pid={pid}, host={host}).\n"
+        f"  Refusing to share its worktree at {wt_path} "
+        f"(would corrupt a shared git index).\n"
+        f"  If this is your session, cd {wt_path} to continue it;\n"
+        f"  otherwise wait for it to release the claim, or pick another node.",
+        err=True,
+    )
+
+
 @target_app.command()
 def start(
     node: str = typer.Argument(
@@ -763,8 +820,15 @@ def start(
     """
     cwd = Path.cwd()
 
-    # Boundary: already isolated -> no-op, create nothing (x-45e6 case).
+    # Boundary: already isolated -> no-op, create nothing (x-45e6 case). But
+    # first refuse if a DIFFERENT live session holds this node's claim: this cwd
+    # is that session's worktree and sharing its git index corrupts the build.
     if _is_linked_worktree(cwd):
+        node_id = _resolve_node_id(node)
+        holder = _foreign_live_holder(node_id)
+        if holder is not None:
+            _print_foreign_holder_park(node_id, holder, cwd)
+            raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
         return
 
@@ -822,6 +886,12 @@ def start(
     manifest = wt_path / ".fno" / "target-state.md"
     fno_state = "healed" if healed else "ok"
     if manifest.exists() and not manifest.is_symlink():
+        # A manifest means init ran, so the claim is set - refuse if a DIFFERENT
+        # live session owns it rather than presenting its worktree as usable.
+        holder = _foreign_live_holder(node)
+        if holder is not None:
+            _print_foreign_holder_park(node, holder, wt_path)
+            raise typer.Exit(code=1)
         typer.echo(
             f"worktree={wt_path}  .fno={fno_state}  base=origin/main  "
             f"node=already-claimed"

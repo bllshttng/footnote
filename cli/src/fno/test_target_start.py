@@ -72,6 +72,8 @@ def test_resolve_node_id_freetext_fallthrough(monkeypatch):
 # ------------------------------- no-op branch ----------------------------- #
 def test_already_isolated_is_noop(monkeypatch):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
     spawned = []
     monkeypatch.setattr(
         target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
@@ -383,3 +385,181 @@ def test_model_reachable_by_conservative_on_unknown(monkeypatch):
     assert target_cli._model_reachable_by("gpt-5.4", "claude") is False
     assert target_cli._model_reachable_by("claude-sonnet-5", "claude") is True
     assert target_cli._model_reachable_by("some-unmapped-model", "claude") is True
+
+
+# ================= ownership guard: refuse a foreign live session (x-84fc) =====
+# _foreign_live_holder unit tests -------------------------------------------- #
+def _wire_claim(monkeypatch, status, *, own_pid=None):
+    monkeypatch.setattr("fno.claims.core.claim_status", lambda key, root=None: status)
+    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: own_pid
+    )
+
+
+def test_foreign_live_holder_free_returns_none(monkeypatch):
+    # AC2-ERR: a free claim -> proceed.
+    _wire_claim(monkeypatch, {"key": "node:N", "state": "free"})
+    assert target_cli._foreign_live_holder("N") is None
+
+
+def test_foreign_live_holder_dead_returns_none(monkeypatch):
+    # AC2-ERR: stale/dead is not live/suspect -> proceed unchanged.
+    _wire_claim(
+        monkeypatch,
+        {"key": "node:N", "state": "stale", "holder": "target-session:A"},
+    )
+    assert target_cli._foreign_live_holder("N") is None
+
+
+def test_foreign_live_holder_different_live_returns_info(monkeypatch):
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:A", "pid": 999, "host": "h",
+    }
+    _wire_claim(monkeypatch, status, own_pid=123)  # own pid != holder pid
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    assert target_cli._foreign_live_holder("N") == status
+
+
+def test_foreign_live_holder_suspect_cross_host_returns_info(monkeypatch):
+    # A suspect holder (live-on-another-host) folds into refuse.
+    status = {
+        "key": "node:N", "state": "suspect",
+        "holder": "target-session:A", "pid": 999, "host": "other",
+    }
+    _wire_claim(monkeypatch, status, own_pid=None)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    assert target_cli._foreign_live_holder("N") == status
+
+
+def test_foreign_live_holder_lapsed_ttl_still_live(monkeypatch):
+    # AC1-EDGE: classify() returns "live" from the durable pid even with TTL
+    # lapsed -> the guard still surfaces the holder (park, not "idle").
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:A", "pid": 999, "host": "h",
+    }
+    _wire_claim(monkeypatch, status, own_pid=None)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    assert target_cli._foreign_live_holder("N") == status
+
+
+def test_foreign_live_holder_ours_by_tsid(monkeypatch):
+    # AC1-ERR: same-session identity by TARGET_SESSION_ID -> not foreign.
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:X", "pid": 1, "host": "h",
+    }
+    _wire_claim(monkeypatch, status)
+    monkeypatch.setenv("TARGET_SESSION_ID", "X")
+    assert target_cli._foreign_live_holder("N") is None
+
+
+def test_foreign_live_holder_ours_by_pid_host(monkeypatch):
+    # Bare interactive re-run: durable pid + host match -> not foreign.
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:Z", "pid": 555, "host": "myhost",
+    }
+    _wire_claim(monkeypatch, status, own_pid=555)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.setattr(target_cli.socket, "gethostname", lambda: "myhost")
+    assert target_cli._foreign_live_holder("N") is None
+
+
+def test_foreign_live_holder_probe_error_degrades_none(monkeypatch):
+    # AC1-FR: claim_status raising -> None (never blocks a legit start).
+    def boom(key, root=None):
+        raise RuntimeError("corrupt claim file")
+
+    monkeypatch.setattr("fno.claims.core.claim_status", boom)
+    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
+    assert target_cli._foreign_live_holder("N") is None
+
+
+def test_foreign_live_holder_uncapturable_pid_parks(monkeypatch):
+    # AC2-FR: own pid None + no TSID + foreign live -> return info (park).
+    status = {
+        "key": "node:N", "state": "live",
+        "holder": "target-session:A", "pid": 999, "host": "h",
+    }
+    _wire_claim(monkeypatch, status, own_pid=None)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    assert target_cli._foreign_live_holder("N") == status
+
+
+def test_foreign_live_holder_freetext_reads_free(monkeypatch):
+    # AC2-EDGE: a free-text arg keys node:<text>, reads free, never false-refuses.
+    seen = {}
+
+    def status(key, root=None):
+        seen["key"] = key
+        return {"key": key, "state": "free"}
+
+    monkeypatch.setattr("fno.claims.core.claim_status", status)
+    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
+    assert target_cli._foreign_live_holder("fix the login bug") is None
+    assert seen["key"] == "node:fix the login bug"
+
+
+# manifest-present exit (Site B) --------------------------------------------- #
+def test_manifest_present_foreign_holder_refuses(monkeypatch, tmp_path):
+    # AC1-HP: foreign live holder at the manifest-present exit -> park, exit 1.
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    init_calls = _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(
+        target_cli, "_foreign_live_holder",
+        lambda nid: {"holder": "target-session:A", "pid": 4321, "host": "boxA"},
+    )
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 1
+    assert "target-session:A" in result.output
+    assert "pid=4321" in result.output
+    assert "boxA" in result.output
+    assert "node=already-claimed" not in result.output
+    assert init_calls == []  # never proceeds into a shared worktree
+
+
+def test_manifest_present_own_rerun_proceeds(monkeypatch, tmp_path):
+    # AC1-ERR: guard returns None (ours/dead) -> today's already-claimed receipt.
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0
+    assert "node=already-claimed" in result.output
+
+
+# already-isolated exit (Site A) --------------------------------------------- #
+def test_already_isolated_foreign_holder_refuses(monkeypatch):
+    # AC2-HP: cwd is a foreign live session's worktree -> park, exit 1.
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli, "_foreign_live_holder",
+        lambda nid: {"holder": "target-session:A", "pid": 4321, "host": "boxA"},
+    )
+    spawned = []
+    monkeypatch.setattr(
+        target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
+    )
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 1
+    assert "target-session:A" in result.output
+    assert "already isolated" not in result.output
+    assert spawned == []  # never created/entered anything
+
+
+# shared park-message printer (Site 1.4) ------------------------------------- #
+def test_park_message_names_holder_pid_host_worktree(capsys):
+    info = {"holder": "target-session:A", "pid": 4321, "host": "boxA"}
+    target_cli._print_foreign_holder_park("x-84fc", info, Path("/wt/x-84fc"))
+    err = capsys.readouterr().err
+    assert "x-84fc" in err  # node id
+    assert "target-session:A" in err  # holder
+    assert "pid=4321" in err  # pid
+    assert "boxA" in err  # host
+    assert "/wt/x-84fc" in err  # worktree path
