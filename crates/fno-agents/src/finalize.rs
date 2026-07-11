@@ -274,7 +274,10 @@ fn append_envelope(path: &Path, envelope: &Value) {
     match fs::OpenOptions::new().create(true).append(true).open(path) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(line.as_bytes()) {
-                eprintln!("finalize: run_summary write to {} failed: {e}", path.display());
+                eprintln!(
+                    "finalize: run_summary write to {} failed: {e}",
+                    path.display()
+                );
             }
         }
         Err(e) => eprintln!("finalize: run_summary open {} failed: {e}", path.display()),
@@ -346,7 +349,14 @@ fn emit_run_summary(
 fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
     let mut cmd = Command::new("fno");
     cmd.args([
-        "event", "push-parent", "--type", "run_summary", "--run", run, "--reason", reason,
+        "event",
+        "push-parent",
+        "--type",
+        "run_summary",
+        "--run",
+        run,
+        "--reason",
+        reason,
     ]);
     if let Some(n) = node {
         cmd.args(["--node", n]);
@@ -2494,10 +2504,17 @@ mod tests {
             "{\"type\":\"task_started\",\"run\":\"R9\",\"data\":{}}\n",
         )
         .unwrap();
-        emit_run_summary(&events, &events, "R9", Some("prj-0001"), true, "DonePRGreen", None);
+        emit_run_summary(
+            &events,
+            &events,
+            "R9",
+            Some("prj-0001"),
+            true,
+            "DonePRGreen",
+            None,
+        );
         let content = fs::read_to_string(&events).unwrap();
-        let last: Value =
-            serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        let last: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
         assert_eq!(last["type"], "run_summary");
         assert_eq!(last["v"], 1);
         assert_eq!(last["run"], "R9");
