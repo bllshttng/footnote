@@ -46,6 +46,76 @@ def _detect_source(state_path: Path) -> str:
     return "test"
 
 
+def _read_manifest_fields(state_path: Path) -> dict[str, str]:
+    """Best-effort parse of ``session_id`` + ``graph_node_id`` from a
+    target-state.md. Substring scan (not a YAML parse) to stay cheap; a missing
+    or unreadable manifest yields ``{}`` so the caller falls back to flags only.
+    """
+    fields: dict[str, str] = {}
+    try:
+        text = state_path.read_text(encoding="utf-8")
+    except OSError:
+        return fields
+    for line in text.splitlines():
+        stripped = line.strip()
+        for key in ("session_id", "graph_node_id"):
+            prefix = f"{key}:"
+            if stripped.startswith(prefix):
+                val = stripped[len(prefix):].strip().strip('"').strip()
+                if val and val != "null":
+                    fields.setdefault(key, val)
+    return fields
+
+
+def _stamp_protocol_envelope(
+    state_path: Path,
+    *,
+    node: Optional[str],
+    task: Optional[str],
+    run: Optional[str],
+    parent: Optional[str],
+    outcome: Optional[str],
+    project: Optional[str],
+) -> dict:
+    """Assemble the extended-envelope fields for an x-dbaf status-breakpoint
+    event. Work coordinates fall back to the manifest; identity (from/model) is
+    stamped ONLY for a real session producer and omitted entirely otherwise
+    (a bare-shell producer never fakes an empty handle). ``None`` values are
+    dropped by ``_build`` so 'omit' means absent, not null.
+    """
+    from fno.events import PROTOCOL_FAMILY_VERSION
+
+    manifest = _read_manifest_fields(state_path)
+    env: dict = {
+        "v": PROTOCOL_FAMILY_VERSION,
+        "run": run or manifest.get("session_id"),
+        "node": node or manifest.get("graph_node_id"),
+        "task": task,
+        "parent": parent,
+        "outcome": outcome,
+        "project": project,
+    }
+    # Identity: session producers only. resolve_harness_identity() returns no
+    # session for cron / CI / a bare shell, so from/model stay unset there.
+    try:
+        from fno.agents.self_stamp import resolve_self_model
+        from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+        ident = resolve_harness_identity()
+        if ident.session_id and ident.harness:
+            env["from"] = canonical_handle(ident.harness, ident.session_id)
+            env["model"] = resolve_self_model()
+    except Exception:
+        pass
+    try:
+        import socket
+
+        env["host"] = socket.gethostname() or None
+    except Exception:
+        pass
+    return env
+
+
 @cli.command()
 def emit(
     ctx: typer.Context,
@@ -55,6 +125,24 @@ def emit(
         "--data",
         "-d",
         help="JSON object string for the event's data envelope",
+    ),
+    node: Optional[str] = typer.Option(
+        None, "--node", help="backlog node id (x-dbaf family; envelope coordinate)"
+    ),
+    task: Optional[str] = typer.Option(
+        None, "--task", help="task id within the plan (x-dbaf family; envelope coordinate)"
+    ),
+    run: Optional[str] = typer.Option(
+        None, "--run", help="target-run id, the dedup identity (x-dbaf family; manifest fallback)"
+    ),
+    parent: Optional[str] = typer.Option(
+        None, "--parent", help="parent spawn-lineage handle (x-dbaf family; when spawned)"
+    ),
+    outcome: Optional[str] = typer.Option(
+        None, "--outcome", help="return-contract outcome (x-dbaf family; task_done/run_summary only)"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", help="project the work belongs to (x-dbaf family; envelope coordinate)"
     ),
     payload: Optional[str] = typer.Option(
         None,
@@ -86,7 +174,7 @@ def emit(
     # Lazy imports keep top-level `fno --help` cold-path fast and avoid
     # paying PyYAML schema-load cost when the user is invoking an
     # unrelated subcommand.
-    from fno.events import _build, append_event, ValidationError
+    from fno.events import _build, append_event, PROTOCOL_FAMILY_TYPES, ValidationError
 
     if data is not None and payload is not None:
         typer.echo(
@@ -133,8 +221,20 @@ def emit(
     resolved_state = state_path if state_path is not None else default_state
     resolved_source = source if source is not None else _detect_source(resolved_state)
 
+    envelope = None
+    if type_ in PROTOCOL_FAMILY_TYPES:
+        envelope = _stamp_protocol_envelope(
+            resolved_state,
+            node=node,
+            task=task,
+            run=run,
+            parent=parent,
+            outcome=outcome,
+            project=project,
+        )
+
     try:
-        event = _build(type_, resolved_source, data_dict)
+        event = _build(type_, resolved_source, data_dict, envelope=envelope)
     except ValidationError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)
