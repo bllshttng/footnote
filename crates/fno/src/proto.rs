@@ -123,11 +123,13 @@ use crate::tree::{Dir, Rect, TabId};
 /// v23: `AgentRow.seen` - server-side per-pane seen bit (x-4328), set when the
 /// operator focuses a `Done` pane, cleared when it leaves `Done`; distinguishes
 /// a looked-at finished agent (`Idle`) from one still surfaced (`DoneUnseen`).
-/// v24: `AgentRow.tab` - the `TabId` hosting a pane-hosted row (x-0090), so the
-/// agents-first sideline renders a tab-ordinal suffix (client derives the
-/// ordinal from the Layout). `#[serde(default)]` keeps a v23 reader
-/// wire-tolerant. Parallel-branch hazard: if another mux branch takes v24
-/// first, the second-to-merge re-bumps (same rule as the v17/v18/v20 churn).
+/// v24 (x-0090, agents-first sideline): `AgentRow.tab` - the `TabId` hosting a
+/// pane-hosted row, so the sideline renders a tab-ordinal suffix (client derives
+/// the ordinal from the Layout); `AgentRow.cwd_base` - the cwd basename of an
+/// orphan watch-only row, for the ` (basename)` suffix under `~ elsewhere`. Both
+/// `#[serde(default)]`, keeping a v23 reader wire-tolerant. Parallel-branch
+/// hazard: if another mux branch takes v24 first, the second-to-merge re-bumps
+/// (same rule as the v17/v18/v20 churn).
 pub const PROTO_VERSION: u32 = 24;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
