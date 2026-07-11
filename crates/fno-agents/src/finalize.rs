@@ -337,6 +337,25 @@ fn emit_run_summary(
     }
 }
 
+/// Push leg for run_summary (x-dbaf): notify the parent handle. run_summary
+/// emits natively above, so the push shells the Python resolver (`fno event
+/// push-parent`) rather than reimplementing registry lookup + mail in Rust.
+/// Best-effort: a missing `fno` / no spawn lineage is a silent skip; the
+/// events.jsonl line already landed independently (AC1-FR). `fno` (not a bare
+/// interpreter) is safe to shell - a PATH miss just skips.
+fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
+    let mut cmd = Command::new("fno");
+    cmd.args([
+        "event", "push-parent", "--type", "run_summary", "--run", run, "--reason", reason,
+    ]);
+    if let Some(n) = node {
+        cmd.args(["--node", n]);
+    }
+    if let Err(e) = cmd.output() {
+        eprintln!("finalize: run_summary parent push skipped (non-fatal): {e}");
+    }
+}
+
 // ── public entry ────────────────────────────────────────────────────────────
 
 /// `fno-agents finalize ...`. Returns a process exit code: 0 for the normal
@@ -596,6 +615,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         &reason,
         run_summary_pr.as_deref(),
     );
+    push_run_summary_to_parent(&session_id, m.graph_node_id.as_deref(), &reason);
 
     // ── emit terminal event ────────────────────────────────────────────────
     let mut data = json!({

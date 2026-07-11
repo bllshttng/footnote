@@ -121,6 +121,99 @@ def _stamp_protocol_envelope(
     return env
 
 
+def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
+    """Resolve the parent spawn-lineage handle, or None (no lineage -> no push).
+
+    An explicit ``--parent`` wins. Otherwise best-effort: find this session's
+    own registry row and read its ``spawned_by_*`` edge. Any miss (no ambient
+    identity, no row, no edge, malformed registry) returns None so the push
+    silently skips - a top-level target has no parent and must not push.
+    """
+    if explicit:
+        return explicit
+    try:
+        from fno.agents.registry import load_registry
+        from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+        ident = resolve_harness_identity()
+        if not (ident.session_id and ident.harness):
+            return None
+        my_handle = canonical_handle(ident.harness, ident.session_id)
+        for entry in load_registry():
+            if entry.name == my_handle:
+                if entry.spawned_by_session and entry.spawned_by_harness:
+                    return canonical_handle(entry.spawned_by_harness, entry.spawned_by_session)
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def _push_to_parent(
+    parent: str,
+    *,
+    event_type: str,
+    run: Optional[str],
+    node: Optional[str],
+    reason: Optional[str],
+) -> bool:
+    """Push a blocked/run_summary notice to the parent via ``fno mail send``.
+
+    `fno mail send` writes the envelope durably BEFORE attempting live delivery,
+    so the push is at-least-once for free (AC1-FR); the events.jsonl record was
+    already written independently by the caller. Non-fatal: any failure logs one
+    stderr note and returns False.
+    """
+    msg = f"[fno:{event_type}] run={run or '?'}"
+    if node:
+        msg += f" node={node}"
+    if reason:
+        msg += f": {reason}"
+    try:
+        result = subprocess.run(
+            ["fno", "mail", "send", parent, msg],
+            check=False, capture_output=True, timeout=20,
+        )
+    except FileNotFoundError:
+        typer.echo("push: note: fno unavailable, skipped parent push", err=True)
+        return False
+    except Exception as exc:  # noqa: BLE001 - push must never wedge the emit
+        typer.echo(f"push: note: parent push failed (non-fatal): {exc}", err=True)
+        return False
+    if result.returncode != 0:
+        typer.echo(
+            f"push: note: parent push failed (non-fatal): "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}",
+            err=True,
+        )
+        return False
+    return True
+
+
+@cli.command("push-parent")
+def push_parent(
+    event_type: str = typer.Option(..., "--type", "-t", help="blocked | run_summary"),
+    run: Optional[str] = typer.Option(None, "--run", help="target-run id referenced in the notice"),
+    node: Optional[str] = typer.Option(None, "--node", help="backlog node id"),
+    reason: Optional[str] = typer.Option(None, "--reason", help="one-line reason / termination"),
+    parent: Optional[str] = typer.Option(None, "--parent", help="explicit parent handle (else registry-resolved)"),
+) -> None:
+    """Push a status-breakpoint notice to the parent handle (x-dbaf push leg).
+
+    The Rust ``finalize`` shells this for ``run_summary`` (it emits the
+    events.jsonl line natively, so it cannot ride the emit-CLI auto-push). No
+    spawn lineage -> silent skip. Always exits 0: the push is non-fatal and the
+    pull leg (events.jsonl) never depends on it.
+    """
+    handle = _resolve_parent_handle(parent)
+    if not handle:
+        typer.echo("push: no parent lineage; skipped")
+        raise typer.Exit(code=0)
+    ok = _push_to_parent(handle, event_type=event_type, run=run, node=node, reason=reason)
+    typer.echo("pushed" if ok else "push-skipped")
+    raise typer.Exit(code=0)
+
+
 @cli.command()
 def emit(
     ctx: typer.Context,
@@ -258,6 +351,22 @@ def emit(
     except Exception as exc:
         typer.echo(f"error: failed to append event: {exc}", err=True)
         raise typer.Exit(code=1)
+
+    # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
+    # lineage exists. Fired AFTER the durable append so the events.jsonl record
+    # is independent of the push (AC1-FR). No lineage -> silent skip.
+    # (run_summary is normally pushed by Rust finalize's native emit; a
+    # CLI-emitted one pushes here too for uniformity.)
+    if type_ in ("blocked", "run_summary"):
+        _parent = _resolve_parent_handle(parent)
+        if _parent:
+            _push_to_parent(
+                _parent,
+                event_type=type_,
+                run=event.get("run"),
+                node=event.get("node"),
+                reason=data_dict.get("reason") or data_dict.get("termination_reason"),
+            )
 
     json_mode = bool(ctx.obj and ctx.obj.get("json", False))
     if json_mode:
