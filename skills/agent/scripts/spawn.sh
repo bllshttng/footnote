@@ -80,8 +80,8 @@ while [[ $# -gt 0 ]]; do
     --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
-    --role)         ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --timeout)      TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -r|--role)      ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -t|--timeout)   TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     # Pass-through cwd flags (ab-77b691dc): forwarded to `fno agents spawn` so a
     # target-class dispatcher can request canonical-root cwd. NOT defaulted here:
     # plain interactive ask/host/spawn keep caller cwd unless asked (AC3).

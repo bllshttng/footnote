@@ -214,8 +214,12 @@ check_eq '--permission-mode -> permission_mode=bypassPermissions' "$(field "$out
 check_eq '--permission-mode -> status ok'   "$(field "$out" status)" 'ok'
 out="$(run 'ab-99999999' --role coordinate)"
 check_eq '--role coordinate -> role=coordinate' "$(field "$out" role)" 'coordinate'
+out="$(run 'ab-99999999' -r coordinate)"
+check_eq '-r coordinate -> role=coordinate' "$(field "$out" role)" 'coordinate'
 out="$(run 'ab-99999999' --timeout 900)"
 check_eq '--timeout 900 -> timeout=900'      "$(field "$out" timeout)" '900'
+out="$(run 'ab-99999999' -t 900)"
+check_eq '-t 900 -> timeout=900'             "$(field "$out" timeout)" '900'
 out="$(run 'ab-99999999' --fresh)"
 check_eq '--fresh -> fresh=1'                "$(field "$out" fresh)" '1'
 out="$(run 'ab-99999999' --here)"

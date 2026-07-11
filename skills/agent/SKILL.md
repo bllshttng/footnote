@@ -158,10 +158,10 @@ see below):
   passed straight to `fno agents spawn --permission-mode` (claude
   `default|acceptEdits|plan|bypassPermissions`; codex/gemini/opencode/agy mapped).
   Value validation is the CLI's (fail-closed), not the skill's.
-- **`--role <role>`** (optional): per-spawn model-routing role
+- **`-r`/`--role <role>`** (optional): per-spawn model-routing role
   (`coordinate|tidy|orient|consolidate` route to the secondary GLM; production
   roles stay primary). Model routing ONLY - it does not affect pane/layout.
-- **`--timeout <secs>`** (optional): per-spawn timeout, passed to `fno agents
+- **`-t`/`--timeout <secs>`** (optional): per-spawn timeout, passed to `fno agents
   spawn --timeout` (CLI default 600).
 - **`--fresh` / `--here`** (optional): `--fresh` resolves the worker cwd to the
   canonical main root; `--here`/`--in-place` opts out and keeps the caller cwd.

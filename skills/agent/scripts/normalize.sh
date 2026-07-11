@@ -88,8 +88,8 @@ while [[ $# -gt 0 ]]; do
     --provider)       PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --role)           ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --timeout)        TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -r|--role)        ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -t|--timeout)     TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --fresh)          FRESH=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     -m|--allow-merge) ALLOW_MERGE=1; shift ;;
@@ -261,7 +261,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--ask|-P|--project|-f|--force|--permission-mode|--role|--timeout|--fresh|--here|--in-place)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
