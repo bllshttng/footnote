@@ -116,6 +116,18 @@ def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
     assert json.loads(again.stdout.strip().splitlines()[-1]) == []
 
 
+def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, monkeypatch):
+    # The receive-path render must show each message's id (what `reply --to`
+    # correlates against) and the how-to, so a draining agent can answer.
+    monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
+    h = _seed_bus_message(to="codex-019f48e1", from_="claude-web", body="need a decision")
+
+    res = runner.invoke(app, ["mail", "drain-self"])  # human path (no --json)
+    assert res.exit_code == 0, res.output
+    assert f"id:{h.thread_id}" in res.output
+    assert "fno mail reply --to <id>" in res.output
+
+
 def test_drain_self_no_harness_env_is_noop(runner, mailbox, monkeypatch):
     for var in ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
                 "GEMINI_SESSION_ID"):

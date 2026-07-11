@@ -10,7 +10,7 @@ Commands:
     send           - publish a message to a peer or project (durable-first)
     unread         - list bus messages addressed to me past my cursor
     ack            - advance my read cursor
-    reply          - reply to a thread (thin wrapper for send --reply-to)
+    reply          - answer a message by id; name-lane -> back to its sender
     list           - list threads in own render (default: unread only)
     triage         - run LLM triage on a heads-up thread
     drain          - drain unread threads (per-kind dispatch)
@@ -1146,7 +1146,8 @@ def cmd_send(
         # control.sock (`mail-inject`); codex over the app-server daemon (US8). The
         # old claude->project re-route is gone; project anycast stays explicit via
         # --to-project. The body is <fno_mail>-wrapped with a truthful from/model
-        # so the recipient can reply with `fno mail send <from>`.
+        # so the recipient can reply by handle (`fno mail send <from>`) for a live
+        # message, or `fno mail reply --to <id>` when answering a drained one.
         if resolved is not None:
             # Live-inject-first with a durable floor addressed to the resolved
             # session's canonical handle. Shared with the name-lane reply path.
@@ -1210,6 +1211,7 @@ def cmd_unread(
     for m in msgs:
         excerpt = m.body.replace("\n", " ")[:100]
         print(f"{m.id}  {m.from_} -> {m.to}  [{m.kind}]  {excerpt}")
+    print('\nto answer one: fno mail reply --to <id> --body "..."')
 
 
 @mail_app.command("ack")
@@ -1304,8 +1306,14 @@ def cmd_drain_self(
     elif msgs:
         print(f"[fno mail] {len(msgs)} message(s) for {handle}:")
         for m in msgs:
-            print(f"\n--- from {m.from_} ({m.ts}) ---")
+            print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
             print(m.body.rstrip("\n"))
+        # This render is what a session sees on receive, so surface the id (which
+        # `reply --to` correlates against) and the how-to. Replying is optional --
+        # an FYI/broadcast needs none.
+        print(
+            '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
+        )
 
     # Inject-before-ack: advance the cursor to the last drained id only after
     # the bodies are out, so a crash re-surfaces rather than drops.
