@@ -1340,7 +1340,9 @@ def cmd_intake(
 def cmd_update(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     completed: bool = typer.Option(False, "--completed", help="Mark as completed"),
-    locked_by: Optional[str] = typer.Option(None, "--locked-by", help="Session ID ('null' to release)"),
+    locked_by: Optional[str] = typer.Option(None, "--locked-by", help="Lock owner id ('null' to release)"),
+    locked_by_harness: Optional[str] = typer.Option(None, "--locked-by-harness", help="Holder's harness/provider (claude|codex|gemini). 'null' clears."),
+    locked_by_harness_session: Optional[str] = typer.Option(None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."),
     has_brief: Optional[str] = typer.Option(None, "--has-brief", help="Set has_brief flag"),
     plan_path: Optional[str] = typer.Option(None, "--plan-path", help="Plan directory path"),
     pr_number: Optional[str] = typer.Option(None, "--pr-number", help="PR number"),
@@ -1577,6 +1579,15 @@ def cmd_update(
             if session is None:
                 node["locked_by_harness"] = None
                 node["locked_by_harness_session"] = None
+        # Harness stamp (US6): the holder's provider + harness-session UUID,
+        # settable alongside the claim. 'null' clears; an explicit unclaim above
+        # already cleared both.
+        if locked_by_harness is not None:
+            node["locked_by_harness"] = None if locked_by_harness == "null" else locked_by_harness
+        if locked_by_harness_session is not None:
+            node["locked_by_harness_session"] = (
+                None if locked_by_harness_session == "null" else locked_by_harness_session
+            )
         if has_brief is not None:
             node["has_brief"] = has_brief.lower() == "true"
         if plan_path is not None:

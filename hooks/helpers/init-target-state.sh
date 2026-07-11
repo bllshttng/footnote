@@ -1031,8 +1031,21 @@ PYEOF
     # lock-contended graph.json must not abort init (AC9-FR).
     if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
       _STAMP_LOG="$STATE_DIR/.init-claim.log"
-      if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" 2>"$_STAMP_LOG" >/dev/null \
-         || python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" 2>"$_STAMP_LOG" >/dev/null; then
+      # Harness stamp (US6): the holder's provider + harness-session UUID, so an
+      # operator/peek can jump from a node straight to `claude -r <uuid>`. The
+      # UUID prefers codex thread, then the claude transcript, then gemini.
+      _HARNESS_SESSION=""
+      if [[ -n "$_codex_thread_compact" ]]; then
+        _HARNESS_SESSION="$_codex_thread_raw"
+      elif [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
+        _HARNESS_SESSION="$claude_transcript_id"
+      elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
+        _HARNESS_SESSION="$GEMINI_SESSION_ID"
+      fi
+      _HARNESS_FLAGS="--locked-by-harness $PROVIDER"
+      [[ -n "$_HARNESS_SESSION" ]] && _HARNESS_FLAGS="$_HARNESS_FLAGS --locked-by-harness-session $_HARNESS_SESSION"
+      if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null \
+         || python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null; then
         rm -f "$_STAMP_LOG"
         echo "target: graph node $_NODE_ID lock stamped for $claim_owner_id" >&2
       else

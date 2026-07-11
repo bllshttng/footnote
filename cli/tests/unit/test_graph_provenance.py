@@ -151,6 +151,41 @@ def test_ac4_edge_provenance_survives_save_reload(tmp_path, monkeypatch):
     assert reloaded[0]["source_kind"] == "from_inbox"
 
 
+def test_us6_harness_stamp_written_and_cleared(tmp_path, monkeypatch):
+    """US6: `update --locked-by X --locked-by-harness ...` stamps the holder's
+    provider + harness UUID over a stale owner; --locked-by null clears all three."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{
+        "id": "ab-harnes01", "title": "t", "plan_path": "p.md",
+        "session_id": "stale-owner", "claimed_at": "2020-01-01T00:00:00Z",
+    }])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+
+    r = CliRunner().invoke(C.cli, [
+        "update", "ab-harnes01", "--locked-by", "new-owner",
+        "--locked-by-harness", "claude", "--locked-by-harness-session", "uuid-9",
+    ])
+    assert r.exit_code == 0, r.output
+    node = read_graph(g)[0]
+    assert node["locked_by"] == "new-owner"          # stale owner overwritten
+    assert node["session_id"] == "new-owner"          # mirror synced
+    assert node["locked_by_harness"] == "claude"
+    assert node["locked_by_harness_session"] == "uuid-9"
+    assert node["_status"] == "claimed"
+
+    r2 = CliRunner().invoke(C.cli, ["update", "ab-harnes01", "--locked-by", "null"])
+    assert r2.exit_code == 0, r2.output
+    cleared = read_graph(g)[0]
+    assert cleared["locked_by"] is None
+    assert cleared["locked_by_harness"] is None
+    assert cleared["locked_by_harness_session"] is None
+    assert cleared["_status"] == "ready"
+
+
 # ---------------------------------------------------------------------------
 # x-30f6 - parent-edge provenance fields (source_node_id + spawned_by_*)
 # ---------------------------------------------------------------------------
