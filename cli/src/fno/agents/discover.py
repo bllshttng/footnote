@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +97,7 @@ def default_name_map_path() -> Path:
 # Reading it makes a hand-started codex session ``fno mail``-able even when it
 # never ran the SessionStart register hook ("whether fno-spawned or not").
 CODEX_SESSIONS_DIR_ENV = "FNO_CODEX_SESSIONS_DIR"
+_CODEX_DAEMON_DISCOVERY_TIMEOUT_SECONDS = 12.0
 
 
 def default_codex_sessions_dir() -> Path:
@@ -104,6 +106,62 @@ def default_codex_sessions_dir() -> Path:
     if override:
         return Path(override)
     return Path(os.path.expanduser("~")) / ".codex" / "sessions"
+
+
+def _discover_from_codex_daemon() -> list[dict]:
+    """Codex threads currently loaded in the app-server daemon.
+
+    The Rust probe owns the Unix-WebSocket protocol. Any missing/stale binary,
+    unavailable daemon, incompatible response, or timeout contributes no rows;
+    recent rollout and registry discovery remain available.
+    """
+    from fno.agents import rust_runtime
+
+    binary = rust_runtime.resolve_installed_binary()
+    if binary is None:
+        return []
+    try:
+        proc = subprocess.run(
+            [str(binary), "codex-loaded-threads"],
+            capture_output=True,
+            text=True,
+            timeout=_CODEX_DAEMON_DISCOVERY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    try:
+        result = json.loads(proc.stdout.strip())
+    except (ValueError, AttributeError):
+        return []
+    if not isinstance(result, dict) or result.get("available") is not True:
+        return []
+    threads = result.get("threads")
+    if not isinstance(threads, list):
+        return []
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for thread in threads:
+        if not isinstance(thread, dict):
+            continue
+        sid = thread.get("session_id")
+        if not isinstance(sid, str) or not sid or sid in seen:
+            continue
+        cwd = thread.get("cwd")
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": cwd if isinstance(cwd, str) else "",
+                "status": None,
+                "agent": "codex",
+            }
+        )
+        seen.add(sid)
+    return rows
 
 
 def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
@@ -837,6 +895,7 @@ def discover_live_sessions(
     resolver = project_resolver or resolve_project_for_cwd
     psu = psutil_mod or _import_psutil()
     exclude = {s for s in (exclude_short_ids or ()) if s}
+    excluded_session_ids = {s for s in (exclude_session_ids or ()) if s}
 
     candidates: list[dict] = []
     for f in _iter_pid_files(sdir):
@@ -882,12 +941,19 @@ def discover_live_sessions(
             pdir,
             psutil_mod=psu,
             recency_seconds=_recency_seconds(),
-            exclude_session_ids=exclude_session_ids,
+            exclude_session_ids=excluded_session_ids,
         )
         for r in project_rows:
             if r["short_id"] in exclude:
                 continue
             candidates.append(r)
+
+    # Daemon-loaded Codex threads are the primary candidate source: loaded
+    # presence is age-free, while turn/start remains the delivery authority.
+    for r in _discover_from_codex_daemon():
+        if r["short_id"] in exclude or r["session_id"] in excluded_session_ids:
+            continue
+        candidates.append(r)
 
     # Codex disk-discovery (US2/US4). Unioned ALWAYS — a host can run
     # live claude AND codex sessions at once, so this is not gated on the claude
@@ -897,7 +963,7 @@ def discover_live_sessions(
     codex_rows = _discover_from_codex(
         codex_sessions_dir or default_codex_sessions_dir(),
         recency_seconds=_recency_seconds(),
-        exclude_session_ids=exclude_session_ids,
+        exclude_session_ids=excluded_session_ids,
     )
     for r in codex_rows:
         if r["short_id"] in exclude:
@@ -910,21 +976,25 @@ def discover_live_sessions(
     # session_id below folds any overlap. Both readers are lenient -> zero rows
     # (never an error) when the roster/registry is absent, so claude-only hosts
     # are unchanged.
-    for r in _discover_from_roster(exclude_session_ids=exclude_session_ids):
+    for r in _discover_from_roster(exclude_session_ids=excluded_session_ids):
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
     for r in _discover_from_registry(
-        registry_path, exclude_session_ids=exclude_session_ids
+        registry_path, exclude_session_ids=excluded_session_ids
     ):
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
 
     # Dedup on session_id (Invariant: one row per live sessionId, not per pid).
+    # Source order preserves daemon liveness precedence; later rows only enrich
+    # missing metadata on the primary candidate.
     by_sid: dict[str, dict] = {}
     for r in candidates:
-        by_sid.setdefault(r["session_id"], r)
+        existing = by_sid.setdefault(r["session_id"], r)
+        if existing is not r and not existing.get("cwd") and r.get("cwd"):
+            existing["cwd"] = r["cwd"]
     live = list(by_sid.values())
 
     for r in live:

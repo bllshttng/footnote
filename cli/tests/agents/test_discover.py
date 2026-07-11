@@ -11,6 +11,7 @@ host-independent.
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -639,6 +640,120 @@ def test_us2_codex_stale_rollout_not_surfaced(tmp_path):
         codex, session_id="019f48e1-dead", cwd="/x", mtime_age=10_000.0,
     )
     assert _run_codex(tmp_path, codex) == []
+
+
+def test_loaded_daemon_thread_resolves_with_stale_rollout(tmp_path, monkeypatch):
+    codex = tmp_path / "codex"
+    sid = "019f4d0c-1111-2222-3333-444444444444"
+    _write_codex_rollout(codex, session_id=sid, cwd="/old/repo", mtime_age=10_000.0)
+    monkeypatch.setattr(
+        discover,
+        "_discover_from_codex_daemon",
+        lambda: [
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": "/live/repo",
+                "status": None,
+                "agent": "codex",
+            }
+        ],
+    )
+
+    resolved, _ = discover.resolve_or_suggest(
+        "codex-019f4d0c",
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda c: None,
+    )
+
+    assert resolved is not None
+    assert resolved.session_id == sid
+    assert resolved.cwd == "/live/repo"
+
+
+def test_daemon_row_is_enriched_by_recent_rollout(tmp_path, monkeypatch):
+    codex = tmp_path / "codex"
+    sid = "019f4d0c-aaaa-bbbb-cccc-dddddddddddd"
+    _write_codex_rollout(codex, session_id=sid, cwd="/rollout/repo")
+    monkeypatch.setattr(
+        discover,
+        "_discover_from_codex_daemon",
+        lambda: [
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": "",
+                "status": None,
+                "agent": "codex",
+            }
+        ],
+    )
+
+    sessions = _run_codex(tmp_path, codex)
+
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/rollout/repo"
+
+
+@pytest.mark.parametrize(
+    "completed",
+    [
+        subprocess.CompletedProcess([], 1, stdout="", stderr="unsupported"),
+        subprocess.CompletedProcess([], 0, stdout="not-json", stderr=""),
+        subprocess.CompletedProcess(
+            [], 0, stdout='{"available":false,"reason":"no-daemon"}', stderr=""
+        ),
+        subprocess.CompletedProcess(
+            [], 0, stdout='{"available":true,"threads":[]}', stderr=""
+        ),
+    ],
+)
+def test_daemon_probe_failure_or_empty_is_lenient(monkeypatch, completed):
+    from fno.agents import rust_runtime
+
+    monkeypatch.setattr(
+        rust_runtime, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
+    )
+    monkeypatch.setattr(discover.subprocess, "run", lambda *a, **kw: completed)
+
+    assert discover._discover_from_codex_daemon() == []
+
+
+def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
+    from fno.agents import rust_runtime
+
+    output = {
+        "available": True,
+        "threads": [
+            {"session_id": "short", "cwd": None},
+            {"session_id": "short", "cwd": "/duplicate"},
+            {"session_id": "019f4d0c-full", "cwd": "/repo"},
+            {"session_id": 7, "cwd": "/bad"},
+        ],
+    }
+    monkeypatch.setattr(
+        rust_runtime, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
+    )
+    monkeypatch.setattr(
+        discover.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps(output), stderr=""
+        ),
+    )
+
+    rows = discover._discover_from_codex_daemon()
+
+    assert [(r["session_id"], r["short_id"], r["cwd"]) for r in rows] == [
+        ("short", "short", ""),
+        ("019f4d0c-full", "019f4d0c", "/repo"),
+    ]
 
 
 def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):

@@ -22,6 +22,7 @@ def _isolate_session_discovery(monkeypatch, tmp_path_factory):
     # read the developer's real ~/.codex/sessions unless isolated here.
     empty_codex = tmp_path_factory.mktemp("empty-codex-sessions")
     monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty_codex))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("empty-codex-home")))
 
 
 @pytest.fixture(autouse=True)
