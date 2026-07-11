@@ -734,6 +734,23 @@ if [[ ! -f "$STATE_FILE" ]]; then
     codex_thread_id="null"
   fi
 
+  # Harness identity (generic; a new provider adds no field). harness_session_id
+  # unifies the per-provider session/thread id from whichever harness env is set;
+  # harness = PROVIDER. Model is best-effort (empty when the harness hides it);
+  # effort has no self-env today. Reused by the manifest write and the US6 stamp.
+  _HARNESS_SESSION=""
+  if [[ -n "$_codex_thread_compact" ]]; then
+    _HARNESS_SESSION="$_codex_thread_raw"
+  elif [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
+    _HARNESS_SESSION="$claude_transcript_id"
+  elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
+    _HARNESS_SESSION="$GEMINI_SESSION_ID"
+  elif [[ -n "${OPENCODE_SESSION_ID:-}" ]]; then
+    _HARNESS_SESSION="$OPENCODE_SESSION_ID"
+  fi
+  _HARNESS_MODEL="${TARGET_HARNESS_MODEL:-${CLAUDE_MODEL:-${ANTHROPIC_MODEL:-}}}"
+  _HARNESS_EFFORT="${TARGET_HARNESS_EFFORT:-}"
+
   # session_id: {UTC-timestamp}-{infix}{PPID}-{6 hex chars of /dev/urandom}
   # ab-7303e5d7: TARGET_SESSION_ID is the absolute override (megawalk walkers
   # pre-assign it). Otherwise mint one id per target run. CODEX_THREAD_ID is a
@@ -814,11 +831,22 @@ if [[ ! -f "$STATE_FILE" ]]; then
 
   cat > "$local_temp" << EOF
 ---
+# fno_id = target-minted run id (canonical). session_id mirrors it for one
+# release and is NOT the harness session (that is harness_session_id below).
+fno_id: $local_session_id
 session_id: $local_session_id
 created_at: $TIMESTAMP
 input: "${escaped_input}"
 plan_path: "${escaped_plan_path}"
 cross_project: $CROSS_PROJECT
+# Harness identity (canonical). harness supersedes provider; harness_session_id
+# supersedes claude_session_id/codex_thread_id. Those legacy keys stay for one
+# release as aliases (removed next release).
+harness: $PROVIDER
+harness_mode: ${PROVIDER_MODE:-standard}
+harness_session_id: ${_HARNESS_SESSION:-null}
+harness_model: ${_HARNESS_MODEL:-}
+harness_effort: ${_HARNESS_EFFORT:-}
 provider: $PROVIDER
 provider_mode: ${PROVIDER_MODE:-standard}
 provider_upgrade_reason: "${escaped_reason:-}"
@@ -903,44 +931,12 @@ PYEOF
   fi
 
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
-    # Does THIS session own the node? Set by either claim layer; graph_node_id
-    # is decided once from it below, so a transient legacy failure no longer
-    # nulls a node the modern `fno claim` won.
+    # Does THIS session own the node? Set by `fno claim` below, the sole liveness
+    # authority (x-4af4). The TTL claim runs FIRST and the graph lock is stamped
+    # only on its success, so a legitimate STALE steal never leaves a dead prior
+    # owner on the node (the stale-locked-by-leak this reorder fixes).
     _NODE_OWNED=0
-    if [[ -f "$_GRAPH_FILE" ]]; then
-      _CURRENT_CLAIM=$(python3 - "$_GRAPH_FILE" "$_NODE_ID" <<'PYEOF' 2>/dev/null || echo ""
-import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-entries = data.get("entries", []) if isinstance(data, dict) else data
-for entry in entries:
-    if entry.get("id") == sys.argv[2]:
-        print(entry.get("session_id") or "")
-        break
-PYEOF
-)
-      if [[ -z "$_CURRENT_CLAIM" ]]; then
-        _ROADMAP_TASKS="${REPO_ROOT}/scripts/roadmap-tasks.py"
-        _CLAIM_LOG="$STATE_DIR/.init-claim.log"
-        if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" \
-            --locked-by "$claim_owner_id" 2>"$_CLAIM_LOG" >/dev/null; then
-          _NODE_OWNED=1
-          rm -f "$_CLAIM_LOG"
-          echo "target: graph node $_NODE_ID claimed for session $claim_owner_id" >&2
-        else
-          # Transient legacy failure (usually the SessionStart reconcile holding
-          # the graph flock): best-effort only; `fno claim` below is authoritative.
-          # A non-fatal NOTE (not a warning) so an agent does not misread it as a
-          # claim failure and manually claim (a manual claim from a shell goes stale).
-          echo "target: note: legacy graph-claim skipped (non-fatal; see $_CLAIM_LOG). The authoritative 'fno claim' runs next - do NOT claim manually." >&2
-        fi
-      else
-        echo "graph_node_claim_refused: $_CURRENT_CLAIM" >> "$STATE_FILE"
-        echo "target: WARNING: graph node $_NODE_ID already claimed by $_CURRENT_CLAIM - proceeding without claim" >&2
-      fi
-    fi
+    _ROADMAP_TASKS="${REPO_ROOT}/scripts/roadmap-tasks.py"
 
     # fno claim acquire (global TTL lock; authoritative mutex)
     if command -v fno >/dev/null 2>&1; then
@@ -1048,10 +1044,35 @@ PYEOF
           else
             touch "$STATE_DIR/.target-cancelled"
             echo "target_claim_blocked_reason: claim_held_by_other" >> "$STATE_FILE"
+            echo "graph_node_claim_refused: held_by_other" >> "$STATE_FILE"
           fi
         else
           echo "target_claim_blocked_reason: acquire_error_rc_${_acq_rc}" >> "$STATE_FILE"
         fi
+      fi
+    fi
+
+    # Graph lock stamp on claim success: unconditional (overwriting a stale prior
+    # owner is the point), retried once. Non-fatal - the TTL claim is
+    # authoritative and the graph field is display/routing metadata, so a
+    # lock-contended graph.json must not abort init (AC9-FR).
+    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
+      _STAMP_LOG="$STATE_DIR/.init-claim.log"
+      # Harness stamp (US6): the holder's provider + harness-session UUID (the
+      # _HARNESS_SESSION computed once above), so an operator/peek can jump from a
+      # node straight to `claude -r <uuid>`.
+      # Unquoted expansion below (same pattern as $_PID_FLAGS): provider + UUID
+      # are single tokens, so word-splitting yields exactly the intended args. An
+      # empty provider omits the flag rather than passing a blank value.
+      _HARNESS_FLAGS=""
+      [[ -n "${PROVIDER:-}" ]] && _HARNESS_FLAGS="--locked-by-harness $PROVIDER"
+      [[ -n "$_HARNESS_SESSION" ]] && _HARNESS_FLAGS="$_HARNESS_FLAGS --locked-by-harness-session $_HARNESS_SESSION"
+      if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null \
+         || python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null; then
+        rm -f "$_STAMP_LOG"
+        echo "target: graph node $_NODE_ID lock stamped for $claim_owner_id" >&2
+      else
+        echo "target: WARNING: graph locked_by stamp failed (non-fatal; TTL claim authoritative; see $_STAMP_LOG)" >&2
       fi
     fi
     # graph_node_id written exactly once: the node id when a claim layer won and

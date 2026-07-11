@@ -187,6 +187,24 @@ def test_stamp_ledger_updates_matching_row(tmp_path: Path) -> None:
     assert "verifier_verdict" not in data["entries"][1]
 
 
+def test_stamp_ledger_matches_either_key(tmp_path: Path) -> None:
+    """AC8-EDGE: a pre-rename row (session_id) and a post-rename row (fno_id)
+    both match by the same target id during the one-release window."""
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(
+        json.dumps({"entries": [
+            {"session_id": "sid-old"},                      # pre-rename row
+            {"fno_id": "sid-new", "session_id": "sid-new"},  # post-rename row
+        ]}),
+        encoding="utf-8",
+    )
+    assert va.stamp_ledger("sid-old", "pass", ledger) is True
+    assert va.stamp_ledger("sid-new", "concerns", ledger) is True
+    data = json.loads(ledger.read_text())
+    assert data["entries"][0]["verifier_verdict"] == "pass"
+    assert data["entries"][1]["verifier_verdict"] == "concerns"
+
+
 def test_stamp_ledger_no_row_or_missing_file(tmp_path: Path) -> None:
     ledger = tmp_path / "ledger.json"
     assert va.stamp_ledger("sid-1", "pass", ledger) is False  # missing file

@@ -1117,7 +1117,9 @@ def cmd_apply(
             node["completed_at"] = None
             node["deferred_at"] = datetime.now(timezone.utc).isoformat()
             node["deferred_reason"] = d["reason"]
-            node["session_id"] = None
+            # Clear the canonical lock field; _normalize_lock_fields re-syncs the
+            # session_id mirror and clears the harness stamp at serialize.
+            node["locked_by"] = None
             node["claimed_at"] = None
             applied["deferred"] += 1
         applied["duplicates_flagged"] = len(cleaned_locked["duplicates"])

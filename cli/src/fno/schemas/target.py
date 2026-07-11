@@ -4,7 +4,7 @@ from __future__ import annotations
 import warnings
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fno.schemas.common import (
     SessionId,
@@ -85,6 +85,54 @@ class TargetState(BaseModel):
 
     model_config = {"extra": "allow"}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_fno_id(cls, data: Any) -> Any:
+        """Back-fill fno_id from the legacy session_id key (one-release alias).
+
+        The target-minted id is renamed fno_id; manifests dual-write both keys
+        for one release and readers resolve fno_id-first. A pre-rename manifest
+        carries only session_id, so populate fno_id from it here when absent.
+        Mirrors the claude_transcript_id -> claude_session_id rename.
+        """
+        if isinstance(data, dict) and not data.get("fno_id") and data.get("session_id"):
+            data = {**data, "fno_id": data["session_id"]}
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_harness(cls, data: Any) -> Any:
+        """Alias the harness_* block with the legacy provider / claude_session_id
+        / codex_thread_id keys for one release, so a reader of either name works
+        on any manifest. harness supersedes provider (bidirectional); the harness
+        session id is back-filled forward from whichever per-provider key is set.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # Canonical wins: when the harness field is set it is authoritative and
+        # syncs its legacy alias (so a conflicting legacy value can't leak);
+        # otherwise adopt the legacy value.
+        for new, old in (("harness", "provider"), ("harness_mode", "provider_mode")):
+            if data.get(new):
+                data[old] = data[new]
+            elif data.get(old):
+                data[new] = data[old]
+        if data.get("harness_session_id"):
+            # canonical present: sync the matching per-provider legacy key so a
+            # reader of the old name still resolves it after alias removal.
+            h = str(data.get("harness") or "").lower()
+            legacy_key = {"claude": "claude_session_id", "codex": "codex_thread_id"}.get(h)
+            if legacy_key and not data.get(legacy_key):
+                data[legacy_key] = data["harness_session_id"]
+        else:
+            for legacy in ("claude_session_id", "codex_thread_id"):
+                v = data.get(legacy)
+                if v and str(v).strip() and str(v).strip().lower() != "null":
+                    data["harness_session_id"] = v
+                    break
+        return data
+
     @field_validator("clean_passed", "goal_verification_passed", "browser_testing_passed", mode="before")
     @classmethod
     def _coerce_gate_field(cls, v: Any, info: Any) -> bool:
@@ -148,18 +196,35 @@ class TargetState(BaseModel):
     # values. Previously accepted via extra="allow"; now a modeled field.
     provenance_nonce: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{16}$")
 
-    # Session tracking
+    # fno_id is the canonical target-minted run id. session_id is a one-release
+    # legacy MIRROR of fno_id (same value, back-filled by _backfill_fno_id),
+    # kept only so pre-rename readers don't break; it is removed next release.
+    # It is NOT the harness session - that is harness_session_id below.
+    fno_id: Optional[SessionId] = None
     session_id: Optional[SessionId] = None
     sessions: List[str] = Field(default_factory=list)
     owner_pid: Optional[int] = None
     owner_started_at: Optional[str] = None
     owner_cwd: Optional[str] = None
 
+    # Harness identity. One generic block describes the harness this session runs
+    # on, so a new provider adds no new field. harness supersedes provider and
+    # harness_session_id supersedes the per-provider claude_session_id /
+    # codex_thread_id; the legacy keys are one-release aliases (see
+    # _backfill_harness) removed next release.
+    harness: Optional[str] = None
+    harness_mode: Optional[str] = None
+    harness_session_id: Optional[str] = None
+    harness_model: Optional[str] = None
+    harness_effort: Optional[str] = None
+
     # Provider config
     execution_mode: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     cross_project: bool = False
+    # Legacy aliases of the harness_* block (one release). provider == harness,
+    # provider_mode == harness_mode; back-filled bidirectionally by _backfill_harness.
     provider: Optional[str] = None
     provider_mode: Optional[str] = None
     provider_upgrade_reason: Optional[str] = None

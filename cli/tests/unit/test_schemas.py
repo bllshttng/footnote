@@ -32,6 +32,68 @@ def test_ac3_edge_session_id_valid_accepted():
     assert instance.session_id == "20260421T093631Z-97817-920dac"
 
 
+def test_fno_id_backfilled_from_legacy_session_id():
+    """AC1-HP boundary: a pre-rename manifest (session_id only) back-fills fno_id."""
+    Schema = load_schema("target")
+    instance = Schema(session_id="20260421T093631Z-97817-920dac")
+    assert instance.fno_id == "20260421T093631Z-97817-920dac"
+    assert instance.session_id == "20260421T093631Z-97817-920dac"
+
+
+def test_harness_backfilled_from_legacy_provider_and_session_fields():
+    """A pre-rename manifest (provider + claude_session_id) resolves the harness_* block."""
+    Schema = load_schema("target")
+    inst = Schema.model_validate({
+        "provider": "claude", "provider_mode": "standard",
+        "claude_session_id": "03401fb3-aaaa-bbbb-cccc-ddddeeeeffff",
+        "codex_thread_id": "null",
+    })
+    assert inst.harness == "claude"
+    assert inst.harness_mode == "standard"
+    assert inst.harness_session_id == "03401fb3-aaaa-bbbb-cccc-ddddeeeeffff"
+
+
+def test_harness_supersedes_and_backfills_provider():
+    """A new manifest (harness only) still exposes provider for legacy readers."""
+    Schema = load_schema("target")
+    inst = Schema.model_validate({"harness": "codex", "harness_session_id": "abc-123"})
+    assert inst.harness == "codex"
+    assert inst.provider == "codex"  # legacy alias populated
+    assert inst.harness_session_id == "abc-123"
+
+
+def test_harness_wins_conflict_and_syncs_legacy():
+    """Canonical harness is authoritative: a conflicting legacy provider is
+    overwritten, and the matching per-provider session key is synced."""
+    Schema = load_schema("target")
+    inst = Schema.model_validate({
+        "harness": "claude", "provider": "codex",  # conflict
+        "harness_session_id": "sync-me",
+    })
+    assert inst.harness == "claude"
+    assert inst.provider == "claude"  # legacy synced from canonical, not left "codex"
+
+
+def test_harness_session_prefers_codex_thread_over_null_claude():
+    """harness_session_id picks the non-null per-provider key (codex here)."""
+    Schema = load_schema("target")
+    inst = Schema.model_validate({
+        "provider": "codex", "claude_session_id": "null",
+        "codex_thread_id": "9f8e-7d6c",
+    })
+    assert inst.harness_session_id == "9f8e-7d6c"
+
+
+def test_fno_id_wins_when_both_present():
+    """fno_id is canonical: an explicit fno_id is never clobbered by session_id."""
+    Schema = load_schema("target")
+    instance = Schema(
+        fno_id="20260421T093631Z-cl97817-920dac",
+        session_id="20260101T000000Z-11111-aaaaaa",
+    )
+    assert instance.fno_id == "20260421T093631Z-cl97817-920dac"
+
+
 def test_session_id_accepts_canonical_codex_thread_uuid():
     Schema = load_schema("target")
     sid = "019f48e1-e641-7170-9ea9-921f07021967"

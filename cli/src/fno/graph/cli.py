@@ -1340,7 +1340,9 @@ def cmd_intake(
 def cmd_update(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     completed: bool = typer.Option(False, "--completed", help="Mark as completed"),
-    locked_by: Optional[str] = typer.Option(None, "--locked-by", help="Session ID ('null' to release)"),
+    locked_by: Optional[str] = typer.Option(None, "--locked-by", help="Lock owner id ('null' to release)"),
+    locked_by_harness: Optional[str] = typer.Option(None, "--locked-by-harness", help="Holder's harness/provider (claude|codex|gemini). 'null' clears."),
+    locked_by_harness_session: Optional[str] = typer.Option(None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."),
     has_brief: Optional[str] = typer.Option(None, "--has-brief", help="Set has_brief flag"),
     plan_path: Optional[str] = typer.Option(None, "--plan-path", help="Plan directory path"),
     pr_number: Optional[str] = typer.Option(None, "--pr-number", help="PR number"),
@@ -1569,8 +1571,23 @@ def cmd_update(
 
         if locked_by is not None:
             session = locked_by if locked_by != "null" else None
-            node["session_id"] = session
+            # locked_by is canonical; session_id mirror is re-synced at serialize
+            # by _normalize_lock_fields. Clearing the lock also clears the US6
+            # harness stamp so an unclaim never leaves a stale holder identity.
+            node["locked_by"] = session
             node["claimed_at"] = datetime.now(timezone.utc).isoformat() if session else None
+            if session is None:
+                node["locked_by_harness"] = None
+                node["locked_by_harness_session"] = None
+        # Harness stamp (US6): the holder's provider + harness-session UUID,
+        # settable alongside the claim. 'null' clears; an explicit unclaim above
+        # already cleared both.
+        if locked_by_harness is not None:
+            node["locked_by_harness"] = None if locked_by_harness == "null" else locked_by_harness
+        if locked_by_harness_session is not None:
+            node["locked_by_harness_session"] = (
+                None if locked_by_harness_session == "null" else locked_by_harness_session
+            )
         if has_brief is not None:
             node["has_brief"] = has_brief.lower() == "true"
         if plan_path is not None:
@@ -1866,8 +1883,8 @@ def _unclaim_node(task_id: str) -> None:
             raise typer.Exit(code=1)
         resolved_id = node["id"]
         # Same field clear as `update --locked-by null`; recompute_statuses
-        # derives _status back to ready from the now-empty session_id.
-        node["session_id"] = None
+        # derives _status back to ready from the now-empty locked_by.
+        node["locked_by"] = None
         node["claimed_at"] = None
         return entries
 
@@ -2057,7 +2074,7 @@ def cmd_next(
             candidates = _pick_ready(entries)
             if candidates:
                 winner = candidates[0]
-                winner["session_id"] = claim
+                winner["locked_by"] = claim
                 winner["claimed_at"] = datetime.now(timezone.utc).isoformat()
                 result[0] = _node_summary(winner)
             return entries
@@ -3104,7 +3121,7 @@ def cmd_defer(
                 f"WARN: Deferring {task_id} blocks: {', '.join(dependents)}",
                 err=True,
             )
-        node["session_id"] = None
+        node["locked_by"] = None
         node["claimed_at"] = None
         # Clear completed_at so the cascade can flip to deferred. Without
         # this, deferring an already-done node is a silent no-op because
@@ -3769,7 +3786,7 @@ def _apply_completion_fields(node: dict) -> None:
     ``completed_at`` is already set). ``recompute_statuses`` derives
     ``_status: done`` from ``completed_at`` and unblocks dependents.
     """
-    node["session_id"] = None
+    node["locked_by"] = None
     node["claimed_at"] = None
     # Done dominates deferred per the cascade. Clear any deferred/queued state
     # so the row presents as cleanly done with no ghost fields.
@@ -5176,7 +5193,7 @@ def cmd_maintain(
                     )
                     # Mirror cmd_defer: clear claim/completion so the cascade
                     # derives _status: deferred, then set the deferred fields.
-                    n["session_id"] = None
+                    n["locked_by"] = None
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
@@ -6169,7 +6186,7 @@ def cmd_supersede(
             supersedes.append(replaces)
         new_node["supersedes"] = supersedes
         old_node["superseded_by"] = new_id
-        old_node["session_id"] = None
+        old_node["locked_by"] = None
         old_node["claimed_at"] = None
         old_node["deferred_at"] = datetime.now(timezone.utc).isoformat()
         old_node["deferred_reason"] = f"superseded by {new_id}: {cleaned_reason}"

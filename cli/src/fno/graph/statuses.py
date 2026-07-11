@@ -32,7 +32,9 @@ _LEGACY_DEFER_PREFIX = "deferred:"
 def is_stale_lock(task: dict) -> bool:
     """Check if a feature's claim has expired (>TTL hours)."""
     lock_time_str = task.get("claimed_at")
-    if not task.get("session_id"):
+    # locked_by-first; tolerate a raw legacy (session_id-only) task not yet
+    # normalized (read-only staleness check, so no resurrection risk).
+    if not (task.get("locked_by") or task.get("session_id")):
         return False
     if not lock_time_str:
         return False
@@ -49,8 +51,13 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     """Recompute _status for all entries based on graph state.
 
     Called inside locked_mutate_graph() after every mutation.
-    Derives status from: completed_at, blocked_by, session_id.
+    Derives status from: completed_at, blocked_by, locked_by.
     """
+    # Reconcile the locked_by/session_id mirror first so derivation keys on the
+    # canonical field even when called directly on legacy (session_id-only)
+    # entries. Lazy import: store imports this module function-locally too.
+    from fno.graph.store import _normalize_lock_fields
+    _normalize_lock_fields(entries)
     # One-shot priority vocabulary backfill: migrate any legacy
     # high/medium/low values to the new p0/p1/p2/p3 vocabulary the first
     # time each row is touched after the migration ships. Idempotent and
@@ -101,8 +108,9 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["_status"] = "deferred"
             continue
 
-        if e.get("session_id") and is_stale_lock(e):
-            e["session_id"] = None
+        if e.get("locked_by") and is_stale_lock(e):
+            e["locked_by"] = None
+            e["session_id"] = None  # keep the one-release mirror in sync
             e["claimed_at"] = None
 
         has_open_blockers = False
@@ -123,7 +131,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # `idea`, and a deferred node never re-surfaces in either bucket.
         if has_open_blockers:
             e["_status"] = "blocked"
-        elif e.get("session_id"):
+        elif e.get("locked_by"):
             e["_status"] = "claimed"
         elif not e.get("plan_path"):
             # Treat both None and empty string as "no plan" - matches the

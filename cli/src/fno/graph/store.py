@@ -66,6 +66,12 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "dep",
     "stub_against",
     "contract_version",
+    # Lock owner. locked_by is canonical; session_id is the one-release legacy
+    # mirror (kept in sync by _normalize_lock_fields). locked_by_harness* record
+    # the holder's harness + harness-session UUID (US6).
+    "locked_by",
+    "locked_by_harness",
+    "locked_by_harness_session",
     "session_id",
     "claimed_at",
     "completed_at",
@@ -156,6 +162,48 @@ def _compute_children(entries: list[dict]) -> list[dict]:
     return entries
 
 
+def _normalize_lock_fields(entries: list[dict]) -> None:
+    """Reconcile the lock-owner field to locked_by, mirroring session_id.
+
+    One-release rename shim. Key-presence disambiguates: a node written by new
+    code carries a locked_by key (authoritative, wins over any session_id); a
+    pre-rename node carries only session_id, so locked_by adopts it. Both keys
+    are then set to the resolved value so the mirror stays in sync for readers
+    on either name. Idempotent; mutates entries in place.
+    """
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        # Legacy node (pre-rename): on a LIVE node the session_id key IS the
+        # lock owner, so adopt it. On a DONE node session_id is work/cost
+        # provenance (done/cli.py:_apply_rollup), NOT a lock - adopting it would
+        # make locked_by truthy and mirror it back over a force-overwrite, so
+        # leave locked_by unset there.
+        if "locked_by" not in e:
+            e["locked_by"] = None if e.get("completed_at") else e.get("session_id")
+        resolved = e.get("locked_by")
+        if resolved:
+            # Claimed: session_id mirrors the canonical lock owner for the
+            # one-release window (locked_by wins over any divergent session_id).
+            e["session_id"] = resolved
+        elif not e.get("completed_at"):
+            # Released and not done (unclaim / defer / supersede / auto-failure):
+            # drop the stale mirror so no consumer reads a dead owner. Keying on
+            # locked_by (not session_id) means status is already correct; this
+            # just keeps the mirror honest.
+            e["session_id"] = None
+        # else: done with no active lock - leave session_id, which carries
+        # done-time work/cost provenance (done/cli.py:_apply_rollup), a distinct
+        # meaning from the lock. A done node never derives 'claimed' (completed_at
+        # wins), so this is never read as a live lock.
+        if not resolved:
+            # A cleared owner must not retain a holder identity: drop the US6
+            # harness stamp whenever the lock is unset, so a later re-claim can
+            # never route to a stale holder.
+            e["locked_by_harness"] = None
+            e["locked_by_harness_session"] = None
+
+
 def canonicalize_entries(entries: list[dict]) -> list[dict]:
     """Reorder each entry's keys status-forward and refresh the children index.
 
@@ -166,6 +214,9 @@ def canonicalize_entries(entries: list[dict]) -> list[dict]:
     child summaries' ``_status`` are already current.
     """
     _compute_children(entries)
+    # Keep the locked_by/session_id mirror consistent after the mutator +
+    # recompute_statuses ran, before the entries are serialized.
+    _normalize_lock_fields(entries)
     out: list[dict] = []
     for e in entries:
         ordered: dict = {}
@@ -273,6 +324,10 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("domain", "code")
         e.setdefault("blocked_by", [])
         e.setdefault("session_id", None)
+        # locked_by is the canonical lock owner; harness fields (US6) record the
+        # holder's provider + harness-session UUID. session_id stays mirrored.
+        e.setdefault("locked_by_harness", None)
+        e.setdefault("locked_by_harness_session", None)
         e.setdefault("claimed_at", None)
         e.setdefault("completed_at", None)
         e.setdefault("_status", "ready")
@@ -320,6 +375,10 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         # pick it up next/today. Cleared on completion.
         e.setdefault("queued_at", None)
         e.setdefault("queued_reason", None)
+    # Populate locked_by (legacy nodes adopt their session_id) so readers and
+    # status derivation see the canonical field. Runs last so the key-presence
+    # rule still sees a pre-rename node's missing locked_by key.
+    _normalize_lock_fields(entries)
     return entries
 
 

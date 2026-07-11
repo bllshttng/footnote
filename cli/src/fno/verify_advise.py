@@ -175,7 +175,12 @@ def stamp_ledger(session_id: str, verdict: str, ledger_path: Path) -> bool:
             return False
         hit = False
         for entry in entries:
-            if isinstance(entry, dict) and entry.get("session_id") == session_id:
+            # Match either key: new rows carry fno_id, pre-rename rows only
+            # session_id (one-release dual-key window).
+            if isinstance(entry, dict) and session_id in (
+                entry.get("fno_id"),
+                entry.get("session_id"),
+            ):
                 entry["verifier_verdict"] = verdict
                 hit = True
         if not hit:

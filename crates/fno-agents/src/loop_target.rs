@@ -83,6 +83,8 @@ fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
     let end = after_first.find("\n---")?;
     let body = &after_first[..end];
 
+    // fno_id is canonical; session_id is the one-release legacy fallback.
+    let mut fno_id = String::new();
     let mut session_id = String::new();
     let mut input = String::new();
     let mut plan_path = String::new();
@@ -97,6 +99,7 @@ fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
             // Strip surrounding quotes from values.
             let v = v.trim().trim_matches(|c: char| c == '"' || c == '\'');
             match k {
+                "fno_id" => fno_id = v.to_string(),
                 "session_id" => session_id = v.to_string(),
                 "input" => input = v.to_string(),
                 "plan_path" => plan_path = v.to_string(),
@@ -105,6 +108,11 @@ fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
         }
     }
 
+    let session_id = if fno_id.is_empty() {
+        session_id
+    } else {
+        fno_id
+    };
     if session_id.is_empty() {
         return None;
     }

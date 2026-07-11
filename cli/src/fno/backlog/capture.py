@@ -1258,7 +1258,7 @@ def _detect_session_id() -> str:
     try:
         from fno.state.io import read_frontmatter
         fm, _ = read_frontmatter(state_path)
-        sid = fm.get("session_id")
+        sid = fm.get("fno_id") or fm.get("session_id")
         return str(sid) if sid else "manual"
     except Exception:
         return "manual"
