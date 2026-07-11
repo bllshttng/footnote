@@ -1035,14 +1035,18 @@ PYEOF
       # operator/peek can jump from a node straight to `claude -r <uuid>`. The
       # UUID prefers codex thread, then the claude transcript, then gemini.
       _HARNESS_SESSION=""
-      if [[ -n "$_codex_thread_compact" ]]; then
-        _HARNESS_SESSION="$_codex_thread_raw"
-      elif [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
+      if [[ -n "${_codex_thread_compact:-}" ]]; then
+        _HARNESS_SESSION="${_codex_thread_raw:-}"
+      elif [[ -n "${claude_transcript_id:-}" && "${claude_transcript_id:-}" != "null" ]]; then
         _HARNESS_SESSION="$claude_transcript_id"
       elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
         _HARNESS_SESSION="$GEMINI_SESSION_ID"
       fi
-      _HARNESS_FLAGS="--locked-by-harness $PROVIDER"
+      # Unquoted expansion below (same pattern as $_PID_FLAGS): provider + UUID
+      # are single tokens, so word-splitting yields exactly the intended args. An
+      # empty provider omits the flag rather than passing a blank value.
+      _HARNESS_FLAGS=""
+      [[ -n "${PROVIDER:-}" ]] && _HARNESS_FLAGS="--locked-by-harness $PROVIDER"
       [[ -n "$_HARNESS_SESSION" ]] && _HARNESS_FLAGS="$_HARNESS_FLAGS --locked-by-harness-session $_HARNESS_SESSION"
       if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null \
          || python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null; then

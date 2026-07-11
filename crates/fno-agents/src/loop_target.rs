@@ -108,7 +108,11 @@ fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
         }
     }
 
-    let session_id = if fno_id.is_empty() { session_id } else { fno_id };
+    let session_id = if fno_id.is_empty() {
+        session_id
+    } else {
+        fno_id
+    };
     if session_id.is_empty() {
         return None;
     }
