@@ -5,8 +5,11 @@
 # already ends -<node-id>.md is a no-op, so a rerun never double-suffixes.
 #
 # Usage: rename-plan-to-node-id.sh <plan-path> <node-id>
-# Output (exactly one line): renamed <new-path> | already-node-bearing <path>
-#                            | skipped reason=<...>   (never fatal to /blueprint)
+# Output: exactly one status line, always. The two RESULT lines go to STDOUT
+# (the caller reads them to learn the final path): `renamed <new-path>` |
+# `already-node-bearing <path>`. Every SKIP/warn diagnostic goes to STDERR so a
+# caller grepping stdout for the path is never confused by a non-path line:
+# `skipped reason=<...>`. Never fatal to /blueprint (all paths exit 0).
 set -uo pipefail
 
 PLAN="${1:-}"

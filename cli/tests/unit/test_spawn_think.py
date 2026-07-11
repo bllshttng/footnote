@@ -706,6 +706,34 @@ def test_think_output_path_reuses_frontmatter_claiming_stub(monkeypatch, tmp_pat
     assert out == str(stub)
 
 
+def test_think_output_path_reuses_legacy_slug_only_doc(monkeypatch, tmp_path):
+    """codex P2: a legacy YYYY-MM-DD-<slug>.md (pre-suffix convention, no
+    frontmatter claim) is reused on re-dispatch under the same slug, not
+    duplicated by a fresh …-<slug>-<node_id>.md mint."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    plans = tmp_path / ".fno" / "plans"
+    plans.mkdir(parents=True)
+    legacy = plans / "2020-01-01-my-slug.md"
+    legacy.write_text("# legacy dispatch, no frontmatter link\n")
+    # An unrelated doc that merely ENDS with -my-slug must NOT over-match.
+    (plans / "2020-01-01-awesome-my-slug.md").write_text("# unrelated\n")
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out == str(legacy)
+
+
+def test_think_output_path_node_id_doc_beats_legacy_slug(monkeypatch, tmp_path):
+    """A node-id-suffixed doc wins over a legacy slug-only doc for the same node
+    (node-id resolution stays primary; the legacy glob is only a last resort)."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    plans = tmp_path / ".fno" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2020-01-01-my-slug.md").write_text("# legacy\n")
+    suffixed = plans / "2020-02-02-my-slug-x-2222aaaa.md"
+    suffixed.write_text("# node-id-suffixed\n")
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out == str(suffixed)
+
+
 def test_think_output_path_claim_beats_name_suffix(monkeypatch, tmp_path):
     """A frontmatter claim outranks a mere name-suffix match for the same node."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))

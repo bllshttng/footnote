@@ -572,10 +572,23 @@ def _think_output_path(node_id: str, slug: str = "") -> str:
         existing = _find_node_doc(pdir, node_id)
         if existing:
             return str(existing)
-        # 3: mint. Empty slug degrades to <date>-<node_id>.md, never a dangling
+        s = (slug or "").strip("-")
+        # 3: backward-compat fallback. A legacy doc from before the -<node_id>
+        #    suffix convention (YYYY-MM-DD-<slug>.md, no frontmatter claim) is
+        #    still this node's doc on a re-dispatch under the SAME slug; reuse it
+        #    before minting a duplicate that would strand the prior design work
+        #    (codex P2). Node-id stays primary (checked first), so this does not
+        #    reintroduce slug-edit instability - it only rescues an unchanged
+        #    legacy name. Anchored to the date prefix so `awesome-<slug>` cannot
+        #    over-match (gemini PR#149); an already-suffixed `-<slug>-<id>.md` has
+        #    a trailing `-<id>` and so never matches this exact-slug glob.
+        if s:
+            legacy = sorted(pdir.glob(f"????-??-??-{s}.md"))
+            if legacy:
+                return str(legacy[0])
+        # 4: mint. Empty slug degrades to <date>-<node_id>.md, never a dangling
         #    <date>--<node_id>.md.
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        s = (slug or "").strip("-")
         tail = f"{s}-{node_id}" if s else node_id
         return str(pdir / f"{date}-{tail}.md")
     except Exception as exc:  # noqa: BLE001 - degrade to briefs, never wedge the spawn
