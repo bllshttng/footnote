@@ -139,6 +139,23 @@ class FailoverConfig(BaseModel):
     max_swaps_per_phase: int = Field(default=5, ge=1)
 
 
+class QuotaConfig(BaseModel):
+    """config.providers.quota block (quota-aware dispatch, x-5d3e).
+
+    Probing and display are always on; only the autonomous *deferral* is gated
+    by ``defer_dispatch`` (default off), matching the opt-in posture of
+    ``backlog advance`` and auto-merge. A missing block yields all-defaults via
+    the loader, which is byte-for-byte today's behavior.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    defer_dispatch: bool = False
+    defer_threshold_pct: float = Field(default=90.0, ge=0.0, le=100.0)
+    probe_ttl_seconds: int = Field(default=300, ge=1)
+    defer_horizon_minutes: int = Field(default=60, ge=0)
+
+
 class ProvidersConfig(BaseModel):
     """Wrapper for the config.providers block plus the sibling config.agents block.
 

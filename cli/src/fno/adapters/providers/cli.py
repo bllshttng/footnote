@@ -80,7 +80,102 @@ def list_providers() -> None:
         return
     for record in config.records:
         marker = "*" if record.id == config.active else " "
-        typer.echo(f"{marker} {record.id}  [{record.cli}] {record.auth}  priority={record.priority}")
+        headroom_col = _headroom_label(record.id)
+        typer.echo(
+            f"{marker} {record.id}  [{record.cli}] {record.auth}  "
+            f"priority={record.priority}  headroom={headroom_col}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# usage (quota-aware dispatch, x-5d3e)
+# ---------------------------------------------------------------------------
+
+
+def _headroom_label(provider_id: str) -> str:
+    """Compact headroom string for the list column. Fail-open to 'unknown'."""
+    try:
+        from fno.adapters.providers.runtime_state import headroom
+
+        return headroom(provider_id).state.name.lower()
+    except Exception:  # noqa: BLE001 - a display read must never break `list`
+        return "unknown"
+
+
+def _fmt_resets_in(resets_at: float, now: float) -> str:
+    """Render a reset epoch as a relative 'in 40m' / 'reset' string."""
+    delta = resets_at - now
+    if delta <= 0:
+        return "reset"
+    mins = int(delta // 60)
+    if mins < 60:
+        return f"in {mins}m"
+    hours = mins // 60
+    rem = mins % 60
+    return f"in {hours}h{rem:02d}m"
+
+
+@cli.command("usage")
+def usage_providers(
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Force a fresh probe (bypass the TTL cache)."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit a one-line JSON object keyed by provider id."
+    ),
+) -> None:
+    """Show per-provider rate-limit windows: used % and reset time.
+
+    A provider with no fresh snapshot (never probed, probe failed, or CLI
+    without a probe) shows ``unknown`` and the command still exits 0 - probing
+    is advisory and fail-open (AC1-ERR).
+    """
+    import json as _json
+    import time as _time
+
+    from fno.adapters.providers.loader import load_quota_config
+    from fno.adapters.providers.runtime_state import read_usage, refresh_usage
+
+    config = _load()
+    now = _time.time()
+    ttl = load_quota_config(repo_root=_get_repo_root()).probe_ttl_seconds
+
+    out: dict[str, object] = {}
+    for record in config.records:
+        if refresh:
+            snap = refresh_usage(record.id, ttl_seconds=0, now=now)
+        else:
+            snap = read_usage(record.id, ttl_seconds=ttl, now=now)
+        if snap is None or not snap.windows:
+            out[record.id] = "unknown"
+        else:
+            out[record.id] = {
+                "source": snap.source,
+                "probed_at": snap.probed_at,
+                "windows": [
+                    {"label": w.label, "used_pct": w.used_pct, "resets_at": w.resets_at}
+                    for w in snap.windows
+                ],
+            }
+
+    if json_output:
+        typer.echo(_json.dumps(out))
+        return
+
+    if not config.records:
+        typer.echo("No providers configured.")
+        return
+    for record in config.records:
+        entry = out[record.id]
+        if entry == "unknown":
+            typer.echo(f"{record.id}  [{record.cli}]  unknown")
+            continue
+        assert isinstance(entry, dict)
+        for w in entry["windows"]:  # type: ignore[index]
+            typer.echo(
+                f"{record.id}  [{record.cli}]  {w['label']:<8} "
+                f"{w['used_pct']:5.1f}%  {_fmt_resets_in(w['resets_at'], now)}"
+            )
 
 
 # ---------------------------------------------------------------------------

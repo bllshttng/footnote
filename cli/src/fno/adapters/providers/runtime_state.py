@@ -25,6 +25,7 @@ when that lands.
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json
 import logging
 import os
@@ -36,6 +37,7 @@ from typing import Any
 import filelock
 
 from fno.adapters.providers.error_taxonomy import ErrorRule
+from fno.adapters.providers.usage import UsageSnapshot, UsageWindow, _clamp_pct
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ MAX_BACKOFF_MS = 5 * 60 * 1000
 MAX_BACKOFF_LEVEL = 15
 PROVIDER_HEALTH_TTL_SECONDS = 60 * 60
 COMBO_CURSOR_TTL_SECONDS = 24 * 60 * 60  # Plan B (Spec 4): cursor goes stale after 24h
+DEFAULT_USAGE_TTL_SECONDS = 300  # quota.probe_ttl_seconds default; snapshot freshness
 RUNTIME_STATE_PATH = ".fno/provider-runtime-state.json"
 LOCK_TIMEOUT_SECONDS = 5
 SCHEMA_VERSION = 2  # Plan B: combo_cursors added; v1 files migrate transparently on read
@@ -151,6 +154,7 @@ class ProviderRuntimeState:
 
     provider_health: dict[str, ProviderHealth]
     combo_cursors: dict[str, ComboCursor] = dataclasses.field(default_factory=dict)
+    usage: dict[str, UsageSnapshot] = dataclasses.field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
 
@@ -215,8 +219,64 @@ def _serialize_state(state: ProviderRuntimeState) -> str:
         "combo_cursors": {
             name: dataclasses.asdict(c) for name, c in state.combo_cursors.items()
         },
+        "usage": {
+            pid: dataclasses.asdict(s) for pid, s in state.usage.items()
+        },
     }
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def _parse_usage_payload(raw: dict[str, Any]) -> dict[str, UsageSnapshot]:
+    """Best-effort parse of the ``usage`` block into UsageSnapshot entries.
+
+    Mirrors ``_parse_state_payload``: a partially-corrupt entry (string
+    ``used_pct``, missing ``resets_at``, non-dict window) is dropped with a
+    warning, never raised. ``used_pct`` is re-clamped on disk-read so a
+    hand-corrupted value can never escape the [0, 100] invariant. An empty
+    ``windows`` list is preserved (it reads as UNKNOWN, never OK).
+    """
+    out: dict[str, UsageSnapshot] = {}
+    block = raw.get("usage") or {}
+    if not isinstance(block, dict):
+        return out
+    for pid, entry in block.items():
+        if not isinstance(entry, dict):
+            logger.warning("runtime_state: dropping malformed usage for %r (not a dict)", pid)
+            continue
+        raw_windows = entry.get("windows")
+        if not isinstance(raw_windows, list):
+            logger.warning("runtime_state: dropping usage for %r (windows not a list)", pid)
+            continue
+        windows: list[UsageWindow] = []
+        bad = False
+        for w in raw_windows:
+            if not isinstance(w, dict):
+                bad = True
+                break
+            try:
+                windows.append(
+                    UsageWindow(
+                        label=str(w["label"]),
+                        used_pct=_clamp_pct(float(w["used_pct"])),
+                        resets_at=float(w["resets_at"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                bad = True
+                break
+        if bad:
+            logger.warning("runtime_state: dropping usage for %r (malformed window)", pid)
+            continue
+        try:
+            out[pid] = UsageSnapshot(
+                provider_id=str(pid),
+                windows=tuple(windows),
+                probed_at=float(entry["probed_at"]),
+                source=str(entry.get("source", "")),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("runtime_state: dropping malformed usage for %r: %s", pid, exc)
+    return out
 
 
 def _parse_cursors_payload(raw: dict[str, Any]) -> dict[str, ComboCursor]:
@@ -440,10 +500,12 @@ def read_state(now: float | None = None) -> ProviderRuntimeState:
     kept, _dropped = _drop_stale(health_map, now)
     cursors = _parse_cursors_payload(raw)
     cursors_kept, _ = _drop_stale_cursors(cursors, now)
+    usage = _parse_usage_payload(raw)
     schema_version = int(raw.get("schema_version", SCHEMA_VERSION))
     return ProviderRuntimeState(
         provider_health=kept,
         combo_cursors=cursors_kept,
+        usage=usage,
         schema_version=schema_version,
     )
 
@@ -552,6 +614,7 @@ def update_provider_health(
             health_map, _dropped = _drop_stale(health_map, now)
             cursors = _parse_cursors_payload(raw or {})
             cursors, _ = _drop_stale_cursors(cursors, now)
+            usage = _parse_usage_payload(raw or {})
 
             current = health_map.get(
                 provider_id, ProviderHealth(provider_id=provider_id)
@@ -561,6 +624,7 @@ def update_provider_health(
             new_state = ProviderRuntimeState(
                 provider_health=health_map,
                 combo_cursors=cursors,
+                usage=usage,
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -617,10 +681,12 @@ def reset_provider_health(
                 # we don't churn the file just because cursors are present.
                 return
             health_map.pop(provider_id, None)
+            usage = _parse_usage_payload(raw)
             schema_version = int(raw.get("schema_version", SCHEMA_VERSION))
             new_state = ProviderRuntimeState(
                 provider_health=health_map,
                 combo_cursors=cursors,
+                usage=usage,
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -675,6 +741,201 @@ def is_in_cooldown(
     if health.rate_limited_until is not None and health.rate_limited_until > now:
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Usage snapshot: read (lock-free, TTL) + write (locked) + refresh (probe).
+#
+# Quota-aware dispatch (x-5d3e). The snapshot is advisory-only: absence or
+# staleness reads as "no data" and the caller proceeds fail-open. Writes carry
+# health + cursors through the same lock so a usage write never drops a
+# concurrent health/cursor mutation (and vice versa) - the same last-writer-wins
+# invariant the health side already relies on.
+# ---------------------------------------------------------------------------
+
+
+def read_usage(
+    provider_id: str,
+    ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
+    now: float | None = None,
+) -> UsageSnapshot | None:
+    """Lock-free read of the cached usage snapshot for ``provider_id``.
+
+    Returns None when no snapshot exists or the snapshot is older than
+    ``ttl_seconds`` (treated as absent, bounding probe frequency to one call
+    per provider per TTL across all consumers). Eventual consistency is fine:
+    the snapshot only makes dispatch smarter, never gates it.
+    """
+    if now is None:
+        now = time.time()
+    state_path = _resolve_state_path()
+    raw = _read_disk_payload(state_path)
+    if raw is None:
+        return None
+    usage = _parse_usage_payload(raw)
+    snap = usage.get(provider_id)
+    if snap is None:
+        return None
+    if snap.probed_at < now - ttl_seconds:
+        return None
+    return snap
+
+
+def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> None:
+    """Persist ``snapshot`` under ``usage[provider_id]``, carrying other state.
+
+    Serializes on the same ``.update.lock`` as health/cursor writes. On lock
+    timeout the write is skipped (last-known-good stays on disk) and logged -
+    a stale snapshot degrades to UNKNOWN on the next read, never an error.
+    """
+    if now is None:
+        now = time.time()
+    state_path = _resolve_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _lock_path(state_path)
+    try:
+        with filelock.FileLock(str(lock_path), timeout=LOCK_TIMEOUT_SECONDS):
+            raw = _read_disk_payload(state_path) or {}
+            health_map = _parse_state_payload(raw)
+            health_map, _ = _drop_stale(health_map, now)
+            cursors = _parse_cursors_payload(raw)
+            cursors, _ = _drop_stale_cursors(cursors, now)
+            usage = _parse_usage_payload(raw)
+            usage[snapshot.provider_id] = snapshot
+            schema_version = int(raw.get("schema_version", SCHEMA_VERSION))
+            new_state = ProviderRuntimeState(
+                provider_health=health_map,
+                combo_cursors=cursors,
+                usage=usage,
+                schema_version=schema_version,
+            )
+            _write_state_atomic(state_path, _serialize_state(new_state))
+    except filelock.Timeout:
+        logger.warning(
+            "runtime_state: lock contention on usage write for %r; skipping "
+            "(snapshot degrades to UNKNOWN until next successful probe).",
+            snapshot.provider_id,
+        )
+
+
+def refresh_usage(
+    provider_id: str,
+    ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
+    now: float | None = None,
+) -> UsageSnapshot | None:
+    """Return a fresh snapshot for ``provider_id``, probing if the cache is stale.
+
+    A cache hit (fresh within TTL) returns immediately without probing. On a
+    miss, resolve the provider record, probe, and persist the result. Any
+    failure (unknown provider, probe returns None) returns None fail-open -
+    the caller treats it as UNKNOWN headroom.
+    """
+    if now is None:
+        now = time.time()
+    cached = read_usage(provider_id, ttl_seconds=ttl_seconds, now=now)
+    if cached is not None:
+        return cached
+    # Local import: loader pulls in rotation/model; keep the module-load graph
+    # acyclic (runtime_state is imported by rotation at call time).
+    from fno.adapters.providers.loader import load_providers
+    from fno.adapters.providers.usage import probe_usage
+
+    try:
+        record = load_providers().by_id.get(provider_id)
+    except Exception:  # noqa: BLE001 - a config read must never break a probe
+        return None
+    if record is None:
+        return None
+    snapshot = probe_usage(record, now=now)
+    if snapshot is None:
+        return None
+    write_usage_snapshot(snapshot, now=now)
+    return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Headroom predicate: the verdict consumers act on (quota-aware dispatch).
+#
+# Derived from the cached usage snapshot + the provider-level rate_limited_until.
+# A window whose reset is already past never binds (its limit has reset even if
+# the snapshot is stale). Absence of data is UNKNOWN, which orders WITH OK - no
+# probe is not evidence of trouble (Locked Decision 9).
+# ---------------------------------------------------------------------------
+
+
+class HeadroomState(enum.Enum):
+    OK = "ok"
+    LOW = "low"
+    EXHAUSTED = "exhausted"
+    UNKNOWN = "unknown"
+
+
+@dataclasses.dataclass(frozen=True)
+class Headroom:
+    """A provider's headroom verdict plus the binding window's reset epoch.
+
+    ``resets_at`` is the reset time of the window (or provider-level lock) that
+    drove the verdict, or None when nothing binds (OK / UNKNOWN). Consumers use
+    it for the ``retry_after`` hint and the defer-horizon check.
+    """
+
+    state: HeadroomState
+    resets_at: float | None = None
+
+
+def _provider_rate_limited_until(provider_id: str, now: float) -> float | None:
+    """Return an active provider-level rate_limited_until, or None. Lock-free."""
+    state_path = _resolve_state_path()
+    raw = _read_disk_payload(state_path)
+    if raw is None:
+        return None
+    health = _parse_state_payload(raw).get(provider_id)
+    if health is None or health.rate_limited_until is None:
+        return None
+    return health.rate_limited_until if health.rate_limited_until > now else None
+
+
+def headroom(
+    provider_id: str,
+    *,
+    now: float | None = None,
+    ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
+    threshold_pct: float = 90.0,
+) -> Headroom:
+    """Compute the headroom verdict for ``provider_id`` from cached usage.
+
+    - EXHAUSTED: any future-binding window at >=100%, or an active
+      provider-level ``rate_limited_until``. ``resets_at`` = soonest such reset.
+    - LOW: worst future-binding window at >= ``threshold_pct``.
+    - UNKNOWN: no fresh snapshot, or a snapshot with an empty windows tuple.
+    - OK: a fresh snapshot whose binding windows are all below threshold (a
+      window already reset never binds, so a stale 100% that has since reset
+      reads OK - AC1-EDGE).
+    """
+    if now is None:
+        now = time.time()
+    rlu = _provider_rate_limited_until(provider_id, now)
+    snap = read_usage(provider_id, ttl_seconds=ttl_seconds, now=now)
+
+    binding = [w for w in (snap.windows if snap else ()) if w.resets_at > now]
+    exhausted = [w for w in binding if w.used_pct >= 100.0]
+    if rlu is not None or exhausted:
+        resets = [w.resets_at for w in exhausted]
+        if rlu is not None:
+            resets.append(rlu)
+        return Headroom(HeadroomState.EXHAUSTED, min(resets))
+    if snap is None or not snap.windows:
+        # No data at all, or a snapshot that reported no windows: UNKNOWN,
+        # never OK (empty windows must not read as headroom).
+        return Headroom(HeadroomState.UNKNOWN, None)
+    if not binding:
+        # Snapshot has windows but every one has already reset: the limits are
+        # fresh, so there is headroom.
+        return Headroom(HeadroomState.OK, None)
+    worst = max(binding, key=lambda w: w.used_pct)
+    if worst.used_pct >= threshold_pct:
+        return Headroom(HeadroomState.LOW, worst.resets_at)
+    return Headroom(HeadroomState.OK, None)
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +1070,7 @@ def advance_cursor(
             health_map, _ = _drop_stale(health_map, now)
             cursors = _parse_cursors_payload(raw)
             cursors, _ = _drop_stale_cursors(cursors, now)
+            usage = _parse_usage_payload(raw)
 
             new_cursor = _next_cursor(
                 cursors.get(combo_name),
@@ -823,6 +1085,7 @@ def advance_cursor(
             new_state = ProviderRuntimeState(
                 provider_health=health_map,
                 combo_cursors=cursors,
+                usage=usage,
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
