@@ -154,6 +154,17 @@ see below):
   so a fire-from-phone autonomous worker lands a PR for review, not an
   auto-merge. (`merge` only omits the no-merge intent; true auto-merge stays a
   separate opt-in.) "let it merge" / "can merge" map here.
+- **`--permission-mode <v>`** (optional): the worker's harness permission posture,
+  passed straight to `fno agents spawn --permission-mode` (claude
+  `default|acceptEdits|plan|bypassPermissions`; codex/gemini/opencode/agy mapped).
+  Value validation is the CLI's (fail-closed), not the skill's.
+- **`-r`/`--role <role>`** (optional): per-spawn model-routing role
+  (`coordinate|tidy|orient|consolidate` route to the secondary GLM; production
+  roles stay primary). Model routing ONLY - it does not affect pane/layout.
+- **`-t`/`--timeout <secs>`** (optional): per-spawn timeout, passed to `fno agents
+  spawn --timeout` (CLI default 600).
+- **`--fresh` / `--here`** (optional): `--fresh` resolves the worker cwd to the
+  canonical main root; `--here`/`--in-place` opts out and keeps the caller cwd.
 
 `normalize.sh` is the deterministic backstop: it recognizes this closed posture
 vocabulary as a contiguous TRAILING run (right-anchored), so a posture word that
@@ -373,7 +384,8 @@ and parses the receipt deterministically:
 ```bash
 bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
   --message "$message" --mode "$mode" --payload-mode "$payload_mode" \
-  [--model "$model"] [--substrate "$substrate"] [--yolo] [--node "$node"] [--self "$self_holder"] [--cwd "<cwd source, see below>"]
+  [--model "$model"] [--substrate "$substrate"] [--yolo] [--node "$node"] [--self "$self_holder"] [--cwd "<cwd source, see below>"] \
+  [--permission-mode "$permission_mode"] [--role "$role"] [--timeout "$timeout"] [--fresh] [--here]
 ```
 
 Pass `--self "$self_holder"` only for a confirmed self-handoff (your
@@ -383,7 +395,10 @@ sanctioned handoff, instead of a confusing foreign `already-running`. It neither
 spawns nor releases the claim. Pass
 `--model "$model"` only when normalize emitted a non-empty `model`
 (spawn.sh forwards it to `fno agents spawn --model`; omit it for the provider
-default). Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
+default). Pass `--permission-mode "$permission_mode"` / `--role "$role"` / `--timeout
+"$timeout"` only when normalize emitted a non-empty value; pass `--fresh` only
+when `fresh=1` and `--here` only when `here=1` (spawn.sh forwards each to `fno
+agents spawn`, which validates values fail-closed). Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
 only when normalize emitted a non-empty `substrate` (`bg` -> a detached `claude
 --bg` thread; `headless` -> a one-shot `claude -p` / `codex --exec` / `agy -p`);
 an empty `substrate` is the default `pane` (owned-PTY) and the flag is omitted.
