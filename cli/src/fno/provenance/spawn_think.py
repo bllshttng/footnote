@@ -501,29 +501,95 @@ def _plans_output_dir() -> Path:
     return plans_content_dir()
 
 
-def _think_output_path(node_id: str, slug: str = "") -> str:
-    """Resolve where the headless /think worker writes its design doc (x-ff83 W1).
+def _frontmatter_claims_node(path: Path, node_id: str) -> bool:
+    """True iff ``path``'s YAML frontmatter ``claims:``/``graph_node_id:`` == node_id.
 
-    Writes ``<plans-dir>/YYYY-MM-DD-<slug>.md`` (matching interactive /think) so
-    ``/blueprint <that-path>`` mutates it in place - no manual relocate from a
-    briefs/ sidecar. Falls back to ``briefs_dir()/think-<node-id>.md`` with a
-    visible warning (AC1-ERR) when the plans dir is unresolvable, so a broken
-    settings lookup never wedges the spawn. Returns "" only if even briefs is
-    unresolvable (a missing path just omits the write-instruction line).
+    Reads only the frontmatter block, never the body (a design doc often quotes
+    an id in prose or a fenced example, which is not an authoritative claim).
     """
-    tail = (slug or node_id).strip("-") or node_id
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # An unreadable candidate reads as "does not claim" - log so a mint
+        # that should have reused it is debuggable, not a silent skip.
+        _LOG.debug("spawn_think: claim scan skipped unreadable %s: %s", path, exc)
+        return False
+    if not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    fm = text[: end if end != -1 else 2000]
+    for line in fm.splitlines():
+        m = re.match(r"^(?:claims|graph_node_id):\s*(.+?)\s*$", line)
+        if m and m.group(1).strip().strip("\"'") == node_id:
+            return True
+    return False
+
+
+def _find_node_doc(pdir: Path, node_id: str) -> Optional[Path]:
+    """The plans-dir doc that already belongs to ``node_id``, or None.
+
+    A bounded plans-dir scan (never a graph walk). A file whose frontmatter
+    *claims* the node wins over one that merely *ends* ``-<node_id>.md`` - the
+    claim is the stronger signal (a pre-created roadmap stub is the doc's home).
+    First match in sorted order is deterministic; two files claiming one node is
+    pre-existing corruption, flagged for separate cleanup, not resolved here.
+    """
+    try:
+        candidates = sorted(pdir.glob("????-??-??-*.md"))
+    except OSError as exc:
+        # A glob failure reads as "no existing doc" -> a fresh mint. Log so the
+        # reuse-vs-mint decision is debuggable rather than a silent duplicate.
+        _LOG.debug("spawn_think: plans-dir scan failed for %s: %s", pdir, exc)
+        return None
+    by_name: Optional[Path] = None
+    for f in candidates:
+        if _frontmatter_claims_node(f, node_id):
+            return f
+        if by_name is None and f.name.endswith(f"-{node_id}.md"):
+            by_name = f
+    return by_name
+
+
+def _think_output_path(node_id: str, slug: str = "") -> str:
+    """Resolve where the headless /think worker writes its design doc (x-8af8).
+
+    A newly minted filename ends ``-<node_id>.md`` so a roadmap base keyed on
+    the node id can find it (a reused frontmatter-claiming stub keeps its own
+    name). Resolution is node-id-first: reuse a file that already claims the
+    node, else a prior ``-<node_id>.md`` doc, else mint
+    ``<plans-dir>/YYYY-MM-DD-<slug>-<node_id>.md`` (empty slug ->
+    ``<date>-<node_id>.md``). Keying reuse on the stable node id, not the mutable
+    slug, keeps a re-dispatch after a slug edit idempotent. Falls back to
+    ``briefs_dir()/think-<node-id>.md`` with a visible warning (AC1-ERR) when the
+    plans dir is unresolvable. Returns "" only if even briefs is unresolvable.
+    """
     from datetime import datetime, timezone
 
     try:
         pdir = _plans_output_dir()
-        # AC1-EDGE: a re-dispatch reuses this slug's existing date-slug doc
-        # rather than minting a second file under today's (different) date.
-        # Anchor to the YYYY-MM-DD- prefix so `slug` does not spuriously match a
-        # file whose slug merely ENDS with `-slug` (e.g. awesome-slug); gemini PR#149.
-        existing = sorted(pdir.glob(f"????-??-??-{tail}.md"))
+        # 1-2: reuse this node's existing doc (frontmatter claim, else a prior
+        #      node-id-suffixed mint) rather than minting a duplicate.
+        existing = _find_node_doc(pdir, node_id)
         if existing:
-            return str(existing[0])
+            return str(existing)
+        s = (slug or "").strip("-")
+        # 3: backward-compat fallback. A legacy doc from before the -<node_id>
+        #    suffix convention (YYYY-MM-DD-<slug>.md, no frontmatter claim) is
+        #    still this node's doc on a re-dispatch under the SAME slug; reuse it
+        #    before minting a duplicate that would strand the prior design work
+        #    (codex P2). Node-id stays primary (checked first), so this does not
+        #    reintroduce slug-edit instability - it only rescues an unchanged
+        #    legacy name. Anchored to the date prefix so `awesome-<slug>` cannot
+        #    over-match (gemini PR#149); an already-suffixed `-<slug>-<id>.md` has
+        #    a trailing `-<id>` and so never matches this exact-slug glob.
+        if s:
+            legacy = sorted(pdir.glob(f"????-??-??-{s}.md"))
+            if legacy:
+                return str(legacy[0])
+        # 4: mint. Empty slug degrades to <date>-<node_id>.md, never a dangling
+        #    <date>--<node_id>.md.
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tail = f"{s}-{node_id}" if s else node_id
         return str(pdir / f"{date}-{tail}.md")
     except Exception as exc:  # noqa: BLE001 - degrade to briefs, never wedge the spawn
         try:

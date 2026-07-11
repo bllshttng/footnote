@@ -840,6 +840,18 @@ def main(argv: list[str] | None = None) -> int:
         print(result, file=sys.stderr)
     elif args.no_emit:
         print(result)
+    else:
+        # US8: the script-direct path (mutate_doc.py + `fno backlog intake`,
+        # bypassing the full /blueprint skill body) skips step 3a's collision
+        # gate. Surface it here - the one point every script-direct mutation
+        # passes through - so a duplicate-file overlap is seen before intake,
+        # not retroactively after ship. Surfacing, not blocking (advisory).
+        print(
+            "blueprint: run `fno backlog collisions check "
+            f"{args.design_doc}` before `fno backlog intake` - the collision "
+            "gate does not fire on the script-direct path.",
+            file=sys.stderr,
+        )
 
     return exit_code
 
