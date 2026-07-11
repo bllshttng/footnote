@@ -97,7 +97,18 @@ done
 command -v fno >/dev/null 2>&1 || fail "fno not on PATH"
 command -v jq  >/dev/null 2>&1 || fail "jq not on PATH"
 [[ -n "$NAME" ]]     || fail "missing --name"
-[[ -n "$PROVIDER" ]] || fail "missing --provider"
+# x-de9d US8: --provider may be omitted when config.agents.defaults.provider is
+# set; adopt the config default here so verb selection and the receipt check
+# both have a concrete provider (the seam then sees it as an explicit flag with
+# the same value). With neither flag nor config default, fail early with today's
+# message (epic Open Question 4).
+if [[ -z "$PROVIDER" ]]; then
+  PROVIDER="$(fno config get agents.defaults.provider 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ -n "$PROVIDER" ]] || fail "missing --provider"
+  # AC5-FR: a config-sourced provider must never be invisible. The seam's own
+  # notice will not fire (it sees this as an explicit --provider), so echo it here.
+  printf 'spawn.sh: provider from config.agents.defaults.provider=%s\n' "$PROVIDER" >&2
+fi
 
 # ---- Verb selection (Locked Decisions 1 + 2; Group 1 ab-8b3e4fe0) -------
 # `ask` never creates (bus epic Group 1): creation is always spawn/host. claude

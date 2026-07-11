@@ -272,6 +272,41 @@ def test_agents_group_execs_when_opted_in(monkeypatch) -> None:
     assert captured == [["ask", "worker-A", "hi", "--provider", "codex"]]
 
 
+def test_spawn_seam_injects_config_defaults(monkeypatch) -> None:
+    """x-de9d US8: the seam injects config.agents.defaults into a bare spawn
+    argv before the route, so the Rust route sees the config provider."""
+    from fno.cli import app
+    import fno.config as _config
+
+    class _D:
+        provider, model, effort = "codex", "gpt-5.6-sol", ""
+
+    class _S:
+        agents = type("A", (), {"defaults": _D()})()
+
+    monkeypatch.setattr(_config, "load_settings", lambda: _S())
+
+    captured: list = []
+
+    def fake_route(args, **kw):
+        captured.append(list(args))
+        raise SystemExit(0)
+
+    # bg substrate keeps the spawn on the Rust route (pane would force Python).
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    result = CliRunner().invoke(
+        app, ["agents", "spawn", "worker-A", "hi", "--substrate", "bg"]
+    )
+    assert result.exit_code == 0
+    argv = captured[0]
+    assert argv[0] == "spawn"
+    assert "--provider" in argv and argv[argv.index("--provider") + 1] == "codex"
+    assert "--model" in argv and argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    # positionals still resolvable after the injected flags
+    assert argv[-2:] == ["worker-A", "hi"] or "worker-A" in argv
+
+
 def test_agents_help_falls_through_when_opted_in(monkeypatch) -> None:
     """`fno agents --help` stays on the Python help even with the env set."""
     from fno.cli import app
