@@ -277,3 +277,137 @@ class TestSidecarBadRequest:
         finally:
             proc.terminate()
             proc.wait(timeout=5)
+
+
+def _read_one_frame(sock: socket.socket, *, timeout: float = 2.0) -> dict:
+    """Read one newline-delimited JSON frame off a live push connection.
+
+    Bounded by ``timeout`` (AC1-FR): a non-delivery raises a clear
+    ``AssertionError`` naming the missing round-trip rather than hanging
+    the suite forever — the exact silent-failure mode this test guards.
+    """
+    sock.settimeout(timeout)
+    buf = bytearray()
+    try:
+        while b"\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+    except socket.timeout:
+        raise AssertionError(
+            f"no deliver frame arrived within {timeout}s: the "
+            f"register/send_to_channel round-trip did not deliver"
+        )
+    line, sep, _ = buf.partition(b"\n")
+    assert sep == b"\n", "push connection closed without a complete deliver frame"
+    return json.loads(line.decode("utf-8"))
+
+
+class TestSidecarChannelDelivery:
+    """The register -> send_to_channel -> deliver HIT case.
+
+    The existing suite only covered the miss case
+    (``test_send_to_unregistered_channel``). The delivery path has real
+    production callers (``agents/dispatch.py``,
+    ``agents/providers/claude.py``) yet no test asserted a payload
+    actually crosses the socket — the coverage gap that let a
+    deliver-nothing regression ship silently.
+    """
+
+    def _register(self, sock_path: Path, session_id: str) -> socket.socket:
+        """Open a persistent connection and register a push channel on it.
+
+        Returns the still-open socket (push mode); the caller keeps it
+        open across the peer's ``send_to_channel`` and tears it down.
+        """
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.settimeout(2.0)
+        conn.connect(str(sock_path))
+        try:
+            conn.sendall(
+                (
+                    json.dumps(
+                        {
+                            "op": "register_channel",
+                            "session_id": session_id,
+                            "channel_name": "test-channel",
+                            "pid": os.getpid(),
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            ack = _read_one_frame(conn)
+            assert ack == {"ok": True}, f"register_channel failed: {ack}"
+            return conn
+        except Exception:
+            conn.close()
+            raise
+
+    def test_send_to_registered_channel_delivers(self, short_home: Path) -> None:
+        """AC1-HP: a registered channel receives the pushed envelope,
+        byte-equal including meta keys."""
+        from fno.mcp.channel import build_channel_notification
+
+        proc, sock_path = _spawn_sidecar(short_home)
+        conn_a = None
+        try:
+            assert _wait_for_socket(sock_path, timeout=5.0)
+            # Connection A registers and STAYS OPEN (push mode). Closing
+            # it first would silently drop the delivery route.
+            conn_a = self._register(sock_path, "sess-hit")
+
+            envelope = build_channel_notification(content="hi", meta={"k": "v"})
+            # Connection B (fresh, single-shot) sends to the same session.
+            resp = _rpc(
+                sock_path,
+                {"op": "send_to_channel", "session_id": "sess-hit", "envelope": envelope},
+            )
+            assert resp == {"ok": True}, f"send_to_channel failed: {resp}"
+
+            frame = _read_one_frame(conn_a)
+            assert frame == {"op": "deliver", "envelope": envelope}
+            # Value equality on meta, not just shape (channel.py's smoke
+            # pins shape and ignores content/meta values).
+            assert frame["envelope"]["params"]["meta"] == {"k": "v"}
+        finally:
+            if conn_a is not None:
+                conn_a.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    def test_empty_meta_envelope_round_trips(self, short_home: Path) -> None:
+        """AC1-EDGE: an envelope built with meta=None (collapsing to {})
+        round-trips with meta preserved as an empty dict."""
+        from fno.mcp.channel import build_channel_notification
+
+        proc, sock_path = _spawn_sidecar(short_home)
+        conn_a = None
+        try:
+            assert _wait_for_socket(sock_path, timeout=5.0)
+            conn_a = self._register(sock_path, "sess-edge")
+
+            envelope = build_channel_notification(content="hi", meta=None)
+            resp = _rpc(
+                sock_path,
+                {"op": "send_to_channel", "session_id": "sess-edge", "envelope": envelope},
+            )
+            assert resp == {"ok": True}
+
+            frame = _read_one_frame(conn_a)
+            assert frame["op"] == "deliver"
+            assert frame["envelope"]["params"]["meta"] == {}
+        finally:
+            if conn_a is not None:
+                conn_a.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
