@@ -57,6 +57,13 @@ run 1 'out-of-scope with hyphen spelling' $'## Out-of-scope\nthe thing we skippe
 
 # --- empty section is a no-op ------------------------------------------------
 run 0 'empty OOS section' $'## Out of scope\n\n## Verification\nran tests'
+# OOS heading at EOF -> empty section array; must NOT crash under set -u on bash
+# 3.2 (guarded array expansion). Without the guard this errors 'unbound variable'.
+run 0 'OOS heading at EOF (empty array)' $'## What\nstuff\n## Out of scope'
+
+# --- configured prefix: a node id with a >4-char / digit-bearing prefix ------
+# (config.backlog.id_prefix allows a letter-led 1-7 alnum token, e.g. proj1-)
+run 0 'configured-prefix node ref' $'## Out of scope\nbackend split - tracked as proj1-1234abcd'
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

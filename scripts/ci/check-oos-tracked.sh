@@ -16,9 +16,9 @@
 #   - A standalone `oos-ok: <rationale>` line waives the WHOLE section (mirrors
 #     loc-ratchet's `loc-exception:`) - for genuinely-nothing-to-track cases.
 #   - Otherwise every ITEM must carry a tracked ref on its own text: a node id
-#     (`x-abcd` / `ab-1234abcd` / any `<prefix>-<hex>`) or a carveout (`cv-...`),
-#     or an inline `oos-ok:`. A bullet/numbered line is one item; a section with
-#     no list is treated as a single item (the whole prose block).
+#     (`<prefix>-<hex>`) or a carveout (`cv-<hex>`), or an inline `oos-ok:`. A
+#     bullet/numbered line is one item; a section with no list is treated as a
+#     single item (the whole prose block).
 #
 # Input (via env ONLY; a workflow must NEVER interpolate PR-controlled text
 # inline into a `run:` block - that is a shell-injection vector):
@@ -28,20 +28,34 @@
 # item. Absent/empty PR_BODY = nothing to gate = pass (mirrors loc-ratchet's
 # "unset PR_BODY = no exception declared").
 #
-# Run locally:
+# Run locally (bash 3.2 safe - the maintainer's macOS /bin/bash):
 #   PR_BODY="$(gh pr view <n> --json body -q .body)" bash scripts/ci/check-oos-tracked.sh
 
 set -uo pipefail
 
 BODY="${PR_BODY:-}"
 
-# A tracked reference: a backlog node id (<prefix>-<hex>, prefix config-driven so
-# match generically: 1-4 lowercase letters, a dash, 4-8 hex) or a carveout id.
-# Deliberately does NOT count a bare `#123` GitHub ref as tracking - a PR/issue is
-# not a backlog node; route those through `oos-ok: tracked in #123` instead.
-REF='(\b[a-z]{1,4}-[0-9a-f]{4,8}\b|\bcv-[0-9a-f]{4,}\b)'
-# An inline waiver on an item, or (standalone) on the whole section.
-OOSOK='^[[:space:]]*oos-ok:[[:space:]]*[^[:space:]]'
+# A tracked reference. A backlog node id is <prefix>-<hex>: the prefix grammar
+# mirrors config.backlog.id_prefix (BacklogBlock.validate_id_prefix: a letter-led
+# 1-7 char lowercase alnum token), so a configured prefix like `proj1-` is
+# honored - NOT just the `ab-`/`x-` defaults. The hex tail is 4+ (x-ids are 4,
+# ab-ids 8, id_hex_width configurable). Carveout ids (cv-<hex>) match the same
+# shape. Deliberately does NOT count a bare `#123` GitHub ref as tracking - a
+# PR/issue is not a backlog node; route those through `oos-ok: tracked in #123`.
+REF='\b[a-z][a-z0-9]{0,6}-[0-9a-f]{4,}\b'
+# An inline waiver on an item, or (standalone) on the whole section. Requires a
+# non-empty rationale (a bare `oos-ok:` does not waive), like loc-exception:.
+OOSOK='oos-ok:[[:space:]]*[^[:space:]]'
+
+# match <ere> <string> [i] -> true if <string> matches. Uses grep WITHOUT -q so
+# the whole input is consumed: under `set -o pipefail` a `grep -q` that exits on
+# first match can SIGPIPE the upstream printf (exit 141) and fail the pipeline
+# (gemini review). Small single-line inputs, so the full read is free.
+match() {
+  local flags='-E'
+  [[ "${3:-}" == i ]] && flags='-iE'
+  printf '%s' "$2" | grep $flags "$1" >/dev/null 2>&1
+}
 
 [[ -z "$BODY" ]] && { echo "check-oos-tracked: no PR body - nothing to gate"; exit 0; }
 
@@ -53,10 +67,9 @@ in_section=0
 section_lines=()
 found_heading=0
 while IFS= read -r line; do
-  low="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
-  if printf '%s' "$low" | grep -qE '^#{1,6}[[:space:]]'; then
+  if match '^#{1,6}[[:space:]]' "$line"; then
     # a heading: does it open, or (if we were inside) close, the OOS section?
-    if printf '%s' "$low" | grep -qE '^#{1,6}[[:space:]]*(out.?of.?scope|not touched here)'; then
+    if match '^#{1,6}[[:space:]]*(out.?of.?scope|not touched here)' "$line" i; then
       in_section=1; found_heading=1; continue
     elif [[ "$in_section" -eq 1 ]]; then
       in_section=0   # next heading ends the section
@@ -72,9 +85,10 @@ fi
 
 # --- 2. section-level waiver -------------------------------------------------
 # A standalone `oos-ok:` line (not inside a list item) waives the whole section.
-for line in "${section_lines[@]}"; do
-  if printf '%s' "$line" | grep -qE "$OOSOK" \
-     && ! printf '%s' "$line" | grep -qE '^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]'; then
+# Guarded expansion (${a[@]+"${a[@]}"}): an empty array under `set -u` on bash
+# 3.2 errors on a plain "${a[@]}" (gemini review) - an OOS heading at EOF.
+for line in ${section_lines[@]+"${section_lines[@]}"}; do
+  if match "$OOSOK" "$line" && ! match '^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]' "$line"; then
     echo "check-oos-tracked: section waived by 'oos-ok:' - ok"
     exit 0
   fi
@@ -82,12 +96,12 @@ done
 
 # --- 3. collect items --------------------------------------------------------
 # A list item (- / * / + / "1.") is one item. If the section has no list items,
-# the whole non-blank prose block is a single item (my paragraph OOS case).
+# the whole non-blank prose block is a single item (the paragraph OOS case).
 items=()
 has_list=0
 prose=""
-for line in "${section_lines[@]}"; do
-  if printf '%s' "$line" | grep -qE '^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]+[^[:space:]]'; then
+for line in ${section_lines[@]+"${section_lines[@]}"}; do
+  if match '^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]+[^[:space:]]' "$line"; then
     has_list=1
     items+=("$line")
   elif [[ -n "${line//[[:space:]]/}" ]]; then
@@ -103,11 +117,9 @@ fi
 # --- 4. every item needs a tracked ref or inline oos-ok ----------------------
 violations=0
 report=""
-for item in "${items[@]}"; do
-  # tracked ref, or an inline oos-ok: with a non-empty rationale (a bare
-  # `oos-ok:` with nothing after does NOT waive - same rule as the section level)
-  if printf '%s' "$item" | grep -qiE "$REF" \
-     || printf '%s' "$item" | grep -qiE 'oos-ok:[[:space:]]*[^[:space:]]'; then
+for item in ${items[@]+"${items[@]}"}; do
+  # tracked ref, or an inline oos-ok: with a non-empty rationale
+  if match "$REF" "$item" i || match "$OOSOK" "$item" i; then
     continue
   fi
   trimmed="$(printf '%s' "$item" | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-100)"
