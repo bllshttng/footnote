@@ -127,8 +127,11 @@ def validate(event: dict[str, Any]) -> None:
         if field not in event:
             raise ValidationError(f"event missing required field: {field}")
     source = event["source"]
-    if source not in ALLOWED_SOURCES and not any(
-        p.match(source) for p in ALLOWED_SOURCE_PATTERNS
+    # isinstance guard first: a non-str source must reject cleanly, not crash
+    # p.match() with a TypeError (the pre-pattern set-membership tolerated it).
+    if not isinstance(source, str) or (
+        source not in ALLOWED_SOURCES
+        and not any(p.match(source) for p in ALLOWED_SOURCE_PATTERNS)
     ):
         raise ValidationError(
             f"unknown source: {source!r} "

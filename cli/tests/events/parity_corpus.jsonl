@@ -124,3 +124,4 @@
 {"expect":"valid","reason":"unified stream-worker: pattern source (x-2901)","event":{"ts":"2026-07-10T12:00:02Z","type":"agent_spawned","source":"stream-worker:abc","data":{"short_id":"abc"}}}
 {"expect":"valid","reason":"unified active-backlog enum source (x-2901)","event":{"ts":"2026-07-10T12:00:03Z","type":"active_backlog_task_crashed","source":"active-backlog","data":{"error":"panic in dispatch"}}}
 {"expect":"invalid","reason":"legacy Branch B flat kind envelope retired (no type)","event":{"ts":"2026-07-10T12:00:04Z","kind":"agent_spawned","source":"daemon","name":"wkA","pid":42}}
+{"expect":"invalid","reason":"non-string source rejected cleanly not TypeError (x-2901)","event":{"ts":"2026-07-10T12:00:05Z","type":"agent_spawned","source":123,"data":{}}}

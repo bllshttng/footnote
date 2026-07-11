@@ -105,6 +105,29 @@ def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
     return records, malformed
 
 
+def _ev_kind(ev: dict[str, Any]) -> str:
+    """Event type name: unified ``type``, else the retired flat ``kind``.
+
+    ~/.fno/events.jsonl carries two shapes: the daemon EventEmitter's unified
+    ``{type, source, data}`` envelope (x-2901) and the flat agents-audit
+    envelope (append_agents_event, unchanged). Drop the ``kind`` fallback once
+    the daemon fleet has restarted on the post-x-2901 binary.
+    """
+    return ev.get("type") or ev.get("kind") or ""
+
+
+def _ev_field(ev: dict[str, Any], key: str) -> Any:
+    """Read a payload field: unified ``data.<key>``, else flat ``<key>``.
+
+    The daemon EventEmitter nests payload fields under ``data``; the flat
+    agents-audit envelope keeps them top-level. Reading both renders every line.
+    """
+    data = ev.get("data")
+    if isinstance(data, dict) and key in data:
+        return data[key]
+    return ev.get(key)
+
+
 class _RegistryReadError(RuntimeError):
     """Surfaced when load_registry() fails for permission/schema/corruption reasons.
 
@@ -231,11 +254,11 @@ def trace_logic(
         if not all_agents and name is not None:
             # to_name (from EventContext) is the canonical recipient;
             # legacy emits also carry `name` for back-compat.
-            recipient = ev.get("to_name") or ev.get("name")
+            recipient = _ev_field(ev, "to_name") or _ev_field(ev, "name")
             if recipient != name:
                 return False
         if request_id is not None:
-            if ev.get("request_id") != request_id:
+            if _ev_field(ev, "request_id") != request_id:
                 return False
         if since is not None:
             ts = ev.get("ts", "")
@@ -265,15 +288,15 @@ def trace_logic(
     # boundary (done at index >= limit, dropped) would falsely flag
     # the surviving started as orphaned. AC4-EDGE.
     seen_done = {
-        e.get("request_id")
+        _ev_field(e, "request_id")
         for e in filtered
-        if e.get("kind", "").endswith("_done") and e.get("request_id")
+        if _ev_kind(e).endswith("_done") and _ev_field(e, "request_id")
     }
     orphan_rids: set[str] = set()
     if not json_out:
         for e in filtered:
-            kind = e.get("kind", "")
-            rid = e.get("request_id")
+            kind = _ev_kind(e)
+            rid = _ev_field(e, "request_id")
             if kind.endswith("_started") and rid and rid not in seen_done:
                 orphan_rids.add(rid)
 
@@ -296,7 +319,7 @@ def trace_logic(
     # Synthesize target header (AC5-UI): if any row carries
     # target_session_id, mention it once at the top.
     header_lines: list[str] = []
-    rsids = sorted({e.get("target_session_id") for e in filtered if e.get("target_session_id")})
+    rsids = sorted({_ev_field(e, "target_session_id") for e in filtered if _ev_field(e, "target_session_id")})
     if rsids and not json_out:
         header_lines.append(f"target_session: {', '.join(str(r) for r in rsids)}")
 
@@ -306,11 +329,11 @@ def trace_logic(
             lines.append(json.dumps(ev, sort_keys=False, separators=(",", ":")))
         else:
             ts = ev.get("ts", "")
-            kind = ev.get("kind", "")
-            recipient = ev.get("to_name") or ev.get("name") or "?"
-            sender = ev.get("from_name") or "?"
-            rid = _format_request_id(ev.get("request_id"), json_mode=False)
-            ck = ev.get("caller_kind") or "-"
+            kind = _ev_kind(ev)
+            recipient = _ev_field(ev, "to_name") or _ev_field(ev, "name") or "?"
+            sender = _ev_field(ev, "from_name") or "?"
+            rid = _format_request_id(_ev_field(ev, "request_id"), json_mode=False)
+            ck = _ev_field(ev, "caller_kind") or "-"
             row = f"{ts}  {kind}  {sender} -> {recipient}  rid={rid}  caller={ck}"
             lines.append(row)
             if kind.endswith("_started") and ev.get("request_id") in orphan_rids:
