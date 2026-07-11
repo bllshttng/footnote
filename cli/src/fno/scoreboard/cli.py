@@ -16,6 +16,7 @@ from fno.scoreboard.fold import (
     build_calibration,
     build_efficiency,
     build_plan_fidelity,
+    build_provider_scoreboard,
     build_scoreboard,
     build_skill_scoreboard,
     load_ledger_rows,
@@ -65,13 +66,33 @@ def scoreboard_command(
             "plan is reported `unjoined`, never scored 0%."
         ),
     ),
+    by_provider: bool = typer.Option(
+        False,
+        "--by-provider",
+        help=(
+            "Provider-outcome attribution: cost per shipped PR per "
+            "provider/model (wedge spend included), post-ship bounce rate, "
+            "median iterations, and re-dispatch counts, with an unattributed "
+            "bucket and a coverage line. Feeds quota-aware dispatch."
+        ),
+    ),
 ) -> None:
     """Fold ledger + events + graph into a stop-cause / spend / autonomy /
     survival scoreboard, with a mandatory coverage line."""
     if since < 1:
         raise typer.BadParameter("--since must be at least 1 (days).")
     # The view flags are mutually exclusive: each renders a different fold.
-    _views = [f for f, on in (("--calibration", calibration), ("--by-skill", by_skill), ("--efficiency", efficiency), ("--plan-fidelity", plan_fidelity)) if on]
+    _views = [
+        f
+        for f, on in (
+            ("--calibration", calibration),
+            ("--by-skill", by_skill),
+            ("--efficiency", efficiency),
+            ("--plan-fidelity", plan_fidelity),
+            ("--by-provider", by_provider),
+        )
+        if on
+    ]
     if len(_views) > 1:
         raise typer.BadParameter(f"{' and '.join(_views)} are mutually exclusive views; pick one.")
     from fno import paths as _paths
@@ -125,6 +146,19 @@ def scoreboard_command(
             typer.echo(_json.dumps(eff, indent=2))
             return
         _render_efficiency(eff)
+        return
+
+    if by_provider:
+        pb = build_provider_scoreboard(
+            rows,
+            read_graph_nodes(graph_path),
+            since_days=since,
+            now=datetime.now(),
+        )
+        if json_out:
+            typer.echo(_json.dumps(pb, indent=2))
+            return
+        _render_by_provider(pb)
         return
 
     if plan_fidelity:
@@ -297,6 +331,38 @@ def _render_by_skill(sb: dict) -> None:
             f"  {row['skill']:<32}{row['version']:<10}{row['runs']:>6}"
             f"{row['ship_rate_pct']:>6}%{revert:>9}"
             f"{row['touches_per_run']:>11}{row['cost_per_run']:>10.2f}  {row['method']}\n"
+        )
+
+
+def _render_by_provider(pb: dict) -> None:
+    out = sys.stdout.write
+    win = pb["since_days"]
+    if pb["state"] == "no_data":
+        out(f"fno scoreboard --by-provider (last {win}d)\n\n  no terminal sessions in window.\n")
+        return
+
+    cov = pb["coverage"]
+    out(f"fno scoreboard --by-provider (last {win}d)\n\n")
+    out("Coverage\n")
+    out(f"  rows in window:      {cov['rows']} execution rows\n")
+    out(f"  attributed:          {cov['attributed_pct']}%\n")
+    if cov["attributed_pct"] < 100:
+        out(
+            f"  ! rows below reflect {cov['attributed_pct']}% provider attribution - "
+            "unattributed rows are a visible bucket, never dropped.\n"
+        )
+    out("\n")
+    out(f"  {'provider':<16}{'model':<22}{'runs':>6}{'shipped':>9}{'spend$':>10}{'$/shipped':>11}{'bounce%':>13}{'med iter':>10}{'retries':>9}\n")
+    prev = None
+    for row in pb["rows"]:
+        provider = row["provider"] if row["provider"] != prev else ""
+        prev = row["provider"]
+        cps = f"{row['cost_per_shipped_usd']:.2f}" if row["cost_per_shipped_usd"] is not None else "n/a"
+        # bounce rides with its denominator: "50% of 4" never a bare rate
+        bounce = f"{row['bounce_rate_pct']}% of {row['shipped_linked']}" if row["bounce_rate_pct"] is not None else "n/a"
+        out(
+            f"  {provider:<16}{row['model']:<22}{row['runs']:>6}{row['shipped']:>9}"
+            f"{row['spend_usd']:>10.2f}{cps:>11}{bounce:>13}{_fmt(row['median_iterations']):>10}{row['retry_rows']:>9}\n"
         )
 
 
