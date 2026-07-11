@@ -734,6 +734,23 @@ if [[ ! -f "$STATE_FILE" ]]; then
     codex_thread_id="null"
   fi
 
+  # Harness identity (generic; a new provider adds no field). harness_session_id
+  # unifies the per-provider session/thread id from whichever harness env is set;
+  # harness = PROVIDER. Model is best-effort (empty when the harness hides it);
+  # effort has no self-env today. Reused by the manifest write and the US6 stamp.
+  _HARNESS_SESSION=""
+  if [[ -n "$_codex_thread_compact" ]]; then
+    _HARNESS_SESSION="$_codex_thread_raw"
+  elif [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
+    _HARNESS_SESSION="$claude_transcript_id"
+  elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
+    _HARNESS_SESSION="$GEMINI_SESSION_ID"
+  elif [[ -n "${OPENCODE_SESSION_ID:-}" ]]; then
+    _HARNESS_SESSION="$OPENCODE_SESSION_ID"
+  fi
+  _HARNESS_MODEL="${TARGET_HARNESS_MODEL:-${CLAUDE_MODEL:-${ANTHROPIC_MODEL:-}}}"
+  _HARNESS_EFFORT="${TARGET_HARNESS_EFFORT:-}"
+
   # session_id: {UTC-timestamp}-{infix}{PPID}-{6 hex chars of /dev/urandom}
   # ab-7303e5d7: TARGET_SESSION_ID is the absolute override (megawalk walkers
   # pre-assign it). Otherwise mint one id per target run. CODEX_THREAD_ID is a
@@ -815,13 +832,21 @@ if [[ ! -f "$STATE_FILE" ]]; then
   cat > "$local_temp" << EOF
 ---
 # fno_id = target-minted run id (canonical). session_id mirrors it for one
-# release and is NOT the harness session (that is claude_session_id/codex_thread_id).
+# release and is NOT the harness session (that is harness_session_id below).
 fno_id: $local_session_id
 session_id: $local_session_id
 created_at: $TIMESTAMP
 input: "${escaped_input}"
 plan_path: "${escaped_plan_path}"
 cross_project: $CROSS_PROJECT
+# Harness identity (canonical). harness supersedes provider; harness_session_id
+# supersedes claude_session_id/codex_thread_id. Those legacy keys stay for one
+# release as aliases (removed next release).
+harness: $PROVIDER
+harness_mode: ${PROVIDER_MODE:-standard}
+harness_session_id: ${_HARNESS_SESSION:-null}
+harness_model: ${_HARNESS_MODEL:-}
+harness_effort: ${_HARNESS_EFFORT:-}
 provider: $PROVIDER
 provider_mode: ${PROVIDER_MODE:-standard}
 provider_upgrade_reason: "${escaped_reason:-}"
@@ -1033,17 +1058,9 @@ PYEOF
     # lock-contended graph.json must not abort init (AC9-FR).
     if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
       _STAMP_LOG="$STATE_DIR/.init-claim.log"
-      # Harness stamp (US6): the holder's provider + harness-session UUID, so an
-      # operator/peek can jump from a node straight to `claude -r <uuid>`. The
-      # UUID prefers codex thread, then the claude transcript, then gemini.
-      _HARNESS_SESSION=""
-      if [[ -n "${_codex_thread_compact:-}" ]]; then
-        _HARNESS_SESSION="${_codex_thread_raw:-}"
-      elif [[ -n "${claude_transcript_id:-}" && "${claude_transcript_id:-}" != "null" ]]; then
-        _HARNESS_SESSION="$claude_transcript_id"
-      elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
-        _HARNESS_SESSION="$GEMINI_SESSION_ID"
-      fi
+      # Harness stamp (US6): the holder's provider + harness-session UUID (the
+      # _HARNESS_SESSION computed once above), so an operator/peek can jump from a
+      # node straight to `claude -r <uuid>`.
       # Unquoted expansion below (same pattern as $_PID_FLAGS): provider + UUID
       # are single tokens, so word-splitting yields exactly the intended args. An
       # empty provider omits the flag rather than passing a blank value.

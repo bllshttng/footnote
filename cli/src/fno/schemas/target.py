@@ -99,6 +99,30 @@ class TargetState(BaseModel):
             data = {**data, "fno_id": data["session_id"]}
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_harness(cls, data: Any) -> Any:
+        """Alias the harness_* block with the legacy provider / claude_session_id
+        / codex_thread_id keys for one release, so a reader of either name works
+        on any manifest. harness supersedes provider (bidirectional); the harness
+        session id is back-filled forward from whichever per-provider key is set.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        for new, old in (("harness", "provider"), ("harness_mode", "provider_mode")):
+            if not data.get(new) and data.get(old):
+                data[new] = data[old]
+            elif not data.get(old) and data.get(new):
+                data[old] = data[new]
+        if not data.get("harness_session_id"):
+            for legacy in ("claude_session_id", "codex_thread_id"):
+                v = data.get(legacy)
+                if v and str(v).strip() and str(v).strip().lower() != "null":
+                    data["harness_session_id"] = v
+                    break
+        return data
+
     @field_validator("clean_passed", "goal_verification_passed", "browser_testing_passed", mode="before")
     @classmethod
     def _coerce_gate_field(cls, v: Any, info: Any) -> bool:
@@ -165,8 +189,7 @@ class TargetState(BaseModel):
     # fno_id is the canonical target-minted run id. session_id is a one-release
     # legacy MIRROR of fno_id (same value, back-filled by _backfill_fno_id),
     # kept only so pre-rename readers don't break; it is removed next release.
-    # It is NOT the harness session - that lives in claude_session_id /
-    # codex_thread_id (extra fields). Do not read session_id as "the session".
+    # It is NOT the harness session - that is harness_session_id below.
     fno_id: Optional[SessionId] = None
     session_id: Optional[SessionId] = None
     sessions: List[str] = Field(default_factory=list)
@@ -174,11 +197,24 @@ class TargetState(BaseModel):
     owner_started_at: Optional[str] = None
     owner_cwd: Optional[str] = None
 
+    # Harness identity. One generic block describes the harness this session runs
+    # on, so a new provider adds no new field. harness supersedes provider and
+    # harness_session_id supersedes the per-provider claude_session_id /
+    # codex_thread_id; the legacy keys are one-release aliases (see
+    # _backfill_harness) removed next release.
+    harness: Optional[str] = None
+    harness_mode: Optional[str] = None
+    harness_session_id: Optional[str] = None
+    harness_model: Optional[str] = None
+    harness_effort: Optional[str] = None
+
     # Provider config
     execution_mode: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     cross_project: bool = False
+    # Legacy aliases of the harness_* block (one release). provider == harness,
+    # provider_mode == harness_mode; back-filled bidirectionally by _backfill_harness.
     provider: Optional[str] = None
     provider_mode: Optional[str] = None
     provider_upgrade_reason: Optional[str] = None
