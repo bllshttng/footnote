@@ -243,6 +243,23 @@ check_eq 'inline --role in task text is error'  "$(field "$out" status)" 'error'
 out="$(run 'ab-99999999 --fresh the thing')"
 check_eq 'inline --fresh in task text is error' "$(field "$out" status)" 'error'
 
+# --- effort <value> two-word posture -----------------------------------------
+out="$(run 'ab-99999999 codex effort high')"
+check_eq   'effort high -> effort=high'          "$(field "$out" effort)" 'high'
+check_eq   'effort keeps provider posture'       "$(field "$out" provider)" 'codex'
+check_not_contains 'effort stripped from message' "$(field "$out" message)" 'effort high'
+out="$(run 'ab-99999999 effort medium' --effort low)"
+check_eq   '--effort wins over dashless effort'  "$(field "$out" effort)" 'low'
+out="$(run 'ab-44444444 effort')"
+check_eq   'dangling effort is error'            "$(field "$out" status)" 'error'
+out="$(run 'ab-44444444' --effort)"
+check_eq   'bare --effort is error'               "$(field "$out" status)" 'error'
+out="$(run 'ab-44444444' --effort '')"
+check_eq   'empty --effort is error'              "$(field "$out" status)" 'error'
+out="$(run 'tune effort carefully for this worker')"
+check_contains 'mid-task effort stays in message' "$(field "$out" message)" 'tune effort carefully for this worker'
+check_eq   'mid-task effort leaves effort empty' "$(field "$out" effort)" ''
+
 # --- mid-task `as` stays task text -------------------------------------------
 out="$(run 'refactor the module as a plugin')"
 check_eq   'mid-task as keeps default name' "$(field "$out" name)" "$(field "$(run 'refactor the module as a plugin')" name)"

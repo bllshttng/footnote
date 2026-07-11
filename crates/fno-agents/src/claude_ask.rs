@@ -419,6 +419,7 @@ pub fn build_argv(
     use_stdin: bool,
     model: Option<&str>,
     permission_mode: Option<&str>,
+    effort: Option<&str>,
 ) -> Vec<String> {
     let mut argv = vec![
         "claude".to_string(),
@@ -432,6 +433,10 @@ pub fn build_argv(
     if let Some(m) = permission_mode.filter(|m| !m.is_empty()) {
         argv.push("--permission-mode".to_string());
         argv.push(m.to_string());
+    }
+    if let Some(value) = effort.filter(|v| !v.is_empty()) {
+        argv.push("--effort".to_string());
+        argv.push(value.to_string());
     }
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
@@ -978,11 +983,12 @@ pub fn bg_create(
     extra_env: &[(&str, &str)],
     model: Option<&str>,
     permission_mode: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<CreateResult, AskError> {
     use std::process::{Command, Stdio};
 
     let use_stdin = use_stdin_for(message);
-    let argv = build_argv(name, message, use_stdin, model, permission_mode);
+    let argv = build_argv(name, message, use_stdin, model, permission_mode, effort);
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -1759,6 +1765,7 @@ pub fn dispatch_claude_spawn(
     extra_env: &[(&str, &str)],
     model: Option<&str>,
     permission_mode: Option<&str>,
+    effort: Option<&str>,
 ) -> AskOutcome {
     // spawn allows an empty initial message (Python dispatch_spawn parity).
     if let Err(msg) = validate_spawn_inputs(name, from_name) {
@@ -1837,6 +1844,7 @@ pub fn dispatch_claude_spawn(
         extra_env,
         model,
         effective_mode,
+        effort,
     );
     if inner.exit_code != 0 {
         return inner;
@@ -1898,6 +1906,7 @@ pub fn dispatch_claude_headless(
     timeout: Option<Duration>,
     model: Option<&str>,
     permission_mode: Option<&str>,
+    effort: Option<&str>,
 ) -> AskOutcome {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1928,6 +1937,10 @@ pub fn dispatch_claude_headless(
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
         argv.push(m.to_string());
+    }
+    if let Some(value) = effort.filter(|v| !v.is_empty()) {
+        argv.push("--effort".to_string());
+        argv.push(value.to_string());
     }
     if !use_stdin {
         argv.push(effective.to_string());
@@ -2317,6 +2330,7 @@ fn create(
     // x-dfa4: the already-resolved permission mode (dispatch_claude_spawn folds
     // --yolo -> bypassPermissions before calling); None = the claude default.
     permission_mode: Option<&str>,
+    effort: Option<&str>,
 ) -> AskOutcome {
     let pre_stderr = String::new();
 
@@ -2331,6 +2345,7 @@ fn create(
         extra_env,
         model,
         permission_mode,
+        effort,
     ) {
         Ok(r) => r,
         Err(AskError::Subprocess { exit_code, stderr }) => {
@@ -2740,11 +2755,11 @@ mod tests {
     #[test]
     fn build_argv_inline_vs_stdin() {
         assert_eq!(
-            build_argv("a", "hi", false, None, None),
+            build_argv("a", "hi", false, None, None, None),
             vec!["claude", "--bg", "--name", "a", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true, None, None),
+            build_argv("a", "hi", true, None, None, None),
             vec!["claude", "--bg", "--name", "a"]
         );
     }
@@ -2754,7 +2769,7 @@ mod tests {
     #[test]
     fn build_argv_appends_permission_mode() {
         assert_eq!(
-            build_argv("a", "hi", false, None, Some("acceptEdits")),
+            build_argv("a", "hi", false, None, Some("acceptEdits"), None),
             vec![
                 "claude",
                 "--bg",
@@ -2767,13 +2782,15 @@ mod tests {
         );
         // Empty mode == unset: no flag, byte-identical to the None case (AC7).
         assert_eq!(
-            build_argv("a", "hi", false, None, Some("")),
-            build_argv("a", "hi", false, None, None)
+            build_argv("a", "hi", false, None, Some(""), None),
+            build_argv("a", "hi", false, None, None, None)
         );
         // Does NOT stack with --dangerously-skip-permissions (bg never had it).
-        assert!(!build_argv("a", "hi", false, None, Some("acceptEdits"))
-            .iter()
-            .any(|t| t == "--dangerously-skip-permissions"));
+        assert!(
+            !build_argv("a", "hi", false, None, Some("acceptEdits"), None)
+                .iter()
+                .any(|t| t == "--dangerously-skip-permissions")
+        );
     }
 
     // x-571f: a per-node model pin appends `--model <m>` between --name and the
@@ -2782,17 +2799,25 @@ mod tests {
     #[test]
     fn build_argv_appends_model_pin() {
         assert_eq!(
-            build_argv("a", "hi", false, Some("fable"), None),
+            build_argv("a", "hi", false, Some("fable"), None, None),
             vec!["claude", "--bg", "--name", "a", "--model", "fable", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true, Some("fable"), None),
+            build_argv("a", "hi", true, Some("fable"), None, None),
             vec!["claude", "--bg", "--name", "a", "--model", "fable"]
         );
         // Empty pin == unset: no flag, byte-identical to the None case.
         assert_eq!(
-            build_argv("a", "hi", false, Some(""), None),
-            build_argv("a", "hi", false, None, None)
+            build_argv("a", "hi", false, Some(""), None, None),
+            build_argv("a", "hi", false, None, None, None)
+        );
+    }
+
+    #[test]
+    fn build_argv_appends_effort() {
+        assert_eq!(
+            build_argv("a", "hi", false, None, None, Some("high")),
+            vec!["claude", "--bg", "--name", "a", "--effort", "high", "hi"]
         );
     }
 

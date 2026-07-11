@@ -20,6 +20,7 @@ The actual subprocess invocation per provider lives in
 ``fno.agents.providers.{claude,codex,gemini}``. US1 ships the claude
 adapter; codex / gemini land in US4.
 """
+
 from __future__ import annotations
 
 import contextvars
@@ -111,13 +112,10 @@ class DispatchAskResult:
     def __post_init__(self) -> None:
         if self.kind not in ("create", "followup"):
             raise ValueError(
-                f"DispatchAskResult.kind must be 'create' or 'followup', "
-                f"got {self.kind!r}"
+                f"DispatchAskResult.kind must be 'create' or 'followup', got {self.kind!r}"
             )
         if self.kind == "followup" and self.reply is None:
-            raise ValueError(
-                "DispatchAskResult.reply is required when kind='followup'"
-            )
+            raise ValueError("DispatchAskResult.reply is required when kind='followup'")
 
 
 class ProviderMismatchError(RuntimeError):
@@ -126,9 +124,7 @@ class ProviderMismatchError(RuntimeError):
 
 def _check_known_provider(name: str) -> None:
     if name not in KNOWN_PROVIDERS:
-        raise ValueError(
-            f"unknown provider {name!r}; supported: {', '.join(KNOWN_PROVIDERS)}"
-        )
+        raise ValueError(f"unknown provider {name!r}; supported: {', '.join(KNOWN_PROVIDERS)}")
 
 
 def is_provider_available(name: str) -> bool:
@@ -198,7 +194,7 @@ _DEFAULT_LOCK_TIMEOUT = 30.0
 
 _FROM_NAME_MAX_LEN = 128
 _FROM_NAME_DEFAULT = "fno"
-_FROM_NAME_FORBIDDEN_CHARS = frozenset("\"<>&")
+_FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
 _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
 
 # x-c393: how recent an inside_leg report must be for a worker to count as
@@ -325,8 +321,7 @@ def _validate_from_name(from_name: str) -> None:
         )
     if any(ch in _FROM_NAME_FORBIDDEN_CHARS for ch in from_name):
         raise DispatchAskError(
-            "from-name must not contain XML-unsafe characters "
-            "(\", <, >, &)",
+            'from-name must not contain XML-unsafe characters (", <, >, &)',
             exit_code=2,
         )
 
@@ -395,9 +390,7 @@ def _followup_path(
     demote_event_kind: Optional[str] = None
     if existing.provider == "claude" and existing.mcp_channel_id:
         try:
-            mcp_alive = claude_mod.mcp_channel_reachable(
-                existing.mcp_channel_id, timeout=0.25
-            )
+            mcp_alive = claude_mod.mcp_channel_reachable(existing.mcp_channel_id, timeout=0.25)
         except ReachabilityProbeError as probe_exc:
             mcp_alive = False
             demote_reason = probe_exc.reason  # "mcp_channel_disconnected"
@@ -454,13 +447,11 @@ def _followup_path(
                 # fail the same way.
                 try:
                     update_registry(
-                        _stamp_status(name, status="orphaned",
-                                      last_message_at_preserve=True)
+                        _stamp_status(name, status="orphaned", last_message_at_preserve=True)
                     )
                 except (OSError, RegistryVersionError) as stamp_exc:
                     print(
-                        f"fno agents: warning: failed to mark {name!r} as orphaned: "
-                        f"{stamp_exc}",
+                        f"fno agents: warning: failed to mark {name!r} as orphaned: {stamp_exc}",
                         file=sys.stderr,
                     )
                 events.emit(
@@ -561,13 +552,11 @@ def _followup_path(
             # is observable via the events log + a stderr warning.
             try:
                 update_registry(
-                    _stamp_status(name, status="orphaned",
-                                  last_message_at_preserve=True)
+                    _stamp_status(name, status="orphaned", last_message_at_preserve=True)
                 )
             except (OSError, RegistryVersionError) as stamp_exc:
                 print(
-                    f"fno agents: warning: failed to mark {name!r} as orphaned: "
-                    f"{stamp_exc}",
+                    f"fno agents: warning: failed to mark {name!r} as orphaned: {stamp_exc}",
                     file=sys.stderr,
                 )
                 events.emit(
@@ -601,8 +590,7 @@ def _followup_path(
                 # Defensive: a future OrphanReason variant should surface
                 # explicitly here, not fall back to no-hint generic text.
                 hint = (
-                    f". Inspect with 'fno agents logs {name}' or remove via "
-                    f"'fno agents rm {name}'"
+                    f". Inspect with 'fno agents logs {name}' or remove via 'fno agents rm {name}'"
                 )
             raise DispatchAskError(
                 f"agent {name!r} is not running (reason: {exc.reason}{'; session is suspended' if exc.reason == 'socket-null' else ''})"
@@ -643,8 +631,7 @@ def _followup_path(
     # stay strictly monotonic.
     try:
         update_registry(
-            _stamp_status(name, status="live",
-                          last_message_at=_utc_now_iso),
+            _stamp_status(name, status="live", last_message_at=_utc_now_iso),
         )
     except (OSError, RegistryVersionError) as exc:
         events.emit(
@@ -657,8 +644,7 @@ def _followup_path(
         )
         lock_handle.detach()
         raise DispatchAskError(
-            f"registry write failed: {exc}. "
-            "NOTE: message was already delivered; do not retry.",
+            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
             exit_code=12,
         ) from exc
 
@@ -736,9 +722,7 @@ def _stamp_status(
             if last_message_at_preserve:
                 out.append(replace(entry, status=status))
             else:
-                out.append(
-                    replace(entry, status=status, last_message_at=resolved_last)
-                )
+                out.append(replace(entry, status=status, last_message_at=resolved_last))
         return out
 
     return _updater
@@ -768,6 +752,7 @@ def _codex_create_path(
     timeout_sec: float,
     lock_handle,
     role: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -796,6 +781,7 @@ def _codex_create_path(
             timeout=timeout_sec,
             agent_self=name,
             role=role,
+            reasoning_effort=effort,
         )
     except codex_mod.NoSessionIdError as exc:
         events.emit(
@@ -931,8 +917,7 @@ def _codex_followup_path(
     # agent name) and confuse downstream `fno agents logs <name>`.
     if not existing.log_path:
         raise DispatchAskError(
-            f"registry entry {name!r} has empty log_path; "
-            f"run 'fno agents rm {name}' and recreate.",
+            f"registry entry {name!r} has empty log_path; run 'fno agents rm {name}' and recreate.",
             exit_code=11,
         )
     if not existing.cwd:
@@ -1003,8 +988,7 @@ def _codex_followup_path(
         )
         lock_handle.detach()
         raise DispatchAskError(
-            f"registry write failed: {exc}. "
-            "NOTE: message was already delivered; do not retry.",
+            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
             exit_code=12,
         ) from exc
 
@@ -1089,8 +1073,7 @@ def _gemini_create_path(
             raw_head=exc.raw_head,
         )
         raise DispatchAskError(
-            f"gemini output parse failed: {exc} "
-            f"(see {output_path} for full bytes)",
+            f"gemini output parse failed: {exc} (see {output_path} for full bytes)",
             exit_code=11,
         ) from exc
     except gemini_mod.GeminiInvocationError as exc:
@@ -1196,8 +1179,7 @@ def _gemini_followup_path(
 
     if not existing.log_path:
         raise DispatchAskError(
-            f"registry entry {name!r} has empty log_path; "
-            f"run 'fno agents rm {name}' and recreate.",
+            f"registry entry {name!r} has empty log_path; run 'fno agents rm {name}' and recreate.",
             exit_code=11,
         )
     if not existing.cwd:
@@ -1241,8 +1223,7 @@ def _gemini_followup_path(
             raw_head=exc.raw_head,
         )
         raise DispatchAskError(
-            f"gemini output parse failed: {exc} "
-            f"(see {output_path} for full bytes)",
+            f"gemini output parse failed: {exc} (see {output_path} for full bytes)",
             exit_code=11,
         ) from exc
     except gemini_mod.GeminiInvocationError as exc:
@@ -1278,8 +1259,7 @@ def _gemini_followup_path(
         )
         lock_handle.detach()
         raise DispatchAskError(
-            f"registry write failed: {exc}. "
-            "NOTE: message was already delivered; do not retry.",
+            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
             exit_code=12,
         ) from exc
 
@@ -1335,6 +1315,7 @@ def _claude_create_path(
     role: Optional[str] = None,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1365,6 +1346,7 @@ def _claude_create_path(
             role=role,
             model=model,
             permission_mode=effective_mode,
+            effort=effort,
         )
     except claude_mod.ProviderSubprocessError as exc:
         events.emit(
@@ -1384,8 +1366,7 @@ def _claude_create_path(
             short_id_raw=exc.stdout_head,
         )
         raise DispatchAskError(
-            f"unable to parse short-id from claude --bg output: "
-            f"{exc.stdout_head}",
+            f"unable to parse short-id from claude --bg output: {exc.stdout_head}",
             exit_code=1,
         ) from exc
 
@@ -1576,9 +1557,7 @@ def dispatch_ask(
             # select_provider also calls load_registry internally; guard the
             # same OSError / RegistryVersionError class.
             try:
-                chosen = select_provider(
-                    name=name, requested_provider=provider
-                )
+                chosen = select_provider(name=name, requested_provider=provider)
             except ProviderMismatchError as exc:
                 raise DispatchAskError(str(exc), exit_code=2) from exc
             except ValueError as exc:
@@ -1681,8 +1660,7 @@ def dispatch_ask(
                             lock_handle=lock_handle,
                         )
                     raise DispatchAskError(
-                        f"follow-up for provider {existing.provider!r} "
-                        "is not implemented",
+                        f"follow-up for provider {existing.provider!r} is not implemented",
                         exit_code=2,
                     )
             finally:
@@ -1783,6 +1761,8 @@ def dispatch_spawn(
     role: Optional[str] = None,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    effort: Optional[str] = None,
+    headless: bool = False,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -1827,7 +1807,7 @@ def dispatch_spawn(
 
     # 3a. claude + --once -> refused immediately (before acquiring the lock,
     # since there is no state to protect).
-    if provider == "claude" and once:
+    if provider == "claude" and once and not headless:
         raise DispatchAskError(
             f"--once is not supported for provider 'claude' "
             f"(claude peers are persistent bg threads; use plain spawn)",
@@ -1861,9 +1841,7 @@ def dispatch_spawn(
             try:
                 entries = load_registry()
             except (OSError, ValueError, RegistryVersionError) as exc:
-                raise DispatchAskError(
-                    f"registry read failed: {exc}", exit_code=12
-                ) from exc
+                raise DispatchAskError(f"registry read failed: {exc}", exit_code=12) from exc
 
             if any(e.name == name for e in entries):
                 raise DispatchAskError(
@@ -1899,6 +1877,43 @@ def dispatch_spawn(
 
                 # 4b. claude plain spawn.
                 if provider == "claude":
+                    if headless:
+                        from fno.agents.providers import claude as claude_mod
+
+                        try:
+                            result = claude_mod.headless_create(
+                                message=message,
+                                cwd=cwd,
+                                timeout=timeout,
+                                model=model,
+                                permission_mode=permission_mode
+                                or ("bypassPermissions" if yolo else None),
+                                effort=effort,
+                            )
+                        except claude_mod.ProviderSubprocessError as exc:
+                            _emit_ev(
+                                "agent_ask_failed",
+                                stage="claude-headless",
+                                name=name,
+                                provider="claude",
+                                returncode=exc.exit_code,
+                            )
+                            raise DispatchAskError(str(exc), exit_code=exc.exit_code) from exc
+                        _emit_ev(
+                            "agent_ask_done",
+                            stage="dispatch",
+                            name=name,
+                            provider="claude",
+                            duration_ms=result.duration_ms,
+                            yolo=yolo,
+                        )
+                        return SpawnResult(
+                            kind="once",
+                            name=name,
+                            provider="claude",
+                            short_id="",
+                            reply=result.stdout,
+                        )
                     result = _claude_create_path(
                         name=name,
                         message=message,
@@ -1910,6 +1925,7 @@ def dispatch_spawn(
                         role=role,
                         model=model,
                         permission_mode=permission_mode,
+                        effort=effort,
                     )
                     return SpawnResult(
                         kind="created",
@@ -1927,12 +1943,11 @@ def dispatch_spawn(
                         from_name=from_name,
                         yolo=yolo,
                         timeout_sec=(
-                            float(timeout)
-                            if timeout is not None
-                            else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
+                            float(timeout) if timeout is not None else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
                         ),
                         lock_handle=lock_handle,
                         role=role,
+                        effort=effort,
                     )
                 else:
                     # gemini --once
@@ -1943,9 +1958,7 @@ def dispatch_spawn(
                         from_name=from_name,
                         yolo=yolo,
                         timeout_sec=(
-                            float(timeout)
-                            if timeout is not None
-                            else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
+                            float(timeout) if timeout is not None else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
                         ),
                         lock_handle=lock_handle,
                     )
@@ -1954,9 +1967,7 @@ def dispatch_spawn(
 
                 # Teardown: remove the registry row the create helper wrote.
                 try:
-                    update_registry(
-                        lambda es: [e for e in es if e.name != name]
-                    )
+                    update_registry(lambda es: [e for e in es if e.name != name])
                     # Teardown receipt on stderr (AC2-UI).
                     print(
                         f"once: {name} ({provider}/{session_or_short_id}) torn down",
@@ -2074,9 +2085,7 @@ def _validate_lifecycle_name(name: str) -> None:
         )
 
 
-def _resolve_registry_entry(
-    name: str, *, registry_path: Optional[Path] = None
-) -> AgentEntry:
+def _resolve_registry_entry(name: str, *, registry_path: Optional[Path] = None) -> AgentEntry:
     """Load the registry and return the entry for ``name``.
 
     Raises :class:`DispatchAskError`(exit_code=2) when the entry is
@@ -2179,9 +2188,7 @@ def with_agent_lock_and_entry(
     if registry_path is None:
         registry_path = paths.agents_registry_path()
     _resolve_registry_entry(name, registry_path=registry_path)
-    with hold_agent_lock(
-        name, registry_path, timeout=timeout, on_wait=on_wait
-    ) as lock_handle:
+    with hold_agent_lock(name, registry_path, timeout=timeout, on_wait=on_wait) as lock_handle:
         # Post-lock re-read. If another process deleted the entry between
         # the pre-flock validation and the flock acquisition, this raises
         # the SAME DispatchAskError shape the pre-flock path would have,
@@ -2231,9 +2238,10 @@ def stop_agent(
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
 
     try:
-        with with_agent_lock_and_entry(
-            name, timeout=lock_timeout, on_wait=_on_wait
-        ) as (_lock_handle, existing):
+        with with_agent_lock_and_entry(name, timeout=lock_timeout, on_wait=_on_wait) as (
+            _lock_handle,
+            existing,
+        ):
             if existing.provider in ("codex", "gemini"):
                 # Locked Decision 5: stop is a no-op between asks for the
                 # synchronous providers. Emit the same event for symmetry
@@ -2250,14 +2258,11 @@ def stop_agent(
                     provider=existing.provider,
                     claude_exit=None,
                 )
-                return StopResult(
-                    name=name, provider=existing.provider, claude_exit=None
-                )
+                return StopResult(name=name, provider=existing.provider, claude_exit=None)
 
             if existing.provider != "claude":
                 raise DispatchAskError(
-                    f"stop for provider {existing.provider!r} is not "
-                    "implemented",
+                    f"stop for provider {existing.provider!r} is not implemented",
                     exit_code=2,
                 )
 
@@ -2275,15 +2280,11 @@ def stop_agent(
             from fno.agents.providers import claude as claude_mod
 
             try:
-                exit_code, stderr_text = claude_mod.claude_stop(
-                    short_id, timeout=shellout_timeout
-                )
+                exit_code, stderr_text = claude_mod.claude_stop(short_id, timeout=shellout_timeout)
             except FileNotFoundError as exc:
                 # PATH check passed above but claude vanished mid-call; treat
                 # the same as not-on-PATH to mirror US1's contract.
-                raise DispatchAskError(
-                    "claude CLI not on PATH", exit_code=14
-                ) from exc
+                raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
             except subprocess.TimeoutExpired as exc:
                 events.emit(
                     "agent_stopped",
@@ -2308,9 +2309,7 @@ def stop_agent(
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
-                raise DispatchAskError(
-                    f"claude stop failed: {exc}", exit_code=1
-                ) from exc
+                raise DispatchAskError(f"claude stop failed: {exc}", exit_code=1) from exc
 
             events.emit(
                 "agent_stopped",
@@ -2362,12 +2361,11 @@ def stop_agent(
                 f"stopped: {name} ({short_id})",
                 flush=True,
             )
-            return StopResult(
-                name=name, provider="claude", claude_exit=exit_code
-            )
+            return StopResult(name=name, provider="claude", claude_exit=exit_code)
     except AgentLockTimeout as exc:
-        events.emit("agent_stopped", name=name, provider=pre_provider,
-                    claude_exit=None, lock_timeout=True)
+        events.emit(
+            "agent_stopped", name=name, provider=pre_provider, claude_exit=None, lock_timeout=True
+        )
         raise DispatchAskError(
             f"lock timeout for agent {name!r} after {exc.timeout}s",
             exit_code=11,
@@ -2408,9 +2406,10 @@ def rm_agent(
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
 
     try:
-        with with_agent_lock_and_entry(
-            name, timeout=lock_timeout, on_wait=_on_wait
-        ) as (_lock_handle, existing):
+        with with_agent_lock_and_entry(name, timeout=lock_timeout, on_wait=_on_wait) as (
+            _lock_handle,
+            existing,
+        ):
             claude_exit: Optional[int] = None
 
             if existing.provider == "claude":
@@ -2438,9 +2437,7 @@ def rm_agent(
                     claude_exit = None
                 else:
                     if not is_provider_available("claude"):
-                        raise DispatchAskError(
-                            "claude CLI not on PATH", exit_code=14
-                        )
+                        raise DispatchAskError("claude CLI not on PATH", exit_code=14)
 
                     from fno.agents.providers import claude as claude_mod
 
@@ -2449,9 +2446,7 @@ def rm_agent(
                             short_id, timeout=shellout_timeout
                         )
                     except FileNotFoundError as exc:
-                        raise DispatchAskError(
-                            "claude CLI not on PATH", exit_code=14
-                        ) from exc
+                        raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
                     except subprocess.TimeoutExpired as exc:
                         events.emit(
                             "agent_removed",
@@ -2479,9 +2474,7 @@ def rm_agent(
                             error=str(exc),
                             error_type=type(exc).__name__,
                         )
-                        raise DispatchAskError(
-                            f"claude rm failed: {exc}", exit_code=1
-                        ) from exc
+                        raise DispatchAskError(f"claude rm failed: {exc}", exit_code=1) from exc
 
                     if claude_exit != 0:
                         if stderr_text:
@@ -2515,17 +2508,14 @@ def rm_agent(
 
             elif existing.provider not in ("codex", "gemini"):
                 raise DispatchAskError(
-                    f"rm for provider {existing.provider!r} is not "
-                    "implemented",
+                    f"rm for provider {existing.provider!r} is not implemented",
                     exit_code=2,
                 )
             # codex / gemini: registry-only removal per Locked Decision 1;
             # the on-disk session files stay.
 
             try:
-                update_registry(
-                    lambda entries: [e for e in entries if e.name != name]
-                )
+                update_registry(lambda entries: [e for e in entries if e.name != name])
             except (OSError, RegistryVersionError) as exc:
                 events.emit(
                     "agent_removed",
@@ -2681,8 +2671,7 @@ def reconcile_agents(
                 if not index_present:
                     codex_index_state = "missing"
                     missing_path = (
-                        codex_session_index_path
-                        or codex_mod.default_session_index_path()
+                        codex_session_index_path or codex_mod.default_session_index_path()
                     )
                     sys.stderr.write(
                         f"WARN: codex session index missing at {missing_path}; "
@@ -2724,12 +2713,14 @@ def reconcile_agents(
                     name=entry.name,
                     provider="gemini",
                 )
-                errors.append({
-                    "name": entry.name,
-                    "provider": "gemini",
-                    "id": None,
-                    "reason": "missing-gemini-session-id",
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "gemini",
+                        "id": None,
+                        "reason": "missing-gemini-session-id",
+                    }
+                )
                 continue
             if not entry.cwd:
                 # Defensive: gemini sessions are cwd-pinned (Wave 2.0 OQ1).
@@ -2739,12 +2730,14 @@ def reconcile_agents(
                     name=entry.name,
                     provider="gemini",
                 )
-                errors.append({
-                    "name": entry.name,
-                    "provider": "gemini",
-                    "id": entry.gemini_session_id,
-                    "reason": "missing-gemini-cwd",
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "gemini",
+                        "id": entry.gemini_session_id,
+                        "reason": "missing-gemini-cwd",
+                    }
+                )
                 continue
 
             from fno.agents.providers import gemini as gemini_mod
@@ -2764,12 +2757,14 @@ def reconcile_agents(
                     provider="gemini",
                     reason=exc.reason,
                 )
-                errors.append({
-                    "name": entry.name,
-                    "provider": "gemini",
-                    "id": entry.gemini_session_id,
-                    "reason": f"gemini-probe-failed: {exc.reason}",
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "gemini",
+                        "id": entry.gemini_session_id,
+                        "reason": f"gemini-probe-failed: {exc.reason}",
+                    }
+                )
                 continue
             new_status = "live" if reachable else "orphaned"
 
@@ -2783,12 +2778,14 @@ def reconcile_agents(
                     reason = "codex-session-index-unreadable"
                 else:
                     reason = "codex-session-index-missing"
-                errors.append({
-                    "name": entry.name,
-                    "provider": "codex",
-                    "id": entry.codex_session_id,
-                    "reason": reason,
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "codex",
+                        "id": entry.codex_session_id,
+                        "reason": reason,
+                    }
+                )
                 continue
             if not entry.codex_session_id:
                 # Registry corruption: a codex row should always carry its
@@ -2799,12 +2796,14 @@ def reconcile_agents(
                     name=entry.name,
                     provider="codex",
                 )
-                errors.append({
-                    "name": entry.name,
-                    "provider": "codex",
-                    "id": None,
-                    "reason": "missing-codex-session-id",
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "codex",
+                        "id": None,
+                        "reason": "missing-codex-session-id",
+                    }
+                )
                 continue
 
             reachable = entry.codex_session_id in known_codex_ids
@@ -2817,12 +2816,14 @@ def reconcile_agents(
                 # the entry to `errors` with status untouched. Anything
                 # else would mass-flip every claude row to orphaned on a
                 # host where claude was removed mid-day.
-                errors.append({
-                    "name": entry.name,
-                    "provider": "claude",
-                    "id": entry.claude_short_id,
-                    "reason": "claude-cli-not-on-path",
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "claude",
+                        "id": entry.claude_short_id,
+                        "reason": "claude-cli-not-on-path",
+                    }
+                )
                 continue
             if not entry.claude_short_id:
                 events.emit(
@@ -2830,12 +2831,14 @@ def reconcile_agents(
                     name=entry.name,
                     provider="claude",
                 )
-                errors.append({
-                    "name": entry.name,
-                    "provider": "claude",
-                    "id": None,
-                    "reason": "missing-claude-short-id",
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "claude",
+                        "id": None,
+                        "reason": "missing-claude-short-id",
+                    }
+                )
                 continue
 
             from fno.agents.providers import claude as claude_mod
@@ -2848,15 +2851,11 @@ def reconcile_agents(
             # ReachabilityProbeError from the probe still has the
             # label in scope for the error route.
             probe_label = (
-                "claude-mcp-probe-failed"
-                if entry.mcp_channel_id
-                else "claude-probe-failed"
+                "claude-mcp-probe-failed" if entry.mcp_channel_id else "claude-probe-failed"
             )
             try:
                 if entry.mcp_channel_id:
-                    reachable = claude_mod.mcp_channel_reachable(
-                        entry.mcp_channel_id, timeout=0.25
-                    )
+                    reachable = claude_mod.mcp_channel_reachable(entry.mcp_channel_id, timeout=0.25)
                 else:
                     reachable = claude_mod.claude_logs_reachable(
                         entry.claude_short_id, timeout=claude_logs_timeout
@@ -2877,22 +2876,26 @@ def reconcile_agents(
                     provider="claude",
                     reason=exc.reason,
                 )
-                errors.append({
-                    "name": entry.name,
-                    "provider": "claude",
-                    "id": entry.claude_short_id,
-                    "reason": f"{probe_label}: {exc.reason}",
-                })
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "claude",
+                        "id": entry.claude_short_id,
+                        "reason": f"{probe_label}: {exc.reason}",
+                    }
+                )
                 continue
             new_status = "live" if reachable else "orphaned"
 
         else:
-            errors.append({
-                "name": entry.name,
-                "provider": entry.provider,
-                "id": None,
-                "reason": f"unknown-provider-{entry.provider}",
-            })
+            errors.append(
+                {
+                    "name": entry.name,
+                    "provider": entry.provider,
+                    "id": None,
+                    "reason": f"unknown-provider-{entry.provider}",
+                }
+            )
             continue
 
         if entry.status == new_status:
@@ -2913,11 +2916,7 @@ def reconcile_agents(
             # gemini agents flipped between live/orphaned with "id": null
             # which rendered as "?" in human output and broke follow-up
             # tooling.
-            "id": (
-                entry.claude_short_id
-                or entry.codex_session_id
-                or entry.gemini_session_id
-            ),
+            "id": (entry.claude_short_id or entry.codex_session_id or entry.gemini_session_id),
         }
         if new_status == "orphaned":
             orphaned.append(change)
@@ -2933,6 +2932,7 @@ def reconcile_agents(
     # update_registry's own atomic-rename semantics — the closure is
     # pure, so an OSError mid-write leaves the registry untouched.
     if pending_updates:
+
         def _apply(current_entries: list[AgentEntry]) -> list[AgentEntry]:
             # Build the new entries from the CURRENT (under-lock) entries,
             # overriding only the ``status`` field from pending_updates.
@@ -3040,9 +3040,7 @@ def attach_agent(name: str) -> AttachResult:
     try:
         exit_code = claude_mod.claude_attach(short_id)
     except FileNotFoundError as exc:
-        raise DispatchAskError(
-            "claude CLI not on PATH", exit_code=14
-        ) from exc
+        raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
     except OSError as exc:
         # PermissionError / EIO / other subprocess errors should surface
         # as a clean DispatchAskError, not a raw Python traceback to the
@@ -3056,9 +3054,7 @@ def attach_agent(name: str) -> AttachResult:
             error=str(exc),
             error_type=type(exc).__name__,
         )
-        raise DispatchAskError(
-            f"claude attach failed: {exc}", exit_code=1
-        ) from exc
+        raise DispatchAskError(f"claude attach failed: {exc}", exit_code=1) from exc
 
     events.emit(
         "agent_attached",
@@ -3564,9 +3560,7 @@ def _a2a_first_use_gate(auto: bool, ceiling: int) -> bool:
     try:
         from fno.config.writer import set_config_value
 
-        set_config_value(
-            "config.agents.a2a.auto", "true" if keep_on else "false", scope="global"
-        )
+        set_config_value("config.agents.a2a.auto", "true" if keep_on else "false", scope="global")
     except Exception:
         pass  # best-effort persist; the marker below still prevents re-asking.
     try:
@@ -3862,8 +3856,7 @@ def dispatch_chat(
         if ent.provider != "claude":
             result.status = "failed"
             result.reason = (
-                f"{ent.name} is provider {ent.provider!r}; chat v1 is "
-                f"claude<->claude only"
+                f"{ent.name} is provider {ent.provider!r}; chat v1 is claude<->claude only"
             )
             return result
 
@@ -4108,8 +4101,7 @@ def _mux_followup_path(
         )
         lock_handle.detach()
         raise DispatchAskError(
-            f"registry write failed: {exc}. "
-            "NOTE: message was already delivered; do not retry.",
+            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
             exit_code=12,
         ) from exc
     _emit_ev(
@@ -4300,9 +4292,7 @@ def _deliver_live(
     # MCP-channel probe (mirrors _followup_path :334-366).
     if entry.mcp_channel_id:
         try:
-            mcp_alive = claude_mod.mcp_channel_reachable(
-                entry.mcp_channel_id, timeout=0.25
-            )
+            mcp_alive = claude_mod.mcp_channel_reachable(entry.mcp_channel_id, timeout=0.25)
         except ReachabilityProbeError:
             mcp_alive = False
         if mcp_alive:
@@ -4571,8 +4561,7 @@ def dispatch_send(
                     _write_durable()
                     if existing.status == "live":
                         demotion_notice = (
-                            f"live delivery failed for {name!r}; "
-                            f"message queued durable ({msg_id})"
+                            f"live delivery failed for {name!r}; message queued durable ({msg_id})"
                         )
 
                 _emit_ev(
@@ -4591,6 +4580,7 @@ def dispatch_send(
             # 4f. Bump registry stamps (best-effort; not fatal if registry
             # write fails here since envelope is already durable).
             try:
+
                 def _stamp(entries_list: "list[AgentEntry]") -> "list[AgentEntry]":
                     out = []
                     for e in entries_list:
@@ -4616,8 +4606,7 @@ def dispatch_send(
             name=name,
         )
         raise DispatchAskError(
-            f"timed out waiting for agent {exc.name!r} lock "
-            f"(timeout={exc.timeout}s)",
+            f"timed out waiting for agent {exc.name!r} lock (timeout={exc.timeout}s)",
             exit_code=11,
         ) from exc
 
@@ -4645,10 +4634,10 @@ class ProjectResolution:
     ambiguous) fails loudly at construction rather than silently mis-routing.
     """
 
-    recipient: Optional[str]        # the single live peer to deliver to, else None
-    live_candidates: list[str]      # all live peer names in the project (sorted)
-    durable: bool                   # True when no live peer -> durable queue
-    ambiguous: bool                 # True when >1 live peer and no --any
+    recipient: Optional[str]  # the single live peer to deliver to, else None
+    live_candidates: list[str]  # all live peer names in the project (sorted)
+    durable: bool  # True when no live peer -> durable queue
+    ambiguous: bool  # True when >1 live peer and no --any
 
     def __post_init__(self) -> None:
         active = (self.recipient is not None) + self.durable + self.ambiguous
@@ -4736,18 +4725,20 @@ def resolve_to_project(
     live_names = sorted(e.name for e in live)
 
     if not live:
-        return ProjectResolution(
-            recipient=None, live_candidates=[], durable=True, ambiguous=False
-        )
+        return ProjectResolution(recipient=None, live_candidates=[], durable=True, ambiguous=False)
     if len(live) == 1:
         return ProjectResolution(
-            recipient=live[0].name, live_candidates=live_names,
-            durable=False, ambiguous=False,
+            recipient=live[0].name,
+            live_candidates=live_names,
+            durable=False,
+            ambiguous=False,
         )
     if not any_:
         return ProjectResolution(
-            recipient=None, live_candidates=live_names,
-            durable=False, ambiguous=True,
+            recipient=None,
+            live_candidates=live_names,
+            durable=False,
+            ambiguous=True,
         )
     # --any tiebreak: most recent last_message_at, then lexicographic name.
     max_ts = max((e.last_message_at or "") for e in live)
@@ -4756,8 +4747,10 @@ def resolve_to_project(
         key=lambda e: e.name,
     )
     return ProjectResolution(
-        recipient=tied[0].name, live_candidates=live_names,
-        durable=False, ambiguous=False,
+        recipient=tied[0].name,
+        live_candidates=live_names,
+        durable=False,
+        ambiguous=False,
     )
 
 
@@ -4824,6 +4817,7 @@ def dispatch_send_to_project(
     from_session = provider_from = None
     try:
         from fno.agents.registry import load_registry as _load_reg
+
         _se = next((e for e in _load_reg() if e.name == from_name), None)
         if _se is not None:
             provider_from = _se.provider
@@ -4860,6 +4854,8 @@ def dispatch_send_to_project(
         delivery="durable",
     )
     return DispatchSendResult(
-        msg_id=handle.thread_id, delivery="durable",
-        recipient=None, to_project=project,
+        msg_id=handle.thread_id,
+        delivery="durable",
+        recipient=None,
+        to_project=project,
     )

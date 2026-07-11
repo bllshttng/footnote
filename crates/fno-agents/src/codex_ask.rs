@@ -128,6 +128,7 @@ pub fn build_argv_create(
     full_prompt: &str,
     yolo: bool,
     model: Option<&str>,
+    reasoning_effort: Option<&str>,
 ) -> Vec<String> {
     // Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     // flag and follows it. See `approval_flag` / `sandbox_flag`.
@@ -145,6 +146,10 @@ pub fn build_argv_create(
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
         argv.push(m.to_string());
+    }
+    if let Some(effort) = reasoning_effort.filter(|e| !e.is_empty()) {
+        argv.push("-c".to_string());
+        argv.push(format!("model_reasoning_effort={effort}"));
     }
     argv.extend(sandbox_flag(yolo));
     argv.push(full_prompt.to_string());
@@ -704,6 +709,7 @@ pub fn codex_create(
     timeout: Option<Duration>,
     agent_self: Option<&str>,
     model: Option<&str>,
+    reasoning_effort: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
     // ab-994222ee: the create/exec path is the autonomous headless lane. codex
@@ -713,7 +719,7 @@ pub fn codex_create(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
     );
-    let argv = build_argv_create(cwd, &full_prompt, eff, model);
+    let argv = build_argv_create(cwd, &full_prompt, eff, model, reasoning_effort);
     run_codex(&argv, output_path, timeout, true, None, agent_self)
 }
 
@@ -946,6 +952,7 @@ pub fn dispatch_codex_once(
     yolo: bool,
     timeout: Option<Duration>,
     model: Option<&str>,
+    reasoning_effort: Option<&str>,
 ) -> AskOutcome {
     use crate::claude_ask::py_repr;
 
@@ -1017,6 +1024,7 @@ pub fn dispatch_codex_once(
         yolo,
         timeout,
         model,
+        reasoning_effort,
     );
     if inner.exit_code != 0 {
         // create failed; dispatch_create only writes the registry post-success,
@@ -1071,6 +1079,7 @@ fn dispatch_create(
     yolo: bool,
     timeout: Option<Duration>,
     model: Option<&str>,
+    reasoning_effort: Option<&str>,
 ) -> AskOutcome {
     let output_path = derive_log_path(home, name);
     let timeout_sec = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
@@ -1084,6 +1093,7 @@ fn dispatch_create(
         Some(timeout_sec),
         Some(name),
         model,
+        reasoning_effort,
     ) {
         Ok(r) => r,
         Err(e) => {

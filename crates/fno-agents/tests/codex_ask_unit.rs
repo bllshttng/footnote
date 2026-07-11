@@ -103,7 +103,7 @@ fn sandbox_flag_resume_yolo_is_bypass() {
 fn build_argv_create_default_sandbox() {
     let cwd = PathBuf::from("/tmp/proj");
     let full_prompt = "[from: alice]\n\nhello";
-    let argv = build_argv_create(&cwd, full_prompt, false, None);
+    let argv = build_argv_create(&cwd, full_prompt, false, None, None);
     assert_eq!(
         argv,
         vec![
@@ -127,14 +127,14 @@ fn build_argv_create_forwards_model() {
     // x-c772: an explicit --model reaches `codex exec --model <m>` (between
     // --skip-git-repo-check and the sandbox flag). None/empty = no --model.
     let cwd = PathBuf::from("/tmp/proj");
-    let argv = build_argv_create(&cwd, "hi", false, Some("gpt-5.5"));
+    let argv = build_argv_create(&cwd, "hi", false, Some("gpt-5.5"), None);
     let i = argv
         .iter()
         .position(|a| a == "--model")
         .expect("--model present");
     assert_eq!(argv[i + 1], "gpt-5.5");
     // empty model = no flag (parity with the None case)
-    let argv_none = build_argv_create(&cwd, "hi", false, Some(""));
+    let argv_none = build_argv_create(&cwd, "hi", false, Some(""), None);
     assert!(!argv_none.iter().any(|a| a == "--model"));
 }
 
@@ -143,7 +143,7 @@ fn build_argv_create_approval_precedes_exec() {
     // Regression (pr704): --ask-for-approval is a GLOBAL flag and MUST come
     // before the `exec` subcommand, or codex aborts with
     // `error: unexpected argument '--ask-for-approval' found`.
-    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None);
+    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None, None);
     let approval = argv
         .iter()
         .position(|a| a == "--ask-for-approval")
@@ -158,7 +158,7 @@ fn build_argv_create_approval_precedes_exec() {
 #[test]
 fn build_argv_create_yolo() {
     let cwd = PathBuf::from("/work");
-    let argv = build_argv_create(&cwd, "msg", true, None);
+    let argv = build_argv_create(&cwd, "msg", true, None, None);
     // --dangerously-bypass-approvals-and-sandbox replaces --sandbox workspace-write
     assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     assert!(!argv.contains(&"--sandbox".to_string()));
@@ -167,7 +167,7 @@ fn build_argv_create_yolo() {
 
 #[test]
 fn build_argv_create_no_resume_subcommand() {
-    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None);
+    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None, None);
     // Should be `codex --ask-for-approval never exec --json -C ...`, not
     // `codex exec resume`. The exec subcommand follows the global approval flag.
     assert_eq!(argv[0], "codex");

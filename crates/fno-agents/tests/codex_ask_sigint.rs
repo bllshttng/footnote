@@ -107,6 +107,7 @@ fn codex_create_ctrl_c_forwards_sigint_and_exits_130() {
         false,
         Some(Duration::from_secs(30)), // large timeout: the interrupt wins
         None,
+        None,
     );
 
     let _ = signal_thread.join();
@@ -172,6 +173,7 @@ fn sigint_ignored_parent_disposition_is_preserved() {
         &cwd,
         false,
         Some(Duration::from_secs(10)),
+        None,
         None,
     );
 

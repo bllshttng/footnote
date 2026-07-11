@@ -161,7 +161,9 @@ fn dispatch_once_with_fake_codex(
         unsafe { std::env::set_var(k, v) };
     }
 
-    let result = dispatch_codex_once(home, name, message, from_name, cwd, yolo, timeout, None);
+    let result = dispatch_codex_once(
+        home, name, message, from_name, cwd, yolo, timeout, None, None,
+    );
 
     match old_path {
         Some(p) => unsafe { std::env::set_var("PATH", p) },

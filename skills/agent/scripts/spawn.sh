@@ -41,6 +41,7 @@ SELF=""                # caller's own claim holder (target_claim_holder). Lets
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
 MODEL=""               # exact model name, forwarded as `spawn --model` (each
                        # provider's own --model). Empty = provider default.
+EFFORT=""              # reasoning effort forwarded as `spawn --effort`.
 PAYLOAD_MODE="build"   # build | ask | handoff | discuss | passthrough
 SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
                        # (JSON receipt); headless -> one-shot (reply receipt).
@@ -77,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --cwd)          CWD="${2:-}"; shift 2 ;;
     --mode)         MODE="${2:-}"; shift 2 ;;
     --model)        MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --effort)       EFFORT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
     --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO=1; shift ;;
@@ -312,6 +314,7 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 [[ "$HERE" -eq 1 ]] && cmd+=(--here)
 [[ "$YOLO" -eq 1 ]] && cmd+=(--yolo)
 [[ -n "$MODEL" ]] && cmd+=(--model "$MODEL")
+[[ -n "$EFFORT" ]] && cmd+=(--effort "$EFFORT")
 [[ -n "$PERMISSION_MODE" ]] && cmd+=(--permission-mode "$PERMISSION_MODE")
 [[ -n "$ROLE" ]] && cmd+=(--role "$ROLE")
 [[ -n "$TIMEOUT" ]] && cmd+=(--timeout "$TIMEOUT")

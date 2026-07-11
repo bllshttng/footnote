@@ -68,6 +68,7 @@ fn create_happy_parses_short_id() {
         &[("PATH", path.as_str())],
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -95,6 +96,7 @@ fn create_nonzero_exit_without_confirmation_is_subprocess_error() {
             ("FAKE_CLAUDE_EXIT", "3"),
             ("FAKE_CLAUDE_STDERR", "boom"),
         ],
+        None,
         None,
         None,
     )
@@ -133,6 +135,7 @@ fn create_confirmation_wins_over_late_nonzero_exit() {
         ],
         None,
         None,
+        None,
     )
     .expect("a printed confirmation must be a success despite a later nonzero exit");
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -153,6 +156,7 @@ fn create_unparseable_stdout_is_parse_error() {
             ("PATH", path.as_str()),
             ("FAKE_CLAUDE_STDOUT", "not the contract\n"),
         ],
+        None,
         None,
         None,
     )
@@ -180,6 +184,7 @@ fn create_argv_overflow_sends_message_via_stdin() {
         ],
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -200,6 +205,7 @@ fn create_missing_binary_is_127() {
         &cwd,
         Some(Duration::from_secs(5)),
         &[("PATH", path.as_str())],
+        None,
         None,
         None,
     )

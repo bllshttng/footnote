@@ -190,6 +190,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         &[("PATH", path.as_str())],
         None,
         None,
+        None,
     );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     // spawn returns JSON receipt, not bare short_id.
@@ -250,6 +251,7 @@ fn spawn_yolo_maps_to_bypass_permissions() {
             ("PATH", path.as_str()),
             ("FAKE_CLAUDE_ARGV", argv_file.to_str().unwrap()),
         ],
+        None,
         None,
         None,
     );
@@ -559,6 +561,7 @@ fn spawn_missing_cli_exit_14() {
         false,
         Some(Duration::from_secs(5)),
         &[("PATH", path.as_str())],
+        None,
         None,
         None,
     );

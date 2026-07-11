@@ -1,7 +1,7 @@
 ---
 name: agent
 description: "Natural-language remote control for the `fno agents` worker mesh. Describe the outcome you want - spawn or hand off work, open an interactive discussion, message or inspect workers, drive a session, or stop it - and this skill resolves and runs the provider- and substrate-specific CLI command. It normalizes arguments, applies confirmation policy, and reports genuine receipts. Use when: 'spawn a worker for ab-XXXX', 'hand off this doc to codex', 'discuss the retry design with gemini', 'show my running agents', 'drive the reviewer', 'stop the billing worker'."
-argument-hint: "<verb> [args]  |  [ask|handoff|discuss] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [as <name>] [merge]"
+argument-hint: "<verb> [args]  |  [ask|handoff|discuss] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]"
 metadata:
   internal: false
 requires:
@@ -106,7 +106,7 @@ never corrupt it. The user types barewords or natural language; you map them to
 the structured fields. The canonical form:
 
 ```
-[ask] <task> [provider] [drive] [yolo] [model <name>] [as <name>] [merge]
+[ask] <task> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]
 ```
 
 The angle brackets are placeholder notation, not literal syntax. Infer the
@@ -148,6 +148,10 @@ see below):
   the model after `model`). Default = the provider's default. There is NO short
   flag: `-m` is `--allow-merge`, so a bare `-m opus` would set merge, not the
   model - always write `model <name>`.
+- **`effort <value>`** (optional): reasoning-effort tier, plumbed to `fno
+  agents spawn --effort`. It is orthogonal to `model`: the model selects which
+  model runs, while effort tunes how hard it reasons. The CLI validates the
+  provider-specific vocabulary and rejects unmappable values before spawning.
 - **`as <name>`** (optional): explicit agent name. Default is derived
   (`<verb>-<node-id>-<slug>` / `<verb>-<slug>`). "call it X" / "name it X" map here.
 - **`merge`** (optional): do NOT inject the no-merge intent. Default injects it
@@ -192,7 +196,7 @@ prompt/path/seed skips posture parsing.
 
 ```bash
 bash "${SKILL_DIR}/scripts/normalize.sh" --input "<raw task [posture barewords]>" \
-  [--provider <p>] [-n <n>|--name <n>] [-i] [--yolo] [--ask] [--handoff] [--discuss] \
+  [--provider <p>] [-n <n>|--name <n>] [--model <m>] [--effort <e>] [-i] [--yolo] [--ask] [--handoff] [--discuss] \
   [-m|--allow-merge] [-y|--yes] [-P <project>|--project <project>] [-f|--force]
 ```
 
@@ -206,6 +210,8 @@ mode, and assembles the provider-aware `message`. Read its `key=value` output
 line by line. Never `eval` it. Captured fields: `node`, `node_query`,
 `spawn_next`, `next_scope`, `shape_hint`, `name`, `provider`, `mode`, `yolo`,
 `yes`, `allow_merge`, `project`, `resolved_cwd`, `payload_mode`, `message`.
+The model-adjacent fields are `model` and `effort`; omit either downstream when
+empty so provider defaults remain unchanged.
 
 **Cross-project target (`-P`/`--project`).** By default a free-text spawn launches
 in the caller's cwd. `-P <project>` retargets it: normalize resolves the registry
@@ -384,7 +390,7 @@ and parses the receipt deterministically:
 ```bash
 bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
   --message "$message" --mode "$mode" --payload-mode "$payload_mode" \
-  [--model "$model"] [--substrate "$substrate"] [--yolo] [--node "$node"] [--self "$self_holder"] [--cwd "<cwd source, see below>"] \
+  [--model "$model"] [--effort "$effort"] [--substrate "$substrate"] [--yolo] [--node "$node"] [--self "$self_holder"] [--cwd "<cwd source, see below>"] \
   [--permission-mode "$permission_mode"] [--role "$role"] [--timeout "$timeout"] [--fresh] [--here]
 ```
 
@@ -395,10 +401,13 @@ sanctioned handoff, instead of a confusing foreign `already-running`. It neither
 spawns nor releases the claim. Pass
 `--model "$model"` only when normalize emitted a non-empty `model`
 (spawn.sh forwards it to `fno agents spawn --model`; omit it for the provider
-default). Pass `--permission-mode "$permission_mode"` / `--role "$role"` / `--timeout
+default). Pass `--effort "$effort"` only when normalize emitted a non-empty
+`effort`; `spawn.sh` forwards it to the fail-closed CLI mapper. Pass
+`--permission-mode "$permission_mode"` / `--role "$role"` / `--timeout
 "$timeout"` only when normalize emitted a non-empty value; pass `--fresh` only
 when `fresh=1` and `--here` only when `here=1` (spawn.sh forwards each to `fno
-agents spawn`, which validates values fail-closed). Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
+agents spawn`, which validates values fail-closed). Pass `--yolo` only when
+normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
 only when normalize emitted a non-empty `substrate` (`bg` -> a detached `claude
 --bg` thread; `headless` -> a one-shot `claude -p` / `codex --exec` / `agy -p`);
 an empty `substrate` is the default `pane` (owned-PTY) and the flag is omitted.
