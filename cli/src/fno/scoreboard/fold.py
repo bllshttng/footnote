@@ -727,20 +727,26 @@ def build_provider_scoreboard(
     # yet", so bounce degrades to n/a instead of a fake 0%.
     w4_available = any(("reverted" in n) or n.get("caused_by") for n in graph_nodes)
 
+    def _key(v, fallback: str) -> str:
+        # Junk-tolerant like _num: a non-string provider/model never crashes
+        # the fold, it lands in the fallback bucket.
+        return v if isinstance(v, str) and v else fallback
+
     buckets: dict[tuple[str, str], dict] = {}
     attributed = 0
     for r in windowed:
-        provider = r.get("provider_id") or "unattributed"
+        provider = _key(r.get("provider_id"), "unattributed")
         if provider != "unattributed":
             attributed += 1
         b = buckets.setdefault(
-            (provider, r.get("model") or "unknown"),
+            (provider, _key(r.get("model"), "unknown")),
             {"runs": 0, "shipped": 0, "shipped_linked": 0, "bounced": 0,
              "spend": 0.0, "iterations": [], "nids": set(), "nid_rows": 0},
         )
         b["runs"] += 1
         b["spend"] += _num(r.get("cost_usd"))
         nid = r.get("graph_node_id")
+        nid = nid if isinstance(nid, str) else None
         if nid:
             b["nids"].add(nid)
             b["nid_rows"] += 1

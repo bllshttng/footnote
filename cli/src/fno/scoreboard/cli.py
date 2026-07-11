@@ -82,7 +82,17 @@ def scoreboard_command(
     if since < 1:
         raise typer.BadParameter("--since must be at least 1 (days).")
     # The view flags are mutually exclusive: each renders a different fold.
-    _views = [f for f, on in (("--calibration", calibration), ("--by-skill", by_skill), ("--efficiency", efficiency), ("--plan-fidelity", plan_fidelity), ("--by-provider", by_provider)) if on]
+    _views = [
+        f
+        for f, on in (
+            ("--calibration", calibration),
+            ("--by-skill", by_skill),
+            ("--efficiency", efficiency),
+            ("--plan-fidelity", plan_fidelity),
+            ("--by-provider", by_provider),
+        )
+        if on
+    ]
     if len(_views) > 1:
         raise typer.BadParameter(f"{' and '.join(_views)} are mutually exclusive views; pick one.")
     from fno import paths as _paths

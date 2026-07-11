@@ -220,6 +220,36 @@ def test_edge_junk_cost_and_iterations_never_crash():
     assert r["spend_usd"] == 0.0 and r["median_iterations"] is None
 
 
+def test_edge_unhashable_provider_model_nid_never_crash():
+    # A row with list/dict values for the key fields folds into the fallback
+    # buckets instead of raising TypeError (sigma silent-failure finding).
+    rows = [
+        {"type": "execution", "completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+         "cost_usd": 1.0, "provider_id": ["claude"], "model": {"id": "opus"}, "graph_node_id": ["x-1"]},
+    ]
+    pb = build_provider_scoreboard(rows, GRAPH, since_days=28, now=NOW)
+    r = pb["rows"][0]
+    assert (r["provider"], r["model"]) == ("unattributed", "unknown")
+    assert r["shipped_linked"] == 0 and r["retry_rows"] == 0
+
+
+def test_ui_populated_render_formats_bounce_and_blanks_repeated_provider(tmp_path, monkeypatch):
+    ts = (datetime.now() - timedelta(days=1)).isoformat()
+    graph = GRAPH + [{"id": "x-2", "caused_by": None}, {"id": "x-9", "caused_by": "x-1", "created_at": ts}]
+    rows = [
+        _row("claude", "opus", nid="x-1", cost=6.0, completed=ts),
+        _row("claude", "haiku", nid="x-2", cost=2.0, completed=ts),
+    ]
+    (tmp_path / "graph.json").write_text(json.dumps({"entries": graph}))
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    res = runner.invoke(_app(), ["--by-provider"])
+    assert res.exit_code == 0, res.output
+    assert "100% of 1" in res.output  # x-1 bounced (fix-node), denominator rides along
+    assert "6.00" in res.output  # cost-per-shipped formatted
+    # provider name printed once, blanked on its second model sub-row
+    assert res.output.count("claude") == 1
+
+
 # --- AC6-FR -------------------------------------------------------------------
 def test_fr_corrupt_ledger_exit_1(tmp_path, monkeypatch):
     p = tmp_path / "ledger.json"
