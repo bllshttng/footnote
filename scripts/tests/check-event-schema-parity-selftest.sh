@@ -4,10 +4,12 @@
 # Feeds the parity script synthetic fixtures via --test-schema-dir,
 # --test-python-schema, and --test-rust-schema flags and asserts
 # non-zero exit on:
-#   1. A drifted Branch A property (field present in Python emit-schema but
-#      not in the on-disk events-v3.json Branch A)
+#   1. A drifted envelope property (field present in an emit-schema but not in
+#      the on-disk single events-v3.json envelope)
 #   2. A name collision between Python event_types and Rust event_kinds
 #   3. A malformed events-v3.json schema file
+#
+# x-2901: fixtures use the single unified envelope (no oneOf).
 #
 # Also verifies exit 0 (parity OK) when fixtures are clean.
 #
@@ -34,32 +36,16 @@ make_events_v3() {
     local dir="$1"
     cat > "$dir/events-v3.json" << 'EOF'
 {
-  "$comment": "test fixture",
-  "oneOf": [
-    {
-      "type": "object",
-      "required": ["ts", "type", "source", "data"],
-      "properties": {
-        "ts": {"type": "string"},
-        "type": {"type": "string"},
-        "source": {"type": "string", "enum": ["target", "test"]},
-        "data": {"type": "object"}
-      },
-      "not": {"required": ["kind"]},
-      "additionalProperties": true
-    },
-    {
-      "type": "object",
-      "required": ["ts", "kind", "source"],
-      "properties": {
-        "ts": {"type": "string"},
-        "kind": {"type": "string"},
-        "source": {"type": "string", "pattern": "^(daemon|worker:.+)$"}
-      },
-      "not": {"required": ["type"]},
-      "additionalProperties": true
-    }
-  ]
+  "$comment": "test fixture (x-2901 single envelope)",
+  "type": "object",
+  "required": ["ts", "type", "source", "data"],
+  "properties": {
+    "ts": {"type": "string"},
+    "type": {"type": "string"},
+    "source": {"type": "string", "enum": ["target", "test"]},
+    "data": {"type": "object"}
+  },
+  "additionalProperties": true
 }
 EOF
 }
@@ -118,8 +104,8 @@ make_status_v1 "$T1"
 check "clean fixtures -> exit 0" 0 \
     bash "$PARITY_SCRIPT" \
         --test-schema-dir "$T1" \
-        --test-python-schema '{"envelope":{"type":"object","required":["ts","type","source","data"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"}},"not":{"required":["kind"]},"additionalProperties":true},"event_types":["phase_transition"]}' \
-        --test-rust-schema '{"envelope":{"type":"object","required":["ts","kind","source"],"properties":{"ts":{"type":"string"},"kind":{"type":"string"},"source":{"type":"string","pattern":"^(daemon|worker:.+)$"}},"not":{"required":["type"]},"additionalProperties":true},"status":{"type":"object","required":["schema_version","short_id","status"],"properties":{"schema_version":{"type":"integer"},"short_id":{"type":"string"},"status":{"type":"string","enum":["spawning","ready","idle","busy","live","restarting","orphaned","failed","exited","permanent_dead"]},"ready":{"type":"boolean"},"last_message_at":{"type":["string","null"]},"last_reply":{"type":["string","null"]},"restart_count":{"type":"integer"},"last_restart_at":{"type":["string","null"]},"pty":{"oneOf":[{"type":"null"},{"type":"object"}]}},"additionalProperties":false},"event_kinds":["daemon_started","agent_spawned"]}'
+        --test-python-schema '{"envelope":{"type":"object","required":["ts","type","source","data"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"}},"additionalProperties":true},"event_types":["phase_transition"]}' \
+        --test-rust-schema '{"envelope":{"type":"object","required":["ts","type","source","data"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"}},"additionalProperties":true},"status":{"type":"object","required":["schema_version","short_id","status"],"properties":{"schema_version":{"type":"integer"},"short_id":{"type":"string"},"status":{"type":"string","enum":["spawning","ready","idle","busy","live","restarting","orphaned","failed","exited","permanent_dead"]},"ready":{"type":"boolean"},"last_message_at":{"type":["string","null"]},"last_reply":{"type":["string","null"]},"restart_count":{"type":"integer"},"last_restart_at":{"type":["string","null"]},"pty":{"oneOf":[{"type":"null"},{"type":"object"}]}},"additionalProperties":false},"event_kinds":["daemon_started","agent_spawned"]}'
 
 # ---------------------------------------------------------------------------
 # Test 2: Name collision (Python event_type = Rust event_kind) -> non-zero
@@ -132,8 +118,8 @@ make_status_v1 "$T2"
 check "name collision -> non-zero" 1 \
     bash "$PARITY_SCRIPT" \
         --test-schema-dir "$T2" \
-        --test-python-schema '{"envelope":{"type":"object","required":["ts","type","source","data"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"}},"not":{"required":["kind"]},"additionalProperties":true},"event_types":["phase_transition","agent_spawned"]}' \
-        --test-rust-schema '{"envelope":{"type":"object","required":["ts","kind","source"],"properties":{"ts":{"type":"string"},"kind":{"type":"string"},"source":{"type":"string","pattern":"^(daemon|worker:.+)$"}},"not":{"required":["type"]},"additionalProperties":true},"status":{"type":"object","required":["schema_version","short_id","status"],"properties":{"schema_version":{"type":"integer"},"short_id":{"type":"string"},"status":{"type":"string","enum":["spawning","ready","idle","busy","live","restarting","orphaned","failed","exited","permanent_dead"]},"ready":{"type":"boolean"},"last_message_at":{"type":["string","null"]},"last_reply":{"type":["string","null"]},"restart_count":{"type":"integer"},"last_restart_at":{"type":["string","null"]},"pty":{"oneOf":[{"type":"null"},{"type":"object"}]}},"additionalProperties":false},"event_kinds":["agent_spawned","daemon_started"]}'
+        --test-python-schema '{"envelope":{"type":"object","required":["ts","type","source","data"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"}},"additionalProperties":true},"event_types":["phase_transition","agent_spawned"]}' \
+        --test-rust-schema '{"envelope":{"type":"object","required":["ts","type","source","data"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"}},"additionalProperties":true},"status":{"type":"object","required":["schema_version","short_id","status"],"properties":{"schema_version":{"type":"integer"},"short_id":{"type":"string"},"status":{"type":"string","enum":["spawning","ready","idle","busy","live","restarting","orphaned","failed","exited","permanent_dead"]},"ready":{"type":"boolean"},"last_message_at":{"type":["string","null"]},"last_reply":{"type":["string","null"]},"restart_count":{"type":"integer"},"last_restart_at":{"type":["string","null"]},"pty":{"oneOf":[{"type":"null"},{"type":"object"}]}},"additionalProperties":false},"event_kinds":["agent_spawned","daemon_started"]}'
 
 # ---------------------------------------------------------------------------
 # Test 3: Drifted Python envelope (extra field in emitted schema not in on-disk)
@@ -146,8 +132,8 @@ make_status_v1 "$T3"
 check "drifted python envelope -> non-zero" 1 \
     bash "$PARITY_SCRIPT" \
         --test-schema-dir "$T3" \
-        --test-python-schema '{"envelope":{"type":"object","required":["ts","type","source","data","DRIFTED_FIELD"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"},"DRIFTED_FIELD":{"type":"string"}},"not":{"required":["kind"]},"additionalProperties":true},"event_types":["phase_transition"]}' \
-        --test-rust-schema '{"envelope":{"type":"object","required":["ts","kind","source"],"properties":{"ts":{"type":"string"},"kind":{"type":"string"},"source":{"type":"string","pattern":"^(daemon|worker:.+)$"}},"not":{"required":["type"]},"additionalProperties":true},"status":{"type":"object","required":["schema_version","short_id","status"],"properties":{"schema_version":{"type":"integer"},"short_id":{"type":"string"},"status":{"type":"string","enum":["spawning","ready","idle","busy","live","restarting","orphaned","failed","exited","permanent_dead"]},"ready":{"type":"boolean"},"last_message_at":{"type":["string","null"]},"last_reply":{"type":["string","null"]},"restart_count":{"type":"integer"},"last_restart_at":{"type":["string","null"]},"pty":{"oneOf":[{"type":"null"},{"type":"object"}]}},"additionalProperties":false},"event_kinds":["daemon_started","agent_spawned"]}'
+        --test-python-schema '{"envelope":{"type":"object","required":["ts","type","source","data","DRIFTED_FIELD"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"},"DRIFTED_FIELD":{"type":"string"}},"additionalProperties":true},"event_types":["phase_transition"]}' \
+        --test-rust-schema '{"envelope":{"type":"object","required":["ts","type","source","data"],"properties":{"ts":{"type":"string"},"type":{"type":"string"},"source":{"type":"string","enum":["target","test"]},"data":{"type":"object"}},"additionalProperties":true},"status":{"type":"object","required":["schema_version","short_id","status"],"properties":{"schema_version":{"type":"integer"},"short_id":{"type":"string"},"status":{"type":"string","enum":["spawning","ready","idle","busy","live","restarting","orphaned","failed","exited","permanent_dead"]},"ready":{"type":"boolean"},"last_message_at":{"type":["string","null"]},"last_reply":{"type":["string","null"]},"restart_count":{"type":"integer"},"last_restart_at":{"type":["string","null"]},"pty":{"oneOf":[{"type":"null"},{"type":"object"}]}},"additionalProperties":false},"event_kinds":["daemon_started","agent_spawned"]}'
 
 # ---------------------------------------------------------------------------
 # Test 4: Malformed JSON schema -> non-zero

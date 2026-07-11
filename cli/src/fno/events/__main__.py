@@ -2,7 +2,7 @@
 
 Supports a single flag: --emit-schema
 
-Prints a JSON object describing the Branch A (Python/fno) envelope schema
+Prints a JSON object describing the unified events.jsonl envelope schema
 and the list of known event type names, then exits 0. Diagnostics go to
 stderr; only the JSON schema goes to stdout so callers can pipe safely.
 
@@ -15,22 +15,29 @@ import json
 import sys
 
 
-def _build_branch_a_schema() -> dict:
-    """Build the Branch A envelope schema for Python/fno events.
+def _build_unified_envelope_schema() -> dict:
+    """Build the unified events.jsonl envelope schema (x-2901).
 
-    This describes the Python emitter's envelope shape: {ts, type, source,
-    data}. It mirrors schemas/events-v3.json Branch A.
+    Describes {ts, type, source, data} with source as an anyOf of the enum
+    and the worker patterns. Structurally equal to schemas/events-v3.json
+    after doc-key stripping (the parity gate diffs them).
     """
-    from fno.events import ALLOWED_SOURCES, _schema_load_error  # noqa: PLC0415
+    from fno.events import (  # noqa: PLC0415
+        ALLOWED_SOURCE_PATTERNS,
+        ALLOWED_SOURCES,
+        _schema_load_error,
+    )
 
     if _schema_load_error is not None:
-        print(f"W7 emit-schema: schema unavailable: {_schema_load_error}", file=sys.stderr)
+        print(f"emit-schema: schema unavailable: {_schema_load_error}", file=sys.stderr)
         sys.exit(1)
 
     source_enum = sorted(ALLOWED_SOURCES) if ALLOWED_SOURCES else []
+    source_anyof: list[dict] = [{"enum": source_enum}]
+    source_anyof += [{"pattern": p.pattern} for p in ALLOWED_SOURCE_PATTERNS]
 
     return {
-        "$comment": "Branch A: Python/fno envelope. Emitted by cli/src/fno/events/__init__.py.",
+        "$comment": "Unified envelope (x-2901). Emitted by cli/src/fno/events/__init__.py.",
         "type": "object",
         "required": ["ts", "type", "source", "data"],
         "properties": {
@@ -44,15 +51,14 @@ def _build_branch_a_schema() -> dict:
             },
             "source": {
                 "type": "string",
-                "enum": source_enum,
-                "description": "Producer identity for the Python/fno emitter",
+                "anyOf": source_anyof,
+                "description": "Producer identity: a fixed-string source or a per-agent worker",
             },
             "data": {
                 "type": "object",
                 "description": "Per-type payload object",
             },
         },
-        "not": {"required": ["kind"]},
         "additionalProperties": True,
     }
 
@@ -98,10 +104,10 @@ def main() -> None:
         sys.exit(2)
 
     try:
-        envelope_schema = _build_branch_a_schema()
+        envelope_schema = _build_unified_envelope_schema()
         event_types = _collect_event_types()
     except Exception as exc:  # noqa: BLE001
-        print(f"W7 emit-schema error: {exc}", file=sys.stderr)
+        print(f"emit-schema error: {exc}", file=sys.stderr)
         sys.exit(1)
 
     output = {

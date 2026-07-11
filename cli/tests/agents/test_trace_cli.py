@@ -54,6 +54,51 @@ def _done(rid: str, to_name: str = "alpha", ts: str = "2026-05-22T10:00:01Z", **
     }
 
 
+def _unified_daemon(kind: str, name: str = "alpha", ts: str = "2026-05-22T10:00:03Z", **data) -> dict:
+    """A daemon EventEmitter line in the unified x-2901 envelope: type + data.
+
+    daemon.rs emits agent lifecycle lines like agent_ask_done as
+    {ts, type, source, data:{name, ...}} (payload nested, `type` not `kind`).
+    """
+    return {"ts": ts, "type": kind, "source": "daemon", "data": {"name": name, **data}}
+
+
+# ---------------------------------------------------------------------------
+# x-2901 — the unified {type, data} daemon envelope renders (fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_trace_renders_unified_daemon_line(tmp_path: Path) -> None:
+    """A daemon EventEmitter line (type + nested data) is matched by name and
+    rendered, not silently filtered. Regression guard for the x-2901 emit cut:
+    before the reader fallback, trace read only top-level kind/name and went
+    blind to the new envelope."""
+    from fno.agents.trace_cli import trace_logic
+
+    events_path = tmp_path / "events.jsonl"
+    _write_events(events_path, [_unified_daemon("agent_ask_done", name="alpha", backend="pty")])
+    res = trace_logic(name="alpha", events_path=events_path, registry_check=False)
+    assert res.exit_code == 0
+    assert "agent_ask_done" in res.output, res.output
+    assert "no events yet" not in res.output
+
+
+def test_trace_mixed_envelopes_both_render(tmp_path: Path) -> None:
+    """A flat audit line (append_agents_event) and a unified daemon line for the
+    same agent both render during the mixed-binary window."""
+    from fno.agents.trace_cli import trace_logic
+
+    events_path = tmp_path / "events.jsonl"
+    _write_events(events_path, [
+        _started(rid=_FULL_RID, to_name="alpha", ts="2026-05-22T10:00:00Z"),
+        _unified_daemon("agent_ask_done", name="alpha", ts="2026-05-22T10:00:01Z"),
+    ])
+    res = trace_logic(name="alpha", events_path=events_path, registry_check=False)
+    assert res.exit_code == 0
+    assert "agent_ask_started" in res.output
+    assert "agent_ask_done" in res.output
+
+
 # ---------------------------------------------------------------------------
 # AC1-HP — interleaved timeline sorted by ts
 # ---------------------------------------------------------------------------

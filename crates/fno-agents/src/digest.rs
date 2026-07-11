@@ -58,15 +58,18 @@ pub struct DigestSummary {
     pub lines: Vec<String>,
 }
 
-/// Read `<field>` from a `loop_check`-shaped value regardless of envelope:
-/// Branch A nests under `/data`, Branch B is flat.
+/// Read `<field>` from an event value regardless of envelope: the unified
+/// shape nests under `/data`, the retired flat shape is top-level. The flat
+/// fallback covers the mixed-binary + rotated-history window (x-2901); drop it
+/// once the daemon fleet has restarted on the post-cut binary.
 fn field<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     v.get("data")
         .and_then(|d| d.get(key))
         .or_else(|| v.get(key))
 }
 
-/// The event's `type` (Branch A) or `kind` (Branch B).
+/// The event's `type` (unified) with a `kind` fallback for retired flat lines
+/// during the mixed-binary window (x-2901); drop the fallback post-cut.
 fn event_kind(v: &Value) -> Option<&str> {
     v.get("type")
         .and_then(|t| t.as_str())

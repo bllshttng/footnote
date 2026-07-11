@@ -59,6 +59,32 @@ phase boundaries (no gate flip happened).
 
 The 64KB cap on `data` payload is enforced by both validators.
 
+`schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
+used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`
+is the source of truth both validators load.
+
+### One envelope, both languages
+
+For a window, the Rust `fno-agents` daemon wrote a second envelope shape
+(`{ts, kind, <flat fields>}`) and `events-v3.json` carried a `oneOf`
+bridge between it and the canonical `{ts, type, source, data}`.
+Publishing the public event contract on top of that split-brain would
+have frozen it in, so it was retired: the daemon's `EventEmitter` now
+emits the single canonical envelope, and `events-v3.json` is one branch
+again (restoring locked decision 4).
+
+Because `events.jsonl` is append-only and `fno-agents` deploys as a
+binary pair, the retired shape can still appear on the wire during a
+rollout: a running daemon keeps emitting `kind` lines until `fno
+restart`, and rotated `events.jsonl.1` history holds old lines. The two
+Rust readers (`subscribe::classify`, `digest`) therefore keep a
+read-side fallback: they read `type` with a `kind` fallback and the
+payload from `data` with a flat fallback. Each fallback site carries its
+removal criterion in a comment - drop it once the daemon fleet has
+restarted on the post-cut binary and no rotated file carries a `kind`
+line. Emitting the old shape is no longer valid; only reading it is
+tolerated.
+
 ### Source enum
 
 | Source | Producers |
@@ -71,9 +97,25 @@ The 64KB cap on `data` payload is enforced by both validators.
 | `subagent` | reserved for direct subagent emissions |
 | `migration` | the one-shot `scripts/migrate-events-shape.py` |
 | `test` | test-only fixtures |
+| `backlog` | `fno backlog` graph mutations (done/refused/forced, capture, triage) |
+| `daemon` | the Rust `fno-agents` supervisor daemon (agent/drive/reconcile lifecycle) |
+| `active-backlog` | the daemon's active-backlog dispatch task |
+| `observer` | the skill-eval observer harness |
+| `skill_diff` | the skill-diff proposer loop |
 
-Adding a new source means editing the YAML manifest + adding a
-`parity_corpus.jsonl` row. CI catches missed updates.
+Plus two **pattern** sources for per-agent Rust workers, matched by
+`envelope.properties.source.patterns` rather than the enum:
+
+| Pattern | Producers |
+|---------|-----------|
+| `worker:<id>` | a per-agent worker process |
+| `stream-worker:<id>` | a claude stream-json worker |
+
+Adding a fixed-string source means editing the YAML manifest's
+`source.enum` + adding a `parity_corpus.jsonl` row. A new worker-style
+source adds a regex to `source.patterns`. Both validators (Python
+`validate()` and `events-validate.sh`) accept a source that matches the
+enum OR any pattern; CI catches missed updates.
 
 ## Three event types you'll touch most
 

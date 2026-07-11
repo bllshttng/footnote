@@ -1,7 +1,7 @@
 """Tests for Task 1.2: --emit-schema on Python events module.
 
 Verifies that `python -m fno.events --emit-schema` prints valid JSON
-to stdout describing the Branch A envelope shape, is idempotent, and has no
+to stdout describing the unified envelope shape, is idempotent, and has no
 side effects.
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ def test_emit_schema_stdout_is_valid_json() -> None:
 
 
 def test_emit_schema_has_envelope_key() -> None:
-    """Output must have an 'envelope' key for the Branch A schema."""
+    """Output must have an 'envelope' key for the unified schema."""
     result = _run_emit_schema()
     assert result.returncode == 0
     data = json.loads(result.stdout)
@@ -81,10 +81,11 @@ def test_emit_schema_envelope_has_required_fields() -> None:
 
 
 def test_emit_schema_envelope_source_enum() -> None:
-    """Envelope source must enumerate Python sources."""
+    """Envelope source anyOf must enumerate the fixed-string sources."""
     result = _run_emit_schema()
     data = json.loads(result.stdout)
-    enum_vals = data["envelope"]["properties"]["source"].get("enum", [])
+    branches = data["envelope"]["properties"]["source"]["anyOf"]
+    enum_vals = next((b["enum"] for b in branches if "enum" in b), [])
     for src in PYTHON_SOURCES:
         assert src in enum_vals, f"source enum missing {src!r}"
 

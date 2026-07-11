@@ -98,7 +98,7 @@ async fn run(args: Vec<String>) -> i32 {
         }
     }
 
-    // `--emit-schema` is a read-only introspection flag: prints the Branch B
+    // `--emit-schema` is a read-only introspection flag: prints the unified
     // envelope + status-v1 schema + known event kinds as JSON to stdout, then
     // exits 0. Used by scripts/check-event-schema-parity.sh. Must not start
     // the daemon or read any runtime state (AC2-HP: side-effect-free).

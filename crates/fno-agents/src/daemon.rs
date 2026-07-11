@@ -4218,11 +4218,14 @@ mod tests {
         let events = read_events(&home);
         let reaped: Vec<&Value> = events
             .iter()
-            .filter(|e| e.get("kind").and_then(Value::as_str) == Some("agent_row_reaped"))
+            .filter(|e| e.get("type").and_then(Value::as_str) == Some("agent_row_reaped"))
             .collect();
         assert_eq!(reaped.len(), 1);
         assert_eq!(
-            reaped[0].get("name").and_then(Value::as_str),
+            reaped[0]
+                .get("data")
+                .and_then(|d| d.get("name"))
+                .and_then(Value::as_str),
             Some("ask-old")
         );
     }
@@ -4291,10 +4294,10 @@ mod tests {
         let events = read_events(&home);
         let crashed = events
             .iter()
-            .find(|e| e["kind"] == "drive_crashed")
+            .find(|e| e["type"] == "drive_crashed")
             .expect("drive_crashed emitted");
-        assert_eq!(crashed["session_id"], "drive-xyz");
-        assert_eq!(crashed["reason"], "daemon_restart");
+        assert_eq!(crashed["data"]["session_id"], "drive-xyz");
+        assert_eq!(crashed["data"]["reason"], "daemon_restart");
 
         // The on-disk state has the window cleared after recovery.
         let after = state::load_state(&home.state_json("wkA")).unwrap().unwrap();
@@ -4346,7 +4349,8 @@ mod tests {
         let events = read_events(&home);
         assert!(events
             .iter()
-            .any(|e| e["kind"] == "agent_inconsistent" && e["reason"] == "missing_state_json"));
+            .any(|e| e["type"] == "agent_inconsistent"
+                && e["data"]["reason"] == "missing_state_json"));
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -4956,7 +4960,7 @@ mod tests {
         let events: Vec<serde_json::Value> = log
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
-            .filter(|v: &serde_json::Value| v["kind"] == "inside_leg_completed")
+            .filter(|v: &serde_json::Value| v["type"] == "inside_leg_completed")
             .collect();
         assert_eq!(
             events.len(),
@@ -4964,10 +4968,10 @@ mod tests {
             "exactly one completion, only for the report-bearing row"
         );
         let ev = &events[0];
-        assert_eq!(ev["name"], "pane");
-        assert_eq!(ev["session_id"], "sess-uuid");
-        assert_eq!(ev["final_state"], "working");
-        assert_eq!(ev["seq"], 9);
+        assert_eq!(ev["data"]["name"], "pane");
+        assert_eq!(ev["data"]["session_id"], "sess-uuid");
+        assert_eq!(ev["data"]["final_state"], "working");
+        assert_eq!(ev["data"]["seq"], 9);
 
         std::fs::remove_dir_all(home.root()).ok();
     }
@@ -5067,10 +5071,10 @@ mod tests {
         let events = read_events(&home);
         assert!(events
             .iter()
-            .any(|e| e["kind"] == "inside_leg_buffer_flushed"
-                && e["name"] == "pane"
-                && e["session_id"] == "uuid-x"
-                && e["seq"] == 4));
+            .any(|e| e["type"] == "inside_leg_buffer_flushed"
+                && e["data"]["name"] == "pane"
+                && e["data"]["session_id"] == "uuid-x"
+                && e["data"]["seq"] == 4));
 
         // Seq gate: a NEWER report already on the row (seq 10) is not regressed by
         // a stale buffered report (seq 7).
@@ -5735,9 +5739,9 @@ done
         // The injected-event reuse carries the switchboard transport discriminator.
         let events = read_events(&home);
         assert!(
-            events.iter().any(|e| e["kind"] == "agent_deliver_injected"
-                && e["transport"] == "switchboard"
-                && e["mirrored"] == true),
+            events.iter().any(|e| e["type"] == "agent_deliver_injected"
+                && e["data"]["transport"] == "switchboard"
+                && e["data"]["mirrored"] == true),
             "switchboard injected event missing: {events:?}"
         );
         std::fs::remove_dir_all(home.root()).ok();
@@ -6015,7 +6019,7 @@ done
 
         let events = read_events(&home);
         assert!(
-            events.iter().any(|e| e["kind"] == "inside_leg_report"),
+            events.iter().any(|e| e["type"] == "inside_leg_report"),
             "inside_leg_report not emitted: {events:?}"
         );
         std::fs::remove_dir_all(home.root()).ok();
@@ -6094,9 +6098,9 @@ done
         assert_eq!(rep.state, state::InsideLegState::Working);
 
         let events = read_events(&home);
-        assert!(events
-            .iter()
-            .any(|e| e["kind"] == "inside_leg_report_dropped" && e["reason"] == "stale_seq"));
+        assert!(events.iter().any(
+            |e| e["type"] == "inside_leg_report_dropped" && e["data"]["reason"] == "stale_seq"
+        ));
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -6138,7 +6142,8 @@ done
         let events = read_events(&home);
         assert!(events
             .iter()
-            .any(|e| e["kind"] == "inside_leg_report_buffered" && e["session_id"] == "uuid-nope"));
+            .any(|e| e["type"] == "inside_leg_report_buffered"
+                && e["data"]["session_id"] == "uuid-nope"));
         std::fs::remove_dir_all(home.root()).ok();
     }
 
