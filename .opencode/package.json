@@ -1,0 +1,15 @@
+{
+  "name": "fno-opencode-plugin",
+  "version": "0.1.0",
+  "description": "footnote's self-contained opencode orchestration plugin",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.2.24",
+    "@opencode-ai/sdk": "^1.2.24",
+    "@types/bun": "^1.3.14"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}
