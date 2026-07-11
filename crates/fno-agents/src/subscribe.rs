@@ -50,9 +50,19 @@ pub struct Transition {
 /// Reshape one `events.jsonl` line into a [`Transition`], or `None` for any
 /// non-transition kind (spawn/stop/reconcile/daemon-lifecycle/... are ignored).
 pub fn classify(v: &Value) -> Option<Transition> {
-    let kind = v.get("kind")?.as_str()?;
-    let str_field = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
-    let seq = v.get("seq").and_then(|x| x.as_u64());
+    // Unified envelope (x-2901): `type` + payload under `data`. The `kind`/flat
+    // fallback covers the mixed-binary window (an old daemon binary keeps writing
+    // the retired shape until `fno restart`) and rotated events.jsonl.1 history.
+    // Removal criterion: drop the `.or_else(kind)`/flat fallback once the daemon
+    // fleet has restarted on the post-x-2901 binary and no rotated file carries a
+    // `kind` line.
+    let kind = v
+        .get("type")
+        .or_else(|| v.get("kind"))
+        .and_then(|x| x.as_str())?;
+    let payload = v.get("data").unwrap_or(v);
+    let str_field = |k: &str| payload.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let seq = payload.get("seq").and_then(|x| x.as_u64());
     match kind {
         // Hook report: {session_id, seq, state} -- no name, resolved later.
         "inside_leg_report" => Some(Transition {
@@ -91,8 +101,8 @@ pub fn classify(v: &Value) -> Option<Transition> {
         // kind for a manifest PARSE ERROR ({provider, error}, no name/state) --
         // that is not a row transition, so require `name` and skip otherwise.
         "screen_state_change" => {
-            let name = v.get("name").and_then(|x| x.as_str())?;
-            let cleared = v.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
+            let name = payload.get("name").and_then(|x| x.as_str())?;
+            let cleared = payload.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
             let state = if cleared {
                 "idle".to_string()
             } else {
@@ -334,7 +344,8 @@ mod tests {
     #[test]
     fn classifies_hook_report_without_name() {
         let t = classify(&json!({
-            "kind": "inside_leg_report", "session_id": "sid-1", "seq": 3, "state": "blocked"
+            "type": "inside_leg_report",
+            "data": {"session_id": "sid-1", "seq": 3, "state": "blocked"}
         }))
         .unwrap();
         assert_eq!(t.category, "state");
@@ -348,8 +359,8 @@ mod tests {
     #[test]
     fn classifies_completion_as_exit() {
         let t = classify(&json!({
-            "kind": "inside_leg_completed", "name": "wkA",
-            "session_id": "sid-1", "final_state": "done", "seq": 9
+            "type": "inside_leg_completed",
+            "data": {"name": "wkA", "session_id": "sid-1", "final_state": "done", "seq": 9}
         }))
         .unwrap();
         assert_eq!(t.category, "exit");
@@ -360,8 +371,8 @@ mod tests {
     #[test]
     fn cleared_screen_state_reads_idle() {
         let t = classify(&json!({
-            "kind": "screen_state_change", "name": "wkA",
-            "state": Value::Null, "rule": Value::Null, "seq": 2, "cleared": true
+            "type": "screen_state_change",
+            "data": {"name": "wkA", "state": Value::Null, "rule": Value::Null, "seq": 2, "cleared": true}
         }))
         .unwrap();
         assert_eq!(t.category, "state");
@@ -373,8 +384,8 @@ mod tests {
     #[test]
     fn live_screen_state_keeps_verdict() {
         let t = classify(&json!({
-            "kind": "screen_state_change", "name": "wkA",
-            "state": "blocked", "rule": "menu", "seq": 4, "cleared": false
+            "type": "screen_state_change",
+            "data": {"name": "wkA", "state": "blocked", "rule": "menu", "seq": 4, "cleared": false}
         }))
         .unwrap();
         assert_eq!(t.state, "blocked");
@@ -382,9 +393,9 @@ mod tests {
 
     #[test]
     fn ignores_non_transition_kinds() {
-        assert!(classify(&json!({"kind": "agent_spawned", "name": "wkA"})).is_none());
-        assert!(classify(&json!({"kind": "daemon_started", "pid": 1})).is_none());
-        assert!(classify(&json!({"no_kind": true})).is_none());
+        assert!(classify(&json!({"type": "agent_spawned", "data": {"name": "wkA"}})).is_none());
+        assert!(classify(&json!({"type": "daemon_started", "data": {"pid": 1}})).is_none());
+        assert!(classify(&json!({"no_type": true})).is_none());
     }
 
     #[test]
@@ -392,8 +403,8 @@ mod tests {
         // The early-push flush is the ONLY event for that transition; it carries
         // {name, session_id, state, seq}.
         let t = classify(&json!({
-            "kind": "inside_leg_buffer_flushed", "name": "wkA",
-            "session_id": "sid-1", "state": "working", "seq": 4
+            "type": "inside_leg_buffer_flushed",
+            "data": {"name": "wkA", "session_id": "sid-1", "state": "working", "seq": 4}
         }))
         .unwrap();
         assert_eq!(t.category, "state");
@@ -408,8 +419,24 @@ mod tests {
         // The scrape sweep emits screen_state_change for a manifest parse error
         // with {provider, error} and no name -- not a row transition, must skip.
         assert!(classify(&json!({
-            "kind": "screen_state_change", "provider": "codex", "error": "bad manifest"
+            "type": "screen_state_change",
+            "data": {"provider": "codex", "error": "bad manifest"}
         }))
         .is_none());
+    }
+
+    #[test]
+    fn legacy_kind_flat_line_still_classifies_via_fallback() {
+        // Mixed-binary/rotated-history window: an old daemon binary emits the
+        // retired {kind, <flat fields>} shape. The fallback must still classify
+        // it until the fleet has restarted. Delete with the fallback in classify.
+        let t = classify(&json!({
+            "kind": "inside_leg_report", "session_id": "sid-1", "seq": 3, "state": "blocked"
+        }))
+        .unwrap();
+        assert_eq!(t.category, "state");
+        assert_eq!(t.session_id.as_deref(), Some("sid-1"));
+        assert_eq!(t.state, "blocked");
+        assert_eq!(t.seq, Some(3));
     }
 }

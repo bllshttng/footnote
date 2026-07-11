@@ -1799,10 +1799,10 @@ cat >/dev/null
         let ev = text
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find(|v| v["kind"] == "agent_exited" && v["lane"] == "stream")
+            .find(|v| v["type"] == "agent_exited" && v["data"]["lane"] == "stream")
             .expect("no agent_exited stream event emitted");
         assert_eq!(
-            ev["reason"], "idle-release",
+            ev["data"]["reason"], "idle-release",
             "idle exit must carry reason=idle-release"
         );
         std::fs::remove_dir_all(&home).ok();
@@ -2077,17 +2077,17 @@ done
         let ev = text
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find(|v| v["kind"] == "agent_exited" && v["lane"] == "stream")
+            .find(|v| v["type"] == "agent_exited" && v["data"]["lane"] == "stream")
             .expect("no agent_exited stream event emitted");
-        assert_eq!(ev["reason"], "child_exited");
-        assert_eq!(ev["exit_code"], 7);
+        assert_eq!(ev["data"]["reason"], "child_exited");
+        assert_eq!(ev["data"]["exit_code"], 7);
         assert!(
-            ev["stderr_tail"]
+            ev["data"]["stderr_tail"]
                 .as_str()
                 .unwrap_or("")
                 .contains("AUTHFAIL-marker"),
             "stderr_tail missing the child's error: {:?}",
-            ev["stderr_tail"]
+            ev["data"]["stderr_tail"]
         );
         std::fs::remove_dir_all(&home).ok();
     }
