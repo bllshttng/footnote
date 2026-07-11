@@ -17,7 +17,6 @@ from fno.adapters.providers import loader
 from fno.adapters.providers.error_taxonomy import ErrorRule
 from fno.adapters.providers.model import ProviderRecord
 from fno.adapters.providers.runtime_state import (
-    Headroom,
     HeadroomState,
     headroom,
     read_state,
@@ -337,7 +336,7 @@ class TestDispatchOneQuotaDefer:
         assert verdict["retry_at"] == 9e18
         # One decision event landed.
         events = (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
-        rows = [_json.loads(l) for l in events if l.strip()]
+        rows = [_json.loads(ln) for ln in events if ln.strip()]
         deferred = [r for r in rows if r["type"] == "quota_deferred"]
         assert len(deferred) == 1
         assert deferred[0]["data"]["provider"] == "p1"
@@ -402,9 +401,9 @@ class TestRequiredBotHeadroomCheck:
         assert warnings[0]["provider"] == "codex-pro"
         # AC3-HP: one decision event emitted naming bot + provider + reset.
         rows = [
-            _json.loads(l)
-            for l in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
-            if l.strip()
+            _json.loads(ln)
+            for ln in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
+            if ln.strip()
         ]
         ev = [r for r in rows if r["type"] == "quota_required_bot_exhausted"]
         assert len(ev) == 1

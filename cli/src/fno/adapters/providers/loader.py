@@ -25,6 +25,7 @@ from fno.adapters.providers.model import (
     ProviderConfigError,
     ProviderRecord,
     ProvidersConfig,
+    QuotaConfig,
 )
 from fno.state.io import atomic_write
 
@@ -322,7 +323,7 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     return {}
 
 
-def load_quota_config(repo_root: Path | None = None) -> "QuotaConfig":
+def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
     """Read config.providers.quota from project-local or global settings.
 
     Same precedence as load_combos (project-local wins over global). Returns
@@ -331,8 +332,6 @@ def load_quota_config(repo_root: Path | None = None) -> "QuotaConfig":
     rather than raising out of a dispatch decision - the dangerous direction
     for an opt-in autonomous feature is silently-enabled, and defaults are off.
     """
-    from fno.adapters.providers.model import QuotaConfig
-
     if repo_root is None:
         repo_root = Path(os.environ.get("PWD", os.getcwd()))
 
