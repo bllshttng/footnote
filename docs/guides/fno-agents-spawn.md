@@ -29,6 +29,31 @@ Pipe it: `fno agents spawn w1 "task" -p claude | jq -r .short_id`.
 
 Plain `spawn` for codex/gemini creates a PTY-backed hosted worker under the `fno-agents` daemon (lazy-started). The receipt is the daemon's JSON payload, also carrying `.short_id`. The Python fallback runtime cannot host PTY workers and exits 13 with guidance.
 
+## Reasoning effort (`--effort`)
+
+`--effort` tunes reasoning without changing the selected model. Omit it to keep
+the provider default.
+
+```bash
+fno agents spawn planner "analyze the migration" --provider claude --effort high
+fno agents spawn verifier "check the invariants" --provider codex --effort medium
+```
+
+The accepted user-facing vocabulary is `minimal`, `low`, `medium`, `high`,
+`xhigh`, and `max`, but each provider supports only its native subset:
+
+| Provider | Supported effort values | Surface |
+|---|---|---|
+| Claude | `low`, `medium`, `high`, `xhigh`, `max` | pane, bg, headless |
+| Codex | `minimal`, `low`, `medium`, `high` | pane, headless |
+| OpenCode | superset, subject to the selected model | pane; persists the model variant |
+| Gemini / agy | none | rejected before spawn |
+
+Unsupported pairs fail with exit 2 before a pane or worker is created. For
+OpenCode, the selected effort becomes the persisted variant for that explicit
+`provider/model` in `~/.local/state/opencode/model.json`, matching OpenCode's
+own variant toggle behavior.
+
 ## Ephemeral one-shot (`--once` / `-o`, codex and gemini)
 
 ```bash
@@ -61,6 +86,7 @@ Precedence is `--cwd` > `--fresh` > caller cwd. An explicit `--cwd` always wins;
 | No `--provider` for a new name | 2 | provider required |
 | Unknown provider | 2 | `unknown provider '<p>'; supported: claude, codex, gemini` |
 | `--once` with claude | 2 | persistent bg threads; use plain spawn |
+| Unsupported provider/effort pair | 2 | names the provider's supported effort values |
 | Plain codex/gemini spawn on the Python fallback | 13 | requires the fno-agents daemon (Rust runtime); use `--once` |
 | Registry unreadable | 12 | `registry read failed: ...` |
 
