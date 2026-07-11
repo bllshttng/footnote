@@ -424,6 +424,9 @@ def build_entry(
         "tokens_total": tokens_total,
         "cache_read_tokens": cache_read,
         "model": model,
+        # Dual-write for one release: new rows carry both keys (same value);
+        # matchers accept either so old (session_id-only) rows stay matchable.
+        "fno_id": scalar_session_id,
         "session_id": scalar_session_id,
         "graph_node_id": scalar_graph_node_id,
         "sessions": sessions,
@@ -511,14 +514,15 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
         # whose scalar session_id is null). This inner dedup's only job
         # is rejecting a second write from the SAME target session that
         # raced past the pre-check between caller-process fork and our
-        # flock acquisition. Match on the scalar `session_id` only;
-        # legacy entries with `session_id: null` are NOT considered.
-        new_scalar = entry.get("session_id")
+        # flock acquisition. Match on the scalar id (fno_id-first, session_id
+        # fallback for the one-release window); legacy null-id entries are NOT
+        # considered.
+        new_scalar = entry.get("fno_id") or entry.get("session_id")
         if new_scalar:
             for existing in data.get("entries", []):
-                if existing.get("session_id") == new_scalar:
+                if (existing.get("fno_id") or existing.get("session_id")) == new_scalar:
                     print(
-                        f"Skipping duplicate entry for target session_id: {new_scalar}",
+                        f"Skipping duplicate entry for target fno_id: {new_scalar}",
                         file=sys.stderr,
                     )
                     return
