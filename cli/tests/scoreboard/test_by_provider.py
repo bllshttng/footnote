@@ -217,7 +217,31 @@ def test_edge_junk_cost_and_iterations_never_crash():
     rows = [_row("claude", "opus", nid="x-1", cost="junk", iterations="junk")]
     pb = build_provider_scoreboard(rows, GRAPH, since_days=28, now=NOW)
     r = pb["rows"][0]
+    # spend sums to 0 (honest lower bound), but cost-per-shipped is n/a, not a
+    # fake $0.00 that would read as "cheapest" to quota dispatch.
     assert r["spend_usd"] == 0.0 and r["median_iterations"] is None
+    assert r["cost_per_shipped_usd"] is None
+
+
+def test_edge_all_missing_cost_shipped_bucket_is_unmeasurable_not_free():
+    rows = [
+        _row("glm", "glm-5", nid="x-1", cost=None),  # shipped, no recorded cost
+        _row("glm", "glm-5", nid="x-2", cost=None),
+    ]
+    pb = build_provider_scoreboard(rows, GRAPH, since_days=28, now=NOW)
+    r = pb["rows"][0]
+    assert r["shipped"] == 2 and r["spend_usd"] == 0.0
+    assert r["cost_per_shipped_usd"] is None  # not $0.00
+
+
+def test_edge_partial_cost_coverage_still_reports_known_spend():
+    rows = [
+        _row("claude", "opus", nid="x-1", cost=6.0),
+        _row("claude", "opus", nid="x-2", cost=None),  # one measured, one missing
+    ]
+    pb = build_provider_scoreboard(rows, GRAPH, since_days=28, now=NOW)
+    r = pb["rows"][0]
+    assert r["cost_per_shipped_usd"] == 3.0  # 6.0 known / 2 shipped
 
 
 def test_edge_unhashable_provider_model_nid_never_crash():
@@ -248,6 +272,29 @@ def test_ui_populated_render_formats_bounce_and_blanks_repeated_provider(tmp_pat
     assert "6.00" in res.output  # cost-per-shipped formatted
     # provider name printed once, blanked on its second model sub-row
     assert res.output.count("claude") == 1
+
+
+def test_edge_junk_termination_reason_never_crash():
+    # A list-valued termination_reason must not reach the frozenset membership
+    # test unhashable (codex peer finding).
+    rows = [{"type": "execution", "completed": "2026-07-03T10:00:00",
+             "termination_reason": ["DonePRGreen"], "cost_usd": 1.0,
+             "provider_id": "claude", "model": "opus"}]
+    pb = build_provider_scoreboard(rows, GRAPH, since_days=28, now=NOW)
+    r = pb["rows"][0]
+    assert r["runs"] == 1 and r["shipped"] == 0  # junk reason is not a ship
+
+
+def test_edge_null_graph_json_yields_null_bounce_not_crash(tmp_path, monkeypatch):
+    # A graph.json containing literally `null` is corrupt-but-valid JSON; the
+    # reader must degrade to [] rather than crash (codex peer finding, AC3).
+    ts = (datetime.now() - timedelta(days=1)).isoformat()
+    rows = [_row("claude", "opus", nid="x-1", cost=2.0, completed=ts)]
+    (tmp_path / "graph.json").write_text("null")
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    res = runner.invoke(_app(), ["--by-provider", "-J"])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output)["rows"][0]["bounce_rate_pct"] is None
 
 
 # --- AC6-FR -------------------------------------------------------------------

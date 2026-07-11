@@ -37,8 +37,11 @@ _SHIPPED_TERMINALS = frozenset({"DonePRGreen", "DoneAdvisory", "DoneBatched"})
 
 
 def _is_shipped_reason(termination_reason: str | None) -> bool:
-    """True iff a terminal reason counts as a delivered node for telemetry."""
-    return (termination_reason or "") in _SHIPPED_TERMINALS
+    """True iff a terminal reason counts as a delivered node for telemetry.
+    Non-string junk (a hand-edited/partial ledger row) is never a ship reason,
+    and must not reach the frozenset membership test unhashable."""
+    tr = termination_reason if isinstance(termination_reason, str) else ""
+    return tr in _SHIPPED_TERMINALS
 
 
 # A plan-only thread produces planning output and no build phase. The
@@ -123,6 +126,8 @@ def read_graph_nodes(path: Path) -> list[dict]:
     nodes = data.get("entries", data.get("nodes", data)) if isinstance(data, dict) else data
     if isinstance(nodes, dict):
         nodes = list(nodes.values())
+    if not isinstance(nodes, list):  # valid JSON, junk shape (null / scalar / {"entries": null})
+        return []
     return [n for n in nodes if isinstance(n, dict)]
 
 
@@ -741,10 +746,12 @@ def build_provider_scoreboard(
         b = buckets.setdefault(
             (provider, _key(r.get("model"), "unknown")),
             {"runs": 0, "shipped": 0, "shipped_linked": 0, "bounced": 0,
-             "spend": 0.0, "iterations": [], "nids": set(), "nid_rows": 0},
+             "spend": 0.0, "measured_cost": False, "iterations": [], "nids": set(), "nid_rows": 0},
         )
         b["runs"] += 1
         b["spend"] += _num(r.get("cost_usd"))
+        if _num_opt(r.get("cost_usd")) is not None:  # a real recorded cost, not a coerced-missing 0
+            b["measured_cost"] = True
         nid = r.get("graph_node_id")
         nid = nid if isinstance(nid, str) else None
         if nid:
@@ -769,7 +776,10 @@ def build_provider_scoreboard(
                 "runs": b["runs"],
                 "shipped": b["shipped"],
                 "spend_usd": round(b["spend"], 2),
-                "cost_per_shipped_usd": round(b["spend"] / b["shipped"], 2) if b["shipped"] else None,
+                # None (not $0.00) when nothing shipped OR the bucket recorded no
+                # real cost - a missing-cost bucket is unmeasurable, not free, and
+                # a fake $0/shipped would read as "cheapest" to quota dispatch.
+                "cost_per_shipped_usd": round(b["spend"] / b["shipped"], 2) if b["shipped"] and b["measured_cost"] else None,
                 "bounce_rate_pct": _pct(b["bounced"], b["shipped_linked"]) if b["shipped_linked"] else None,
                 "shipped_linked": b["shipped_linked"],
                 "median_iterations": _percentile(b["iterations"], 50),
