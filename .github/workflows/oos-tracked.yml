@@ -1,0 +1,46 @@
+name: oos-tracked
+
+# Blocks a PR whose body has an "Out of scope" section with an item that
+# references no tracked backlog node / carveout. Deferred work stated only in a
+# PR body evaporates on merge (no `fno backlog` query, roadmap, or nag surfaces
+# it), so each out-of-scope item must point to tracked work or be explicitly
+# waived. NARROW: fires only on an explicit "Out of scope" heading.
+#
+# `edited` is in the trigger list on purpose: the usual fix is editing the PR
+# body to add a node id, which must re-run the gate. No `paths:` filter - a body
+# leak rides any PR regardless of which files it touches.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: oos-tracked-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-oos-tracked:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # PR-controlled text (the body) reaches the script via env ONLY - never
+      # interpolated inline into `run:`, which would be a shell-injection hole.
+      - name: Out-of-scope items reference a tracked node / carveout
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash scripts/ci/check-oos-tracked.sh
+
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run oos-tracked test harness
+        run: bash tests/ci/test_oos_tracked.sh
