@@ -26,6 +26,7 @@ from stdin unconditionally, so the substrate is verified independent of
 real CLI drift. When ``claude`` changes its stdin convention, only the
 ``_ARGV_OVERFLOW_THRESHOLD`` branch needs to follow.
 """
+
 from __future__ import annotations
 
 import html
@@ -40,7 +41,10 @@ from pathlib import Path
 from typing import Literal, Optional
 
 OrphanReason = Literal[
-    "not-found", "socket-null", "liveness-failed", "roster-live-inject-failed",
+    "not-found",
+    "socket-null",
+    "liveness-failed",
+    "roster-live-inject-failed",
 ]
 
 from fno.agents.providers._claude_session_registry import (
@@ -104,9 +108,7 @@ class ProviderSubprocessError(RuntimeError):
     """
 
     def __init__(self, exit_code: int, stderr: str) -> None:
-        super().__init__(
-            f"claude --bg exited {exit_code}: {stderr!r}"
-        )
+        super().__init__(f"claude --bg exited {exit_code}: {stderr!r}")
         self.exit_code = exit_code
         self.stderr = stderr
 
@@ -134,6 +136,7 @@ def _build_argv(
     use_stdin: bool,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> list[str]:
     """Render the argv list for ``claude --bg``.
 
@@ -156,6 +159,8 @@ def _build_argv(
     # the Rust build_argv (cross-runtime parity). Empty/None = unchanged argv.
     if permission_mode:
         argv += ["--permission-mode", permission_mode]
+    if effort:
+        argv += ["--effort", effort]
     if model:
         argv += ["--model", model]
     if not use_stdin:
@@ -171,6 +176,7 @@ def bg_create(
     role: Optional[str] = None,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -205,6 +211,7 @@ def bg_create(
         use_stdin=use_stdin,
         model=model,
         permission_mode=permission_mode,
+        effort=effort,
     )
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
@@ -374,8 +381,7 @@ class ProviderOrphanError(RuntimeError):
     code 13.
     """
 
-    def __init__(self, *, reason: OrphanReason, short_id: str,
-                 detail: str = "") -> None:
+    def __init__(self, *, reason: OrphanReason, short_id: str, detail: str = "") -> None:
         super().__init__(
             f"agent short-id {short_id!r} is not reachable (reason: {reason})"
             + (f": {detail}" if detail else "")
@@ -426,11 +432,7 @@ def build_cross_session_container(message: str, from_name: str) -> str:
     the escaper here means changing `xml_attr_escape` in daemon.rs too.
     """
     safe_from = html.escape(from_name, quote=True)
-    return (
-        f"<cross-session-message from-name=\"{safe_from}\">\n"
-        f"{message}\n"
-        f"</cross-session-message>"
-    )
+    return f'<cross-session-message from-name="{safe_from}">\n{message}\n</cross-session-message>'
 
 
 def _build_envelope(message: str, from_name: str) -> bytes:
@@ -482,9 +484,7 @@ def send_to_session(sock_path: str, content: str, from_name: str) -> None:
             # the close error - on AF_UNIX it signals the recipient
             # didn't accept the bytes.
             if primary_exc is None:
-                raise ProviderSocketError(
-                    f"close after send failed: {close_exc}"
-                ) from close_exc
+                raise ProviderSocketError(f"close after send failed: {close_exc}") from close_exc
     if primary_exc is not None:
         raise ProviderSocketError(str(primary_exc)) from primary_exc
 
@@ -551,10 +551,8 @@ def wait_for_reply(
         # timeout. Let them propagate.
 
         if snap is not None and snap.state in TERMINAL_STATES:
-            advanced = (
-                baseline_updated_at is None
-                or (snap.updated_at is not None
-                    and snap.updated_at > baseline_updated_at)
+            advanced = baseline_updated_at is None or (
+                snap.updated_at is not None and snap.updated_at > baseline_updated_at
             )
             if advanced:
                 final_snap = snap
@@ -605,8 +603,12 @@ def ask_followup(
         # is genuinely dead and never falls back (Locked Decision 5).
         if reason == "socket-null" and roster_live(claude_short_id):
             return _ask_via_control_sock(
-                claude_short_id, message, from_name, timeout,
-                jobs_dir=jobs_dir, poll_interval=poll_interval,
+                claude_short_id,
+                message,
+                from_name,
+                timeout,
+                jobs_dir=jobs_dir,
+                poll_interval=poll_interval,
             )
         raise ProviderOrphanError(reason=reason, short_id=claude_short_id)
 
@@ -614,11 +616,16 @@ def ask_followup(
         # Socket exists but is dead. Same control.sock fallback when roster-live.
         if roster_live(claude_short_id):
             return _ask_via_control_sock(
-                claude_short_id, message, from_name, timeout,
-                jobs_dir=jobs_dir, poll_interval=poll_interval,
+                claude_short_id,
+                message,
+                from_name,
+                timeout,
+                jobs_dir=jobs_dir,
+                poll_interval=poll_interval,
             )
         raise ProviderOrphanError(
-            reason="liveness-failed", short_id=claude_short_id,
+            reason="liveness-failed",
+            short_id=claude_short_id,
             detail=locator.messaging_socket_path,
         )
 
@@ -700,7 +707,8 @@ def _ask_via_control_sock(
     wrapped = build_cross_session_container(message, from_name)
     if not _mail_inject_claude(short_id, wrapped):
         raise ProviderOrphanError(
-            reason="roster-live-inject-failed", short_id=short_id,
+            reason="roster-live-inject-failed",
+            short_id=short_id,
         )
 
     # Delivered. A bg recipient writes state.json/timeline; poll for its reply.
@@ -836,8 +844,7 @@ def claude_agents_json(
         parsed = json.loads(result.stdout or "{}")
     except json.JSONDecodeError as exc:
         return {}, [
-            f"claude agents --json parse failure: {exc}; "
-            "falling back to registry-only view"
+            f"claude agents --json parse failure: {exc}; falling back to registry-only view"
         ]
 
     # Claude's `agents --json` output shape isn't formally pinned: some
@@ -865,15 +872,11 @@ def claude_agents_json(
     warnings: list[str] = []
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            warnings.append(
-                f"claude agents --json row {index} is not an object; skipped"
-            )
+            warnings.append(f"claude agents --json row {index} is not an object; skipped")
             continue
         short_id = row.get("short_id")
         if not isinstance(short_id, str) or not short_id:
-            warnings.append(
-                f"claude agents --json row {index} missing short_id; skipped"
-            )
+            warnings.append(f"claude agents --json row {index} missing short_id; skipped")
             continue
         live_status = row.get("status")
         if live_status is not None and live_status not in KNOWN_LIVE_STATUSES:
@@ -957,9 +960,7 @@ def logs(
             )
             return 127
         except OSError as exc:
-            err.write(
-                f"claude logs {short_id!r}: OSError invoking claude: {exc}\n"
-            )
+            err.write(f"claude logs {short_id!r}: OSError invoking claude: {exc}\n")
             return 1
 
         try:
@@ -1004,14 +1005,10 @@ def logs(
     try:
         result = _subprocess_run(argv, capture_output=True, text=True)
     except FileNotFoundError:
-        err.write(
-            "claude logs: claude binary not found on PATH; install claude or check $PATH\n"
-        )
+        err.write("claude logs: claude binary not found on PATH; install claude or check $PATH\n")
         return 127
     except OSError as exc:
-        err.write(
-            f"claude logs {short_id!r}: OSError invoking claude: {exc}\n"
-        )
+        err.write(f"claude logs {short_id!r}: OSError invoking claude: {exc}\n")
         return 1
 
     raw_stdout = result.stdout or ""
@@ -1030,9 +1027,7 @@ def logs(
     # If claude exited non-zero with no stderr to forward, surface a
     # diagnostic so the operator isn't stuck with a bare exit code.
     if result.returncode != 0 and not raw_stderr:
-        err.write(
-            f"claude logs {short_id!r} exited {result.returncode} with no stderr output\n"
-        )
+        err.write(f"claude logs {short_id!r} exited {result.returncode} with no stderr output\n")
 
     return result.returncode
 
@@ -1138,15 +1133,11 @@ def claude_logs_reachable(short_id: str, *, timeout: float = 10.0) -> bool:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ReachabilityProbeError(
-            provider="claude", reason=f"timeout after {timeout}s"
-        ) from exc
+        raise ReachabilityProbeError(provider="claude", reason=f"timeout after {timeout}s") from exc
     except FileNotFoundError as exc:
         # The caller's is_provider_available check should make this
         # unreachable, but defensive-catch keeps the contract explicit.
-        raise ReachabilityProbeError(
-            provider="claude", reason="claude vanished mid-probe"
-        ) from exc
+        raise ReachabilityProbeError(provider="claude", reason="claude vanished mid-probe") from exc
     except OSError as exc:
         raise ReachabilityProbeError(provider="claude", reason=str(exc)) from exc
     return result.returncode == 0
@@ -1237,8 +1228,7 @@ def acquire_session_writer_claim(
     except ClaimHeldByOther as exc:
         raise SessionWriterClaimError(
             session_uuid,
-            f"single-writer claim already held by {exc.holder} "
-            f"(pid={exc.pid}, host={exc.host})",
+            f"single-writer claim already held by {exc.holder} (pid={exc.pid}, host={exc.host})",
         ) from exc
 
 

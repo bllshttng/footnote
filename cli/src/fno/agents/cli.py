@@ -4,6 +4,7 @@ US1 wires ``ask`` to ``dispatch_ask``. US3 (this revision) replaces the
 ``list`` stub with a real implementation and adds the new ``logs``
 verb. ``ping`` remains a Phase 1 stub until its own user story lands.
 """
+
 from __future__ import annotations
 
 import enum
@@ -138,8 +139,12 @@ def _resolve_stream_short_id(name: str) -> "str | None":
 
 
 def _worker_rpc(
-    sock_path: Path, method: str, params: dict,
-    *, connect_timeout: float = 3.0, read_timeout: float = 5.0,
+    sock_path: Path,
+    method: str,
+    params: dict,
+    *,
+    connect_timeout: float = 3.0,
+    read_timeout: float = 5.0,
 ) -> "dict | None":
     """One length-prefixed JSON RPC to a worker socket (NEVER raises).
 
@@ -283,14 +288,18 @@ def cmd_spawn(
     name: str = typer.Argument(..., help="Agent name."),
     message: str = typer.Argument("", help="Initial message (optional; empty string if omitted)."),
     provider: str | None = typer.Option(
-        None, "--provider", "-p",
+        None,
+        "--provider",
+        "-p",
         help=(
             "claude | codex | gemini (optional). Defaults to the invoking "
             "harness, then claude. An explicit value wins."
         ),
     ),
     once: bool = typer.Option(
-        False, "--once", "-o",
+        False,
+        "--once",
+        "-o",
         help=(
             "Ephemeral one-shot: create + exchange + teardown. "
             "Supported for codex and gemini only. "
@@ -298,7 +307,8 @@ def cmd_spawn(
         ),
     ),
     substrate: str = typer.Option(
-        "pane", "--substrate",
+        "pane",
+        "--substrate",
         help=(
             "Session substrate (x-2c27): pane (mux-hosted PTY, the default; "
             "4a-G2) | bg (claude --bg thread) | headless (-p/--exec one-shot). "
@@ -307,7 +317,9 @@ def cmd_spawn(
         ),
     ),
     headless: bool = typer.Option(
-        False, "--headless", "-H",
+        False,
+        "--headless",
+        "-H",
         help=(
             "Shortcut for --substrate headless: a one-shot (-p/--exec) worker. "
             "Mobile-friendly (no '--substrate' to type; -H is one hyphen). "
@@ -318,18 +330,20 @@ def cmd_spawn(
         None, "--cwd", "-c", help="Working directory for the agent subprocess."
     ),
     timeout: int | None = typer.Option(
-        None, "--timeout", "-t",
+        None,
+        "--timeout",
+        "-t",
         help="Per-spawn timeout in seconds (default 600).",
     ),
     from_name: str = typer.Option(
-        "fno", "--from-name",
-        help=(
-            "Identity advertised in the message envelope. "
-            "Must be XML-attribute-safe."
-        ),
+        "fno",
+        "--from-name",
+        help=("Identity advertised in the message envelope. Must be XML-attribute-safe."),
     ),
     yolo: bool = typer.Option(
-        False, "--yolo", "-Y",
+        False,
+        "--yolo",
+        "-Y",
         help=(
             "Provider-specific dangerous-mode bypass. For codex: passes "
             "--dangerously-bypass-approvals-and-sandbox. "
@@ -337,18 +351,23 @@ def cmd_spawn(
         ),
     ),
     fresh: bool = typer.Option(
-        False, "--fresh",
+        False,
+        "--fresh",
         help=(
             "Resolve the worker cwd to the canonical (main) repo root regardless "
             "of caller cwd. Opt-in; an explicit --cwd still wins."
         ),
     ),
     here: bool = typer.Option(
-        False, "--here", "--in-place",
+        False,
+        "--here",
+        "--in-place",
         help="Opt out of --fresh: keep the worker in the caller's cwd.",
     ),
     role: str | None = typer.Option(
-        None, "--role", "-r",
+        None,
+        "--role",
+        "-r",
         help=(
             "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
             "roles (coordinate|tidy|orient|consolidate) route to a secondary "
@@ -358,7 +377,9 @@ def cmd_spawn(
         ),
     ),
     model: str | None = typer.Option(
-        None, "--model", "-m",
+        None,
+        "--model",
+        "-m",
         help=(
             "Model for the worker, forwarded as --model <m> to the provider's "
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
@@ -368,7 +389,8 @@ def cmd_spawn(
         ),
     ),
     permission_mode: str | None = typer.Option(
-        None, "--permission-mode",
+        None,
+        "--permission-mode",
         help=(
             "Permission/approval mode forwarded to the provider (x-dfa4). "
             "Provider-native values, fail-closed: claude default|acceptEdits|"
@@ -380,8 +402,17 @@ def cmd_spawn(
             "codex/gemini bg/headless one-shots reject it (use --substrate pane)."
         ),
     ),
+    effort: str | None = typer.Option(
+        None,
+        "--effort",
+        help=(
+            "Reasoning effort: minimal|low|medium|high|xhigh|max. Values are "
+            "validated against the selected provider; unset uses its default."
+        ),
+    ),
     node: str | None = typer.Option(
-        None, "--node",
+        None,
+        "--node",
         help=(
             "Backlog node id (or slug) this pane is working (x-84a8). Node-driven "
             "pane spawns export FNO_NODE/FNO_SLUG/FNO_PLAN into the pane so the "
@@ -396,7 +427,9 @@ def cmd_spawn(
         None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
     ),
     force: bool = typer.Option(
-        False, "--force", "-F",
+        False,
+        "--force",
+        "-F",
         help=(
             "Spawn-gate bypass (x-c5cc): skip the max_live cap AND the "
             "min_free_gb RAM floor. Workers are still QoS-demoted and still "
@@ -404,11 +437,9 @@ def cmd_spawn(
         ),
     ),
     no_wait: bool = typer.Option(
-        False, "--no-wait",
-        help=(
-            "Fail immediately when max_live is reached instead of queueing "
-            "for a free slot."
-        ),
+        False,
+        "--no-wait",
+        help=("Fail immediately when max_live is reached instead of queueing for a free slot."),
     ),
 ) -> None:
     """Spawn a new agent.
@@ -471,6 +502,15 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    if effort is not None:
+        from fno.agents.mux_spawn import effort_tokens
+
+        try:
+            effort_tokens(provider, effort)
+        except DispatchAskError as exc:
+            print(str(exc), file=sys.stderr)
+            raise typer.Exit(code=exc.exit_code) from exc
+
     # AC5-ERR: --permission-mode and --yolo are one knob at a time.
     if permission_mode is not None and yolo:
         print(
@@ -483,11 +523,7 @@ def cmd_spawn(
     # (dispatch_spawn -> _claude_create_path); codex/gemini one-shot lanes
     # hardcode their own bypass and can't express a mapped mode. The pane
     # substrate maps every provider, so it's exempt here. (x-dfa4)
-    if (
-        permission_mode is not None
-        and provider != "claude"
-        and (substrate != "pane" or once)
-    ):
+    if permission_mode is not None and provider != "claude" and (substrate != "pane" or once):
         print(
             f"--permission-mode is not supported for provider {provider!r} on "
             "--substrate bg/headless (its one-shot lane hardcodes its own bypass "
@@ -527,6 +563,7 @@ def cmd_spawn(
                     role=role,
                     model=model,
                     permission_mode=permission_mode,
+                    effort=effort,
                     provenance=resolve_provenance(node, slug, plan),
                 )
             except DispatchAskError as exc:
@@ -569,6 +606,7 @@ def cmd_spawn(
                 role=role,
                 model=model,
                 permission_mode=permission_mode,
+                effort=effort,
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
@@ -628,9 +666,7 @@ def cmd_spawn_guard(
             "spawn failure and lets it TTL-expire on success."
         ),
     ),
-    ttl: str = typer.Option(
-        "3m", "--ttl", help="TTL for the dispatch:<id> reservation (Guard 2)."
-    ),
+    ttl: str = typer.Option("3m", "--ttl", help="TTL for the dispatch:<id> reservation (Guard 2)."),
     no_reserve: bool = typer.Option(
         False,
         "--no-reserve",
@@ -719,9 +755,7 @@ def cmd_spawn_guard(
         _emit(
             "error",
             exit_code=3,
-            detail=(
-                f"claim probe failed ({exc}); not dispatching to avoid a double-launch"
-            ),
+            detail=(f"claim probe failed ({exc}); not dispatching to avoid a double-launch"),
         )
     state = info.get("state")
     if not state:
@@ -745,8 +779,7 @@ def cmd_spawn_guard(
         _emit(
             "corrupted",
             detail=(
-                f"node:{node_id} claim is corrupted; "
-                "force-release or repair before dispatching"
+                f"node:{node_id} claim is corrupted; force-release or repair before dispatching"
             ),
         )
     # state in {free, stale} -> a dispatchable candidate. stale = dead holder; the
@@ -785,9 +818,7 @@ def cmd_spawn_guard(
 
 @agents_app.command("ask")
 def cmd_ask(
-    name: str | None = typer.Argument(
-        None, help="Agent name. Omit when using --to-project."
-    ),
+    name: str | None = typer.Argument(None, help="Agent name. Omit when using --to-project."),
     message: str | None = typer.Argument(None, help="Message to send."),
     provider: str | None = typer.Option(
         None, "--provider", "-p", help="claude | codex | gemini (required on first ask)."
@@ -796,18 +827,23 @@ def cmd_ask(
         None, "--cwd", "-c", help="Working directory for the agent subprocess."
     ),
     timeout: int | None = typer.Option(
-        None, "--timeout", "-t",
+        None,
+        "--timeout",
+        "-t",
         help="Per-ask timeout in seconds (follow-up reply wait, default 600).",
     ),
     from_name: str = typer.Option(
-        "fno", "--from-name",
+        "fno",
+        "--from-name",
         help=(
             "Identity advertised in the cross-session-message envelope "
             "on follow-up. Ignored on create. Must be XML-attribute-safe."
         ),
     ),
     yolo: bool = typer.Option(
-        False, "--yolo", "-Y",
+        False,
+        "--yolo",
+        "-Y",
         help=(
             "Provider-specific dangerous-mode bypass. For codex: passes "
             "--dangerously-bypass-approvals-and-sandbox (replaces the "
@@ -816,7 +852,8 @@ def cmd_ask(
         ),
     ),
     to_project: str | None = typer.Option(
-        None, "--to-project",
+        None,
+        "--to-project",
         help=(
             "Anycast: ask whoever works on this project. ask is synchronous, so "
             "this resolves to exactly one live peer; none/ambiguous is an error "
@@ -824,18 +861,22 @@ def cmd_ask(
         ),
     ),
     any_live: bool = typer.Option(
-        False, "--any",
+        False,
+        "--any",
         help="With --to-project, break a multi-live-peer tie (most recent activity wins).",
     ),
     fresh: bool = typer.Option(
-        False, "--fresh",
+        False,
+        "--fresh",
         help=(
             "Resolve the worker cwd to the canonical (main) repo root regardless "
             "of caller cwd. Opt-in; an explicit --cwd still wins."
         ),
     ),
     here: bool = typer.Option(
-        False, "--here", "--in-place",
+        False,
+        "--here",
+        "--in-place",
         help="Opt out of --fresh: keep the worker in the caller's cwd.",
     ),
 ) -> None:
@@ -1004,13 +1045,13 @@ def cmd_chat(
 @agents_app.command("list")
 def cmd_list(
     cwd: str = typer.Option(None, "--cwd", help="Filter by working directory."),
-    provider: str = typer.Option(None, "--provider", help="Filter by provider (claude | codex | gemini)."),
+    provider: str = typer.Option(
+        None, "--provider", help="Filter by provider (claude | codex | gemini)."
+    ),
     status: AgentStatusFilter = typer.Option(
         None, "--status", help="Filter by registry status (live | orphaned)."
     ),
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit JSON regardless of TTY."
-    ),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
     discovered: bool = typer.Option(
         True,
         "--discovered/--no-discovered",
@@ -1134,14 +1175,19 @@ def cmd_nudge_peek(
 def cmd_logs(
     name: str = typer.Argument(..., help="Agent name (from `fno agents list`)."),
     tail: int = typer.Option(
-        100, "--tail", "-n",
+        100,
+        "--tail",
+        "-n",
         help="Show only the last N lines of output (default 100; pass 0 for none).",
     ),
     follow: bool = typer.Option(
         False, "--follow", "-f", help="Stream output as the agent emits new lines."
     ),
     json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit JSON-Lines (codex/gemini only; Claude is raw passthrough)."
+        False,
+        "--json",
+        "-J",
+        help="Emit JSON-Lines (codex/gemini only; Claude is raw passthrough).",
     ),
 ) -> None:
     """Tail or follow an agent's log output.
@@ -1182,7 +1228,8 @@ def cmd_logs(
 @agents_app.command("peek")
 def cmd_peek(
     handle: str = typer.Argument(
-        ..., help="Peer handle (same as `fno mail send`: alias, hex short-id, or <harness>-<short8>)."
+        ...,
+        help="Peer handle (same as `fno mail send`: alias, hex short-id, or <harness>-<short8>).",
     ),
     lines: int = typer.Option(
         15, "--lines", "-n", help="Show the last N transcript records (default 15; 0 for none)."
@@ -1225,9 +1272,7 @@ def cmd_peek(
 
 @agents_app.command("whoami")
 def cmd_whoami(
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit JSON regardless of TTY."
-    ),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
 ) -> None:
     """Print THIS mesh worker's own registered name (+ registry enrichment).
 
@@ -1372,7 +1417,9 @@ def cmd_stop(
 def cmd_rm(
     name: str = typer.Argument(..., help="Agent name (from `fno agents list`)."),
     force: bool = typer.Option(
-        False, "--force", "-F",
+        False,
+        "--force",
+        "-F",
         help=(
             "Override claude's refusal (e.g. uncommitted worktree changes) "
             "and drop the registry entry regardless. WARNING: leaves an "
@@ -1400,7 +1447,9 @@ def cmd_rm(
 @agents_app.command("reconcile")
 def cmd_reconcile(
     json_out: bool = typer.Option(
-        False, "--json", "-J",
+        False,
+        "--json",
+        "-J",
         help="Emit JSON regardless of TTY (mirrors `fno agents list --json`).",
     ),
 ) -> None:
@@ -1457,14 +1506,10 @@ def render_reconcile_human(result, *, out) -> None:
     """
     for entry in result.orphaned:
         sid = entry.get("id") or "?"
-        out.write(
-            f"{entry['name']} ({entry['provider']}/{sid}): live → orphaned\n"
-        )
+        out.write(f"{entry['name']} ({entry['provider']}/{sid}): live → orphaned\n")
     for entry in result.recovered:
         sid = entry.get("id") or "?"
-        out.write(
-            f"{entry['name']} ({entry['provider']}/{sid}): orphaned → live\n"
-        )
+        out.write(f"{entry['name']} ({entry['provider']}/{sid}): orphaned → live\n")
     for entry in result.skipped:
         out.write(
             f"{entry['name']} ({entry['provider']}): skipped "
@@ -1472,8 +1517,7 @@ def render_reconcile_human(result, *, out) -> None:
         )
     for entry in result.errors:
         out.write(
-            f"{entry['name']} ({entry['provider']}): error "
-            f"({entry.get('reason', 'unspecified')})\n"
+            f"{entry['name']} ({entry['provider']}): error ({entry.get('reason', 'unspecified')})\n"
         )
 
     out.write(

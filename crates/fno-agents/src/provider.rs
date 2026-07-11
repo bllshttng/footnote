@@ -51,6 +51,8 @@ pub struct CreateContext {
     /// Yolo / sandbox-bypass opt-in (codex/gemini); maps to provider-specific
     /// flags. Claude ignores it.
     pub yolo: bool,
+    /// Pre-validated provider-native reasoning effort; `None` preserves argv.
+    pub reasoning_effort: Option<String>,
     /// Optional system prompt appended at spawn (interactive claude only, the
     /// "sentinel-prompt seam", inside-out-multiplexer E4.1): a relay-targeted
     /// spawn passes the relay sentinel prompt (`RELAY_SYSTEM_PROMPT`, the
@@ -440,6 +442,10 @@ impl Provider for CodexProvider {
             "--skip-git-repo-check".into(),
         ];
         argv.extend(Self::sandbox_create(ctx.yolo));
+        if let Some(effort) = ctx.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
+            argv.push("-c".into());
+            argv.push(format!("model_reasoning_effort={effort}"));
+        }
         argv.push(ctx.message.clone());
         argv
     }
@@ -1080,6 +1086,7 @@ mod tests {
             from_name: None,
             session_id: None,
             yolo: false,
+            reasoning_effort: None,
             append_system_prompt: None,
         }
     }
@@ -1161,6 +1168,16 @@ mod tests {
         let argv = CodexProvider.create_argv(&ctx);
         assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!argv.iter().any(|a| a == "--sandbox"));
+    }
+
+    #[test]
+    fn codex_create_argv_appends_reasoning_effort() {
+        let mut ctx = create_ctx();
+        ctx.reasoning_effort = Some("high".into());
+        let argv = CodexProvider.create_argv(&ctx);
+        assert!(argv
+            .windows(2)
+            .any(|w| w == ["-c", "model_reasoning_effort=high"]));
     }
 
     #[test]

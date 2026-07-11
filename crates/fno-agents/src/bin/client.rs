@@ -770,6 +770,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // never reaches here (it re-execs the Python CLI, which owns pane mapping);
     // this arm handles the claude bg/headless lanes only.
     let permission_mode = params.get("permission_mode").and_then(|v| v.as_str());
+    let effort = params.get("effort").and_then(|v| v.as_str());
 
     // Validate the provider FIRST so an unknown provider is a client-side
     // error (exit 2) for every substrate, never a fall-through to the daemon.
@@ -799,6 +800,29 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             py_repr(provider)
         );
         return Some(2);
+    }
+    if let Some(value) = effort {
+        let allowed = match provider {
+            "claude" => &["low", "medium", "high", "xhigh", "max"][..],
+            "codex" => &["minimal", "low", "medium", "high"][..],
+            _ => {
+                eprintln!(
+                    "provider {} has no reasoning-effort surface; omit --effort",
+                    py_repr(provider)
+                );
+                return Some(2);
+            }
+        };
+        if !allowed.contains(&value) {
+            eprintln!(
+                "{} --effort {} unmappable; {} supports {}",
+                provider,
+                py_repr(value),
+                provider,
+                allowed.join(", ")
+            );
+            return Some(2);
+        }
     }
 
     // Spawn gate (x-c5cc): cap + RAM floor for the CLIENT-SIDE substrates only.
@@ -871,6 +895,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 &[],
                 model,
                 permission_mode,
+                effort,
             );
             if !outcome.stderr.is_empty() {
                 eprint!("{}", outcome.stderr);
@@ -922,6 +947,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 timeout,
                 model,
                 permission_mode,
+                effort,
             ))
         }
 
@@ -929,7 +955,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
         // passthrough to the provider CLI's own --model).
         ("codex", "headless") => emit!(dispatch_codex_once(
-            home, name, message, from_name, &cwd, yolo, timeout, model,
+            home, name, message, from_name, &cwd, yolo, timeout, model, effort,
         )),
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, message, from_name, &cwd, yolo, timeout, model,
@@ -1266,6 +1292,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--mode",
         "--substrate",
         "--permission-mode",
+        "--effort",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -1387,6 +1414,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     "permission_mode".into(),
                     str_arg(&mut it, "--permission-mode")?,
                 );
+            }
+            "--effort" => {
+                params.insert("effort".into(), str_arg(&mut it, "--effort")?);
             }
             "--substrate" => {
                 // The session-substrate selector (x-2c27): pane (owned-PTY,

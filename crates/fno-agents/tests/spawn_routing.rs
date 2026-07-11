@@ -333,6 +333,7 @@ fn spawn_claude_receipt_byte_shape() {
         &[("PATH", path.as_str())],
         None,
         None,
+        None,
     );
 
     assert_eq!(
@@ -398,6 +399,7 @@ fn spawn_claude_collision_exits_2() {
         &[],
         None,
         None,
+        None,
     );
 
     assert_eq!(
@@ -444,6 +446,7 @@ fn spawn_codex_once_happy_path() {
         &cwd,
         false,
         Some(Duration::from_secs(10)),
+        None,
         None,
     );
 
@@ -504,7 +507,17 @@ fn spawn_codex_once_collision_exits_2() {
     // Seed a pre-existing agent.
     seed_registry(&home, "taken", "codex");
 
-    let out = dispatch_codex_once(&home, "taken", "msg", "abilities", &cwd, false, None, None);
+    let out = dispatch_codex_once(
+        &home,
+        "taken",
+        "msg",
+        "abilities",
+        &cwd,
+        false,
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(out.exit_code, 2, "collision must exit 2: {}", out.stderr);
     assert!(
@@ -538,6 +551,7 @@ fn spawn_codex_once_create_failure_no_registry_entry() {
         &cwd,
         false,
         Some(Duration::from_secs(3)),
+        None,
         None,
     );
 

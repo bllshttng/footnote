@@ -19,12 +19,14 @@ Interactive argv per provider mirrors the Rust daemon providers
 forms, never ``-p``/``--print`` (D2 billing guard, re-checked here before any
 pane exists).
 """
+
 from __future__ import annotations
 
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import uuid as _uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,9 +181,63 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
             "(toolPermission).",
             exit_code=2,
         )
-    raise DispatchAskError(
-        f"provider {provider!r} has no permission-mode mapping", exit_code=2
-    )
+    raise DispatchAskError(f"provider {provider!r} has no permission-mode mapping", exit_code=2)
+
+
+_EFFORT_SUPERSET = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+_EFFORT_ALLOWED = {
+    "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
+    "codex": frozenset({"minimal", "low", "medium", "high"}),
+    "opencode": _EFFORT_SUPERSET,
+}
+
+
+def effort_tokens(provider: str, value: str) -> list[str]:
+    """Validate effort and return the provider-native argv tokens."""
+    if not value:
+        raise DispatchAskError("--effort requires a value", exit_code=2)
+    if value not in _EFFORT_SUPERSET:
+        raise DispatchAskError(
+            f"--effort {value!r} unknown; valid: {', '.join(sorted(_EFFORT_SUPERSET))}",
+            exit_code=2,
+        )
+    allowed = _EFFORT_ALLOWED.get(provider)
+    if allowed is None:
+        raise DispatchAskError(
+            f"provider {provider!r} has no reasoning-effort surface; omit --effort",
+            exit_code=2,
+        )
+    if value not in allowed:
+        raise DispatchAskError(
+            f"{provider} --effort {value!r} unmappable; {provider} supports "
+            f"{', '.join(sorted(allowed))}",
+            exit_code=2,
+        )
+    if provider == "claude":
+        return ["--effort", value]
+    if provider == "codex":
+        return ["-c", f"model_reasoning_effort={value}"]
+    return []
+
+
+def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path] = None) -> None:
+    """Best-effort atomic update of opencode's persisted model variant."""
+    path = state_path or Path.home() / ".local" / "state" / "opencode" / "model.json"
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+        variants = data.setdefault("variant", {})
+        if not isinstance(variants, dict):
+            raise ValueError("variant is not an object")
+        variants[model] = effort
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
+            json.dump(data, tmp, separators=(",", ":"))
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = Path(tmp.name)
+        os.replace(tmp_path, path)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        print(f"warning: could not set opencode effort variant: {exc}", file=sys.stderr)
 
 
 def build_pane_argv(
@@ -192,6 +248,7 @@ def build_pane_argv(
     session_uuid: Optional[str],
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -220,6 +277,8 @@ def build_pane_argv(
         elif yolo:
             # AC4-HP: claude --yolo now means bypassPermissions (was a no-op).
             argv += ["--permission-mode", "bypassPermissions"]
+        if effort:
+            argv += effort_tokens("claude", effort)
         if message:
             argv.append(message)
         return argv
@@ -236,10 +295,14 @@ def build_pane_argv(
             )
         if model:
             argv += ["--model", model]
+        if effort:
+            argv += effort_tokens("codex", effort)
         if message:
             argv.append(message)
         return argv
     if provider == "gemini":
+        if effort:
+            effort_tokens("gemini", effort)
         # `-i` executes the prompt then stays interactive; --skip-trust avoids
         # the workspace-trust modal blocking the TUI.
         argv = ["gemini", "--skip-trust"]
@@ -253,6 +316,8 @@ def build_pane_argv(
             argv += ["--yolo"] if yolo else ["--approval-mode", "default"]
         return argv
     if provider == "agy":
+        if effort:
+            effort_tokens("agy", effort)
         # agy (Antigravity) interactive pane (x-8f7f US1). Mirrors AgyProvider in
         # provider.rs: `--dangerously-skip-permissions` is the never-prompt lane
         # so an unattended pane can't wedge on its first approval. agy is
@@ -272,6 +337,8 @@ def build_pane_argv(
             argv.append(message)
         return argv
     if provider == "opencode":
+        if effort:
+            effort_tokens("opencode", effort)
         # Bare `opencode` is the TUI (x-51f6); `opencode run` is the HEADLESS
         # form and must not be pane-hosted. The positional is a PROJECT PATH,
         # not a prompt, so the message rides --prompt (argv pinned from
@@ -290,9 +357,7 @@ def build_pane_argv(
         elif yolo:
             argv.append("--auto")
         return argv
-    raise DispatchAskError(
-        f"provider {provider!r} has no interactive pane form", exit_code=2
-    )
+    raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
 
 def _mesh_env_wrapper(
@@ -390,8 +455,7 @@ def _run_mux(
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise DispatchAskError(
-            f"fno mux did not answer within {_MUX_SUBPROCESS_TIMEOUT_S}s "
-            f"({' '.join(args[:3])}...)",
+            f"fno mux did not answer within {_MUX_SUBPROCESS_TIMEOUT_S}s ({' '.join(args[:3])}...)",
             exit_code=1,
         ) from exc
 
@@ -405,9 +469,7 @@ def _lookup_child_pid(
     row's ``pid`` so reconcile/GC can probe liveness). ``None`` on any miss -
     the pane is live regardless."""
     try:
-        proc = _run_mux(
-            ["mux", "pane", "ls", "--session", session, "--json"], runner
-        )
+        proc = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
         if proc.returncode != 0:
             return None
         for row in json.loads(proc.stdout or "[]"):
@@ -429,6 +491,7 @@ def dispatch_spawn_pane(
     role: Optional[str] = None,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    effort: Optional[str] = None,
     session: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
@@ -461,8 +524,10 @@ def dispatch_spawn_pane(
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
     argv = build_pane_argv(
-        provider, message, cwd, yolo, session_uuid, model, permission_mode
+        provider, message, cwd, yolo, session_uuid, model, permission_mode, effort
     )
+    if provider == "opencode" and effort:
+        apply_opencode_variant(model or _OPENCODE_DEFAULT_MODEL, effort)
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "
@@ -487,9 +552,7 @@ def dispatch_spawn_pane(
         try:
             entries = load_registry()
         except (OSError, ValueError, RegistryVersionError) as exc:
-            raise DispatchAskError(
-                f"registry read failed: {exc}", exit_code=12
-            ) from exc
+            raise DispatchAskError(f"registry read failed: {exc}", exit_code=12) from exc
         if any(e.name == name for e in entries):
             raise DispatchAskError(
                 f"agent {name!r} already exists; "
