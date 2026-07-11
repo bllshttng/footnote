@@ -384,7 +384,7 @@ out="$(run '/x/doc.md' --handoff --provider agy)"
 check_eq       'handoff explicit unsupported error' "$(field "$out" status)" 'error'
 check_contains 'handoff unsupported names allowlist' "$(field "$out" error)" 'claude, codex, gemini'
 
-# --- configured codex/gemini routing is honored for handoff only --------------
+# --- configured codex/gemini routing is honored for prose-shaped modes --------
 _resolver_codex="$(mktemp)"
 printf '#!/usr/bin/env bash\necho codex\n' > "$_resolver_codex"
 chmod +x "$_resolver_codex"
@@ -392,8 +392,8 @@ out="$(DISPATCH_PROVIDER_RESOLVER="$_resolver_codex" run '/tmp/doc.md' --handoff
 check_eq 'handoff config codex status'   "$(field "$out" status)"   'ok'
 check_eq 'handoff config codex provider' "$(field "$out" provider)" 'codex'
 out="$(DISPATCH_PROVIDER_RESOLVER="$_resolver_codex" run 'lets talk about the loop' --discuss)"
-check_eq 'discuss ignores config non-claude (status)'  "$(field "$out" status)"   'ok'
-check_eq 'discuss forces claude despite config routing' "$(field "$out" provider)" 'claude'
+check_eq 'discuss config codex status'   "$(field "$out" status)"   'ok'
+check_eq 'discuss config codex provider' "$(field "$out" provider)" 'codex'
 rm -f "$_resolver_codex"
 
 _resolver_unsupported="$(mktemp)"
@@ -412,8 +412,12 @@ check_eq           'discuss message verbatim'  "$(field "$out" message)"      'w
 check_not_contains 'discuss no /target'        "$(field "$out" message)"      '/target'
 
 out="$(run 'what is the architecture of the loop' --discuss --provider codex)"
-check_eq       'discuss explicit codex error' "$(field "$out" status)" 'error'
-check_contains 'discuss remains claude-only'  "$(field "$out" error)"  'claude-only'
+check_eq 'discuss explicit codex status'   "$(field "$out" status)"   'ok'
+check_eq 'discuss explicit codex provider' "$(field "$out" provider)" 'codex'
+
+out="$(run 'compare the retry designs' --discuss --provider gemini)"
+check_eq 'discuss explicit gemini status'   "$(field "$out" status)"   'ok'
+check_eq 'discuss explicit gemini provider' "$(field "$out" provider)" 'gemini'
 
 # --- discuss seed starting with / stays verbatim (discuss beats passthrough) --
 out="$(run '/target what does it do' --discuss)"

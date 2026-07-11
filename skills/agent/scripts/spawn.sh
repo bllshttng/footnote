@@ -404,9 +404,9 @@ else
 fi
 
 # ---- Report (mode-aware) ------------------------------------------------
-# host is interactive: STAGED, not running yet - the user drives it later. Every
-# other verb here is a BACKGROUND launch (claude/codex/gemini spawn) whose
-# progress streams to logs. (spawn --once already returned above.)
+# host is interactive: STAGED, not running yet - the user drives it later.
+# Plain spawn may be autonomous work or a seeded interactive pane; report the
+# payload intent rather than labeling every non-host launch as exec work.
 if [[ "$VERB" == "host" ]]; then
   printf 'result=launched short_id=%s name=%s mode=interactive staged="not running yet" drive="fno agents grid %s"\n' \
     "$short_id" "$NAME" "$NAME"
@@ -417,6 +417,7 @@ else
   wt_field=""; [[ -n "$AUTO_WT" ]] && wt_field=" cwd=\"$AUTO_WT\""
   report_mode="exec"
   [[ "$PAYLOAD_MODE" == "handoff" ]] && report_mode="spawn"
+  [[ "$PAYLOAD_MODE" == "discuss" ]] && report_mode="discuss"
   printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
     "$short_id" "$NAME" "$report_mode" "$wt_field" "$NAME" "$NAME"
 fi

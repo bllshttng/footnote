@@ -465,6 +465,31 @@ else
   fail "ab-ca822421 gemini handoff route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
+# ---- provider-neutral discuss is a seeded, running pane -------------------
+reset_log
+discuss_seed='Compare the retry designs and wait for my follow-up.'
+OUT="$(MOCK_SPAWN_OUT="$(spawn_json discuss1 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+       run_spawn --name discuss-retries --provider codex --payload-mode discuss --message "$discuss_seed" --mode exec)"
+if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=discuss1"* ]] \
+   && [[ "$OUT" == *"mode=discuss"* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
+   && grep -qF -- "$discuss_seed" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
+   && ! grep -q -- "--once" "$SPAWN_LOG"; then
+  pass "discuss codex -> seeded interactive pane"
+else
+  fail "discuss codex route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
+fi
+
+reset_log
+OUT="$(MOCK_SPAWN_OUT="$(spawn_json discuss2 gemini)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+       run_spawn --name discuss-retries-gemini --provider gemini --payload-mode discuss --message "$discuss_seed" --mode exec)"
+if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"mode=discuss"* ]] \
+   && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
+   && ! grep -q -- "--once" "$SPAWN_LOG"; then
+  pass "discuss gemini -> seeded interactive pane parity"
+else
+  fail "discuss gemini route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
+fi
+
 # ===========================================================================
 # US2 - interactive `-i` dispatch -> `fno agents host` (staged, drivable)
 # ===========================================================================
