@@ -712,6 +712,26 @@ fi
    already durably written, so intake failures never block the handoff
    message.
 
+3b-bis. **Node-bearing filename for raw-prose intake** (US5)
+
+   A node-seeded plan is authored with its id already in the name (step 3, and
+   `/think`'s save rule). Only the **raw-prose** path - `/blueprint "some
+   feature"` with no node - lands id-less, and auto-intake has just minted its
+   node id (`$NODE_ID`, the `intake <id> -> backlog` line). Give the artifact
+   its node-bearing name and repoint `plan_path`, so a roadmap base keyed on the
+   node id finds it:
+
+   ```bash
+   "${SKILL_DIR}/scripts/rename-plan-to-node-id.sh" "$PLAN_PATH" "$NODE_ID"
+   ```
+
+   The helper is idempotent and non-fatal: a plan already ending `-$NODE_ID.md`
+   (every node-seeded path) is a no-op, a pre-existing target is never
+   clobbered, and any failure leaves the id-less file intact and re-runnable -
+   it never blocks the handoff. If `$PLAN_PATH` still points at the old name in
+   the same session, read the helper's `renamed <new-path>` line and use that
+   path downstream.
+
 4. **Present** plan and offer execution
 
 ### Template
