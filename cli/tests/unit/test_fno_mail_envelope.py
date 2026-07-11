@@ -29,6 +29,35 @@ def test_open_tag_omits_node_includes_directed_to():
     )
 
 
+def test_open_tag_renders_reply_to_last_when_present():
+    # Mirrors Rust `fno_mail_open_renders_reply_to_last_when_present`: reply_to is
+    # additive and LAST in attribute order (a name-lane reply's answered msg-id).
+    assert (
+        fno_mail_open(
+            from_="7d1f8bdc",
+            harness="claude-code",
+            model="opus-4.8",
+            to="e5f6a7b8",
+            reply_to="msg-0091f3",
+        )
+        == '<fno_mail from="7d1f8bdc" harness="claude-code" model="opus-4.8" to="e5f6a7b8" reply_to="msg-0091f3">'
+    )
+
+
+def test_absent_reply_to_is_byte_identical_to_pre_change():
+    # AC1-EDGE: an omitted reply_to leaves the envelope byte-identical to today's
+    # fixture, so a plain send is unchanged. reply_to=None must add nothing.
+    assert fno_mail_open(
+        from_="7d1f8bdc", harness="claude-code", model="opus-4.8", node="x-26df"
+    ) == fno_mail_open(
+        from_="7d1f8bdc",
+        harness="claude-code",
+        model="opus-4.8",
+        node="x-26df",
+        reply_to=None,
+    )
+
+
 def test_wrap_is_paired_envelope_matching_rust():
     # Mirrors Rust `wrap_fno_mail_is_a_paired_envelope`: open tag, newline, body,
     # newline, close tag.

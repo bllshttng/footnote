@@ -10,7 +10,7 @@ Commands:
     send           - publish a message to a peer or project (durable-first)
     unread         - list bus messages addressed to me past my cursor
     ack            - advance my read cursor
-    reply          - reply to a thread (thin wrapper for send --reply-to)
+    reply          - answer a message by id; name-lane -> back to its sender
     list           - list threads in own render (default: unread only)
     triage         - run LLM triage on a heads-up thread
     drain          - drain unread threads (per-kind dispatch)
@@ -369,15 +369,67 @@ def cmd_reply(
     from_project: Optional[str] = typer.Option(None, "--from", help="Sender project (overrides settings.yaml)"),
     json_out: bool = typer.Option(False, "--json", "-J", help="Print {msg_id, thread_path} as JSON"),
 ) -> None:
-    """Reply to a thread (thin wrapper for `send --reply-to`).
+    """Reply to a message, routed by the answered message's lane.
 
-    Looks up ``to_msg`` in the sender's own inbox to find the original sender,
-    then appends to that thread file (if it exists in the recipient's inbox)
-    or creates a new thread linked via ``replies_to``.
+    Looks ``to_msg`` up on the durable bus. A name-lane message (``to_kind ==
+    "name"``) is answered by sending back to its original sender -- no re-typed
+    handle -- with the correlation threaded via ``in_reply_to`` (and the wire
+    ``reply_to`` attr). Any other target falls through to the thread-store reply
+    (append to the existing thread, or a ``replies_to``-linked new thread). A
+    ``to_msg`` absent from the bus is a hard error.
     """
     kind = _validate_kind(kind)
-    sender = _resolve_from(from_project)
     body_text = _read_body(body, body_file)
+
+    # Name-lane routing (x-8045): look the --to msg-id up on the durable bus and
+    # branch on its addressing. A name-lane message is answered by sending back to
+    # its original sender (no re-typed handle) with the correlation threaded via
+    # in_reply_to. Anything else falls through to the thread-store reply below.
+    from fno.bus.log import iter_messages
+
+    orig = next((m for m in iter_messages() if m.id == to_msg), None)
+    if orig is not None and orig.to_kind == "name":
+        from fno.agents import discover as discover_mod
+
+        # from_name defaults to None so stamp_from auto-stamps THIS session's
+        # canonical handle (claude-/codex-<short>) -- the handle the original
+        # sender replies back to and that drain-self scans, NOT a project name.
+        resolved, _ = discover_mod.resolve_or_suggest(orig.from_)
+        if resolved is not None:
+            _name_lane_send(
+                body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
+            )
+        else:
+            # AC1-FR: the original sender is no longer live -> durable floor
+            # addressed to their canonical handle (orig.from_), still drainable.
+            prov = orig.from_.split("-", 1)[0] if "-" in orig.from_ else None
+            # Keep the wire `to` attr the 8-hex short even if from_ carries a full
+            # uuid (`claude-<uuid>`): take the first dash-segment after the harness.
+            short = (
+                orig.from_.split("-", 1)[1].split("-")[0]
+                if "-" in orig.from_
+                else orig.from_
+            )
+            _name_lane_send(
+                body_text,
+                from_name=from_project,
+                resolved=None,
+                recipient=orig.from_,
+                provider=prov,
+                to_short=short,
+                reply_to=to_msg,
+            )
+        return
+    if orig is None:
+        # AC1-ERR / LD4: the name lane cannot invent a target from nothing. Every
+        # real message is durable-first (on the bus), so an id absent from the bus
+        # is genuinely unknown -- hard error, never a silent self-note.
+        print(f"msg-id {to_msg!r} not in the bus log", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    # Thread-store reply path (non-name-lane): resolve the sender project here so
+    # the name-lane path above is never forced through project identification.
+    sender = _resolve_from(from_project)
 
     own_handle = find_thread_by_msg_id(sender, to_msg)
     if own_handle is None:
@@ -735,6 +787,73 @@ def _print_thread_summary(h: ThreadHandle) -> None:
 # send/inbox/ack and inbox unread/ack verbs (the one messaging namespace).
 
 
+def _name_lane_send(
+    message: str,
+    *,
+    from_name: Optional[str],
+    resolved,
+    recipient: Optional[str] = None,
+    provider: Optional[str] = None,
+    to_short: Optional[str] = None,
+    reply_to: Optional[str] = None,
+) -> None:
+    """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
+    ``mail reply``. When ``resolved`` (a live ``DiscoveredSession``) is set:
+    live-inject-first, durable floor on miss, addressed to its canonical handle.
+    When ``resolved`` is None: durable-only, addressed to ``recipient`` (a reply
+    to an offline sender). ``reply_to`` stamps BOTH the wire ``reply_to`` attr and
+    the bus ``in_reply_to`` from ONE msg-id -- never one set, the other null.
+    Exits 12 on a durable-floor write failure."""
+    from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
+    from fno.agents.provider_resolve import infer_invoking_harness
+    from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.harness_identity import canonical_handle
+    from fno.inbox.store import write_new_thread
+    from fno.mail.envelope import wrap_fno_mail
+
+    if resolved is not None:
+        recipient = canonical_handle(resolved.agent, resolved.session_id)
+        provider = resolved.agent
+        to_short = resolved.short_id
+
+    wrapped = wrap_fno_mail(
+        message,
+        from_=stamp_from(from_name),
+        harness=infer_invoking_harness() or "cli",
+        model=resolve_self_model(),
+        to=to_short,
+        reply_to=reply_to,
+    )
+
+    injected = False
+    if resolved is not None:
+        if provider == "claude":
+            injected = _mail_inject_claude(resolved.session_id, wrapped)
+        elif provider == "codex":
+            injected = _mail_inject_codex(resolved.session_id, wrapped)
+
+    live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
+    corr = f" re:{reply_to}" if reply_to else ""
+    if injected:
+        print(f"delivered (hosted) to {recipient}{live}{corr}")
+        return
+
+    try:
+        th = write_new_thread(
+            recipient=recipient,
+            sender=stamp_from(from_name),
+            kind="send",
+            body=wrapped,
+            to_kind="name",
+            provider_to=provider,
+            replies_to=reply_to,
+        )
+    except (OSError, ValueError, RuntimeError) as exc2:
+        print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
+        raise typer.Exit(code=12) from exc2
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr}")
+
+
 @mail_app.command("send")
 def cmd_send(
     name: str | None = typer.Argument(
@@ -1027,57 +1146,12 @@ def cmd_send(
         # control.sock (`mail-inject`); codex over the app-server daemon (US8). The
         # old claude->project re-route is gone; project anycast stays explicit via
         # --to-project. The body is <fno_mail>-wrapped with a truthful from/model
-        # so the recipient can reply with `fno mail send <from>`.
+        # so the recipient can reply by handle (`fno mail send <from>`) for a live
+        # message, or `fno mail reply --to <id>` when answering a drained one.
         if resolved is not None:
-            from fno.agents.provider_resolve import infer_invoking_harness
-            from fno.harness_identity import canonical_handle
-            from fno.inbox.store import write_new_thread
-            from fno.mail.envelope import wrap_fno_mail
-
-            handle = canonical_handle(resolved.agent, resolved.session_id)
-            wrapped = wrap_fno_mail(
-                message,
-                from_=stamp_from(from_name),
-                harness=infer_invoking_harness() or "cli",
-                model=resolve_self_model(),
-                to=resolved.short_id,
-            )
-
-            # Live-inject-first, per harness. A hosted confirmation returns
-            # immediately; any miss falls through to the durable floor below.
-            from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
-
-            injected = False
-            if resolved.agent == "claude":
-                # mail-inject accepts the full UUID or the 8-hex short (roster
-                # resolves either); pass the collision-proof UUID, matching the
-                # codex path and dispatch's uuid-preference.
-                injected = _mail_inject_claude(resolved.session_id, wrapped)
-            elif resolved.agent == "codex":
-                injected = _mail_inject_codex(resolved.session_id, wrapped)
-            if injected:
-                print(
-                    f"delivered (hosted) to {handle} "
-                    f"[live {resolved.agent} session {resolved.handle}]"
-                )
-                return
-
-            try:
-                th = write_new_thread(
-                    recipient=handle,
-                    sender=stamp_from(from_name),
-                    kind="send",
-                    body=wrapped,
-                    to_kind="name",
-                    provider_to=resolved.agent,
-                )
-            except (OSError, ValueError, RuntimeError) as exc2:
-                print(f"durable envelope write failed for {handle!r}: {exc2}", file=sys.stderr)
-                raise typer.Exit(code=12) from exc2
-            print(
-                f"{th.thread_id} queued (durable) for {handle} "
-                f"[live {resolved.agent} session {resolved.handle}]"
-            )
+            # Live-inject-first with a durable floor addressed to the resolved
+            # session's canonical handle. Shared with the name-lane reply path.
+            _name_lane_send(message, from_name=from_name, resolved=resolved)
             return
 
         # AC2-ERR: not a registered agent, not a discovered handle. Error with
@@ -1137,6 +1211,7 @@ def cmd_unread(
     for m in msgs:
         excerpt = m.body.replace("\n", " ")[:100]
         print(f"{m.id}  {m.from_} -> {m.to}  [{m.kind}]  {excerpt}")
+    print('\nto answer one: fno mail reply --to <id> --body "..."')
 
 
 @mail_app.command("ack")
@@ -1231,8 +1306,14 @@ def cmd_drain_self(
     elif msgs:
         print(f"[fno mail] {len(msgs)} message(s) for {handle}:")
         for m in msgs:
-            print(f"\n--- from {m.from_} ({m.ts}) ---")
+            print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
             print(m.body.rstrip("\n"))
+        # This render is what a session sees on receive, so surface the id (which
+        # `reply --to` correlates against) and the how-to. Replying is optional --
+        # an FYI/broadcast needs none.
+        print(
+            '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
+        )
 
     # Inject-before-ack: advance the cursor to the last drained id only after
     # the bodies are out, so a crash re-surfaces rather than drops.
