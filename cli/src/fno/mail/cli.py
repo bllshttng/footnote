@@ -379,7 +379,6 @@ def cmd_reply(
     ``to_msg`` absent from the bus is a hard error.
     """
     kind = _validate_kind(kind)
-    sender = _resolve_from(from_project)
     body_text = _read_body(body, body_file)
 
     # Name-lane routing (x-8045): look the --to msg-id up on the durable bus and
@@ -392,10 +391,13 @@ def cmd_reply(
     if orig is not None and orig.to_kind == "name":
         from fno.agents import discover as discover_mod
 
+        # from_name defaults to None so stamp_from auto-stamps THIS session's
+        # canonical handle (claude-/codex-<short>) -- the handle the original
+        # sender replies back to and that drain-self scans, NOT a project name.
         resolved, _ = discover_mod.resolve_or_suggest(orig.from_)
         if resolved is not None:
             _name_lane_send(
-                body_text, from_name=sender, resolved=resolved, reply_to=to_msg
+                body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
             )
         else:
             # AC1-FR: the original sender is no longer live -> durable floor
@@ -410,7 +412,7 @@ def cmd_reply(
             )
             _name_lane_send(
                 body_text,
-                from_name=sender,
+                from_name=from_project,
                 resolved=None,
                 recipient=orig.from_,
                 provider=prov,
@@ -424,6 +426,10 @@ def cmd_reply(
         # is genuinely unknown -- hard error, never a silent self-note.
         print(f"msg-id {to_msg!r} not in the bus log", file=sys.stderr)
         raise typer.Exit(code=1)
+
+    # Thread-store reply path (non-name-lane): resolve the sender project here so
+    # the name-lane path above is never forced through project identification.
+    sender = _resolve_from(from_project)
 
     own_handle = find_thread_by_msg_id(sender, to_msg)
     if own_handle is None:

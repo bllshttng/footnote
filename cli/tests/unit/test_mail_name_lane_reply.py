@@ -94,13 +94,14 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    # THIS session's identity: the reply must stamp its canonical handle as `from`,
+    # not a project name, so the sender can reply back and drain-self finds it.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(
         to="claude-meeeeeee", from_="claude-9a063cd3", body="ping"
     )
-    r = runner.invoke(
-        app, ["mail", "reply", "--to", msg, "--from", "web", "--body", "ack"]
-    )
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
     # I never typed the sender handle on the command line; the reply still names it.
     assert "claude-9a063cd3" in r.output
@@ -109,6 +110,7 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
     assert replies[0].to == "claude-9a063cd3"  # addressed to the original sender
+    assert replies[0].from_ == "claude-11111111"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 
 
@@ -155,7 +157,7 @@ def test_ac2edge_two_replies_to_one_message_both_thread(
     )
     for body in ("first reply", "second reply"):
         r = runner.invoke(
-            app, ["mail", "reply", "--to", msg, "--from", "web", "--body", body]
+            app, ["mail", "reply", "--to", msg, "--body", body]
         )
         assert r.exit_code == 0, r.output
 
@@ -175,7 +177,7 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
         to="claude-meeeeeee", from_="claude-deadbeef", body="ping"
     )
     r = runner.invoke(
-        app, ["mail", "reply", "--to", msg, "--from", "web", "--body", "ack"]
+        app, ["mail", "reply", "--to", msg, "--body", "ack"]
     )
     assert r.exit_code == 0, r.output
     assert "queued (durable)" in r.output
@@ -200,7 +202,7 @@ def test_ac1fr_offline_full_uuid_handle_keeps_wire_to_short(
         to="claude-meeeeeee", from_=f"claude-{uuid}", body="ping"
     )
     r = runner.invoke(
-        app, ["mail", "reply", "--to", msg, "--from", "web", "--body", "ack"]
+        app, ["mail", "reply", "--to", msg, "--body", "ack"]
     )
     assert r.exit_code == 0, r.output
     rep = next(m for m in _bus_msgs() if m.in_reply_to == msg)
