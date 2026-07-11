@@ -65,6 +65,10 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 
+    if matches!(verb, "codex-loaded-threads") {
+        return fno_agents::codex_inject::run_loaded_thread_discovery().await;
+    }
+
     // `claim` is the HIDDEN debug front over the native claims module
     // (`fno_agents::claims`): the cross-impl compatibility matrix drives the
     // Rust side of the lockfile protocol through it, and it doubles as an ops
