@@ -731,6 +731,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // verdict was stored/refreshed/cleared on a hook-less mux row, or a
     // provider's manifest failed to load.
     "screen_state_change",
+    // a2a status-breakpoint family (x-dbaf): the run-terminal summary, emitted
+    // natively by `finalize` with the extended envelope (task counts +
+    // termination reason). The three tick kinds (task_started/task_done/blocked)
+    // are Python-emitted, so only run_summary is registered here.
+    "run_summary",
 ];
 
 /// Build the unified (x-2901) events.jsonl envelope JSON Schema and the

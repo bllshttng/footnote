@@ -87,6 +87,21 @@ Run every step listed under `## Verification`:
 - Behavioral checks → verify manually or describe result
 - If any verification fails → stop and report what failed
 
+## 3b. Status-breakpoint emit (x-dbaf, best-effort)
+
+After each change lands (or blocks), emit the task-boundary event so observers can track the run. `task_started` already fired from `resolve-executor.sh` at dispatch; `run_summary` fires from `finalize` at the loop terminal. You emit the middle boundary — one non-fatal line per change, never gating anything:
+
+```bash
+# SUCCESS / DONE_WITH_CONCERNS after a change commits:
+python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary task_done \
+  --task "<n>" --outcome SUCCESS --data '{"commit":"<sha>","concerns":0}'
+# BLOCKED when a change cannot proceed (also the <help> path):
+python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary blocked \
+  --task "<n>" --data '{"reason":"<why>"}'
+```
+
+`--run`/`--node` fall back to the manifest, so they are optional here. Emission is best-effort: a failure prints one stderr note and never stops the run.
+
 ## 4. Report Done
 
 Summarize what was done:

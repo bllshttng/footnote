@@ -10,6 +10,11 @@ import typer
 
 cli = typer.Typer(name="event", help="emit and audit events", no_args_is_help=True)
 
+# Documented cap for truncatable x-dbaf family data strings (title/reason/evidence/
+# termination_reason). Mirrors the Rust RUN_SUMMARY_DATA_CAP; keeps a runaway
+# reason from bloating an events.jsonl line while still landing the event.
+_PROTOCOL_DATA_STR_CAP = 500
+
 
 @cli.callback()
 def _event_callback(
@@ -223,6 +228,13 @@ def emit(
 
     envelope = None
     if type_ in PROTOCOL_FAMILY_TYPES:
+        # Truncate the free-text data strings to the documented cap (AC2-EDGE,
+        # Boundaries) so an oversized reason/title lands truncated rather than
+        # rejected; envelope fields are bounded by construction.
+        for _k in ("title", "reason", "evidence", "termination_reason"):
+            _v = data_dict.get(_k)
+            if isinstance(_v, str) and len(_v) > _PROTOCOL_DATA_STR_CAP:
+                data_dict[_k] = _v[:_PROTOCOL_DATA_STR_CAP]
         envelope = _stamp_protocol_envelope(
             resolved_state,
             node=node,

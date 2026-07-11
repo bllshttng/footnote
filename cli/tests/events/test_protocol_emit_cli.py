@@ -113,6 +113,21 @@ def test_task_done_with_flags(runner, tmp_path, monkeypatch) -> None:
     assert ev["outcome"] == "SUCCESS"
 
 
+# -- AC2-EDGE: oversized data string truncated to the cap, event still written --
+
+def test_blocked_reason_truncated_to_cap(runner, tmp_path, monkeypatch) -> None:
+    result = _emit(
+        runner, tmp_path, monkeypatch,
+        "--type", "blocked",
+        "--source", "test",
+        "--run", "tgt-run-1",
+        "--data", json.dumps({"reason": "x" * 900}),
+    )
+    assert result.exit_code == 0, result.output
+    ev = _last_event(_events_path(tmp_path))
+    assert len(ev["data"]["reason"]) == 500  # truncated to the documented cap
+
+
 # -- a bad outcome is rejected pre-lock (nothing appended) --
 
 def test_bad_outcome_rejected_pre_lock(runner, tmp_path, monkeypatch) -> None:

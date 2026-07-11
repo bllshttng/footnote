@@ -931,6 +931,45 @@ def parse_task_result(output: str) -> Optional[TaskResult]:
     return _build_task_result(data, structured=False)
 
 
+def emit_status_event(
+    event_type: str,
+    *,
+    run: str = "",
+    node: str = "",
+    task: str = "",
+    outcome: str = "",
+    data: Optional[Dict] = None,
+) -> bool:
+    """Emit an x-dbaf status-breakpoint event by shelling ``fno event emit``.
+
+    Non-fatal by contract: any failure logs one stderr note and returns False;
+    it never raises, so a boundary emit can never fail the task or the run.
+    Skills shell to the installed CLI (never import repo code), matching
+    resolve-executor.sh. Work coordinates fall back to the manifest inside the
+    emit CLI when the flags are empty.
+    """
+    argv = ["fno", "event", "emit", "-t", event_type, "-d", json.dumps(data or {})]
+    for flag, val in (("--run", run), ("--node", node), ("--task", task), ("--outcome", outcome)):
+        if val:
+            argv += [flag, val]
+    try:
+        result = subprocess.run(argv, check=False, capture_output=True, timeout=15)
+    except FileNotFoundError:
+        print(f"orchestrator: note: fno unavailable, skipped {event_type} emit", file=sys.stderr)
+        return False
+    except Exception as exc:  # noqa: BLE001 - emission must never wedge the run
+        print(f"orchestrator: note: {event_type} emit failed (non-fatal): {exc}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(
+            f"orchestrator: note: {event_type} emit rejected (non-fatal): "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def get_blocked_tasks_from_state(state_path: str) -> List[str]:
     """Parse blocked tasks from STATE.md"""
     path = Path(state_path)
@@ -1220,6 +1259,37 @@ if __name__ == "__main__":
         print("  --agent 'Setup Docker'           → archer (devops)")
         print("  --agent 'ETL pipeline'           → archer (data)")
         sys.exit(0 if len(sys.argv) > 1 and sys.argv[1] in ('-h', '--help') else 1)
+
+    # Handle --emit-boundary first (standalone; the do skill's one-line boundary
+    # emit for task_done / blocked after parse_task_result). Always exits 0:
+    # emission is non-fatal and must never fail the caller's task or run.
+    if sys.argv[1] == "--emit-boundary":
+        if len(sys.argv) < 3:
+            print("Error: --emit-boundary requires an event type", file=sys.stderr)
+            sys.exit(0)
+        b_type = sys.argv[2]
+        b_opts = {"--run": "", "--node": "", "--task": "", "--outcome": "", "--data": "{}"}
+        b_args = sys.argv[3:]
+        b_i = 0
+        while b_i < len(b_args):
+            if b_args[b_i] in b_opts and b_i + 1 < len(b_args):
+                b_opts[b_args[b_i]] = b_args[b_i + 1]
+                b_i += 2
+            else:
+                b_i += 1
+        try:
+            b_data = json.loads(b_opts["--data"])
+        except json.JSONDecodeError:
+            b_data = {}
+        emit_status_event(
+            b_type,
+            run=b_opts["--run"],
+            node=b_opts["--node"],
+            task=b_opts["--task"],
+            outcome=b_opts["--outcome"],
+            data=b_data,
+        )
+        sys.exit(0)
 
     # Handle --agent flag first (standalone command, no index needed)
     if sys.argv[1] == "--agent":
