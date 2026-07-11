@@ -61,10 +61,34 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     ev = json.loads(events.read_text().splitlines()[-1])
     assert ev["type"] == "blocked"
+    # P2: parent is resolved into the durable envelope, not only the push path
+    assert ev["parent"] == "claude-parent99"
     assert sent["argv"][:3] == ["fno", "mail", "send"]
     assert "claude-parent99" in sent["argv"]
     # message references the run so the parent can correlate
     assert any("R1" in a for a in sent["argv"])
+
+
+# -- P1: resolution matches a spawned row by identity, not name==handle --
+
+def test_resolve_parent_by_identity_not_display_name(monkeypatch) -> None:
+    from fno.events import cli as clim
+    from fno.harness_identity import HarnessIdentity
+
+    class FakeEntry:
+        name = "tgt-prj0001-claude-g1"  # caller-provided display name, NOT the handle
+        provider = "claude"
+        claude_short_id = "03401fb3"    # the stored short id
+        spawned_by_session = "parentsess123"
+        spawned_by_harness = "claude"
+
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda *a, **k: HarnessIdentity(session_id="03401fb3-92b2-cafe", harness="claude"),
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda *a, **k: [FakeEntry()])
+    # canonical_handle("claude", "parentsess123") -> "claude-parentse"
+    assert clim._resolve_parent_handle(None) == "claude-parentse"
 
 
 # -- no lineage -> silent skip, no mail send --

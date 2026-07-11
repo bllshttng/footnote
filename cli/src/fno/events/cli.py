@@ -96,7 +96,11 @@ def _stamp_protocol_envelope(
         "run": run or manifest.get("session_id"),
         "node": node or manifest.get("graph_node_id"),
         "task": task,
-        "parent": parent,
+        # Resolve lineage HERE so `parent` lands in the durable envelope for every
+        # family event (the contract's "parent when spawned" field), not just on
+        # the push path - pull observers route/filter on it too (codex P2). The
+        # push then reuses event["parent"] rather than re-resolving.
+        "parent": _resolve_parent_handle(parent),
         "outcome": outcome,
         "project": project,
     }
@@ -132,15 +136,28 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
     if explicit:
         return explicit
     try:
-        from fno.agents.registry import load_registry
+        from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS, load_registry
         from fno.harness_identity import canonical_handle, resolve_harness_identity
 
         ident = resolve_harness_identity()
         if not (ident.session_id and ident.harness):
             return None
+        # Match this session's row by STORED IDENTITY, not by name==handle: a
+        # spawned row usually carries a caller-provided display name (e.g.
+        # tgt-<node>-<harness>-gN), so a handle-equality check would miss it and
+        # the push would silently skip (codex P1). The per-provider session field
+        # may hold the full id or its first-8 (claude stores the short), so both
+        # variants are accepted; a canonically-named row still matches too.
         my_handle = canonical_handle(ident.harness, ident.session_id)
+        session_field = PROVIDER_SESSION_ID_FIELDS.get(ident.harness)
+        sid_variants = {ident.session_id, ident.session_id[:8]}
         for entry in load_registry():
-            if entry.name == my_handle:
+            same_session = (
+                entry.provider == ident.harness
+                and session_field is not None
+                and getattr(entry, session_field, None) in sid_variants
+            )
+            if entry.name == my_handle or same_session:
                 if entry.spawned_by_session and entry.spawned_by_harness:
                     return canonical_handle(entry.spawned_by_harness, entry.spawned_by_session)
                 return None
@@ -358,7 +375,7 @@ def emit(
     # (run_summary is normally pushed by Rust finalize's native emit; a
     # CLI-emitted one pushes here too for uniformity.)
     if type_ in ("blocked", "run_summary"):
-        _parent = _resolve_parent_handle(parent)
+        _parent = event.get("parent")  # already resolved into the envelope above
         if _parent:
             _push_to_parent(
                 _parent,
