@@ -337,6 +337,7 @@ check_eq 'shape continue pickup' "$(field "$out" shape_hint)" 'continue'
 # --- handoff mode: doc path -> continuation seed, no /target ------------------
 out="$(run '/Users/me/handoff-2026.md' --handoff)"
 check_eq           'handoff status'         "$(field "$out" status)"       'ok'
+check_eq           'handoff default provider' "$(field "$out" provider)"   'claude'
 check_eq           'handoff payload_mode'   "$(field "$out" payload_mode)" 'handoff'
 check_eq           'handoff node empty'     "$(field "$out" node)"         ''
 check_contains     'handoff seed has path'  "$(msg_block "$out")"          '/Users/me/handoff-2026.md'
@@ -363,23 +364,45 @@ check_contains 'handoff relative path in seed' "$(msg_block "$out")"          'd
 out="$(run '' --handoff)"
 check_eq 'handoff empty path error' "$(field "$out" status)" 'error'
 
-# --- handoff is claude-only: an EXPLICIT non-claude provider is an error -----
+# --- explicit codex/gemini handoffs keep the provider-neutral seed -----------
 out="$(run '/x/doc.md' --handoff --provider codex)"
-check_eq 'handoff explicit non-claude error' "$(field "$out" status)" 'error'
+check_eq           'handoff explicit codex status'   "$(field "$out" status)"       'ok'
+check_eq           'handoff explicit codex provider' "$(field "$out" provider)"     'codex'
+check_eq           'handoff explicit codex mode'     "$(field "$out" payload_mode)" 'handoff'
+check_contains     'handoff codex seed has path'     "$(msg_block "$out")"          '/x/doc.md'
+check_contains     'handoff codex seed guardrail'    "$(msg_block "$out")"          'GUARDRAIL'
+check_not_contains 'handoff codex no /target'        "$(msg_block "$out")"          '/target'
 
-# --- but config routing the derived tgt-* name to non-claude must NOT error ---
-# (codex P2 #501): a configured user who did not choose a provider can still use
-# the claude-only verbs; we force claude rather than consulting config routing.
+out="$(run '/x/gemini.md' --handoff --provider gemini)"
+check_eq           'handoff explicit gemini status'   "$(field "$out" status)"       'ok'
+check_eq           'handoff explicit gemini provider' "$(field "$out" provider)"     'gemini'
+check_eq           'handoff explicit gemini mode'     "$(field "$out" payload_mode)" 'handoff'
+check_not_contains 'handoff gemini no /target'        "$(msg_block "$out")"          '/target'
+
+# --- unverified handoff providers stay outside this feature's allowlist ------
+out="$(run '/x/doc.md' --handoff --provider agy)"
+check_eq       'handoff explicit unsupported error' "$(field "$out" status)" 'error'
+check_contains 'handoff unsupported names allowlist' "$(field "$out" error)" 'claude, codex, gemini'
+
+# --- configured codex/gemini routing is honored for prose-shaped modes --------
 _resolver_codex="$(mktemp)"
 printf '#!/usr/bin/env bash\necho codex\n' > "$_resolver_codex"
 chmod +x "$_resolver_codex"
 out="$(DISPATCH_PROVIDER_RESOLVER="$_resolver_codex" run '/tmp/doc.md' --handoff)"
-check_eq 'handoff ignores config non-claude (status)'  "$(field "$out" status)"   'ok'
-check_eq 'handoff forces claude despite config routing' "$(field "$out" provider)" 'claude'
+check_eq 'handoff config codex status'   "$(field "$out" status)"   'ok'
+check_eq 'handoff config codex provider' "$(field "$out" provider)" 'codex'
 out="$(DISPATCH_PROVIDER_RESOLVER="$_resolver_codex" run 'lets talk about the loop' --discuss)"
-check_eq 'discuss ignores config non-claude (status)'  "$(field "$out" status)"   'ok'
-check_eq 'discuss forces claude despite config routing' "$(field "$out" provider)" 'claude'
+check_eq 'discuss config codex status'   "$(field "$out" status)"   'ok'
+check_eq 'discuss config codex provider' "$(field "$out" provider)" 'codex'
 rm -f "$_resolver_codex"
+
+_resolver_unsupported="$(mktemp)"
+printf '#!/usr/bin/env bash\necho agy\n' > "$_resolver_unsupported"
+chmod +x "$_resolver_unsupported"
+out="$(DISPATCH_PROVIDER_RESOLVER="$_resolver_unsupported" run '/tmp/doc.md' --handoff)"
+check_eq 'handoff unsupported config status'   "$(field "$out" status)"   'ok'
+check_eq 'handoff unsupported config fallback' "$(field "$out" provider)" 'claude'
+rm -f "$_resolver_unsupported"
 
 # --- discuss mode: verbatim seed, no /target ---------------------------------
 out="$(run 'what is the architecture of the loop' --discuss)"
@@ -387,6 +410,14 @@ check_eq           'discuss status'           "$(field "$out" status)"       'ok
 check_eq           'discuss payload_mode'      "$(field "$out" payload_mode)" 'discuss'
 check_eq           'discuss message verbatim'  "$(field "$out" message)"      'what is the architecture of the loop'
 check_not_contains 'discuss no /target'        "$(field "$out" message)"      '/target'
+
+out="$(run 'what is the architecture of the loop' --discuss --provider codex)"
+check_eq 'discuss explicit codex status'   "$(field "$out" status)"   'ok'
+check_eq 'discuss explicit codex provider' "$(field "$out" provider)" 'codex'
+
+out="$(run 'compare the retry designs' --discuss --provider gemini)"
+check_eq 'discuss explicit gemini status'   "$(field "$out" status)"   'ok'
+check_eq 'discuss explicit gemini provider' "$(field "$out" provider)" 'gemini'
 
 # --- discuss seed starting with / stays verbatim (discuss beats passthrough) --
 out="$(run '/target what does it do' --discuss)"

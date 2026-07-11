@@ -40,7 +40,7 @@ SELF=""                # caller's own claim holder (target_claim_holder). Lets
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
 MODEL=""               # exact model name, forwarded as `spawn --model` (each
                        # provider's own --model). Empty = provider default.
-PAYLOAD_MODE="build"   # build | ask | passthrough (ask -> spawn --once)
+PAYLOAD_MODE="build"   # build | ask | handoff | discuss | passthrough
 SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
                        # (JSON receipt); headless -> one-shot (reply receipt).
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
@@ -362,6 +362,25 @@ if [[ "$REPLY" -eq 1 ]]; then
   exit 0
 else
   short_id="$(printf '%s' "$spawn_out" | jq -r '.short_id // empty' 2>/dev/null)"
+  # Python-authored pane rows have no worker socket, so their genuine receipt
+  # carries an empty short_id plus the addressable registry name and concrete
+  # mux coordinates. Accept that handle only when every identity field matches
+  # this launch; a partial/mismatched empty-id receipt still fails closed below.
+  case "$SUBSTRATE" in
+    ""|pane)
+      if [[ -z "$short_id" ]]; then
+        receipt_name="$(printf '%s' "$spawn_out" | jq -r '.name // empty' 2>/dev/null)"
+        receipt_provider="$(printf '%s' "$spawn_out" | jq -r '.provider // empty' 2>/dev/null)"
+        receipt_status="$(printf '%s' "$spawn_out" | jq -r '.status // empty' 2>/dev/null)"
+        mux_session="$(printf '%s' "$spawn_out" | jq -r '.mux_session // empty' 2>/dev/null)"
+        pane_id="$(printf '%s' "$spawn_out" | jq -r '.pane_id // empty' 2>/dev/null)"
+        if [[ "$receipt_name" == "$NAME" && "$receipt_provider" == "$PROVIDER" \
+           && "$receipt_status" == "live" && -n "$mux_session" && -n "$pane_id" ]]; then
+          short_id="$receipt_name"
+        fi
+      fi
+      ;;
+  esac
   # WHOLE-string match (not `grep -qx`, which matches ANY line): a multi-line
   # `.short_id` value - e.g. `{"short_id":"junk\ndeadbeef"}` or a banner leaking
   # into the value - must NOT pass on one of its lines being valid. `[[ =~ ]]`
@@ -370,12 +389,11 @@ else
   #
   # The valid SHAPE depends on the substrate (x-61b7). Only `bg`/`headless` return
   # a real 8-hex session-id prefix (client-side `claude --bg` / one-shot). The
-  # default/`pane` owned-PTY lane is a daemon worker whose short_id is a NAME-SLUG
-  # from derive_short_id() (daemon.rs): up to 8 ascii-alphanumerics of the name,
-  # an optional numeric collision suffix, or a `<base>-<ts>` fallback. The 8-hex
-  # rule wrongly rejected that slug and reported a false `failed` for a live
-  # worker; accept any single-line identifier-shaped token there (empty/torn
-  # still fail - the cardinal guard is intact on every lane).
+  # default/`pane` owned-PTY lane is addressed by an identifier-shaped registry
+  # handle: Rust derives a non-empty name-slug short_id; Python supplies the
+  # verified receipt name above because mux panes own no worker socket. The
+  # 8-hex rule wrongly rejects both shapes, so accept a single-line identifier
+  # there (empty/torn receipts still fail - the cardinal guard remains intact).
   case "$SUBSTRATE" in
     bg|headless) short_id_shape='^[0-9a-f]{8}$' ;;
     *)           short_id_shape='^[A-Za-z0-9_-]{1,40}$' ;;
@@ -386,9 +404,9 @@ else
 fi
 
 # ---- Report (mode-aware) ------------------------------------------------
-# host is interactive: STAGED, not running yet - the user drives it later. Every
-# other verb here is a BACKGROUND launch (claude/codex/gemini spawn) whose
-# progress streams to logs. (spawn --once already returned above.)
+# host is interactive: STAGED, not running yet - the user drives it later.
+# Plain spawn may be autonomous work or a seeded interactive pane; report the
+# payload intent rather than labeling every non-host launch as exec work.
 if [[ "$VERB" == "host" ]]; then
   printf 'result=launched short_id=%s name=%s mode=interactive staged="not running yet" drive="fno agents grid %s"\n' \
     "$short_id" "$NAME" "$NAME"
@@ -397,7 +415,10 @@ else
   # the value (like hint/trace): a path with spaces must not split the receipt's
   # space-separated key=value fields.
   wt_field=""; [[ -n "$AUTO_WT" ]] && wt_field=" cwd=\"$AUTO_WT\""
-  printf 'result=launched short_id=%s name=%s mode=exec%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
-    "$short_id" "$NAME" "$wt_field" "$NAME" "$NAME"
+  report_mode="exec"
+  [[ "$PAYLOAD_MODE" == "handoff" ]] && report_mode="spawn"
+  [[ "$PAYLOAD_MODE" == "discuss" ]] && report_mode="discuss"
+  printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
+    "$short_id" "$NAME" "$report_mode" "$wt_field" "$NAME" "$NAME"
 fi
 exit 0

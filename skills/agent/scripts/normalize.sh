@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # normalize.sh - deterministic input normalization for /fno:agent (spawn verb).
 #
-# A runner-less surface (the phone / Happy app) curls quotes and cannot run a
-# `!` local command, so a typed `fno agents spawn ...` either splits on bad
-# quotes or never executes. This helper takes the messy payload, normalizes it,
+# Remote and runner-less surfaces can curl quotes or lack a local command runner,
+# so a typed `fno agents spawn ...` may split on bad quotes or never execute.
+# This helper takes the natural-language payload, normalizes it,
 # and emits the exact fields the agents SKILL.md needs to build a genuine
 # `fno agents spawn|host <name> "<message>" --provider <p>` launch. It does NOT spawn
 # anything (that is spawn.sh, after the SKILL.md confirm gate) and has no
@@ -560,17 +560,25 @@ except Exception:
 }
 
 if [[ "$HANDOFF_MODE" -eq 1 || "$DISCUSS_MODE" -eq 1 ]]; then
-  # handoff/discuss are claude-only in v1 (codex/gemini interactive is `drive`/
-  # `host -i`; their handoff is a deferred prose-brief follow-up). An EXPLICIT
-  # non-claude --provider is a loud error; otherwise force claude WITHOUT
-  # consulting config routing - a derived <verb>-* name that config routes to
-  # codex/gemini must NOT break a claude-only verb the user never asked to route
-  # elsewhere (codex P2, PR #501).
-  if [[ -n "$PROVIDER" && "$PROVIDER" != "claude" ]]; then
-    vmode="handoff"; [[ "$DISCUSS_MODE" -eq 1 ]] && vmode="discuss"
-    emit_error "$vmode is claude-only in v1; you passed --provider $PROVIDER. Drop it (claude is implied) or use 'drive'/'host -i' for a codex/gemini interactive session"
+  # Prose handoffs and discussions run on the verified first-class CLIs. Honor
+  # explicit -> config -> claude routing within that allowlist. A user's explicit
+  # unsupported choice is an error; unrelated configured providers fall back.
+  prose_mode="handoff"; [[ "$DISCUSS_MODE" -eq 1 ]] && prose_mode="discuss"
+  if [[ -n "$PROVIDER" ]]; then
+    if ! is_valid_provider "$PROVIDER"; then
+      emit_error "invalid provider '$PROVIDER'; valid: ${VALID_PROVIDERS// /, }"
+    fi
+    case "$PROVIDER" in
+      claude|codex|gemini) provider="$PROVIDER" ;;
+      *) emit_error "$prose_mode supports providers claude, codex, gemini; you passed --provider $PROVIDER" ;;
+    esac
+  else
+    provider="$(resolve_from_config "$agent_name" | head -1 | tr -d '[:space:]' || true)"
+    case "$provider" in
+      claude|codex|gemini) : ;;
+      *) provider="claude" ;;
+    esac
   fi
-  provider="claude"
 elif [[ -n "$PROVIDER" ]]; then
   if ! is_valid_provider "$PROVIDER"; then
     emit_error "invalid provider '$PROVIDER'; valid: ${VALID_PROVIDERS// /, }"
@@ -629,7 +637,7 @@ case "$payload_mode" in
     message="$msg"
     ;;
   handoff)
-    # claude-only continuation seed: the doc IS the plan; do not re-derive it.
+    # Provider-neutral continuation seed: the doc IS the plan; do not re-derive it.
     # The standing GUARDRAIL keeps a fire-from-phone continuation from
     # autonomously taking outward/irreversible actions (prompt-level in v1; the
     # harness-level gate is a deferred follow-up). NO /target, NO no-merge token.
@@ -640,8 +648,8 @@ GUARDRAIL: Do not autonomously perform outward-facing or irreversible actions (s
 If the work includes code changes, land them as a pull request for review; do not merge."
     ;;
   discuss)
-    # A regular interactive claude thread, daemon-managed for dashboard
-    # visibility. The seed is the opening turn, sent VERBATIM (no /target).
+    # A provider-native interactive pane. The seed is the opening turn, sent
+    # VERBATIM (no /target or build framing).
     message="$msg"
     ;;
   build)

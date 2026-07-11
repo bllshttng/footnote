@@ -1,6 +1,6 @@
 ---
 name: agent
-description: "Dispatch and message background agent workers from a runner-less surface (phone / Happy app). One router over the shipped `fno agents` mesh: spawn (launch a build worker), handoff (continue a doc without re-deriving a plan), discuss (open a daemon-managed chat thread), send (message a peer over the bus), watch/list/logs (observe), stop (terminate). Normalizes messy input (smart quotes, name, provider, mode), confirms billed launches, and reports the real receipt - never a fabricated one. Works for claude, codex, and gemini (handoff/discuss are claude-only in v1). Use when: 'spawn a worker for ab-XXXX', 'hand off this doc to a worker', 'open a discussion thread', 'send a peer a message', 'run /target in the background', 'ask codex <question>', 'list/watch/stop my agents'."
+description: "Natural-language remote control for the `fno agents` worker mesh. Describe the outcome you want - spawn or hand off work, open an interactive discussion, message or inspect workers, drive a session, or stop it - and this skill resolves and runs the provider- and substrate-specific CLI command. It normalizes arguments, applies confirmation policy, and reports genuine receipts. Use when: 'spawn a worker for ab-XXXX', 'hand off this doc to codex', 'discuss the retry design with gemini', 'show my running agents', 'drive the reviewer', 'stop the billing worker'."
 argument-hint: "<verb> [args]  |  [ask|handoff|discuss] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [as <name>] [merge]"
 metadata:
   internal: false
@@ -12,25 +12,22 @@ requires:
 
 # Agents
 
-**Dispatch and message background workers from anywhere - even your phone.**
+**Describe the agent outcome you want; this skill remembers the command.**
 
-`/fno:agent` is the runner-less front door over the shipped `fno agents`
-mesh. `fno agents spawn|send|watch|...` needs exact shell quoting, and a phone
-has no `!` local-command runner, so a typed command either splits on bad quotes
-or never executes at all. A long session was once burned on a phone-typed
-`! fno agents ask ...` that *looked* like a command but emitted no receipt
-because nothing ran.
+`/fno:agent` is the natural-language front door over the shipped `fno agents`
+mesh. The CLI is intentionally precise, but its provider, substrate, lifecycle,
+and receipt shapes are too much syntax to keep in working memory. State the
+intent in ordinary language; the skill selects the real verb and arguments.
 
-This skill fixes that. **You (the agent) are the runner.** `!` is a client
-affordance the phone lacks; a skill's executor is the model, which every surface
-already has. You read the messy input, route it to the right verb, normalize it,
-confirm a billed launch, run the **genuine** `fno agents` command via your Bash
-tool, and report the **real** captured receipt - never a fabricated one.
+**You (the agent) are the runner.** Read the user's desired outcome, route it to
+the right verb, normalize it, confirm only costed or destructive operations, run
+the **genuine** `fno agents` command, and report the **real** captured receipt -
+never a fabricated one.
 
 This skill REUSES the shipped `fno agents` primitives. It does not reimplement
 spawn, the addressed bus, or session observation. Its value is verb routing +
-input normalization + a confirm gate + honest reporting for surfaces that cannot
-run a local command.
+input normalization + confirmation policy + honest reporting. Smart-quote and
+dashless parsing also keep it reliable from remote or runner-less controls.
 
 `SKILL_DIR` below is `skills/agent` inside this plugin.
 
@@ -47,8 +44,8 @@ focused core:
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
 | `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-2c27): default `pane` (owned-PTY drivable); trailing `bg` -> detached `claude --bg` thread; trailing `headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
-| `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (claude `--bg`, continuation seed, NO `/target`) | free (claude subscription) |
-| `discuss [seed]` | normalize `--discuss` + honest-receipt (free lane) | `fno agents spawn` (claude `--bg`, verbatim chat seed, NO `/target`) | free (claude subscription) |
+| `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
+| `discuss [seed]` | normalize `--discuss` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini interactive pane, verbatim seed, NO `/target`) | free (provider subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno mail send` (the addressed jsonl bus, sender-excluded) | free |
 | `chat A B "..."` | normalize + **always-confirm** + honest-receipt | `fno agents chat` (stream-json adopt + switchboard relay) | **Agent SDK plan credit / turn** |
 | `watch <name>` | thin pass-through | `fno agents watch` | free |
@@ -57,12 +54,12 @@ focused core:
 | `logs <name>` | thin pass-through | `fno agents logs` | free |
 | `stop <name>` | confirm (destructive) + pass-through | `fno agents stop` | free |
 
-Everything outside this set (`drive`/`grid`/`attach`/`resume`/`reconcile`/`rm`/
-`ack`/`promote`/`host` bare) stays raw `fno agents X`. The capability matrix at
-`docs/provider-command-matrix.md` remains the per-verb provider-support truth;
-this skill reflects it, never duplicates it. For the full surface map - which
-verbs are human-facing vs machine-internal (out of scope for this router by
-design) vs exploratory channel infra - see
+Advanced lifecycle intents (`drive`/`grid`/`attach`/`resume`/`reconcile`/`rm`/
+`ack`/`promote`) map to their corresponding raw `fno agents` verbs; the skill
+resolves their arguments and runs them rather than reimplementing them. The
+capability matrix at `docs/provider-command-matrix.md` remains the per-provider
+truth. For the full surface map - which verbs are human-facing vs
+machine-internal vs exploratory channel infra - see
 [references/fno-agents-surface.md](references/fno-agents-surface.md).
 
 > `chat` is the only costed verb: it opens a live real-time channel and every
@@ -224,10 +221,11 @@ the real node.
 - **ask** (`ask`/`bare` verb): a one-shot question. The prompt is sent verbatim.
 - **handoff** (`--handoff`): a doc path becomes a continuation seed (read the doc,
   continue from where it left off, do NOT re-derive a plan) + a standing
-  guardrail against autonomous outward/irreversible actions. claude-only, NO
-  `/target`, NO `no-merge`. See the `handoff` section.
-- **discuss** (`--discuss`): a verbatim conversational seed -> a daemon-managed
-  interactive claude thread. claude-only, NO `/target`. See the `discuss` section.
+  guardrail against autonomous outward/irreversible actions. Supports Claude,
+  Codex, and Gemini; NO `/target`, NO `no-merge`. See the `handoff` section.
+- **discuss** (`--discuss`): a verbatim conversational seed -> a running,
+  provider-native interactive pane. Claude/Codex/Gemini, NO `/target`. See the
+  `discuss` section.
 - **passthrough** (leading `/`): the explicit command, verbatim. claude-only;
   normalize refuses it for codex/gemini.
 
@@ -436,10 +434,16 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
 
 - `result=launched ... mode=exec ...` -> a background worker launched. Quote the
   **real** `short_id` and give `fno agents logs <name>` + `fno agents trace <name>`.
+- `result=launched ... mode=spawn ...` -> an autonomously seeded handoff worker
+  launched through the provider's spawn lane. The default Rust substrate is a
+  drivable pane; this is not a one-shot reply or a refuse-to-stop loop.
+- `result=launched ... mode=discuss ...` -> a seeded interactive discussion is
+  running in a provider-native pane. Give `fno agents grid <name>` / `drive
+  <name>` for live interaction and `fno mail send` for asynchronous follow-up.
 - `result=launched ... mode=interactive ...` -> a drivable session **staged, NOT
   running yet**. Give `fno agents grid <name>` (or `fno agents drive <name>
   --mode interactive`). Note: no proactive push when it waits on input.
-- `result=replied ...` (codex/gemini **ask** only) -> the one-shot returned its
+- `result=replied ...` (a one-shot ask or explicit headless substrate) -> the one-shot returned its
   answer synchronously; the **reply follows the outcome line** and IS the
   deliverable. Relay it (preview ~15 lines; full reply in `fno agents logs <name>`).
 - `result=already-running ...` -> a worker already exists for this node/name; no
@@ -454,15 +458,18 @@ sniffing output (Group 1 ab-8b3e4fe0 moved claude creation off `ask` onto
 `spawn`, so claude takes the JSON `.short_id` family below, not a bare 8-hex
 line):
 
-- **`spawn --once`** (codex/gemini ask-mode): a **client-side one-shot**
+- **`spawn --once` / `--substrate headless`**: a **client-side one-shot**
   (`codex exec` / `gemini -p`). stdout is the model REPLY verbatim, not a
   short-id. Success = exit 0 AND a non-empty reply; an empty reply (even on
   exit 0) is FAILED, never a fabricated answer.
-- **`spawn` / `host`** (claude `--bg`, codex/gemini build): stdout is JSON
-  carrying `{"short_id",...}` (one compact line from the client-side claude
-  spawn, pretty multi-line from the codex/gemini daemon). `.short_id` is parsed
-  with `jq` and validated whole-string 8-hex; empty/missing/non-8-hex (even on
-  exit 0) is FAILED.
+- **`spawn` / `host`**: stdout is JSON
+  carrying `{"short_id",...}` (compact or pretty depending on runtime and
+  substrate). `.short_id` is parsed with `jq`; `bg` requires a whole-string
+  8-hex id. The default/pane lane accepts the runtime's identifier-shaped
+  handle: Rust returns a name-slug `short_id`; Python pane receipts have an
+  empty worker-socket id, so `spawn.sh` uses the receipt's registry `name` only
+  after matching provider/status and requiring both mux session and pane id.
+  Empty, mismatched, or malformed receipts (even on exit 0) are FAILED.
 
 Report only what `spawn.sh` actually captured - a real short-id, or a real reply.
 "No valid receipt" is FAILED, full stop.
@@ -480,84 +487,91 @@ safe (the registry same-name guard catches it).
 
 ---
 
-## `handoff <doc>` - continue a doc without re-deriving (claude-only)
+## `handoff <doc>` - continue a doc without re-deriving
 
 `handoff` exists because `build` (`/target`) is the wrong frame for a handoff. A
 `/target` worker re-derives think->plan->do and loops until a PR is green - but a
 handoff document already IS the plan, and a handoff is often multi-thread,
 mostly-non-code continuation work that never produces a single green PR. So
-`handoff` spawns a **plain claude `--bg` thread** (no `/target`, no loop-grade
-"refuse to stop" guarantee) seeded to read the doc and continue from where it
-left off. A handoff that is really a feature build still goes through `build`.
+`handoff` spawns a **plain autonomous worker** on Claude, Codex, or Gemini (no
+`/target`, no loop-grade "refuse to stop" guarantee) seeded to read the doc and
+continue from where it left off. The default substrate is the owned-PTY `pane`;
+the worker starts autonomously and can later be driven through the provider's
+supported pane tools. A handoff that is really a feature build still goes
+through `build`.
 
 It also injects a **standing guardrail**: the seed bars the worker from
 autonomously taking outward-facing or irreversible actions (emails, deploys,
 merges, publishing, contacting third parties) and tells it to STOP and surface
 them via `<help reason="outward-action" evidence="...">` for human confirmation.
 This is **prompt-level** enforcement in v1 (the model obeying the seed), observed
-via `watch`; a harness-level tool gate is a deferred follow-up. Say so honestly -
-do not imply the worker is sandboxed from outward actions.
+through provider-supported logs or pane tools; a harness-level tool gate is a
+deferred follow-up. Say so honestly - do not imply the worker is sandboxed from
+outward actions.
 
 ### Flow: NORMALIZE -> VALIDATE -> SPAWN -> REPORT (no confirm: free lane)
 
 1. **NORMALIZE.** Strip the leading `handoff` verb; pass the rest as the doc path.
    Run `normalize.sh --input "<doc-path>" --handoff` (carry `--provider`/`as
-   <name>` only if given; handoff is claude-only, so a non-claude provider is a
-   loud error from normalize). It emits `payload_mode=handoff` and a `message`
+   <name>`/`model <name>`/`yolo` only if given). Provider resolution is
+   explicit -> configured -> Claude, constrained to Claude/Codex/Gemini. It emits
+   `payload_mode=handoff` and a `message`
    that is the continuation seed (path + "do not re-derive" + GUARDRAIL +
-   PR-for-review). On `status=error` (empty path, non-claude provider), STOP and
-   report the `error=` line.
+   PR-for-review). On `status=error` (empty path or explicit unsupported
+   provider), STOP and report the `error=` line.
 2. **VALIDATE the doc path (best-effort).** If the path is **absolute** and does
    not exist, STOP and report the real missing path - never boot a worker pointed
    at nothing (AC5-ERR). If it is **relative**, you cannot reliably check it here
    (the worker's cwd may differ); proceed but note in REPORT that it must resolve
    at the worker's cwd, and prefer an absolute path.
-3. **SPAWN.** Run the genuine wire (claude `--bg`, the seed verbatim):
+3. **SPAWN.** Run the genuine autonomous wire with the seed verbatim:
 
    ```bash
-   bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider claude \
-     --message "$message" --mode exec --payload-mode handoff [--cwd "<cwd>"]
+   bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
+     --message "$message" --mode exec --payload-mode handoff [--cwd "<cwd>"] \
+     [--model "$model"] [--yolo]
    ```
 
 4. **REPORT** the real receipt exactly as the `spawn` section's REPORT does
-   (`result=launched ... mode=exec` -> quote the real `short_id`, give `fno agents
-   logs <name>` / `fno agents watch <name>`; `result=failed` -> FAILED with the
-   real reason, no fabricated short-id). Note it is a continuation thread, not a
+   (`result=launched ... mode=spawn` -> quote the real `short_id` and always give
+   `fno agents logs <name>` plus `grid`/`drive` for the default pane;
+   `result=failed` -> FAILED with the real reason, no fabricated short-id). Note
+   it is an autonomously seeded, drivable continuation worker, not a
    refuse-to-stop loop, and that the outward-action guardrail is prompt-level.
 
 ---
 
-## `discuss [seed]` - a daemon-managed interactive thread (claude-only)
+## `discuss [seed]` - open a provider-native interactive discussion
 
-`discuss` is just a regular interactive claude thread - the same as opening claude
-and chatting - but launched on the `--bg` lane so the daemon manages it and it
-shows in `fno agents list` / the dashboard. No `/target`, no build framing, no
-cost beyond the subscription lane. Use it when you want to talk, not build.
+`discuss` is a regular interactive Claude, Codex, or Gemini session seeded with
+the user's words verbatim. It launches on the default owned-PTY pane, appears in
+`fno agents list` / the grid, and remains drivable after the opening turn. No
+`/target`, no build framing, and no cost beyond the provider subscription. Use
+it when you want to talk, not build.
 
-The seed is the **opening turn**, sent verbatim. You then drive the thread with
-`send` and observe it with `watch` (delivery is at the worker's loop boundary, not
-a live tail; for true live turn-by-turn use the `drive` stream-json lane). v1
-requires a non-empty seed (the first thing to say); a bare `discuss` with nothing
-to say is a loud error rather than an idle thread.
+The seed is the **opening turn**, sent verbatim. Continue live through `fno agents
+grid <name>` / `fno agents drive <name>` or send an asynchronous follow-up over
+the bus. v1 requires a non-empty seed; a bare `discuss` with nothing to say is a
+loud error rather than an idle thread.
 
 ### Flow: NORMALIZE -> SPAWN -> REPORT (no confirm: free lane)
 
 1. **NORMALIZE.** Strip the leading `discuss` verb; pass the rest as the seed. Run
-   `normalize.sh --input "<seed>" --discuss` (claude-only; a non-claude provider
-   is a loud error). It emits `payload_mode=discuss` and `message` = the seed
-   verbatim (a seed that happens to start with `/` is still a chat seed, never a
-   passthrough command). On `status=error` (empty seed, non-claude provider),
-   STOP and report the `error=` line.
-2. **SPAWN.** Run the genuine wire (claude `--bg`, the seed as the first turn):
+   `normalize.sh --input "<seed>" --discuss` (carry provider/name/model posture
+   when supplied). Provider resolution is explicit -> configured -> Claude,
+   constrained to Claude/Codex/Gemini. It emits `payload_mode=discuss` and
+   `message` = the seed verbatim (a seed beginning with `/` remains chat text,
+   never a passthrough command). On `status=error`, STOP and report it.
+2. **SPAWN.** Run the genuine pane wire with the seed as the first turn:
 
    ```bash
-   bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider claude \
+   bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
      --message "$message" --mode exec --payload-mode discuss [--cwd "<cwd>"]
    ```
 
-3. **REPORT** the real receipt (as the `spawn` REPORT does). Point at `fno mail
-   send <name> "<reply>"` to continue the conversation and `fno agents watch
-   <name>` to follow it.
+3. **REPORT** the real `mode=discuss` receipt. Point at `fno agents grid <name>` /
+   `drive <name>` for live interaction, or `fno mail send <name> "<reply>"` for
+   an asynchronous follow-up.
 
 ---
 

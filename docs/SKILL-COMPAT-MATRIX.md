@@ -40,7 +40,7 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | codemap | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Pure Python + tree-sitter. |
 | create-pr | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Mechanical `gh` invocation. |
 | debug | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Hypothesis loop completes within one turn unless chained. |
-| agent | orchestrator | OOTB | - | - | - | OOTB | Provider-native worker front door. Codex build dispatch uses a prose brief with `pane`/exec or `headless`, returns the real JSON receipt, and rejects unsupported slash-command passthrough before spawn; `bg`, `handoff`, and `discuss` retain their documented Claude-only semantics. |
+| agent | orchestrator | OOTB | - | - | - | OOTB | Natural-language control over the provider-native worker mesh. Codex/Gemini build dispatch and prose handoff use provider-neutral briefs; discussions use provider-native interactive panes. All return real receipts and never send Claude slash commands. Explicit `bg` remains Claude-only. |
 | distill | stateless | OOTB | partial | partial | partial | partial | Reads Claude Code observations; other drivers need skill-checkpoint parity. |
 | do | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Lightweight single-session executor. Does not emit `<promise>`. |
 | fix | hybrid | OOTB | wrapper | wrapper | wrapper | wrapper | Bounded iteration loop (N iterations). Wrapper restarts between iterations on non-CC. |

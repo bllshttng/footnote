@@ -176,5 +176,15 @@ err8="$(cat "$TMP/err8")"
 no   "ask no worktree note" "$err8" "auto-worktree:"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-ask-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: ask payload got a worktree"; } || PASS=$((PASS+1))
 
+# 9. prose handoff continues an existing document; it is not a fresh feature
+#    build and must stay in the caller-selected cwd for relative-path fidelity.
+out9="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "handoff-doc-demo" \
+  --provider codex --payload-mode handoff --message "Read docs/handoff.md and continue." \
+  --cwd "$REPO" 2>"$TMP/err9")"
+err9="$(cat "$TMP/err9")"
+has "handoff launched" "$out9" "result=launched"
+no  "handoff no worktree note" "$err9" "auto-worktree:"
+[[ -d "$TMP/conductor/workspaces/myrepo/handoff-doc-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: handoff payload got a worktree"; } || PASS=$((PASS+1))
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
