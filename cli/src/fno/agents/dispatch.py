@@ -1891,7 +1891,22 @@ def dispatch_spawn(
                                 effort=effort,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
+                            _emit_ev(
+                                "agent_ask_failed",
+                                stage="claude-headless",
+                                name=name,
+                                provider="claude",
+                                returncode=exc.exit_code,
+                            )
                             raise DispatchAskError(str(exc), exit_code=exc.exit_code) from exc
+                        _emit_ev(
+                            "agent_ask_done",
+                            stage="dispatch",
+                            name=name,
+                            provider="claude",
+                            duration_ms=result.duration_ms,
+                            yolo=yolo,
+                        )
                         return SpawnResult(
                             kind="once",
                             name=name,
