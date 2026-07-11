@@ -553,9 +553,10 @@ def _find_node_doc(pdir: Path, node_id: str) -> Optional[Path]:
 def _think_output_path(node_id: str, slug: str = "") -> str:
     """Resolve where the headless /think worker writes its design doc (x-8af8).
 
-    The filename ALWAYS ends ``-<node_id>.md`` so a roadmap base keyed on the
-    node id can find it. Resolution is node-id-first: reuse a file that already
-    claims the node, else a prior ``-<node_id>.md`` doc, else mint
+    A newly minted filename ends ``-<node_id>.md`` so a roadmap base keyed on
+    the node id can find it (a reused frontmatter-claiming stub keeps its own
+    name). Resolution is node-id-first: reuse a file that already claims the
+    node, else a prior ``-<node_id>.md`` doc, else mint
     ``<plans-dir>/YYYY-MM-DD-<slug>-<node_id>.md`` (empty slug ->
     ``<date>-<node_id>.md``). Keying reuse on the stable node id, not the mutable
     slug, keeps a re-dispatch after a slug edit idempotent. Falls back to
