@@ -146,7 +146,14 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
             // quoted session_id/created_at parses identically (gemini MEDIUM).
             let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
             match k {
-                "session_id" => m.session_id = Some(v.to_string()),
+                // fno_id is canonical and wins; session_id is the one-release
+                // legacy fallback (never overwrites a resolved fno_id).
+                "fno_id" => m.session_id = Some(v.to_string()),
+                "session_id" => {
+                    if m.session_id.is_none() {
+                        m.session_id = Some(v.to_string());
+                    }
+                }
                 "created_at" => m.created_at = Some(v.to_string()),
                 "attended" => m.attended = v == "true",
                 "advisory" => m.advisory = v == "true",
@@ -579,7 +586,10 @@ fn session_cost_from_ledger(ledger_path: &Path, session_id: &str) -> f64 {
     };
     let mut total = 0.0_f64;
     for entry in entries {
-        if entry.get("session_id").and_then(|v| v.as_str()) == Some(session_id) {
+        // Either key: new rows carry fno_id, pre-rename rows only session_id.
+        let matches = entry.get("fno_id").and_then(|v| v.as_str()) == Some(session_id)
+            || entry.get("session_id").and_then(|v| v.as_str()) == Some(session_id);
+        if matches {
             if let Some(c) = entry.get("cost_usd").and_then(|v| v.as_f64()) {
                 total += c;
             }

@@ -163,7 +163,10 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             }
         };
         match k {
-            "session_id" => set(&mut m.session_id, v),
+            // fno_id is the canonical target-minted id; session_id is the
+            // pre-rename fallback. `set` keeps the first non-empty, so fno_id
+            // (written first in the manifest) wins.
+            "fno_id" | "session_id" => set(&mut m.session_id, v),
             // Current key is claude_session_id; accept the pre-rename
             // claude_transcript_id as a fallback for one release. `set` keeps the
             // first non-empty value, so the current key (written first) wins.
