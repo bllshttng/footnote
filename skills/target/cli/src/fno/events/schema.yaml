@@ -2509,7 +2509,101 @@ event_types:
         error:
           type: string
 
+  # ── a2a status breakpoints: task-boundary protocol family (x-dbaf) ──────────
+  # Four task-boundary events carrying the extended envelope in `protocol_family`
+  # below (routable fields at envelope level, not smeared into `data`). The
+  # public contract is schemas/events-protocol-v1.json; docs/protocol/a2a-status-events.md.
+  - name: task_started
+    description: "The do-phase orchestrator is about to dispatch a task to its executor. A tick (pulled from events.jsonl, never pushed)."
+    sources: [target, subagent, test]
+    data:
+      required: []
+      properties:
+        title:
+          type: string
+          description: "Task title, truncated to the reason/title cap."
+        executor:
+          type: string
+          description: "Resolved executor (do | tdd | impeccable | ...)."
+        wave:
+          type: string
+          description: "Wave id the task belongs to, when the plan declares waves."
+    consumers: [x-05da peek, third-party observers]
+
+  - name: task_done
+    description: "An executor returned and its result was parsed. Carries the return-contract outcome at envelope level. A tick (pulled, never pushed)."
+    sources: [target, subagent, test]
+    data:
+      required: []
+      properties:
+        commit:
+          type: string
+          description: "Commit sha the task produced, when it committed."
+        concerns:
+          type: integer
+          description: "Count of DONE_WITH_CONCERNS findings, 0 when none."
+    consumers: [x-05da peek, third-party observers]
+
+  - name: blocked
+    description: "A task returned RESULT: BLOCKED, or an in-session <help> distress was emitted. The one event that requests action; PUSHED to the parent handle when spawn lineage exists."
+    sources: [target, subagent, test]
+    data:
+      required: []
+      properties:
+        reason:
+          type: string
+          description: "Why it blocked, truncated to the reason cap."
+        evidence:
+          type: string
+          description: "Pointer to evidence (path/url), truncated to the reason cap."
+    consumers: [parent handle via mail bus, x-05da peek]
+
+  - name: run_summary
+    description: "The loop reached terminal (finalize path). Carries per-run task counts + termination reason. Emitted natively in Rust. PUSHED to the parent handle when spawn lineage exists."
+    sources: [target, hook, test]
+    data:
+      required: [tasks_started, tasks_done, tasks_failed]
+      properties:
+        tasks_started:
+          type: integer
+        tasks_done:
+          type: integer
+        tasks_failed:
+          type: integer
+        termination_reason:
+          type: string
+          description: "The loop's TerminationReason (DonePRGreen | NoProgress | Budget | ...)."
+        pr_url:
+          type: string
+          description: "The run's PR url, when one exists."
+    consumers: [parent handle via mail bus, x-05da peek, third-party observers]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:
   max_data_bytes: 65536
+
+# ── a2a status-breakpoint protocol family (x-dbaf) ──────────────────────────
+# The four types above carry an EXTENDED envelope: routable fields live at
+# envelope level (an observer routes 'notify me when MY worker blocks' on them),
+# only type-specific payload stays in `data`. This section is the validator's
+# source of truth for the family; the self-contained public artifact is
+# schemas/events-protocol-v1.json (kept in sync by test_protocol_family.py).
+#
+# Rule: additionalProperties:false at envelope level for this family ONLY;
+# legacy types keep today's tolerance.
+protocol_family:
+  version: 1                       # `v` on the wire; additive-only within v:1
+  types: [task_started, task_done, blocked, run_summary]
+  envelope:
+    # Every top-level key a family event may carry. additionalProperties:false
+    # rejects anything outside this whitelist.
+    allowed: [ts, v, type, source, from, model, host, project, node, task, run, parent, outcome, data]
+    # Always required, on top of the base [ts, type, source, data].
+    required: [v, run]
+  # `outcome` (return-contract enum) is present ONLY on these types, and required
+  # there; forbidden on task_started/blocked. (Key is `present_on`, not `on`:
+  # YAML 1.1 parses a bare `on:` key as the boolean True.)
+  outcome:
+    enum: [SUCCESS, DONE_WITH_CONCERNS, FAILED, BLOCKED]
+    present_on: [task_done, run_summary]
