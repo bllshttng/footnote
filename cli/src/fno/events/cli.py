@@ -195,7 +195,7 @@ def push_parent(
     event_type: str = typer.Option(..., "--type", "-t", help="blocked | run_summary"),
     run: Optional[str] = typer.Option(None, "--run", help="target-run id referenced in the notice"),
     node: Optional[str] = typer.Option(None, "--node", help="backlog node id"),
-    reason: Optional[str] = typer.Option(None, "--reason", help="one-line reason / termination"),
+    reason: Optional[str] = typer.Option(None, "--reason", "-R", help="one-line reason / termination"),
     parent: Optional[str] = typer.Option(None, "--parent", help="explicit parent handle (else registry-resolved)"),
 ) -> None:
     """Push a status-breakpoint notice to the parent handle (x-dbaf push leg).
