@@ -101,7 +101,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the branch after an auto-merge. |
 | `auto_merge.require_checks_pass` | bool | `true` | advanced | Require CI green before auto-merge. |
 | `auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
-| `auto_merge.allowed_invokers` | list[str] | `[]` | never | Who may trigger auto-merge. |
 | `auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |
 | `pr_watch.enabled` | bool | `false` | advanced | Enable the global PR-state watcher daemon. |
 | `pr_watch.interval_seconds` | int | `600` | never | PR-watcher poll interval (seconds). |

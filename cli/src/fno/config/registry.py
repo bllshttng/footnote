@@ -253,7 +253,6 @@ FIELD_META: dict[str, Meta] = {
     "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the branch after an auto-merge."),
     "auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
-    "auto_merge.allowed_invokers": Meta("never", "Who may trigger auto-merge."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
     # --- config.pr_watch.* ---
     "pr_watch.enabled": Meta("advanced", "Enable the global PR-state watcher daemon."),

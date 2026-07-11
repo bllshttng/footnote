@@ -300,23 +300,10 @@ get_auto_merge_conflict_resolution() {
     esac
 }
 
-# Usage: is_auto_merge_allowed_for <skill>  → exit 0 if allowed, 1 if restricted
-# Takes one arg: "target" | "megawalk"
-is_auto_merge_allowed_for() {
-    local skill="$1"
-    [[ "$(get_auto_merge_enabled)" == "true" ]] || return 1
-    # If allowed_invokers is not set, all skills are allowed
-    local allowed
-    allowed=$(get_config "auto_merge.allowed_invokers" "")
-    if [[ -z "$allowed" ]]; then
-        return 0
-    fi
-    # allowed is a YAML list rendered as a string like "[target, megawalk]"
-    if echo "$allowed" | grep -q "\b$skill\b"; then
-        return 0
-    fi
-    return 1
-}
+# The who-may-merge gate `is_auto_merge_allowed_for <skill>` was removed
+# (x-04ab): auto-merge is gated by `get_auto_merge_enabled` alone (plus the merge
+# command's CI-green / external-review / stub-manifest guards). Callers now read
+# `get_auto_merge_enabled` directly.
 
 # ── Domain profile functions ──────────────────────────────────────
 # Read domain profiles from settings.yaml `domains:` section.

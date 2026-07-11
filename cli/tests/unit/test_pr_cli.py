@@ -35,12 +35,20 @@ def test_pr_merge_dispatches_in_package(monkeypatch):
         return 2
 
     monkeypatch.setattr(_merge, "run_merge", _fake)
-    result = runner.invoke(app, ["pr", "merge", "--invoker=megawalk", "999999"])
+    result = runner.invoke(app, ["pr", "merge", "999999"])
     assert result.exit_code == 2
-    assert captured["argv"] == ["--invoker=megawalk", "999999"]
+    assert captured["argv"] == ["999999"]
 
 
-def test_pr_merge_invalid_invoker_exit_1():
-    """End-to-end through the verb: a bad invoker is rejected with exit 1."""
-    result = runner.invoke(app, ["pr", "merge", "--invoker=evil", "42"])
-    assert result.exit_code == 1
+def test_pr_merge_forwards_legacy_invoker_flag(monkeypatch):
+    """x-04ab: a legacy --invoker=... is forwarded verbatim (run_merge ignores it)."""
+    captured = {}
+
+    def _fake(argv, cwd=None):
+        captured["argv"] = list(argv)
+        return 2
+
+    monkeypatch.setattr(_merge, "run_merge", _fake)
+    result = runner.invoke(app, ["pr", "merge", "--invoker=target", "42"])
+    assert result.exit_code == 2
+    assert captured["argv"] == ["--invoker=target", "42"]

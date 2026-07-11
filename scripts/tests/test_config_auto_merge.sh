@@ -139,43 +139,9 @@ CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
 result=$(get_auto_merge_conflict_resolution)
 assert_eq "test_conflict_resolution_default_opus: no setting → opus" "opus" "$result"
 
-# ---- test_allowed_invokers_restricts ----
-# enabled: true, allowed_invokers: [target] → target allowed (exit 0), megawalk denied (exit 1)
-
-echo ""
-echo "test_allowed_invokers_restricts"
-mkdir -p "$TMPDIR_T/restricted/.fno"
-cat > "$TMPDIR_T/restricted/.fno/config.toml" <<'YAML'
-[auto_merge]
-enabled = true
-allowed_invokers = ["target"]
-YAML
-LOCAL_SETTINGS="$TMPDIR_T/restricted/.fno/config.toml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
-LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
-CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
-CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
-assert_exit_0 "test_allowed_invokers_restricts: target is in list → exit 0" is_auto_merge_allowed_for "target"
-assert_exit_1 "test_allowed_invokers_restricts: megawalk not in list → exit 1" is_auto_merge_allowed_for "megawalk"
-
-# ---- test_allowed_invokers_omitted_allows_all ----
-# enabled: true, no allowed_invokers key → all 3 skills allowed
-
-echo ""
-echo "test_allowed_invokers_omitted_allows_all"
-mkdir -p "$TMPDIR_T/allow_all/.fno"
-cat > "$TMPDIR_T/allow_all/.fno/config.toml" <<'YAML'
-[auto_merge]
-enabled = true
-YAML
-LOCAL_SETTINGS="$TMPDIR_T/allow_all/.fno/config.toml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
-LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
-CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
-CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
-assert_exit_0 "test_allowed_invokers_omitted_allows_all: target → exit 0" is_auto_merge_allowed_for "target"
-assert_exit_0 "test_allowed_invokers_omitted_allows_all: megawalk → exit 0" is_auto_merge_allowed_for "megawalk"
-assert_exit_0 "test_allowed_invokers_omitted_allows_all: megawalk → exit 0" is_auto_merge_allowed_for "megawalk"
+# The who-may-merge gate (is_auto_merge_allowed_for / allowed_invokers) was
+# removed (x-04ab): auto-merge is gated by get_auto_merge_enabled alone, which
+# is covered by the enabled/default cases above.
 
 # ---- Summary ----
 

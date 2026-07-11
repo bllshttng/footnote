@@ -33,9 +33,8 @@ class VerifyKind(str, enum.Enum):
     "merge",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "Merge a PR via gh CLI with the fno-canonical guards "
-        "(--invoker=<target|megawalk> <pr_number>). Emits a JSON line "
-        "{pr, outcome, reason, strategy, invoker}; exit 0 merged|queued, "
+        "Merge a PR via gh CLI with the fno-canonical guards (<pr_number>). "
+        "Emits a JSON line {pr, outcome, reason, strategy}; exit 0 merged|queued, "
         "1 failed, 2 skipped, 127 gh-missing."
     ),
 )

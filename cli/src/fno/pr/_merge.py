@@ -3,12 +3,17 @@
 Skill-agnostic PR merge wrapper. Shells to ``gh``/``git`` and preserves the
 caller-facing contract verbatim:
 
-- Stdout: one JSON line ``{pr, outcome, reason, strategy, invoker}`` on
+- Stdout: one JSON line ``{pr, outcome, reason, strategy}`` on
   merged/queued/skipped; failures print the same JSON shape to STDERR.
 - Exit codes: 0 merged|queued, 1 failed (incl. bad args), 2 skipped
-  (auto_merge disabled / invoker not allowed), 127 gh not installed.
-- The footnote-canonical merge guards (config.auto_merge gating + invoker
-  allowlist) and the worktree server-side-recovery fallback are preserved.
+  (auto_merge disabled), 127 gh not installed.
+- The footnote-canonical merge guard (config.auto_merge ``enabled`` + the
+  CI-green / external-review / stub-manifest guards) and the worktree
+  server-side-recovery fallback are preserved. The who-may-merge gate
+  (``--invoker`` + ``auto_merge.allowed_invokers``) was removed (x-04ab): the
+  caller context is derivable and megawalk is deprecated, so the flag was
+  redundant ceremony. A legacy ``--invoker=...`` arg is silently accepted and
+  ignored so old callers never break.
 - Post-merge followups (memory-pass + triage sentinels, the session_satisfied
   event, the per-PR artifact consolidation) fire for merged AND queued,
   best-effort: a followup failure never changes the already-emitted outcome.
@@ -27,7 +32,6 @@ from typing import Iterator, List, Literal, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
 
-_VALID_INVOKERS = {"target", "megawalk"}
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
 
 # Merge serialization (parallel mode, epic x-42d5 G4, Locked Decision #9):
@@ -46,14 +50,13 @@ _MERGE_LOCK_WAIT_S = 120
 _MERGE_LOCK_POLL_S = 5
 
 
-def _emit(pr: int, outcome: str, reason: str, strategy: str, invoker: str, *, err: bool) -> None:
+def _emit(pr: int, outcome: str, reason: str, strategy: str, *, err: bool) -> None:
     """Print the JSON line. ``err`` routes to stderr (failure cases)."""
     obj = {
         "pr": pr,
         "outcome": outcome,
         "reason": reason,
         "strategy": strategy,
-        "invoker": invoker,
     }
     line = json.dumps(obj, separators=(",", ":")) + "\n"
     (sys.stderr if err else sys.stdout).write(line)
@@ -424,34 +427,26 @@ def _behind_by(pr_number: int, cwd: str) -> int:
 
 def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     repo = cwd or os.getcwd()
-    invoker = ""
     pr_raw = ""
     for arg in argv:
+        # A legacy ``--invoker=...`` is silently accepted and ignored (x-04ab
+        # removed the flag + its gate). Never break a merge command on a stray
+        # flag an un-updated caller still passes.
         if arg.startswith("--invoker="):
-            invoker = arg[len("--invoker="):]
+            continue
         elif arg[:1].isdigit():
             pr_raw = arg
         else:
             sys.stderr.write(f"Error: unknown arg '{arg}'\n")
             return 1
 
-    if not invoker:
-        sys.stderr.write("--invoker=<target|megawalk> required\n")
-        return 1
     if not pr_raw:
         sys.stderr.write("pr_number required\n")
         return 1
 
-    # Invoker whitelist (injection guard).
-    if invoker not in _VALID_INVOKERS:
-        sys.stderr.write(
-            f"Error: invalid --invoker '{invoker}'. Must be target|megawalk.\n"
-        )
-        return 1
-
     # pr_number must be a positive integer.
     if not _PR_RE.match(pr_raw):
-        _emit(0, "failed", f"invalid pr number: {pr_raw}", "none", invoker, err=True)
+        _emit(0, "failed", f"invalid pr number: {pr_raw}", "none", err=True)
         return 1
     pr_number = int(pr_raw)
 
@@ -482,27 +477,27 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             f"contract dependent {held.get('_node')} carries a {detail}; "
             "reconcile before merge",
             "none",
-            invoker,
             err=False,
         )
         return 2
 
-    # (1) Short-circuit if disabled or invoker not allowed.
+    # (1) Short-circuit if auto-merge is disabled. The who-may-merge gate
+    # (--invoker + allowed_invokers) was removed (x-04ab): auto-merge is gated
+    # by `enabled` plus the CI-green / external-review / stub-manifest guards.
     auto_merge = _load_auto_merge()
-    if not auto_merge.is_allowed_for(invoker):
+    if not auto_merge.enabled:
         _emit(
             pr_number,
             "skipped",
-            f"auto_merge disabled or invoker '{invoker}' not in allowed_invokers",
+            "auto_merge disabled",
             "none",
-            invoker,
             err=False,
         )
         return 2
 
     # (2) gh must be installed.
     if shutil.which("gh") is None:
-        _emit(pr_number, "failed", "gh CLI not installed", "none", invoker, err=True)
+        _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
@@ -519,7 +514,6 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                 "held",
                 "merge serialized: another merge holds the lock; retry",
                 "none",
-                invoker,
                 err=False,
             )
             return 2
@@ -532,14 +526,13 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                     f"stale base: head is {behind} commit(s) behind base with "
                     "parallel lanes live; run fno pr rebase, then retry",
                     "none",
-                    invoker,
                     err=False,
                 )
                 return 2
-        return _do_merge(pr_number, auto_merge, invoker, repo)
+        return _do_merge(pr_number, auto_merge, repo)
 
 
-def _do_merge(pr_number: int, auto_merge, invoker: str, repo: str) -> int:
+def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # (3) Build command.
     strategy = auto_merge.merge_strategy
@@ -553,16 +546,16 @@ def _do_merge(pr_number: int, auto_merge, invoker: str, repo: str) -> int:
     try:
         res = _gh(cmd, repo)
     except ToolMissing:
-        _emit(pr_number, "failed", "gh CLI not installed", "none", invoker, err=True)
+        _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
     output = (res.stdout or "") + (res.stderr or "")
     if res.ok:
         if re.search(r"will be automatically merged", output, re.IGNORECASE):
-            _emit(pr_number, "queued", "awaiting required checks", strategy, invoker, err=False)
+            _emit(pr_number, "queued", "awaiting required checks", strategy, err=False)
             _sync_graph_merge_status("queued", pr_number)
         else:
-            _emit(pr_number, "merged", "merged immediately", strategy, invoker, err=False)
+            _emit(pr_number, "merged", "merged immediately", strategy, err=False)
             _sync_graph_merge_status("merged", pr_number)
         _run_post_merge_followups(pr_number, strategy, repo)
         return 0
@@ -583,7 +576,6 @@ def _do_merge(pr_number: int, auto_merge, invoker: str, repo: str) -> int:
                 "merged",
                 "merged server-side; local post-merge step skipped in worktree",
                 strategy,
-                invoker,
                 err=False,
             )
             _sync_graph_merge_status("merged", pr_number)
@@ -608,7 +600,6 @@ def _do_merge(pr_number: int, auto_merge, invoker: str, repo: str) -> int:
                 "merged",
                 "merged server-side (worktree fallback)",
                 strategy,
-                invoker,
                 err=False,
             )
             _sync_graph_merge_status("merged", pr_number)
@@ -623,6 +614,6 @@ def _do_merge(pr_number: int, auto_merge, invoker: str, repo: str) -> int:
         reason = "not mergeable (conflicts or base changed)"
     elif re.search(r"required review", output, re.IGNORECASE):
         reason = "required review pending"
-    _emit(pr_number, "failed", reason, strategy, invoker, err=True)
+    _emit(pr_number, "failed", reason, strategy, err=True)
     _sync_graph_merge_status("failed", pr_number)
     return 1
