@@ -108,6 +108,24 @@ def test_ac2_hp_merged_already_dispatched_is_noop():
     assert d.kind == "noop"
 
 
+def test_post_merge_verdict_is_ready_seam():
+    """Regression: the tick reads `post_merge_readiness(...).is_ready`; a real
+    verdict must expose that boolean (the missing property raised AttributeError
+    every tick and silently forced merge_ready=False)."""
+    from fno.config_cli import PostMergeVerdict
+
+    ready = PostMergeVerdict(status="ready", enabled=True, activity=True)
+    assert ready.is_ready is True
+    for status in ("unconfigured", "opted_out", "dormant", "error"):
+        assert PostMergeVerdict(status=status, enabled=True, activity=False).is_ready is False
+
+    # And a merged PR with a ready verdict reaches a `merge` decision through
+    # the boolean the tick actually reads.
+    obs = _obs(state="MERGED", merged=True)
+    d = decide(obs, watermark={}, reviewers=[], merge_ready=ready.is_ready, now_iso=NOW)
+    assert d.kind == "merge"
+
+
 # ---------------------------------------------------------------------------
 # AC2-FR: CLOSED (not merged) -> "park"
 # ---------------------------------------------------------------------------
