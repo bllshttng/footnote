@@ -361,7 +361,14 @@ def tick(
     )
     _reviewers_for = reviewers_for if reviewers_for is not None else (lambda _: [])
     _post_merge = post_merge_readiness_fn if post_merge_readiness_fn is not None else _noop_readiness
-    _discover = discover_fn if discover_fn is not None else _default_discover
+    # Bind the grace window into the default discover so a PR stays watchable
+    # across the PR-green -> merge window (test seams inject their own
+    # single-arg discover_fn and control candidates directly).
+    _discover = (
+        discover_fn
+        if discover_fn is not None
+        else (lambda entries: _default_discover(entries, now_iso=now_iso, max_age_days=max_age_days))
+    )
     _read_state = read_pr_state_fn if read_pr_state_fn is not None else _default_read_pr_state
     _max_retries = max_retries if max_retries is not None else _MAX_RETRIES
 
@@ -625,10 +632,15 @@ def _noop_readiness(repo_root: Any) -> Any:  # pragma: no cover
     return _V()
 
 
-def _default_discover(entries: list[dict[str, Any]]) -> list[Any]:  # pragma: no cover
+def _default_discover(
+    entries: list[dict[str, Any]],
+    *,
+    now_iso: Optional[str] = None,
+    max_age_days: int = 14,
+) -> list[Any]:  # pragma: no cover
     from fno.pr_watch._discover import discover_open_prs
 
-    return discover_open_prs(entries)
+    return discover_open_prs(entries, now_iso=now_iso, max_age_days=max_age_days)
 
 
 def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> Any:

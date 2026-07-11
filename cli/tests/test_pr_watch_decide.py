@@ -161,6 +161,54 @@ def test_boundary_node_with_completed_at_excluded():
     assert result == []
 
 
+def test_done_node_within_grace_window_discovered(tmp_path):
+    """AC1-EDGE / Wave 2: a node done-at-PR-green within max_age_days is still
+    watched (bridges the PR-green -> merge gap) when a clock is supplied."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    node = {
+        "id": "x-0010",
+        "pr_number": 11,
+        "pr_url": "https://github.com/owner/repo/pull/11",
+        "completed_at": "2026-06-13T18:02:00Z",  # 1 day before NOW
+        "cwd": str(repo_dir),
+    }
+    result = discover_open_prs([node], now_iso=NOW, max_age_days=14)
+    assert [c.node_id for c in result] == ["x-0010"]
+
+
+def test_done_node_outside_grace_window_excluded(tmp_path):
+    """AC1-EDGE / Wave 2: a node completed > max_age_days ago is dropped."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    node = {
+        "id": "x-0011",
+        "pr_number": 12,
+        "pr_url": "https://github.com/owner/repo/pull/12",
+        "completed_at": "2026-05-01T00:00:00Z",  # > 14 days before NOW
+        "cwd": str(repo_dir),
+    }
+    assert discover_open_prs([node], now_iso=NOW, max_age_days=14) == []
+
+
+def test_superseded_done_node_never_discovered(tmp_path):
+    """AC1-EDGE / Wave 2: a superseded node is excluded even inside the window."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    node = {
+        "id": "x-0012",
+        "pr_number": 13,
+        "pr_url": "https://github.com/owner/repo/pull/13",
+        "completed_at": "2026-06-13T00:00:00Z",
+        "superseded_by": "x-0099",
+        "cwd": str(repo_dir),
+    }
+    assert discover_open_prs([node], now_iso=NOW, max_age_days=14) == []
+
+
 def test_boundary_node_with_no_pr_number_excluded():
     """Boundary: node with no pr_number is excluded."""
     node = {

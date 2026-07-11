@@ -24,7 +24,6 @@ from fno.graph._reconcile import (
     PrMergeState,
     PrStateLiteral,
     ReconcileError,
-    node_is_open,
     node_pr_refs,
     query_pr_merge_state,
     repo_slug_from_url,
@@ -152,20 +151,51 @@ def _max_review_ts(reviews: list[dict], reviewers: list[str]) -> Optional[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def discover_open_prs(entries: list[dict]) -> list[PrCandidate]:
-    """Filter graph entries down to open-PR candidates worth polling.
+def _node_watchable(
+    node: dict, *, now_iso: Optional[str], max_age_days: int
+) -> bool:
+    """Whether the watcher should still poll this node's PR(s).
 
-    Returns one ``PrCandidate`` per (open-node, pr_number) pair. Nodes that
-    are done (``completed_at`` set) or superseded (``superseded_by`` set) are
-    excluded via ``node_is_open``. Nodes with no PR references are excluded
-    via ``node_pr_refs``. An empty graph returns an empty list.
+    A node is watchable when it is open, OR it is done-at-PR-green
+    (``completed_at`` set, ``superseded_by`` unset) and completed within the
+    ``max_age_days`` grace window. This bridges the PR-green -> merge gap:
+    ``/target`` finalize stamps ``completed_at`` at PR-green, hours before the
+    PR merges, so the merge would otherwise never be detected. A superseded
+    node is never watchable; a done node older than the window is dropped.
+    """
+    if node.get("superseded_by"):
+        return False
+    completed = node.get("completed_at")
+    if not completed:
+        return True  # open node
+    if not now_iso:
+        return False  # cannot age-gate without a clock; preserve old exclusion
+    from fno.pr_watch import _days_between
+
+    return _days_between(completed, now_iso) <= max_age_days
+
+
+def discover_open_prs(
+    entries: list[dict],
+    *,
+    now_iso: Optional[str] = None,
+    max_age_days: int = 14,
+) -> list[PrCandidate]:
+    """Filter graph entries down to PR candidates worth polling.
+
+    Returns one ``PrCandidate`` per (node, pr_number) pair. A node is included
+    when it is open, or done-at-PR-green within the ``max_age_days`` grace
+    window (see ``_node_watchable``) -- so a PR stays watched across the
+    PR-green -> merge window. Superseded nodes and done nodes older than the
+    window are excluded; nodes with no PR references are excluded via
+    ``node_pr_refs``. An empty graph returns an empty list.
 
     This function performs NO I/O beyond reading the in-memory ``entries``
     list, making it easy to test in isolation.
     """
     candidates: list[PrCandidate] = []
     for node in entries:
-        if not node_is_open(node):
+        if not _node_watchable(node, now_iso=now_iso, max_age_days=max_age_days):
             continue
         refs = node_pr_refs(node)
         if not refs:
