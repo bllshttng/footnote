@@ -159,14 +159,16 @@ def _codex_rollout_path(
     from fno.agents.discover import _codex_meta, default_codex_sessions_dir
 
     root = codex_sessions_dir or default_codex_sessions_dir()
+    dated: list[tuple[float, Path]] = []
     try:
-        rollouts = sorted(
-            root.rglob("rollout-*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        for path in root.rglob("rollout-*.jsonl"):
+            try:
+                dated.append((path.stat().st_mtime, path))
+            except OSError:
+                continue  # vanished mid-scan: skip this file, never abort the scan
     except OSError:
         return None
+    rollouts = [p for _mt, p in sorted(dated, key=lambda t: t[0], reverse=True)]
     for path in rollouts:
         meta = _codex_meta(path)
         if meta is not None and meta[0] == session_id:
@@ -277,6 +279,29 @@ def _status_events(
 # --------------------------------------------------------------------------
 
 
+def _read_complete_lines(fh) -> list[bytes]:
+    """Read whole (newline-terminated) lines from a binary handle at EOF.
+
+    A concurrent writer can leave a partial trailing line (bytes flushed before
+    the ``\\n``). Consuming it now, failing to parse, and reading the remainder
+    next poll would drop BOTH halves of one record. Instead we stop at the first
+    non-newline-terminated read and ``seek`` back over it, so the next poll
+    re-reads that record whole once the writer completes it (plan Concurrency
+    invariant: "next poll picks up the completed record").
+    """
+    lines: list[bytes] = []
+    while True:
+        pos = fh.tell()
+        line = fh.readline()
+        if not line:
+            break  # genuine EOF, nothing buffered
+        if not line.endswith(b"\n"):
+            fh.seek(pos)  # partial line: rewind, wait for the writer to finish it
+            break
+        lines.append(line)
+    return lines
+
+
 def _follow_records(
     path: Path,
     parse: Callable[[dict], Optional[Record]],
@@ -289,9 +314,11 @@ def _follow_records(
 ) -> None:
     """Stream new parsed records as the transcript grows.
 
-    Exits cleanly when the file rotates/disappears (peer ended + cleaned up) or,
-    after a stretch of no growth, when ``is_live()`` reports the peer gone
-    (AC1-FR: no infinite spin). KeyboardInterrupt is trapped by the caller.
+    Reads only complete lines (a mid-write partial waits for its completion,
+    never corrupts a record). Exits cleanly when the file rotates/disappears
+    (peer ended + cleaned up) or, after a stretch of no growth, when
+    ``is_live()`` reports the peer gone (AC1-FR: no infinite spin).
+    KeyboardInterrupt is trapped by the caller.
     """
     try:
         initial = path.stat()
@@ -299,16 +326,18 @@ def _follow_records(
         stderr.write(f"transcript disappeared: {path}\n")
         return
     idle = 0
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("rb") as fh:
         fh.seek(0, 2)  # end
         while True:
-            line = fh.readline()
-            if line:
+            new_lines = _read_complete_lines(fh)
+            if new_lines:
                 idle = 0
-                stripped = line.strip()
-                if stripped:
+                for raw in new_lines:
+                    stripped = raw.strip()
+                    if not stripped:
+                        continue
                     try:
-                        rec = json.loads(stripped)
+                        rec = json.loads(stripped.decode("utf-8"))
                     except (ValueError, UnicodeDecodeError):
                         continue
                     if isinstance(rec, dict):

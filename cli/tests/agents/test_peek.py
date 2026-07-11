@@ -15,6 +15,8 @@ from pathlib import Path
 from fno.agents.peek import (
     ObserveUnsupported,
     Record,
+    _codex_rollout_path,
+    _read_complete_lines,
     peek,
     recent_records,
 )
@@ -204,6 +206,36 @@ def test_peek_follow_exits_when_peer_not_live(tmp_path):
 # --------------------------------------------------------------------------
 # peek_status_stream — US4
 # --------------------------------------------------------------------------
+
+
+def test_follow_reads_only_complete_lines_no_partial_loss(tmp_path):
+    """Concurrency (gemini HIGH): a record split across two writes is emitted
+    whole on the next poll, not corrupted into two dropped fragments."""
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(b'{"a":1}\n{"b":2')  # one complete line + a partial
+    with p.open("rb") as fh:
+        assert _read_complete_lines(fh) == [b'{"a":1}\n']
+        pos = fh.tell()  # positioned at the start of the partial
+    with p.open("ab") as fh:
+        fh.write(b'}\n')  # writer completes the record
+    with p.open("rb") as fh:
+        fh.seek(pos)
+        assert _read_complete_lines(fh) == [b'{"b":2}\n']
+
+
+def test_codex_rollout_scan_skips_unstatable_file(tmp_path):
+    """Pessimist (gemini MEDIUM): a rollout that vanishes mid-scan is skipped,
+    it does not abort the whole scan and lose a resolvable session."""
+    day = tmp_path / "2025" / "10" / "16"
+    day.mkdir(parents=True)
+    good = day / "rollout-good.jsonl"
+    good.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "sid", "cwd": "/x"}}) + "\n",
+        encoding="utf-8",
+    )
+    # A dangling symlink named like a rollout: rglob yields it, stat() raises.
+    (day / "rollout-dangling.jsonl").symlink_to(day / "does-not-exist.jsonl")
+    assert _codex_rollout_path("sid", tmp_path) == good
 
 
 def test_peek_status_stream_dual_envelope(tmp_path):
