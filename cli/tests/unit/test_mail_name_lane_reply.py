@@ -186,3 +186,23 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     assert rep.to == "claude-deadbeef"  # sender's canonical handle
     assert rep.in_reply_to == msg  # bus correlation
     assert f'reply_to="{msg}"' in rep.body  # wrapped-body wire attr (never split)
+
+
+def test_ac1fr_offline_full_uuid_handle_keeps_wire_to_short(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    # Hardening: an offline sender whose from_ carries a full uuid
+    # (claude-<uuid>) still emits an 8-hex wire `to` attr, matching the resolved
+    # path and the codebase's short-id convention.
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    uuid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    msg = _seed_name_lane_inbound(
+        to="claude-meeeeeee", from_=f"claude-{uuid}", body="ping"
+    )
+    r = runner.invoke(
+        app, ["mail", "reply", "--to", msg, "--from", "web", "--body", "ack"]
+    )
+    assert r.exit_code == 0, r.output
+    rep = next(m for m in _bus_msgs() if m.in_reply_to == msg)
+    assert rep.to == f"claude-{uuid}"  # durable floor still to the full handle
+    assert 'to="9a063cd3"' in rep.body  # but the wire `to` attr is 8-hex

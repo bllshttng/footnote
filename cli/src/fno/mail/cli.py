@@ -401,7 +401,13 @@ def cmd_reply(
             # AC1-FR: the original sender is no longer live -> durable floor
             # addressed to their canonical handle (orig.from_), still drainable.
             prov = orig.from_.split("-", 1)[0] if "-" in orig.from_ else None
-            short = orig.from_.split("-", 1)[1] if "-" in orig.from_ else orig.from_
+            # Keep the wire `to` attr the 8-hex short even if from_ carries a full
+            # uuid (`claude-<uuid>`): take the first dash-segment after the harness.
+            short = (
+                orig.from_.split("-", 1)[1].split("-")[0]
+                if "-" in orig.from_
+                else orig.from_
+            )
             _name_lane_send(
                 body_text,
                 from_name=sender,
