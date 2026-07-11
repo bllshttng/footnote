@@ -39,6 +39,12 @@ case "$1 $2" in
     if [[ "${STUB_SPAWN_FAIL:-0}" == "1" ]]; then echo "spawn boom" >&2; exit 1; fi
     # short_id is programmable (default 8-hex) so the receipt-shape tests can feed
     # a daemon name-slug / empty / torn value. `-` (not `:-`) keeps an explicit "".
+    # STUB_MUX=1 emits a Python mux-pane receipt: short_id "" + identity fields +
+    # mux coords; the name/provider are taken from env so they can MATCH the launch
+    # (spawn.sh accepts a pane receipt only when every identity field matches).
+    if [[ "${STUB_MUX:-0}" == "1" ]]; then
+      echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"\",\"provider\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"live\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
+    fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"provider\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
     exit 0 ;;
@@ -157,6 +163,30 @@ ok 'bg 8-hex -> launched'          "$(field "$out")" 'launched'
 out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='spawngoa' \
   run --name spawn-bg2 --provider claude --message '/target x' --node "$NODE" --substrate bg)"
 ok 'bg slug -> failed'             "$(field "$out")" 'failed'
+
+# --- pane worker observability hint (PR #341 delta) --------------------------
+# A matched mux-pane receipt launches (main's verified-identity path), but a pane
+# row has no log_path -- the report must point at `fno mux attach <session>`, not
+# `fno agents logs <name>` (which returns "no logs"). short_id (=name) stays.
+
+# AC-HP: pane launch -> launched, pane coords + mux-attach hint, NOT `agents logs`.
+out="$(STUB_MUX=1 STUB_MUX_NAME=paneW STUB_MUX_PROVIDER=codex STUB_MUX_SESSION=main \
+  run --name paneW --provider codex --message 'Implement x')"
+ok  'pane launch -> launched'        "$(field "$out")" 'launched'
+has 'pane coords surfaced'           "$out" 'pane="main:1"'
+has 'pane hint is mux attach'        "$out" 'fno mux attach main'
+no  'pane hint is NOT agents logs'   "$out" 'fno agents logs'
+
+# AC-EDGE: a session name with a space -> ref quoted so it can't split the line.
+out="$(STUB_MUX=1 STUB_MUX_NAME=paneS STUB_MUX_PROVIDER=codex STUB_MUX_SESSION='work 1' \
+  run --name paneS --provider codex --message 'Implement x')"
+ok  'pane spaced session -> launched' "$(field "$out")" 'launched'
+has 'pane spaced ref quoted'          "$out" 'pane="work 1:1"'
+
+# AC-ERR: identity mismatch (receipt name != launch name) -> failed, no fake handle.
+out="$(STUB_MUX=1 STUB_MUX_NAME=someone-else STUB_MUX_PROVIDER=codex \
+  run --name paneM --provider codex --message 'Implement x')"
+ok 'pane identity mismatch -> failed' "$(field "$out")" 'failed'
 
 # --- summary -----------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

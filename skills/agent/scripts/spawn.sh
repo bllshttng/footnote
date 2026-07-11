@@ -19,6 +19,7 @@
 #
 # Outcome (one line on stdout; NEVER silent, NEVER a fabricated uuid):
 #   result=launched short_id=<hex> name=<n> hint="fno agents logs <n>" trace="fno agents trace <n>"
+#   result=launched short_id=<name> name=<n> pane="<session>:<pane_id>" hint="fno mux attach <session>"
 #   result=already-running name=<n> reason="<why>"
 #   result=failed reason="<real captured error>"
 # Exit: 0 launched | 0 already-running | 1 failed.
@@ -362,6 +363,7 @@ if [[ "$REPLY" -eq 1 ]]; then
   exit 0
 else
   short_id="$(printf '%s' "$spawn_out" | jq -r '.short_id // empty' 2>/dev/null)"
+  PANE_SESSION=""; PANE_ID=""   # set below only for a matched Python mux-pane receipt
   # Python-authored pane rows have no worker socket, so their genuine receipt
   # carries an empty short_id plus the addressable registry name and concrete
   # mux coordinates. Accept that handle only when every identity field matches
@@ -377,6 +379,9 @@ else
         if [[ "$receipt_name" == "$NAME" && "$receipt_provider" == "$PROVIDER" \
            && "$receipt_status" == "live" && -n "$mux_session" && -n "$pane_id" ]]; then
           short_id="$receipt_name"
+          # Remember the mux coordinates so the report points at `fno mux attach`:
+          # a pane row has no log_path, so the `fno agents logs` hint misses.
+          PANE_SESSION="$mux_session"; PANE_ID="$pane_id"
         fi
       fi
       ;;
@@ -418,7 +423,16 @@ else
   report_mode="exec"
   [[ "$PAYLOAD_MODE" == "handoff" ]] && report_mode="spawn"
   [[ "$PAYLOAD_MODE" == "discuss" ]] && report_mode="discuss"
-  printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
-    "$short_id" "$NAME" "$report_mode" "$wt_field" "$NAME" "$NAME"
+  if [[ -n "$PANE_SESSION" ]]; then
+    # Pane worker: observe via mux, not `fno agents logs` (a pane row has no
+    # log_path). Surface the coordinates and quote the ref (a session name may
+    # contain a space); shell-quote the session in the hint so `fno mux attach
+    # <session>` stays copy-pasteable.
+    printf 'result=launched short_id=%s name=%s mode=%s%s pane="%s:%s" hint="fno mux attach %s"\n' \
+      "$short_id" "$NAME" "$report_mode" "$wt_field" "$PANE_SESSION" "$PANE_ID" "$(printf '%q' "$PANE_SESSION")"
+  else
+    printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
+      "$short_id" "$NAME" "$report_mode" "$wt_field" "$NAME" "$NAME"
+  fi
 fi
 exit 0

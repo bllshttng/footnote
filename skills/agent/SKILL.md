@@ -434,6 +434,9 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
 
 - `result=launched ... mode=exec ...` -> a background worker launched. Quote the
   **real** `short_id` and give `fno agents logs <name>` + `fno agents trace <name>`.
+  When the line also carries `pane="<session>:<pane_id>"` (a mux-pane worker), it
+  has no log_path - relay the pane ref and give `fno mux attach <session>` (the
+  line's own `hint=`) instead of `fno agents logs`, which would miss.
 - `result=launched ... mode=spawn ...` -> an autonomously seeded handoff worker
   launched through the provider's spawn lane. The default Rust substrate is a
   drivable pane; this is not a one-shot reply or a refuse-to-stop loop.
