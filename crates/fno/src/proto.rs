@@ -457,6 +457,15 @@ pub struct AgentRow {
     /// keeps a v23 reader wire-tolerant (`None` -> no ordinal suffix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab: Option<TabId>,
+    /// (v24, x-0090) The cwd basename of an ORPHAN watch-only row (matched no
+    /// squad), rendered as a ` (basename)` suffix under the `~ elsewhere`
+    /// header so two same-named workers in different repos are distinguishable.
+    /// The client can't derive it (an orphan matches no squad, so its cwd is
+    /// not among the `Layout`'s squads), hence the wire carries it. `None` for
+    /// any pane-hosted or squad-matched row. `#[serde(default)]` keeps a v23
+    /// reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_base: Option<String>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1570,6 +1579,7 @@ mod tests {
                         attach_id: None,
                         external: false,
                         seen: false,
+                        cwd_base: None,
                         tab: None,
                     },
                     AgentRow {
@@ -1583,6 +1593,7 @@ mod tests {
                         attach_id: None,
                         external: false,
                         seen: false,
+                        cwd_base: None,
                         tab: None,
                     },
                 ],

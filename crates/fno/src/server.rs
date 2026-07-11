@@ -1871,6 +1871,7 @@ impl Core {
                                 external: a.external,
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
+                                cwd_base: None,
                             }
                         }
                         None => {
@@ -1894,6 +1895,7 @@ impl Core {
                                 external: false,
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
+                                cwd_base: None,
                             }
                         }
                     };
@@ -1928,6 +1930,7 @@ impl Core {
                         external: a.external,
                         tab: None,
                         seen: self.seen.contains(pane),
+                        cwd_base: None,
                     });
                 }
                 None => {
@@ -1940,6 +1943,16 @@ impl Core {
                         .iter()
                         .find(|s| s.owns_path(&a.cwd))
                         .map(|s| s.id);
+                    // An orphan (no squad) carries its cwd basename so the client
+                    // can disambiguate same-named workers under `~ elsewhere`
+                    // (AC2-UI); a squad-matched row needs none.
+                    let cwd_base = squad.is_none().then(|| {
+                        Path::new(&a.cwd)
+                            .file_name()
+                            .and_then(|b| b.to_str())
+                            .unwrap_or(a.cwd.as_str())
+                            .to_string()
+                    });
                     out.push(AgentRow {
                         squad,
                         name: a.name.clone(),
@@ -1954,6 +1967,7 @@ impl Core {
                         // A watch-only row has no pane to focus, so it is always
                         // unseen.
                         seen: false,
+                        cwd_base,
                     });
                 }
             }
