@@ -23,6 +23,16 @@ field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 # run <input> [extra argv...] -> echoes normalize.sh stdout
 run() { bash "$NORM" --input "$1" "${@:2}"; }
 
+# run_guarded caps a run at 5s when a timeout binary exists (coreutils `timeout`,
+# or `gtimeout` on macOS), so a regressed $#-guard that spins is caught, not hung.
+# Where neither exists (bare macOS), it runs unguarded - the status/value asserts
+# still prove correctness, and CI (Linux, has `timeout`) enforces the no-hang.
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+run_guarded() {
+  if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" 5 bash "$NORM" --input "$1" "${@:2}"
+  else bash "$NORM" --input "$1" "${@:2}"; fi
+}
+
 check_eq() {
   local label="$1" got="$2" want="$3"
   if [[ "$got" == "$want" ]]; then
@@ -194,6 +204,40 @@ check_eq   'inline --model in task text is error' "$(field "$out" status)" 'erro
 out="$(run 'model the user data carefully')"
 check_contains 'mid-task model stays in message' "$(field "$out" message)" 'model the user data carefully'
 check_eq   'mid-task model leaves model empty'  "$(field "$out" model)" ''
+
+# --- x-019d: permission-mode / role / timeout / fresh / here dash-flags -------
+# Front-half (permission-mode/fresh/here) + two-layer (role/timeout) flags that
+# normalize.sh must accept and round-trip to spawn.sh. Value flags use the
+# $#-guarded idiom, so a bare trailing flag must stay status=ok and not hang.
+out="$(run 'ab-99999999' --permission-mode bypassPermissions)"
+check_eq '--permission-mode -> permission_mode=bypassPermissions' "$(field "$out" permission_mode)" 'bypassPermissions'
+check_eq '--permission-mode -> status ok'   "$(field "$out" status)" 'ok'
+out="$(run 'ab-99999999' --role coordinate)"
+check_eq '--role coordinate -> role=coordinate' "$(field "$out" role)" 'coordinate'
+out="$(run 'ab-99999999' --timeout 900)"
+check_eq '--timeout 900 -> timeout=900'      "$(field "$out" timeout)" '900'
+out="$(run 'ab-99999999' --fresh)"
+check_eq '--fresh -> fresh=1'                "$(field "$out" fresh)" '1'
+out="$(run 'ab-99999999' --here)"
+check_eq '--here -> here=1'                   "$(field "$out" here)" '1'
+out="$(run 'ab-99999999' --in-place)"
+check_eq '--in-place -> here=1'               "$(field "$out" here)" '1'
+# bare trailing value flag (no value): $#-guard must keep status=ok, no hang,
+# empty value. `timeout 5` fails the assertion loudly if the parse spins.
+out="$(run_guarded 'ab-99999999' --permission-mode)"
+check_eq 'bare --permission-mode -> status ok'  "$(field "$out" status)" 'ok'
+check_eq 'bare --permission-mode -> empty value' "$(field "$out" permission_mode)" ''
+out="$(run_guarded 'ab-99999999' --role)"
+check_eq 'bare --role -> status ok'          "$(field "$out" status)" 'ok'
+out="$(run_guarded 'ab-99999999' --timeout)"
+check_eq 'bare --timeout -> status ok'       "$(field "$out" status)" 'ok'
+# inline in BUILD task text fails loud (defensive flag-vocabulary scan)
+out="$(run 'ab-99999999 --permission-mode bypassPermissions')"
+check_eq 'inline --permission-mode in task text is error' "$(field "$out" status)" 'error'
+out="$(run 'ab-99999999 --role coordinate')"
+check_eq 'inline --role in task text is error'  "$(field "$out" status)" 'error'
+out="$(run 'ab-99999999 --fresh the thing')"
+check_eq 'inline --fresh in task text is error' "$(field "$out" status)" 'error'
 
 # --- mid-task `as` stays task text -------------------------------------------
 out="$(run 'refactor the module as a plugin')"

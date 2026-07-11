@@ -58,6 +58,11 @@ PROJECT=""         # cross-project target: a registry project name/short_name to
 PROJECT_SET=0      # 1 = -P/--project was passed (empty value -> loud error, never
                    # a silent caller-cwd launch when a cross-project hop was asked)
 FORCE=0            # 1 = -f/--force: let --project win over a node's own cwd
+PERMISSION_MODE="" # x-dfa4: forwarded to spawn.sh --permission-mode (provider-native, CLI fails closed)
+ROLE=""            # x-d2fe: per-spawn model-routing role; forwarded to spawn.sh --role
+TIMEOUT=""         # per-spawn timeout seconds; forwarded to spawn.sh --timeout
+FRESH=0            # 1 = --fresh: resolve worker cwd to canonical main root
+HERE=0             # 1 = --here/--in-place: keep caller cwd (opt out of --fresh)
 
 emit_error() { printf 'status=error\nerror=%s\n' "$1"; exit 0; }
 
@@ -82,6 +87,11 @@ while [[ $# -gt 0 ]]; do
     -n|--name)        NAME="${2:-}"; NAME_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --provider)       PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --role)           ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --timeout)        TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --fresh)          FRESH=1; shift ;;
+    --here|--in-place) HERE=1; shift ;;
     -m|--allow-merge) ALLOW_MERGE=1; shift ;;
     -y|--yes)         YES=1; shift ;;
     -i|--interactive) MODE="interactive"; shift ;;
@@ -90,6 +100,9 @@ while [[ $# -gt 0 ]]; do
     --handoff)        HANDOFF_MODE=1; shift ;;
     --discuss)        DISCUSS_MODE=1; shift ;;
     -P|--project)     PROJECT="${2:-}"; PROJECT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    # -f here = override the node's own cwd with --project. NOT `fno agents spawn
+    # -F/--force` (spawn-gate bypass: max_live + RAM floor). Different semantics;
+    # do not plumb the CLI gate-bypass through as -f.
     -f|--force)       FORCE=1; shift ;;
     *) emit_error "unknown argument: $tok" ;;
   esac
@@ -248,7 +261,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--ask|-P|--project|-f|--force)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--ask|-P|--project|-f|--force|--permission-mode|--role|--timeout|--fresh|--here|--in-place)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
@@ -715,6 +728,14 @@ printf 'shape_hint=%s\n' "$shape_hint"
 printf 'name=%s\n' "$agent_name"
 printf 'provider=%s\n' "$provider"
 printf 'model=%s\n' "$MODEL"
+# Spawn flags the SKILL forwards to spawn.sh (permission-mode/role/timeout are
+# value flags, empty when unset; fresh/here are 0|1). Value validation lives in
+# `fno agents spawn` (fail-closed), not here - these pass through opaquely.
+printf 'permission_mode=%s\n' "$PERMISSION_MODE"
+printf 'role=%s\n' "$ROLE"
+printf 'timeout=%s\n' "$TIMEOUT"
+printf 'fresh=%s\n' "$FRESH"
+printf 'here=%s\n' "$HERE"
 printf 'mode=%s\n' "$MODE"
 # x-2c27: the spawn substrate (empty=pane default). The SKILL forwards a
 # non-empty value to `spawn.sh --substrate`; bg -> claude --bg thread,
