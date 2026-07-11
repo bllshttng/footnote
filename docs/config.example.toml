@@ -194,6 +194,14 @@ auto = true
 # Max turns in an agent-to-agent thread.
 turn_ceiling = 6
 
+[agents.defaults]
+# Default provider for bare `fno agents spawn` / `/agent spawn` (claude/codex/gemini/agy/opencode); an explicit -p flag wins, empty = unset (harness inference then claude). Validated at the spawn seam.
+provider = ""
+# Default model for bare spawns, forwarded as --model; an explicit -m flag wins, empty = unset (provider default). Passthrough (provider CLIs own model names).
+model = ""
+# Default reasoning effort for bare spawns (minimal|low|medium|high|xhigh|max); an explicit --effort wins, empty = unset. Config-sourced effort degrades open on providers with no effort surface (gemini/agy).
+effort = ""
+
 [agents.codex]
 # Use full-yolo (drop sandbox) for headless codex workers.
 headless_yolo = false

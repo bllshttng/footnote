@@ -43,3 +43,24 @@ def test_worker_qos_unknown_coerces_to_utility():
     assert AgentsBlock(worker_qos="turbo").worker_qos == "utility"
     assert AgentsBlock(worker_qos=None).worker_qos == "utility"
     assert AgentsBlock(worker_qos="OFF").worker_qos == "off"
+
+
+def test_spawn_defaults_unset_by_default():
+    # US7: empty string = unset (the spawn_permission_mode convention).
+    d = AgentsBlock().defaults
+    assert d.provider == ""
+    assert d.model == ""
+    assert d.effort == ""
+
+
+def test_spawn_defaults_values_pass_through():
+    b = AgentsBlock(defaults={"provider": "codex", "model": "gpt-5.6-sol", "effort": "high"})
+    assert b.defaults.provider == "codex"
+    assert b.defaults.model == "gpt-5.6-sol"
+    assert b.defaults.effort == "high"
+
+
+def test_spawn_defaults_non_mapping_degrades_to_unset():
+    # A scalar/list/null `agents.defaults:` must not raise out of the load.
+    for bad in ("banana", ["x"], None, 3):
+        assert AgentsBlock(defaults=bad).defaults.provider == ""

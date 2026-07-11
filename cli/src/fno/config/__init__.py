@@ -1041,6 +1041,33 @@ class AgentProviderBlock(BaseModel):
     headless_yolo: bool = False
 
 
+class SpawnDefaultsBlock(BaseModel):
+    """Default spawn routing (nested under 'config.agents.defaults').
+
+    The bottom-most operator rung of the spawn precedence chain: an explicit
+    CLI flag > these defaults > the built-in (provider: harness-inference then
+    claude). Every bare `fno agents spawn` / `/agent spawn` inherits any field
+    set here, injected field-by-field at the Python dispatch seam. Empty string
+    = unset (the `spawn_permission_mode` convention); an unset field falls
+    through to the built-in exactly as today.
+
+    Scope is the operator-initiated spawn surface only. Autonomous dispatch
+    (`/target`, think dispatch, backlog advance) computes its own routing and
+    reaches the seam as explicit flags, so setting `provider` here cannot
+    silently reroute the fleet.
+
+    No value validation here: config stays a leaf module (x-7fdd, no import
+    from agents/providers at load time). Provider is checked against the known
+    set at the spawn seam; effort against the per-provider surface.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    provider: str = ""
+    model: str = ""
+    effort: str = ""
+
+
 class AgentsBlock(BaseModel):
     """Agent-runtime settings (nested under 'config.agents').
 
@@ -1066,6 +1093,7 @@ class AgentsBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     a2a: A2aBlock = Field(default_factory=A2aBlock)
+    defaults: SpawnDefaultsBlock = Field(default_factory=SpawnDefaultsBlock)
     confirm: str = "auto"
     # Dead-row GC grace window in SECONDS (x-b1aa). A finished agent-view row
     # stays visible this long after the daemon GC first observes its process gone,
@@ -1170,6 +1198,19 @@ class AgentsBlock(BaseModel):
         takes effect. Mirrors ``ConfigBlock._coerce_auto_continue``.
         """
         if isinstance(v, (dict, AgentProviderBlock)):
+            return v
+        return {}
+
+    @field_validator("defaults", mode="before")
+    @classmethod
+    def _coerce_defaults_block(cls, v: object) -> object:
+        """Fail-safe: a non-mapping `agents.defaults` degrades to empty (unset).
+
+        `config.agents.defaults: banana` (a scalar/list/null) cannot build the
+        block; fall back to all-unset rather than raising out of the whole
+        settings load, matching `_coerce_provider_block`.
+        """
+        if isinstance(v, (dict, SpawnDefaultsBlock)):
             return v
         return {}
 
