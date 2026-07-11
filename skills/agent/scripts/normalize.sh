@@ -44,6 +44,8 @@ PROVIDER=""
 MODEL=""           # exact model name forwarded to `fno agents spawn --model`
                    # (each provider's own --model). Dashless: `model <name>`.
                    # No short flag: `-m` is taken by --allow-merge.
+EFFORT=""          # reasoning effort forwarded to `fno agents spawn --effort`.
+                   # Dashless: `effort <value>`; the CLI validates per provider.
 ALLOW_MERGE=0
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
@@ -87,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     -n|--name)        NAME="${2:-}"; NAME_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --provider)       PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --effort)         EFFORT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -r|--role)        ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -t|--timeout)     TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
@@ -177,6 +180,11 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       _end=$(( _i - 1 ))
       continue
     fi
+    if (( _i >= 1 )) && [[ "$(printf '%s' "${_toks[$((_i-1))]}" | tr '[:upper:]' '[:lower:]')" == "effort" ]]; then
+      [[ -z "$EFFORT" ]] && EFFORT="$_t"
+      _end=$(( _i - 1 ))
+      continue
+    fi
     _lt=$(printf '%s' "$_t" | tr '[:upper:]' '[:lower:]')
     # A provider bareword is any non-claude token in VALID_PROVIDERS (which
     # mirrors the Rust KNOWN_PROVIDERS source of truth), so a newly-supported
@@ -194,6 +202,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       bg|headless)         [[ -z "$SUBSTRATE" ]] && SUBSTRATE="$_lt"; _end=$_i ;;
       as)                  emit_error "'as' is a name keyword with no name after it; write 'as <name>' or drop it" ;;
       model)               emit_error "'model' is a keyword with no name after it; write 'model <name>' or drop it" ;;
+      effort)              emit_error "'effort' is a keyword with no value after it; write 'effort <value>' or drop it" ;;
       *)                   break ;;  # task-text boundary (the run ends here)
     esac
   done
@@ -261,7 +270,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
@@ -736,6 +745,7 @@ printf 'role=%s\n' "$ROLE"
 printf 'timeout=%s\n' "$TIMEOUT"
 printf 'fresh=%s\n' "$FRESH"
 printf 'here=%s\n' "$HERE"
+printf 'effort=%s\n' "$EFFORT"
 printf 'mode=%s\n' "$MODE"
 # x-2c27: the spawn substrate (empty=pane default). The SKILL forwards a
 # non-empty value to `spawn.sh --substrate`; bg -> claude --bg thread,
