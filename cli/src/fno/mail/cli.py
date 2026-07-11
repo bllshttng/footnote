@@ -379,6 +379,43 @@ def cmd_reply(
     sender = _resolve_from(from_project)
     body_text = _read_body(body, body_file)
 
+    # Name-lane routing (x-8045): look the --to msg-id up on the durable bus and
+    # branch on its addressing. A name-lane message is answered by sending back to
+    # its original sender (no re-typed handle) with the correlation threaded via
+    # in_reply_to. Anything else falls through to the thread-store reply below.
+    from fno.bus.log import iter_messages
+
+    orig = next((m for m in iter_messages() if m.id == to_msg), None)
+    if orig is not None and orig.to_kind == "name":
+        from fno.agents import discover as discover_mod
+
+        resolved, _ = discover_mod.resolve_or_suggest(orig.from_)
+        if resolved is not None:
+            _name_lane_send(
+                body_text, from_name=sender, resolved=resolved, reply_to=to_msg
+            )
+        else:
+            # AC1-FR: the original sender is no longer live -> durable floor
+            # addressed to their canonical handle (orig.from_), still drainable.
+            prov = orig.from_.split("-", 1)[0] if "-" in orig.from_ else None
+            short = orig.from_.split("-", 1)[1] if "-" in orig.from_ else orig.from_
+            _name_lane_send(
+                body_text,
+                from_name=sender,
+                resolved=None,
+                recipient=orig.from_,
+                provider=prov,
+                to_short=short,
+                reply_to=to_msg,
+            )
+        return
+    if orig is None:
+        # AC1-ERR / LD4: the name lane cannot invent a target from nothing. Every
+        # real message is durable-first (on the bus), so an id absent from the bus
+        # is genuinely unknown -- hard error, never a silent self-note.
+        print(f"msg-id {to_msg!r} not in the bus log", file=sys.stderr)
+        raise typer.Exit(code=1)
+
     own_handle = find_thread_by_msg_id(sender, to_msg)
     if own_handle is None:
         typer.echo(
