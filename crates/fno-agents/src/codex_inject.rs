@@ -143,14 +143,9 @@ pub fn parse_loaded_list_response(
     }
     let next_cursor = match result.get("nextCursor") {
         None | Some(serde_json::Value::Null) => None,
-        Some(value) => Some(
-            value
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or("rpc-error")?
-                .to_string(),
-        ),
+        Some(value) => Some(value.as_str().ok_or("rpc-error")?.to_string()),
     };
+    let next_cursor = next_cursor.filter(|cursor| !cursor.is_empty());
     Ok((ids, next_cursor))
 }
 
@@ -424,6 +419,15 @@ mod tests {
         assert_eq!(
             parse_loaded_list_response(r#"{"id":2,"result":{"data":[1]}}"#),
             Err("rpc-error")
+        );
+    }
+
+    #[test]
+    fn loaded_list_parser_treats_empty_cursor_as_terminal() {
+        let raw = r#"{"id":2,"result":{"data":["a"],"nextCursor":""}}"#;
+        assert_eq!(
+            parse_loaded_list_response(raw),
+            Ok((vec!["a".to_string()], None))
         );
     }
 
