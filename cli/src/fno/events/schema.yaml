@@ -118,6 +118,43 @@ event_types:
           description: "Emitting session id (optional; observability)."
     consumers: [fno-agents loop-check]
 
+  - name: review_finding
+    description: "An operator annotated a node's work (via `fno annotate add` / `fno mux block annotate`). loop-check treats an open finding as a blocking review-gate input: terminal-allow is denied while any review_finding for the node has no matching review_finding_resolved. Node-scoped and NOT head-pinned - only an explicit resolve clears it, a new commit does not. The recorded text is the original; only the mail live-inject frame is x-9ed6-defanged."
+    sources: [observer]
+    data:
+      required: [finding_id, node, text]
+      properties:
+        finding_id:
+          type: string
+          description: "Collision-safe short id minted at emit, never operator-supplied. loop-check quotes it in the deny reason and `fno annotate resolve` clears it."
+        node:
+          type: string
+          description: "The backlog node the finding is scoped to. loop-check matches the session's node against this."
+        text:
+          type: string
+          description: "The operator annotation (original, un-defanged)."
+        block_cmd:
+          type: string
+          description: "The annotated block's command line, when captured via mux (optional)."
+        block_excerpt:
+          type: string
+          description: "A capped excerpt of the annotated block output (optional)."
+    consumers: [fno-agents loop-check]
+
+  - name: review_finding_resolved
+    description: "A review_finding was explicitly resolved (by operator or self-resolving worker via `fno annotate resolve`). Clears the matching finding for the loop-check gate. Idempotent: a second resolve of the same id is a warning no-op and emits nothing."
+    sources: [observer]
+    data:
+      required: [finding_id]
+      properties:
+        finding_id:
+          type: string
+          description: "The review_finding id being resolved."
+        node:
+          type: string
+          description: "The finding's node (echoed for observability; optional)."
+    consumers: [fno-agents loop-check]
+
   - name: mission_started
     description: "Megatron mission entered RUNNING state."
     sources: [megatron]
