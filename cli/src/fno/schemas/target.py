@@ -162,8 +162,11 @@ class TargetState(BaseModel):
     # values. Previously accepted via extra="allow"; now a modeled field.
     provenance_nonce: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{16}$")
 
-    # Session tracking. fno_id is the canonical target-minted id; session_id is
-    # the legacy mirror kept for one release (back-filled by _backfill_fno_id).
+    # fno_id is the canonical target-minted run id. session_id is a one-release
+    # legacy MIRROR of fno_id (same value, back-filled by _backfill_fno_id),
+    # kept only so pre-rename readers don't break; it is removed next release.
+    # It is NOT the harness session - that lives in claude_session_id /
+    # codex_thread_id (extra fields). Do not read session_id as "the session".
     fno_id: Optional[SessionId] = None
     session_id: Optional[SessionId] = None
     sessions: List[str] = Field(default_factory=list)

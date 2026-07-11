@@ -814,6 +814,8 @@ if [[ ! -f "$STATE_FILE" ]]; then
 
   cat > "$local_temp" << EOF
 ---
+# fno_id = target-minted run id (canonical). session_id mirrors it for one
+# release and is NOT the harness session (that is claude_session_id/codex_thread_id).
 fno_id: $local_session_id
 session_id: $local_session_id
 created_at: $TIMESTAMP
