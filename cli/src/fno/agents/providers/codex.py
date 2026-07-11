@@ -621,6 +621,7 @@ def create(
     agent_self: Optional[str] = None,
     headless_yolo: Optional[bool] = None,
     role: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> CodexResult:
     """Spawn ``codex exec --json --cd <cwd> --skip-git-repo-check ...``.
 
@@ -651,6 +652,8 @@ def create(
         if codex_route is not None:
             config_args = codex_route.config_args
             route_env = codex_route.env
+    if reasoning_effort:
+        config_args += ["-c", f"model_reasoning_effort={reasoning_effort}"]
     # Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     # flag and follows it. See `approval_flag` / `sandbox_flag`.
     argv = [

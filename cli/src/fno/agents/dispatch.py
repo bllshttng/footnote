@@ -752,6 +752,7 @@ def _codex_create_path(
     timeout_sec: float,
     lock_handle,
     role: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -780,6 +781,7 @@ def _codex_create_path(
             timeout=timeout_sec,
             agent_self=name,
             role=role,
+            reasoning_effort=effort,
         )
     except codex_mod.NoSessionIdError as exc:
         events.emit(
@@ -1907,6 +1909,7 @@ def dispatch_spawn(
                         ),
                         lock_handle=lock_handle,
                         role=role,
+                        effort=effort,
                     )
                 else:
                     # gemini --once
