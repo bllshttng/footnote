@@ -904,44 +904,12 @@ PYEOF
   fi
 
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
-    # Does THIS session own the node? Set by either claim layer; graph_node_id
-    # is decided once from it below, so a transient legacy failure no longer
-    # nulls a node the modern `fno claim` won.
+    # Does THIS session own the node? Set by `fno claim` below, the sole liveness
+    # authority (x-4af4). The TTL claim runs FIRST and the graph lock is stamped
+    # only on its success, so a legitimate STALE steal never leaves a dead prior
+    # owner on the node (the stale-locked-by-leak this reorder fixes).
     _NODE_OWNED=0
-    if [[ -f "$_GRAPH_FILE" ]]; then
-      _CURRENT_CLAIM=$(python3 - "$_GRAPH_FILE" "$_NODE_ID" <<'PYEOF' 2>/dev/null || echo ""
-import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-entries = data.get("entries", []) if isinstance(data, dict) else data
-for entry in entries:
-    if entry.get("id") == sys.argv[2]:
-        print(entry.get("session_id") or "")
-        break
-PYEOF
-)
-      if [[ -z "$_CURRENT_CLAIM" ]]; then
-        _ROADMAP_TASKS="${REPO_ROOT}/scripts/roadmap-tasks.py"
-        _CLAIM_LOG="$STATE_DIR/.init-claim.log"
-        if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" \
-            --locked-by "$claim_owner_id" 2>"$_CLAIM_LOG" >/dev/null; then
-          _NODE_OWNED=1
-          rm -f "$_CLAIM_LOG"
-          echo "target: graph node $_NODE_ID claimed for session $claim_owner_id" >&2
-        else
-          # Transient legacy failure (usually the SessionStart reconcile holding
-          # the graph flock): best-effort only; `fno claim` below is authoritative.
-          # A non-fatal NOTE (not a warning) so an agent does not misread it as a
-          # claim failure and manually claim (a manual claim from a shell goes stale).
-          echo "target: note: legacy graph-claim skipped (non-fatal; see $_CLAIM_LOG). The authoritative 'fno claim' runs next - do NOT claim manually." >&2
-        fi
-      else
-        echo "graph_node_claim_refused: $_CURRENT_CLAIM" >> "$STATE_FILE"
-        echo "target: WARNING: graph node $_NODE_ID already claimed by $_CURRENT_CLAIM - proceeding without claim" >&2
-      fi
-    fi
+    _ROADMAP_TASKS="${REPO_ROOT}/scripts/roadmap-tasks.py"
 
     # fno claim acquire (global TTL lock; authoritative mutex)
     if command -v fno >/dev/null 2>&1; then
@@ -1049,10 +1017,26 @@ PYEOF
           else
             touch "$STATE_DIR/.target-cancelled"
             echo "target_claim_blocked_reason: claim_held_by_other" >> "$STATE_FILE"
+            echo "graph_node_claim_refused: held_by_other" >> "$STATE_FILE"
           fi
         else
           echo "target_claim_blocked_reason: acquire_error_rc_${_acq_rc}" >> "$STATE_FILE"
         fi
+      fi
+    fi
+
+    # Graph lock stamp on claim success: unconditional (overwriting a stale prior
+    # owner is the point), retried once. Non-fatal - the TTL claim is
+    # authoritative and the graph field is display/routing metadata, so a
+    # lock-contended graph.json must not abort init (AC9-FR).
+    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
+      _STAMP_LOG="$STATE_DIR/.init-claim.log"
+      if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" 2>"$_STAMP_LOG" >/dev/null \
+         || python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" 2>"$_STAMP_LOG" >/dev/null; then
+        rm -f "$_STAMP_LOG"
+        echo "target: graph node $_NODE_ID lock stamped for $claim_owner_id" >&2
+      else
+        echo "target: WARNING: graph locked_by stamp failed (non-fatal; TTL claim authoritative; see $_STAMP_LOG)" >&2
       fi
     fi
     # graph_node_id written exactly once: the node id when a claim layer won and
