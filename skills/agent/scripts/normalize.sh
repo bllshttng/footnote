@@ -46,6 +46,7 @@ MODEL=""           # exact model name forwarded to `fno agents spawn --model`
                    # No short flag: `-m` is taken by --allow-merge.
 EFFORT=""          # reasoning effort forwarded to `fno agents spawn --effort`.
                    # Dashless: `effort <value>`; the CLI validates per provider.
+EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
 ALLOW_MERGE=0
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
@@ -89,7 +90,7 @@ while [[ $# -gt 0 ]]; do
     -n|--name)        NAME="${2:-}"; NAME_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --provider)       PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --effort)         EFFORT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --effort)         EFFORT="${2:-}"; EFFORT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -r|--role)        ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -t|--timeout)     TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
@@ -432,6 +433,9 @@ print("ok\t%s\t%s" % (canon, path))' "$_proj" 2>/dev/null || { printf 'error\tpr
 # than silently launch in the caller's cwd (mirrors the empty --name guard below).
 if [[ "$PROJECT_SET" -eq 1 && -z "$PROJECT" ]]; then
   emit_error "-P/--project requires a project name (got an empty value)"
+fi
+if [[ "$EFFORT_SET" -eq 1 && -z "$EFFORT" ]]; then
+  emit_error "--effort requires a value (got an empty value)"
 fi
 if [[ -n "$PROJECT" ]]; then
   # A node reference (resolved ab-id, slug candidate, or `next` pointer) carries

@@ -252,6 +252,10 @@ out="$(run 'ab-99999999 effort medium' --effort low)"
 check_eq   '--effort wins over dashless effort'  "$(field "$out" effort)" 'low'
 out="$(run 'ab-44444444 effort')"
 check_eq   'dangling effort is error'            "$(field "$out" status)" 'error'
+out="$(run 'ab-44444444' --effort)"
+check_eq   'bare --effort is error'               "$(field "$out" status)" 'error'
+out="$(run 'ab-44444444' --effort '')"
+check_eq   'empty --effort is error'              "$(field "$out" status)" 'error'
 out="$(run 'tune effort carefully for this worker')"
 check_contains 'mid-task effort stays in message' "$(field "$out" message)" 'tune effort carefully for this worker'
 check_eq   'mid-task effort leaves effort empty' "$(field "$out" effort)" ''

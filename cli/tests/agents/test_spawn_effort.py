@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -62,6 +66,70 @@ def test_opencode_variant_write_and_corrupt_degrade(tmp_path, capsys):
     assert "warning" in capsys.readouterr().err.lower()
 
 
+def test_opencode_variant_serializes_full_read_modify_write(tmp_path, monkeypatch):
+    from fno.agents import mux_spawn
+
+    state = tmp_path / "model.json"
+    state.write_text('{"variant":{}}')
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+    real_loads = json.loads
+
+    def slow_loads(value):
+        nonlocal active, max_active
+        with guard:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        try:
+            return real_loads(value)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(mux_spawn.json, "loads", slow_loads)
+    threads = [
+        threading.Thread(
+            target=apply_opencode_variant,
+            args=(f"provider/model-{i}", "high"),
+            kwargs={"state_path": state},
+        )
+        for i in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert max_active == 1
+    assert json.loads(state.read_text())["variant"] == {
+        "provider/model-0": "high",
+        "provider/model-1": "high",
+    }
+
+
+def test_opencode_variant_is_not_written_before_collision_check(tmp_path, monkeypatch):
+    from fno.agents import mux_spawn
+
+    applied = []
+
+    @contextmanager
+    def unlocked(*args, **kwargs):
+        yield
+
+    monkeypatch.setattr(mux_spawn, "hold_agent_lock", unlocked)
+    monkeypatch.setattr(mux_spawn, "load_registry", lambda: [SimpleNamespace(name="taken")])
+    monkeypatch.setattr(mux_spawn.paths, "agents_registry_path", lambda: tmp_path / "registry.json")
+    monkeypatch.setattr(mux_spawn, "apply_opencode_variant", lambda *args, **kwargs: applied.append(args))
+
+    with pytest.raises(DispatchAskError):
+        mux_spawn.dispatch_spawn_pane(
+            "taken", "hi", "opencode", tmp_path, effort="high"
+        )
+    assert applied == []
+
+
 def test_claude_python_build_argv_threads_effort():
     from fno.agents.providers.claude import _build_argv
 
@@ -74,3 +142,25 @@ def test_claude_python_build_argv_threads_effort():
         "high",
         "hi",
     ]
+
+
+def test_codex_python_create_threads_effort(monkeypatch, tmp_path):
+    from fno.agents.providers import codex
+
+    captured = {}
+
+    def fake_run_codex(**kwargs):
+        captured.update(kwargs)
+        return codex.CodexResult(0, "session", "ok", 1)
+
+    monkeypatch.setattr(codex, "_run_codex", fake_run_codex)
+    codex.create(
+        cwd=tmp_path,
+        prompt="hi",
+        from_name="parent",
+        yolo=False,
+        output_path=tmp_path / "out.jsonl",
+        reasoning_effort="high",
+    )
+    argv = captured["argv"]
+    assert argv[1:3] == ["-c", "model_reasoning_effort=high"]

@@ -22,6 +22,7 @@ pane exists).
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -224,18 +225,22 @@ def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path
     """Best-effort atomic update of opencode's persisted model variant."""
     path = state_path or Path.home() / ".local" / "state" / "opencode" / "model.json"
     try:
-        data = json.loads(path.read_text()) if path.exists() else {}
-        variants = data.setdefault("variant", {})
-        if not isinstance(variants, dict):
-            raise ValueError("variant is not an object")
-        variants[model] = effort
         path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
-            json.dump(data, tmp, separators=(",", ":"))
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, path)
+        locks_dir = path.parent / "locks"
+        locks_dir.mkdir(parents=True, exist_ok=True)
+        with (locks_dir / "model.json.lock").open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            data = json.loads(path.read_text()) if path.exists() else {}
+            variants = data.setdefault("variant", {})
+            if not isinstance(variants, dict):
+                raise ValueError("variant is not an object")
+            variants[model] = effort
+            with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
+                json.dump(data, tmp, separators=(",", ":"))
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_path = Path(tmp.name)
+            os.replace(tmp_path, path)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         print(f"warning: could not set opencode effort variant: {exc}", file=sys.stderr)
 
@@ -526,8 +531,6 @@ def dispatch_spawn_pane(
     argv = build_pane_argv(
         provider, message, cwd, yolo, session_uuid, model, permission_mode, effort
     )
-    if provider == "opencode" and effort:
-        apply_opencode_variant(model or _OPENCODE_DEFAULT_MODEL, effort)
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "
@@ -559,6 +562,8 @@ def dispatch_spawn_pane(
                 f"use 'fno agents rm {name}' first or pick another name",
                 exit_code=2,
             )
+        if provider == "opencode" and effort:
+            apply_opencode_variant(model or _OPENCODE_DEFAULT_MODEL, effort)
 
         # --claim marks the pane writer-claim eligible (agent panes only);
         # mail's live inject holds it around each burst.
