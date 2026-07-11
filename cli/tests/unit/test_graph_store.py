@@ -38,6 +38,42 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
 # -- tests --
 
 
+def test_locked_by_normalized_from_legacy_session_id():
+    """US3: a pre-rename node (session_id only) gets locked_by on load, mirrored."""
+    e = {"id": "ab-11112222", "session_id": "sess-old", "plan_path": "p.md"}
+    out = _apply_graph_defaults([e])[0]
+    assert out["locked_by"] == "sess-old"
+    assert out["session_id"] == "sess-old"  # mirror preserved
+
+
+def test_locked_by_wins_when_both_present_and_differ():
+    """US3: locked_by is canonical; a divergent session_id is overwritten."""
+    e = {"id": "ab-11112223", "locked_by": "new-owner", "session_id": "stale"}
+    out = _apply_graph_defaults([e])[0]
+    assert out["locked_by"] == "new-owner"
+    assert out["session_id"] == "new-owner"
+
+
+def test_ac7_edge_mixed_version_round_trip(tmp_path):
+    """AC7-EDGE: legacy node (session_id only) round-trips through a mutation
+    with locked_by == original session_id and status still 'claimed'."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    p = _make_graph(tmp_path, [{
+        "id": "ab-7edge001", "session_id": "worker-7", "claimed_at": now,
+        "plan_path": "p.md",
+    }])
+    # Mutate an unrelated field.
+    def mutator(entries):
+        entries[0]["details"] = "touched"
+        return entries
+    locked_mutate_graph(p, mutator)
+    saved = json.loads(p.read_text())["entries"][0]
+    assert saved["locked_by"] == "worker-7"
+    assert saved["session_id"] == "worker-7"  # mirror written
+    assert saved["_status"] == "claimed"
+
+
 def test_ac1_hp_lock_path_is_tmp_abilities_graph_lock():
     """AC3-EDGE: Lock file path is /tmp/abilities-graph.lock."""
     assert str(GRAPH_LOCK_FILE) == "/tmp/abilities-graph.lock"

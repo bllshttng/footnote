@@ -54,7 +54,7 @@ def _derive_status(data: dict) -> str:
         return "deferred"
     if data.get("blocked_by"):
         return "blocked"
-    if data.get("session_id"):
+    if data.get("locked_by"):
         return "claimed"
     if not data.get("plan_path"):
         return "idea"
@@ -87,6 +87,12 @@ class Entry(BaseModel):
     rank: Optional[float] = None
     domain: str = "code"
     blocked_by: list[str] = Field(default_factory=list)
+    # Lock owner. locked_by is canonical; session_id is the one-release mirror
+    # (_normalize_lock_fields keeps them equal). locked_by_harness* record the
+    # holder's provider + harness-session UUID (US6).
+    locked_by: Optional[str] = None
+    locked_by_harness: Optional[str] = None
+    locked_by_harness_session: Optional[str] = None
     session_id: Optional[str] = None
     claimed_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -246,7 +252,7 @@ class Entry(BaseModel):
               (single-entry cannot verify sibling completed_at -- just
                a non-empty list is the best approximation here;
                cascade-wide open-blocker check stays in recompute_statuses)
-          session_id set      -> "claimed"
+          locked_by set       -> "claimed"
           no plan_path        -> "idea"
           else                -> "ready"
         """
@@ -255,6 +261,8 @@ class Entry(BaseModel):
             "superseded_by": self.superseded_by,
             "deferred_at": self.deferred_at,
             "blocked_by": self.blocked_by,
-            "session_id": self.session_id,
+            # locked_by-first; fall back to the legacy session_id mirror in case
+            # this Entry was built from a pre-rename node not yet normalized.
+            "locked_by": self.locked_by or self.session_id,
             "plan_path": self.plan_path,
         })
