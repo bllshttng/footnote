@@ -604,6 +604,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 12: config-agnostic id shape (x-8af8): a configured prefix + non-default
+# hex width resolves + dispatches. The old hard-coded `ab-[0-9a-f]{8}` grep
+# silently never matched these, so `x-` nodes never autolaunched (US6).
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Test 12: configured-prefix node id (x-8af8) resolves + dispatches ---"
+_SAVED_NODE_ID="$NODE_ID"
+NODE_ID="x-8af8"                       # configured prefix, 4-hex width (not ab-<8hex>)
+SBX12="$(make_autolaunch_sandbox t12 graph_node_id)"
+LOG12="$SBX12/call-log"
+OUT12="$(run_autolaunch "$SBX12" "$SBX12/plan.md")"
+check_contains "T12: auto-launched line present" "auto-launched" "$OUT12"
+check_contains "T12: resolved the x- prefixed node" "$NODE_ID" "$OUT12"
+check_log_present "T12: dispatch-node.sh invoked with x- node" "$LOG12" "dispatch-node.sh $NODE_ID"
+# Also cover the claims: tier for the same shape.
+SBX12B="$(make_autolaunch_sandbox t12b claims)"
+OUT12B="$(run_autolaunch "$SBX12B" "$SBX12B/plan.md")"
+check_contains "T12b: claims: tier resolves x- node" "$NODE_ID" "$OUT12B"
+NODE_ID="$_SAVED_NODE_ID"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

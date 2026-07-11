@@ -75,12 +75,18 @@ _FRONTMATTER="$(awk '
   /^---[[:space:]]*$/ { fence++; if (fence==2) exit; next }
   fence==1 { print }
 ' "$PLAN_PATH" 2>/dev/null)"
+# The accepted id shape is the config-free NODE_ID_BODY liberal format check
+# (fno.graph._constants: <prefix><hex>, prefix a 1-8 char letter-led token, hex
+# 4-8 wide). It matches a configured `x-8af8` and the legacy `ab-<8hex>` alike -
+# and, unlike a single config-derived prefix, still accepts legacy `ab-` nodes in
+# a repo mid-migration. Hard-coding `ab-<8hex>` silently never launched `x-` nodes.
+_NODE_ID_RE='[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}'
 node="$(printf '%s\n' "$_FRONTMATTER" \
-        | grep -m1 -E '^claims:[[:space:]]+ab-[0-9a-f]{8}' \
+        | grep -m1 -E "^claims:[[:space:]]+${_NODE_ID_RE}" \
         | sed -E 's/^claims:[[:space:]]+//; s/[[:space:]].*$//; s/\r$//')"
 if [[ -z "$node" ]]; then
   node="$(printf '%s\n' "$_FRONTMATTER" \
-          | grep -m1 -E '^graph_node_id:[[:space:]]+ab-[0-9a-f]{8}' \
+          | grep -m1 -E "^graph_node_id:[[:space:]]+${_NODE_ID_RE}" \
           | sed -E 's/^graph_node_id:[[:space:]]+//; s/[[:space:]].*$//; s/\r$//')"
 fi
 unset _FRONTMATTER
