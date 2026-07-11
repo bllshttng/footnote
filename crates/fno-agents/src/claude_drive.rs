@@ -134,10 +134,14 @@ pub struct FnoMail<'a> {
     /// OPTIONAL. A peer's short sessionId, only when the turn is directed at a
     /// specific peer (omitted on broadcast/bus delivery).
     pub to: Option<&'a str>,
+    /// OPTIONAL. The bus msg-id this envelope answers (name-lane reply
+    /// correlation). Additive, last in attribute order; runtime-stamped from
+    /// `fno mail reply --to <msg-id>`, never agent-authored.
+    pub reply_to: Option<&'a str>,
 }
 
 /// Render the `<fno_mail ...>` open tag with double-quoted attributes:
-/// `<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."]>`.
+/// `<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."][ reply_to="..."]>`.
 pub fn fno_mail_open(m: &FnoMail) -> String {
     let mut s = format!(
         "<fno_mail from=\"{}\" harness=\"{}\" model=\"{}\"",
@@ -148,6 +152,9 @@ pub fn fno_mail_open(m: &FnoMail) -> String {
     }
     if let Some(to) = m.to {
         s.push_str(&format!(" to=\"{to}\""));
+    }
+    if let Some(reply_to) = m.reply_to {
+        s.push_str(&format!(" reply_to=\"{reply_to}\""));
     }
     s.push('>');
     s
@@ -347,6 +354,7 @@ mod tests {
             model: "opus-4.8",
             node: Some("x-26df"),
             to: None,
+            reply_to: None,
         }
     }
 
@@ -365,10 +373,30 @@ mod tests {
             model: "opus-4.8",
             node: None,
             to: Some("ee99ff00"),
+            reply_to: None,
         };
         assert_eq!(
             fno_mail_open(&directed),
             "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"ee99ff00\">"
+        );
+    }
+
+    #[test]
+    fn fno_mail_open_renders_reply_to_last_when_present() {
+        // reply_to is additive and LAST in attribute order; a name-lane reply
+        // carries the answered msg-id inline. Parity-pinned by the Python
+        // `test_fno_mail_envelope.py` reply_to case.
+        let reply = FnoMail {
+            from: "7d1f8bdc",
+            harness: "claude-code",
+            model: "opus-4.8",
+            node: None,
+            to: Some("e5f6a7b8"),
+            reply_to: Some("msg-0091f3"),
+        };
+        assert_eq!(
+            fno_mail_open(&reply),
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"e5f6a7b8\" reply_to=\"msg-0091f3\">"
         );
     }
 
