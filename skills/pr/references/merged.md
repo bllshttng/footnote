@@ -350,6 +350,38 @@ merge-detection auto-dispatch for the same merge runs `sync_command` at most
 once. A failure withholds the marker (visible retry next reconcile) and never
 blocks the rest of the ritual.
 
+## Step 3e: Warm-window triage of this PR's deferral-born nodes
+
+The merge lands inside the 3-day window where deferral returns actually happen,
+so this is the cheapest moment to decide the fate of the nodes W1's `/pr create`
+step filed from this PR's "Out of scope" section. Each such node carries
+`deferred from PR:` in its details and (when the ship session knew its node)
+`parent: $NODE_ID`. Collect them by provenance, scoped to this project:
+
+```bash
+BORN_JSON="$(fno backlog find 'deferred from PR' --project "$PROJECT" -s idea -J 2>/dev/null || echo '[]')"
+```
+
+Keep only the rows that belong to THIS PR: `parent == "$NODE_ID"` when `$NODE_ID`
+is set, else those whose `details` name this PR's branch. If the filtered set is
+empty, **skip this step silently** - most PRs defer nothing (Boundary: zero
+deferral-born nodes is a no-op).
+
+**Attended** (an operator is present, `$AUTONOMOUS != 1`): present each node once
+as `<id> <title>` and offer a one-touch decision, running the chosen `fno backlog`
+verb:
+- **promote** -> `fno backlog rank <id> --top` (float it to run next), optionally with `fno backlog reprioritize <id> -p p1`;
+- **keep** as filed -> no-op;
+- **defer** explicitly -> `fno backlog defer <id>`;
+- **supersede** (already covered / obsolete) -> `fno backlog supersede <id> --by <other-id>`, or `fno backlog done <id>` if it is moot.
+
+**Unattended** (`$AUTONOMOUS == 1`): do NOT prompt. Log each node as `undecided`
+in the report (Step 7) and continue - undecided is exactly today's status quo, no
+regression.
+
+Non-fatal and skippable: a query failure or an unresolved choice records the node
+as undecided and never blocks the ritual's remaining steps.
+
 ## Step 4: Best-effort worktree archive
 
 After the mechanical triage steps complete, archive the feature's worktree so
