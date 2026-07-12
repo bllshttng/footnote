@@ -73,7 +73,16 @@ fn agy_yolo_flags() -> Vec<String> {
 /// LAST with the prompt attached (the wrapper's load-bearing ordering rule).
 /// `full_prompt` should already be built via [`inject_from_name`]. cwd is passed
 /// BOTH as `--add-dir` (agy's workspace) and via `Command::current_dir`.
-pub fn build_argv_once(full_prompt: &str, cwd: &Path, model: Option<&str>) -> Vec<String> {
+///
+/// A user `--add-dir` (x-b6e2) is ADDITIVE: it appends a second `--add-dir
+/// <dir>` after the internal cwd injection, never replacing it (Locked Decision
+/// 5). Empty/None leaves the argv byte-for-byte as before.
+pub fn build_argv_once(
+    full_prompt: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    add_dir: Option<&str>,
+) -> Vec<String> {
     let mut argv = vec![
         "agy".to_string(),
         "--print-timeout".to_string(),
@@ -81,6 +90,10 @@ pub fn build_argv_once(full_prompt: &str, cwd: &Path, model: Option<&str>) -> Ve
         "--add-dir".to_string(),
         cwd.to_string_lossy().into_owned(),
     ];
+    if let Some(d) = add_dir.filter(|d| !d.is_empty()) {
+        argv.push("--add-dir".to_string());
+        argv.push(d.to_string());
+    }
     argv.extend(agy_yolo_flags());
     if let Some(m) = model {
         if !m.is_empty() {
@@ -525,9 +538,10 @@ pub fn agy_create(
     output_path: &Path,
     timeout: Option<Duration>,
     agent_self: Option<&str>,
+    add_dir: Option<&str>,
 ) -> Result<AgyResult, AgyAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
-    let argv = build_argv_once(&full_prompt, cwd, model);
+    let argv = build_argv_once(&full_prompt, cwd, model, add_dir);
     run_agy(&argv, output_path, timeout, cwd, agent_self)
 }
 
@@ -583,6 +597,7 @@ pub fn dispatch_agy_once(
     cwd: &Path,
     model: Option<&str>,
     timeout: Option<Duration>,
+    add_dir: Option<&str>,
 ) -> AskOutcome {
     use crate::claude_ask::py_repr;
     if let Err(msg) = crate::claude_ask::validate_spawn_inputs(name, from_name) {
@@ -639,6 +654,7 @@ pub fn dispatch_agy_once(
         &log_path,
         eff_timeout,
         Some(name),
+        add_dir,
     ) {
         Ok(res) => AskOutcome::ok_reply(res.last_msg),
         Err(e) => {

@@ -51,6 +51,10 @@ ROLE=""                # x-d2fe: forwarded as --role to the spawn verb (model ro
 TIMEOUT=""             # forwarded as --timeout to the spawn verb (per-spawn seconds)
 FRESH=0                # 1 appends --fresh (canonical-root cwd) to the spawn argv
 HERE=0                 # 1 appends --here (opt out of --fresh) to the spawn argv
+ADD_DIR=""             # x-b6e2: forwarded as --add-dir to the spawn verb
+AGENT=""               # x-b6e2: forwarded as --agent to the spawn verb
+TOOLS=""               # x-b6e2: forwarded as --tools to the spawn verb
+DENY_TOOLS=""          # x-b6e2: forwarded as --deny-tools to the spawn verb
 
 # Dispatcher reservation state (Guard 2). Initialized up-front so fail() can
 # reference it safely under set -u even before the reservation is acquired.
@@ -85,6 +89,10 @@ while [[ $# -gt 0 ]]; do
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     -r|--role)      ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -t|--timeout)   TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --add-dir)      ADD_DIR="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --agent)        AGENT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --tools)        TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --deny-tools)   DENY_TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     # Pass-through cwd flags (ab-77b691dc): forwarded to `fno agents spawn` so a
     # target-class dispatcher can request canonical-root cwd. NOT defaulted here:
     # plain interactive ask/host/spawn keep caller cwd unless asked (AC3).
@@ -329,6 +337,10 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 [[ -n "$PERMISSION_MODE" ]] && cmd+=(--permission-mode "$PERMISSION_MODE")
 [[ -n "$ROLE" ]] && cmd+=(--role "$ROLE")
 [[ -n "$TIMEOUT" ]] && cmd+=(--timeout "$TIMEOUT")
+[[ -n "$ADD_DIR" ]] && cmd+=(--add-dir "$ADD_DIR")
+[[ -n "$AGENT" ]] && cmd+=(--agent "$AGENT")
+[[ -n "$TOOLS" ]] && cmd+=(--tools "$TOOLS")
+[[ -n "$DENY_TOOLS" ]] && cmd+=(--deny-tools "$DENY_TOOLS")
 # x-2c27: an explicit substrate emits --substrate (the canonical selector) and
 # supersedes the --once alias; otherwise the ask lane keeps --once.
 if [[ -n "$SUBSTRATE" ]]; then

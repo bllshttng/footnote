@@ -66,6 +66,10 @@ ROLE=""            # x-d2fe: per-spawn model-routing role; forwarded to spawn.sh
 TIMEOUT=""         # per-spawn timeout seconds; forwarded to spawn.sh --timeout
 FRESH=0            # 1 = --fresh: resolve worker cwd to canonical main root
 HERE=0             # 1 = --here/--in-place: keep caller cwd (opt out of --fresh)
+ADD_DIR=""         # x-b6e2: extra writable dir; forwarded to spawn.sh --add-dir
+AGENT=""           # x-b6e2: sub-agent name; forwarded to spawn.sh --agent
+TOOLS=""           # x-b6e2: allowed-tools list; forwarded to spawn.sh --tools
+DENY_TOOLS=""      # x-b6e2: disallowed-tools list; forwarded to spawn.sh --deny-tools
 
 emit_error() { printf 'status=error\nerror=%s\n' "$1"; exit 0; }
 
@@ -94,6 +98,10 @@ while [[ $# -gt 0 ]]; do
     --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -r|--role)        ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -t|--timeout)     TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --add-dir)        ADD_DIR="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --agent)          AGENT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --tools)          TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --deny-tools)     DENY_TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --fresh)          FRESH=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     -m|--allow-merge) ALLOW_MERGE=1; shift ;;
@@ -271,7 +279,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
@@ -751,6 +759,12 @@ printf 'model=%s\n' "$MODEL"
 printf 'permission_mode=%s\n' "$PERMISSION_MODE"
 printf 'role=%s\n' "$ROLE"
 printf 'timeout=%s\n' "$TIMEOUT"
+# x-b6e2: Tier-3 harness-native passthrough (empty when unset). spawn.sh forwards
+# a non-empty value; `fno agents spawn` maps or fails closed per provider.
+printf 'add_dir=%s\n' "$ADD_DIR"
+printf 'agent=%s\n' "$AGENT"
+printf 'tools=%s\n' "$TOOLS"
+printf 'deny_tools=%s\n' "$DENY_TOOLS"
 printf 'fresh=%s\n' "$FRESH"
 printf 'here=%s\n' "$HERE"
 printf 'effort=%s\n' "$EFFORT"

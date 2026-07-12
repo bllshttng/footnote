@@ -183,6 +183,19 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
   && pass "AC3-ERR claude yolo + explicit --permission-mode -> explicit wins" \
   || fail "claude yolo explicit permission-mode: $OUT"
 
+# x-b6e2: Tier-3 harness passthrough flags forward opaquely to the emit; the CLI
+# maps or fails closed per provider (the skill never validates them).
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude \
+       --add-dir /work --agent reviewer --tools Read,Edit --deny-tools Bash)"
+if [[ "$(field "$OUT" add_dir)" == "/work" ]] \
+   && [[ "$(field "$OUT" agent)" == "reviewer" ]] \
+   && [[ "$(field "$OUT" tools)" == "Read,Edit" ]] \
+   && [[ "$(field "$OUT" deny_tools)" == "Bash" ]]; then
+  pass "x-b6e2 tier-3 flags (--add-dir/--agent/--tools/--deny-tools) forward to emit"
+else
+  fail "x-b6e2 tier-3 forward: $OUT"
+fi
+
 # --- US4: payload modes (build / ask / passthrough) + provider-aware messages ---
 
 # AC4-HP: ask mode (--ask) -> prompt VERBATIM, no /target, no no-merge, no brief.

@@ -129,6 +129,7 @@ pub fn build_argv_create(
     yolo: bool,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    add_dir: Option<&str>,
 ) -> Vec<String> {
     // Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     // flag and follows it. See `approval_flag` / `sandbox_flag`.
@@ -141,6 +142,13 @@ pub fn build_argv_create(
         cwd.to_string_lossy().to_string(),
         "--skip-git-repo-check".to_string(),
     ]);
+    // x-b6e2: a user `--add-dir` grants extra write access on `codex exec`.
+    // codex's own cwd rides `-C` (separate flag), so this is purely additive -
+    // no collision. Empty/None = unchanged argv.
+    if let Some(d) = add_dir.filter(|d| !d.is_empty()) {
+        argv.push("--add-dir".to_string());
+        argv.push(d.to_string());
+    }
     // x-c772: an explicit --model is forwarded to `codex exec --model <m>`
     // (empty/None = codex default). Exact passthrough, no fuzzy resolution.
     if let Some(m) = model.filter(|m| !m.is_empty()) {
@@ -710,6 +718,7 @@ pub fn codex_create(
     agent_self: Option<&str>,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    add_dir: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
     // ab-994222ee: the create/exec path is the autonomous headless lane. codex
@@ -719,7 +728,7 @@ pub fn codex_create(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
     );
-    let argv = build_argv_create(cwd, &full_prompt, eff, model, reasoning_effort);
+    let argv = build_argv_create(cwd, &full_prompt, eff, model, reasoning_effort, add_dir);
     run_codex(&argv, output_path, timeout, true, None, agent_self)
 }
 
@@ -953,6 +962,7 @@ pub fn dispatch_codex_once(
     timeout: Option<Duration>,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    add_dir: Option<&str>,
 ) -> AskOutcome {
     use crate::claude_ask::py_repr;
 
@@ -1025,6 +1035,7 @@ pub fn dispatch_codex_once(
         timeout,
         model,
         reasoning_effort,
+        add_dir,
     );
     if inner.exit_code != 0 {
         // create failed; dispatch_create only writes the registry post-success,
@@ -1080,6 +1091,7 @@ fn dispatch_create(
     timeout: Option<Duration>,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    add_dir: Option<&str>,
 ) -> AskOutcome {
     let output_path = derive_log_path(home, name);
     let timeout_sec = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
@@ -1094,6 +1106,7 @@ fn dispatch_create(
         Some(name),
         model,
         reasoning_effort,
+        add_dir,
     ) {
         Ok(r) => r,
         Err(e) => {

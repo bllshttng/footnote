@@ -753,6 +753,7 @@ def _codex_create_path(
     lock_handle,
     role: Optional[str] = None,
     effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -782,6 +783,7 @@ def _codex_create_path(
             agent_self=name,
             role=role,
             reasoning_effort=effort,
+            add_dir=add_dir,
         )
     except codex_mod.NoSessionIdError as exc:
         events.emit(
@@ -1316,6 +1318,10 @@ def _claude_create_path(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1347,6 +1353,10 @@ def _claude_create_path(
             model=model,
             permission_mode=effective_mode,
             effort=effort,
+            add_dir=add_dir,
+            agent=agent,
+            tools=tools,
+            deny_tools=deny_tools,
         )
     except claude_mod.ProviderSubprocessError as exc:
         events.emit(
@@ -1762,6 +1772,10 @@ def dispatch_spawn(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
     headless: bool = False,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
@@ -1889,6 +1903,10 @@ def dispatch_spawn(
                                 permission_mode=permission_mode
                                 or ("bypassPermissions" if yolo else None),
                                 effort=effort,
+                                add_dir=add_dir,
+                                agent=agent,
+                                tools=tools,
+                                deny_tools=deny_tools,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
                             _emit_ev(
@@ -1926,6 +1944,10 @@ def dispatch_spawn(
                         model=model,
                         permission_mode=permission_mode,
                         effort=effort,
+                        add_dir=add_dir,
+                        agent=agent,
+                        tools=tools,
+                        deny_tools=deny_tools,
                     )
                     return SpawnResult(
                         kind="created",
@@ -1948,6 +1970,7 @@ def dispatch_spawn(
                         lock_handle=lock_handle,
                         role=role,
                         effort=effort,
+                        add_dir=add_dir,
                     )
                 else:
                     # gemini --once

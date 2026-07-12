@@ -284,6 +284,55 @@ def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
         assert argv[argv.index("--model") + 1] == _OPENCODE_DEFAULT_MODEL
 
 
+def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
+    # x-b6e2: --add-dir/--agent/--tools/--deny-tools map to claude's own
+    # spellings in a fixed order; codex/agy map only --add-dir; opencode maps
+    # only --agent. Fixed order enforces the Rust/Python parity contract.
+    from fno.agents.mux_spawn import build_pane_argv
+
+    claude = build_pane_argv(
+        "claude", "t", tmp_path, False, "u",
+        add_dir="/work", agent="reviewer", tools="Read,Edit", deny_tools="Bash",
+    )
+    # tokens present, in order.
+    for a, b in [("--add-dir", "/work"), ("--agent", "reviewer"),
+                 ("--allowedTools", "Read,Edit"), ("--disallowedTools", "Bash")]:
+        assert claude[claude.index(a) + 1] == b
+    assert claude.index("--add-dir") < claude.index("--agent") < \
+        claude.index("--allowedTools") < claude.index("--disallowedTools")
+
+    codex = build_pane_argv("codex", "t", tmp_path, False, None, add_dir="/extra")
+    assert codex[codex.index("--add-dir") + 1] == "/extra"
+    agy = build_pane_argv("agy", "t", tmp_path, False, None, add_dir="/extra")
+    assert agy[agy.index("--add-dir") + 1] == "/extra"
+    opencode = build_pane_argv("opencode", "t", tmp_path, False, None, agent="build")
+    assert opencode[opencode.index("--agent") + 1] == "build"
+
+
+def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
+    # x-b6e2: a no-equivalent (provider, flag) cell raises BEFORE any spawn.
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import build_pane_argv
+
+    closed = [
+        ("codex", {"agent": "x"}),
+        ("codex", {"tools": "Read"}),
+        ("agy", {"deny_tools": "Bash"}),
+        ("opencode", {"add_dir": "/w"}),
+        ("gemini", {"add_dir": "/w"}),
+        ("gemini", {"agent": "x"}),
+    ]
+    for provider, kw in closed:
+        with pytest.raises(DispatchAskError):
+            build_pane_argv(provider, "t", tmp_path, False, None, **kw)
+
+    # AC2-ERR: an EMPTY value is unset, not a stray token - it must NOT trip the
+    # fail-closed guard even on a no-equivalent provider (gemini review finding).
+    for provider, kw in closed:
+        argv = build_pane_argv(provider, "t", tmp_path, False, None, **{k: "" for k in kw})
+        assert "--add-dir" not in argv and "--agent" not in argv
+
+
 def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) -> None:
     """x-8f7f: PANE_HOSTABLE_PROVIDERS is the pane gate's source of truth and MUST
     match build_pane_argv's branches exactly - every listed provider builds argv,

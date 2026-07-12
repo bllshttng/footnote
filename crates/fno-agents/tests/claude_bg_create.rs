@@ -69,6 +69,7 @@ fn create_happy_parses_short_id() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     )
     .unwrap();
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -99,6 +100,7 @@ fn create_nonzero_exit_without_confirmation_is_subprocess_error() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     )
     .unwrap_err();
     match err {
@@ -136,6 +138,7 @@ fn create_confirmation_wins_over_late_nonzero_exit() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     )
     .expect("a printed confirmation must be a success despite a later nonzero exit");
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -159,6 +162,7 @@ fn create_unparseable_stdout_is_parse_error() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     )
     .unwrap_err();
     assert!(matches!(err, AskError::Parse { .. }));
@@ -185,6 +189,7 @@ fn create_argv_overflow_sends_message_via_stdin() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     )
     .unwrap();
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -208,6 +213,7 @@ fn create_missing_binary_is_127() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     )
     .unwrap_err();
     match err {
