@@ -542,7 +542,13 @@ set +o pipefail
 CHILD_SID="$(printf '%s\n' "$_ASK_OUT" | grep -F '"short_id"' | head -1 | jq -r '.short_id // empty' 2>/dev/null || true)"
 set -o pipefail
 
-if [ "$_ASK_RC" -ne 0 ] || [ -z "$CHILD_SID" ]; then
+# Only a nonzero launch rc is a spawn failure. A clean rc with an empty
+# CHILD_SID (unparseable/truncated receipt) is NOT a failure: the child may be
+# live. It falls through to Step 7's name-keyed registry poll, the authoritative
+# liveness oracle (Locked Decision 1) - the receipt short_id is audit data, not
+# launch proof. Conflating the two used to park the parent while a receiptless
+# child kept running, splitting the branch across two workers (x-1adb).
+if [ "$_ASK_RC" -ne 0 ]; then
   # Spawn failure: unwind in order
   #   (a) re-acquire node:<id> FIRST; capture the rc
   _REACQ_RC=0
@@ -570,9 +576,6 @@ if [ "$_ASK_RC" -ne 0 ] || [ -z "$CHILD_SID" ]; then
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
   _FAIL_DETAIL="spawn rc=$_ASK_RC${_ASK_ERR:+: $(printf '%s' "$_ASK_ERR" | tr '\n' ' ' | cut -c1-160)}"
-  if [ -z "$CHILD_SID" ] && [ "$_ASK_RC" -eq 0 ]; then
-    _FAIL_DETAIL="spawn succeeded but returned no short_id receipt"
-  fi
 
   if [ "$_RESTORE_RC" -ne 0 ]; then
     _emit_event "handoff_failed" \
@@ -595,12 +598,25 @@ _VERIFY_ELAPSED=0
 _CHILD_LIVE=0
 while [ "$_VERIFY_ELAPSED" -lt "$VERIFY_TIMEOUT" ]; do
   set +o pipefail
-  _LIST_STATUS="$(fno agents list 2>/dev/null \
-    | jq -r --arg n "$CHILD_NAME" '.agents[]? | select(.name==$n) | .status' 2>/dev/null \
+  _LIST_ROW="$(fno agents list 2>/dev/null \
+    | jq -c --arg n "$CHILD_NAME" '.agents[]? | select(.name==$n)' 2>/dev/null \
     | head -1 || true)"
+  _LIST_STATUS="$(printf '%s' "$_LIST_ROW" | jq -r '.status // empty' 2>/dev/null || true)"
   set -o pipefail
   if [ "$_LIST_STATUS" = "live" ]; then
     _CHILD_LIVE=1
+    # Backfill child identity from the live registry row when the spawn receipt
+    # yielded no short_id, so a receiptless-but-live child commits as a real
+    # delegation instead of parking (x-1adb). to_session stays CHILD_NAME; a row
+    # that also lacks short_id/session_id leaves CHILD_SID empty -> "unknown".
+    if [ -z "$CHILD_SID" ]; then
+      # jq's // treats "" as truthy, and registry.py defaults short_id to ""
+      # (not null) for non-stream rows, so select(. != "") is required for the
+      # fallback to session_id to fire on an empty short_id (gemini PR #378).
+      set +o pipefail
+      CHILD_SID="$(printf '%s' "$_LIST_ROW" | jq -r '(.short_id | select(. != "")) // (.session_id | select(. != "")) // empty' 2>/dev/null || true)"
+      set -o pipefail
+    fi
     break
   fi
   sleep "$VERIFY_INTERVAL" 2>/dev/null || true
@@ -653,9 +669,12 @@ fi
 # Step 8: Commit the delegation
 # ---------------------------------------------------------------------------
 
-# 8a. Emit delegated event
+# 8a. Emit delegated event. child_session degrades to "unknown" only when
+# neither the receipt nor the registry row carried a short_id/session_id
+# (AC4-EDGE); correctness rides on to_session=CHILD_NAME, not this field.
+_CHILD_SESSION="${CHILD_SID:-unknown}"
 _emit_event "delegated" \
-  "{\"node_id\":\"$NODE_ID\",\"from_session\":\"$SESSION_ID\",\"to_session\":\"$CHILD_NAME\",\"child_session\":\"$CHILD_SID\",\"boundary\":\"$BOUNDARY\",\"generation\":$CHILD_GEN,\"harness\":\"$_HARNESS\"}"
+  "{\"node_id\":\"$NODE_ID\",\"from_session\":\"$SESSION_ID\",\"to_session\":\"$CHILD_NAME\",\"child_session\":\"$_CHILD_SESSION\",\"boundary\":\"$BOUNDARY\",\"generation\":$CHILD_GEN,\"harness\":\"$_HARNESS\"}"
 
 # 8b. Emit session_satisfied (trigger=delegated)
 # Compute gate_state_hash from archived manifest (sha256 of the file, or "none")
@@ -759,5 +778,5 @@ rm -f "$FNO_DIR/.handoff-armed-$SESSION_ID"
 # ---------------------------------------------------------------------------
 # Step 8 complete: print delegated line (step 9 is the calling LLM's job)
 # ---------------------------------------------------------------------------
-echo "delegated $NODE_ID child=$CHILD_NAME session=$CHILD_SID generation=$CHILD_GEN"
+echo "delegated $NODE_ID child=$CHILD_NAME session=$_CHILD_SESSION generation=$CHILD_GEN"
 exit 0

@@ -997,6 +997,143 @@ check_not_contains "codex-holder: release never substitutes run id" \
   "$(cat "$SBX/call-log")"
 
 # ---------------------------------------------------------------------------
+# Scenario 20: AC1-HP - clean-rc spawn, receipt has NO short_id, child registers
+# live WITH a short_id in the registry row -> delegated, exit 0, CHILD_SID
+# backfilled from the row (x-1adb: receiptless-but-live child is a real
+# delegation, not a park).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 20: AC1-HP live receiptless child (backfill) ==="
+SBX="$(make_sandbox s20)"
+# Spawn exits 0 but the receipt carries no short_id key.
+printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+# Registry row IS live and DOES carry a short_id to backfill from.
+printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"reg789"}]}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+
+check_exit "AC1-HP-backfill: exits 0" "0" "$handoff_rc"
+check_contains "AC1-HP-backfill: output contains 'delegated'" "delegated" "$output"
+check_contains "AC1-HP-backfill: session backfilled from registry row" "session=reg789" "$output"
+# Parent's node claim stays released: no re-acquire on the delegated path.
+check_not_contains "AC1-HP-backfill: node claim NOT re-acquired" \
+  "claim acquire node:" "$(cat "$CALL_LOG")"
+set +e
+delegated_child=$(grep '"type":"delegated"' "$SBX/.fno/events.jsonl" 2>/dev/null | grep -o '"child_session":"[^"]*"' | head -1)
+set -e
+check_contains "AC1-HP-backfill: delegated event child_session=reg789" '"child_session":"reg789"' "$delegated_child"
+
+# ---------------------------------------------------------------------------
+# Scenario 21: AC3-FR - phantom spawn: clean rc, no receipt short_id, and NO
+# child ever registers -> Step 7 poll times out -> parked, exit 10 (x-1adb: the
+# clean-rc/empty-receipt no-child case reuses the existing verify-timeout unwind).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 21: AC3-FR phantom spawn parks after poll ==="
+SBX="$(make_sandbox s21)"
+printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+# No child ever appears in the registry.
+echo '{"agents":[]}' > "$SBX/scenario/abi-list-out"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=3 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+
+check_exit "AC3-FR: exits 10 (parked)" "10" "$handoff_rc"
+check_contains "AC3-FR: output contains 'parked'" "parked" "$output"
+check_contains "AC3-FR: reason is verify timeout, not spawn failure" "verify timeout" "$output"
+# Reuses the existing no-child unwind: re-acquire node AFTER spawn, manifest restored.
+check_log_order "AC3-FR: re-acquire node claim AFTER spawn (existing unwind)" \
+  "$CALL_LOG" "agents spawn" "claim acquire node:"
+check_file_exists "AC3-FR: target-state.md restored" \
+  "$SBX/.fno/target-state.md"
+set +e
+phantom_delegated=$(grep '"type":"delegated"' "$SBX/.fno/events.jsonl" 2>/dev/null | wc -l | tr -d ' ')
+set -e
+check_eq "AC3-FR: no delegated event emitted" "0" "$phantom_delegated"
+
+# ---------------------------------------------------------------------------
+# Scenario 22: AC4-EDGE - clean-rc/empty-receipt, child live but the registry
+# row's short_id is EMPTY ("", registry.py's non-stream default) AND no
+# session_id -> delegation still commits (exit 0) with child_session degraded to
+# "unknown"; to_session stays CHILD_NAME. Uses short_id:"" not an absent key,
+# because "" is the real registry shape (jq // treats "" as truthy).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 22: AC4-EDGE live child, empty short_id, no session_id ==="
+SBX="$(make_sandbox s22)"
+printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+# Live row with empty short_id and empty session_id -> nothing to backfill.
+printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":""}]}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+
+check_exit "AC4-EDGE: exits 0" "0" "$handoff_rc"
+check_contains "AC4-EDGE: session degrades to unknown" "session=unknown" "$output"
+set +e
+edge_child=$(grep '"type":"delegated"' "$SBX/.fno/events.jsonl" 2>/dev/null | grep -o '"child_session":"[^"]*"' | head -1)
+edge_to=$(grep '"type":"delegated"' "$SBX/.fno/events.jsonl" 2>/dev/null | grep -o "\"to_session\":\"tgt-${NODE_ID:3:8}-${TEST_HARNESS}-g2\"" | head -1)
+set -e
+check_contains "AC4-EDGE: child_session is unknown" '"child_session":"unknown"' "$edge_child"
+check_contains "AC4-EDGE: to_session stays CHILD_NAME" \
+  "\"to_session\":\"tgt-${NODE_ID:3:8}-${TEST_HARNESS}-g2\"" "$edge_to"
+
+# ---------------------------------------------------------------------------
+# Scenario 22b: AC4-EDGE - empty short_id but a present session_id -> the jq
+# fallback must fire (select(. != "") drops the empty short_id) and backfill
+# from session_id, NOT degrade to "unknown" (gemini finding, PR #378).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 22b: AC4-EDGE empty short_id falls back to session_id ==="
+SBX="$(make_sandbox s22b)"
+printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":"sess456"}]}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+
+check_exit "AC4-EDGE-fallback: exits 0" "0" "$handoff_rc"
+check_contains "AC4-EDGE-fallback: backfills from session_id, not unknown" "session=sess456" "$output"
+set +e
+fb_child=$(grep '"type":"delegated"' "$SBX/.fno/events.jsonl" 2>/dev/null | grep -o '"child_session":"[^"]*"' | head -1)
+set -e
+check_contains "AC4-EDGE-fallback: child_session=sess456" '"child_session":"sess456"' "$fb_child"
+
+# ---------------------------------------------------------------------------
+# Scenario 23: AC5-EDGE - clean-rc/empty-receipt, child never goes live AND the
+# post-timeout re-acquire fails (a lagging child won the claim) -> exit 12
+# handoff-claim-lost; parent must NOT continue, manifest stays archived.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 23: AC5-EDGE timeout re-acquire loses race ==="
+SBX="$(make_sandbox s23)"
+printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+echo '{"agents":[]}' > "$SBX/scenario/abi-list-out"
+# Re-acquire of node:<id> fails because a lagging child already claimed it.
+echo "1" > "$SBX/scenario/abi-claim-acquire-node-rc"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=3 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+
+check_exit "AC5-EDGE: exits 12 (claim-lost)" "12" "$handoff_rc"
+check_contains "AC5-EDGE: output is handoff-claim-lost" "handoff-claim-lost" "$output"
+check_file_absent "AC5-EDGE: manifest stays archived (not restored)" \
+  "$SBX/.fno/target-state.md"
+set +e
+lost_reason=$(grep '"type":"handoff_failed"' "$SBX/.fno/events.jsonl" 2>/dev/null | grep -o '"reason":"[^"]*"' | head -1)
+set -e
+check_contains "AC5-EDGE: reason is reacquire_failed" "reacquire_failed" "$lost_reason"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
