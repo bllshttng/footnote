@@ -150,6 +150,43 @@ git log origin/main..HEAD --pretty=format:"- %s%n%b" | head -50
 - Use commit messages as the source of truth
 - Don't invent features not in commits
 
+### 4.5 Out-of-scope items are born tracked
+
+**Purpose:** the CI gate `check-oos-tracked.sh` reds any PR whose body has an "Out of scope" / "Not touched here" section containing an item with no tracked reference. This step makes every such item born tracked so the PR lands gate-green. Advisory and best-effort - identical error posture to step 5.5: a tracking failure degrades to today's behavior (a red gate for a human to resolve), NEVER a blocked or failed PR.
+
+**Fires ONLY when** the description you just composed already contains an ATX heading matching (case-insensitive) `Out of scope`, `Out-of-scope`, or `Not touched here`. Never invent such a section, and never invent items - the section exists only when there is genuinely deferred work grounded in the commits, the plan, or the dispatch context.
+
+Read the graph node id once (the same value step 5.5 reads):
+
+```bash
+NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | tr -d "\"'")
+```
+
+For each item line under that heading, in order:
+
+1. **Cite first.** If the item's deferred work is already tracked - a `<prefix>-<hex>` node id, a `cv-<hex>` carveout id, or an inline `oos-ok: <rationale>` already appears on the line, in the plan frontmatter, a commit trailer, or `.fno/carveouts.jsonl` - leave the line byte-identical. File nothing.
+2. **File second, with inherited weight.** Otherwise classify the item and file it. Strip markdown/backticks from the item text and pass a concise title (the trimmed item line, not the whole paragraph) as a double-quoted argument:
+   - a pre-existing **bug** being deferred (a missed defect, not a new feature):
+     ```bash
+     RECEIPT=$(fno backlog idea "<item title>" -t task -p p2 --description "deferred from PR: <pr title> (<branch>)" ${NODE_ID:+--parent "$NODE_ID"})
+     ```
+   - a genuine **nice-to-have / future feature**: the same command with `-p p3` (and drop `-t task`).
+   - Extract the id from the JSON receipt and append it to the item line:
+     ```bash
+     NEW_ID=$(printf '%s' "$RECEIPT" | grep -o '"id": *"[^"]*"' | head -1 | sed -E 's/.*"id": *"([^"]*)".*/\1/')
+     # rewrite the item line so it ends: ` - tracked as $NEW_ID`
+     ```
+3. **Fall back** if `fno backlog idea` exits non-zero (lock contention, missing CLI):
+   ```bash
+   CV_ID=$(fno carveout add --kind deferred "<item>")
+   # append ` - tracked as $CV_ID` (a cv- id satisfies the same gate grammar)
+   ```
+4. **Degrade loud, not silent.** If BOTH verbs fail, leave the item untracked, print a `warn:` line naming it, and continue. The CI gate is the backstop and will red the check for a human. NEVER write an `oos-ok:` waiver to route around a tooling failure - a waiver asserts "nothing to track", a judgment a tooling error cannot establish; that call is a human's, never the worker's.
+
+**Idempotent by construction:** step 1 skips any item that already carries a tracked reference, so a re-run over a body whose items already read `- tracked as <id>` files nothing.
+
+**Report** each action as `item -> <id>` (and any `warn:` lines) so the dispatcher transcript shows exactly what was filed. Then continue to step 5 with the rewritten body.
+
 ### 5. Create PR
 
 ```bash
