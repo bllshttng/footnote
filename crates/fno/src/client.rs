@@ -2533,7 +2533,7 @@ const KEY_TABLE: &[&str] = &[
     "  &  close tab          w  panel selector ",
     "     selector ⏎ acts on the row: squad/tab ",
     "     · agent focus/attach · card dispatch · + create ",
-    "     · r rename · x remove/dismiss · J/K reorder · m move tab ",
+    "     organize: r(squad) ,(tab) rename · J/K(squad) </>(tab) reorder · m move · x remove ",
     "     · space mark agent · R recruit marked → workspace ",
     "  a  answer queue       b  toggle sideline ",
     "  s  toggle status      ?  this key table  ",
@@ -5853,6 +5853,12 @@ mod tests {
         // x-653d AC5-HP: the table documents leader+f and its filters.
         assert!(text.contains("f  find"), "key table documents leader+f");
         assert!(text.contains("Tab state"), "and its type/Tab/goto filters");
+        assert!(
+            text.contains(
+                "organize: r(squad) ,(tab) rename · J/K(squad) </>(tab) reorder · m move · x remove"
+            ),
+            "key table documents the organize gestures"
+        );
     }
 
     #[test]
