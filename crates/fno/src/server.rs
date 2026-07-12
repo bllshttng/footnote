@@ -3596,16 +3596,17 @@ impl Core {
                 }
                 Flow::Continue
             }
-            Command::ReorderTab { tab, delta } => {
-                let Some((squad_id, idx)) = self.session.find_tab(tab) else {
+            Command::ReorderTab { squad, tab, delta } => {
+                let Some((current_squad, idx)) = self.session.find_tab(tab) else {
                     self.notice(client_id, "no such tab");
                     return Flow::Continue;
                 };
+                if current_squad != squad {
+                    self.notice(client_id, "tab moved to another workspace");
+                    return Flow::Continue;
+                }
                 let changed = {
-                    let squad = self
-                        .session
-                        .squad_mut(squad_id)
-                        .expect("find_tab live squad");
+                    let squad = self.session.squad_mut(squad).expect("find_tab live squad");
                     let new =
                         (idx as i64 + delta as i64).clamp(0, squad.tabs.len() as i64 - 1) as usize;
                     if new == idx {
@@ -6112,7 +6113,14 @@ mod tests {
         let (client, mut rx) = client_with_rx(1);
         core.clients.push(client);
 
-        core.command(1, Command::ReorderTab { tab: 6, delta: 1 });
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 6,
+                delta: 1,
+            },
+        );
 
         let squad = core.session.squad(1).unwrap();
         assert_eq!(
@@ -6132,8 +6140,22 @@ mod tests {
         let (client, mut rx) = client_with_rx(1);
         core.clients.push(client);
 
-        core.command(1, Command::ReorderTab { tab: 5, delta: -1 });
-        core.command(1, Command::ReorderTab { tab: 6, delta: 1 });
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 5,
+                delta: -1,
+            },
+        );
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 6,
+                delta: 1,
+            },
+        );
 
         let squad = core.session.squad(1).unwrap();
         assert_eq!(
@@ -6154,10 +6176,54 @@ mod tests {
         let (client, mut rx) = client_with_rx(1);
         core.clients.push(client);
 
-        core.command(1, Command::ReorderTab { tab: 999, delta: 1 });
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 999,
+                delta: 1,
+            },
+        );
 
         assert_eq!(core.session.find_tab(5), Some((1, 0)));
         assert_eq!(drain_notice(&mut rx).as_deref(), Some("no such tab"));
+    }
+
+    #[test]
+    fn reorder_tab_refuses_when_the_tab_moved_to_another_squad() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session.squad_mut(1).unwrap().tabs.push(leaf_tab(6, 2));
+        core.session
+            .add_squad(2, vec!["/b".into()], None, leaf_tab(7, 3));
+        core.session.squad_mut(2).unwrap().tabs.push(leaf_tab(8, 4));
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(1, Command::MoveTab { tab: 6, squad: 2 });
+        while rx.try_recv().is_ok() {}
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 6,
+                delta: -1,
+            },
+        );
+
+        assert_eq!(
+            core.session
+                .squad(2)
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 6],
+            "a stale reorder must not mutate the destination squad"
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("moved"));
     }
 
     #[test]
