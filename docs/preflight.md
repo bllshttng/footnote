@@ -52,23 +52,40 @@ produces local-only failures, which is what pushes agents toward selective
 `-k` subset runs that then miss CI-only failures. The runner resets a dedicated
 worktree to your HEAD and runs it with an environment that mirrors a fresh CI
 checkout: a temp `HOME` (no `~/.fno`, `~/.claude`, or `~/.gitconfig`), `FNO_*`
-scrubbed, a worktree-pinned `PYTHONPATH`, and the pytest spawn-leak guard. Cache
+scrubbed, the ambient `HARNESS_SESSION_MARKERS` unset, `FNO_NO_CANONICAL_CONFIG=1`
+exported, a worktree-pinned `PYTHONPATH`, and the pytest spawn-leak guard. Cache
 directories (`CARGO_HOME`, `RUSTUP_HOME`, `UV_CACHE_DIR`) are deliberately
 re-exported so builds stay warm; the worktree's `target/` and `cli/.venv`
 persist across runs. Hermeticity comes from environment isolation plus a hard
 reset, not from disposing the worktree.
 
-**Known residual - the config candidate chain.** A worktree reaches the
-canonical checkout's `.fno/config.toml` through the shared git-common-dir, not
-through `HOME` or `cwd`, so a scrubbed environment cannot hide it. Pinning
-`FNO_CONFIG` or `FNO_GLOBAL_SETTINGS_PATH` to suppress it diverges from CI and
-breaks the suite's own config-fixture tests, so the runner deliberately does
-not. A handful of tests that assert on the absence of that config therefore
-stay red locally while passing in CI. That leak is the separately-tracked
-root-cause fix (a change to the config loader, not to preflight); until it
-lands, treat those specific failures as the known residual, not a real red.
-`smoke.sh --keep-going` names every failing step, so the residual is visible
-and distinguishable rather than hidden.
+**Two ambient leaks a bare `FNO_*` scrub misses, and how they are sealed.** A
+temp `HOME` cannot hide either, because both travel through channels other than
+`HOME`/`cwd`. Both are sealed by preflight-internal seams set only by
+`run_hermetic`, so default and real-worktree behavior is byte-for-byte unchanged:
+
+1. **Ambient harness identity.** Preflight always runs inside a live harness, so
+   `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / `CODEX_SESSION_ID` /
+   `GEMINI_SESSION_ID` are set and `resolve_self_model()` would resolve the real
+   session's model instead of the `"unknown"` floor a fresh CI checkout produces.
+   `run_hermetic` unsets every `HARNESS_SESSION_MARKERS` name (derived from the
+   Python tuple that is the single source of truth, fail-closed to a hardcoded
+   literal list with a warning if the fetch errors).
+
+2. **The canonical config candidate chain.** A worktree reaches the canonical
+   checkout's `.fno/config.toml` through the shared git-common-dir, leaking
+   `worktrees_base` into path/worktree tests. Pinning `FNO_CONFIG` or
+   `FNO_GLOBAL_SETTINGS_PATH` diverges from CI and breaks the suite's own
+   config-fixture tests, so instead `run_hermetic` exports
+   `FNO_NO_CANONICAL_CONFIG=1`, which drops **only** the canonical candidate from
+   `_settings_yaml_locations()`. An explicit `FNO_CONFIG` (candidate #1) and a
+   worktree-local config (#2) still win, so no fixture is clobbered. The flag is
+   preflight-internal (an env var, not a `config.*` key) and inert unless exactly
+   `"1"`. The broader "a worktree always resolves its own config" loader change
+   remains a separate root-cause node; this flag is the preflight-scoped subset.
+
+`smoke.sh --keep-going` still names every failing step, so any genuine red stays
+visible and distinguishable.
 
 Worktree location follows `config.paths.worktrees_base`
 (`<base>/<repo>/preflight`), falling back to the harness-native
