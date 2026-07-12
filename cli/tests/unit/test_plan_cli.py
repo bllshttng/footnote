@@ -149,3 +149,63 @@ def test_plan_set_expected_forwards_args_verbatim(tmp_path, monkeypatch):
     assert cmd[1:3] == ["-m", "fno.plan._stamp"]
     assert cmd[3] == "set-expected"
     assert cmd[4:] == ["--plan-path", "/tmp/some-plan.md", "--count", "3"]
+
+
+# ---------------------------------------------------------------------------
+# fno plan path (config.plans_filename renderer)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_doc_filename_default_template(monkeypatch):
+    import datetime
+
+    from fno import paths
+
+    name = paths.plan_doc_filename(
+        "dark-mode", "x-8af8", now=datetime.datetime(2026, 7, 11)
+    )
+    assert name == "20260711-dark-mode-x-8af8.md"
+
+
+def test_plan_doc_filename_collapses_empty_parts():
+    import datetime
+
+    from fno import paths
+
+    stamp = datetime.datetime(2026, 7, 11)
+    assert paths.plan_doc_filename("dark-mode", "", now=stamp) == "20260711-dark-mode.md"
+    assert paths.plan_doc_filename("", "x-8af8", now=stamp) == "20260711-x-8af8.md"
+
+
+def test_plan_doc_filename_honors_custom_template(monkeypatch):
+    import datetime
+
+    from fno import paths
+
+    class _S:
+        plans_filename = "%Y-%m-%d-{slug}-{node}.md"
+
+    monkeypatch.setattr(paths, "_settings", lambda: _S())
+    name = paths.plan_doc_filename("dark-mode", "x-8af8", now=datetime.datetime(2026, 7, 11))
+    assert name == "2026-07-11-dark-mode-x-8af8.md"
+
+
+def test_plans_filename_config_rejects_bad_template():
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import ConfigBlock
+
+    with pytest.raises(ValidationError):
+        ConfigBlock(plans_filename="{slug}/{node}.md")  # renders a path, not a name
+    with pytest.raises(ValidationError):
+        ConfigBlock(plans_filename="{slug}-{nodeid}.md")  # unknown placeholder
+    assert ConfigBlock(plans_filename="%Y%m%d-{slug}-{node}.md")
+
+
+def test_plan_path_verb_prints_rendered_path():
+    result = runner.invoke(app, ["plan", "path", "--slug", "dark-mode", "--node", "x-8af8", "--name-only"])
+    assert result.exit_code == 0
+    out = result.stdout.strip()
+    assert out.endswith("-dark-mode-x-8af8.md")
+    assert "/" not in out

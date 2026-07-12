@@ -17,6 +17,8 @@
 state_dir = "~/.fno/"
 # Where folder plans are written.
 plans_dir = ".fno/plans/"
+# Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name.
+plans_filename = "%Y%m%d-{slug}-{node}.md"
 # Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report).
 loops = {}
 # Settings schema version; managed by fno, not hand-set.

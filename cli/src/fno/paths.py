@@ -646,6 +646,31 @@ def plans_content_dir(project_root: Optional[Path] = None) -> Path:
     return plans_dir(root)
 
 
+def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -> str:
+    """Render ``config.plans_filename`` (strftime codes + {slug}/{node}).
+
+    An empty slug or node collapses its dangling separator, so the default
+    template degrades cleanly: no node -> ``20260711-slug.md``, no slug ->
+    ``20260711-x-8af8.md``, never ``--`` or ``-.md``.
+    """
+    import datetime as _dt
+    import re as _re
+
+    stamp = now if isinstance(now, _dt.datetime) else _dt.datetime.now()
+    name = stamp.strftime(_settings().plans_filename).format(slug=slug, node=node)
+    name = _re.sub(r"-{2,}", "-", name)
+    if name.endswith("-.md"):
+        name = name[: -len("-.md")] + ".md"
+    return name.lstrip("-")
+
+
+def plan_doc_path(
+    slug: str, node: str = "", project_root: Optional[Path] = None
+) -> Path:
+    """The save path for a NEW plan/design doc: resolved plans dir + filename."""
+    return plans_content_dir(project_root) / plan_doc_filename(slug, node)
+
+
 def handoffs_dir(project_root: Optional[Path] = None) -> Path:
     """Return the directory where target writes session handoff artifacts.
 

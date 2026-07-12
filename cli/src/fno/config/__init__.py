@@ -2299,6 +2299,7 @@ class ConfigBlock(BaseModel):
 
     state_dir: str = "~/.fno/"
     plans_dir: str = ".fno/plans/"
+    plans_filename: str = "%Y%m%d-{slug}-{node}.md"
     branch: BranchBlock = Field(default_factory=BranchBlock)
     paths: PathsBlock = Field(default_factory=PathsBlock)
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
@@ -2537,6 +2538,25 @@ class ConfigBlock(BaseModel):
         if isinstance(v, str):
             _check_no_glob(v, "path field")
             _check_path_max(v, "path field")
+        return v
+
+    @field_validator("plans_filename")
+    @classmethod
+    def validate_plans_filename(cls, v: str) -> str:
+        """Template must render (strftime + {slug}/{node} only) to a .md name."""
+        import datetime as _dt
+
+        try:
+            rendered = _dt.datetime(2000, 1, 2).strftime(v).format(slug="s", node="n")
+        except (KeyError, IndexError, ValueError) as e:
+            raise ValueError(
+                f"config.plans_filename: unrenderable template {v!r}: {e} "
+                "(strftime codes plus {slug} and {node} placeholders only)"
+            ) from e
+        if not rendered.endswith(".md") or "/" in rendered:
+            raise ValueError(
+                f"config.plans_filename: must render to a bare *.md filename, got {rendered!r}"
+            )
         return v
 
     @model_validator(mode="after")
