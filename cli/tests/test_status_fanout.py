@@ -459,3 +459,133 @@ def test_json_webhook_url_env_resolves(tmp_path, monkeypatch):
     sink = _json_sink(url=None, url_env="OPS_URL")
     sf._dispatch_json_webhook(sink, _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig())
     assert posted["url"] == "https://from-env"
+
+
+# ── US4: text-webhook adapter (custom Formatter, mentions guard) ─────────────
+
+
+def test_render_dotted_data_path():
+    from fno import status_fanout as sf
+
+    ev = _ev("t", "blocked", **{"from": "worker", "node": "x-9"})
+    ev["data"] = {"reason": "needs a decision"}
+    out = sf._render_template("{from} blocked on {node}: {data.reason}", ev)
+    assert out == "worker blocked on x-9: needs a decision"
+
+
+def test_render_missing_field_is_empty_not_crash():
+    from fno import status_fanout as sf
+
+    ev = _ev("t", "blocked")  # no 'from', no data.reason
+    out = sf._render_template("[{from}] {data.reason}{node}", ev)
+    assert out == "[] "  # every missing ref renders empty, no KeyError/AttributeError
+
+
+def test_render_dotted_on_nondict_is_empty():
+    from fno import status_fanout as sf
+
+    ev = _ev("t", "blocked", **{"from": "w"})
+    # `from` is a string; `.foo` traversal must yield empty, not crash.
+    assert sf._render_template("{from.foo}", ev) == ""
+
+
+def test_text_webhook_discord_shaped_adds_allowed_mentions(monkeypatch):
+    from fno import status_fanout as sf
+
+    posted = {}
+    monkeypatch.setattr(sf, "_post_json",
+                        lambda u, b, t: (posted.update(body=b) or sf._HttpResult(ok=True, status=200)))
+    ev = _ev("t", "blocked", **{"node": "x"})
+    ev["data"] = {"reason": "@everyone ship it"}
+    sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
+                            url="https://discord", template="{data.reason}", field="content")
+    status, _ = sf._dispatch_text_webhook(sink, ev, StatusFanoutConfig())
+    assert status == sf.DELIVERED
+    assert posted["body"]["content"] == "@everyone ship it"
+    assert posted["body"]["allowed_mentions"] == {"parse": []}  # no server ping
+
+
+def test_text_webhook_slack_field_no_allowed_mentions(monkeypatch):
+    from fno import status_fanout as sf
+
+    posted = {}
+    monkeypatch.setattr(sf, "_post_json",
+                        lambda u, b, t: (posted.update(body=b) or sf._HttpResult(ok=True, status=200)))
+    sink = StatusSinkConfig(name="s", type="text-webhook", events=["blocked"],
+                            url="https://slack", template="hi", field="text")
+    sf._dispatch_text_webhook(sink, _ev("t", "blocked"), StatusFanoutConfig())
+    assert posted["body"] == {"text": "hi"}  # no allowed_mentions for non-Discord
+
+
+def test_text_webhook_reuses_failure_classes(monkeypatch):
+    from fno import status_fanout as sf
+
+    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=404))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    sink = StatusSinkConfig(name="s", type="text-webhook", events=["blocked"],
+                            url="https://x", template="hi", field="content")
+    status, detail = sf._dispatch_text_webhook(sink, _ev("t", "blocked"), StatusFanoutConfig())
+    assert status == sf.DROPPED and "404" in detail
+
+
+# ── integration: run_tick through the real adapter router (mocked HTTP) ──────
+
+
+def test_integration_tick_text_webhook_delivers_and_advances(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    posts = []
+    monkeypatch.setattr(sf, "_post_json",
+                        lambda u, b, t: (posts.append(b) or sf._HttpResult(ok=True, status=200)))
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    (ss / "d.cursor").write_text("2026-07-12T00:00:00Z")
+    ev = _ev("2026-07-12T00:00:05Z", "blocked", **{"node": "x-9"})
+    ev["data"] = {"reason": "why"}
+    _write_events(tmp_path, [ev])
+    sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
+                            url="https://x", template="{node}: {data.reason}", field="content")
+    res = sf.run_tick(tmp_path, [sink])  # default dispatch_fn -> real router
+    assert len(posts) == 1 and posts[0]["content"] == "x-9: why"
+    assert res.sinks[0].dispatched == 1
+    assert (ss / "d.cursor").read_text().strip() == "2026-07-12T00:00:05Z"
+
+
+def test_integration_tick_connect_class_short_circuit_holds_batch(tmp_path, monkeypatch):
+    # AC1-ERR end-to-end: 3 pending events, connect-class. First exhausts retries
+    # and short-circuits; remaining 2 are unattempted; cursor does not advance.
+    from fno import status_fanout as sf
+
+    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=None))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    (ss / "d.cursor").write_text("2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [
+        _ev("2026-07-12T00:00:01Z", "blocked"),
+        _ev("2026-07-12T00:00:02Z", "blocked"),
+        _ev("2026-07-12T00:00:03Z", "blocked"),
+    ])
+    sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
+                            url="https://x", template="hi", field="content")
+    res = sf.run_tick(tmp_path, [sink], StatusFanoutConfig(retries=1))
+    assert res.sinks[0].short_circuited is True
+    assert res.sinks[0].dispatched == 0
+    assert (ss / "d.cursor").read_text().strip() == "2026-07-12T00:00:00Z"  # held
+    assert (ss / "d.errors.jsonl").exists()
+
+
+def test_integration_tick_permanent_4xx_drops_and_advances(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=404))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    (ss / "d.cursor").write_text("2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
+                            url="https://x", template="hi", field="content")
+    res = sf.run_tick(tmp_path, [sink])
+    assert res.sinks[0].dropped == 1
+    assert (ss / "d.cursor").read_text().strip() == "2026-07-12T00:00:05Z"  # advanced past drop

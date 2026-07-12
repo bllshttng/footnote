@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import string
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -447,10 +448,51 @@ def _dispatch_json_webhook(
     return _deliver(url, body, fanout)
 
 
+class _EventFormatter(string.Formatter):
+    """Template renderer over an event dict. Unlike bare ``str.format``:
+    ``{data.reason}`` does *dict item* traversal (not attribute access, which
+    raises on a dict), and any missing field renders empty instead of raising."""
+
+    def get_field(self, field_name: str, args: Any, kwargs: Any) -> "tuple[Any, str]":
+        first, _, rest = field_name.partition(".")
+        obj: Any = kwargs.get(first, "") if isinstance(kwargs, dict) else ""
+        for part in (rest.split(".") if rest else []):
+            obj = obj.get(part, "") if isinstance(obj, dict) else ""
+        return obj, first
+
+    def get_value(self, key: Any, args: Any, kwargs: Any) -> Any:
+        if isinstance(key, int):
+            return ""  # positional refs unsupported; never crash
+        return kwargs.get(key, "") if isinstance(kwargs, dict) else ""
+
+    def format_field(self, value: Any, format_spec: str) -> str:
+        return str(super().format_field("" if value is None else value, format_spec))
+
+
+def _render_template(template: Optional[str], event: dict[str, Any]) -> str:
+    try:
+        return _EventFormatter().vformat(template or "", (), event)
+    except (ValueError, KeyError, IndexError):
+        # A malformed template (e.g. an unbalanced brace) degrades to raw text
+        # rather than crashing the tick.
+        return template or ""
+
+
 def _dispatch_text_webhook(
     sink: StatusSinkConfig, event: dict[str, Any], fanout: StatusFanoutConfig
-) -> "tuple[str, str]":  # implemented in US4
-    raise NotImplementedError("text-webhook adapter (US4)")
+) -> "tuple[str, str]":
+    """Render ``template`` against the event and POST ``{field: rendered}``. One
+    adapter serves Discord (``content``) / Slack-incoming (``text``) / ntfy via
+    the configurable ``field``. A Discord-shaped post (``field == "content"``)
+    sends ``allowed_mentions: {"parse": []}`` so a worker-influenced reason
+    containing ``@everyone`` cannot ping the server."""
+    url, err = _resolve_url(sink)
+    if url is None:
+        return SHORT_CIRCUIT, err or "no url"
+    body: dict[str, Any] = {sink.field: _render_template(sink.template, event)}
+    if sink.field == "content":
+        body["allowed_mentions"] = {"parse": []}
+    return _deliver(url, body, fanout)
 
 
 def _dispatch_backlog_progress(
