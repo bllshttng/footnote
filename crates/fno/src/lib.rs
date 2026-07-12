@@ -11,6 +11,7 @@ pub mod digest_overlay;
 pub mod keys;
 pub mod mouse;
 pub mod mux_cli;
+pub mod needs_overlay;
 pub mod proto;
 pub mod pty;
 pub mod server;

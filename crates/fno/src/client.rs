@@ -27,9 +27,10 @@ use tokio::sync::mpsc;
 
 use crate::keys::{Event, Scanner};
 use crate::proto::{
-    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, BacklogCard, BlockDir, CardState,
-    Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent, MouseKind, ProtoError,
-    ServerMsg, SquadMeta, BUILD_VERSION, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
+    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, AnswerablePrompt, BacklogCard,
+    BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
+    MouseKind, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    PROTO_VERSION,
 };
 use crate::tree::{Rect, TabId};
 
@@ -415,6 +416,25 @@ struct View {
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
+    /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
+    /// result while the overlay is open (`None` = live-only, not yet fetched
+    /// this open). Merged with the live badge leg by [`View::needs_view`].
+    needs_fold: Option<Vec<crate::needs_overlay::FoldItem>>,
+    /// (x-feec) When `needs_fold` was last fetched, for the short re-open cache.
+    needs_fold_at: Option<Instant>,
+    /// (x-feec) The last fold shell-out failed/timed out: render the loud
+    /// degraded notice (AC2-ERR) instead of a silent partial queue.
+    needs_degraded: bool,
+    /// (x-feec) Set by OpenAnswers when a fresh fold is wanted; the run loop
+    /// spawns the shell-out and clears it, keeping the channel sender out of the
+    /// deep stdin handler.
+    needs_want: bool,
+    /// (x-feec) A fold shell-out is running; bounds concurrent folds to one so
+    /// mashing leader+a on a stale cache cannot spawn a pile of children (P2-5).
+    needs_inflight: bool,
+    /// (x-feec) Generation token, bumped on every open/close so a fold result
+    /// landing after the overlay closed or re-opened is discarded (AC6-FR).
+    needs_gen: u64,
     /// Catch-up "while you were gone" digest lines (x-4e2d), set on attach after
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
@@ -568,6 +588,12 @@ impl View {
             sideline_offset: 0,
             answers: None,
             ans_esc: Vec::new(),
+            needs_fold: None,
+            needs_fold_at: None,
+            needs_degraded: false,
+            needs_want: false,
+            needs_inflight: false,
+            needs_gen: 0,
             digest: None,
             notice: None,
             search: None,
@@ -590,18 +616,179 @@ impl View {
         }
     }
 
-    /// The blocked-pane queue for the answer overlay (x-c929): live rows badged
-    /// `blocked`, in `Layout.agents` order (the documented, deterministic cycle
-    /// order - AC2-UI). Owned clones so a per-key mutation of `answers` does not
-    /// alias the borrow (the same reason the selector materializes owned data
-    /// per key); blocked panes are few, so the clone is cheap.
-    fn blocked_queue(&self) -> Vec<AgentRow> {
-        self.layout
-            .agents
-            .iter()
-            .filter(|a| is_blocked_row(a))
-            .cloned()
-            .collect()
+    /// The unified needs-me queue (x-feec), worst-first: the live badge leg
+    /// (this session's blocked / done-unseen rows, instant from the layout)
+    /// merged with the event-fold leg (`review_wedged` / `budget_stop`), each
+    /// fold item joined to a roster row when one exists. Owned rows so a per-key
+    /// mutation of `answers` never aliases the borrow (the reason the old
+    /// blocked_queue cloned too). Sorted `(kind, ts, name)`.
+    fn needs_queue(&self) -> Vec<NeedRow> {
+        let mut rows: Vec<NeedRow> = Vec::new();
+
+        // Leg 1: live badge rows from the current layout (no shell-out).
+        for a in &self.layout.agents {
+            if is_blocked_row(a) {
+                let kind = if a.answerable.is_some() {
+                    NeedKind::BlockedAnswerable
+                } else {
+                    NeedKind::BlockedFocusOnly
+                };
+                let reason = a.reason.clone().unwrap_or_else(|| {
+                    if a.answerable.is_some() {
+                        "needs an answer".into()
+                    } else {
+                        "needs focus".into()
+                    }
+                });
+                rows.push(NeedRow {
+                    kind,
+                    name: a.name.clone(),
+                    reason,
+                    ts: String::new(),
+                    id_key: a.name.clone(),
+                    answerable: a.answerable.clone(),
+                    pane_id: a.pane_id,
+                    attach_id: a.attach_id.clone(),
+                    squad: a.squad,
+                    tab: a.tab,
+                });
+            } else if !a.exited && pane_state(a.badge, a.seen) == PaneState::DoneUnseen {
+                rows.push(NeedRow {
+                    kind: NeedKind::DoneUnseen,
+                    name: a.name.clone(),
+                    reason: a.reason.clone().unwrap_or_else(|| "done, unseen".into()),
+                    ts: String::new(),
+                    id_key: a.name.clone(),
+                    answerable: None,
+                    pane_id: a.pane_id,
+                    attach_id: a.attach_id.clone(),
+                    squad: a.squad,
+                    tab: a.tab,
+                });
+            }
+        }
+
+        // Leg 2: event-fold items, joined to a roster row, else rendered
+        // squadless when live, else dropped (a dead session's stale stop must
+        // not nag forever - Locked 5).
+        if let Some(items) = &self.needs_fold {
+            for item in items {
+                let kind = match item.kind.as_str() {
+                    "review_wedged" => NeedKind::ReviewWedged,
+                    "budget_stop" => NeedKind::BudgetStop,
+                    _ => continue,
+                };
+                match self.join_fold_row(item) {
+                    Some(a) => rows.push(NeedRow {
+                        kind,
+                        name: a.name.clone(),
+                        reason: item.evidence.clone(),
+                        ts: item.ts.clone(),
+                        id_key: item.session_id.clone(),
+                        answerable: None,
+                        pane_id: a.pane_id,
+                        attach_id: a.attach_id.clone(),
+                        squad: a.squad,
+                        tab: a.tab,
+                    }),
+                    None if item.live => rows.push(NeedRow {
+                        kind,
+                        name: item
+                            .name
+                            .clone()
+                            .or_else(|| item.node.clone())
+                            .unwrap_or_else(|| item.session_id.clone()),
+                        reason: item.evidence.clone(),
+                        ts: item.ts.clone(),
+                        id_key: item.session_id.clone(),
+                        answerable: None,
+                        pane_id: None,
+                        attach_id: None,
+                        squad: None,
+                        tab: None,
+                    }),
+                    None => {} // unjoined + not live: drop (stale-nag guard)
+                }
+            }
+        }
+
+        rows.sort_by(|a, b| {
+            a.kind
+                .cmp(&b.kind)
+                .then_with(|| a.ts.cmp(&b.ts))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        rows
+    }
+
+    /// The roster row a fold item joins to: a name / node / session-id match
+    /// against a layout row's name or cwd basename (the identity a sideline
+    /// orphan row carries).
+    fn join_fold_row(&self, item: &crate::needs_overlay::FoldItem) -> Option<&AgentRow> {
+        let keys: Vec<&str> = [
+            item.name.as_deref(),
+            item.node.as_deref(),
+            Some(item.session_id.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        self.layout.agents.iter().find(|a| {
+            keys.iter().any(|k| a.name == *k)
+                || a.cwd_base.as_deref().is_some_and(|c| keys.contains(&c))
+        })
+    }
+
+    /// The capped, sorted queue actually rendered and indexed, plus the count of
+    /// rows the worst-first cap dropped (for the footer). Both the overlay draw
+    /// and the key handler read this, so cursor index and rendered rows never
+    /// diverge.
+    fn needs_view(&self) -> (Vec<NeedRow>, usize) {
+        let mut rows = self.needs_queue();
+        let dropped = rows.len().saturating_sub(NEEDS_CAP);
+        rows.truncate(NEEDS_CAP);
+        (rows, dropped)
+    }
+
+    /// The overlay footer state: a failed fold degrades loudly (AC2-ERR), an
+    /// unfetched fold reads as still folding, else it has landed.
+    fn needs_footer(&self) -> NeedsFooter {
+        if self.needs_degraded {
+            NeedsFooter::Degraded
+        } else if self.needs_fold.is_none() {
+            NeedsFooter::Folding
+        } else {
+            NeedsFooter::AsOf
+        }
+    }
+
+    /// The identity of the currently-selected needs row, for re-anchoring the
+    /// cursor across a layout push or fold merge (AC3-UI).
+    fn answers_selected_id(&self) -> Option<(NeedKind, String)> {
+        let cur = self.answers?;
+        let (rows, _) = self.needs_view();
+        rows.get(cur).map(NeedRow::id)
+    }
+
+    /// Re-anchor the answer cursor to `prev` (its item identity) after the queue
+    /// recomputed: keep it on the same item if still present, else clamp. The
+    /// overlay stays open on an empty queue (the "nothing needs you" state,
+    /// AC4-EDGE) with the cursor clamped to 0 so a later merge lands cleanly.
+    fn reanchor_answers(&mut self, prev: Option<(NeedKind, String)>) {
+        if self.answers.is_none() {
+            return;
+        }
+        let (rows, _) = self.needs_view();
+        if rows.is_empty() {
+            self.answers = Some(0);
+            return;
+        }
+        let idx = prev
+            .and_then(|(k, n)| rows.iter().position(|r| r.kind == k && r.name == n))
+            .or(self.answers)
+            .unwrap_or(0)
+            .min(rows.len() - 1);
+        self.answers = Some(idx);
     }
 
     /// Open the new-workspace name overlay modally (x-9e5e): clear any
@@ -1137,6 +1324,9 @@ impl View {
         // holds live squads (bounded leak otherwise).
         self.expanded
             .retain(|id| layout.squads.iter().any(|s| s.id == *id));
+        // Capture the selected needs-row identity against the OLD layout, before
+        // the swap, so the cursor can re-anchor to the same item afterward.
+        let needs_prev = self.answers_selected_id();
         self.layout = layout;
         // Selector re-anchors to a live, actionable row on catalog change
         // (AC6-FR): clamp into the unified rows, then step off an inert Header
@@ -1151,19 +1341,12 @@ impl View {
             };
             self.selector = anchored;
         }
-        // Answer overlay re-clamps when a scrape tick drops the selected blocked
-        // pane (x-c929, AC2-EDGE): stay in place if a later entry now occupies
-        // the slot, move to the new last entry if the removed one was last, and
-        // close when the queue empties (AC2-ERR).
-        if let Some(cur) = self.answers {
-            let n = self
-                .layout
-                .agents
-                .iter()
-                .filter(|a| is_blocked_row(a))
-                .count();
-            self.answers = if n == 0 { None } else { Some(cur.min(n - 1)) };
-        }
+        // Needs-me overlay re-anchors to the SAME item across a scrape tick
+        // (x-feec AC3-UI): a resolved row drops out, the queue re-sorts, and the
+        // cursor stays on the item it was on (by identity, not index), clamped
+        // in range. An emptied queue keeps the overlay open in its "nothing
+        // needs you" state (AC4-EDGE) rather than closing under the user.
+        self.reanchor_answers(needs_prev);
         // Navigator re-clamps its cursor when a scrape tick reorders/removes rows
         // under it (x-653d, AC1-FR/AC2-EDGE): the rows recompute from self.layout
         // on every access, so after a push a past-the-end cursor would draw no
@@ -1401,13 +1584,15 @@ impl View {
         } else if self.overlay {
             draw_overlay(&mut cells, rows, cols);
         } else if let Some(sel) = self.answers {
-            // x-c929 answer overlay: reuse the inverse-video overlay chrome with
-            // computed lines (blocked queue + the selected pane's prompt/options).
-            let blocked = self.blocked_queue();
-            if !blocked.is_empty() {
-                let lines = answer_overlay_lines(&blocked, sel.min(blocked.len() - 1));
-                draw_lines_overlay(&mut cells, rows, cols, &lines);
-            }
+            // x-feec needs-me queue (grown from the x-c929 answer overlay): the
+            // severity-ranked union + the selected row's answer options, on the
+            // shared inverse-video chrome. Always drawn while open - an empty
+            // union renders "nothing needs you", a pending/failed fold renders
+            // its footer notice (never a blank overlay).
+            let (queue, dropped) = self.needs_view();
+            let sel = sel.min(queue.len().saturating_sub(1));
+            let lines = needs_overlay_lines(&queue, sel, dropped, self.needs_footer());
+            draw_lines_overlay(&mut cells, rows, cols, &lines);
         } else if let Some((_, squads)) = &self.move_pick {
             // x-96e8 move-tab picker: `move tab to:` + one numbered line per
             // candidate squad, on the same inverse-video overlay chrome.
@@ -2161,6 +2346,81 @@ fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
     }
 }
 
+/// Why a session needs a human, worst-first (x-feec). Declaration order IS the
+/// severity contract: the needs-me queue is `(kind, ts, name)`-sorted, so the
+/// worst band leads and the longest-waiting fold item tops its band (a live
+/// badge row carries no ts, so it degenerates to name order within its band -
+/// leg-1 and leg-2 never share a band, so the two orderings never mix). Same
+/// declaration-order `Ord` trick as [`PaneState`]. `Decision` is reserved for
+/// the typed help / decision-gate source (x-dbaf) and is unpopulated in v1 -
+/// kept so the ordering contract and the future fold arm have a home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NeedKind {
+    // Reserved (x-dbaf); never constructed in v1. Leads the order so a decision
+    // gate, when it lands, outranks everything downstream of it. Kept so the
+    // severity contract and the future fold arm have a home.
+    #[allow(dead_code)]
+    Decision,
+    BlockedAnswerable,
+    BlockedFocusOnly,
+    ReviewWedged,
+    BudgetStop,
+    DoneUnseen,
+}
+
+/// The leading glyph per need kind, matching the sideline's [`nav_glyph`]
+/// vocabulary where they overlap (blocked `▲`, done `✓`).
+fn need_glyph(k: NeedKind) -> char {
+    match k {
+        NeedKind::Decision => '⁉',
+        NeedKind::BlockedAnswerable | NeedKind::BlockedFocusOnly => '▲',
+        NeedKind::ReviewWedged => '⏳',
+        NeedKind::BudgetStop => '⏹',
+        NeedKind::DoneUnseen => '✓',
+    }
+}
+
+/// One unified needs-me-queue row: a live badge row (leg 1) or an event-fold
+/// item joined to the roster (leg 2), reduced to what the overlay renders and
+/// routes on. Identity for cursor re-anchor is `(kind, name)`.
+#[derive(Clone)]
+struct NeedRow {
+    kind: NeedKind,
+    name: String,
+    reason: String,
+    /// The deciding event ts for a fold row (oldest-first tie-break); `""` for a
+    /// live badge row (name-ordered within its band).
+    ts: String,
+    /// A STABLE re-anchor key: a fold row's session id (survives a joined <->
+    /// squadless flip, where `name` changes), a badge row's name. Not shown.
+    id_key: String,
+    /// Present only on a `BlockedAnswerable` row - the digit-answer payload.
+    answerable: Option<AnswerablePrompt>,
+    pane_id: Option<u64>,
+    attach_id: Option<String>,
+    squad: Option<u64>,
+    tab: Option<u64>,
+}
+
+impl NeedRow {
+    /// The re-anchor identity: a scrape tick / fold merge keeps the cursor on
+    /// the same item, not the same index (AC3-UI). Keyed on `(kind, id_key)` -
+    /// a stable session id for fold rows so a joined<->squadless transition (its
+    /// `name` flips) does not drop the cursor (codex P2).
+    fn id(&self) -> (NeedKind, String) {
+        (self.kind, self.id_key.clone())
+    }
+}
+
+/// Cap on rendered rows (worst-first, so the cap drops only the least severe);
+/// the footer states the drop count. Matches the sideline card cap.
+const NEEDS_CAP: usize = 40;
+/// Re-open cache: a fold younger than this is reused instantly (mashing
+/// `leader+a` never re-shells - Perspective B).
+const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
+/// Default fold window: the last 24h (the fold also windows server-side).
+const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
+
 /// One row of the navigator's flat catalog (x-653d). Fully owned (no layout
 /// borrow) so goto can mutate the view after the catalog is built; recomputed
 /// per keypress, never cached.
@@ -2314,47 +2574,75 @@ fn draw_overlay(cells: &mut [Cell], rows: usize, cols: usize) {
 /// region text) and pad to it so the inverse block is a clean rectangle.
 const ANSWER_OVERLAY_W: usize = 54;
 
-/// Build the answer-overlay lines from the blocked-pane queue + the selected
-/// pane's prompt/options (x-c929). `sel` is pre-clamped by the caller. A `▸`
-/// marks the selected row (AC1-UI); an answerable row lists its numbered
-/// options, a focus-only row shows the "⏎ to focus" affordance (AC1-EDGE).
-fn answer_overlay_lines(blocked: &[AgentRow], sel: usize) -> Vec<String> {
+/// The footer state of the needs-me overlay: whether the event-fold leg is
+/// still in flight, failed (loud degrade, AC2-ERR), or landed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NeedsFooter {
+    Folding,
+    Degraded,
+    AsOf,
+}
+
+/// Build the needs-me overlay lines (x-feec): the severity-ranked union + the
+/// selected row's answer options + a state footer, on the shared inverse-video
+/// chrome. `sel` is pre-clamped by the caller. A `▸` marks the selected row; an
+/// answerable row lists its numbered options, a focus-only row is tagged.
+/// Always renders something - an empty union shows "nothing needs you", so the
+/// overlay never opens blank.
+fn needs_overlay_lines(
+    queue: &[NeedRow],
+    sel: usize,
+    dropped: usize,
+    footer: NeedsFooter,
+) -> Vec<String> {
     let mut lines = vec![pad_to(
-        " answer queue · digit answers · n/N cycle · ⏎ focus · esc close",
+        " needs me · digit answers · n/N cycle · ⏎ goto · q close",
         ANSWER_OVERLAY_W,
     )];
-    for (i, a) in blocked.iter().enumerate() {
-        let marker = if i == sel { '▸' } else { ' ' };
-        let tag = if a.answerable.is_some() {
-            ""
-        } else {
-            "  ⚠ focus"
-        };
-        lines.push(pad_to(
-            &format!(" {marker} {}{}", a.name, tag),
-            ANSWER_OVERLAY_W,
-        ));
-    }
-    lines.push(pad_to("", ANSWER_OVERLAY_W)); // divider row
-    if let Some(a) = blocked.get(sel) {
-        match &a.answerable {
-            Some(ans) => {
-                if !ans.prompt.is_empty() {
-                    lines.push(pad_to(
-                        &format!("   {}", ans.prompt.replace('\n', " ")),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-                for o in &ans.options {
-                    lines.push(pad_to(
-                        &format!("     {}. {}", o.idx, o.label),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
+    if queue.is_empty() {
+        lines.push(pad_to("   nothing needs you", ANSWER_OVERLAY_W));
+    } else {
+        for (i, r) in queue.iter().enumerate() {
+            let marker = if i == sel { '▸' } else { ' ' };
+            let tag = match r.kind {
+                NeedKind::BlockedFocusOnly => "  ⚠ focus",
+                _ => "",
+            };
+            lines.push(pad_to(
+                &format!(
+                    " {marker} {} {}  {}{tag}",
+                    need_glyph(r.kind),
+                    r.name,
+                    r.reason
+                ),
+                ANSWER_OVERLAY_W,
+            ));
+        }
+        lines.push(pad_to("", ANSWER_OVERLAY_W)); // divider row
+        if let Some(ans) = queue.get(sel).and_then(|r| r.answerable.as_ref()) {
+            if !ans.prompt.is_empty() {
+                lines.push(pad_to(
+                    &format!("   {}", ans.prompt.replace('\n', " ")),
+                    ANSWER_OVERLAY_W,
+                ));
             }
-            None => lines.push(pad_to("   ⚠ needs you — ⏎ to focus", ANSWER_OVERLAY_W)),
+            for o in &ans.options {
+                lines.push(pad_to(
+                    &format!("     {}. {}", o.idx, o.label),
+                    ANSWER_OVERLAY_W,
+                ));
+            }
         }
     }
+    let footer_line = match footer {
+        NeedsFooter::Folding => "   folding events...".to_string(),
+        NeedsFooter::Degraded => "   events fold unavailable - live badges only".to_string(),
+        NeedsFooter::AsOf if dropped > 0 => {
+            format!("   {dropped} more hidden (worst shown first)")
+        }
+        NeedsFooter::AsOf => "   as of now".to_string(),
+    };
+    lines.push(pad_to(&footer_line, ANSWER_OVERLAY_W));
     lines
 }
 
@@ -2615,6 +2903,14 @@ async fn attach_and_run(
     let (copy_tx, mut copy_rx) =
         tokio::sync::mpsc::unbounded_channel::<(usize, crate::clipboard::CopyOutcome)>();
 
+    // x-feec: the needs-me event-fold leg runs off the UI loop and reports back
+    // here, tagged with the generation token it was kicked under, so a slow
+    // `fno-agents needs` never blocks the overlay and a result landing after the
+    // overlay closed/re-opened is discarded (AC6-FR). `None` = the fold failed.
+    let (needs_tx, mut needs_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::needs_overlay::FoldItem>>)>(
+        );
+
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
     // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
@@ -2635,6 +2931,25 @@ async fn attach_and_run(
         .map_err(|e| format!("draw: {e}"))?;
 
     let exit: Result<i32, String> = loop {
+        // x-feec: kick a wanted event-fold off the UI loop, at most ONE in
+        // flight (P2-5). Runs at loop top so a want re-armed from either the
+        // stdin arm (OpenAnswers) or the needs_rx arm (superseded refold) fires
+        // without needing another keypress. The sender lives in this scope, out
+        // of the deep stdin handler; the result reports back on needs_rx tagged
+        // with this generation.
+        if view.needs_want && !view.needs_inflight {
+            view.needs_want = false;
+            view.needs_inflight = true;
+            let tx = needs_tx.clone();
+            let gen = view.needs_gen;
+            let since = crate::digest_overlay::now_secs()
+                .saturating_sub(NEEDS_WINDOW_SECS)
+                .to_string();
+            tokio::spawn(async move {
+                let result = crate::needs_overlay::fold_now(&since).await;
+                let _ = tx.send((gen, result));
+            });
+        }
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
         // The which-key hint fires once per pending chord (US4, AC4-HP).
@@ -2797,6 +3112,44 @@ async fn attach_and_run(
                 view.set_notice(notice);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
+                }
+            }
+            Some((gen, result)) = needs_rx.recv() => {
+                // x-feec: an event-fold landed; the in-flight fold is done, so a
+                // later open may spawn a fresh one (P2-5 bound).
+                view.needs_inflight = false;
+                // Merge only if the overlay is still open under the same
+                // generation it was kicked for; a result for a closed/superseded
+                // overlay is discarded (AC6-FR). If the overlay is still open but
+                // moved on (re-opened, still live-only), re-arm a fresh fold.
+                if gen == view.needs_gen && view.answers.is_some() {
+                    let prev = view.answers_selected_id();
+                    match result {
+                        Some(items) => {
+                            view.needs_fold = Some(items);
+                            view.needs_degraded = false;
+                            // Only a SUCCESS seeds the re-open cache; a failure is
+                            // never cached, so the next open retries instead of
+                            // silently serving the failed empty fold (P2-6).
+                            view.needs_fold_at = Some(Instant::now());
+                        }
+                        // Fold failed/timed out: keep the live badge leg, flip the
+                        // loud degraded notice (AC2-ERR), never a silent partial
+                        // queue. An empty Some keeps leg-1 rendering; leave
+                        // needs_fold_at untouched so the next open re-folds.
+                        None => {
+                            view.needs_fold = Some(Vec::new());
+                            view.needs_degraded = true;
+                        }
+                    }
+                    view.reanchor_answers(prev);
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                } else if view.answers.is_some() && view.needs_fold.is_none() {
+                    // A superseded fold returned while the current overlay still
+                    // needs one (re-opened past the cache): kick a fresh fold.
+                    view.needs_want = true;
                 }
             }
             _ = winch.recv() => {
@@ -3035,13 +3388,25 @@ async fn handle_stdin(
                 }
             }
             Event::OpenAnswers => {
-                // Nothing blocked -> a local BEL, the overlay never opens on an
-                // empty queue (AC2-ERR). `.any` over the rows, no clone.
-                if !view.layout.agents.iter().any(is_blocked_row) {
-                    let _ = raw_out(b"\x07");
+                // x-feec: open the needs-me queue. Always opens (even with an
+                // empty live leg) so the async event-fold leg can populate it;
+                // an ultimately-empty union renders "nothing needs you". The
+                // fold merges in when it lands - the overlay never blocks on it.
+                view.answers = Some(0);
+                view.ans_esc.clear();
+                view.needs_gen = view.needs_gen.wrapping_add(1);
+                let fresh = view
+                    .needs_fold_at
+                    .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
+                if fresh {
+                    // Re-open within the cache TTL: reuse the last fold instantly
+                    // (Perspective B - mashing leader+a never re-shells).
+                    view.needs_degraded = false;
                 } else {
-                    view.answers = Some(0);
-                    view.ans_esc.clear();
+                    // Stale/first open: live-only until the refresh lands.
+                    view.needs_fold = None;
+                    view.needs_degraded = false;
+                    view.needs_want = true;
                 }
             }
             Event::TogglePanel => {
@@ -4101,12 +4466,15 @@ async fn rename_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Answer-overlay keys (x-c929): a digit answers the selected blocked pane
-/// (sending [`ClientMsg::PaneAnswer`] with the daemon-pinned option keystroke -
-/// focus unchanged), `n`/`N` (and j/k/arrows) cycle the blocked queue, Enter
-/// focuses+closes, Esc/q closes. The blocked queue is re-read per key so a
-/// scrape tick that drops the selected pane re-clamps instead of indexing a
-/// dropped row (AC2-EDGE); an emptied queue closes the overlay (AC2-ERR).
+/// Needs-me overlay keys (x-feec, grown from x-c929): a digit answers the
+/// selected answerable row (unchanged [`ClientMsg::PaneAnswer`] - daemon-pinned
+/// keystroke, fingerprint fail-closed, focus unchanged), `n`/`N` (and j/k/
+/// arrows) cycle the queue, Enter routes per kind (goto its pane/attach, else a
+/// focus-manually notice for a squadless live row), q/Esc closes. The queue is
+/// read once per chunk from the same [`View::needs_view`] the overlay draws, so
+/// the cursor and the rendered rows never diverge. An empty overlay (the
+/// "nothing needs you" state) closes on ANY key (AC4-EDGE). Closing bumps the
+/// generation token so an in-flight fold result is discarded (AC6-FR).
 async fn answer_keys(
     view: &mut View,
     bytes: &[u8],
@@ -4115,24 +4483,37 @@ async fn answer_keys(
     let mut esc = std::mem::take(&mut view.ans_esc);
     let keys = fold_selector_keys(&mut esc, bytes); // arrows -> hjkl twins
     view.ans_esc = esc;
+    let (queue, _) = view.needs_view();
+    // Active squad/tab, captured once (the layout is stable within a key chunk):
+    // an Enter goto sends SelectSquad/SelectTab only when they would change the
+    // view, mirroring the x-653d nav goto so a same-context row emits just
+    // FocusPane (no redundant selects).
+    let active_squad = view.layout.active_squad;
+    let active_tab = view
+        .layout
+        .squads
+        .iter()
+        .find(|s| s.id == active_squad)
+        .and_then(|s| s.tabs.get(s.active_tab))
+        .map(|t| t.id);
     for &k in &keys {
-        let blocked = view.blocked_queue();
-        if blocked.is_empty() {
-            view.answers = None; // drained mid-chunk: close, swallow the rest
+        // The empty "nothing needs you" state: any key dismisses it (AC4-EDGE).
+        if queue.is_empty() {
+            view.answers = None;
+            view.needs_gen = view.needs_gen.wrapping_add(1);
             break;
         }
         let Some(cur0) = view.answers else {
             break; // closed mid-chunk
         };
-        let cur = cur0.min(blocked.len() - 1);
+        let cur = cur0.min(queue.len() - 1);
         view.answers = Some(cur);
         match k {
             // Cycle: n/N are the documented keys; j/k and folded arrows too.
-            // Wraps deterministically in Layout.agents order (AC2-UI).
-            b'n' | b'j' => view.answers = Some((cur + 1) % blocked.len()),
-            b'N' | b'k' => view.answers = Some((cur + blocked.len() - 1) % blocked.len()),
+            b'n' | b'j' => view.answers = Some((cur + 1) % queue.len()),
+            b'N' | b'k' => view.answers = Some((cur + queue.len() - 1) % queue.len()),
             b'0'..=b'9' => {
-                let sel = &blocked[cur];
+                let sel = &queue[cur];
                 let picked = sel
                     .answerable
                     .as_ref()
@@ -4160,24 +4541,52 @@ async fn answer_keys(
                         .await
                         .map_err(|e| format!("answer send failed: {e}"))?;
                     }
-                    // AC1-ERR: a digit with no matching option (or a focus-only
-                    // row) is a local BEL, never a stray key sent to any pane.
+                    // A digit with no matching option (or a non-answerable row,
+                    // e.g. review-wedged / budget / focus-only) is a local BEL,
+                    // never a stray key sent to any pane (x-c929 invariant).
                     None => {
                         let _ = raw_out(b"\x07");
                     }
                 }
             }
             b'\r' | b'\n' => {
-                // Focus the exact blocked pane: the server selects its squad/tab
-                // and pins focus. A row with no pane_id just closes (AC1-EDGE).
-                if let Some(pane) = blocked[cur].pane_id {
+                // Goto the row's target (x-653d): SelectSquad/SelectTab only when
+                // they change the view, then FocusPane; a paneless watch-only row
+                // attaches; a squadless live fold row has no reachable pane here,
+                // so it degrades to a notice (Invariant: every item actionable).
+                let row = &queue[cur];
+                if let Some(pane) = row.pane_id {
+                    let switching = row.squad.is_some_and(|s| s != active_squad);
+                    if let Some(sq) = row.squad.filter(|_| switching) {
+                        write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
+                            .await
+                            .map_err(|e| format!("command send failed: {e}"))?;
+                    }
+                    if let Some(tid) = row.tab.filter(|&t| switching || active_tab != Some(t)) {
+                        write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
+                            .await
+                            .map_err(|e| format!("command send failed: {e}"))?;
+                    }
                     write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pane)))
                         .await
                         .map_err(|e| format!("command send failed: {e}"))?;
+                } else if let Some(id) = &row.attach_id {
+                    write_msg(
+                        sock_w,
+                        &ClientMsg::Command(Command::AttachAgent(id.clone())),
+                    )
+                    .await
+                    .map_err(|e| format!("command send failed: {e}"))?;
+                } else {
+                    view.set_notice("no pane here - focus it manually".into());
                 }
                 view.answers = None;
+                view.needs_gen = view.needs_gen.wrapping_add(1);
             }
-            0x1b | b'q' => view.answers = None,
+            0x1b | b'q' => {
+                view.answers = None;
+                view.needs_gen = view.needs_gen.wrapping_add(1);
+            }
             _ => {}
         }
     }
@@ -7095,6 +7504,28 @@ mod tests {
         v
     }
 
+    // A roster row with an arbitrary badge/seen (x-feec): a join target for a
+    // fold item, or a done-unseen leg-1 row.
+    fn agent_row(name: &str, pane: u64, badge: Option<AgentBadge>, seen: bool) -> AgentRow {
+        let mut r = blocked_row(name, pane, None);
+        r.badge = badge;
+        r.seen = seen;
+        r
+    }
+
+    fn fold_item(kind: &str, name: &str, live: bool) -> crate::needs_overlay::FoldItem {
+        crate::needs_overlay::FoldItem {
+            kind: kind.into(),
+            session_id: format!("sess-{name}"),
+            node: Some(name.into()),
+            name: Some(name.into()),
+            title: None,
+            ts: "2026-07-03T02:00:00Z".into(),
+            evidence: format!("{kind} evidence"),
+            live,
+        }
+    }
+
     #[test]
     fn xc929_pad_to_truncates_and_pads() {
         assert_eq!(pad_to("hi", 5), "hi   ");
@@ -7102,31 +7533,58 @@ mod tests {
         assert_eq!(pad_to("hello world", 5), "hell…");
     }
 
-    // AC1-UI + AC1-EDGE: the selected row is marked, an answerable row lists its
-    // numbered options, a focus-only row shows the "⏎ to focus" affordance.
+    // AC1-HP + AC1-EDGE (x-feec): the selected row is marked, an answerable row
+    // lists its numbered options, a focus-only row is tagged; the answerable
+    // kind sorts ahead of focus-only (severity order).
     #[test]
-    fn xc929_answer_overlay_lines_marks_selection_and_renders_focus_only() {
-        let rows = vec![
+    fn needs_overlay_lines_mark_selection_and_tag_focus_only() {
+        let v = view_with_agents(vec![
             blocked_row("peer", 4, Some(answerable(&[("1", "Yes"), ("2", "No")], 7))),
             blocked_row("other", 5, None),
-        ];
-        let lines = answer_overlay_lines(&rows, 0);
+        ]);
+        let (queue, dropped) = v.needs_view();
+        let lines = needs_overlay_lines(&queue, 0, dropped, NeedsFooter::AsOf);
         assert!(
-            lines[1].trim_start().starts_with("▸ peer"),
+            lines[1].contains('▸') && lines[1].contains("peer"),
             "{:?}",
             lines[1]
         );
         assert!(lines[2].contains("other") && lines[2].contains("⚠ focus"));
         assert!(lines.iter().any(|l| l.contains("1. Yes")));
         assert!(lines.iter().any(|l| l.contains("2. No")));
-        // Selecting the focus-only row shows the affordance, no digits.
-        let lines = answer_overlay_lines(&rows, 1);
-        assert!(lines.iter().any(|l| l.contains("needs you")));
+        // Selecting the focus-only row shows no answer options.
+        let lines = needs_overlay_lines(&queue, 1, dropped, NeedsFooter::AsOf);
         assert!(!lines.iter().any(|l| l.contains("1. Yes")));
     }
 
+    // The empty union renders the "nothing needs you" state, never a blank
+    // overlay (AC4-EDGE), and states the drop count when the cap trims (footer).
     #[test]
-    fn xc929_blocked_queue_filters_to_live_blocked_rows() {
+    fn needs_overlay_lines_empty_and_capped_footers() {
+        let empty = needs_overlay_lines(&[], 0, 0, NeedsFooter::AsOf);
+        assert!(empty.iter().any(|l| l.contains("nothing needs you")));
+        let one = vec![NeedRow {
+            kind: NeedKind::BudgetStop,
+            name: "x".into(),
+            reason: "stopped".into(),
+            ts: String::new(),
+            id_key: "x".into(),
+            answerable: None,
+            pane_id: Some(1),
+            attach_id: None,
+            squad: Some(1),
+            tab: None,
+        }];
+        let degraded = needs_overlay_lines(&one, 0, 0, NeedsFooter::Degraded);
+        assert!(degraded
+            .iter()
+            .any(|l| l.contains("events fold unavailable")));
+        let capped = needs_overlay_lines(&one, 0, 7, NeedsFooter::AsOf);
+        assert!(capped.iter().any(|l| l.contains("7 more hidden")));
+    }
+
+    #[test]
+    fn needs_queue_filters_to_live_blocked_rows() {
         let mut working = blocked_row("working", 2, None);
         working.badge = Some(AgentBadge::Working);
         let mut dead = blocked_row("dead", 3, None);
@@ -7137,44 +7595,193 @@ mod tests {
             dead,
             blocked_row("b", 4, None),
         ]);
-        let q = v.blocked_queue();
         assert_eq!(
-            q.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            v.needs_queue()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>(),
             vec!["a", "b"],
-            "only live blocked rows, in Layout.agents order"
+            "only live blocked rows"
         );
     }
 
-    // AC2-EDGE: a scrape tick that drops the selected pane re-clamps the overlay
-    // cursor instead of indexing a dropped row; an emptied queue closes it.
+    // AC3-UI (x-feec): a scrape tick that drops the selected pane re-anchors the
+    // cursor by identity; an emptied queue keeps the overlay open in its
+    // "nothing needs you" state (does NOT close under the user).
     #[test]
-    fn xc929_answers_reclamp_and_close_on_layout_change() {
+    fn needs_reanchor_keeps_cursor_and_stays_open_when_empty() {
         let mut v = view_with_agents(vec![blocked_row("a", 1, None), blocked_row("b", 2, None)]);
         v.answers = Some(1);
-        // The last blocked pane drops -> cursor clamps to the new last (0).
-        v.set_layout(LayoutView {
+        let with = |v: &View, agents: Vec<AgentRow>| LayoutView {
             squads: v.layout.squads.clone(),
             active_squad: 1,
             panes: v.layout.panes.clone(),
             focus: v.layout.focus,
             area: v.layout.area,
-            agents: vec![blocked_row("a", 1, None)],
+            agents,
             focus_node: None,
             backlog: Vec::new(),
-        });
+        };
+        // "b" drops -> its identity is gone, so the cursor clamps to the new last.
+        let l1 = with(&v, vec![blocked_row("a", 1, None)]);
+        v.set_layout(l1);
         assert_eq!(v.answers, Some(0));
-        // The queue empties -> the overlay closes (AC2-ERR).
-        v.set_layout(LayoutView {
-            squads: v.layout.squads.clone(),
-            active_squad: 1,
-            panes: v.layout.panes.clone(),
-            focus: v.layout.focus,
-            area: v.layout.area,
-            agents: vec![],
-            focus_node: None,
-            backlog: Vec::new(),
-        });
+        // Queue empties -> overlay stays open (AC4-EDGE empty state), cursor at 0.
+        let l2 = with(&v, vec![]);
+        v.set_layout(l2);
+        assert_eq!(v.answers, Some(0), "empty keeps the overlay open");
+    }
+
+    // INV (x-feec): NeedKind declaration order IS the severity contract.
+    #[test]
+    fn needs_kind_ord_is_declaration_order() {
+        use NeedKind::*;
+        let mut ks = vec![
+            DoneUnseen,
+            BudgetStop,
+            ReviewWedged,
+            BlockedFocusOnly,
+            BlockedAnswerable,
+            Decision,
+        ];
+        ks.sort();
+        assert_eq!(
+            ks,
+            vec![
+                Decision,
+                BlockedAnswerable,
+                BlockedFocusOnly,
+                ReviewWedged,
+                BudgetStop,
+                DoneUnseen
+            ]
+        );
+    }
+
+    // AC1-HP (x-feec): the live badge leg + the event-fold leg merge into one
+    // worst-first queue: answerable, focus-only, review-wedged, budget-stopped,
+    // done-unseen.
+    #[test]
+    fn needs_queue_merges_and_ranks_five_kinds() {
+        let mut v = view_with_agents(vec![
+            blocked_row("ans", 1, Some(answerable(&[("1", "Y")], 3))),
+            blocked_row("foc", 2, None),
+            agent_row("dn", 3, Some(AgentBadge::Done), false),
+            agent_row("rw", 4, Some(AgentBadge::Working), false),
+            agent_row("bs", 5, Some(AgentBadge::Working), false),
+        ]);
+        v.needs_fold = Some(vec![
+            fold_item("budget_stop", "bs", false),
+            fold_item("review_wedged", "rw", false),
+        ]);
+        assert_eq!(
+            v.needs_queue()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["ans", "foc", "rw", "bs", "dn"]
+        );
+    }
+
+    // Locked 5 (x-feec): an unjoined fold item renders only when live (squadless
+    // with no pane), else it is dropped (a dead session's stale stop never nags).
+    #[test]
+    fn needs_fold_drops_dead_and_renders_live_squadless() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_fold = Some(vec![
+            fold_item("budget_stop", "gone", false),
+            fold_item("review_wedged", "alive", true),
+        ]);
+        let q = v.needs_queue();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].name, "alive");
+        assert_eq!(q[0].kind, NeedKind::ReviewWedged);
+        assert!(q[0].pane_id.is_none(), "squadless row has no pane");
+    }
+
+    // AC5-FR (x-feec): Enter on a joined fold row focuses its pane (goto).
+    #[tokio::test]
+    async fn needs_enter_goto_focuses_joined_fold_row() {
+        let mut v = view_with_agents(vec![agent_row("bs", 5, Some(AgentBadge::Working), false)]);
+        v.needs_fold = Some(vec![fold_item("budget_stop", "bs", false)]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert!(
+            matches!(msg, ClientMsg::Command(Command::FocusPane(5))),
+            "{msg:?}"
+        );
         assert_eq!(v.answers, None);
+    }
+
+    // Invariant (x-feec): a squadless live row has no reachable pane, so Enter
+    // degrades to a notice and sends nothing.
+    #[tokio::test]
+    async fn needs_enter_squadless_row_notices_no_send() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_fold = Some(vec![fold_item("review_wedged", "alive", true)]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "squadless row sends nothing");
+        assert_eq!(v.answers, None);
+        assert!(v.notice.is_some(), "shows a focus-manually notice");
+    }
+
+    // Invariant (x-feec): a digit on a non-answerable fold row is a local BEL,
+    // never a stray keystroke to a pane.
+    #[tokio::test]
+    async fn needs_digit_on_non_answerable_sends_nothing() {
+        let mut v = view_with_agents(vec![agent_row("rw", 4, Some(AgentBadge::Working), false)]);
+        v.needs_fold = Some(vec![fold_item("review_wedged", "rw", false)]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"1", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+    }
+
+    // AC6-FR (x-feec): closing bumps the generation token so a fold result that
+    // lands after the overlay closed is discarded by the recv guard.
+    #[tokio::test]
+    async fn needs_close_bumps_generation() {
+        let mut v = view_with_agents(vec![blocked_row("a", 1, None)]);
+        v.answers = Some(0);
+        let g = v.needs_gen;
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"q", &mut buf).await.unwrap();
+        assert_eq!(
+            v.needs_gen,
+            g + 1,
+            "close bumps gen (in-flight fold discarded)"
+        );
+    }
+
+    // codex P2 (x-feec): a fold row's cursor re-anchor survives a squadless ->
+    // joined transition, because identity is the stable session id, not the
+    // display name (which flips from session id to the roster row's name).
+    #[test]
+    fn needs_fold_row_id_is_stable_across_join_flip() {
+        // Squadless first: no roster row, item is live -> name is the session id.
+        let mut v = view_with_agents(vec![]);
+        v.needs_fold = Some(vec![fold_item("budget_stop", "wkr", true)]);
+        let squadless_id = v.needs_view().0[0].id();
+        // Now the roster row appears: the item joins and its name flips to "wkr"
+        // (already the same here, so use a distinct roster name to prove it).
+        let mut joined_row = agent_row("wkr-pane", 5, Some(AgentBadge::Working), false);
+        joined_row.cwd_base = Some("wkr".into()); // join by cwd_base, name differs
+        v.layout.agents = vec![joined_row];
+        let joined = &v.needs_view().0[0];
+        assert_eq!(
+            joined.name, "wkr-pane",
+            "display name flips to the roster row"
+        );
+        assert_eq!(
+            joined.id(),
+            squadless_id,
+            "but the re-anchor identity (session id) is unchanged"
+        );
     }
 
     // AC1-HP: a digit on an answerable pane sends PaneAnswer with the exact

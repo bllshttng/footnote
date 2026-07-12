@@ -138,6 +138,10 @@ RUST_CLIENT_VERBS = frozenset(
         # client.rs before build_request (no daemon RPC, no Python impl); this
         # entry keeps the client.rs<->router parity test in sync.
         "digest",
+        # Needs-me queue (x-feec): read-only fold over events.jsonl + ledger for
+        # ALL sessions, emitting review_wedged / budget_stop items. Dispatched in
+        # client.rs before build_request (no daemon RPC, no Python impl).
+        "needs",
     }
 )
 
@@ -250,6 +254,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
     "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",
     "digest": "Catch-up 'while you were gone' fold over events + ledger for a session: --session <s> --since <ts> [--json].",
+    "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
 }
 
 #: Verbs retired at G4 (x-f54c): the grid, the WebSocket ``drive`` surface, and
