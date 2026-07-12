@@ -563,3 +563,104 @@ fn finalize_cost_null_when_no_transcript() {
         "session-cost.py skipped when no transcript uuid: {c}"
     );
 }
+
+// ── node<->PR pr_number backstop stamp (x-280d) ──────────────────────────────
+// finalize shells `gh pr view` and `fno backlog update`; these tests shim both
+// onto PATH (mirroring the PYTHONPATH-stub pattern for the Python helpers) to
+// assert the stamp fires on a non-ship terminal, skips when there's no PR/node,
+// and never raises the exit code.
+
+fn write_shim(dir: &Path, name: &str, body: &str) {
+    let p = dir.join(name);
+    fs::write(&p, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Run finalize with `gh` + `fno` shims on PATH. `gh_body` is a full shell
+/// script; the `fno` shim records its argv to calls.log (same file the Python
+/// stubs use) and exits 0.
+fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process::Output {
+    let bin = env.cwd.join("shimbin");
+    fs::create_dir_all(&bin).unwrap();
+    write_shim(&bin, "gh", gh_body);
+    write_shim(&bin, "fno", "#!/bin/sh\necho \"fno $*\" >> calls.log\n");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    Command::new(BIN)
+        .arg("finalize")
+        .arg("--state")
+        .arg(&env.state)
+        .arg("--cwd")
+        .arg(&env.cwd)
+        .arg("--reason")
+        .arg(reason)
+        .arg("--events")
+        .arg(&env.events)
+        .arg("--global-events")
+        .arg(&env.global_events)
+        .arg("--handoffs-dir")
+        .arg(&env.handoffs)
+        .arg("--postmortems-dir")
+        .arg(&env.postmortems)
+        .env("PYTHONPATH", &env.pypath)
+        .env("PATH", path)
+        .current_dir(&env.cwd)
+        .output()
+        .expect("run finalize")
+}
+
+const GH_PR_358: &str =
+    "#!/bin/sh\necho '{\"number\": 358, \"url\": \"https://github.com/o/r/pull/358\"}'\n";
+
+/// AC1-HP + AC2-HP: a node-driven session with an open PR stamps pr_number even
+/// on a NON-ship terminal (DoneAwaitingMerge - the terminal in_review covers).
+#[test]
+fn finalize_stamps_pr_number_on_nonship() {
+    let env = setup("S-stamp", false);
+    let out = run_finalize_shimmed(&env, "DoneAwaitingMerge", GH_PR_358);
+    assert!(out.status.success(), "stamp path must exit 0");
+    let c = calls(&env);
+    assert!(
+        c.contains(
+            "fno backlog update ab-testnode --pr-number 358 --pr-url https://github.com/o/r/pull/358"
+        ),
+        "finalize must stamp pr_number on a non-ship terminal with an open PR: {c}"
+    );
+}
+
+/// AC1-FR: a node id but no open PR (gh fails) -> no stamp call, still exit 0.
+#[test]
+fn finalize_skips_stamp_when_no_pr() {
+    let env = setup("S-nopr", false);
+    let out = run_finalize_shimmed(&env, "Budget", "#!/bin/sh\nexit 1\n");
+    assert!(out.status.success(), "no-PR skip must exit 0");
+    assert!(
+        !calls(&env).contains("fno backlog update"),
+        "no open PR -> no pr_number stamp call"
+    );
+}
+
+/// AC2-FR: a raw-prose session (graph_node_id null) -> stamp skipped entirely,
+/// even though gh would return a PR.
+#[test]
+fn finalize_skips_stamp_when_no_node() {
+    let env = setup("S-nonode", false);
+    fs::write(
+        &env.state,
+        "---\nsession_id: S-nonode\ncreated_at: 2026-06-07T00:00:00Z\ninput: \"x\"\nplan_path: \"plan.md\"\nprovider: claude\n---\n# Target Session State\n",
+    )
+    .unwrap();
+    let out = run_finalize_shimmed(&env, "Budget", GH_PR_358);
+    assert!(out.status.success());
+    assert!(
+        !calls(&env).contains("fno backlog update"),
+        "no node id -> no pr_number stamp call"
+    );
+}

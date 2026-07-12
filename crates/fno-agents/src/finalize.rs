@@ -634,6 +634,12 @@ pub fn run_finalize(args: &[String]) -> i32 {
     );
     push_run_summary_to_parent(&session_id, m.graph_node_id.as_deref(), &reason);
 
+    // ── node<->PR pr_number backstop stamp (x-280d) ────────────────────────
+    // Runs in the always-run tail (first fire of every reason), so it stamps
+    // even a non-ship/awaiting-merge terminal that left an open PR. Non-fatal;
+    // deliberately not returned into `failed`.
+    stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+
     // ── emit terminal event ────────────────────────────────────────────────
     let mut data = json!({
         "session_id": session_id,
@@ -1435,6 +1441,68 @@ fn gh_pr_url(cwd: &Path) -> Option<String> {
     }
 }
 
+/// Resolve the branch's open PR as `(number, url)` for the node<->PR backstop
+/// stamp (x-280d). Returns None when gh fails/rate-limits, no PR exists, or the
+/// JSON is malformed - all of which the caller treats as "nothing to stamp".
+fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
+    let out = Command::new("gh")
+        .args(["pr", "view", "--json", "number,url"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_pr_ref(&out.stdout)
+}
+
+/// Pure parse of `gh pr view --json number,url` stdout. Split from the shell-out
+/// so the malformed/missing-field cases are unit-testable without gh.
+fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
+    let v: Value = serde_json::from_slice(stdout).ok()?;
+    let number = v.get("number")?.as_u64()?;
+    let url = v.get("url")?.as_str()?.trim().to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some((number, url))
+    }
+}
+
+/// Deterministic node<->PR `pr_number` backstop (x-280d): the create-time skill
+/// stamp (pr-creator §5.5) is best-effort and was skipped for x-1829/#358,
+/// leaving `pr_number` null so the derived `in_review` status never engaged.
+/// Gated on node-presence + PR-exists (NOT `ship`) so `DoneAwaitingMerge` - the
+/// exact terminal `in_review` covers - is included. Best-effort + non-fatal +
+/// idempotent: never returned into `failed`, never changes the exit code; a
+/// re-stamp of the same value is a no-op via `fno backlog update`'s lock.
+fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
+    let Some(node) = node else { return };
+    let Some((number, url)) = gh_pr_ref(cwd) else {
+        eprintln!("finalize: no open PR found for branch; skipped pr_number stamp for node {node}");
+        return;
+    };
+    let ok = Command::new("fno")
+        .args([
+            "backlog",
+            "update",
+            node,
+            "--pr-number",
+            &number.to_string(),
+            "--pr-url",
+            &url,
+        ])
+        .current_dir(cwd)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        eprintln!("finalize: stamped pr_number {number} on node {node}");
+    } else {
+        eprintln!("finalize: pr_number stamp failed for node {node} (non-fatal)");
+    }
+}
+
 /// Run `git <args>` in cwd, returning trimmed stdout on success.
 fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
@@ -1676,6 +1744,21 @@ mod tests {
     #[test]
     fn parse_args_rejects_unknown_flag() {
         assert!(parse_args(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_pr_ref_valid_missing_and_malformed() {
+        // Valid: number + url.
+        assert_eq!(
+            parse_pr_ref(br#"{"number": 358, "url": "https://x/pull/358"}"#),
+            Some((358, "https://x/pull/358".to_string()))
+        );
+        // Malformed JSON -> None (treated as "no PR", not a crash). AC1-ERR.
+        assert_eq!(parse_pr_ref(b"not json"), None);
+        // Missing number field -> None.
+        assert_eq!(parse_pr_ref(br#"{"url": "https://x/pull/1"}"#), None);
+        // Empty url -> None.
+        assert_eq!(parse_pr_ref(br#"{"number": 1, "url": ""}"#), None);
     }
 
     #[test]
