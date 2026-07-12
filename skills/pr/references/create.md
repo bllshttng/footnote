@@ -165,18 +165,18 @@ NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-stat
 For each item line under that heading, in order:
 
 1. **Cite first.** If a `<prefix>-<hex>` node id, a `cv-<hex>` carveout id, or an inline `oos-ok: <rationale>` is **already on the item line**, leave the line byte-identical (idempotent). If the item's deferred work is tracked **elsewhere** - a node/`cv-` id in the plan frontmatter, a commit trailer, or `.fno/carveouts.jsonl` - append that existing id to the line (` - tracked as <id>`) rather than filing a new one; the gate reads only the item line, so an off-line citation must be brought onto it. File nothing new in either case.
-2. **File second, with inherited weight.** Otherwise classify the item and file it. Strip markdown/backticks from the item text and pass a concise title (the trimmed item line, not the whole paragraph) as a double-quoted argument:
+2. **File second, with inherited weight.** Otherwise classify the item and file it. Strip markdown/backticks AND shell metacharacters (`` ` ``, `$`, `"`) from the item text so nothing can break out of the quoting or trigger `$(...)` expansion, and pass a concise plain title (the trimmed item line, not the whole paragraph) as a double-quoted argument:
    - a pre-existing **bug** being deferred (a missed defect, not a new feature):
      ```bash
      RECEIPT=$(fno backlog idea "<item title>" -t task -p p2 --description "deferred from PR: <pr title> (<branch>)" ${NODE_ID:+--parent "$NODE_ID"})
      ```
    - a genuine **nice-to-have / future feature**: the same command with `-p p3` (and drop `-t task`).
-   - Extract the id from the JSON receipt and append it to the item line:
+   - Extract the id from the JSON receipt and **validate it before appending** - a command can exit 0 yet print an empty/unparsable receipt, and appending a blank id leaves the line untracked while skipping the fallback below:
      ```bash
      NEW_ID=$(printf '%s' "$RECEIPT" | grep -o '"id": *"[^"]*"' | head -1 | sed -E 's/.*"id": *"([^"]*)".*/\1/')
-     # rewrite the item line so it ends: ` - tracked as $NEW_ID`
      ```
-3. **Fall back** if `fno backlog idea` exits non-zero (lock contention, missing CLI):
+     If `NEW_ID` matches the tracked-ref grammar (`<prefix>-<hex>`), rewrite the item line so it ends ` - tracked as $NEW_ID`. If it is empty or malformed, treat this as a filing failure and drop to step 3 (fallback), then step 4 (warn) - never append an empty ` - tracked as `.
+3. **Fall back** if `fno backlog idea` exits non-zero (lock contention, missing CLI) OR returned no usable id above:
    ```bash
    CV_ID=$(fno carveout add --kind deferred "<item>")
    # append ` - tracked as $CV_ID` (a cv- id satisfies the same gate grammar)

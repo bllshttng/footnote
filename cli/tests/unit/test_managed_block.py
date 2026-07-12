@@ -46,6 +46,35 @@ def test_stamp_and_restamp_preserve_outside_bytes(tmp_path: Path) -> None:
     assert before_block == after.split("<!-- fno:begin", 1)[0] == _USER + "\n"
 
 
+def test_crlf_outside_markers_preserved(tmp_path: Path) -> None:
+    """A CRLF host file keeps its \\r\\n line endings outside the fences across
+    append + re-stamp (the invariant is bytes, not just visible text)."""
+    f = tmp_path / "AGENTS.md"
+    crlf = "# House Rules\r\nline one\r\nline two\r\n"
+    f.write_bytes(crlf.encode("utf-8"))
+    stamp_block(f, version=1)
+    stamp_block(f, version=2)
+    raw = f.read_bytes().decode("utf-8")
+    before_block = raw.split("<!-- fno:begin", 1)[0]
+    # The host's own CRLF bytes survive verbatim (not normalized to \n); the
+    # separator we add before our fence is our content, not theirs.
+    assert before_block.startswith(crlf), before_block
+    assert "\r\n" in before_block
+
+
+def test_never_downgrades_newer_block(tmp_path: Path) -> None:
+    """offer leaves a block newer than the template alone (no downgrade prompt)."""
+    f = tmp_path / "AGENTS.md"
+    f.write_text("# rules\n", encoding="utf-8")
+    stamp_block(f, version=BLOCK_VERSION + 1)  # host carries a newer stamp
+    calls: list[str] = []
+    res = offer_managed_block(
+        tmp_path, confirm_fn=lambda m: calls.append(m) or True, version=BLOCK_VERSION
+    )
+    assert res["status"] == "current"
+    assert calls == []  # never prompted to downgrade
+
+
 def test_restamp_same_version_is_current_noop(tmp_path: Path) -> None:
     f = tmp_path / "AGENTS.md"
     f.write_text(_USER, encoding="utf-8")

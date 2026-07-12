@@ -57,6 +57,19 @@ Spot a small pre-existing bug while building? Fold the fix into the current PR a
 its own atomic commit. Capture non-small finds with `fno carveout add`."""
 
 
+def _read(path: Path) -> str:
+    # newline="" disables universal-newline translation so a CRLF host file's
+    # line endings survive read+write - the "preserve every byte outside the
+    # markers" invariant would otherwise silently rewrite \r\n -> \n.
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def _write(path: Path, text: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
 def _begin_marker(version: int) -> str:
     return f"<!-- fno:begin v={version} -->"
 
@@ -111,10 +124,10 @@ def stamp_block(path: Path, *, version: int = BLOCK_VERSION) -> StampResult:
     path = Path(path)
     block = render_block(version)
     if not path.exists():
-        path.write_text(block + "\n", encoding="utf-8")
+        _write(path, block + "\n")
         return StampResult("created", version, path)
 
-    text = path.read_text(encoding="utf-8")
+    text = _read(path)
     state = marker_state(text)
     if state == "malformed":
         return StampResult("refused-malformed", None, path)
@@ -122,12 +135,12 @@ def stamp_block(path: Path, *, version: int = BLOCK_VERSION) -> StampResult:
     if state == "none":
         if not text.strip():
             # Empty / whitespace-only file: no prose to separate from.
-            path.write_text(block + "\n", encoding="utf-8")
+            _write(path, block + "\n")
         else:
             # Append with exactly one blank line of separation, whatever the
             # file's trailing whitespace was.
             sep = "" if text.endswith("\n\n") else "\n" if text.endswith("\n") else "\n\n"
-            path.write_text(text + sep + block + "\n", encoding="utf-8")
+            _write(path, text + sep + block + "\n")
         return StampResult("appended", version, path)
 
     # state == "both": splice the fenced region, preserving outside bytes exactly.
@@ -137,7 +150,7 @@ def stamp_block(path: Path, *, version: int = BLOCK_VERSION) -> StampResult:
         return StampResult("refused-malformed", None, path)
     if text[start:end] == block:
         return StampResult("current", version, path)
-    path.write_text(text[:start] + block + text[end:], encoding="utf-8")
+    _write(path, text[:start] + block + text[end:])
     return StampResult("restamped", version, path)
 
 
@@ -161,7 +174,7 @@ def offer_managed_block(
     repo_root = Path(repo_root)
     target = resolve_target(repo_root)
     decline = _decline_marker(repo_root)
-    text = target.read_text(encoding="utf-8") if target.is_file() else ""
+    text = _read(target) if target.is_file() else ""
     state = marker_state(text)
 
     if state == "malformed":
@@ -172,7 +185,9 @@ def offer_managed_block(
         return {"status": "refused-malformed", "path": str(target)}
 
     stamped = stamped_version(text)
-    if state == "both" and stamped == version:
+    # >= not ==: a block at or newer than this template is left alone (never
+    # offer a downgrade to an older host that somehow carries a newer stamp).
+    if state == "both" and stamped is not None and stamped >= version:
         return {"status": "current", "path": str(target)}
 
     # No block yet AND a durable decline on record -> honor it, don't re-ask.

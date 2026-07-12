@@ -359,8 +359,10 @@ step filed from this PR's "Out of scope" section. Each such node carries
 `parent: $NODE_ID`. Collect them by provenance, scoped to this project:
 
 ```bash
-BORN_JSON="$(fno backlog find 'deferred from PR' --project "$PROJECT" -s idea -J 2>/dev/null || echo '[]')"
+BORN_JSON="$(fno backlog find 'deferred from PR' --project "$PROJECT" -J 2>/dev/null || echo '[]')"
 ```
+
+Do NOT add `-s idea`: a deferral-born node may have already been triaged or moved before the merge landed, and those are exactly the ones warm-window triage should still surface. Provenance + parent linkage is the scope.
 
 Keep only the rows that belong to THIS PR: `parent == "$NODE_ID"` when `$NODE_ID`
 is set, else those whose `details` name this PR's branch. If the filtered set is
