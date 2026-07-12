@@ -260,6 +260,22 @@ out="$(run 'tune effort carefully for this worker')"
 check_contains 'mid-task effort stays in message' "$(field "$out" message)" 'tune effort carefully for this worker'
 check_eq   'mid-task effort leaves effort empty' "$(field "$out" effort)" ''
 
+# --- x-d235: --yolo on claude maps to --permission-mode bypassPermissions -----
+# claude has no --yolo flag; its full-auto/no-gates equivalent is
+# bypassPermissions. Map it (don't drop it) so a yolo'd claude bg worker runs
+# gate-free. An explicit --permission-mode wins; codex/gemini yolo is unchanged.
+out="$(run 'ab-99999999' --provider claude --yolo)"
+check_eq 'claude yolo -> permission_mode=bypassPermissions' "$(field "$out" permission_mode)" 'bypassPermissions'
+check_eq 'claude yolo -> yolo cleared'                      "$(field "$out" yolo)" '0'
+out="$(run 'ab-99999999' --provider claude --yolo --permission-mode acceptEdits)"
+check_eq 'claude yolo + explicit permission-mode -> explicit wins' "$(field "$out" permission_mode)" 'acceptEdits'
+check_eq 'claude yolo + explicit -> yolo still cleared'           "$(field "$out" yolo)" '0'
+out="$(run 'ab-99999999' --provider codex --yolo)"
+check_eq 'codex yolo -> yolo stays 1'                      "$(field "$out" yolo)" '1'
+check_eq 'codex yolo -> no permission_mode injected'       "$(field "$out" permission_mode)" ''
+out="$(run 'ab-99999999' --provider claude)"
+check_eq 'claude no-yolo -> permission_mode stays empty'   "$(field "$out" permission_mode)" ''
+
 # --- mid-task `as` stays task text -------------------------------------------
 out="$(run 'refactor the module as a plugin')"
 check_eq   'mid-task as keeps default name' "$(field "$out" name)" "$(field "$(run 'refactor the module as a plugin')" name)"

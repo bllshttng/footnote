@@ -137,10 +137,13 @@ see below):
   headless codex/gemini worker is already BOUNDED - sandboxed AND never-prompt
   (codex `--sandbox workspace-write --ask-for-approval never`, gemini
   `--approval-mode yolo --sandbox`) - so it neither hangs nor roams outside the
-  workspace. Reach for `yolo` only when you genuinely want no sandbox. Ignored
-  for claude. "full auto" / "no sandbox" / "unsandboxed" map here. (To make full
-  yolo the standing default for a provider instead of per-launch, set
-  `config.agents.<provider>.headless_yolo: true`.)
+  workspace. Reach for `yolo` only when you genuinely want no sandbox. For claude
+  (which has no `--yolo` flag) it maps to `--permission-mode bypassPermissions`,
+  the equivalent full-auto/no-gates posture, so a yolo'd claude worker runs
+  gate-free instead of stalling on a permission prompt; an explicit
+  `--permission-mode` you pass wins over this default. "full auto" / "no sandbox"
+  / "unsandboxed" map here. (To make full yolo the standing default for a provider
+  instead of per-launch, set `config.agents.<provider>.headless_yolo: true`.)
 - **`model <name>`** (optional): exact model for the worker, plumbed to `fno
   agents spawn --model` (each provider's own `--model`). Two-word posture so a
   model name that is not a posture word is read as the value: `spawn ab-X model
@@ -352,8 +355,14 @@ compute the decision:
 bash "${SKILL_DIR}/scripts/confirm-decision.sh" \
   --node "$node" --provider "$provider" --mode "$mode" \
   --payload-mode "$payload_mode" --yolo "$yolo" --yes "$yes" \
-  --allow-merge "$allow_merge"
+  --permission-mode "$permission_mode" --allow-merge "$allow_merge"
 ```
+
+Pass `--permission-mode "$permission_mode"` so a gate-bypass launch still surfaces
+its caveat: normalize maps `--yolo` on claude to `permission_mode=bypassPermissions`
+and clears `yolo`, so the yolo caveat alone would go silent - the helper instead
+caveats on the effective `bypassPermissions` mode (whether it came from `--yolo` or
+an explicit `--permission-mode`).
 
 It emits `confirm_required` (0|1), `caveat` (0|1), `caveat_text`, a `warn` line,
 and `reason`. `config.agents.confirm` (`always|auto|never`, model default `auto`)

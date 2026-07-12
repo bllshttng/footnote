@@ -615,13 +615,17 @@ else
   is_valid_provider "$provider" || provider="claude"
 fi
 
-# --yolo is the codex/gemini full-auto bypass (maps to codex
-# --dangerously-bypass-approvals-and-sandbox / gemini --yolo inside `fno agents
-# spawn`/`host`). claude has no such flag, so do NOT forward an unknown flag to a
-# claude `ask`: drop it and warn on stderr (stderr keeps the key=value stdout
-# clean). Sandboxed is the default - --yolo is honored only when explicitly passed.
+# --yolo is the full-auto / no-gates bypass. codex/gemini have a literal --yolo
+# (codex --dangerously-bypass-approvals-and-sandbox / gemini --yolo inside `fno
+# agents spawn`/`host`), so YOLO stays 1 for them. claude has NO --yolo flag; its
+# "full auto, no gates" equivalent is --permission-mode bypassPermissions (x-dfa4:
+# default|acceptEdits|plan|bypassPermissions). Map it there rather than dropping
+# it, so a yolo'd claude bg worker actually runs gate-free instead of stalling on
+# a permission prompt. An explicit --permission-mode the user passed WINS (never
+# clobber it); then clear YOLO so the claude spawn is never handed an unknown
+# --yolo flag. Forwarded via permission_mode= (the x-019d plumbing).
 if [[ "$YOLO" -eq 1 && "$provider" == "claude" ]]; then
-  printf 'warning: --yolo is not supported for claude; ignoring it\n' >&2
+  [[ -z "$PERMISSION_MODE" ]] && PERMISSION_MODE="bypassPermissions"
   YOLO=0
 fi
 

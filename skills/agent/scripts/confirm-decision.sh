@@ -13,6 +13,10 @@
 #   --mode <m>             exec | interactive           (default exec)
 #   --payload-mode <m>     build | ask | passthrough    (default build)
 #   --yolo <0|1>           --yolo in effect             (default 0)
+#   --permission-mode <m>  effective harness permission mode (default empty).
+#                          bypassPermissions is a gate bypass -> caveat, so the
+#                          warning survives even when --yolo was mapped to it for
+#                          claude (normalize clears YOLO in that case, x-d235).
 #   --allow-merge <0|1>    -m/--allow-merge in effect   (default 0)
 #   --yes <0|1>            -y/--yes in effect           (default 0)
 #
@@ -43,6 +47,7 @@ PROVIDER="claude"
 MODE="exec"
 PAYLOAD_MODE="build"
 YOLO=0
+PERMISSION_MODE=""
 ALLOW_MERGE=0
 YES=0
 
@@ -53,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     --mode)         MODE="${2:-exec}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --payload-mode) PAYLOAD_MODE="${2:-build}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO="${2:-0}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --allow-merge)  ALLOW_MERGE="${2:-0}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yes)          YES="${2:-0}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     *) printf 'posture=always\nconfirm_required=1\ncaveat=0\ncaveat_text=\nwarn=unknown argument: %s\nreason=bad-invocation\n' "$1"; exit 0 ;;
@@ -123,7 +129,11 @@ if [[ "$PAYLOAD_MODE" == "build" && "$MODE" == "exec" ]]; then
   esac
 fi
 [[ "$YOLO" -eq 1 ]] && add_caveat "running with --yolo (sandbox/approval bypass)"
-[[ "$ALLOW_MERGE" -eq 1 ]] && add_caveat "merge grant in effect (-m/--allow-merge): the worker may merge to main"
+# bypassPermissions is the same gate-bypass risk class as yolo, and for claude it
+# IS the yolo mapping (normalize clears YOLO after mapping, x-d235). Caveat on the
+# effective mode so a bypass launch always surfaces the warning - whether it came
+# from --yolo on claude or an explicit --permission-mode bypassPermissions.
+[[ "$PERMISSION_MODE" == "bypassPermissions" ]] && add_caveat "running with --permission-mode bypassPermissions (permission-gate bypass)"
 
 # ---- decide (free-lane posture, ab-994222ee) ---------------------------------
 # spawn is a FREE, reversible lane: an autonomous worker lands a PR for REVIEW

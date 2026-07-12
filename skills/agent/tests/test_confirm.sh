@@ -46,6 +46,21 @@ ok 'auto yolo no confirm' "$(field "$out" confirm_required)" '0'
 out="$(run "$R_AUTO" --node ab-deadbeef --provider claude --payload-mode build --mode exec --allow-merge 1)"
 ok 'auto merge grant no confirm' "$(field "$out" confirm_required)" '0'
 
+# --- x-d235: bypassPermissions is a gate bypass -> caveat survives the yolo map -
+# normalize maps --yolo on claude to permission_mode=bypassPermissions + yolo=0,
+# so the yolo caveat alone would go silent. The helper caveats on the effective
+# mode, so the warning is preserved (the regression codex caught on PR #362).
+out="$(run "$R_AUTO" --node ab-deadbeef --provider claude --payload-mode build --mode exec --yolo 0 --permission-mode bypassPermissions)"
+ok 'claude yolo-mapped bypass: caveat set' "$(field "$out" caveat)" '1'
+if printf '%s' "$out" | grep -qi 'bypassPermissions'; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL: bypassPermissions caveat text missing: $out"; fi
+if printf '%s' "$out" | grep -qi 'caveat applies'; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL: bypass caveat not surfaced as warn: $out"; fi
+# a non-bypass permission mode is NOT a caveat
+out="$(run "$R_AUTO" --node ab-deadbeef --provider claude --payload-mode build --mode exec --permission-mode acceptEdits)"
+ok 'acceptEdits is not a bypass caveat' "$(field "$out" caveat)" '0'
+# no permission mode -> no bypass caveat
+out="$(run "$R_AUTO" --node ab-deadbeef --provider claude --payload-mode build --mode exec)"
+ok 'no permission mode -> no bypass caveat' "$(field "$out" caveat)" '0'
+
 # --- AC2-EDGE: config.agents.confirm: always -> cautious opt-in confirms -------
 out="$(run "$R_ALWAYS" --node ab-deadbeef --provider claude --payload-mode build --mode exec)"
 ok 'AC2-EDGE always confirms even the free lane' "$(field "$out" confirm_required)" '1'
