@@ -572,6 +572,37 @@ def _redispatch(candidate: "Candidate") -> bool:
         return False
 
 
+def _materialize_managed_switch(record_id: str) -> bool:
+    """Materialize a managed account's credentials into the shared slot after an
+    auto-switch swap landed on it (US3). Returns True iff the slot now holds the
+    new account's verified credentials, so the redispatch reads live creds.
+
+    Gated on ``config.providers.auto_switch`` (default False): with it off, the
+    swap does NOT touch the shared slot (the credential mutation the knob arms)
+    and this returns False, so the caller degrades to the bounded nudge. A
+    live-pin defer (``SwitchDeferred``) or any store/keychain failure also
+    returns False - never redispatch onto un-switched (exhausted) creds. Reuses
+    ``managed.switch`` (capture-before-overwrite + live-pin gate) and its
+    ``account_switched`` emit from the manual `use` path (US2); no new switch
+    logic here.
+    """
+    try:
+        from fno.adapters.providers.loader import load_providers
+        from fno.adapters.providers import managed
+        from fno.agents.events import emit as _emit
+
+        config = load_providers()
+        if not getattr(config, "auto_switch", False):
+            return False
+        record = config.by_id.get(record_id)
+        if record is None or record.auth != "managed":
+            return False
+        managed.switch(record, by_id=config.by_id, emit_fn=_emit)
+        return True
+    except Exception:  # noqa: BLE001 - a materialize miss must never crash the sweep; degrade to nudge
+        return False
+
+
 def _default_failover(candidate: "Candidate", error) -> str:
     """Real ``failover_fn``: rotate the active provider via the shipped controller.
 
@@ -606,15 +637,26 @@ def _default_failover(candidate: "Candidate", error) -> str:
 
     if result.decision is SwapDecision.SWAPPED:
         # The swap installed result.new_provider_id as the active record. Re-read
-        # to get its cli KIND (codex P1: new_provider_id is a record id like
-        # "claude-secondary", NOT the "claude"/"codex" kind that spawn wants).
+        # to get its cli KIND + auth strategy (codex P1: new_provider_id is a
+        # record id like "claude-secondary", NOT the "claude"/"codex" kind spawn
+        # wants).
         try:
-            new_cli = read_active_provider_atomic(settings_path=settings_path).cli
+            snap = read_active_provider_atomic(settings_path=settings_path)
         except Exception:  # noqa: BLE001
             return "rotated-no-worker"
         # Autonomous /target only bg-runs on claude; a non-claude target cannot
         # be bg-redispatched (the Rust client rejects --substrate bg for it).
-        if new_cli == "claude" and _redispatch(candidate):
+        if snap.cli != "claude":
+            return "rotated-no-worker"
+        # A managed record shares ONE credential slot, so the swap only flipped
+        # the routing pointer - the slot still holds the exhausted account's
+        # creds. Materialize the new account into the slot (US3) before redispatch,
+        # or the replacement worker reads the exhausted creds and dies again. A
+        # disarmed knob / live-pin defer / store failure returns False, so we
+        # degrade to the nudge instead of redispatching onto un-switched creds.
+        if getattr(snap, "auth", None) == "managed" and not _materialize_managed_switch(snap.id):
+            return "rotated-no-worker"
+        if _redispatch(candidate):
             return "swapped"
         return "rotated-no-worker"
     if result.decision is SwapDecision.BLOCKED_THRASH:

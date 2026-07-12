@@ -388,7 +388,7 @@ trigger a swap.
 |---|---|---|
 | `provider_5xx` | YES | HTTP 529 (overloaded), 500/502/503/504 |
 | `provider_4xx_auth` | YES | HTTP 401, 403 - creds bad on this provider |
-| `provider_4xx_quota` | YES | HTTP 402, 429; HTTP 200 with body containing "rate limit" or "quota exceeded" |
+| `provider_4xx_quota` | YES | HTTP 402, 429; HTTP 200 or a dead-session result whose body contains "rate limit", "quota exceeded", or "usage limit" (the claude CLI's own exhaustion phrasing) |
 | `parser_error` | NO | HTTP 200 with unparseable body (OpenRouter envelope mismatch, HTML error page through 200) |
 | `unknown` | NO | Anything else - surface to caller |
 
@@ -406,6 +406,31 @@ trigger a swap.
   loop layer's mode-aware branching (attended -> BLOCKED with
   `reason: all_providers_exhausted`; unattended -> sleep 5 min, restart)
   handles the action.
+
+### Exhaustion-triggered auto-switch (multi-account)
+
+When the recovery sweep swaps a rate-limited claude worker onto a second claude
+record, the account switch depends on the swapped-to record's `auth` strategy:
+
+- **`oauth_dir`** (two-dir substrate): nothing extra - the record's own config
+  dir rides the respawn's `dispatch_env`, so the new worker reads the other
+  account's credentials directly.
+- **`managed`** (single shared slot): the swap only flips the routing pointer;
+  the shared slot still holds the exhausted account's credentials. The sweep
+  materializes the new account into the slot (capture-before-overwrite +
+  live-pin gate, the same path as `fno providers use`) before redispatch, and
+  emits `account_switched`. This slot mutation is **opt-in**:
+
+```toml
+[providers]
+auto_switch = true   # default false; arms managed-account materialization on auto-switch
+```
+
+With `auto_switch` off (default) a swap onto a managed record does not touch the
+slot - the sweep degrades to the bounded nudge rather than redispatching onto
+un-switched (exhausted) credentials. A live-pin defer or any store/keychain
+failure degrades the same way. Single-account and `oauth_dir` setups are
+unaffected by the knob.
 
 ### Per-provider Cost Sub-cap
 
