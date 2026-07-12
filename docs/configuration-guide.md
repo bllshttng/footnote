@@ -8,6 +8,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 |-----|------|---------|--------|-------------|
 | `state_dir` | str | `~/.fno/` | advanced | Root dir for global fno state. |
 | `plans_dir` | str | `.fno/plans/` | advanced | Where folder plans are written. |
+| `plans_filename` | str | `%Y%m%d-{slug}-{node}.md` | advanced | Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name. |
 | `branch.prefix` | str | `fno` | advanced | Prefix for dispatched worktree branches: <prefix>/<slug>-<node>. |
 | `paths.graph_json` | str (optional) | _(none)_ | never | Override path to the backlog graph.json. |
 | `paths.ledger_json` | str (optional) | _(none)_ | never | Override path to ledger.json. |

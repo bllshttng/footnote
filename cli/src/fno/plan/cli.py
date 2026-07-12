@@ -7,6 +7,7 @@ Verbs:
     validate          - validate a plan's frontmatter against fno.plan.schema (read-only)
     reconcile-status  - normalize drifted plan frontmatter status in place
     folder-audit      - count folder plans owned by a non-terminal graph node
+    path              - print the save path for a NEW plan/design doc (config.plans_filename)
 
 stamp and graduate forward all unknown args + propagate exit codes from the
 in-package ``fno.plan._stamp`` module. brief is implemented in fno.plan.brief.
@@ -80,6 +81,27 @@ def graduate(ctx: typer.Context) -> None:
 def set_expected(ctx: typer.Context) -> None:
     rc = _forward("set-expected", list(ctx.args))
     raise typer.Exit(code=rc)
+
+
+@plan_app.command(
+    "path",
+    help=(
+        "Print the save path for a NEW plan/design doc: the resolved plans dir "
+        "(plansDirectory -> config.plans_dir) joined with the config.plans_filename "
+        "template (strftime + {slug}/{node}). /think and /blueprint shell this "
+        "instead of hardcoding a filename convention."
+    ),
+)
+def path(
+    slug: str = typer.Option(..., "--slug", help="Kebab-case feature slug."),
+    node: str = typer.Option("", "--node", help="Graph node id suffix; omit for an id-less doc."),
+    name_only: bool = typer.Option(
+        False, "--name-only", help="Print just the rendered filename, no directory."
+    ),
+) -> None:
+    from fno.paths import plan_doc_filename, plan_doc_path
+
+    print(plan_doc_filename(slug, node) if name_only else plan_doc_path(slug, node))
 
 
 # Update the module docstring's verb list when adding verbs above.

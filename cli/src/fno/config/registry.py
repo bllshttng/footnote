@@ -43,6 +43,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.paths.* (all defaulted; advanced) ---
     "state_dir": Meta("advanced", "Root dir for global fno state.", default_source="default"),
     "plans_dir": Meta("advanced", "Where folder plans are written.", default_source="default"),
+    "plans_filename": Meta("advanced", "Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name.", default_source="default"),
     "branch.prefix": Meta("advanced", "Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.", default_source="default"),
     "paths.graph_json": Meta("never", "Override path to the backlog graph.json."),
     "paths.ledger_json": Meta("never", "Override path to ledger.json."),

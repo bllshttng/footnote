@@ -39,7 +39,7 @@ Do NOT invoke any implementation skill, write any code, scaffold any project, or
 
 ### 1. Understand Context
 - Check current project state (files, docs, recent commits)
-- Review any existing specs (read plan path: `.claude/settings.json` → `plansDirectory`, or `.fno/config.toml` → `config.plans.full_path`)
+- Review any existing specs (read plan path: `.claude/settings.local.json` → `plansDirectory`, then `.claude/settings.json` → `plansDirectory`, then `.fno/config.toml` → `plans_dir`)
 
 ### 1b. Scope Decomposition Check
 Before diving into design, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
@@ -633,10 +633,10 @@ Document any pitfalls that could affect the implementation plan. Examples:
 Finalize the doc drafted incrementally from Step 3 (or write it now if the flow
 was short enough to skip the skeleton).
 
-Save to `{plansDirectory}/` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/config.toml` → `config.plans.full_path`). The filename depends on whether this `/think` is node-seeded:
+Save to the path printed by `fno plan path --slug "<feature-slug>" [--node "<node-id>"]` - it joins the resolved plans dir (`.claude/settings.local.json` → `plansDirectory`, then `.claude/settings.json` → `plansDirectory`, then `.fno/config.toml` → `plans_dir`) with the `config.plans_filename` template (default `%Y%m%d-{slug}-{node}.md`, e.g. `20260711-dark-mode-x-8af8.md`). Do NOT hand-assemble the filename and do NOT anchor on legacy loose files in the plans dir (`think-<node>.md`, dashed dates); the verb is the convention. Per invocation shape:
 
-- **Node-seeded** (`/think <node-id>`): save `YYYY-MM-DD-<feature-slug>-<full-node-id>.md` - the canonical node id is the filename suffix so a roadmap base keyed on the node id can find the doc (`/think x-8af8` → `…-x-8af8.md`; the configured prefix/width is preserved verbatim, never re-prefixed). First **reuse if claimed**: if a plans-dir file already carries this node in its frontmatter (`claims:`/`graph_node_id:`) or already ends `-<node-id>.md`, finalize INTO that file instead of minting a second one (a pre-created roadmap stub is the doc's home; a re-dispatch after a slug edit reuses the same doc). An empty slug degrades to `YYYY-MM-DD-<node-id>.md`, never a dangling `--<node-id>.md`.
-- **Raw prose** (no node): keep the id-less `YYYY-MM-DD-<feature-slug>.md`. If `/blueprint` later intakes it and assigns a node id, its step 3b-bis renames the artifact to carry the id and repoints `plan_path` - so the final invariant (id in both filename and `plan_path`) is reached either way.
+- **Node-seeded** (`/think <node-id>`): pass `--node` - the canonical node id is the filename suffix so a roadmap base keyed on the node id can find the doc (`/think x-8af8` → `…-x-8af8.md`; the configured prefix/width is preserved verbatim, never re-prefixed). First **reuse if claimed**: if a plans-dir file already carries this node in its frontmatter (`claims:`/`graph_node_id:`) or already ends `-<node-id>.md`, finalize INTO that file instead of minting a second one (a pre-created roadmap stub is the doc's home; a re-dispatch after a slug edit reuses the same doc). An empty slug degrades cleanly (the verb collapses the dangling separator), never a `--<node-id>.md`.
+- **Raw prose** (no node): omit `--node` for the id-less name. If `/blueprint` later intakes it and assigns a node id, its step 3b-bis renames the artifact to carry the id and repoints `plan_path` - so the final invariant (id in both filename and `plan_path`) is reached either way.
 
 Stamp the resolved type into the doc's frontmatter as
 `deliverable_type: feature | bug | investigation` (Step 1f).

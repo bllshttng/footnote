@@ -490,13 +490,7 @@ and always carries full frontmatter (see [Kill Criteria Declaration](#kill-crite
 
 ### Plan Save Location
 
-Read plan path (first match wins):
-1. `.claude/settings.local.json` → `"plansDirectory"`
-2. `.claude/settings.json` → `"plansDirectory"`
-3. `.fno/config.toml` → `config.plans.quick_path`
-4. `~/.fno/config.toml` → `config.plans.quick_path`
-
-**No default.** If none of these are set, ask the user where to save. Suggest running `/setup` to configure (if setup skill is installed).
+Resolve the save path with `fno plan path --slug "<slug>" [--node "<node-id>"]` - it joins the plans dir (`.claude/settings.local.json` → `plansDirectory`, then `.claude/settings.json`, then `plans_dir` in `.fno/config.toml` / `~/.fno/config.toml`) with the `config.plans_filename` template (default `%Y%m%d-{slug}-{node}.md`). Do NOT hand-assemble the filename; the verb is the convention. If `fno` is unavailable, ask the user where to save and suggest running `/setup`.
 
 ### Session State Initialization
 
@@ -573,10 +567,10 @@ fi
      (`os.replace` onto the resolved path), so an already-node-bearing name is
      preserved as-is and the `-<node-id>` suffix is never dropped or duplicated
      into `…-x-8af8-x-8af8.md` (US4). Do NOT rename a supplied doc.
-   - **Creating fresh** (no design doc): write to `{quick_path}/YYYY-MM-DD-{slug}.md`,
-     but when this is **node-seeded** (`$CLAIMS_ID` set, e.g. a direct
-     `/blueprint x-8af8` with no prior `/think`), append the node id to the name:
-     `{quick_path}/YYYY-MM-DD-{slug}-$CLAIMS_ID.md`. `/blueprint` is the first
+   - **Creating fresh** (no design doc): write to the path printed by
+     `fno plan path --slug "{slug}"`; when this is **node-seeded** (`$CLAIMS_ID` set,
+     e.g. a direct `/blueprint x-8af8` with no prior `/think`), pass the node too:
+     `fno plan path --slug "{slug}" --node "$CLAIMS_ID"`. `/blueprint` is the first
      artifact author on the direct path and cannot lean on `/think`'s save rule,
      so it must produce the node-bearing name itself. First **reuse if claimed**:
      if a plans-dir file already carries `$CLAIMS_ID` in its frontmatter or ends
