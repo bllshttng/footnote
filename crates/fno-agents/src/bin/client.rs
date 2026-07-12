@@ -776,10 +776,19 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // bg/headless lane. Every non-equivalent cell fails closed below (mirrors
     // --permission-mode / x-dfa4). The pane substrate re-execs the Python CLI,
     // which owns its own per-provider mapping + fail-closed for these.
-    let add_dir = params.get("add_dir").and_then(|v| v.as_str());
-    let agent = params.get("agent").and_then(|v| v.as_str());
-    let tools = params.get("tools").and_then(|v| v.as_str());
-    let deny_tools = params.get("deny_tools").and_then(|v| v.as_str());
+    // Normalize empty-as-None once: an empty value is UNSET (the builders omit an
+    // empty flag), so the guard below must not trip on `--add-dir=""` and the
+    // bundle must carry None, not Some("").
+    let empty_as_none = |k: &str| {
+        params
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let add_dir = empty_as_none("add_dir");
+    let agent = empty_as_none("agent");
+    let tools = empty_as_none("tools");
+    let deny_tools = empty_as_none("deny_tools");
 
     // Validate the provider FIRST so an unknown provider is a client-side
     // error (exit 2) for every substrate, never a fall-through to the daemon.

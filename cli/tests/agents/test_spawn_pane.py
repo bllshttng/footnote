@@ -326,6 +326,12 @@ def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
         with pytest.raises(DispatchAskError):
             build_pane_argv(provider, "t", tmp_path, False, None, **kw)
 
+    # AC2-ERR: an EMPTY value is unset, not a stray token - it must NOT trip the
+    # fail-closed guard even on a no-equivalent provider (gemini review finding).
+    for provider, kw in closed:
+        argv = build_pane_argv(provider, "t", tmp_path, False, None, **{k: "" for k in kw})
+        assert "--add-dir" not in argv and "--agent" not in argv
+
 
 def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) -> None:
     """x-8f7f: PANE_HOSTABLE_PROVIDERS is the pane gate's source of truth and MUST

@@ -570,14 +570,16 @@ def cmd_spawn(
     # there). Mirrors the --permission-mode guard above; the same per-cell matrix
     # as the Rust client. Validate BEFORE any spawn.
     if substrate != "pane" or once:
+        # Truthiness, not `is not None`: an empty value is UNSET (the builders
+        # omit an empty flag), so `--add-dir=""` must NOT trip the guard.
         bad = None
-        if add_dir is not None and provider not in ("claude", "codex", "agy"):
+        if add_dir and provider not in ("claude", "codex", "agy"):
             bad = "--add-dir"
-        elif agent is not None and provider != "claude":
+        elif agent and provider != "claude":
             bad = "--agent"
-        elif tools is not None and provider != "claude":
+        elif tools and provider != "claude":
             bad = "--tools"
-        elif deny_tools is not None and provider != "claude":
+        elif deny_tools and provider != "claude":
             bad = "--deny-tools"
         if bad is not None:
             print(
