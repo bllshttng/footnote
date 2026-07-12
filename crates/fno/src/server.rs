@@ -759,6 +759,23 @@ struct Core {
     /// teardown; `agent_rows()` also checks `panes` liveness lazily so a stale
     /// entry can never present a dead pane.
     attached: HashMap<String, u64>,
+    /// (x-8f11) Durable membership of each PERSISTED named squad: squad id ->
+    /// its recruited members (attach-ids + tombstone bits). Populated only by
+    /// `NewSquad`, `RecruitAgents`, and restore; presence here is what marks a
+    /// squad persistent (an attach-born origin squad is absent and never
+    /// written). Written through to `~/.fno/squads.json` on every membership
+    /// mutation. Keyed by session-scoped id, so a removed squad's entry is
+    /// inert (ids never reused; no GC - ponytail: a dead-sid leak is one small
+    /// map entry per closed workspace per session, bounded by session length).
+    squad_members: HashMap<u64, Vec<crate::squad_store::StoredMember>>,
+    /// (x-8f11) Latch for the one-shot "persistence degraded" notice (AC3-ERR):
+    /// a store-write failure notices every client exactly once, then stays
+    /// silent so a full disk never spams a bell per keystroke.
+    persist_degraded_notified: bool,
+    /// (x-8f11) First-attach restore fires once per server lifetime; this gates
+    /// it so a second client attach does not re-materialize the persisted
+    /// squads.
+    restored: bool,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -1223,6 +1240,124 @@ impl Core {
         self.agents
             .iter()
             .any(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id))
+    }
+
+    // ---- Persisted named squads (x-8f11) --------------------------------
+
+    /// Whether `name` is already taken by a LIVE named squad or a PERSISTED
+    /// one - the fail-closed uniqueness gate for `NewSquad` and recruit-create
+    /// (Locked Decision 4). Case-sensitive, trimmed by the caller.
+    fn named_squad_taken(&self, name: &str) -> bool {
+        let live = self
+            .session
+            .squads
+            .iter()
+            .any(|s| s.name.as_deref() == Some(name));
+        live || crate::squad_store::load().squads.iter().any(|s| s.name == name)
+    }
+
+    /// Write-through one persisted squad (upsert by name). Reads name/origins
+    /// from the live session squad and members from `squad_members`; a squad
+    /// that is unnamed or untracked is a silent no-op.
+    fn persist_squad(&mut self, sid: u64) {
+        let Some(sq) = self.session.squad(sid) else {
+            return;
+        };
+        let Some(name) = sq.name.clone() else {
+            return;
+        };
+        let origins = sq.origins.clone();
+        let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
+        if let Err(e) = crate::squad_store::upsert(&name, &origins, &members) {
+            self.persist_degraded(&e);
+        }
+    }
+
+    /// Write-through a raw upsert from captured fields (used when the in-session
+    /// squad is already gone - a churned member's last pane).
+    fn persist_stored(
+        &mut self,
+        name: &str,
+        origins: &[String],
+        members: &[crate::squad_store::StoredMember],
+    ) {
+        if let Err(e) = crate::squad_store::upsert(name, origins, members) {
+            self.persist_degraded(&e);
+        }
+    }
+
+    /// Write-through a delete of the workspace named `name`.
+    fn persist_remove_name(&mut self, name: &str) {
+        if let Err(e) = crate::squad_store::remove(name) {
+            self.persist_degraded(&e);
+        }
+    }
+
+    /// Notice every client exactly once that persistence is degraded (AC3-ERR),
+    /// then latch silent. The live session is never affected by a failed write.
+    fn persist_degraded(&mut self, e: &std::io::Error) {
+        eprintln!("fno mux: squad persistence degraded: {e}");
+        if self.persist_degraded_notified {
+            return;
+        }
+        self.persist_degraded_notified = true;
+        let text = format!("workspace persistence degraded: {e}");
+        for c in &self.clients {
+            let _ = c.reliable_tx.try_send(ServerMsg::Notice { text: text.clone() });
+        }
+    }
+
+    /// The persisted-member context of a pane, captured BEFORE it is reaped
+    /// (the reap clears `attached` and the tree). `(squad id, name, origins,
+    /// attach_id)`, or `None` when the pane is not a member of a persisted
+    /// named squad.
+    #[allow(clippy::type_complexity)]
+    fn member_ctx(&self, pid: u64) -> Option<(u64, String, Vec<String>, String)> {
+        let attach_id = self
+            .attached
+            .iter()
+            .find(|(_, &p)| p == pid)
+            .map(|(k, _)| k.clone())?;
+        let (sid, _) = self.session.find_pane(pid)?;
+        if !self.squad_members.contains_key(&sid) {
+            return None;
+        }
+        let sq = self.session.squad(sid)?;
+        let name = sq.name.clone()?;
+        Some((sid, name, sq.origins.clone(), attach_id))
+    }
+
+    /// Reconcile the store after a member pane left, given its pre-reap context.
+    /// `churn` (worker died on its own) tombstones the member and keeps the
+    /// workspace persisted even if its last pane just died (AC4-EDGE + the
+    /// zero-live restore, AC1-EDGE); `!churn` (user closed the pane) de-recruits
+    /// the member, and if that was the workspace's last pane the whole entry is
+    /// dropped (AC3-EDGE - it must not return at restart).
+    fn reconcile_member_close(
+        &mut self,
+        ctx: Option<(u64, String, Vec<String>, String)>,
+        churn: bool,
+    ) {
+        let Some((sid, name, origins, attach_id)) = ctx else {
+            return;
+        };
+        let members = self.squad_members.entry(sid).or_default();
+        if churn {
+            if let Some(mm) = members.iter_mut().find(|m| m.attach_id == attach_id) {
+                mm.tombstone = true;
+            }
+            let members = members.clone();
+            self.persist_stored(&name, &origins, &members);
+        } else {
+            members.retain(|m| m.attach_id != attach_id);
+            let survives = self.session.squad(sid).is_some();
+            if survives {
+                self.persist_squad(sid);
+            } else {
+                self.squad_members.remove(&sid);
+                self.persist_remove_name(&name);
+            }
+        }
     }
 
     fn notice(&self, client_id: u64, text: impl Into<String>) {
@@ -2600,7 +2735,14 @@ impl Core {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
                 };
-                self.close_pane(tab.focus)
+                let pid = tab.focus;
+                // Capture membership BEFORE the reap clears it, reconcile AFTER
+                // the close settles (so squad-survival is known) - user close
+                // de-recruits (AC3-EDGE).
+                let ctx = self.member_ctx(pid);
+                let flow = self.close_pane(pid);
+                self.reconcile_member_close(ctx, false);
+                flow
             }
             Command::FocusDir(dir) => {
                 let Some(tab) = self.viewed_tab_mut(view) else {
@@ -2710,10 +2852,18 @@ impl Core {
                 };
                 let pids =
                     tree::leaves(&self.session.squad(sid).expect("live squad").tabs[ti].root);
+                // De-recruit any member panes in this tab (AC3-EDGE), captured
+                // before the reaps clear them; reconciled AFTER remove_tab so
+                // squad-survival (survives vs de-persist) reflects reality.
+                let ctxs: Vec<_> = pids.iter().filter_map(|&pid| self.member_ctx(pid)).collect();
                 for pid in pids {
                     self.reap_pane(pid);
                 }
-                match self.session.remove_tab(sid, ti) {
+                let outcome = self.session.remove_tab(sid, ti);
+                for ctx in ctxs {
+                    self.reconcile_member_close(Some(ctx), false);
+                }
+                match outcome {
                     RemoveOutcome::SessionEmpty => Flow::Shutdown,
                     _ => {
                         // Everyone who viewed the dead tab (sender included)
@@ -2912,6 +3062,13 @@ impl Core {
                     self.notice(client_id, "name required");
                     return Flow::Continue;
                 }
+                // Name is the durable identity (Locked Decision 4): a duplicate
+                // of a live OR persisted named squad is refused fail-closed,
+                // same shape as the blank refusal.
+                if self.named_squad_taken(name) {
+                    self.notice(client_id, "name taken");
+                    return Flow::Continue;
+                }
                 // Seed the shell at the given origin, else the sender's current
                 // squad cwd (a new workspace opens where you are). PTY-first
                 // ordering (Locked 7): a spawn failure mutates no model. Consume
@@ -2951,6 +3108,10 @@ impl Core {
                         focus: pid,
                     },
                 );
+                // Track + persist the new (empty-membership) workspace so it
+                // restores next session even before any recruit (AC1-EDGE).
+                self.squad_members.insert(sid, Vec::new());
+                self.persist_squad(sid);
                 self.set_view(client_id, sid, tid);
                 self.push_layout(true);
                 Flow::Continue
@@ -2992,11 +3153,36 @@ impl Core {
                             self.notice(client_id, "name required");
                             return Flow::Continue;
                         }
+                        let new_name = (!clean.is_empty()).then_some(clean);
+                        let old_name = sq.name.clone();
+                        // Uniqueness (Locked 4): renaming onto a DIFFERENT live
+                        // or persisted name is refused, like NewSquad.
+                        if let Some(nn) = new_name.as_deref() {
+                            if old_name.as_deref() != Some(nn) && self.named_squad_taken(nn) {
+                                self.notice(client_id, "name taken");
+                                return Flow::Continue;
+                            }
+                        }
+                        let tracked = self.squad_members.contains_key(&squad);
                         self.session
                             .squad_mut(squad)
                             .expect("squad() live above")
-                            .name = (!clean.is_empty()).then_some(clean);
+                            .name = new_name.clone();
                         self.push_layout(true);
+                        // Write-through only for persisted (tracked) squads: the
+                        // store is name-keyed, so a rename is delete-old +
+                        // upsert-new; a CLEAR turns the workspace unnamed, so it
+                        // leaves the store entirely.
+                        if tracked {
+                            if let Some(old) = old_name {
+                                self.persist_remove_name(&old);
+                            }
+                            if new_name.is_some() {
+                                self.persist_squad(squad);
+                            } else {
+                                self.squad_members.remove(&squad);
+                            }
+                        }
                     }
                     None => self.notice(client_id, "no such squad"),
                 }
@@ -3010,6 +3196,14 @@ impl Core {
                     self.notice(client_id, "no such squad");
                     return Flow::Continue;
                 };
+                // De-persist the whole workspace up front (user dismissed it -
+                // it must not return at restart). Reaping its member panes below
+                // then no-ops on the store (the entry and tracking are gone).
+                if let Some(name) = self.session.squads[pos].name.clone() {
+                    if self.squad_members.remove(&id).is_some() {
+                        self.persist_remove_name(&name);
+                    }
+                }
                 let pids: Vec<u64> = self.session.squads[pos]
                     .tabs
                     .iter()
@@ -3662,6 +3856,9 @@ async fn serve(
         client_count: client_count_tx,
         seen: HashSet::new(),
         attached: HashMap::new(),
+        squad_members: HashMap::new(),
+        persist_degraded_notified: false,
+        restored: false,
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -3941,6 +4138,10 @@ async fn serve(
             exited = exit_rx.recv() => {
                 let Some(pid) = exited else { break Flow::Shutdown };
                 e2e_log(format_args!("pane {pid} child exited"));
+                // A worker that died on its own (churn) tombstones its member
+                // BEFORE the reap clears the mapping (AC4-EDGE).
+                let ctx = core.member_ctx(pid);
+                core.reconcile_member_close(ctx, true);
                 if core.close_pane(pid) == Flow::Shutdown {
                     e2e_log(format_args!("last pane gone; shutting down"));
                     break Flow::Shutdown;
@@ -5778,6 +5979,110 @@ mod tests {
         );
     }
 
+    /// A scratch `FNO_AGENTS_HOME` for store-write-through tests, serialized on
+    /// the shared crate-wide env lock (the var is process-global).
+    struct StoreScratch(std::path::PathBuf, std::sync::MutexGuard<'static, ()>);
+    impl StoreScratch {
+        fn new(name: &str) -> Self {
+            let g = crate::squad_store::TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let dir = std::env::temp_dir().join(format!(
+                "fno-srv-store-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("FNO_AGENTS_HOME", &dir);
+            StoreScratch(dir, g)
+        }
+    }
+    impl Drop for StoreScratch {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_AGENTS_HOME");
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn named_member_squad(core: &mut Core, sid: u64, name: &str, pid: u64, attach: &str) {
+        core.session.add_squad(
+            sid,
+            vec!["/repo".into()],
+            Some(name.into()),
+            Tab {
+                name: None,
+                id: sid,
+                root: Node::Leaf(pid),
+                focus: pid,
+            },
+        );
+        core.squad_members.insert(
+            sid,
+            vec![crate::squad_store::StoredMember {
+                attach_id: attach.into(),
+                tombstone: false,
+            }],
+        );
+        core.attached.insert(attach.into(), pid);
+    }
+
+    #[test]
+    fn persist_squad_writes_named_workspace_and_dupe_is_taken() {
+        let _s = StoreScratch::new("persist-named");
+        let mut core = empty_core();
+        named_member_squad(&mut core, 7, "harden", 100, "c19cd2c3");
+        core.persist_squad(7);
+        let loaded = crate::squad_store::load();
+        assert_eq!(loaded.squads.len(), 1);
+        assert_eq!(loaded.squads[0].name, "harden");
+        assert_eq!(loaded.squads[0].origins, vec!["/repo".to_string()]);
+        // A live named squad is taken; a persisted-but-not-live one is too.
+        assert!(core.named_squad_taken("harden"), "live name is taken");
+        core.session.squads.clear();
+        assert!(core.named_squad_taken("harden"), "persisted name is taken");
+        assert!(!core.named_squad_taken("nope-zzz"));
+    }
+
+    #[test]
+    fn churn_tombstones_and_user_close_de_recruits() {
+        // AC4-EDGE: a worker dying on its own tombstones its member (survives as
+        // a persisted, tombstoned entry). AC3-EDGE: the user closing the pane
+        // de-recruits it (gone from the store).
+        let _s = StoreScratch::new("churn-vs-user");
+        let mut core = empty_core();
+        named_member_squad(&mut core, 7, "harden", 100, "c19cd2c3");
+        core.persist_squad(7);
+
+        // Churn: the member is tombstoned, not removed.
+        let ctx = core.member_ctx(100);
+        assert!(ctx.is_some(), "pane 100 resolves to a persisted member");
+        core.reconcile_member_close(ctx, true);
+        let after_churn = crate::squad_store::load();
+        assert_eq!(after_churn.squads[0].members.len(), 1);
+        assert!(after_churn.squads[0].members[0].tombstone, "churn tombstones");
+
+        // User close of the still-live squad de-recruits the member.
+        let ctx = core.member_ctx(100);
+        core.reconcile_member_close(ctx, false);
+        let after_user = crate::squad_store::load();
+        assert_eq!(after_user.squads.len(), 1, "workspace survives");
+        assert!(after_user.squads[0].members.is_empty(), "member de-recruited");
+    }
+
+    #[test]
+    fn user_close_of_last_member_pane_de_persists_the_workspace() {
+        // AC3-EDGE corner: closing the workspace's last pane (squad removed from
+        // the session) drops the whole entry, so it never returns at restart.
+        let _s = StoreScratch::new("last-pane");
+        let mut core = empty_core();
+        named_member_squad(&mut core, 7, "harden", 100, "c19cd2c3");
+        core.persist_squad(7);
+        let ctx = core.member_ctx(100);
+        // Simulate the squad already gone (its last tab was removed by close).
+        core.session.squads.clear();
+        core.reconcile_member_close(ctx, false);
+        let loaded = crate::squad_store::load();
+        assert!(loaded.squads.is_empty(), "de-persisted with its last pane");
+    }
+
     #[test]
     fn rerun_refused_for_a_busy_or_unknown_agent_pane() {
         // AC-ERR: false-ready is the forbidden direction - a working/blocked
@@ -5932,6 +6237,9 @@ mod tests {
             client_count: watch::channel(0).0,
             seen: HashSet::new(),
             attached: HashMap::new(),
+            squad_members: HashMap::new(),
+            persist_degraded_notified: false,
+            restored: false,
         }
     }
 

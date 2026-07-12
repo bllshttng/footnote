@@ -15,6 +15,7 @@ pub mod proto;
 pub mod pty;
 pub mod server;
 pub mod squad;
+pub mod squad_store;
 pub mod tree;
 pub mod version;
 pub mod vt;
