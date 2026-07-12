@@ -130,7 +130,15 @@ use crate::tree::{Dir, Rect, TabId};
 /// `#[serde(default)]`, keeping a v23 reader wire-tolerant. Parallel-branch
 /// hazard: if another mux branch takes v24 first, the second-to-merge re-bumps
 /// (same rule as the v17/v18/v20 churn).
-pub const PROTO_VERSION: u32 = 24;
+/// v25 (x-8f11, persisted squads + bulk recruit): `Command::RecruitAgents {
+/// squad, ids }` recruits N watch-only agents into a named workspace
+/// (create-if-absent); `Command::DismissMember { squad, attach_id }` deletes a
+/// tombstoned member from a persisted workspace. `AgentRow.tombstone` marks a
+/// synthesized dead-member row (dimmed, dismissable) under its squad; both new
+/// `AgentRow` reads are `#[serde(default)]`, keeping a v24 reader wire-tolerant.
+/// (v24 was taken by x-0090's `AgentRow.tab`/`cwd_base`, so this re-bumps per
+/// the second-to-merge rule the v17/v18/v20 churn established.)
+pub const PROTO_VERSION: u32 = 25;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -468,6 +476,14 @@ pub struct AgentRow {
     /// reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_base: Option<String>,
+    /// (v25, x-8f11) True for a SYNTHESIZED dead-member row: a tombstoned
+    /// persisted member with no live pane, rendered dimmed under its squad and
+    /// dismissable (`DismissMember`). Distinguishes it from a squad-header row
+    /// (`x` removes the squad) so the same `x` key dismisses a tombstone but
+    /// removes a squad, disambiguated by row type. `#[serde(default)]` keeps a
+    /// v24 reader wire-tolerant (defaults false).
+    #[serde(default)]
+    pub tombstone: bool,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -651,6 +667,27 @@ pub enum Command {
     MoveTab {
         tab: TabId,
         squad: u64,
+    },
+    /// (v25, x-8f11) Recruit N watch-only agents into a NAMED workspace
+    /// (create-if-absent, no origin). `squad` is a workspace name; `ids` are
+    /// `claude attach` jobIds from the sideline marks. The server is the
+    /// authoritative gate: a blank name or empty `ids` is refused fail-closed;
+    /// each id is validated through the exact `AttachAgent` gates (8-hex shape +
+    /// catalog membership); an id already paned or already a member is a dedup
+    /// no-op; per-id outcomes fold into one partial-success notice. Members are
+    /// written through to `~/.fno/squads.json`.
+    RecruitAgents {
+        squad: String,
+        ids: Vec<String>,
+    },
+    /// (v25, x-8f11) Delete a TOMBSTONED member (a dead worker's dimmed row)
+    /// from a persisted workspace. `squad` names a stable squad id; `attach_id`
+    /// the member. Only a tombstone is dismissable (a live member leaves by
+    /// closing its pane); an unknown workspace/member is refused with a notice.
+    /// Write-through delete.
+    DismissMember {
+        squad: u64,
+        attach_id: String,
     },
 }
 
@@ -1593,6 +1630,7 @@ mod tests {
                         external: false,
                         seen: false,
                         cwd_base: None,
+                        tombstone: false,
                         tab: None,
                     },
                     AgentRow {
@@ -1607,6 +1645,7 @@ mod tests {
                         external: false,
                         seen: false,
                         cwd_base: None,
+                        tombstone: false,
                         tab: None,
                     },
                 ],
