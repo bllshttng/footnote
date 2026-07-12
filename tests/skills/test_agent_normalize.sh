@@ -166,15 +166,22 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
 [[ "$(field "$OUT" yolo)" == "1" ]] && pass "AC3-HP explicit --yolo (codex) -> yolo=1" || fail "codex yolo: $OUT"
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider gemini --yolo)"
 [[ "$(field "$OUT" yolo)" == "1" ]] && pass "AC3-HP explicit --yolo (gemini) -> yolo=1" || fail "gemini yolo: $OUT"
-# AC3-ERR: --yolo with claude -> dropped (yolo=0) + a stderr warning, not an unknown flag.
+# AC3-ERR (x-d235): --yolo with claude MAPS to --permission-mode bypassPermissions
+# (claude has no --yolo flag; bypassPermissions is its full-auto/no-gates
+# equivalent), not dropped. yolo is cleared, permission_mode is set, status ok.
 ERRF="$TMP/yolo.err"
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude --yolo 2>"$ERRF")"
 if [[ "$(field "$OUT" yolo)" == "0" ]] && [[ "$(field "$OUT" status)" == "ok" ]] \
-   && grep -qi "not supported for claude" "$ERRF"; then
-  pass "AC3-ERR --yolo + claude -> dropped (yolo=0) + stderr warning, still ok"
+   && [[ "$(field "$OUT" permission_mode)" == "bypassPermissions" ]]; then
+  pass "AC3-ERR --yolo + claude -> mapped to permission_mode=bypassPermissions (yolo cleared), still ok"
 else
   fail "AC3-ERR claude yolo: out=$OUT err=$(cat "$ERRF")"
 fi
+# and an explicit --permission-mode the user passed WINS over the yolo default.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude --yolo --permission-mode acceptEdits)"
+[[ "$(field "$OUT" permission_mode)" == "acceptEdits" ]] \
+  && pass "AC3-ERR claude yolo + explicit --permission-mode -> explicit wins" \
+  || fail "claude yolo explicit permission-mode: $OUT"
 
 # --- US4: payload modes (build / ask / passthrough) + provider-aware messages ---
 
