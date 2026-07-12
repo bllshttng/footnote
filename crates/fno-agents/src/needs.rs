@@ -98,7 +98,11 @@ fn in_window(ts: &str, since: u64) -> bool {
     to_epoch_lenient(ts).is_none_or(|secs| secs >= since)
 }
 
-/// The latest loop_check state observed for a session (later event wins).
+/// The latest loop_check state observed for a session. "Latest" is by
+/// `(epoch, seq)`, NOT file order: events from a project + global events.jsonl
+/// are concatenated, so a later-in-file line can be older in time; comparing by
+/// parsed epoch (with a monotonic fold `seq` tiebreak for same-second events)
+/// keeps the truly newest state per kind.
 #[derive(Default, Clone)]
 struct LoopState {
     decision: String,
@@ -108,13 +112,17 @@ struct LoopState {
     reviewed: bool,
     fires: u64,
     ts: String,
+    epoch: u64,
+    seq: usize,
 }
 
-/// The latest termination observed for a session.
+/// The latest termination observed for a session (same `(epoch, seq)` ordering).
 #[derive(Default, Clone)]
 struct TermState {
     reason: String,
     ts: String,
+    epoch: u64,
+    seq: usize,
 }
 
 #[derive(Default)]
@@ -128,6 +136,8 @@ struct SessionAcc {
 /// qualifying session, sorted `(ts, session_id)` for deterministic output.
 pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) -> Vec<NeedItem> {
     let mut sessions: HashMap<String, SessionAcc> = HashMap::new();
+    // Monotonic fold position, breaking same-second ties in true stream order.
+    let mut seq = 0usize;
 
     for line in events_raw.lines() {
         if line.trim().is_empty() {
@@ -143,29 +153,54 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         let Some(sid) = str_field(&v, "session_id") else {
             continue; // an event with no session can't be joined to a row
         };
-        match event_kind(&v) {
+        let kind = event_kind(&v);
+        if !matches!(
+            kind,
+            Some("loop_check") | Some("termination") | Some("loop_terminated")
+        ) {
+            continue;
+        }
+        let epoch = to_epoch_lenient(ts).unwrap_or(0);
+        seq += 1;
+        let acc = sessions.entry(sid.to_string()).or_default();
+        match kind {
             Some("loop_check") => {
-                let acc = sessions.entry(sid.to_string()).or_default();
-                acc.latest_loop = Some(LoopState {
-                    decision: str_field(&v, "decision").unwrap_or("").to_string(),
-                    intent: str_field(&v, "intent").unwrap_or("").to_string(),
-                    ci: str_field(&v, "ci").unwrap_or("").to_string(),
-                    pr_state: str_field(&v, "pr_state").unwrap_or("").to_string(),
-                    reviewed: field(&v, "reviewed")
-                        .and_then(|r| r.as_bool())
-                        .unwrap_or(false),
-                    fires: field(&v, "fires").and_then(|f| f.as_u64()).unwrap_or(0),
-                    ts: ts.to_string(),
-                });
+                // Keep the newest by (epoch, seq): a later-in-file but older-in-
+                // time line (cross-source concat) never clobbers newer state.
+                if acc
+                    .latest_loop
+                    .as_ref()
+                    .is_none_or(|c| (epoch, seq) >= (c.epoch, c.seq))
+                {
+                    acc.latest_loop = Some(LoopState {
+                        decision: str_field(&v, "decision").unwrap_or("").to_string(),
+                        intent: str_field(&v, "intent").unwrap_or("").to_string(),
+                        ci: str_field(&v, "ci").unwrap_or("").to_string(),
+                        pr_state: str_field(&v, "pr_state").unwrap_or("").to_string(),
+                        reviewed: field(&v, "reviewed")
+                            .and_then(|r| r.as_bool())
+                            .unwrap_or(false),
+                        fires: field(&v, "fires").and_then(|f| f.as_u64()).unwrap_or(0),
+                        ts: ts.to_string(),
+                        epoch,
+                        seq,
+                    });
+                }
             }
-            Some("termination") | Some("loop_terminated") => {
-                let acc = sessions.entry(sid.to_string()).or_default();
-                acc.latest_term = Some(TermState {
-                    reason: str_field(&v, "reason").unwrap_or("").to_string(),
-                    ts: ts.to_string(),
-                });
+            _ => {
+                if acc
+                    .latest_term
+                    .as_ref()
+                    .is_none_or(|c| (epoch, seq) >= (c.epoch, c.seq))
+                {
+                    acc.latest_term = Some(TermState {
+                        reason: str_field(&v, "reason").unwrap_or("").to_string(),
+                        ts: ts.to_string(),
+                        epoch,
+                        seq,
+                    });
+                }
             }
-            _ => {}
         }
     }
 
@@ -200,15 +235,12 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
 /// check is a green OPEN unreviewed block past the fires floor is `review_wedged`
 /// - a later `allow` or a termination clears it (the latest event wins).
 fn classify(acc: &SessionAcc, fires_floor: u64) -> Option<(&'static str, String, String)> {
-    // Compare by epoch, not lexically: a Python-isoformat termination ts
-    // (`...00.5`, no Z) would sort BEFORE a same-second Z-suffixed loop_check
-    // (`.` 46 < `Z` 90) and misclassify a real stop as still-looping. Fall back
-    // to a lexical compare only when a ts is unparseable.
+    // Order by (epoch, seq), the same key the accumulator kept: epoch first (so
+    // a fractional Python-isoformat stop is not misordered against a Z loop_check
+    // by a lexical string compare), then the monotonic fold seq so a same-second
+    // loop_check that RE-ARMS after a termination wins over the stop (codex P2).
     let terminated = match (&acc.latest_term, &acc.latest_loop) {
-        (Some(t), Some(l)) => match (to_epoch_lenient(&t.ts), to_epoch_lenient(&l.ts)) {
-            (Some(ts), Some(ls)) => ts >= ls,
-            _ => t.ts >= l.ts,
-        },
+        (Some(t), Some(l)) => (t.epoch, t.seq) >= (l.epoch, l.seq),
         (Some(_), None) => true,
         (None, _) => false,
     };
@@ -544,6 +576,63 @@ mod tests {
     fn done_pr_green_termination_yields_nothing() {
         let events = termination("2026-07-03T02:00:00Z", "s", "DonePRGreen");
         assert!(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR).is_empty());
+    }
+
+    #[test]
+    fn same_second_rearm_after_termination_is_not_terminated() {
+        // A Budget stop then a same-second re-armed loop_check: the loop's higher
+        // fold seq wins the (epoch, seq) tiebreak, so the session reads as live
+        // again (review_wedged), not budget-stopped (codex P2).
+        let events = [
+            termination("2026-07-03T02:00:00Z", "s", "Budget"),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "s",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                9,
+            ),
+        ]
+        .join("\n");
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "review_wedged");
+    }
+
+    #[test]
+    fn newer_state_survives_older_line_from_a_later_source() {
+        // Simulate project+global concat where the LATER-in-file line is OLDER:
+        // an old allow appended after a newer block must not clobber the block.
+        let events = [
+            loop_check(
+                "2026-07-03T05:00:00Z",
+                "s",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                9,
+            ),
+            loop_check(
+                "2026-07-03T01:00:00Z",
+                "s",
+                "allow",
+                "SUCCESS",
+                "OPEN",
+                true,
+                3,
+            ),
+        ]
+        .join("\n");
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(
+            items.len(),
+            1,
+            "the newer block state survives the older line"
+        );
+        assert_eq!(items[0].kind, "review_wedged");
     }
 
     #[test]
