@@ -265,11 +265,14 @@ fn normalize_reviewer(raw: &str) -> String {
 /// UNRESOLVED_PEER_SENTINEL).
 const MALFORMED_REVIEWERS_SENTINEL: &str = "\u{0}malformed-reviewers";
 
-/// A `config.review.peers` entry. `provider` is kept for messaging; the gate
-/// only uses the resolved posting `identity` (own, or the shared peer_identity).
+/// A `config.review.peers` entry. `provider` is kept for messaging and the
+/// same-model guard; `model` carries an optional `"route_provider,route_model"`
+/// route (the claude CLI as transport for a genuinely different model); the gate
+/// itself only matches the resolved posting `identity` (own, or peer_identity).
 #[derive(Debug, Default, Clone)]
 struct PeerEntry {
     provider: String,
+    model: Option<String>,
     identity: Option<String>,
 }
 
@@ -393,14 +396,19 @@ fn value_as_reviewers(v: &toml::Value) -> Vec<String> {
 fn value_as_peers(v: &toml::Value) -> Vec<PeerEntry> {
     let scalar_entry = |s: String| PeerEntry {
         provider: s,
+        model: None,
         identity: None,
     };
-    // One table entry -> a PeerEntry (provider/identity read order-independently).
+    // One table entry -> a PeerEntry (provider/model/identity read order-independently).
     let map_entry = |it: &toml::Value| -> Option<PeerEntry> {
         let provider = it
             .get("provider")
             .and_then(scalar_string)
             .unwrap_or_default();
+        let model = it
+            .get("model")
+            .and_then(scalar_string)
+            .filter(|s| !s.is_empty());
         let identity = it
             .get("identity")
             .and_then(scalar_string)
@@ -408,7 +416,11 @@ fn value_as_peers(v: &toml::Value) -> Vec<PeerEntry> {
         if provider.is_empty() && identity.is_none() {
             None
         } else {
-            Some(PeerEntry { provider, identity })
+            Some(PeerEntry {
+                provider,
+                model,
+                identity,
+            })
         }
     };
     match v {
@@ -1603,11 +1615,75 @@ const DEFAULT_REQUIRED_BOTS: &[&str] = &[];
 /// rather than silently going green without that reviewer (x-4baa).
 const UNRESOLVED_PEER_SENTINEL: &str = "\u{0}fno-peer-without-identity\u{0}";
 
+/// A login no real GitHub account can equal, pushed when a required peer login is
+/// backed ONLY by peers whose model is the author's own (same-model guard). It
+/// REPLACES the clearable login so a same-model review can never satisfy the
+/// cross-model gate. Distinct from UNRESOLVED_PEER_SENTINEL for greppability.
+const SAME_MODEL_PEER_SENTINEL: &str = "\u{0}fno-peer-same-model\u{0}";
+
+/// Model family of a harness or provider name - the same-model guard's proxy for
+/// "which model". The author's family is its invoking harness's family
+/// (claude->anthropic, codex->openai, gemini->google); a peer's family is its
+/// route provider (else its bare provider). An unknown name is None and so never
+/// equals any author family (fail open per-peer). A routed-transport author
+/// (claude CLI over GLM) still reads as anthropic here - a known limitation that
+/// errs toward HOLDING the gate, never wrongly clearing it.
+fn harness_family(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "claude" | "anthropic" => Some("anthropic"),
+        "codex" | "openai" => Some("openai"),
+        "gemini" | "google" => Some("google"),
+        _ => None,
+    }
+}
+
+/// The route provider of a peers `model` route: `"route_provider,route_model"`
+/// -> `route_provider`. None unless there are exactly two non-empty comma parts,
+/// matching the loader's parse rule (config/__init__.py coerce_peers), so a
+/// malformed route falls back to the bare provider.
+fn route_provider(model: &str) -> Option<&str> {
+    let mut parts = model.split(',').map(str::trim);
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(prov), Some(rest), None) if !prov.is_empty() && !rest.is_empty() => Some(prov),
+        _ => None,
+    }
+}
+
+/// A peer's effective model family: its route provider's family when it names a
+/// valid route, else its bare provider's family.
+fn peer_family(peer: &PeerEntry) -> Option<&'static str> {
+    let effective = peer
+        .model
+        .as_deref()
+        .and_then(route_provider)
+        .unwrap_or(peer.provider.as_str());
+    harness_family(effective)
+}
+
+/// Thin wrapper: resolve the must-have-reviewed login set with NO author-harness
+/// awareness (the same-model guard is inert). Test-only convenience so existing
+/// tests stay byte-identical; production passes the resolved harness via
+/// [`resolved_required_bots_for_author`].
+#[cfg(test)]
+fn resolved_required_bots(settings: &Settings) -> Vec<String> {
+    resolved_required_bots_for_author(settings, None)
+}
+
 /// The set of expected review logins that must have passed for the gate to
 /// clear (x-4baa): `github_apps` (or its legacy `required_bots` alias) UNION
 /// the resolved posting identity of each `peers` entry. loop-check stays
 /// login-based; a peer with no resolvable identity fails closed via a sentinel.
-fn resolved_required_bots(settings: &Settings) -> Vec<String> {
+///
+/// `author_harness` is the invoking harness (`claude`/`codex`/`gemini`), resolved
+/// from the ambient env markers by the caller. When it resolves to a model
+/// family, the same-model guard (x-c2e7) replaces any peer login backed ONLY by
+/// the author's own model with SAME_MODEL_PEER_SENTINEL, so a codex-authored run
+/// with `peers: [codex]` can no longer review its own work and clear the gate.
+/// `None` (unknown authorship) leaves the login set byte-identical - fail open.
+fn resolved_required_bots_for_author(
+    settings: &Settings,
+    author_harness: Option<&str>,
+) -> Vec<String> {
     // github_apps wins over the legacy required_bots alias when both are set.
     if settings.github_apps.is_some() && settings.required_bots.is_some() {
         eprintln!(
@@ -1648,7 +1724,68 @@ fn resolved_required_bots(settings: &Settings) -> Vec<String> {
             }
         }
     }
+
+    // Same-model guard (x-c2e7): a peer login backed ONLY by the author's own
+    // model cannot honestly satisfy the cross-model gate. Inert unless the
+    // author harness resolves to a family (fail open on unknown authorship, so
+    // the block above stays byte-identical). The GITHUB_APPS base set is never
+    // touched - only logins contributed by `peers` are eligible.
+    if let Some(author) = author_harness.filter(|_| !settings.peers.is_empty()) {
+        if let Some(author_fam) = harness_family(author) {
+            apply_same_model_guard(&mut logins, settings, author, author_fam);
+        }
+    }
     logins
+}
+
+/// Replace every peer-contributed login backed ONLY by same-model peers with
+/// SAME_MODEL_PEER_SENTINEL and print one loud line per such login. A login with
+/// >=1 cross-model peer (a different family, or an unknown provider) is left
+/// alone. Logins present in the github_apps/required_bots base set are exempt -
+/// an explicit App requirement is never loosened by this guard. Peers are walked
+/// in config order so the output is deterministic.
+fn apply_same_model_guard(
+    logins: &mut [String],
+    settings: &Settings,
+    author_harness: &str,
+    author_fam: &str,
+) {
+    let base_set: Vec<&String> = settings
+        .github_apps
+        .as_ref()
+        .or(settings.required_bots.as_ref())
+        .map(|l| l.iter().collect())
+        .unwrap_or_default();
+
+    // Per distinct peer login, in first-seen order: does any backing peer differ
+    // in model family, and the first same-model provider (for the message)?
+    let mut seen: Vec<(String, bool, String)> = Vec::new();
+    for peer in &settings.peers {
+        let Some(login) = peer
+            .identity
+            .clone()
+            .or_else(|| settings.peer_identity.clone())
+        else {
+            continue;
+        };
+        let cross = peer_family(peer) != Some(author_fam);
+        match seen.iter_mut().find(|(l, _, _)| *l == login) {
+            Some(entry) => entry.1 = entry.1 || cross,
+            None => seen.push((login, cross, peer.provider.clone())),
+        }
+    }
+
+    for (login, any_cross, provider) in seen {
+        if any_cross || base_set.iter().any(|b| **b == login) {
+            continue;
+        }
+        if let Some(slot) = logins.iter_mut().find(|l| **l == login) {
+            *slot = SAME_MODEL_PEER_SENTINEL.to_string();
+        }
+        eprintln!(
+            "loop-check: peer '{provider}' is the author's own model ({author_harness}-authored run) - the cross-model gate cannot be satisfied by it; configure a cross-model peer or a model route"
+        );
+    }
 }
 
 /// The OPTIONAL reviewer logins (config.review.optional_apps): honored-if-
@@ -2624,8 +2761,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
         merged
     };
 
-    // Resolve the must-have-reviewed list once (code default when unset).
-    let required_bots = resolved_required_bots(&settings);
+    // Resolve the must-have-reviewed list once (code default when unset). The
+    // author harness (from the ambient env markers, shared with claims.rs) drives
+    // the same-model peer guard (x-c2e7); None leaves the set unchanged.
+    let author_harness = crate::claims::resolve_harness();
+    let required_bots = resolved_required_bots_for_author(&settings, author_harness.as_deref());
     let optional_bots = resolved_optional_bots(&settings);
 
     // Now timestamp
@@ -5207,10 +5347,12 @@ mod tests {
             peers: vec![
                 PeerEntry {
                     provider: "codex".into(),
+                    model: None,
                     identity: None,
                 },
                 PeerEntry {
                     provider: "gemini".into(),
+                    model: None,
                     identity: None,
                 },
             ],
@@ -5227,10 +5369,12 @@ mod tests {
             peers: vec![
                 PeerEntry {
                     provider: "codex".into(),
+                    model: None,
                     identity: Some("fno-codex-bot".into()),
                 },
                 PeerEntry {
                     provider: "gemini".into(),
+                    model: None,
                     identity: Some("fno-gemini-bot".into()),
                 },
             ],
@@ -5336,6 +5480,7 @@ mod tests {
             github_apps: Some(Vec::new()),
             peers: vec![PeerEntry {
                 provider: "codex".into(),
+                model: None,
                 identity: None,
             }],
             peer_identity: None,
@@ -5349,6 +5494,186 @@ mod tests {
             "chatgpt-codex-connector[bot]",
             UNRESOLVED_PEER_SENTINEL
         ));
+    }
+
+    // ---- same-model peer guard (x-c2e7) -----------------------------------
+
+    /// US5: effective model family resolution across bare providers, routes,
+    /// malformed routes (fall back to provider), and unknown providers (None).
+    #[test]
+    fn peer_family_mapping_table() {
+        let bare = |p: &str| PeerEntry {
+            provider: p.into(),
+            model: None,
+            identity: None,
+        };
+        let routed = |p: &str, m: &str| PeerEntry {
+            provider: p.into(),
+            model: Some(m.into()),
+            identity: None,
+        };
+        // harness_family: names + aliases + case-insensitivity; unknown -> None.
+        assert_eq!(harness_family("claude"), Some("anthropic"));
+        assert_eq!(harness_family("ANTHROPIC"), Some("anthropic"));
+        assert_eq!(harness_family("codex"), Some("openai"));
+        assert_eq!(harness_family("gemini"), Some("google"));
+        assert_eq!(harness_family("zai"), None);
+        // route_provider: exactly two non-empty parts, else None (fall back).
+        assert_eq!(route_provider("zai,glm-5.2"), Some("zai"));
+        assert_eq!(route_provider(" openai , gpt-5 "), Some("openai"));
+        assert_eq!(route_provider("gpt-5"), None); // no comma -> malformed
+        assert_eq!(route_provider("zai,"), None); // empty model -> malformed
+        assert_eq!(route_provider(",glm"), None); // empty provider -> malformed
+        assert_eq!(route_provider("a,b,c"), None); // three parts -> malformed
+        // peer_family: bare provider, valid route wins, malformed falls back.
+        assert_eq!(peer_family(&bare("codex")), Some("openai"));
+        assert_eq!(peer_family(&bare("grok")), None); // unknown -> never matches
+        assert_eq!(peer_family(&routed("claude", "zai,glm-5.2")), None); // route wins
+        assert_eq!(peer_family(&routed("codex", "openai,gpt-5")), Some("openai"));
+        assert_eq!(peer_family(&routed("codex", "gpt-5")), Some("openai")); // malformed -> provider
+    }
+
+    /// AC1-HP: codex author + `peers: [codex]` -> the peer login is replaced by
+    /// the same-model sentinel so the gate cannot clear.
+    #[test]
+    fn same_model_peer_holds_gate() {
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![PeerEntry {
+                provider: "codex".into(),
+                model: None,
+                identity: None,
+            }],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        let logins = resolved_required_bots_for_author(&s, Some("codex"));
+        assert!(logins.iter().any(|l| l == SAME_MODEL_PEER_SENTINEL));
+        assert!(!logins.iter().any(|l| l == "fno-peer-bot"));
+    }
+
+    /// AC2-HP: codex author + `peers: [gemini]` (cross-model) clears exactly as
+    /// today - the login stays, no sentinel.
+    #[test]
+    fn cross_model_peer_login_unchanged() {
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![PeerEntry {
+                provider: "gemini".into(),
+                model: None,
+                identity: None,
+            }],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        let logins = resolved_required_bots_for_author(&s, Some("codex"));
+        assert_eq!(logins, vec!["fno-peer-bot".to_string()]);
+    }
+
+    /// US1 / step-3b: a claude author with a routed claude peer
+    /// (`{provider: claude, model: "zai,glm-5.2"}`) is cross-model (GLM via zai)
+    /// -> the login stays.
+    #[test]
+    fn routed_claude_peer_is_cross_model() {
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![PeerEntry {
+                provider: "claude".into(),
+                model: Some("zai,glm-5.2".into()),
+                identity: None,
+            }],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        let logins = resolved_required_bots_for_author(&s, Some("claude"));
+        assert_eq!(logins, vec!["fno-peer-bot".to_string()]);
+    }
+
+    /// AC3-ERR: a claude peer routed back to the author's own family
+    /// (`anthropic,...`, hand-edited past the loader) is same-model -> sentinel.
+    #[test]
+    fn same_family_route_holds_gate() {
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![PeerEntry {
+                provider: "claude".into(),
+                model: Some("anthropic,claude-opus".into()),
+                identity: None,
+            }],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        let logins = resolved_required_bots_for_author(&s, Some("claude"));
+        assert!(logins.iter().any(|l| l == SAME_MODEL_PEER_SENTINEL));
+        assert!(!logins.iter().any(|l| l == "fno-peer-bot"));
+    }
+
+    /// AC5-EDGE: codex author + `peers: [codex, gemini]` sharing one identity
+    /// stays satisfiable (gemini backs the login) -> login kept, no sentinel.
+    #[test]
+    fn shared_identity_mixed_peers_stays_satisfiable() {
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![
+                PeerEntry {
+                    provider: "codex".into(),
+                    model: None,
+                    identity: None,
+                },
+                PeerEntry {
+                    provider: "gemini".into(),
+                    model: None,
+                    identity: None,
+                },
+            ],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        let logins = resolved_required_bots_for_author(&s, Some("codex"));
+        assert_eq!(logins, vec!["fno-peer-bot".to_string()]);
+    }
+
+    /// AC6-FR: unknown harness (None) leaves the login set byte-identical to the
+    /// no-guard wrapper, even for a would-be same-model config.
+    #[test]
+    fn unknown_harness_is_byte_identical() {
+        let s = Settings {
+            github_apps: Some(vec!["chatgpt-codex-connector".into()]),
+            peers: vec![PeerEntry {
+                provider: "codex".into(),
+                model: None,
+                identity: None,
+            }],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        // None author => guard inert => equals the no-harness wrapper exactly.
+        assert_eq!(
+            resolved_required_bots_for_author(&s, None),
+            resolved_required_bots(&s)
+        );
+        assert!(!resolved_required_bots_for_author(&s, None)
+            .iter()
+            .any(|l| l == SAME_MODEL_PEER_SENTINEL));
+    }
+
+    /// The github_apps base set is never loosened: a same-model peer whose
+    /// identity coincides with a required App login keeps that App requirement.
+    #[test]
+    fn base_app_login_exempt_from_guard() {
+        let s = Settings {
+            github_apps: Some(vec!["fno-peer-bot".into()]),
+            peers: vec![PeerEntry {
+                provider: "codex".into(),
+                model: None,
+                identity: None,
+            }],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        let logins = resolved_required_bots_for_author(&s, Some("codex"));
+        assert_eq!(logins, vec!["fno-peer-bot".to_string()]);
+        assert!(!logins.iter().any(|l| l == SAME_MODEL_PEER_SENTINEL));
     }
 
     #[test]
