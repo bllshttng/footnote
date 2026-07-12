@@ -19,6 +19,7 @@ class Status(str, Enum):
     superseded = "superseded"  # Fix 2: added to match _derive_status bare-string return
     idea = "idea"
     deferred = "deferred"
+    in_review = "in_review"  # node carries an open, unmerged PR; held out of dispatch
 
 
 class Priority(str, Enum):
@@ -52,6 +53,10 @@ def _derive_status(data: dict) -> str:
         return "superseded"
     if data.get("deferred_at"):
         return "deferred"
+    # Open, unmerged PR -> in_review (see recompute_statuses for the rationale).
+    # Merge sets completed_at, so `done` above wins once the PR lands.
+    if data.get("pr_number"):
+        return "in_review"
     if data.get("blocked_by"):
         return "blocked"
     # locked_by-first; tolerate a raw pre-rename dict passed straight in (not via

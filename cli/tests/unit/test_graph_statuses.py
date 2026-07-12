@@ -191,3 +191,43 @@ def test_ac4_edge_idea_when_plan_path_is_empty_string():
     e = _entry("ab-emptyplan", plan_path="")
     result = recompute_statuses([e])
     assert result[0]["_status"] == "idea"
+
+
+# -- in_review: node with an open, unmerged PR is held out of dispatch --
+
+
+def test_in_review_when_pr_number_set():
+    """A node carrying a pr_number (not yet merged) derives in_review."""
+    e = _entry("ab-prreview1", pr_number=358)
+    result = recompute_statuses([e])
+    assert result[0]["_status"] == "in_review"
+
+
+def test_in_review_survives_stale_claim():
+    """The stampede case: builder session died (stale lock) but PR is still
+    open. Status must stay in_review, NOT revert to ready and re-enter the
+    dispatch pool."""
+    old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    e = _entry("ab-prreview2", pr_number=358, session_id="dead-sess", claimed_at=old)
+    result = recompute_statuses([e])
+    assert result[0]["_status"] == "in_review"
+
+
+def test_done_wins_over_pr_number_on_merge():
+    """Once the PR merges, completed_at is set and `done` wins over in_review."""
+    e = _entry("ab-prreview3", pr_number=358, completed_at="2026-07-12T00:00:00Z")
+    result = recompute_statuses([e])
+    assert result[0]["_status"] == "done"
+
+
+def test_deferred_wins_over_pr_number():
+    """An explicit defer (e.g. a no-merge run parking its own open PR) still
+    surfaces as deferred, not in_review."""
+    e = _entry(
+        "ab-prreview4",
+        pr_number=358,
+        deferred_at="2026-07-12T00:00:00Z",
+        deferred_reason="awaiting human merge",
+    )
+    result = recompute_statuses([e])
+    assert result[0]["_status"] == "deferred"
