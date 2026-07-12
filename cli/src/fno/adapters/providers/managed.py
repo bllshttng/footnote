@@ -82,13 +82,14 @@ class PinningSession:
 
 
 def store_root() -> Path:
-    """Root of the managed store: ``<state_dir>/providers`` (default ~/.fno/providers)."""
-    try:
-        from fno import paths as _paths
+    """Root of the managed store: ``<state_dir>/providers`` (default ~/.fno/providers).
 
-        return _paths.state_dir() / "providers"
-    except Exception:  # noqa: BLE001 - fail-open to the default, mirrors staging.py
-        return Path.home() / ".fno" / "providers"
+    Routed through ``fno.paths`` (no bare ``~/.fno`` fallback): this is only
+    reached from the register/use/switch CLI commands, well after config load,
+    so ``state_dir()`` is always resolvable here."""
+    from fno import paths as _paths
+
+    return _paths.state_dir() / "providers"
 
 
 def account_dir(record_id: str, root: Path | None = None) -> Path:
