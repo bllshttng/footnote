@@ -316,11 +316,20 @@ class _FireResult:
         self.rc = rc
 
 
+def _arm_auto_run(repo_dir):
+    """Arm the post_merge.auto_run opt-in for a repo dir. _default_dispatch_ritual
+    now honors it (x-7930): a bare tmp_path defaults auto_run off -> 'disabled'."""
+    cfg = repo_dir / ".fno" / "config.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("[post_merge]\nauto_run = true\n")
+
+
 def test_default_dispatch_ritual_cold_fire_ok_marks(tmp_path, monkeypatch):
     """The daemon's real adapter: a successful headless fire is a completed
     hand-off (dispatched, marker set)."""
     from fno.pr_watch._dispatch import _default_dispatch_ritual
 
+    _arm_auto_run(tmp_path)
     fired: list = []
 
     def fire(verb, pr, repo_dir, *, model=None):
@@ -341,6 +350,8 @@ def test_default_dispatch_ritual_cold_fire_notok_no_marker(tmp_path):
     generic dispatcher tests only assert at the seam)."""
     from fno.pr_watch._dispatch import _default_dispatch_ritual
 
+    _arm_auto_run(tmp_path)
+
     def fire(verb, pr, repo_dir, *, model=None):
         return _FireResult(ok=False, rc=1)
 
@@ -351,6 +362,27 @@ def test_default_dispatch_ritual_cold_fire_notok_no_marker(tmp_path):
     assert not (tmp_path / ".fno" / "post-merge-dispatched" / "shaD2").exists()
 
 
+def test_default_dispatch_ritual_respects_auto_run_off(tmp_path):
+    """x-7930 / codex P1: pr-watch must honor the post_merge.auto_run opt-in that
+    reconcile honors. A `ready` repo that never armed auto_run must NOT auto-run
+    /fno:pr merged + the canonical sync when pr-watch merely enables. No config
+    -> auto_run off -> disabled, nothing fired, no marker."""
+    from fno.pr_watch._dispatch import _default_dispatch_ritual
+
+    fired: list = []
+
+    def fire(verb, pr, repo_dir, *, model=None):
+        fired.append(pr)
+        return _FireResult(ok=True)
+
+    res = _default_dispatch_ritual(
+        _Cand(7, tmp_path, source_session_id=None), _Obs(merge_sha="shaOFF"), fire
+    )
+    assert res.outcome == "disabled"
+    assert fired == []
+    assert not (tmp_path / ".fno" / "post-merge-dispatched" / "shaOFF").exists()
+
+
 def test_cross_detector_one_handoff_per_sha(tmp_path):
     """US3: reconcile (via canonical_root) and the daemon adapter (via node_cwd)
     converge on the SAME per-SHA marker under one canonical, so a merge both
@@ -359,6 +391,7 @@ def test_cross_detector_one_handoff_per_sha(tmp_path):
 
     canonical = tmp_path / "canon"
     canonical.mkdir()
+    _arm_auto_run(canonical)
 
     # Detector A: reconcile-style call (its own canonical_root + merge_sha).
     spawn_a = _Spawn(short_id="A")
@@ -540,3 +573,104 @@ def test_source_harness_threads_to_resolver_and_inject(tmp_path, monkeypatch):
     assert seen["resolver"] == ("codex-sess", "codex")
     assert warm.calls == [("codex-sess", 9, "codex")]
     assert spawn.calls == []
+
+
+# --- Wave 3 (x-7930): notify the origin session on a cold-dispatched merge ---
+
+
+class _Notify:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls: list[tuple] = []
+
+    def __call__(self, session_id, pr_number, source_harness, cold_reason):
+        self.calls.append((session_id, pr_number, source_harness, cold_reason))
+        if self.fail:
+            raise RuntimeError("mail boom")
+
+
+def test_cold_dispatch_notifies_origin_once(tmp_path, monkeypatch):
+    """AC2-HP: a cold-dispatched merge sends exactly one origin mail; a re-tick
+    (marker exists) sends none."""
+    _patch_resolver(monkeypatch, None)  # origin not live -> cold path
+    notify = _Notify()
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN1", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-origin", source_harness="claude",
+        warm_inject=_WarmInject(), notify_origin=notify,
+    )
+    assert res.outcome == "dispatched"
+    assert notify.calls == [("sess-origin", 7, "claude", "no-live-source-session")]
+
+    # Re-tick: marker exists -> already-dispatched -> no second mail.
+    second = dispatch_post_merge_ritual(
+        7, dedup_key="shaN1", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-origin", source_harness="claude",
+        warm_inject=_WarmInject(), notify_origin=notify,
+    )
+    assert second.outcome == "already-dispatched"
+    assert len(notify.calls) == 1
+
+
+def test_routed_warm_sends_no_origin_mail(tmp_path, monkeypatch):
+    """Locked #5: the warm route ran the ritual in the live origin already, so
+    no advisory mail is sent."""
+    _patch_resolver(monkeypatch, "sess-live")
+    notify = _Notify()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN2", auto_run=True, canonical_root=tmp_path,
+        spawn=_Spawn(), source_session_id="sess-live",
+        warm_inject=_WarmInject(delivered=True), notify_origin=notify,
+    )
+    assert res.outcome == "routed-warm"
+    assert notify.calls == []
+
+
+def test_no_source_session_no_origin_mail(tmp_path):
+    """AC2-EDGE: no source_session_id -> no mail attempted, no error."""
+    notify = _Notify()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN3", auto_run=True, canonical_root=tmp_path,
+        spawn=_Spawn(), source_session_id=None, notify_origin=notify,
+    )
+    assert res.outcome == "dispatched"
+    assert notify.calls == []
+
+
+def test_default_notifier_addresses_origin_session_durably(monkeypatch):
+    """The default notifier addresses the origin by canonical handle and routes
+    through the durable name-lane send (resolved=None: the cold path is already
+    a warm-miss, so the durable bus is the floor)."""
+    import fno.graph._reconcile as rec
+
+    seen = {}
+
+    def _fake_send(message, *, from_name, resolved, recipient, provider, **kw):
+        seen.update(
+            message=message, from_name=from_name, resolved=resolved,
+            recipient=recipient, provider=provider,
+        )
+
+    monkeypatch.setattr("fno.mail.cli._name_lane_send", _fake_send)
+    rec._notify_origin_merged("abcdef1234567890", 42, "claude", "no-live-source-session")
+    assert seen["recipient"] == "claude-abcdef12"  # canonical_handle
+    assert seen["resolved"] is None  # durable floor, no live resolution
+    assert seen["provider"] == "claude"
+    assert seen["from_name"] == "fno"
+    assert "PR #42 merged" in seen["message"]
+
+
+def test_origin_mail_failure_keeps_marker_and_dispatch(tmp_path, monkeypatch):
+    """AC2-ERR: a mail failure never breaks the dispatch or withholds the marker."""
+    _patch_resolver(monkeypatch, None)
+    notify = _Notify(fail=True)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaN4", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sess-origin",
+        warm_inject=_WarmInject(), notify_origin=notify,
+    )
+    assert res.outcome == "dispatched"
+    assert len(notify.calls) == 1
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaN4").exists()

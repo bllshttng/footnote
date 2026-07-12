@@ -37,6 +37,12 @@ class PostMergeVerdict:
     cause: Optional[str] = None  # populated only on status == "error"
     note: Optional[str] = None  # soft advisory (e.g. project.id unset on ready)
 
+    @property
+    def is_ready(self) -> bool:
+        """The pr-watch tick reads this to decide a merge dispatch (the seam
+        `_noop_readiness` already fakes)."""
+        return self.status == "ready"
+
     def to_dict(self) -> dict:
         return dict(asdict(self).items())
 

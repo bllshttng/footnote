@@ -192,3 +192,37 @@ def test_no_merge_commit_skips(tmp_path, capsys):
     assert rc == 0
     assert "no merge commit" in capsys.readouterr().out
     assert shell.calls == []
+
+
+# --- Wave 4 (x-7930) AC-e2e: canonical-sync fires on merge, targets canonical --
+
+
+def test_e2e_merge_syncs_canonical_not_worktree_and_dedups(tmp_path, capsys):
+    """AC-e2e: a merged PR (manual or daemon-detected, no live session in the
+    picture) runs sync_command IN the canonical, writes post-merge-synced/<sha>
+    under the canonical, never touches the worktree, and a re-run is a no-op."""
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    worktree = tmp_path / "worktree"  # must never be the sync cwd
+    worktree.mkdir()
+
+    shell = _Shell()
+    rc = _run(canonical, shell_runner=shell)
+    assert rc == 0
+
+    # sync_command ran exactly once, in the canonical, never the worktree.
+    assert len(shell.calls) == 1
+    _cmd, cwd = shell.calls[0]
+    assert Path(cwd) == canonical
+    assert Path(cwd) != worktree
+
+    # Marker landed under the canonical (keyed by merge SHA), not the worktree.
+    marker = canonical / ".fno" / "post-merge-synced" / ("a" * 40)
+    assert marker.exists()
+    assert not (worktree / ".fno" / "post-merge-synced" / ("a" * 40)).exists()
+
+    # Re-run (a second detection / re-tick) re-runs nothing.
+    rc2 = _run(canonical, shell_runner=shell)
+    assert rc2 == 0
+    assert len(shell.calls) == 1  # unchanged: dedup by marker
+    assert "already synced" in capsys.readouterr().out
