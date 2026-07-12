@@ -6124,6 +6124,29 @@ mod tests {
     }
 
     #[test]
+    fn reorder_tab_at_an_edge_is_a_silent_noop() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session.squad_mut(1).unwrap().tabs.push(leaf_tab(6, 2));
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(1, Command::ReorderTab { tab: 5, delta: -1 });
+        core.command(1, Command::ReorderTab { tab: 6, delta: 1 });
+
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(
+            squad.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "edge bumps push neither Layout nor Notice"
+        );
+    }
+
+    #[test]
     fn move_tab_follows_the_viewing_client_into_dst() {
         // Invariant (view validity): a viewer of the moved tab follows it into
         // the destination squad - content continuity beats spatial position.
