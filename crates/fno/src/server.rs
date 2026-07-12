@@ -1253,7 +1253,10 @@ impl Core {
             .squads
             .iter()
             .any(|s| s.name.as_deref() == Some(name));
-        live || crate::squad_store::load().squads.iter().any(|s| s.name == name)
+        live || crate::squad_store::load()
+            .squads
+            .iter()
+            .any(|s| s.name == name)
     }
 
     /// Write-through one persisted squad (upsert by name). Reads name/origins
@@ -1303,7 +1306,9 @@ impl Core {
         self.persist_degraded_notified = true;
         let text = format!("workspace persistence degraded: {e}");
         for c in &self.clients {
-            let _ = c.reliable_tx.try_send(ServerMsg::Notice { text: text.clone() });
+            let _ = c
+                .reliable_tx
+                .try_send(ServerMsg::Notice { text: text.clone() });
         }
     }
 
@@ -1332,7 +1337,9 @@ impl Core {
     fn notice_all(&self, text: impl Into<String>) {
         let text = text.into();
         for c in &self.clients {
-            let _ = c.reliable_tx.try_send(ServerMsg::Notice { text: text.clone() });
+            let _ = c
+                .reliable_tx
+                .try_send(ServerMsg::Notice { text: text.clone() });
         }
     }
 
@@ -1383,7 +1390,11 @@ impl Core {
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_default();
         for ps in loaded.squads {
-            let cwd0 = ps.origins.first().cloned().unwrap_or_else(|| home_cwd.clone());
+            let cwd0 = ps
+                .origins
+                .first()
+                .cloned()
+                .unwrap_or_else(|| home_cwd.clone());
             let mut members: Vec<crate::squad_store::StoredMember> = Vec::new();
             // (tab, optional (attach_id, pid)) for each pane we build.
             let mut tabs: Vec<(Tab, Option<(String, u64)>)> = Vec::new();
@@ -1401,7 +1412,11 @@ impl Core {
                     continue;
                 }
                 // Live: re-attach it into a fresh pane.
-                let argv = vec!["claude".to_string(), "attach".to_string(), m.attach_id.clone()];
+                let argv = vec![
+                    "claude".to_string(),
+                    "attach".to_string(),
+                    m.attach_id.clone(),
+                ];
                 match self.spawn_pane_cmd(&argv, rows, cols, &cwd0) {
                     Ok(pid) => {
                         let tid = self.session.mint_tab_id();
@@ -3063,7 +3078,10 @@ impl Core {
                 // De-recruit any member panes in this tab (AC3-EDGE), captured
                 // before the reaps clear them; reconciled AFTER remove_tab so
                 // squad-survival (survives vs de-persist) reflects reality.
-                let ctxs: Vec<_> = pids.iter().filter_map(|&pid| self.member_ctx(pid)).collect();
+                let ctxs: Vec<_> = pids
+                    .iter()
+                    .filter_map(|&pid| self.member_ctx(pid))
+                    .collect();
                 for pid in pids {
                     self.reap_pane(pid);
                 }
@@ -3377,18 +3395,35 @@ impl Core {
                             .expect("squad() live above")
                             .name = new_name.clone();
                         self.push_layout(true);
-                        // Write-through only for persisted (tracked) squads: the
-                        // store is name-keyed, so a rename is delete-old +
-                        // upsert-new; a CLEAR turns the workspace unnamed, so it
-                        // leaves the store entirely.
+                        // Write-through only for persisted (tracked) squads. The
+                        // store is name-keyed: a rename is ONE atomic delete-old
+                        // + upsert-new (so a concurrent restore never sees a
+                        // window with neither name); a CLEAR turns the workspace
+                        // unnamed, so it leaves the store entirely.
                         if tracked {
-                            if let Some(old) = old_name {
-                                self.persist_remove_name(&old);
-                            }
-                            if new_name.is_some() {
-                                self.persist_squad(squad);
-                            } else {
-                                self.squad_members.remove(&squad);
+                            match (old_name, new_name) {
+                                (Some(old), Some(new)) => {
+                                    let origins = self
+                                        .session
+                                        .squad(squad)
+                                        .map(|s| s.origins.clone())
+                                        .unwrap_or_default();
+                                    let members =
+                                        self.squad_members.get(&squad).cloned().unwrap_or_default();
+                                    if let Err(e) =
+                                        crate::squad_store::rename(&old, &new, &origins, &members)
+                                    {
+                                        self.persist_degraded(&e);
+                                    }
+                                }
+                                (Some(old), None) => {
+                                    self.persist_remove_name(&old);
+                                    self.squad_members.remove(&squad);
+                                }
+                                // A tracked squad is always named, so these arms
+                                // are unreachable in practice; upsert is the safe
+                                // default if one ever occurs.
+                                (None, _) => self.persist_squad(squad),
                             }
                         }
                     }
@@ -3563,20 +3598,20 @@ impl Core {
                             // its first tab.
                             let ns = self.next_squad_id;
                             self.next_squad_id += 1;
-                            self.session.add_squad(ns, Vec::new(), Some(name.clone()), tab);
+                            self.session
+                                .add_squad(ns, Vec::new(), Some(name.clone()), tab);
                             self.squad_members.insert(ns, Vec::new());
                             sid = Some(ns);
                         }
                     }
                     let s = sid.expect("set above");
                     self.attached.insert(id.clone(), pid);
-                    self.squad_members
-                        .entry(s)
-                        .or_default()
-                        .push(crate::squad_store::StoredMember {
+                    self.squad_members.entry(s).or_default().push(
+                        crate::squad_store::StoredMember {
                             attach_id: id.clone(),
                             tombstone: false,
-                        });
+                        },
+                    );
                     recruited += 1;
                 }
                 if recruited > 0 {
@@ -6332,24 +6367,28 @@ mod tests {
 
     /// A scratch `FNO_AGENTS_HOME` for store-write-through tests, serialized on
     /// the shared crate-wide env lock (the var is process-global).
-    struct StoreScratch(std::path::PathBuf, std::sync::MutexGuard<'static, ()>);
+    struct StoreScratch {
+        dir: std::path::PathBuf,
+        // Held for RAII: serializes env-var-touching tests for its lifetime.
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
     impl StoreScratch {
         fn new(name: &str) -> Self {
-            let g = crate::squad_store::TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            let dir = std::env::temp_dir().join(format!(
-                "fno-srv-store-{}-{name}",
-                std::process::id()
-            ));
+            let guard = crate::squad_store::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let dir =
+                std::env::temp_dir().join(format!("fno-srv-store-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("FNO_AGENTS_HOME", &dir);
-            StoreScratch(dir, g)
+            StoreScratch { dir, _guard: guard }
         }
     }
     impl Drop for StoreScratch {
         fn drop(&mut self) {
             std::env::remove_var("FNO_AGENTS_HOME");
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
@@ -6388,7 +6427,7 @@ mod tests {
         // still empty then): an exited registry row is dead, a live one and a
         // roster worker are live.
         let s = StoreScratch::new("live-ids");
-        let home = s.0.clone();
+        let home = s.dir.clone();
         std::fs::write(
             home.join("registry.json"),
             r#"{"agents":[
@@ -6408,7 +6447,10 @@ mod tests {
         std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
         assert!(live.contains("c19cd2c3"), "a live registry row is live");
         assert!(!live.contains("deadbeef"), "an exited row is not live");
-        assert!(live.contains("aa11bb22"), "a roster worker's short_id is live");
+        assert!(
+            live.contains("aa11bb22"),
+            "a roster worker's short_id is live"
+        );
     }
 
     #[test]
@@ -6417,8 +6459,12 @@ mod tests {
         // materializes with one shell pane, each dead member a tombstone; the
         // reconciled tombstone is written back to the store.
         let _s = StoreScratch::new("restore-dead");
-        crate::squad_store::upsert("dead-ws", &["/tmp".into()], &[stored_member("deadbeef", false)])
-            .unwrap();
+        crate::squad_store::upsert(
+            "dead-ws",
+            &["/tmp".into()],
+            &[stored_member("deadbeef", false)],
+        )
+        .unwrap();
         let mut core = empty_core();
         core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
         // No live set (no registry/roster under the scratch home).
@@ -6449,7 +6495,10 @@ mod tests {
         let _s = StoreScratch::new("restore-empty");
         let mut core = empty_core();
         core.restore_squads(24, 80, 999);
-        assert!(core.session.squads.is_empty(), "nothing persisted -> nothing restored");
+        assert!(
+            core.session.squads.is_empty(),
+            "nothing persisted -> nothing restored"
+        );
     }
 
     #[test]
@@ -6459,12 +6508,33 @@ mod tests {
             1,
             vec!["/x".into()],
             None,
-            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
         );
         core.clients.push(client(1, 5, (24, 80), false));
-        core.command(1, Command::RecruitAgents { squad: "  ".into(), ids: vec!["c19cd2c3".into()] });
-        core.command(1, Command::RecruitAgents { squad: "team".into(), ids: vec![] });
-        assert_eq!(core.session.squads.len(), 1, "no workspace created on refusal");
+        core.command(
+            1,
+            Command::RecruitAgents {
+                squad: "  ".into(),
+                ids: vec!["c19cd2c3".into()],
+            },
+        );
+        core.command(
+            1,
+            Command::RecruitAgents {
+                squad: "team".into(),
+                ids: vec![],
+            },
+        );
+        assert_eq!(
+            core.session.squads.len(),
+            1,
+            "no workspace created on refusal"
+        );
         assert!(core.squad_members.is_empty());
     }
 
@@ -6477,7 +6547,12 @@ mod tests {
             1,
             vec!["/x".into()],
             None,
-            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
         );
         core.clients.push(client(1, 5, (24, 80), false));
         core.attached.insert("aaaaaaaa".into(), 1); // already paned -> dedup skip
@@ -6504,24 +6579,57 @@ mod tests {
             7,
             vec!["/repo".into()],
             Some("harden".into()),
-            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
         );
         core.squad_members.insert(
             7,
-            vec![stored_member("c19cd2c3", true), stored_member("deadbeef", false)],
+            vec![
+                stored_member("c19cd2c3", true),
+                stored_member("deadbeef", false),
+            ],
         );
         core.persist_squad(7);
         core.clients.push(client(1, 5, (24, 80), false));
         // Dismiss the live (non-tombstone) member: refused, nothing removed.
-        core.command(1, Command::DismissMember { squad: 7, attach_id: "deadbeef".into() });
-        assert_eq!(core.squad_members[&7].len(), 2, "a live member is not dismissable");
+        core.command(
+            1,
+            Command::DismissMember {
+                squad: 7,
+                attach_id: "deadbeef".into(),
+            },
+        );
+        assert_eq!(
+            core.squad_members[&7].len(),
+            2,
+            "a live member is not dismissable"
+        );
         // Dismiss the tombstone: removed + persisted.
-        core.command(1, Command::DismissMember { squad: 7, attach_id: "c19cd2c3".into() });
+        core.command(
+            1,
+            Command::DismissMember {
+                squad: 7,
+                attach_id: "c19cd2c3".into(),
+            },
+        );
         assert_eq!(core.squad_members[&7].len(), 1);
         let loaded = crate::squad_store::load();
-        assert_eq!(loaded.squads[0].members, vec![stored_member("deadbeef", false)]);
+        assert_eq!(
+            loaded.squads[0].members,
+            vec![stored_member("deadbeef", false)]
+        );
         // An unknown workspace is refused.
-        core.command(1, Command::DismissMember { squad: 999, attach_id: "c19cd2c3".into() });
+        core.command(
+            1,
+            Command::DismissMember {
+                squad: 999,
+                attach_id: "c19cd2c3".into(),
+            },
+        );
     }
 
     #[test]
@@ -6534,11 +6642,19 @@ mod tests {
             7,
             vec!["/repo".into()],
             Some("harden".into()),
-            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
         );
         core.squad_members.insert(
             7,
-            vec![stored_member("c19cd2c3", true), stored_member("deadbeef", true)],
+            vec![
+                stored_member("c19cd2c3", true),
+                stored_member("deadbeef", true),
+            ],
         );
         // "deadbeef" is re-paned this session -> skipped in the synthesis.
         core.attached.insert("deadbeef".into(), 99);
@@ -6585,14 +6701,20 @@ mod tests {
         core.reconcile_member_close(ctx, true);
         let after_churn = crate::squad_store::load();
         assert_eq!(after_churn.squads[0].members.len(), 1);
-        assert!(after_churn.squads[0].members[0].tombstone, "churn tombstones");
+        assert!(
+            after_churn.squads[0].members[0].tombstone,
+            "churn tombstones"
+        );
 
         // User close of the still-live squad de-recruits the member.
         let ctx = core.member_ctx(100);
         core.reconcile_member_close(ctx, false);
         let after_user = crate::squad_store::load();
         assert_eq!(after_user.squads.len(), 1, "workspace survives");
-        assert!(after_user.squads[0].members.is_empty(), "member de-recruited");
+        assert!(
+            after_user.squads[0].members.is_empty(),
+            "member de-recruited"
+        );
     }
 
     #[test]

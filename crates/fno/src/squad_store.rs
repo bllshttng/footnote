@@ -121,7 +121,10 @@ pub fn load() -> Loaded {
             let _ = std::fs::rename(&path, &aside);
             return Loaded {
                 squads: Vec::new(),
-                notice: Some(format!("quarantined corrupt squads.json to {}", aside.display())),
+                notice: Some(format!(
+                    "quarantined corrupt squads.json to {}",
+                    aside.display()
+                )),
             };
         }
     };
@@ -171,7 +174,12 @@ pub fn remove(name: &str) -> io::Result<()> {
 
 /// Rename `old` -> `new` in one locked mutation, carrying `created_at` across
 /// (a `RenameSquad`). Any pre-existing `new` entry is overwritten.
-pub fn rename(old: &str, new: &str, origins: &[String], members: &[StoredMember]) -> io::Result<()> {
+pub fn rename(
+    old: &str,
+    new: &str,
+    origins: &[String],
+    members: &[StoredMember],
+) -> io::Result<()> {
     mutate(|squads| {
         let created_at = squads
             .iter()
@@ -305,10 +313,8 @@ mod tests {
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "fno-squadstore-{}-{name}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("fno-squadstore-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("FNO_AGENTS_HOME", &dir);
@@ -374,7 +380,11 @@ mod tests {
         let asides: Vec<_> = std::fs::read_dir(&s.0)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with("squads.json.corrupt-"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("squads.json.corrupt-")
+            })
             .collect();
         assert_eq!(asides.len(), 1, "exactly one quarantine file");
     }
@@ -403,10 +413,10 @@ mod tests {
                 name: "w".into(),
                 origins: vec![],
                 members: vec![
-                    m("c19cd2c3"),          // good
-                    m("; rm -rf"),          // shell metachar
-                    m("deadbeef9"),         // 9 chars
-                    m("GHIJKLmn"),          // non-hex
+                    m("c19cd2c3"),  // good
+                    m("; rm -rf"),  // shell metachar
+                    m("deadbeef9"), // 9 chars
+                    m("GHIJKLmn"),  // non-hex
                 ],
                 created_at: "2026-07-11T00:00:00Z".into(),
             }],

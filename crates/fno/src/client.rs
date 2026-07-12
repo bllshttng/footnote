@@ -3395,9 +3395,7 @@ async fn selector_keys(
                 // than arm an INVISIBLE confirm (x-260a); an unknown squad or a
                 // tab/other row BELs.
                 let dismiss = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) if a.tombstone => {
-                        a.squad.zip(a.attach_id.clone())
-                    }
+                    Some(DisplayRow::Agent(a)) if a.tombstone => a.squad.zip(a.attach_id.clone()),
                     _ => None,
                 };
                 if let Some((squad, attach_id)) = dismiss {
@@ -6016,7 +6014,10 @@ mod tests {
         let idx = agent_row_at(&v, |a| a.attach_id.as_deref() == Some("c19cd2c3"));
         v.selector = Some(idx);
         selector_keys(&mut v, b" ", &mut buf).await.unwrap();
-        assert!(v.marks.contains("c19cd2c3"), "space marks the attachable row");
+        assert!(
+            v.marks.contains("c19cd2c3"),
+            "space marks the attachable row"
+        );
         v.selector = Some(idx);
         selector_keys(&mut v, b" ", &mut buf).await.unwrap();
         assert!(!v.marks.contains("c19cd2c3"), "space toggles the mark off");
@@ -6029,7 +6030,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_R_opens_recruit_and_falls_back_to_focused_row() {
+    async fn selector_recruit_key_opens_recruit_and_falls_back_to_focused_row() {
         // R with marks opens the prompt; with no marks it marks the focused
         // attachable row first (the grid single-recruit generalized).
         let mut v = unified_rows_view();
@@ -6038,7 +6039,10 @@ mod tests {
         v.selector = Some(idx);
         selector_keys(&mut v, b"R", &mut buf).await.unwrap();
         assert!(v.recruit.is_some(), "R opens the recruit prompt");
-        assert!(v.marks.contains("c19cd2c3"), "zero-mark R marks the focused row");
+        assert!(
+            v.marks.contains("c19cd2c3"),
+            "zero-mark R marks the focused row"
+        );
         assert_eq!(v.selector, None, "recruit is modal - the selector closes");
     }
 
