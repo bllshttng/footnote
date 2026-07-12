@@ -254,7 +254,8 @@ fn install_source(override_val: Option<&str>, pin: Option<&str>) -> BootResult<S
 /// silently building nothing. A bad pin errors naming `config.dev.source` and
 /// an escape hatch, never falling through to PyPI (US3/AC3).
 fn resolve_pin(pin: &str) -> BootResult<String> {
-    let cli = PathBuf::from(pin).join("cli");
+    // A config value like `~/src/fno` is common; PathBuf::from won't expand it.
+    let cli = expand_tilde(pin).join("cli");
     if cli.join("pyproject.toml").is_file() {
         return Ok(cli.to_string_lossy().into_owned());
     }
@@ -267,6 +268,26 @@ fn resolve_pin(pin: &str) -> BootResult<String> {
              bypass it once (`FNO_BOOTSTRAP_WHEEL=fno`)."
         ),
     ))
+}
+
+/// Expand a leading `~`/`~/` to `$HOME` (Rust does not; a config pin like
+/// `~/src/fno` is common). `~user` and non-tilde paths pass through literally.
+fn expand_tilde(p: &str) -> PathBuf {
+    expand_tilde_with(p, home_dir())
+}
+
+/// Pure core of `expand_tilde` (home injected for testing without touching the
+/// process-global `$HOME`). No home resolvable -> the value passes through.
+fn expand_tilde_with(p: &str, home: Option<PathBuf>) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        return home
+            .map(|h| h.join(rest))
+            .unwrap_or_else(|| PathBuf::from(p));
+    }
+    if p == "~" {
+        return home.unwrap_or_else(|| PathBuf::from(p));
+    }
+    PathBuf::from(p)
 }
 
 /// Read the `config.dev.source` pin from `~/.fno/config.toml`, fno-free: we are
@@ -629,6 +650,24 @@ mod tests {
         let root = env::temp_dir().join(format!("fno-boot-bare-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         assert!(install_source(None, Some(root.to_str().unwrap())).is_err());
+    }
+
+    #[test]
+    fn expand_tilde_expands_leading_home() {
+        let home = PathBuf::from("/home/me");
+        assert_eq!(
+            expand_tilde_with("~/src/fno", Some(home.clone())),
+            home.join("src/fno")
+        );
+        assert_eq!(expand_tilde_with("~", Some(home.clone())), home);
+        // absolute + `~user` (no slash) pass through unchanged.
+        assert_eq!(
+            expand_tilde_with("/abs/fno", Some(home.clone())),
+            PathBuf::from("/abs/fno")
+        );
+        assert_eq!(expand_tilde_with("~foo", Some(home)), PathBuf::from("~foo"));
+        // no home -> literal, never a panic.
+        assert_eq!(expand_tilde_with("~/x", None), PathBuf::from("~/x"));
     }
 
     #[test]
