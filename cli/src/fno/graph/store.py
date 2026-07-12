@@ -92,6 +92,10 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "merge_status",
     "artifact_url",
     "completion_note",
+    # Append-only timestamped progress notes ({ts, text}), distinct from the
+    # single `completion_note` string: the status-fanout backlog-progress adapter
+    # stamps one per task_done/run_summary (x-2057). `fno backlog note` appends.
+    "progress_notes",
     "created_at",
     "supersedes",
     "superseded_by",
@@ -354,6 +358,7 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("merge_status", None)
         e.setdefault("artifact_url", None)
         e.setdefault("completion_note", None)
+        e.setdefault("progress_notes", [])
         e.setdefault("collisions_acknowledged", [])
         e.setdefault("supersedes", [])
         e.setdefault("superseded_by", None)
@@ -518,3 +523,27 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         return entries
     finally:
         _release_flock(fd)
+
+
+def append_progress_note(
+    path: Path, node_id: str, note: dict
+) -> "tuple[bool, str | None]":
+    """Append a ``{ts, text}`` progress note to a node's ``progress_notes``
+    (append-only), returning ``(found, plan_path)``. Uses the sanctioned
+    ``locked_mutate_graph`` path (NOT a forbidden direct write); shared by
+    ``fno backlog note`` and the status-fanout backlog-progress adapter so the
+    append logic lives in one place (x-2057)."""
+    from fno.graph._intake import _find_node  # function-local: avoid import cycle
+
+    result: dict = {"found": False, "plan_path": None}
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is not None:
+            node.setdefault("progress_notes", []).append(note)
+            result["found"] = True
+            result["plan_path"] = node.get("plan_path")
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    return result["found"], result["plan_path"]

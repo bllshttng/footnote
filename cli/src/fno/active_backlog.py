@@ -159,6 +159,54 @@ def _max_lanes_for(cwd: str) -> int:
         return 1
 
 
+@dataclass
+class FanoutTarget:
+    """A project the status-fanout supervisor should tick (x-2057). Enablement is
+    'has >=1 enabled status sink', INDEPENDENT of active_backlog drain."""
+
+    project: str
+    cwd: str
+    interval_seconds: int
+
+
+def resolve_fanout_targets() -> list["FanoutTarget"]:
+    """Projects with at least one enabled status sink, each carrying its own
+    ``status_fanout.interval_secs``. Reuses the same workspace project->path map
+    as the drain resolver; a project without a workspace path is skipped (no cwd
+    to tick from - the standalone/cron ``fno status-fanout tick`` covers a
+    runner-less setup)."""
+    from pathlib import Path as _P
+
+    from fno.config import load_settings_for_repo
+
+    targets: list[FanoutTarget] = []
+    for name, cwd in sorted(_workspace_paths().items()):
+        if not cwd:
+            continue
+        try:
+            settings = load_settings_for_repo(_P(cwd))
+        except Exception:  # noqa: BLE001 - a bad/absent settings must not tick
+            continue
+        if not any(s.enabled for s in settings.status_sinks):
+            continue
+        targets.append(
+            FanoutTarget(
+                project=name,
+                cwd=cwd,
+                interval_seconds=max(1, int(settings.status_fanout.interval_secs)),
+            )
+        )
+    return targets
+
+
+def fanout_targets_as_dicts() -> list[dict]:
+    """JSON-serializable form of :func:`resolve_fanout_targets` for the daemon."""
+    return [
+        {"project": t.project, "cwd": t.cwd, "interval_seconds": t.interval_seconds}
+        for t in resolve_fanout_targets()
+    ]
+
+
 def drain_targets_as_dicts() -> list[dict]:
     """JSON-serializable form of :func:`resolve_drain_targets` for the daemon."""
     return [

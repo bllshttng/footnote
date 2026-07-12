@@ -804,6 +804,13 @@ def project_log(name: str, project_root: Optional[Path] = None) -> Path:
     return (root / ".fno" / name).resolve()
 
 
+def status_sinks_dir(project_root: Optional[Path] = None) -> Path:
+    """Directory holding per-sink cursor + error-log files for the status
+    fanout (``<repo>/.fno/status-sinks/``, x-2057). Routes through
+    :func:`project_log` so callers never hand-assemble a ``.fno/`` path."""
+    return project_log("status-sinks", project_root=project_root)
+
+
 _INBOX_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
