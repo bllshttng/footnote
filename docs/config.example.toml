@@ -21,6 +21,8 @@ plans_dir = ".fno/plans/"
 plans_filename = "%Y%m%d-{slug}-{node}.md"
 # Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report).
 loops = {}
+# Status-fanout subscribers: list of {name, type (json-webhook|text-webhook|backlog-progress), events, match, url|url_env, template, field, cloudevents, enabled}.
+status_sinks = []
 # Settings schema version; managed by fno, not hand-set.
 schema_version = 1
 
@@ -357,3 +359,11 @@ attach_digest = true
 attach_digest_threshold_min = 10
 # Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).
 hover_focus = true
+
+[status_fanout]
+# Seconds between status-fanout ticks per project (daemon host).
+interval_secs = 5
+# Bounded per-webhook HTTP timeout for a status sink.
+http_timeout_secs = 5
+# Retry budget per webhook dispatch before drop/short-circuit.
+retries = 2

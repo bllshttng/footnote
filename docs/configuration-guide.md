@@ -140,4 +140,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `mux.attach_digest_threshold_min` | int | `10` | advanced | Minutes since last detach before the catch-up digest overlay shows (default 10). |
 | `mux.hover_focus` | bool | `true` | advanced | Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on). |
 | `loops` | dict[str, LoopEntry] | `{}` | advanced | Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report). |
+| `status_sinks` | list[StatusSinkConfig] | `[]` | advanced | Status-fanout subscribers: list of {name, type (json-webhook|text-webhook|backlog-progress), events, match, url|url_env, template, field, cloudevents, enabled}. |
+| `status_fanout.interval_secs` | int | `5` | advanced | Seconds between status-fanout ticks per project (daemon host). |
+| `status_fanout.http_timeout_secs` | int | `5` | advanced | Bounded per-webhook HTTP timeout for a status sink. |
+| `status_fanout.retries` | int | `2` | advanced | Retry budget per webhook dispatch before drop/short-circuit. |
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |

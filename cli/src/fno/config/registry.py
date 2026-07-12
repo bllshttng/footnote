@@ -303,6 +303,13 @@ FIELD_META: dict[str, Meta] = {
     "model_routing.extra_env": Meta(
         "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides)."
     ),
+    # --- config.status_sinks / config.status_fanout (x-2057) ---
+    "status_sinks": Meta(
+        "advanced", "Status-fanout subscribers: list of {name, type (json-webhook|text-webhook|backlog-progress), events, match, url|url_env, template, field, cloudevents, enabled}.",
+    ),
+    "status_fanout.interval_secs": Meta("advanced", "Seconds between status-fanout ticks per project (daemon host)."),
+    "status_fanout.http_timeout_secs": Meta("advanced", "Bounded per-webhook HTTP timeout for a status sink."),
+    "status_fanout.retries": Meta("advanced", "Retry budget per webhook dispatch before drop/short-circuit."),
 }
 
 

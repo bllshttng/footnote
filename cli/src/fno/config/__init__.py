@@ -2292,6 +2292,96 @@ class MuxBlock(BaseModel):
         return "off" if isinstance(v, str) and v.strip() == "off" else "mux-panes"
 
 
+_STATUS_SINK_TYPES = ("json-webhook", "text-webhook", "backlog-progress")
+
+# The protocol-family envelope whitelist minus `data` (a nested object, not an
+# equality target). Sourced from events/schema.yaml at validation time so it
+# cannot drift; this literal is the fallback for a smoke venv where the schema
+# file is absent.
+_MATCH_KEYS_FALLBACK = frozenset(
+    {"ts", "v", "type", "source", "from", "model", "host",
+     "project", "node", "task", "run", "parent", "outcome"}
+)
+
+
+def _status_sink_match_keys() -> frozenset[str]:
+    try:
+        from fno.events import PROTOCOL_ENVELOPE_ALLOWED
+
+        allowed = set(PROTOCOL_ENVELOPE_ALLOWED)
+        if allowed:
+            return frozenset(allowed - {"data"})
+    except Exception:
+        pass
+    return _MATCH_KEYS_FALLBACK
+
+
+class StatusFanoutConfig(BaseModel):
+    """Fanout dispatcher tuning (config.status_fanout)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    interval_secs: int = 5
+    http_timeout_secs: int = 5
+    retries: int = 2
+
+
+class StatusSinkConfig(BaseModel):
+    """One status sink (``config.status_sinks[]``, x-2057).
+
+    Semantic errors (unknown type, out-of-whitelist ``match`` key, both/neither
+    of ``url``/``url_env``, duplicate ``name`` across the list) RAISE at config
+    load - a misconfigured sink fails loud rather than silently not delivering.
+    A container-level type mismatch (a scalar where the list belongs) still
+    fails safe to ``[]`` in ``ConfigBlock`` so a typo never bricks settings load.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    type: str
+    events: list[str] = Field(default_factory=list)
+    match: dict[str, str] = Field(default_factory=dict)
+    url: Optional[str] = None
+    url_env: Optional[str] = None
+    template: Optional[str] = None
+    field: str = "content"
+    cloudevents: bool = False
+    enabled: bool = True
+
+    @field_validator("type")
+    @classmethod
+    def _known_type(cls, v: str) -> str:
+        if v not in _STATUS_SINK_TYPES:
+            raise ValueError(
+                f"unknown status sink type {v!r} "
+                f"(allowed: {', '.join(_STATUS_SINK_TYPES)})"
+            )
+        return v
+
+    @field_validator("match")
+    @classmethod
+    def _match_keys_in_whitelist(cls, v: dict[str, str]) -> dict[str, str]:
+        allowed = _status_sink_match_keys()
+        bad = [k for k in v if k not in allowed]
+        if bad:
+            raise ValueError(
+                f"status sink match key(s) {bad} not in the protocol envelope "
+                f"whitelist (allowed: {', '.join(sorted(allowed))})"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _url_xor_url_env(self) -> "StatusSinkConfig":
+        if self.type in ("json-webhook", "text-webhook"):
+            if bool(self.url) == bool(self.url_env):
+                raise ValueError(
+                    f"status sink {self.name!r} ({self.type}) requires exactly "
+                    f"one of url / url_env"
+                )
+        return self
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -2326,6 +2416,33 @@ class ConfigBlock(BaseModel):
     model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
     mux: MuxBlock = Field(default_factory=MuxBlock)
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
+    status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
+    status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
+
+    @field_validator("status_sinks", mode="before")
+    @classmethod
+    def _coerce_status_sinks(cls, v: object) -> object:
+        """Fail-safe container: a non-list ``status_sinks`` degrades to []. A
+        well-formed list with a semantically-invalid sink still raises (x-2057:
+        loud config error, not a silent drop)."""
+        return v if isinstance(v, list) else []
+
+    @field_validator("status_sinks")
+    @classmethod
+    def _unique_sink_names(
+        cls, v: list[StatusSinkConfig]
+    ) -> list[StatusSinkConfig]:
+        names = [s.name for s in v]
+        dups = sorted({n for n in names if names.count(n) > 1})
+        if dups:
+            raise ValueError(f"duplicate status sink name(s): {dups}")
+        return v
+
+    @field_validator("status_fanout", mode="before")
+    @classmethod
+    def _coerce_status_fanout(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``status_fanout:`` degrades to defaults."""
+        return v if isinstance(v, (dict, StatusFanoutConfig)) else {}
 
     @field_validator("model_routing", mode="before")
     @classmethod
