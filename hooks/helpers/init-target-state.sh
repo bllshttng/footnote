@@ -939,10 +939,12 @@ EOF
   mv "$local_temp" "$STATE_FILE"
 
   # ── Graph + node claim (gate-provenance phase 02b; ab-fcf9cec5) ───
-  # _GRAPH_FILE hoisted to the in_review guard above (same fresh-init branch).
+  # _GRAPH_FILE + node-id resolution hoisted to the in_review guard above (same
+  # fresh-init branch): _GUARD_NODE already holds the resolved id-input, so reuse
+  # it instead of re-running the identical regex + graph grep.
   _NODE_ID=""
-  if [[ "$INITIAL_INPUT" =~ ^ab-[0-9a-f]{8}$ ]] || { [[ "$INITIAL_INPUT" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] && grep -q "\"${INITIAL_INPUT}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
-    _NODE_ID="$INITIAL_INPUT"
+  if [[ -n "$_GUARD_NODE" ]]; then
+    _NODE_ID="$_GUARD_NODE"
   elif [[ -f "$_GRAPH_FILE" && -n "$INITIAL_PLAN_PATH" ]]; then
     _NODE_ID=$(python3 - "$_GRAPH_FILE" "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' 2>/dev/null || true
 import json, os, sys

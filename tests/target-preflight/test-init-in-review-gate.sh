@@ -98,10 +98,10 @@ echo "--- AC1-HP: in_review node refuses ---"
 T="$TMP_BASE/ac1"; make_repo "$T"
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_PR=999); EC=$?
 [[ $EC -ne 0 ]] && pass "AC1-HP: non-zero exit ($EC)" || fail "AC1-HP: expected non-zero exit, got 0"
-echo "$OUT" | grep -q "REFUSED: node $NODE is in_review" && pass "AC1-HP: refusal names node" || fail "AC1-HP: refusal message missing. Got: $OUT"
-echo "$OUT" | grep -q "#999" && pass "AC1-HP: refusal names open PR number" || fail "AC1-HP: PR number missing. Got: $OUT"
-echo "$OUT" | grep -q "/pr check" && pass "AC1-HP: refusal points at /pr check" || fail "AC1-HP: /pr check hint missing. Got: $OUT"
-echo "$OUT" | grep -q "TARGET_ALLOW_IN_REVIEW=1" && pass "AC1-HP: refusal documents override env" || fail "AC1-HP: override env hint missing. Got: $OUT"
+grep -q "REFUSED: node $NODE is in_review" <<<"$OUT" && pass "AC1-HP: refusal names node" || fail "AC1-HP: refusal message missing. Got: $OUT"
+grep -q "#999" <<<"$OUT" && pass "AC1-HP: refusal names open PR number" || fail "AC1-HP: PR number missing. Got: $OUT"
+grep -q "/pr check" <<<"$OUT" && pass "AC1-HP: refusal points at /pr check" || fail "AC1-HP: /pr check hint missing. Got: $OUT"
+grep -q "TARGET_ALLOW_IN_REVIEW=1" <<<"$OUT" && pass "AC1-HP: refusal documents override env" || fail "AC1-HP: override env hint missing. Got: $OUT"
 [[ ! -f "$T/.fno/target-state.md" ]] && pass "AC1-HP: no state file written" || fail "AC1-HP: target-state.md written despite refusal"
 
 # --- AC2-HP: override forces a fresh run ------------------------------------
@@ -110,7 +110,7 @@ echo "--- AC2-HP: TARGET_ALLOW_IN_REVIEW=1 proceeds ---"
 T="$TMP_BASE/ac2"; make_repo "$T"
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_PR=999 TARGET_ALLOW_IN_REVIEW=1); EC=$?
 [[ $EC -eq 0 ]] && pass "AC2-HP: exit 0 with override" || fail "AC2-HP: expected exit 0, got $EC. Output: $OUT"
-! echo "$OUT" | grep -q "REFUSED" && pass "AC2-HP: no refusal under override" || fail "AC2-HP: unexpected refusal under override. Got: $OUT"
+! grep -q "REFUSED" <<<"$OUT" && pass "AC2-HP: no refusal under override" || fail "AC2-HP: unexpected refusal under override. Got: $OUT"
 [[ -f "$T/.fno/target-state.md" ]] && pass "AC2-HP: state file written under override" || fail "AC2-HP: state file missing under override"
 
 # --- AC3-ERR: free-text input is never guarded (no probe) -------------------
@@ -119,7 +119,7 @@ echo "--- AC3-ERR: free-text input skips the guard ---"
 T="$TMP_BASE/ac3"; make_repo "$T"; MK="$T/probed.marker"
 OUT=$(run_init "$T" TARGET_INPUT="fix the login bug" STUB_STATUS=in_review STUB_MARKER="$MK"); EC=$?
 [[ $EC -eq 0 ]] && pass "AC3-ERR: exit 0 on free-text" || fail "AC3-ERR: expected exit 0, got $EC. Output: $OUT"
-! echo "$OUT" | grep -q "REFUSED" && pass "AC3-ERR: no refusal on free-text" || fail "AC3-ERR: unexpected refusal on free-text. Got: $OUT"
+! grep -q "REFUSED" <<<"$OUT" && pass "AC3-ERR: no refusal on free-text" || fail "AC3-ERR: unexpected refusal on free-text. Got: $OUT"
 [[ ! -f "$MK" ]] && pass "AC3-ERR: guard never probed backlog get" || fail "AC3-ERR: guard probed status for a free-text input"
 [[ -f "$T/.fno/target-state.md" ]] && pass "AC3-ERR: state file written on free-text" || fail "AC3-ERR: state file missing on free-text"
 
@@ -129,7 +129,7 @@ echo "--- AC4-EDGE: ready status proceeds ---"
 T="$TMP_BASE/ac4a"; make_repo "$T"
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=ready); EC=$?
 [[ $EC -eq 0 ]] && pass "AC4-EDGE(ready): exit 0" || fail "AC4-EDGE(ready): expected exit 0, got $EC. Output: $OUT"
-! echo "$OUT" | grep -q "REFUSED" && pass "AC4-EDGE(ready): no refusal" || fail "AC4-EDGE(ready): unexpected refusal. Got: $OUT"
+! grep -q "REFUSED" <<<"$OUT" && pass "AC4-EDGE(ready): no refusal" || fail "AC4-EDGE(ready): unexpected refusal. Got: $OUT"
 
 # --- AC4-EDGE: backlog get failure fails open ------------------------------
 echo ""
@@ -137,7 +137,7 @@ echo "--- AC4-EDGE: backlog get failure fails open ---"
 T="$TMP_BASE/ac4b"; make_repo "$T"
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=__fail__); EC=$?
 [[ $EC -eq 0 ]] && pass "AC4-EDGE(fail): exit 0 (fail-open)" || fail "AC4-EDGE(fail): expected exit 0, got $EC. Output: $OUT"
-! echo "$OUT" | grep -q "REFUSED" && pass "AC4-EDGE(fail): no refusal on probe failure" || fail "AC4-EDGE(fail): unexpected refusal on probe failure. Got: $OUT"
+! grep -q "REFUSED" <<<"$OUT" && pass "AC4-EDGE(fail): no refusal on probe failure" || fail "AC4-EDGE(fail): unexpected refusal on probe failure. Got: $OUT"
 
 # --- AC5-FR: refusal leaves no stub; re-run with override bootstraps clean --
 echo ""
@@ -162,7 +162,7 @@ plan_path: ""
 MANIFEST
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_MARKER="$MK"); EC=$?
 [[ $EC -eq 0 ]] && pass "AC5-FR(resume): exit 0" || fail "AC5-FR(resume): expected exit 0, got $EC. Output: $OUT"
-! echo "$OUT" | grep -q "REFUSED" && pass "AC5-FR(resume): no refusal on resume" || fail "AC5-FR(resume): guard fired on resume. Got: $OUT"
+! grep -q "REFUSED" <<<"$OUT" && pass "AC5-FR(resume): no refusal on resume" || fail "AC5-FR(resume): guard fired on resume. Got: $OUT"
 [[ ! -f "$MK" ]] && pass "AC5-FR(resume): guard never probed on resume" || fail "AC5-FR(resume): guard probed status on resume"
 
 echo ""
