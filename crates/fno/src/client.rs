@@ -1992,7 +1992,7 @@ impl View {
             let start = cols.saturating_sub(text.chars().count() + 1);
             for (i, ch) in text.chars().enumerate() {
                 let idx = start + i;
-                if idx > c && idx < cols {
+                if idx < cols {
                     cells[idx] = Cell {
                         c: ch,
                         fg: Color::Default,
@@ -2533,7 +2533,7 @@ const KEY_TABLE: &[&str] = &[
     "  &  close tab          w  panel selector ",
     "     selector ⏎ acts on the row: squad/tab ",
     "     · agent focus/attach · card dispatch · + create ",
-    "     organize: r(squad) ,(tab) rename · J/K(squad) </>(tab) reorder · m move · x remove ",
+    "     organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder",
     "     · space mark agent · R recruit marked → workspace ",
     "  a  answer queue       b  toggle sideline ",
     "  s  toggle status      ?  this key table  ",
@@ -5846,6 +5846,7 @@ mod tests {
     fn client_compose_overlay_renders_key_table() {
         // AC4-EDGE: leader+? renders the full table over the content area.
         let mut view = two_pane_view();
+        view.term = (30, 80);
         view.overlay = true;
         let text = frame_text(&view.compose());
         assert!(text.contains("fno keys"), "table header present");
@@ -5855,9 +5856,26 @@ mod tests {
         assert!(text.contains("Tab state"), "and its type/Tab/goto filters");
         assert!(
             text.contains(
-                "organize: r(squad) ,(tab) rename · J/K(squad) </>(tab) reorder · m move · x remove"
+                "organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder"
             ),
-            "key table documents the organize gestures"
+            "80-column key table documents every organize gesture"
+        );
+    }
+
+    #[test]
+    fn client_compose_notice_overlays_a_full_tab_bar() {
+        let mut view = two_pane_view();
+        view.term = (30, 80);
+        view.layout.squads[0] = meta(1, "long-workspace", 6, 5);
+        for tab in &mut view.layout.squads[0].tabs {
+            tab.name = "very-long-tab-name".into();
+        }
+        view.set_notice("no such tab".into());
+
+        let text = frame_text(&view.compose());
+        assert!(
+            text.lines().next().unwrap().contains("no such tab"),
+            "the stale-refusal notice remains visible over a dense tab bar"
         );
     }
 
