@@ -49,6 +49,10 @@ pub struct NeedItem {
     pub ts: String,
     /// A one-line human reason.
     pub evidence: String,
+    /// Does this item's node hold a live (or suspect) claim? Stamped by the IO
+    /// layer, not the pure fold. The client renders an item that joins no roster
+    /// row only when it is `live`, so a dead session's stale stop never nags.
+    pub live: bool,
 }
 
 /// Read `<field>` regardless of envelope: nested under `/data` (unified) or
@@ -174,6 +178,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                 title,
                 ts,
                 evidence,
+                live: false, // stamped by the IO layer; the fold stays pure
             });
         }
     }
@@ -356,6 +361,24 @@ fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
     (vec![project_events, global_events], ledger)
 }
 
+/// Stamp each item's `live` bit from its node claim (x-feec 1.4): an item whose
+/// node holds a Live or Suspect claim (a suspect TTL-unexpired claim still
+/// protects the slot) renders even without a roster row; an unclaimed or
+/// node-less one stays `live=false` and the client drops it when unjoined. This
+/// is the IO half of the fold, kept out of the pure [`fold`] so it stays testable.
+fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
+    for item in &mut items {
+        item.live = item.node.as_deref().is_some_and(|n| {
+            let (state, _) = crate::claims::status(&format!("node:{n}"), None);
+            matches!(
+                state,
+                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+            )
+        });
+    }
+    items
+}
+
 /// Current epoch seconds; `0` if the clock is somehow before the epoch.
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -398,7 +421,7 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     let since = args
         .since_epoch
         .unwrap_or_else(|| now_secs().saturating_sub(DEFAULT_WINDOW_SECS));
-    let items = fold(&events_raw, &ledger_raw, since, args.fires_floor);
+    let items = stamp_liveness(fold(&events_raw, &ledger_raw, since, args.fires_floor));
 
     if args.json {
         println!(
