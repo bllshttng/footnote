@@ -10,9 +10,10 @@
 //! Same rules as the rest of this crate: the FILE is the contract (no
 //! cross-crate import), all I/O degrades the persistence, never the session -
 //! a corrupt file quarantines, a contended lock skips the write, a disk-full
-//! write returns an error the caller notices once. The env override
-//! (`FNO_AGENTS_HOME`) redirects the file so tests never touch a real home,
-//! mirroring [`crate::agents_view::registry_path`].
+//! write returns an error the caller notices once. Production resolves the path
+//! via `FNO_AGENTS_HOME` (mirroring [`crate::agents_view::registry_path`]);
+//! tests redirect it with a per-thread override so they never touch a real home
+//! and never mutate the shared environment.
 
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -21,11 +22,28 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// A process-global lock for tests that redirect `FNO_AGENTS_HOME` (the env
-/// var is shared, so every store-touching test across the crate must serialize
-/// on ONE mutex, not per-module ones).
+// A per-thread store-path override for tests, so a store-touching test never
+// mutates the process-global environment (a `set_var` there would race any
+// concurrent `getenv` in a sibling test - a real data race). Cargo runs each
+// test on its own thread, so a thread-local gives every test full isolation
+// with no lock. Set via `set_test_path`; cleared on scope exit.
 #[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+thread_local! {
+    static TEST_PATH: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Point this thread's store at `dir/squads.json` (test-only).
+#[cfg(test)]
+pub(crate) fn set_test_path(dir: &std::path::Path) {
+    TEST_PATH.with(|c| *c.borrow_mut() = Some(dir.join("squads.json")));
+}
+
+/// Clear this thread's store override (test-only).
+#[cfg(test)]
+pub(crate) fn clear_test_path() {
+    TEST_PATH.with(|c| *c.borrow_mut() = None);
+}
 
 /// The only store schema this build understands. An unknown version is treated
 /// exactly like a corrupt file (quarantine + fresh) rather than guessed at
@@ -80,6 +98,10 @@ pub struct Loaded {
 /// The store file: a sibling of the registry under `FNO_AGENTS_HOME`, else
 /// `$HOME/.fno/squads.json`. Machine-global because a squad spans repos.
 pub fn squads_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = TEST_PATH.with(|c| c.borrow().clone()) {
+        return p;
+    }
     if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
         return PathBuf::from(v).join("squads.json");
     }
@@ -308,8 +330,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A scratch `FNO_AGENTS_HOME` so the store never touches a real file. The
-    /// env var is process-global, so these tests are serialized by the mutex.
+    /// A scratch store dir installed via the per-thread path override, so the
+    /// store never touches a real file AND never mutates the process
+    /// environment (no cross-test env race). Cleared on drop.
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(name: &str) -> Self {
@@ -317,7 +340,7 @@ mod tests {
                 std::env::temp_dir().join(format!("fno-squadstore-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            std::env::set_var("FNO_AGENTS_HOME", &dir);
+            super::set_test_path(&dir);
             Scratch(dir)
         }
         fn file(&self) -> PathBuf {
@@ -326,13 +349,10 @@ mod tests {
     }
     impl Drop for Scratch {
         fn drop(&mut self) {
-            std::env::remove_var("FNO_AGENTS_HOME");
+            super::clear_test_path();
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
-
-    // The env var is global; hold this across every test that sets it.
-    use super::TEST_ENV_LOCK as ENV_LOCK;
 
     fn m(id: &str) -> StoredMember {
         StoredMember {
@@ -343,7 +363,6 @@ mod tests {
 
     #[test]
     fn missing_file_is_a_fresh_store() {
-        let _g = ENV_LOCK.lock().unwrap();
         let _s = Scratch::new("missing");
         let loaded = load();
         assert!(loaded.squads.is_empty());
@@ -352,7 +371,6 @@ mod tests {
 
     #[test]
     fn upsert_then_load_roundtrips_and_preserves_created_at() {
-        let _g = ENV_LOCK.lock().unwrap();
         let _s = Scratch::new("roundtrip");
         upsert("harden", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
         let first = load();
@@ -370,7 +388,6 @@ mod tests {
     #[test]
     fn corrupt_file_is_quarantined_and_read_empty() {
         // AC1-ERR: invalid JSON is renamed aside, not fatal.
-        let _g = ENV_LOCK.lock().unwrap();
         let s = Scratch::new("corrupt");
         std::fs::write(s.file(), "{not valid json").unwrap();
         let loaded = load();
@@ -393,7 +410,6 @@ mod tests {
     fn unknown_version_is_quarantined() {
         // Discretion 5: a version this build does not understand takes the
         // quarantine path, never a best-effort parse.
-        let _g = ENV_LOCK.lock().unwrap();
         let s = Scratch::new("version");
         std::fs::write(s.file(), r#"{"version":999,"squads":[]}"#).unwrap();
         let loaded = load();
@@ -405,7 +421,6 @@ mod tests {
     fn hostile_attach_ids_are_dropped_at_load() {
         // AC2-ERR: a member whose attach_id is not 8-hex never survives load,
         // so restore can never spawn it.
-        let _g = ENV_LOCK.lock().unwrap();
         let s = Scratch::new("hostile");
         let file = StoreFile {
             version: STORE_VERSION,
@@ -429,7 +444,6 @@ mod tests {
 
     #[test]
     fn remove_and_rename_mutate_by_name() {
-        let _g = ENV_LOCK.lock().unwrap();
         let _s = Scratch::new("remove-rename");
         upsert("a", &[], &[m("11111111")]).unwrap();
         upsert("b", &[], &[m("22222222")]).unwrap();

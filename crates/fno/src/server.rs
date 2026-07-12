@@ -804,6 +804,30 @@ fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> 
     }
 }
 
+/// The set of attach-ids live NOW, from the raw registry + roster contents
+/// (x-8f11). Pure so restore's liveness read is unit-testable without files or
+/// env, like `agents_view::derive_rows`: a non-exited registry row's
+/// `attach_id` and every roster worker's `short_id` are live; an exited row is
+/// not.
+fn live_ids_from(reg_raw: Option<&str>, roster_raw: Option<&str>, now: u64) -> HashSet<String> {
+    let mut live = HashSet::new();
+    if let Some(raw) = reg_raw {
+        for a in agents_view::derive_rows(raw, now).into_iter().flatten() {
+            if !a.exited {
+                if let Some(id) = a.attach_id {
+                    live.insert(id);
+                }
+            }
+        }
+    }
+    if let Some(raw) = roster_raw {
+        for w in agents_view::parse_roster(raw).into_iter().flatten() {
+            live.insert(w.short_id);
+        }
+    }
+    live
+}
+
 /// Loose `<prefix>-<hex4..8>` node-id shape check for the cwd-basename
 /// fallback, so a plain shell squad (basename "footnote") is never
 /// mis-attributed as a graph node.
@@ -1353,22 +1377,9 @@ impl Core {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let mut live = HashSet::new();
-        if let Ok(raw) = std::fs::read_to_string(agents_view::registry_path()) {
-            for a in agents_view::derive_rows(&raw, now).into_iter().flatten() {
-                if !a.exited {
-                    if let Some(id) = a.attach_id {
-                        live.insert(id);
-                    }
-                }
-            }
-        }
-        if let Ok(raw) = std::fs::read_to_string(agents_view::roster_path()) {
-            for w in agents_view::parse_roster(&raw).into_iter().flatten() {
-                live.insert(w.short_id);
-            }
-        }
-        live
+        let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
+        let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
+        live_ids_from(reg.as_deref(), roster.as_deref(), now)
     }
 
     /// Materialize the persisted named squads at the first real attach (US2).
@@ -6365,29 +6376,24 @@ mod tests {
         );
     }
 
-    /// A scratch `FNO_AGENTS_HOME` for store-write-through tests, serialized on
-    /// the shared crate-wide env lock (the var is process-global).
+    /// A scratch store dir for write-through tests, installed via the per-thread
+    /// path override so no test mutates the shared environment (no env race).
     struct StoreScratch {
         dir: std::path::PathBuf,
-        // Held for RAII: serializes env-var-touching tests for its lifetime.
-        _guard: std::sync::MutexGuard<'static, ()>,
     }
     impl StoreScratch {
         fn new(name: &str) -> Self {
-            let guard = crate::squad_store::TEST_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
             let dir =
                 std::env::temp_dir().join(format!("fno-srv-store-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            std::env::set_var("FNO_AGENTS_HOME", &dir);
-            StoreScratch { dir, _guard: guard }
+            crate::squad_store::set_test_path(&dir);
+            StoreScratch { dir }
         }
     }
     impl Drop for StoreScratch {
         fn drop(&mut self) {
-            std::env::remove_var("FNO_AGENTS_HOME");
+            crate::squad_store::clear_test_path();
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -6422,35 +6428,24 @@ mod tests {
     }
 
     #[test]
-    fn live_attach_ids_now_reads_registry_and_roster() {
+    fn live_ids_from_marks_live_registry_and_roster_rows() {
         // AC1-HP hinges on a FRESH liveness read at first attach (self.agents is
-        // still empty then): an exited registry row is dead, a live one and a
-        // roster worker are live.
-        let s = StoreScratch::new("live-ids");
-        let home = s.dir.clone();
-        std::fs::write(
-            home.join("registry.json"),
-            r#"{"agents":[
-                {"name":"w","cwd":"/x","status":"live","claude_short_id":"c19cd2c3"},
-                {"name":"d","cwd":"/x","status":"exited","claude_short_id":"deadbeef"}
-            ]}"#,
-        )
-        .unwrap();
-        std::env::set_var("FNO_CLAUDE_DAEMON_DIR", &home);
-        std::fs::write(
-            home.join("roster.json"),
-            r#"{"workers":{"k":{"sessionId":"aa11bb22-xyz","cwd":"/y"}}}"#,
-        )
-        .unwrap();
-        let core = empty_core();
-        let live = core.live_attach_ids_now();
-        std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
+        // still empty then). Pure over the raw file contents: an exited registry
+        // row is dead, a live one and a roster worker are live.
+        let reg = r#"{"agents":[
+            {"name":"w","cwd":"/x","status":"live","claude_short_id":"c19cd2c3"},
+            {"name":"d","cwd":"/x","status":"exited","claude_short_id":"deadbeef"}
+        ]}"#;
+        let roster = r#"{"workers":{"k":{"sessionId":"aa11bb22-xyz","cwd":"/y"}}}"#;
+        let live = live_ids_from(Some(reg), Some(roster), 0);
         assert!(live.contains("c19cd2c3"), "a live registry row is live");
         assert!(!live.contains("deadbeef"), "an exited row is not live");
         assert!(
             live.contains("aa11bb22"),
             "a roster worker's short_id is live"
         );
+        // Missing files (None) yield an empty live set.
+        assert!(live_ids_from(None, None, 0).is_empty());
     }
 
     #[test]
