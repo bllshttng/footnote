@@ -1,9 +1,8 @@
 # footnote's opencode plugin
 
-footnote's self-contained opencode orchestration layer. Replaces the
-`oh-my-openagent` dependency: footnote ships its own native opencode plugin
-instead of renting a 27-package monorepo for task delegation, identity, and
-agent registration.
+footnote's self-contained opencode orchestration layer. footnote ships its own
+native opencode plugin instead of depending on an external orchestration package
+for task delegation, identity, and agent registration.
 
 ## What's here
 
@@ -35,8 +34,8 @@ no build toolchain, and no vendored agent framework here.
 ## Activation is opt-in
 
 The plugin auto-loads but stays **inert** until you opt in, so opening this repo
-in opencode while `oh-my-openagent` is still active never collides on the `task`
-tool. Activate for a session:
+in opencode while another orchestration plugin is still active never collides on
+the `task` tool. Activate for a session:
 
 ```bash
 FNO_OPENCODE=1 opencode
@@ -44,15 +43,16 @@ FNO_OPENCODE=1 opencode
 
 With `FNO_OPENCODE` unset, the plugin registers nothing.
 
-## Full cutover (replace oh-my-openagent globally)
+## Full cutover (make fno the sole orchestration plugin)
 
 When you're ready to make fno the sole orchestration plugin, edit your global
-`~/.config/opencode/opencode.json` and drop `oh-my-openagent@latest` from the
-`plugin` array. footnote's plugin auto-loads from this repo's `.opencode/plugins/`
-for sessions in this project; for other projects, add a `file:` entry pointing at
-`plugins/fno.ts` or publish the plugin to npm. Once oh-my-openagent is gone you
-can also run without the `FNO_OPENCODE` gate if you edit `isActivated` to default
-on. This is a local-machine change and is deliberately not automated.
+`~/.config/opencode/opencode.json` and drop any other orchestration plugin entry
+from the `plugin` array. footnote's plugin auto-loads from this repo's
+`.opencode/plugins/` for sessions in this project; for other projects, add a
+`file:` entry pointing at `plugins/fno.ts` or publish the plugin to npm. Once no
+other orchestration plugin is loaded you can also run without the `FNO_OPENCODE`
+gate if you edit `isActivated` to default on. This is a local-machine change and
+is deliberately not automated.
 
 ## Model routing
 

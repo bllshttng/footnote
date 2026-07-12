@@ -1,6 +1,7 @@
 // footnote's self-contained opencode orchestration plugin.
 //
-// Replaces the oh-my-openagent dependency. Built on opencode's plugin API:
+// Gives footnote native opencode orchestration with no external dependency.
+// Built on opencode's plugin API:
 // a config hook (register footnote's agents), a system-prompt transform
 // (inject the orchestrator identity), and a `task` delegation tool. opencode's
 // NATIVE machinery does the rest — it auto-loads `.opencode/agents/*.md` and
@@ -379,9 +380,9 @@ function loadOrchestratorPrompt(projectDir: string): string {
 /**
  * Activation gate. The plugin auto-loads (opencode scans `.opencode/plugins/`),
  * but stays INERT unless explicitly opted in — so merely opening this repo in
- * opencode while oh-my-openagent is still globally active never collides on the
- * `task` tool. Dogfood with `FNO_OPENCODE=1 opencode`; flip the global cutover
- * on your own schedule. See .opencode/README.md.
+ * opencode while another orchestration plugin is still globally active never
+ * collides on the `task` tool. Dogfood with `FNO_OPENCODE=1 opencode`; flip the
+ * global cutover on your own schedule. See .opencode/README.md.
  */
 export function isActivated(env: Record<string, string | undefined> = process.env): boolean {
   const v = env.FNO_OPENCODE
