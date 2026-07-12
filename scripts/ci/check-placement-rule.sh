@@ -109,6 +109,7 @@ CLAUDE_ALLOWLIST=$(cat <<'EOF'
 cli/src/fno/adapters/__init__.py
 cli/src/fno/adapters/_shared.py
 cli/src/fno/adapters/providers/dispatch.py
+cli/src/fno/adapters/providers/managed.py
 cli/src/fno/adapters/providers/staging.py
 cli/src/fno/adapters/providers/test_cli.py
 cli/src/fno/adapters/providers/test_dispatch.py
