@@ -81,18 +81,21 @@ def _record(cwd: Path | None, *, session_id: str | None = "sid-1", pr_number: in
 # scan_merge_drift threads session_id + cwd onto the record
 # ---------------------------------------------------------------------------
 
-def test_scan_threads_session_id_and_cwd_onto_record():
+def test_scan_threads_session_id_and_cwd_onto_record(tmp_path):
+    # Live cwd: the forward-path dead-cwd guard (x-4114) degrades a gone cwd to
+    # None, so a threading test must anchor on a real dir to see it pass through.
+    live = str(tmp_path)
     entries = [{
         "id": "ab-own", "title": "t", "pr_number": 42,
         "pr_url": "https://github.com/test-owner/test-repo/pull/42",
         "additional_prs": [], "completed_at": None, "superseded_by": None,
-        "plan_path": None, "cwd": "/some/where", "session_id": "sid-xyz",
+        "plan_path": None, "cwd": live, "session_id": "sid-xyz",
     }]
     records = scan_merge_drift(entries, query=lambda n, repo=None, cwd=None: PrMergeState(
         number=n, state="MERGED", url="u", merged_at="2026-06-02T00:00:00Z"))
     assert len(records) == 1
     assert records[0].session_id == "sid-xyz"
-    assert records[0].cwd == "/some/where"
+    assert records[0].cwd == live
 
 
 # ---------------------------------------------------------------------------

@@ -205,6 +205,14 @@ def test_scan_passes_repo_from_url():
 # Reverse-map: unstamped open nodes matched by merged branch name (x-8c3b)
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def live_cwd(tmp_path) -> str:
+    """An existing dir standing in for a live worktree cwd. The reverse-map
+    dead-cwd guard (x-4114) skips any node whose cwd is not an existing dir, so
+    tests exercising the gh-query path must anchor on a real directory."""
+    return str(tmp_path)
+
+
 def _merged(node_id_to_branch: dict, url_owner: str = "test-owner/test-repo"):
     """Return a list_merged stub: yields merged-PR rows for the given branches.
 
@@ -222,9 +230,9 @@ def _merged(node_id_to_branch: dict, url_owner: str = "test-owner/test-repo"):
     return lambda **kw: rows
 
 
-def test_reverse_map_legacy_feature_branch():
+def test_reverse_map_legacy_feature_branch(live_cwd):
     """Unstamped open node + merged `feature/<id>` -> closeable drift record."""
-    entries = [_node("ab-rev1", cwd="/repo")]  # no pr_number -> ref-less
+    entries = [_node("ab-rev1", cwd=live_cwd)]  # no pr_number -> ref-less
     records = scan_merge_drift(entries, list_merged=_merged({268: "feature/ab-rev1"}))
     assert len(records) == 1
     r = records[0]
@@ -233,9 +241,9 @@ def test_reverse_map_legacy_feature_branch():
     assert r.pr_url.endswith("/pull/268")
 
 
-def test_reverse_map_slug_branch():
+def test_reverse_map_slug_branch(live_cwd):
     """Unstamped node + merged `<prefix>/<slug>-<id>` -> matches."""
-    entries = [_node("ab-rev2", cwd="/repo")]
+    entries = [_node("ab-rev2", cwd=live_cwd)]
     records = scan_merge_drift(
         entries, list_merged=_merged({270: "target/some-slug-ab-rev2"})
     )
@@ -243,9 +251,9 @@ def test_reverse_map_slug_branch():
     assert records[0].pr_number == 270
 
 
-def test_reverse_map_prefix_collision_guard():
+def test_reverse_map_prefix_collision_guard(live_cwd):
     """id `ab-rev` must NOT match branch `feature/ab-rev7` or `feature/ab-reva`."""
-    entries = [_node("ab-rev", cwd="/repo")]
+    entries = [_node("ab-rev", cwd=live_cwd)]
     records = scan_merge_drift(
         entries,
         list_merged=_merged({1: "feature/ab-rev7", 2: "feature/ab-reva"}),
@@ -253,16 +261,16 @@ def test_reverse_map_prefix_collision_guard():
     assert records == []
 
 
-def test_reverse_map_no_match_leaves_open():
+def test_reverse_map_no_match_leaves_open(live_cwd):
     """No merged branch carries the id -> no record, node stays open."""
-    entries = [_node("ab-rev3", cwd="/repo")]
+    entries = [_node("ab-rev3", cwd=live_cwd)]
     records = scan_merge_drift(entries, list_merged=_merged({9: "feature/other-node"}))
     assert records == []
 
 
-def test_reverse_map_ambiguous_is_error():
+def test_reverse_map_ambiguous_is_error(live_cwd):
     """Two merged PRs match one id -> error record, never an auto-close."""
-    entries = [_node("ab-dup", cwd="/repo")]
+    entries = [_node("ab-dup", cwd=live_cwd)]
     records = scan_merge_drift(
         entries,
         list_merged=_merged({10: "feature/ab-dup", 11: "target/x-ab-dup"}),
@@ -298,19 +306,23 @@ def test_reverse_map_requires_cwd():
     assert records == []
 
 
-def test_reverse_map_gh_failure_surfaces_error():
-    """A gh failure during reverse-map yields an error record, not a silent drop."""
+def test_reverse_map_gh_failure_surfaces_error(live_cwd):
+    """A gh failure during reverse-map yields an error record, not a silent drop.
+
+    AC2-ERR: the node's cwd EXISTS (live worktree) but gh exits non-zero - the
+    real-failure path, distinct from the dead-cwd skip.
+    """
     def _boom(**kw):
         raise rec.ReconcileError("gh list exploded")
 
-    entries = [_node("ab-fail", cwd="/repo")]
+    entries = [_node("ab-fail", cwd=live_cwd)]
     records = scan_merge_drift(entries, list_merged=_boom)
     assert len(records) == 1
     assert not records[0].closeable
     assert "gh list exploded" in records[0].error
 
 
-def test_reverse_map_one_gh_call_per_repo(monkeypatch):
+def test_reverse_map_one_gh_call_per_repo(live_cwd):
     """Multiple ref-less nodes sharing a cwd trigger ONE gh call, not N."""
     calls = {"n": 0}
 
@@ -323,7 +335,7 @@ def test_reverse_map_one_gh_call_per_repo(monkeypatch):
              "mergedAt": "2026-07-08T00:00:00Z"},
         ]
 
-    entries = [_node("ab-m1", cwd="/repo"), _node("ab-m2", cwd="/repo")]
+    entries = [_node("ab-m1", cwd=live_cwd), _node("ab-m2", cwd=live_cwd)]
     records = scan_merge_drift(entries, list_merged=_once)
     assert calls["n"] == 1
     assert {r.node_id for r in records} == {"ab-m1", "ab-m2"}
@@ -360,9 +372,9 @@ def test_reverse_map_gone_cwd_falls_back_to_project_root(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("resolved", [None, "__nonexistent__"])
-def test_reverse_map_gone_cwd_unresolvable_keeps_original(tmp_path, monkeypatch, resolved):
-    """AC2-ERR: gone cwd + (unmapped project | mapped-but-missing root) ->
-    original cwd kept and the existing gh-failure warning still fires."""
+def test_reverse_map_gone_cwd_unresolvable_is_skipped(tmp_path, monkeypatch, capsys, resolved):
+    """AC1-HP / US1: gone cwd + (unmapped project | mapped-but-missing root) ->
+    node SKIPPED, gh never called, one aggregated advisory instead of Errno 2."""
     import fno.graph._intake as intake
 
     missing_root = str(tmp_path / "also-gone")
@@ -374,15 +386,91 @@ def test_reverse_map_gone_cwd_unresolvable_keeps_original(tmp_path, monkeypatch,
     gone = str(tmp_path / "gone-wt")
 
     def _boom(**kw):
-        raise rec.ReconcileError(
-            f"gh pr list (merged) failed: [Errno 2] No such file: {kw.get('cwd')}"
-        )
+        raise AssertionError("list_merged must not run for a dead-cwd node")
 
     entries = [_node("ab-unresolvable", cwd=gone, project="p")]
     records = scan_merge_drift(entries, list_merged=_boom)
+    assert records == []  # skipped: no record (neither closeable nor error)
+    err = capsys.readouterr().err
+    assert "reverse-map: skipped 1 ref-less node(s)" in err
+    assert "ab-unresolvable" in err
+    assert "fno backlog update" in err
+
+
+def test_reverse_map_advisory_aggregates_and_is_silent_when_clean(tmp_path, monkeypatch, capsys):
+    """US2: N dead-cwd nodes -> exactly one advisory line naming all ids; a graph
+    with no dead-cwd node prints nothing."""
+    import fno.graph._intake as intake
+    monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
+
+    gone = str(tmp_path / "nope")
+    entries = [_node(nid, cwd=gone) for nid in ("ab-d1", "ab-d2", "ab-d3")]
+    scan_merge_drift(entries, list_merged=lambda **kw: [])
+    err = capsys.readouterr().err.strip()
+    assert err.count("reverse-map: skipped") == 1
+    assert "skipped 3 ref-less node(s)" in err
+    for nid in ("ab-d1", "ab-d2", "ab-d3"):
+        assert nid in err
+
+    # Clean graph (live cwd, no match): no advisory at all.
+    entries = [_node("ab-clean", cwd=str(tmp_path))]
+    scan_merge_drift(entries, list_merged=lambda **kw: [])
+    assert "reverse-map: skipped" not in capsys.readouterr().err
+
+
+def test_reverse_map_advisory_names_every_id_no_truncation(tmp_path, monkeypatch, capsys):
+    """Visibility invariant: a large batch names EVERY skipped id on one line -
+    no cap, no `(+N more)` collapse (a truncated tail would be un-healable)."""
+    import fno.graph._intake as intake
+    monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
+
+    gone = str(tmp_path / "gone")
+    ids = [f"ab-dead{i:02d}" for i in range(12)]  # > the old 10-id cap
+    scan_merge_drift([_node(nid, cwd=gone) for nid in ids],
+                     list_merged=lambda **kw: [])
+    err = capsys.readouterr().err
+    assert "skipped 12 ref-less node(s)" in err
+    assert "more)" not in err  # no truncation suffix
+    for nid in ids:
+        assert nid in err
+
+
+def test_forward_dead_cwd_with_pr_url_queries_with_repo(tmp_path, monkeypatch):
+    """AC4-EDGE / US3: a stamped node whose cwd is gone but pr_url is parseable
+    resolves via --repo with cwd=None and closes on MERGED - no Errno 2."""
+    import fno.graph._intake as intake
+    monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
+
+    seen: dict = {}
+
+    def _q(number, repo=None, cwd=None) -> PrMergeState:
+        seen["repo"], seen["cwd"] = repo, cwd
+        return PrMergeState(number=number, state="MERGED", url=None,
+                            merged_at="2026-05-24T00:00:00Z")
+
+    gone = str(tmp_path / "archived-wt")
+    entries = [_node("ab-fwd", pr_number=88, cwd=gone)]  # default url -> parseable repo
+    records = scan_merge_drift(entries, query=_q)
+    assert seen["repo"] == "test-owner/test-repo"
+    assert seen["cwd"] is None  # dead cwd degraded, never handed to subprocess
+    assert len(records) == 1 and records[0].closeable
+
+
+def test_forward_dead_cwd_no_repo_context_is_error(tmp_path, monkeypatch):
+    """AC5-EDGE / US3: a stamped node with an unparseable pr_url and a dead cwd
+    yields the existing `no repo context` error, not an Errno 2."""
+    import fno.graph._intake as intake
+    monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
+
+    def _q(number, repo=None, cwd=None) -> PrMergeState:
+        raise AssertionError("query must not run without repo context")
+
+    gone = str(tmp_path / "archived-wt")
+    entries = [_node("ab-norepo-fwd", pr_number=91, pr_url=None, cwd=gone)]
+    records = scan_merge_drift(entries, query=_q)
     assert len(records) == 1
     assert not records[0].closeable
-    assert records[0].cwd == gone  # original cwd preserved, never substituted
+    assert "no repo context" in records[0].error
 
 
 def test_reverse_map_existing_cwd_skips_resolver(tmp_path, monkeypatch):
@@ -521,12 +609,14 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     assert node2["completed_at"] == first_ts
 
 
-def test_reconcile_backfills_reverse_mapped_pr_ref(cli_env, monkeypatch):
+def test_reconcile_backfills_reverse_mapped_pr_ref(cli_env, tmp_path, monkeypatch):
     """A reverse-mapped node (dead before stamp) gets its recovered PR ref
     written back to the graph, not just closed - else the board loses the PR
     link and detect_reverted_nodes cannot match a later revert (codex P2)."""
     graph_path, sentinel_dir = cli_env
-    _make_graph(graph_path, [_node("ab-rmap", cwd="/repo")])  # ref-less
+    # Live cwd: the reverse-map dead-cwd guard (x-4114) skips a node whose cwd is
+    # gone, so a close-path test must anchor on a real dir.
+    _make_graph(graph_path, [_node("ab-rmap", cwd=str(tmp_path))])  # ref-less
     monkeypatch.setattr(
         rec, "list_merged_pr_branches",
         lambda **kw: [{
