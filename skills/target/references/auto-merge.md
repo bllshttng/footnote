@@ -18,10 +18,13 @@ config:
     enabled: true
     strategy: merge          # merge | squash | rebase (default: merge)
     delete_branch: true      # delete branch after merge (default: true)
-    allowed_invokers:
-      - target
-      - megawalk
 ```
+
+Auto-merge is gated by `enabled` alone (plus the merge command's own CI-green /
+external-review / stub-manifest guards). The who-may-merge gate
+(`allowed_invokers` + `fno pr merge --invoker`) was removed (x-04ab): `enabled:
+true` means any surface that reaches the merge command may auto-merge, so treat
+it as a project-wide opt-in, not a per-invoker allowlist.
 
 The `strategy: merge` default preserves full commit history, which is important for
 `git bisect` and forensic analysis. Squash collapses context; only use it if your
@@ -93,7 +96,7 @@ The merge attempt yields one of four outcomes, written to the skill's state file
 | `merged` | PR merged successfully | append PR number to `merged_prs` | No |
 | `queued` | Branch protection requires checks; merge queued | append to `merge_auto_queued` | No |
 | `failed` | Merge attempt failed (protected branch, permissions, etc.) | append `{pr, reason}` to `merge_failed` | No |
-| `skipped` | Auto-merge disabled for this invoker | no state change | No |
+| `skipped` | Auto-merge disabled (`enabled: false`) | no state change | No |
 
 A `failed` outcome does NOT block the promise or mark the session as failed. The PR was
 created successfully; the merge failure is post-hoc. The user can merge manually.

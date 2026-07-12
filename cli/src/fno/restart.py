@@ -6,9 +6,11 @@
 - Agents daemon: ALWAYS restarted - SIGTERM the stale daemon and lazy-start a
   fresh one from the current binary; PTY workers survive. Safe: the daemon holds
   no user session state.
-- Mux servers: reported by default, restarted only with --mux. A live mux server
-  holds real shells/panes and deliberately survives `cargo install` upgrades, so
-  restarting it ENDS those sessions - hence opt-in, not the default.
+- Mux servers: a STALE-wire server (its `.ver` sidecar predates the running
+  binary, so a new client's handshake is rejected - already unreachable) is
+  auto-restarted, healing the pair-deploy skew (x-1a85). A CURRENT-wire server
+  holds real reachable shells/panes, so restarting it ENDS those sessions and
+  stays opt-in behind --mux (reported by default).
 """
 from __future__ import annotations
 
@@ -60,9 +62,10 @@ def restart_command(
 ) -> None:
     """Restart running fno processes onto freshly-installed binaries.
 
-    The agents daemon restarts always (PTY workers survive). Live mux servers are
-    reported by default and restarted only with --mux (killing a server ends its
-    live sessions).
+    The agents daemon restarts always (PTY workers survive). A stale-wire mux
+    server (predates the running binary; unreachable by a new client) is
+    auto-restarted; a current-wire server is reported by default and restarted
+    only with --mux (killing a server ends its live sessions).
     """
     result: dict[str, Any] = {
         "daemon": None,
@@ -112,11 +115,21 @@ def restart_command(
     if sessions is None:
         say("fno restart: mux front door unavailable; skipped mux check.")
     else:
-        live = [
-            s["session"]
+        live_rows = [
+            s
             for s in sessions
             if isinstance(s, dict) and s.get("session") and s.get("state") == "live"
         ]
+        live = [s["session"] for s in live_rows]
+        # (x-1a85) A stale-wire live server predates the running binary (its
+        # `.ver` sidecar version != ours, or is absent), so a new client's
+        # handshake is REJECTED - it is already unreachable. Restart those
+        # UNCONDITIONALLY (killing them loses nothing a current client could
+        # still reach, and it heals the pair-deploy skew with no manual --mux).
+        # A current-wire server has healthy, reachable panes, so restarting it
+        # stays opt-in behind --mux.
+        stale_live = [s["session"] for s in live_rows if s.get("stale")]
+        current_live = [s["session"] for s in live_rows if not s.get("stale")]
         # A wedged server holds its socket but never accepts (x-82c6): it is a
         # broken server, NOT a benign non-live socket. Reporting it as
         # "restart succeeded" is the ok:true lie this fixes -- surface each one
@@ -134,6 +147,7 @@ def restart_command(
             and s.get("state") not in ("live", "wedged")
         ]
         result["mux_sessions"] = live
+        result["mux_stale"] = stale_live
         result["mux_wedged"] = [w["session"] for w in wedged]
         result["mux_other"] = other
         for w in wedged:
@@ -148,19 +162,24 @@ def restart_command(
             failures.append(f"mux: {name} wedged")
         if other:
             say(f"fno restart: {len(other)} non-live mux row(s) (not restarted): {other}.")
+
+        # Always restart the stale-wire servers; add the current-wire ones only
+        # when --mux is given.
+        to_restart = list(stale_live) + (current_live if mux else [])
         if not live:
             say("fno restart: no live mux sessions.")
-        elif mux:
+        if to_restart:
             fno = shutil.which("fno")
             if not fno:
                 say(
-                    "fno restart: --mux requested but the `fno` mux binary is not on PATH; "
-                    "cannot restart mux sessions.",
+                    "fno restart: mux session(s) need restarting but the `fno` mux binary is "
+                    "not on PATH; cannot restart them.",
                     err=True,
                 )
                 failures.append("mux: fno not on PATH")
             else:
-                for name in live:
+                for name in to_restart:
+                    reason = "stale wire version" if name in stale_live else "requested"
                     try:
                         kc = subprocess.run(
                             [fno, "mux", "kill-server", name],
@@ -177,18 +196,19 @@ def restart_command(
                     if kc == 0:
                         result["mux_restarted"].append(name)
                         say(
-                            f"fno restart: mux session '{name}' killed; the next attach starts a "
-                            "fresh server on the new binary."
+                            f"fno restart: mux session '{name}' killed ({reason}); the next "
+                            "attach starts a fresh server on the new binary."
                         )
                     else:
                         say(f"fno restart: could not kill mux session '{name}' (exit {kc}).", err=True)
                         failures.append(f"mux: kill {name} exit {kc}")
-        else:
+        # Current-wire servers left running (opt-in): report so the operator can
+        # restart them deliberately. Skipped when --mux already restarted them.
+        if current_live and not mux:
             say(
-                f"fno restart: {len(live)} live mux session(s) still on the current binary: "
-                f"{live}. Killing a mux server ends its shells/panes and the next attach starts a "
-                "fresh server on the new binary; that stays opt-in. Do it with "
-                "`fno mux kill-server <name>`, or `fno restart --mux` for all."
+                f"fno restart: {len(current_live)} live mux session(s) on the current wire: "
+                f"{current_live}. Killing one ends its shells/panes; that stays opt-in. Do it "
+                "with `fno mux kill-server <name>`, or `fno restart --mux` for all."
             )
 
     result["ok"] = not failures

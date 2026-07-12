@@ -261,8 +261,6 @@ delete_branch_on_merge = true
 require_checks_pass = true
 # Conflict-resolution agent for auto-merge rebases.
 conflict_resolution = "opus"
-# Who may trigger auto-merge.
-allowed_invokers = []
 # Post-failure remediation policy for auto-merge.
 remediation = "attempt"
 

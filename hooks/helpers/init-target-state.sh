@@ -355,7 +355,10 @@ if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
 elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="true"
-elif declare -F is_auto_merge_allowed_for >/dev/null 2>&1 && is_auto_merge_allowed_for "target" 2>/dev/null; then
+elif _is_true "$AUTO_MERGE_ENABLED"; then
+  # The who-may-merge gate (allowed_invokers) was removed (x-04ab): auto-merge
+  # is approved whenever it is `enabled`, gated further by the merge command's
+  # own CI-green / external-review / stub-manifest guards.
   AUTO_MERGE_APPROVED="true"
 fi
 

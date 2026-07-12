@@ -1100,6 +1100,17 @@ pub fn socket_path(session: &str) -> Result<PathBuf, String> {
     Ok(mux_dir().join(format!("{session}.sock")))
 }
 
+/// The wire-version sidecar for a session socket (`<name>.sock` -> `<name>.ver`),
+/// written by the server at startup with its [`PROTO_VERSION`] (x-1a85). It lets
+/// `fno mux ls` tell a stale-wire server (predating the installed binary, so a
+/// new client's handshake would be rejected) from a healthy same-version one -
+/// a distinction the FROZEN, version-agnostic `Query`/`Info` probe cannot make.
+/// A `.ver` file is skipped by [`session_names`]'s `.sock` filter, so it never
+/// reads as a session.
+pub fn version_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("ver")
+}
+
 pub const DEFAULT_SESSION: &str = "main";
 
 /// Outcome of [`bind_or_probe`].

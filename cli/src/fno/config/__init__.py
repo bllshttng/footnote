@@ -1462,7 +1462,6 @@ class AutoMergeBlock(BaseModel):
     delete_branch_on_merge: bool = True
     require_checks_pass: bool = True
     conflict_resolution: str = "opus"
-    allowed_invokers: list[str] = Field(default_factory=list)
     remediation: str = "attempt"
 
     @field_validator("enabled", mode="before")
@@ -1496,35 +1495,6 @@ class AutoMergeBlock(BaseModel):
             return v.strip()
         return "attempt"
 
-    @field_validator("allowed_invokers", mode="before")
-    @classmethod
-    def _coerce_allowed_invokers(cls, v: object) -> object:
-        """Accept a YAML list or a bare string; degrade junk to [] (all allowed).
-
-        An empty list means "no restriction" (the bash treated an empty
-        allowed_invokers as all-allowed). A single bare string is wrapped to a
-        one-element list so ``allowed_invokers: target`` resolves sanely.
-        """
-        if v is None:
-            return []
-        if isinstance(v, str):
-            s = v.strip()
-            return [s] if s else []
-        if isinstance(v, (list, tuple)):
-            return [str(x).strip() for x in v if str(x).strip()]
-        return []
-
-    def is_allowed_for(self, invoker: str) -> bool:
-        """Port of ``is_auto_merge_allowed_for``: enabled AND invoker permitted.
-
-        Disabled -> never allowed. Enabled with an empty allowed_invokers ->
-        all invokers allowed. Enabled with a non-empty list -> membership.
-        """
-        if not self.enabled:
-            return False
-        if not self.allowed_invokers:
-            return True
-        return invoker in self.allowed_invokers
 
 
 class PrWatchBlock(BaseModel):

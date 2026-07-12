@@ -17,7 +17,10 @@
 //! Each verb emits a stable, documented JSON shape on stdout under `--json`;
 //! errors stay one-line on stderr (never mixed into the json). The shapes:
 //! - `ls`: array of `{session, state: live|stale|unqueryable|unprobeable,
-//!   clients?, squads?, panes?, error?}` (`[]` when empty).
+//!   clients?, squads?, panes?, error?}` (`[]` when empty). A `live` row also
+//!   carries `stale` (x-1a85: on a wire version this binary can't handshake -
+//!   `fno restart` auto-restarts these) and `wire_version` (the server's
+//!   `.ver` sidecar value, `null` for a pre-sidecar server).
 //! - `kill-server`: `{session, killed: true, note}` on success.
 //! - `shell-init`: `{shell, snippet}` (the raw snippet without `--json`).
 //! - `doctor`: `{ok: bool, checks: [{check, verdict: ok|warn|fail|n/a, detail,
@@ -212,12 +215,36 @@ pub fn shell_init(shell: Option<&str>, json: bool) -> i32 {
 struct SessionRow {
     name: String,
     probe: Probe,
+    /// (x-1a85) The wire version the server stamped in its `.ver` sidecar, or
+    /// `None` when absent (a pre-sidecar server, i.e. an older build). Only
+    /// meaningful for a `Live` row.
+    wire_version: Option<u32>,
 }
 
 impl SessionRow {
     fn is_live(&self) -> bool {
         matches!(self.probe, Probe::Live { .. })
     }
+
+    /// (x-1a85) A LIVE server whose wire version is not the running binary's:
+    /// a new client's handshake would be REJECTED (`check_attach_version`), so
+    /// the server is unreachable by a current client and safe to auto-restart.
+    /// A missing sidecar (`None`) is treated as stale - it predates the feature,
+    /// so it is necessarily an older wire (the exact pair-deploy case this
+    /// heals). Non-live rows are never "wire stale" (they are dead/wedged).
+    fn wire_stale(&self) -> bool {
+        self.is_live() && self.wire_version != Some(proto::PROTO_VERSION)
+    }
+}
+
+/// Read a session socket's `.ver` sidecar (x-1a85) and parse the stamped wire
+/// version. `None` on any read/parse failure (absent sidecar = older server).
+fn read_wire_version(sock: &Path) -> Option<u32> {
+    std::fs::read_to_string(proto::version_sidecar_path(sock))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Enumerate `*.sock` stems in the mux dir, sorted. `Err` is an unreadable dir
@@ -254,7 +281,12 @@ fn session_rows() -> Result<Vec<SessionRow>, String> {
         .map(|name| {
             let sock = dir.join(format!("{name}.sock"));
             let probe = probe(&sock);
-            SessionRow { name, probe }
+            let wire_version = read_wire_version(&sock);
+            SessionRow {
+                name,
+                probe,
+                wire_version,
+            }
         })
         .collect())
 }
@@ -264,7 +296,12 @@ fn session_rows() -> Result<Vec<SessionRow>, String> {
 /// non-zero exit); a wedged row also carries its `log` path so the operator can
 /// find the stuck server. Pure, so the state contract is unit-testable.
 fn session_row_json(row: &SessionRow) -> serde_json::Value {
-    let SessionRow { name, probe } = row;
+    let stale = row.wire_stale();
+    let SessionRow {
+        name,
+        probe,
+        wire_version,
+    } = row;
     match probe {
         Probe::Live {
             clients,
@@ -273,6 +310,10 @@ fn session_row_json(row: &SessionRow) -> serde_json::Value {
         } => serde_json::json!({
             "session": name, "state": "live",
             "clients": clients, "squads": squads, "panes": panes,
+            // (x-1a85) `stale` = live but on a wire version the running binary
+            // can't handshake; `fno restart` auto-restarts these unconditionally.
+            // `wire_version` is null for a pre-sidecar (older) server.
+            "stale": stale, "wire_version": wire_version,
         }),
         Probe::Unqueryable => serde_json::json!({ "session": name, "state": "unqueryable" }),
         Probe::Wedged => {
@@ -311,13 +352,24 @@ pub fn ls(json: bool) -> i32 {
         println!("no sessions");
         return EXIT_OK;
     }
-    for SessionRow { name, probe } in &rows {
+    for row in &rows {
+        let stale = row.wire_stale();
+        let SessionRow { name, probe, .. } = row;
         match probe {
             Probe::Live {
                 clients,
                 squads,
                 panes,
-            } => println!("{name}: {clients} clients, {squads} squads, {panes} panes"),
+            } => {
+                // (x-1a85) A stale-wire live server is flagged: a current client
+                // can't attach it, and `fno restart` will auto-restart it.
+                let tail = if stale {
+                    " [stale wire - restart to reconnect]"
+                } else {
+                    ""
+                };
+                println!("{name}: {clients} clients, {squads} squads, {panes} panes{tail}")
+            }
             Probe::Unqueryable => println!("{name}: alive (unqueryable - older server?)"),
             Probe::Wedged => {
                 println!(
@@ -2106,6 +2158,8 @@ mod tests {
                 squads: 2,
                 panes: 3,
             },
+            // A live server on the current wire (not stale).
+            wire_version: Some(proto::PROTO_VERSION),
         }
     }
 
@@ -2113,6 +2167,7 @@ mod tests {
         SessionRow {
             name: name.into(),
             probe: Probe::Stale,
+            wire_version: None,
         }
     }
 
@@ -2120,6 +2175,7 @@ mod tests {
         SessionRow {
             name: name.into(),
             probe: Probe::Wedged,
+            wire_version: None,
         }
     }
 
@@ -2135,6 +2191,33 @@ mod tests {
         assert!(w.get("log").is_some(), "a wedged row carries its log path");
         // A wedged row is NOT live: it must never be auto-attached.
         assert!(!wedged("s").is_live());
+    }
+
+    #[test]
+    fn mux_ls_flags_stale_wire_live_server() {
+        // x-1a85: a live server whose sidecar version != the running binary's
+        // (or is absent) is `stale` - a current client can't handshake it, so
+        // `fno restart` auto-restarts it. A current-version live server is not.
+        let current = live("cur"); // wire_version = PROTO_VERSION
+        assert!(!current.wire_stale(), "same wire is not stale");
+        assert_eq!(session_row_json(&current)["stale"], false);
+
+        let mut older = live("old");
+        older.wire_version = Some(proto::PROTO_VERSION - 1);
+        assert!(older.wire_stale(), "an older wire is stale");
+        assert_eq!(session_row_json(&older)["stale"], true);
+
+        let mut unstamped = live("pre");
+        unstamped.wire_version = None; // a pre-sidecar (older) build
+        assert!(unstamped.wire_stale(), "a missing sidecar reads as stale");
+        assert_eq!(
+            session_row_json(&unstamped)["wire_version"],
+            serde_json::Value::Null
+        );
+
+        // Non-live rows are never wire-stale (they are dead/wedged, not skewed).
+        assert!(!stale("d").wire_stale());
+        assert!(!wedged("w").wire_stale());
     }
 
     #[test]

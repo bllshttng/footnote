@@ -78,6 +78,31 @@ def test_restart_mux_skips_non_live_sessions(monkeypatch) -> None:
     assert not any("dead" in c for c in calls), "must NOT kill a non-live session"
 
 
+def test_restart_auto_restarts_stale_wire_server_without_mux(monkeypatch) -> None:
+    """x-1a85: a stale-wire live server is auto-restarted even WITHOUT --mux (a
+    new client can't attach it anyway); a current-wire server stays opt-in."""
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(
+        restart,
+        "_mux_sessions",
+        lambda: [
+            {"session": "old", "state": "live", "stale": True},
+            {"session": "cur", "state": "live", "stale": False},
+        ],
+    )
+
+    result = runner.invoke(app, ["restart"])  # NO --mux
+    assert result.exit_code == 0
+    assert ["/cargo/bin/fno", "mux", "kill-server", "old"] in calls, "stale auto-restarted"
+    assert not any(
+        "kill-server" in c and "cur" in c for c in calls
+    ), "a current-wire server is left opt-in"
+    assert "current wire" in result.output, "current-wire server reported, not killed"
+
+
 def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
     """A real daemon-restart failure fails the command (scripts must see it)."""
     _fake_daemon_binary(monkeypatch)
