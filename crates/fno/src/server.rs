@@ -2198,6 +2198,7 @@ impl Core {
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
+                                tombstone: false,
                             }
                         }
                         None => {
@@ -2222,6 +2223,7 @@ impl Core {
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
+                                tombstone: false,
                             }
                         }
                     };
@@ -2257,6 +2259,7 @@ impl Core {
                         tab: None,
                         seen: self.seen.contains(pane),
                         cwd_base: None,
+                        tombstone: false,
                     });
                 }
                 None => {
@@ -2294,8 +2297,41 @@ impl Core {
                         // unseen.
                         seen: false,
                         cwd_base,
+                        tombstone: false,
                     });
                 }
+            }
+        }
+        // 3. Synthesized tombstone rows (x-8f11 US4): each persisted member that
+        //    died shows as a dimmed, dismissable row under its (live) squad. A
+        //    member re-recruited to a live pane this session is skipped here (it
+        //    already rendered pane-hosted above - Open Question 1: mid-session a
+        //    tombstone otherwise persists until dismissed/restart).
+        for (&sid, members) in &self.squad_members {
+            if self.session.squad(sid).is_none() {
+                continue;
+            }
+            for m in members.iter().filter(|m| m.tombstone) {
+                if self.attached.contains_key(&m.attach_id) {
+                    continue;
+                }
+                out.push(AgentRow {
+                    squad: Some(sid),
+                    name: format!("cc-{}", m.attach_id),
+                    pane_id: None,
+                    badge: None,
+                    reason: None,
+                    exited: true,
+                    answerable: None,
+                    // Carried so the client can DismissMember; exited: true keeps
+                    // it out of the attach catalog gate (attach_id + !exited).
+                    attach_id: Some(m.attach_id.clone()),
+                    external: false,
+                    tab: None,
+                    seen: false,
+                    cwd_base: None,
+                    tombstone: true,
+                });
             }
         }
         out
@@ -3445,6 +3481,149 @@ impl Core {
                         self.push_layout(true);
                     }
                 }
+                Flow::Continue
+            }
+            Command::RecruitAgents { squad, ids } => {
+                // Bulk recruit (x-8f11 US3). The server is the authoritative
+                // gate: blank name / empty ids refused fail-closed; each id
+                // re-validated through the exact AttachAgent gates; dedup no-op
+                // for an already-paned or already-member id; one write-through.
+                let name = squad.trim().to_string();
+                if name.is_empty() {
+                    self.notice(client_id, "name required");
+                    return Flow::Continue;
+                }
+                if ids.is_empty() {
+                    self.notice(client_id, "no agents selected");
+                    return Flow::Continue;
+                }
+                let (rows, cols) = self
+                    .clients
+                    .iter()
+                    .find(|c| c.id == client_id)
+                    .map(|c| c.dims)
+                    .unwrap_or((vp.rows, vp.cols));
+                // Target the live named squad if one exists, else create it lazily
+                // on the first successful recruit (no empty squad on all-skip).
+                let mut sid = self
+                    .session
+                    .squads
+                    .iter()
+                    .find(|s| s.name.as_deref() == Some(name.as_str()))
+                    .map(|s| s.id);
+                let mut recruited = 0usize;
+                let mut skipped: Vec<String> = Vec::new();
+                for id in &ids {
+                    if id.len() != 8 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        skipped.push(format!("{id} (bad id)"));
+                        continue;
+                    }
+                    if !self.attachable_agent(id) {
+                        skipped.push(format!("{id} (not attachable)"));
+                        continue;
+                    }
+                    // Dedup (AC2-EDGE): an id with a live pane, or already a
+                    // member of the target squad, is a no-op counted as skipped.
+                    let already_member = sid
+                        .and_then(|s| self.squad_members.get(&s))
+                        .is_some_and(|ms| ms.iter().any(|m| m.attach_id == *id));
+                    if self.attached.contains_key(id) || already_member {
+                        skipped.push(format!("{id} (already recruited)"));
+                        continue;
+                    }
+                    let cwd = sid
+                        .and_then(|s| self.session.squad(s))
+                        .map(|s| s.canonical_cwd().to_string())
+                        .unwrap_or_default();
+                    let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
+                    let pid = match self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            skipped.push(format!("{id} ({e})"));
+                            continue;
+                        }
+                    };
+                    let tid = self.session.mint_tab_id();
+                    let tab = Tab {
+                        name: None,
+                        id: tid,
+                        root: Node::Leaf(pid),
+                        focus: pid,
+                    };
+                    match sid {
+                        Some(s) => {
+                            self.session
+                                .squad_mut(s)
+                                .expect("target squad live")
+                                .tabs
+                                .push(tab);
+                        }
+                        None => {
+                            // Create the named workspace (no origin) with this as
+                            // its first tab.
+                            let ns = self.next_squad_id;
+                            self.next_squad_id += 1;
+                            self.session.add_squad(ns, Vec::new(), Some(name.clone()), tab);
+                            self.squad_members.insert(ns, Vec::new());
+                            sid = Some(ns);
+                        }
+                    }
+                    let s = sid.expect("set above");
+                    self.attached.insert(id.clone(), pid);
+                    self.squad_members
+                        .entry(s)
+                        .or_default()
+                        .push(crate::squad_store::StoredMember {
+                            attach_id: id.clone(),
+                            tombstone: false,
+                        });
+                    recruited += 1;
+                }
+                if recruited > 0 {
+                    let s = sid.expect("recruited > 0 implies a squad");
+                    self.persist_squad(s);
+                    // Show the operator their new team: switch to the target
+                    // squad's active tab.
+                    if let Some(sq) = self.session.squad(s) {
+                        let tid = sq
+                            .tabs
+                            .get(sq.active_tab)
+                            .or_else(|| sq.tabs.first())
+                            .map(|t| t.id);
+                        if let Some(tid) = tid {
+                            self.set_view(client_id, s, tid);
+                        }
+                    }
+                }
+                let msg = if skipped.is_empty() {
+                    format!("recruited {recruited}")
+                } else {
+                    format!(
+                        "recruited {recruited}, skipped {}: {}",
+                        skipped.len(),
+                        skipped.join(", ")
+                    )
+                };
+                self.notice(client_id, msg);
+                self.push_layout(true);
+                Flow::Continue
+            }
+            Command::DismissMember { squad, attach_id } => {
+                // Dismiss a TOMBSTONED member from a persisted workspace (x-8f11
+                // US4). Only a tombstone is dismissable - a live member leaves by
+                // closing its pane. Unknown workspace/member is refused.
+                let Some(members) = self.squad_members.get_mut(&squad) else {
+                    self.notice(client_id, "no such workspace");
+                    return Flow::Continue;
+                };
+                let before = members.len();
+                members.retain(|m| !(m.attach_id == attach_id && m.tombstone));
+                if members.len() == before {
+                    self.notice(client_id, "no such tombstoned member");
+                    return Flow::Continue;
+                }
+                self.persist_squad(squad);
+                self.push_layout(true);
                 Flow::Continue
             }
             Command::CopySelection => {
@@ -6271,6 +6450,106 @@ mod tests {
         let mut core = empty_core();
         core.restore_squads(24, 80, 999);
         assert!(core.session.squads.is_empty(), "nothing persisted -> nothing restored");
+    }
+
+    #[test]
+    fn recruit_refuses_blank_name_and_empty_ids() {
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(1, Command::RecruitAgents { squad: "  ".into(), ids: vec!["c19cd2c3".into()] });
+        core.command(1, Command::RecruitAgents { squad: "team".into(), ids: vec![] });
+        assert_eq!(core.session.squads.len(), 1, "no workspace created on refusal");
+        assert!(core.squad_members.is_empty());
+    }
+
+    #[test]
+    fn recruit_skips_bad_unattachable_and_deduped_ids() {
+        // All ids fail a gate before any spawn: a bad-shape id, a not-attachable
+        // id, and one already recruited (in self.attached). No squad, no panes.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.attached.insert("aaaaaaaa".into(), 1); // already paned -> dedup skip
+        core.command(
+            1,
+            Command::RecruitAgents {
+                squad: "team".into(),
+                ids: vec![
+                    "nothex!!".into(), // bad shape
+                    "deadbeef".into(), // not in the catalog -> not attachable
+                    "aaaaaaaa".into(), // already recruited
+                ],
+            },
+        );
+        assert_eq!(core.session.squads.len(), 1, "no new workspace on all-skip");
+        assert!(!core.squad_members.contains_key(&2), "no squad 2 minted");
+    }
+
+    #[test]
+    fn dismiss_member_removes_a_tombstone_and_refuses_unknown() {
+        let _s = StoreScratch::new("dismiss");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+        );
+        core.squad_members.insert(
+            7,
+            vec![stored_member("c19cd2c3", true), stored_member("deadbeef", false)],
+        );
+        core.persist_squad(7);
+        core.clients.push(client(1, 5, (24, 80), false));
+        // Dismiss the live (non-tombstone) member: refused, nothing removed.
+        core.command(1, Command::DismissMember { squad: 7, attach_id: "deadbeef".into() });
+        assert_eq!(core.squad_members[&7].len(), 2, "a live member is not dismissable");
+        // Dismiss the tombstone: removed + persisted.
+        core.command(1, Command::DismissMember { squad: 7, attach_id: "c19cd2c3".into() });
+        assert_eq!(core.squad_members[&7].len(), 1);
+        let loaded = crate::squad_store::load();
+        assert_eq!(loaded.squads[0].members, vec![stored_member("deadbeef", false)]);
+        // An unknown workspace is refused.
+        core.command(1, Command::DismissMember { squad: 999, attach_id: "c19cd2c3".into() });
+    }
+
+    #[test]
+    fn agent_rows_synthesizes_tombstone_rows_for_dead_members() {
+        // AC4-EDGE: a tombstoned member renders dimmed under its squad, carrying
+        // its attach_id for DismissMember and exited (so it fails the attach
+        // gate). A re-paned id is skipped (rendered pane-hosted instead).
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab { name: None, id: 5, root: Node::Leaf(1), focus: 1 },
+        );
+        core.squad_members.insert(
+            7,
+            vec![stored_member("c19cd2c3", true), stored_member("deadbeef", true)],
+        );
+        // "deadbeef" is re-paned this session -> skipped in the synthesis.
+        core.attached.insert("deadbeef".into(), 99);
+        let rows = core.agent_rows();
+        let tomb: Vec<_> = rows.iter().filter(|r| r.tombstone).collect();
+        assert_eq!(tomb.len(), 1, "only the un-repaned tombstone renders");
+        let t = tomb[0];
+        assert_eq!(t.squad, Some(7));
+        assert!(t.exited, "a tombstone is dimmed/exited");
+        assert_eq!(t.attach_id.as_deref(), Some("c19cd2c3"));
+        assert_eq!(t.name, "cc-c19cd2c3");
     }
 
     #[test]

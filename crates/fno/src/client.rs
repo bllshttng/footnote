@@ -460,6 +460,17 @@ struct View {
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
+    /// (x-8f11) Multi-select marks for bulk recruit: the `attach_id`s toggled
+    /// with `space` in the sideline selector. Client-local ephemera keyed by id,
+    /// so a marked row surviving a filter/scroll keeps its mark and a vanished
+    /// row simply drops it (never a stale index). Cleared on a recruit submit.
+    marks: std::collections::HashSet<String>,
+    /// (x-8f11) The pending recruit workspace-name buffer, `Some` while the `R`
+    /// recruit overlay is open. Enter sends [`Command::RecruitAgents`] with the
+    /// marked ids (empty keeps it open, like `create`); Esc cancels, marks kept.
+    recruit: Option<String>,
+    /// Pending escape bytes in recruit-overlay mode (split-arrow safety).
+    recruit_esc: Vec<u8>,
     /// (x-96e8) The move-a-tab-to-another-squad picker: `(tab captured at open,
     /// candidate squad ids in the numbered order shown)`, `Some` while the
     /// selector `m` overlay is open. A digit sends [`Command::MoveTab`]; the id
@@ -569,6 +580,9 @@ impl View {
             create_esc: Vec::new(),
             rename: None,
             rename_esc: Vec::new(),
+            marks: std::collections::HashSet::new(),
+            recruit: None,
+            recruit_esc: Vec::new(),
             move_pick: None,
             sel_follow: None,
             nav: None,
@@ -601,8 +615,26 @@ impl View {
         self.rename = None;
         self.move_pick = None;
         self.nav = None;
+        self.recruit = None;
+        self.recruit_esc.clear();
         self.create = Some(String::new());
         self.create_esc.clear();
+    }
+
+    /// Open the recruit workspace-name overlay modally (x-8f11), clearing other
+    /// keyboard-opened overlays first (x-260a). The marks are NOT cleared - they
+    /// are the payload; Esc keeps them, a submit clears them.
+    fn open_recruit(&mut self) {
+        self.selector = None;
+        self.answers = None;
+        self.search = None;
+        self.rename = None;
+        self.create = None;
+        self.move_pick = None;
+        self.nav = None;
+        self.confirm = None;
+        self.recruit = Some(String::new());
+        self.recruit_esc.clear();
     }
 
     /// Arm the card-dispatch confirm modally (x-a496) with the same
@@ -628,6 +660,8 @@ impl View {
         // it wins stdin routing after the confirm resolves and would swallow the
         // next keys, same reasoning as the selector above.
         self.nav = None;
+        self.recruit = None;
+        self.recruit_esc.clear();
         self.confirm = Some(action);
     }
 
@@ -642,6 +676,8 @@ impl View {
         self.move_pick = None;
         self.create = None;
         self.nav = None;
+        self.recruit = None;
+        self.recruit_esc.clear();
         self.rename = Some((target, String::new()));
         self.rename_esc.clear();
     }
@@ -657,6 +693,8 @@ impl View {
         self.rename = None;
         self.confirm = None;
         self.nav = None;
+        self.recruit = None;
+        self.recruit_esc.clear();
         self.move_pick = Some((tab, squads));
     }
 
@@ -1446,6 +1484,7 @@ impl View {
             && (self.confirm.is_some()
                 || self.create.is_some()
                 || self.rename.is_some()
+                || self.recruit.is_some()
                 || self.search.is_some()
                 || self.hint
                 || self.status_on)
@@ -1493,6 +1532,25 @@ impl View {
                 RenameTarget::Squad(_) => "workspace",
             };
             let text = format!(" rename {noun}: {name}_ (empty resets to auto)");
+            for (i, ch) in text.chars().take(cols).enumerate() {
+                cells[r * cols + i] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: cell_flags::BOLD,
+                };
+            }
+            return;
+        }
+        // The recruit workspace-name input (x-8f11): same overlay discipline; the
+        // hint names how many marked agents will join (create-if-absent).
+        if let Some(name) = &self.recruit {
+            let r = rows - 1;
+            for c in 0..cols {
+                cells[r * cols + c] = Cell::default();
+            }
+            let n = self.marks.len();
+            let text = format!(" recruit {n} into: {name}_ (create-if-absent)");
             for (i, ch) in text.chars().take(cols).enumerate() {
                 cells[r * cols + i] = Cell {
                     c: ch,
@@ -1912,7 +1970,19 @@ impl View {
                             None => '·',
                         }
                     };
-                    let mut text = format!("  {glyph} {}", a.name);
+                    // A recruit mark (x-8f11) replaces the leading space with a
+                    // `*`, keeping the row width unchanged (same vocabulary as
+                    // the active-squad/tab marker).
+                    let mark = if a
+                        .attach_id
+                        .as_deref()
+                        .is_some_and(|id| self.marks.contains(id))
+                    {
+                        '*'
+                    } else {
+                        ' '
+                    };
+                    let mut text = format!(" {mark}{glyph} {}", a.name);
                     // (x-0090) A pane row names its tab with a `·N` ordinal; an
                     // orphan row names its repo with a ` (basename)` suffix. The
                     // two are mutually exclusive (a pane row has a tab, an orphan
@@ -1956,7 +2026,16 @@ impl View {
                     (format!("  {glyph} {label} {}", c.priority), flags)
                 }
                 DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM),
-                DisplayRow::NewSquad => ("+ new workspace".to_string(), cell_flags::DIM),
+                DisplayRow::NewSquad => {
+                    // The recruit-mark footer count rides the create affordance
+                    // (x-8f11): `space` marks, `R` recruits the marked set.
+                    let label = if self.marks.is_empty() {
+                        "+ new workspace".to_string()
+                    } else {
+                        format!("+ new workspace   {} marked ·R", self.marks.len())
+                    };
+                    (label, cell_flags::DIM)
+                }
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -2186,7 +2265,8 @@ const KEY_TABLE: &[&str] = &[
     "  &  close tab          w  panel selector ",
     "     selector ⏎ acts on the row: squad/tab ",
     "     · agent focus/attach · card dispatch · + create ",
-    "     · r rename · x remove · J/K reorder · m move tab ",
+    "     · r rename · x remove/dismiss · J/K reorder · m move tab ",
+    "     · space mark agent · R recruit marked → workspace ",
     "  a  answer queue       b  toggle sideline ",
     "  s  toggle status      ?  this key table  ",
     "  [ ]  jump block       v  select block   ",
@@ -2893,6 +2973,9 @@ async fn handle_stdin(
         // lingering overlay never swallows the typed name (x-9e5e finding).
         return rename_keys(view, &passthrough, sock_w).await;
     }
+    if view.recruit.is_some() {
+        return recruit_keys(view, &passthrough, sock_w).await;
+    }
     if view.search.is_some() {
         return search_keys(view, &passthrough, sock_w).await;
     }
@@ -3260,12 +3343,72 @@ async fn selector_keys(
                     }
                 }
             }
+            b' ' => {
+                // Toggle a recruit mark on the focused row (x-8f11). Markable
+                // only if it is an attachable watch-only agent (live, has an
+                // attach_id); anything else gives a notice, never zero feedback.
+                let id = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) if a.attach_id.is_some() && !a.exited => {
+                        a.attach_id.clone()
+                    }
+                    _ => None,
+                };
+                match id {
+                    Some(id) => {
+                        if !view.marks.remove(&id) {
+                            view.marks.insert(id);
+                        }
+                    }
+                    None => view.set_notice("not attachable".into()),
+                }
+            }
+            b'R' => {
+                // Open the recruit name prompt for the marked rows (x-8f11). With
+                // no marks, fall back to marking the focused attachable row first
+                // (the grid's single-recruit `m`, generalized); a non-attachable
+                // focused row with no marks BELs.
+                if view.marks.is_empty() {
+                    let id = match view.display_rows().get(cur) {
+                        Some(DisplayRow::Agent(a)) if a.attach_id.is_some() && !a.exited => {
+                            a.attach_id.clone()
+                        }
+                        _ => None,
+                    };
+                    match id {
+                        Some(id) => {
+                            view.marks.insert(id);
+                            view.open_recruit();
+                        }
+                        None => {
+                            let _ = raw_out(b"\x07");
+                        }
+                    }
+                } else {
+                    view.open_recruit();
+                }
+            }
             b'x' => {
-                // Remove the squad at the cursor (x-96e8), behind a confirm. A
-                // too-short terminal cannot render the bottom-row prompt, so it
-                // refuses with a notice rather than arm an INVISIBLE confirm
-                // (x-260a row_action rule); an unknown squad or a tab/other row
-                // BELs.
+                // A TOMBSTONE member row dismisses (x-8f11); a squad-header row
+                // removes the squad (x-96e8), behind a confirm - disambiguated by
+                // row type so one key serves both. A too-short terminal cannot
+                // render the bottom-row prompt, so it refuses with a notice rather
+                // than arm an INVISIBLE confirm (x-260a); an unknown squad or a
+                // tab/other row BELs.
+                let dismiss = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) if a.tombstone => {
+                        a.squad.zip(a.attach_id.clone())
+                    }
+                    _ => None,
+                };
+                if let Some((squad, attach_id)) = dismiss {
+                    write_msg(
+                        sock_w,
+                        &ClientMsg::Command(Command::DismissMember { squad, attach_id }),
+                    )
+                    .await
+                    .map_err(|e| format!("dismiss send failed: {e}"))?;
+                    continue;
+                }
                 let squad = match view.display_rows().get(cur) {
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
                     _ => None,
@@ -3828,6 +3971,71 @@ async fn create_keys(
     Ok(StdinFlow::Continue)
 }
 
+/// Recruit workspace-name keys (x-8f11): the create overlay's shape - printable
+/// append, Backspace pops, Esc cancels locally (marks kept), Enter sends
+/// [`Command::RecruitAgents`] with the marked ids and CLEARS the marks. An empty
+/// name keeps the overlay open (the server would refuse it). An empty mark set
+/// falls back to nothing sendable, so Enter just closes (the `R` key already
+/// fell back to marking the focused row before opening).
+async fn recruit_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.recruit_esc);
+    let keys = fold_search_input(&mut esc, bytes);
+    view.recruit_esc = esc;
+    for key in keys {
+        if view.recruit.is_none() {
+            break;
+        }
+        match key {
+            SearchKey::Esc => {
+                view.recruit = None;
+                view.recruit_esc.clear();
+                break; // marks kept - Esc cancels the prompt only
+            }
+            SearchKey::Byte(b) => match b {
+                b'\r' | b'\n' => {
+                    if let Some(name) = view.recruit.as_deref().map(str::trim) {
+                        if !name.is_empty() {
+                            let ids: Vec<String> = view.marks.iter().cloned().collect();
+                            write_msg(
+                                sock_w,
+                                &ClientMsg::Command(Command::RecruitAgents {
+                                    squad: name.to_string(),
+                                    ids,
+                                }),
+                            )
+                            .await
+                            .map_err(|e| format!("recruit send failed: {e}"))?;
+                            view.recruit = None;
+                            view.recruit_esc.clear();
+                            view.marks.clear(); // submit clears the marks (AC2-HP)
+                            break;
+                        }
+                    }
+                    // Empty name: keep the overlay open (server would refuse).
+                }
+                0x7f | 0x08 => {
+                    if let Some(buf) = view.recruit.as_mut() {
+                        buf.pop();
+                    }
+                }
+                0x20..=0x7e => {
+                    if let Some(buf) = view.recruit.as_mut() {
+                        if buf.len() < MAX_SQUAD_NAME {
+                            buf.push(b as char);
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
 /// Rename-tab name-input keys (x-c150). The create overlay's shape (split-arrow
 /// folding, printable append, Backspace pops, Esc cancels locally) with one
 /// deliberate divergence: Enter ALWAYS sends [`Command::RenameTab`] - an empty
@@ -4203,6 +4411,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         };
         assert!(
@@ -4932,6 +5141,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         };
         // A watch-only bg row with a claude jobId: a click attaches it.
@@ -4947,6 +5157,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         };
         // A watch-only row with no attach target: a click can only hint.
@@ -4962,6 +5173,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
@@ -5000,6 +5212,7 @@ mod tests {
                 external: false,
                 seen: false,
                 cwd_base: None,
+                tombstone: false,
                 tab: None,
             })
             .collect();
@@ -5248,6 +5461,7 @@ mod tests {
                     external: false,
                     seen: false,
                     cwd_base: None,
+                    tombstone: false,
                     tab: None,
                 },
                 AgentRow {
@@ -5262,6 +5476,7 @@ mod tests {
                     external: false,
                     seen: false,
                     cwd_base: None,
+                    tombstone: false,
                     tab: None,
                 },
                 AgentRow {
@@ -5276,6 +5491,7 @@ mod tests {
                     external: false,
                     seen: false,
                     cwd_base: None,
+                    tombstone: false,
                     tab: None,
                 },
             ],
@@ -5338,6 +5554,7 @@ mod tests {
                 external: false,
                 seen: false,
                 cwd_base: None,
+                tombstone: false,
                 tab: None,
             }
         }
@@ -5446,6 +5663,7 @@ mod tests {
                     external: false,
                     seen: false,
                     cwd_base: None,
+                    tombstone: false,
                     tab: None,
                 },
                 AgentRow {
@@ -5460,6 +5678,7 @@ mod tests {
                     external: true,
                     seen: false,
                     cwd_base: None,
+                    tombstone: false,
                     tab: None,
                 },
                 AgentRow {
@@ -5474,6 +5693,7 @@ mod tests {
                     external: false,
                     seen: false,
                     cwd_base: None,
+                    tombstone: false,
                     tab: None,
                 },
             ],
@@ -5727,6 +5947,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         };
         let card = |id: &str, state| BacklogCard {
@@ -5777,6 +5998,122 @@ mod tests {
         assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
         assert_eq!(v.selector_anchor(50), Some(10), "stale index clamps");
         assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
+    }
+
+    fn agent_row_at(v: &View, pred: impl Fn(&AgentRow) -> bool) -> usize {
+        v.display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if pred(a)))
+            .expect("a matching agent row")
+    }
+
+    #[tokio::test]
+    async fn selector_space_marks_attachable_and_notices_unmarkable() {
+        // AC1-UI: space marks an attachable watch-only row (toggling), and gives
+        // a notice on a pane-hosted (unmarkable) row without marking.
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let idx = agent_row_at(&v, |a| a.attach_id.as_deref() == Some("c19cd2c3"));
+        v.selector = Some(idx);
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        assert!(v.marks.contains("c19cd2c3"), "space marks the attachable row");
+        v.selector = Some(idx);
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        assert!(!v.marks.contains("c19cd2c3"), "space toggles the mark off");
+        // A pane-hosted row (no attach_id) is unmarkable -> notice, no mark.
+        let hosted = agent_row_at(&v, |a| a.pane_id == Some(10));
+        v.selector = Some(hosted);
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        assert!(v.marks.is_empty(), "an unmarkable row is not marked");
+        assert!(v.notice.is_some(), "an unmarkable row gives a notice");
+    }
+
+    #[tokio::test]
+    async fn selector_R_opens_recruit_and_falls_back_to_focused_row() {
+        // R with marks opens the prompt; with no marks it marks the focused
+        // attachable row first (the grid single-recruit generalized).
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let idx = agent_row_at(&v, |a| a.attach_id.as_deref() == Some("c19cd2c3"));
+        v.selector = Some(idx);
+        selector_keys(&mut v, b"R", &mut buf).await.unwrap();
+        assert!(v.recruit.is_some(), "R opens the recruit prompt");
+        assert!(v.marks.contains("c19cd2c3"), "zero-mark R marks the focused row");
+        assert_eq!(v.selector, None, "recruit is modal - the selector closes");
+    }
+
+    #[tokio::test]
+    async fn recruit_keys_enter_sends_marked_ids_and_clears_marks() {
+        // AC2-HP (client half): a name + Enter sends one RecruitAgents with the
+        // marked ids, and the marks clear.
+        let mut v = unified_rows_view();
+        v.marks.insert("c19cd2c3".into());
+        v.open_recruit();
+        let mut buf: Vec<u8> = Vec::new();
+        recruit_keys(&mut v, b"team\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        match msg {
+            ClientMsg::Command(Command::RecruitAgents { squad, ids }) => {
+                assert_eq!(squad, "team");
+                assert_eq!(ids, vec!["c19cd2c3".to_string()]);
+            }
+            other => panic!("expected RecruitAgents, got {other:?}"),
+        }
+        assert!(v.marks.is_empty(), "submit clears the marks");
+        assert_eq!(v.recruit, None, "submit closes the overlay");
+    }
+
+    #[tokio::test]
+    async fn recruit_keys_esc_keeps_marks() {
+        // AC2-UI: Esc cancels the prompt but keeps the marks for a re-open.
+        let mut v = unified_rows_view();
+        v.marks.insert("c19cd2c3".into());
+        v.open_recruit();
+        let mut buf: Vec<u8> = Vec::new();
+        // A lone ESC is CSI-ambiguous until a following byte resolves it (the
+        // fold's arrow-key safety); the trailing `x` surfaces the bare Esc and
+        // then dies with the overlay.
+        recruit_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
+        assert_eq!(v.recruit, None, "esc closes the overlay");
+        assert!(v.marks.contains("c19cd2c3"), "esc keeps the marks");
+        assert!(buf.is_empty(), "esc sends nothing");
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_a_tombstone_sends_dismiss() {
+        // AC4-EDGE (client half): x on a tombstone member row sends
+        // DismissMember for its squad + attach_id (not a squad remove).
+        let tomb = AgentRow {
+            squad: Some(1),
+            name: "cc-deadbeef".into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited: true,
+            answerable: None,
+            attach_id: Some("deadbeef".into()),
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: true,
+            tab: None,
+        };
+        let mut v = view_with_agents(vec![tomb]);
+        v.expanded.insert(1);
+        let idx = agent_row_at(&v, |a| a.tombstone);
+        v.selector = Some(idx);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::DismissMember {
+                squad: 1,
+                attach_id: "deadbeef".into()
+            })
+        );
     }
 
     #[test]
@@ -5994,6 +6331,7 @@ mod tests {
                 external: false,
                 seen: false,
                 cwd_base: None,
+                tombstone: false,
                 tab: Some(1),
             },
             AgentRow {
@@ -6008,6 +6346,7 @@ mod tests {
                 external: false,
                 seen: false,
                 cwd_base: None,
+                tombstone: false,
                 tab: None,
             },
         ];
@@ -6039,6 +6378,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         };
         let bare = row("zsh", 10, None);
@@ -6093,6 +6433,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         }];
         let composed = NavView {
@@ -6136,6 +6477,7 @@ mod tests {
                 external: false,
                 seen: true,
                 cwd_base: None,
+                tombstone: false,
                 tab: None,
             },
             AgentRow {
@@ -6150,6 +6492,7 @@ mod tests {
                 external: false,
                 seen: false,
                 cwd_base: None,
+                tombstone: false,
                 tab: None,
             },
         ];
@@ -6228,6 +6571,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         }];
         let idx = v
@@ -6583,6 +6927,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -6735,6 +7080,7 @@ mod tests {
             external: false,
             seen: false,
             cwd_base: None,
+            tombstone: false,
             tab: None,
         }
     }
