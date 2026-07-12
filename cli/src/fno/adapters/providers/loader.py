@@ -157,6 +157,7 @@ def _parse_providers_block(
     """
     raw_records = block.get("records") or []
     active = block.get("active")
+    auto_switch = bool(block.get("auto_switch", False))
 
     records: list[ProviderRecord] = []
     for raw in raw_records:
@@ -180,7 +181,7 @@ def _parse_providers_block(
             raise ProviderConfigError(": ".join(msg_parts)) from exc
 
     try:
-        config_obj = ProvidersConfig(records=records, active=active)
+        config_obj = ProvidersConfig(records=records, active=active, auto_switch=auto_switch)
     except pydantic.ValidationError as exc:
         pydantic_msg = str(exc)
         phrase = "duplicate_record_ids" if "duplicate_record_ids" in pydantic_msg else ""

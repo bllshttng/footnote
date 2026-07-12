@@ -110,6 +110,24 @@ class TestLoadProvidersValid:
         assert primary.auth == "oauth_dir"
         assert primary.priority == 10
 
+    def test_auto_switch_defaults_false(self, tmp_path: Path):
+        """US3: config.providers.auto_switch defaults False when the key is absent."""
+        from fno.adapters.providers.loader import load_providers
+
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, _valid_providers_block())
+        assert load_providers(repo_root=tmp_path).auto_switch is False
+
+    def test_auto_switch_parsed_when_set(self, tmp_path: Path):
+        """US3: an operator-set config.providers.auto_switch = true is read through."""
+        from fno.adapters.providers.loader import load_providers
+
+        block = _valid_providers_block()
+        block["config"]["providers"]["auto_switch"] = True
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+        assert load_providers(repo_root=tmp_path).auto_switch is True
+
 
 # ---------------------------------------------------------------------------
 # AC01.3-EDGE: Empty list / missing section is not an error

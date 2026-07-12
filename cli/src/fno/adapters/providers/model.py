@@ -181,6 +181,12 @@ class ProvidersConfig(BaseModel):
     records: list[ProviderRecord] = Field(default_factory=list)
     active: str | None = None
     failover: FailoverConfig | None = None
+    # Opt-in arming for exhaustion-triggered auto-switch (US3). When False
+    # (default), a swap onto an `auth: managed` record does NOT materialize
+    # credentials into the shared slot, so single- and multi-account setups keep
+    # today's warn/defer/nudge behavior. Registration of a 2nd account plus this
+    # knob is what arms the feature.
+    auto_switch: bool = False
     # Per-agent provider pins. config.agents is a YAML sibling of
     # config.providers; absent block defaults to empty dict (back-compat).
     agents: dict[str, AgentProviderBinding] = Field(default_factory=dict)
