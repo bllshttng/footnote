@@ -307,7 +307,15 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     projects = tmp_path / "sender-projects"
     (projects / "-Users-x-proj").mkdir(parents=True, exist_ok=True)
     (projects / "-Users-x-proj" / f"{sender_sid}.jsonl").write_text(
-        json.dumps({"message": {"model": "claude-opus-4-8"}}) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                "type": "assistant",
+                "isSidechain": False,
+                "message": {"model": "claude-opus-4-8"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
     )
     monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sender_sid)
