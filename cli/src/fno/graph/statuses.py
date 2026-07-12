@@ -109,6 +109,16 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["_status"] = "deferred"
             continue
 
+        # Reap a stale lock BEFORE the in_review branch: a PR-bearing node with
+        # an expired claim (the stampede case) must still shed the dead owner,
+        # else `_normalize_lock_fields` later mirrors the stale `locked_by` back
+        # into `session_id` at canonicalize/done time and overwrites the
+        # merge-time provenance.
+        if e.get("locked_by") and is_stale_lock(e):
+            e["locked_by"] = None
+            e["session_id"] = None  # keep the one-release mirror in sync
+            e["claimed_at"] = None
+
         # A node carrying a PR that has not closed (merge sets completed_at, so
         # `done` wins above) is IN REVIEW: hold it out of the dispatch pool
         # durably, independent of the builder session's ephemeral PID claim.
@@ -120,11 +130,6 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         if e.get("pr_number"):
             e["_status"] = "in_review"
             continue
-
-        if e.get("locked_by") and is_stale_lock(e):
-            e["locked_by"] = None
-            e["session_id"] = None  # keep the one-release mirror in sync
-            e["claimed_at"] = None
 
         has_open_blockers = False
         for blocker_id in e.get("blocked_by", []):

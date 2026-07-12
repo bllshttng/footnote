@@ -211,6 +211,21 @@ def test_in_review_survives_stale_claim():
     e = _entry("ab-prreview2", pr_number=358, session_id="dead-sess", claimed_at=old)
     result = recompute_statuses([e])
     assert result[0]["_status"] == "in_review"
+    # The stale lock must still be reaped (not leaked): otherwise
+    # _normalize_lock_fields re-mirrors it into session_id at done time and
+    # clobbers merge-time provenance.
+    assert result[0]["session_id"] is None
+    assert result[0]["claimed_at"] is None
+    assert result[0]["locked_by"] is None
+
+
+def test_in_review_reachable_through_typed_entry():
+    """The Entry._status computed field must also derive in_review, so a typed
+    round-trip (model_dump) does not silently emit ready/idea/blocked."""
+    from fno.graph.types import Entry
+
+    entry = Entry(id="ab-prreview5", title="t", pr_number=358)
+    assert entry._status == "in_review"
 
 
 def test_done_wins_over_pr_number_on_merge():
