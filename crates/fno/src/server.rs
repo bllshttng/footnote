@@ -1327,6 +1327,169 @@ impl Core {
         Some((sid, name, sq.origins.clone(), attach_id))
     }
 
+    /// Broadcast a one-line notice to every attached client (restore + degraded
+    /// paths that are not scoped to one sender).
+    fn notice_all(&self, text: impl Into<String>) {
+        let text = text.into();
+        for c in &self.clients {
+            let _ = c.reliable_tx.try_send(ServerMsg::Notice { text: text.clone() });
+        }
+    }
+
+    /// The attach-ids that are LIVE right now, read synchronously from the
+    /// registry + roster files. Restore runs at the first attach, before the
+    /// off-loop 1s reader has populated `self.agents`, so a stale in-memory
+    /// catalog would tombstone every member (AC1-HP). One-shot read per server
+    /// lifetime, off the steady loop.
+    fn live_attach_ids_now(&self) -> HashSet<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut live = HashSet::new();
+        if let Ok(raw) = std::fs::read_to_string(agents_view::registry_path()) {
+            for a in agents_view::derive_rows(&raw, now).into_iter().flatten() {
+                if !a.exited {
+                    if let Some(id) = a.attach_id {
+                        live.insert(id);
+                    }
+                }
+            }
+        }
+        if let Ok(raw) = std::fs::read_to_string(agents_view::roster_path()) {
+            for w in agents_view::parse_roster(&raw).into_iter().flatten() {
+                live.insert(w.short_id);
+            }
+        }
+        live
+    }
+
+    /// Materialize the persisted named squads at the first real attach (US2).
+    /// `rows`/`cols` are the attaching client's dims; `home_sid` is its own cwd
+    /// squad, restored as the active anchor afterward so the restored squads sit
+    /// in the sideline without stealing the view. Per-squad failure isolation:
+    /// a squad that cannot even open a shell is skipped with a notice, never a
+    /// crash (AC2-FR: a degraded restore leaves a fully usable session).
+    fn restore_squads(&mut self, rows: u16, cols: u16, home_sid: u64) {
+        let loaded = crate::squad_store::load();
+        if let Some(n) = loaded.notice {
+            self.notice_all(n);
+        }
+        if loaded.squads.is_empty() {
+            return;
+        }
+        let live = self.live_attach_ids_now();
+        let home_cwd = std::env::var_os("HOME")
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for ps in loaded.squads {
+            let cwd0 = ps.origins.first().cloned().unwrap_or_else(|| home_cwd.clone());
+            let mut members: Vec<crate::squad_store::StoredMember> = Vec::new();
+            // (tab, optional (attach_id, pid)) for each pane we build.
+            let mut tabs: Vec<(Tab, Option<(String, u64)>)> = Vec::new();
+            for m in &ps.members {
+                if m.tombstone {
+                    members.push(m.clone()); // already dead - stays a tombstone
+                    continue;
+                }
+                if !live.contains(&m.attach_id) {
+                    // Dead now: tombstone it (AC1-EDGE dimmed row, persisted).
+                    members.push(crate::squad_store::StoredMember {
+                        attach_id: m.attach_id.clone(),
+                        tombstone: true,
+                    });
+                    continue;
+                }
+                // Live: re-attach it into a fresh pane.
+                let argv = vec!["claude".to_string(), "attach".to_string(), m.attach_id.clone()];
+                match self.spawn_pane_cmd(&argv, rows, cols, &cwd0) {
+                    Ok(pid) => {
+                        let tid = self.session.mint_tab_id();
+                        tabs.push((
+                            Tab {
+                                name: None,
+                                id: tid,
+                                root: Node::Leaf(pid),
+                                focus: pid,
+                            },
+                            Some((m.attach_id.clone(), pid)),
+                        ));
+                        members.push(crate::squad_store::StoredMember {
+                            attach_id: m.attach_id.clone(),
+                            tombstone: false,
+                        });
+                    }
+                    Err(e) => {
+                        // AC2-FR: keep the member (not tombstone - it is live),
+                        // skip its pane, notice; restore continues.
+                        self.notice_all(format!("restore: could not attach {}: {e}", m.attach_id));
+                        members.push(crate::squad_store::StoredMember {
+                            attach_id: m.attach_id.clone(),
+                            tombstone: false,
+                        });
+                    }
+                }
+            }
+            // >=1-tab invariant (AC1-EDGE zero-live, or every attach spawn
+            // failed): open one shell at origins[0] (else $HOME).
+            if tabs.is_empty() {
+                match self.spawn_pane(rows, cols, &cwd0) {
+                    Ok(pid) => {
+                        let tid = self.session.mint_tab_id();
+                        tabs.push((
+                            Tab {
+                                name: None,
+                                id: tid,
+                                root: Node::Leaf(pid),
+                                focus: pid,
+                            },
+                            None,
+                        ));
+                    }
+                    Err(e) => {
+                        // Cannot even open a shell: skip this squad entirely, the
+                        // rest of the restore proceeds (per-squad isolation).
+                        self.notice_all(format!("restore: skipped workspace {}: {e}", ps.name));
+                        continue;
+                    }
+                }
+            }
+            // Register the squad with its first tab, push the rest, record the
+            // attach mappings so agent_rows reconciles the panes and member_ctx
+            // resolves them.
+            let sid = self.next_squad_id;
+            self.next_squad_id += 1;
+            let mut it = tabs.into_iter();
+            let (first_tab, first_map) = it.next().expect("tabs is non-empty above");
+            self.session
+                .add_squad(sid, ps.origins.clone(), Some(ps.name.clone()), first_tab);
+            if let Some((id, pid)) = first_map {
+                self.attached.insert(id, pid);
+            }
+            for (tab, map) in it {
+                self.session
+                    .squad_mut(sid)
+                    .expect("just added")
+                    .tabs
+                    .push(tab);
+                if let Some((id, pid)) = map {
+                    self.attached.insert(id, pid);
+                }
+            }
+            self.squad_members.insert(sid, members);
+            // Persist the reconciled membership (members dead at restore are now
+            // tombstoned in the store).
+            self.persist_squad(sid);
+        }
+        // The restored squads must not steal the attaching client's view: its
+        // per-client `view` is untouched, but add_squad flipped the global MRU
+        // anchor - restore it so the sideline active marker stays on home.
+        if self.session.squad(home_sid).is_some() {
+            self.session.active_squad = Some(home_sid);
+        }
+        self.push_layout(true);
+    }
+
     /// Reconcile the store after a member pane left, given its pre-reap context.
     /// `churn` (worker died on its own) tombstones the member and keeps the
     /// workspace persisted even if its last pane just died (AC4-EDGE + the
@@ -1519,6 +1682,15 @@ impl Core {
             e2e_log(format_args!(
                 "attach client {id}: {visible_n} visible panes, {sent_n} reliable frames"
             ));
+        }
+        // (x-8f11) Eager restore of persisted named squads, once per server
+        // lifetime, on the first REAL (non-passive) attach - a passive observer
+        // has no dims to spawn panes with, so it defers restore to the first
+        // terminal. The restored squads sit in the sideline; this client's view
+        // stays on its own cwd squad.
+        if !self.restored && !passive {
+            self.restored = true;
+            self.restore_squads(rows, cols, view.0);
         }
     }
 
@@ -6022,6 +6194,83 @@ mod tests {
             }],
         );
         core.attached.insert(attach.into(), pid);
+    }
+
+    fn stored_member(id: &str, tombstone: bool) -> crate::squad_store::StoredMember {
+        crate::squad_store::StoredMember {
+            attach_id: id.into(),
+            tombstone,
+        }
+    }
+
+    #[test]
+    fn live_attach_ids_now_reads_registry_and_roster() {
+        // AC1-HP hinges on a FRESH liveness read at first attach (self.agents is
+        // still empty then): an exited registry row is dead, a live one and a
+        // roster worker are live.
+        let s = StoreScratch::new("live-ids");
+        let home = s.0.clone();
+        std::fs::write(
+            home.join("registry.json"),
+            r#"{"agents":[
+                {"name":"w","cwd":"/x","status":"live","claude_short_id":"c19cd2c3"},
+                {"name":"d","cwd":"/x","status":"exited","claude_short_id":"deadbeef"}
+            ]}"#,
+        )
+        .unwrap();
+        std::env::set_var("FNO_CLAUDE_DAEMON_DIR", &home);
+        std::fs::write(
+            home.join("roster.json"),
+            r#"{"workers":{"k":{"sessionId":"aa11bb22-xyz","cwd":"/y"}}}"#,
+        )
+        .unwrap();
+        let core = empty_core();
+        let live = core.live_attach_ids_now();
+        std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
+        assert!(live.contains("c19cd2c3"), "a live registry row is live");
+        assert!(!live.contains("deadbeef"), "an exited row is not live");
+        assert!(live.contains("aa11bb22"), "a roster worker's short_id is live");
+    }
+
+    #[test]
+    fn restore_zero_live_squad_gets_a_shell_and_tombstones_dead_members() {
+        // AC1-EDGE: a persisted workspace whose members are all dead
+        // materializes with one shell pane, each dead member a tombstone; the
+        // reconciled tombstone is written back to the store.
+        let _s = StoreScratch::new("restore-dead");
+        crate::squad_store::upsert("dead-ws", &["/tmp".into()], &[stored_member("deadbeef", false)])
+            .unwrap();
+        let mut core = empty_core();
+        core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
+        // No live set (no registry/roster under the scratch home).
+        core.restore_squads(24, 80, 999);
+        assert_eq!(core.session.squads.len(), 1);
+        let sq = &core.session.squads[0];
+        assert_eq!(sq.name.as_deref(), Some("dead-ws"));
+        assert_eq!(sq.tabs.len(), 1, "zero live members -> one shell tab");
+        let sid = sq.id;
+        assert!(
+            core.squad_members[&sid][0].tombstone,
+            "the dead member is tombstoned at restore"
+        );
+        let loaded = crate::squad_store::load();
+        assert!(
+            loaded.squads[0].members[0].tombstone,
+            "the tombstone is persisted"
+        );
+        // Reap the spawned shell so the test leaks no process.
+        let pids: Vec<u64> = core.panes.keys().copied().collect();
+        for pid in pids {
+            core.reap_pane(pid);
+        }
+    }
+
+    #[test]
+    fn restore_is_a_noop_on_an_empty_store() {
+        let _s = StoreScratch::new("restore-empty");
+        let mut core = empty_core();
+        core.restore_squads(24, 80, 999);
+        assert!(core.session.squads.is_empty(), "nothing persisted -> nothing restored");
     }
 
     #[test]
