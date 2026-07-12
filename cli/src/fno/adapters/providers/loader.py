@@ -157,6 +157,10 @@ def _parse_providers_block(
     """
     raw_records = block.get("records") or []
     active = block.get("active")
+    # Pass the raw value to the pydantic bool field, which coerces "false"/"0"/"no"
+    # correctly and REJECTS garbage. A local bool() would read a quoted "false" as
+    # True and silently arm the credential-slot mutation (peer review, PR#366).
+    auto_switch = block.get("auto_switch", False)
 
     records: list[ProviderRecord] = []
     for raw in raw_records:
@@ -180,7 +184,7 @@ def _parse_providers_block(
             raise ProviderConfigError(": ".join(msg_parts)) from exc
 
     try:
-        config_obj = ProvidersConfig(records=records, active=active)
+        config_obj = ProvidersConfig(records=records, active=active, auto_switch=auto_switch)
     except pydantic.ValidationError as exc:
         pydantic_msg = str(exc)
         phrase = "duplicate_record_ids" if "duplicate_record_ids" in pydantic_msg else ""
@@ -231,6 +235,7 @@ def _parse_providers_block(
                 records=records,
                 active=active,
                 failover=config_obj.failover,
+                auto_switch=config_obj.auto_switch,  # already-coerced bool from the first build
                 agents=parsed_agents,
             )
         except pydantic.ValidationError as exc:
@@ -440,6 +445,12 @@ def save_providers(
     providers_block: dict[str, Any] = {"records": records_raw}
     if config.active is not None:
         providers_block["active"] = config.active
+    # Round-trip auto_switch off the object (only when armed, to keep the default
+    # case clean). Without this a ProvidersConfig(auto_switch=True) written back
+    # would silently disarm; the disk-preserve below only covers a value already
+    # on disk (peer review, PR#366).
+    if config.auto_switch:
+        providers_block["auto_switch"] = True
 
     # Flat config.toml: providers lives at the top level (whole-block replace).
     # If existing was read from a legacy wrapped file, lift its config.* keys up

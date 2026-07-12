@@ -517,7 +517,8 @@ class TestDefaultFailover:
     bg-redispatches when that kind is claude. Controller + settings are
     monkeypatched so no real provider rotation / subprocess fires."""
 
-    def _patch(self, monkeypatch, decision, new_cli="claude", redispatch_result=None, calls=None):
+    def _patch(self, monkeypatch, decision, new_cli="claude", redispatch_result=None,
+               calls=None, auth=None):
         from fno.adapters.providers import failover as fo_mod
         from fno.adapters.providers import loader as loader_mod
         from fno.adapters.providers import dispatch as dispatch_mod
@@ -535,17 +536,24 @@ class TestDefaultFailover:
                 return _Result()
 
         class _Snap:
-            # .id is the record id (pre-swap read); .cli is the kind (post-swap read).
-            id = "claude-primary"
+            # Read AFTER the swap, so it is the swapped-to record: .id is the new
+            # active id, .cli its kind, .auth its auth strategy (US3: "managed"
+            # needs a credential materialization into the shared slot pre-redispatch).
+            id = "claude-secondary"
             cli = new_cli
+        _Snap.auth = auth
 
         monkeypatch.setattr(fo_mod, "FailoverController", _Ctrl)
         monkeypatch.setattr(loader_mod, "read_active_provider_atomic", lambda **kw: _Snap())
         monkeypatch.setattr(dispatch_mod, "_default_settings_path", lambda: "/tmp/settings.yaml")
         if redispatch_result is not None:
-            def _fake_redispatch(cand):
+            def _fake_redispatch(cand, *, pre_spawn=None):
                 if calls is not None:
                     calls.append(cand.short_id)
+                # Honor the real contract: pre_spawn (managed materialize) runs
+                # inside _redispatch; a False result aborts the respawn.
+                if pre_spawn is not None and not pre_spawn():
+                    return False
                 return redispatch_result
             monkeypatch.setattr(recovery, "_redispatch", _fake_redispatch)
 
@@ -603,6 +611,133 @@ class TestDefaultFailover:
         monkeypatch.setattr(dispatch_mod, "_default_settings_path", boom)
         err = recovery.classify_session_error("rate limit")
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "no-swap"
+
+    # --- US3: managed-account materialization hook (auto-switch) ---------------
+
+    def test_managed_swap_materializes_then_redispatches(self, monkeypatch, tmp_path):
+        # AC3-HP: swap lands on an armed managed claude record -> _redispatch runs
+        # with a pre_spawn that materializes the account (after the stop, before
+        # the spawn). Returns "swapped".
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result=True, calls=calls, auth="managed")
+        monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: True)
+        mat: list = []
+        monkeypatch.setattr(recovery, "_materialize_managed_switch",
+                            lambda rid, repo_root=None: mat.append(rid) or True)
+        err = recovery.classify_session_error("usage limit reached")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "swapped"
+        assert mat == ["claude-secondary"]   # materialized the swapped-to record
+        assert calls == [_stale_candidate(tmp_path).short_id]  # via _redispatch
+
+    def test_managed_materialize_fails_is_rotated_no_worker(self, monkeypatch, tmp_path):
+        # Armed, but a live-pin defer / store error makes materialize (the
+        # pre_spawn) return False -> _redispatch aborts the respawn -> nudge.
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result=True, calls=calls, auth="managed")
+        monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: True)
+        monkeypatch.setattr(recovery, "_materialize_managed_switch",
+                            lambda rid, repo_root=None: False)
+        err = recovery.classify_session_error("usage limit reached")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "rotated-no-worker"
+        assert calls == [_stale_candidate(tmp_path).short_id]  # _redispatch ran (stopped worker)
+
+    def test_managed_auto_switch_off_leaves_worker_alive(self, monkeypatch, tmp_path):
+        # Disarmed managed swap: never stop the worker (never _redispatch); leave
+        # it alive for the bounded nudge. codex P1 ordering guard: the exhausted
+        # worker must not be stopped for a switch that will not happen.
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result=True, calls=calls, auth="managed")
+        monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: False)
+        mat = {"called": False}
+        monkeypatch.setattr(recovery, "_materialize_managed_switch",
+                            lambda rid, repo_root=None: mat.__setitem__("called", True) or True)
+        err = recovery.classify_session_error("usage limit reached")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "rotated-no-worker"
+        assert calls == []                    # never stopped/redispatched the worker
+        assert mat["called"] is False         # never materialized
+
+    def test_oauth_dir_swap_skips_materialize(self, monkeypatch, tmp_path):
+        # An oauth_dir claude record needs no materialization (env-var switch at
+        # spawn); _redispatch runs with no pre_spawn hook.
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result=True, calls=calls, auth="oauth_dir")
+        called = {"mat": False, "gate": False}
+        monkeypatch.setattr(recovery, "_auto_switch_enabled",
+                            lambda repo_root=None: called.__setitem__("gate", True) or True)
+        monkeypatch.setattr(recovery, "_materialize_managed_switch",
+                            lambda rid, repo_root=None: called.__setitem__("mat", True) or True)
+        err = recovery.classify_session_error("rate limit")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "swapped"
+        assert called["mat"] is False         # no materialize for oauth_dir
+        assert called["gate"] is False        # auto_switch gate not consulted either
+        assert calls == [_stale_candidate(tmp_path).short_id]
+
+
+class TestMaterializeManagedSwitch:
+    """US3: the managed-account materialize gate (config.providers.auto_switch)."""
+
+    def _fake_config(self, auto_switch, record):
+        class _Cfg:
+            pass
+        c = _Cfg()
+        c.auto_switch = auto_switch
+        c.by_id = {record.id: record} if record is not None else {}
+        return c
+
+    def _managed_record(self):
+        from fno.adapters.providers.model import ProviderRecord
+        return ProviderRecord(id="claude-secondary", name="B", cli="claude", auth="managed")
+
+    def test_auto_switch_off_returns_false_without_touching_slot(self, monkeypatch):
+        from fno.adapters.providers import loader as loader_mod
+        from fno.adapters.providers import managed as managed_mod
+
+        rec = self._managed_record()
+        monkeypatch.setattr(loader_mod, "load_providers",
+                            lambda *a, **k: self._fake_config(False, rec))
+        switched = {"called": False}
+        monkeypatch.setattr(managed_mod, "switch",
+                            lambda *a, **k: switched.__setitem__("called", True))
+        assert recovery._materialize_managed_switch("claude-secondary") is False
+        assert switched["called"] is False   # disarmed: slot never mutated
+
+    def test_auto_switch_on_materializes(self, monkeypatch):
+        from fno.adapters.providers import loader as loader_mod
+        from fno.adapters.providers import managed as managed_mod
+
+        rec = self._managed_record()
+        monkeypatch.setattr(loader_mod, "load_providers",
+                            lambda *a, **k: self._fake_config(True, rec))
+        seen: dict = {}
+        monkeypatch.setattr(managed_mod, "switch",
+                            lambda r, **k: seen.update(id=r.id, by_id=k.get("by_id")))
+        assert recovery._materialize_managed_switch("claude-secondary") is True
+        assert seen["id"] == "claude-secondary"
+
+    def test_switch_deferred_returns_false(self, monkeypatch):
+        from fno.adapters.providers import loader as loader_mod
+        from fno.adapters.providers import managed as managed_mod
+
+        rec = self._managed_record()
+        monkeypatch.setattr(loader_mod, "load_providers",
+                            lambda *a, **k: self._fake_config(True, rec))
+
+        def _defer(*a, **k):
+            raise managed_mod.SwitchDeferred("slot pinned by pid 42")
+        monkeypatch.setattr(managed_mod, "switch", _defer)
+        assert recovery._materialize_managed_switch("claude-secondary") is False
 
 
 class TestNodeIdFromWorktree:
@@ -763,3 +898,28 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is False
         assert calls == []
+
+    def test_pre_spawn_runs_after_stop_release_before_spawn(self, monkeypatch):
+        # codex P1 (US3): the managed materialize (pre_spawn) must run AFTER the
+        # worker is stopped (so it no longer pins the slot) and its claim freed,
+        # and BEFORE the replacement spawns (it must read the new account's creds).
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch)
+        assert recovery._redispatch(
+            self._cand(), pre_spawn=lambda: calls.append(["MATERIALIZE"]) or True) is True
+        stop = self._index_of(calls, ["fno-py", "agents", "stop"])
+        fr = self._index_of(calls, ["fno-py", "claim", "force-release"])
+        mat = next((i for i, c in enumerate(calls) if c == ["MATERIALIZE"]), None)
+        spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
+        assert None not in (stop, fr, mat, spawn)
+        assert stop < mat < spawn      # materialize between the stop and the spawn
+        assert fr < mat                # and after the claim is freed
+
+    def test_pre_spawn_false_aborts_spawn_and_frees_lane(self, monkeypatch):
+        # A False pre_spawn (materialize deferred/failed) → no spawn, lane slot
+        # freed so the node re-dispatches fresh, and False so the caller nudges.
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch)
+        assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
+        assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
+        assert self._index_of(calls, ["fno-py", "claim", "lane-release"]) is not None

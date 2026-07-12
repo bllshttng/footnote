@@ -19,7 +19,11 @@ _BODY_EXCERPT_LEN = 256
 # Body-string matches that turn an HTTP-200 (or successful subprocess) into
 # a swap-triggering quota error. Match is case-insensitive and matches
 # anywhere in the excerpt.
-_QUOTA_BODY_MARKERS = ("rate limit", "quota exceeded")
+# "usage limit" is the claude CLI's own exhaustion phrasing ("Claude usage limit
+# reached"), distinct from the API-path "rate limit" body; without it a claude bg
+# worker dying on its usage limit classified UNKNOWN and got nudged at the dead
+# provider instead of triggering a multi-account auto-switch (US3).
+_QUOTA_BODY_MARKERS = ("rate limit", "quota exceeded", "usage limit")
 
 # Status codes that classify as PROVIDER_5XX swap triggers. 529 is
 # Anthropic's "overloaded" non-standard code; we treat it as a 5XX.

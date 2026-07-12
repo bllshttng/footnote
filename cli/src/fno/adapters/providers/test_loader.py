@@ -110,6 +110,69 @@ class TestLoadProvidersValid:
         assert primary.auth == "oauth_dir"
         assert primary.priority == 10
 
+    def test_auto_switch_defaults_false(self, tmp_path: Path):
+        """US3: config.providers.auto_switch defaults False when the key is absent."""
+        from fno.adapters.providers.loader import load_providers
+
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, _valid_providers_block())
+        assert load_providers(repo_root=tmp_path).auto_switch is False
+
+    def test_auto_switch_parsed_when_set(self, tmp_path: Path):
+        """US3: an operator-set config.providers.auto_switch = true is read through."""
+        from fno.adapters.providers.loader import load_providers
+
+        block = _valid_providers_block()
+        block["config"]["providers"]["auto_switch"] = True
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+        assert load_providers(repo_root=tmp_path).auto_switch is True
+
+    def test_auto_switch_quoted_false_is_false(self, tmp_path: Path):
+        """Peer review (PR#366): a mistyped quoted `"false"` must parse False, not
+        True — pydantic coerces the raw value; a local bool() would arm it."""
+        from fno.adapters.providers.loader import load_providers
+
+        block = _valid_providers_block()
+        block["config"]["providers"]["auto_switch"] = "false"  # quoted string, not a bool
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+        assert load_providers(repo_root=tmp_path).auto_switch is False
+
+    def test_auto_switch_round_trips_through_save(self, tmp_path: Path, monkeypatch):
+        """Peer review (PR#366): save_providers serializes auto_switch=True off the
+        object so a write-back never silently disarms the feature.
+
+        save_providers(scope="project") targets ``$PWD/.fno/config.toml``, and
+        monkeypatch.chdir does NOT update $PWD - so PWD is pinned to tmp_path here
+        or the write escapes the sandbox and clobbers the real config."""
+        from fno.adapters.providers.loader import load_providers, save_providers
+        from fno.adapters.providers.model import ProvidersConfig
+
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, _valid_providers_block())
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        cfg = load_providers(repo_root=tmp_path)
+        armed = ProvidersConfig(records=cfg.records, active=cfg.active, auto_switch=True)
+        save_providers(armed, scope="project")
+        assert settings.read_text().count("auto_switch") == 1   # written to the sandbox file
+        assert load_providers(repo_root=tmp_path).auto_switch is True
+
+    def test_auto_switch_survives_agents_reconstruction(self, tmp_path: Path):
+        """US3 review (PR#366): the agents-path ProvidersConfig rebuild must keep
+        auto_switch, or it reverts to False for anyone using per-agent routing."""
+        from fno.adapters.providers.loader import load_providers
+
+        block = _valid_providers_block()
+        block["config"]["providers"]["auto_switch"] = True
+        block["config"]["agents"] = {"reviewer": {"provider": "claude-primary"}}
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+        result = load_providers(repo_root=tmp_path)
+        assert result.auto_switch is True
+        assert "reviewer" in result.agents
+
 
 # ---------------------------------------------------------------------------
 # AC01.3-EDGE: Empty list / missing section is not an error

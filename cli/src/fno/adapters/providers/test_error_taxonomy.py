@@ -72,6 +72,16 @@ class TestSwapTriggers:
         assert result.error_class is ErrorClass.PROVIDER_4XX_QUOTA
         assert result.triggers_swap is True
 
+    def test_claude_usage_limit_body_classifies_swap(self) -> None:
+        # A claude CLI usage-limit death (the multi-account auto-switch trigger,
+        # US3) prints "usage limit reached", which matched neither prior marker,
+        # so it nudged a rate-limited provider instead of switching accounts.
+        for body in ("Claude usage limit reached. resets at 3pm",
+                      "Claude AI usage limit reached", "USAGE LIMIT reached"):
+            result = normalize(http_status=None, exit_code=None, body=body)
+            assert result.error_class is ErrorClass.PROVIDER_4XX_QUOTA, body
+            assert result.triggers_swap is True, body
+
     def test_body_match_is_case_insensitive(self) -> None:
         for body in ("RATE LIMIT exceeded", "Quota Exceeded", "Rate Limit",
                       "QUOTA EXCEEDED"):
