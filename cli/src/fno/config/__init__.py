@@ -2400,6 +2400,28 @@ class StatusSinkConfig(BaseModel):
         return self
 
 
+class DevBlock(BaseModel):
+    """Maintainer local-dev settings (nested under 'config.dev').
+
+    ``source`` is the machine-local pin the Rust bootstrap reads to re-provision
+    from a checkout instead of the published PyPI wheel when its uv tool venv is
+    wiped (x-88b9). Unset (the default) keeps the frictionless PyPI self-provision
+    for end users; a maintainer sets it to their checkout root to make recovery
+    source-first, matching the repo's "unset = OSS-neutral, set = maintainer
+    choice" pattern (``paths.worktrees_base``).
+
+    The bootstrap reads this key from ``~/.fno/config.toml`` DIRECTLY (fno-free:
+    it runs precisely because ``fno`` is broken). The read is hard-coded in
+    ``crates/fno/src/bootstrap.rs::parse_dev_source`` as ``[dev].source``; the
+    cross-language test in ``cli/tests/unit/test_dev_source_pin.py`` pins the two
+    sides so a rename here can't silently break recovery.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    source: str = ""
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -2433,6 +2455,7 @@ class ConfigBlock(BaseModel):
     work: WorkBlock = Field(default_factory=WorkBlock)
     model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
     mux: MuxBlock = Field(default_factory=MuxBlock)
+    dev: DevBlock = Field(default_factory=DevBlock)
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)

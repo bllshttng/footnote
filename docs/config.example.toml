@@ -360,6 +360,10 @@ attach_digest_threshold_min = 10
 # Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).
 hover_focus = true
 
+[dev]
+# Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default).
+source = ""
+
 [status_fanout]
 # Seconds between status-fanout ticks per project (daemon host).
 interval_secs = 5
