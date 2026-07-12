@@ -160,6 +160,12 @@ def dispatch_env(
             )
         return _env_for_oauth(record, root)
 
+    if record.auth == "managed":
+        # A managed account materializes into the shared default slot
+        # (~/.claude for claude, ~/.codex for codex), so dispatch adds no
+        # CLAUDE_CONFIG_DIR/HOME override - the CLI reads the slot directly.
+        return {}
+
     # api_key path
     return _env_for_api_key(record)
 

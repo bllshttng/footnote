@@ -16,7 +16,7 @@ _RECOGNIZED_API_KEY_NAMES = frozenset(
 )
 
 _CLI_LITERAL = Literal["claude", "gemini", "codex", "openclaw", "hermes"]
-_AUTH_LITERAL = Literal["oauth_dir", "api_key"]
+_AUTH_LITERAL = Literal["oauth_dir", "api_key", "managed"]
 
 _ID_PATTERN = r"^[a-z][a-z0-9-]{0,63}$"
 
@@ -114,6 +114,16 @@ class ProviderRecord(BaseModel):
                     f"auth_strategy_mismatch: {self.id}: "
                     f"auth=api_key env must contain at least one of "
                     f"{sorted(_RECOGNIZED_API_KEY_NAMES)}, got {sorted(self.env.keys())}"
+                )
+        elif self.auth == "managed":
+            # A managed account's credential lives in the store (~/.fno/providers/<id>/),
+            # derived from id; it reads neither field. Reject them so a config typo
+            # that sets one surfaces instead of silently doing nothing.
+            if self.credentials_source is not None or self.env:
+                raise ValueError(
+                    f"auth_strategy_mismatch: {self.id}: "
+                    "auth=managed takes neither credentials_source nor env "
+                    "(the credential is snapshotted into the managed store)"
                 )
         return self
 
