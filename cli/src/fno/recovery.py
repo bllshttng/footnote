@@ -47,6 +47,7 @@ suspended-session recovery is ever observed in the wild.
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -735,7 +736,9 @@ def _resume_command(provider_id: str, repo_root: Optional[str], session_uuid: st
         env = dispatch_env(provider_id, repo_root=Path(repo_root) if repo_root else None)
         cfg = env.get("CLAUDE_CONFIG_DIR")
         if cfg:
-            prefix = f"CLAUDE_CONFIG_DIR={cfg} "
+            # shell-quote: a config dir with spaces (e.g. macOS "Application
+            # Support") must stay one token when the human pastes the command.
+            prefix = f"CLAUDE_CONFIG_DIR={shlex.quote(cfg)} "
     except Exception:  # noqa: BLE001 - best-effort prefix; bare command still resumes
         pass
     return f"{prefix}claude --resume {session_uuid}"

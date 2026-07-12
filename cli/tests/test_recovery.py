@@ -1200,6 +1200,15 @@ class TestNotifyManualResume:
         assert recovery._resume_command("claude-b", "/wt/thread", "U-1") == \
             "CLAUDE_CONFIG_DIR=/home/u/.claude-b claude --resume U-1"
 
+    def test_spacey_config_dir_is_shell_escaped(self, monkeypatch):
+        # A config dir with spaces must stay one shell token when pasted (gemini
+        # review): shlex.quote wraps it so the CLAUDE_CONFIG_DIR assignment holds.
+        from fno.adapters.providers import dispatch as dispatch_mod
+        monkeypatch.setattr(dispatch_mod, "dispatch_env",
+                            lambda pid, **k: {"CLAUDE_CONFIG_DIR": "/Users/u/Application Support/.claude"})
+        assert recovery._resume_command("claude-b", "/wt/thread", "U-1") == \
+            "CLAUDE_CONFIG_DIR='/Users/u/Application Support/.claude' claude --resume U-1"
+
     def test_notify_sends_os_notification_with_command(self, monkeypatch):
         from types import SimpleNamespace
         from fno.notify import _impl as notify_impl
