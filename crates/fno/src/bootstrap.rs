@@ -34,6 +34,7 @@ use std::process::{Command, Stdio};
 /// A bootstrap failure: a human-facing message plus the exit code to use.
 /// Every failure path produces one of these so the shim never panics on an
 /// expected condition (no network, foreign package, exec failure).
+#[derive(Debug)]
 struct BootErr {
     msg: String,
     code: i32,
@@ -190,9 +191,14 @@ fn ensure_uv() -> BootResult<PathBuf> {
 
 /// `uv tool install <source>`. Source is `fno` (PyPI by name) by default, or
 /// the value of `FNO_BOOTSTRAP_WHEEL` (a local wheel path or any uv install
-/// spec) so the channel is testable before the PyPI publish lands.
+/// spec) so the channel is testable before the PyPI publish lands, or a
+/// maintainer's pinned checkout (`config.dev.source`) so editing source never
+/// re-provisions the stale published wheel.
 fn install_wheel(uv: &Path) -> BootResult<()> {
-    let source = install_source(env::var("FNO_BOOTSTRAP_WHEEL").ok().as_deref());
+    let source = install_source(
+        env::var("FNO_BOOTSTRAP_WHEEL").ok().as_deref(),
+        read_dev_source_pin().as_deref(),
+    )?;
     // --force so a half-built or stale tool venv is repaired rather than failing
     // with "already installed" (AC4-FR: never trust a half-provisioned state).
     // We only reach here when no usable install was found, so --force never does
@@ -216,12 +222,91 @@ fn install_wheel(uv: &Path) -> BootResult<()> {
     }
 }
 
-/// Choose the `uv tool install` source: the `FNO_BOOTSTRAP_WHEEL` override when
-/// set and non-empty, else the by-name PyPI package `fno`. Pure for testing.
-fn install_source(override_val: Option<&str>) -> String {
-    match override_val {
-        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => "fno".to_string(),
+/// Choose the `uv tool install` source across three rungs of precedence, pure
+/// for testing:
+///   1. `FNO_BOOTSTRAP_WHEEL` (`override_val`) when set and non-empty.
+///   2. a maintainer's `config.dev.source` pin (`pin`) when set: validated and
+///      expanded to its `<checkout>/cli` build dir.
+///   3. `"fno"` (PyPI by name; the end-user default, byte-identical to before).
+/// A set-but-invalid pin is an error, never a silent PyPI downgrade: a
+/// maintainer who pinned source WANTS to know it is broken, not be handed a
+/// months-stale wheel (US3/AC3).
+fn install_source(override_val: Option<&str>, pin: Option<&str>) -> BootResult<String> {
+    if let Some(v) = override_val {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Ok(v.to_string());
+        }
+    }
+    if let Some(p) = pin {
+        let p = p.trim();
+        if !p.is_empty() {
+            return resolve_pin(p);
+        }
+    }
+    Ok("fno".to_string())
+}
+
+/// Validate a pinned checkout and return its `uv tool install` source
+/// (`<checkout>/cli`, the same wheel-build path `fno update` uses, so the venv
+/// ships `fno-py`). Validity is the strict "`cli/pyproject.toml` present" check
+/// so a pin at the repo root (missing the `cli/` subdir) fails rather than
+/// silently building nothing. A bad pin errors naming `config.dev.source` and
+/// an escape hatch, never falling through to PyPI (US3/AC3).
+fn resolve_pin(pin: &str) -> BootResult<String> {
+    // A config value like `~/src/fno` is common; PathBuf::from won't expand it.
+    let cli = expand_tilde(pin).join("cli");
+    if cli.join("pyproject.toml").is_file() {
+        return Ok(cli.to_string_lossy().into_owned());
+    }
+    Err(BootErr::new(
+        1,
+        format!(
+            "config.dev.source points at '{pin}', which is not an fno checkout \
+             (no cli/pyproject.toml). Fix it (`fno config set config.dev.source \
+             <checkout>`), clear it (`fno config unset config.dev.source`), or \
+             bypass it once (`FNO_BOOTSTRAP_WHEEL=fno`)."
+        ),
+    ))
+}
+
+/// Expand a leading `~`/`~/` to `$HOME` (Rust does not; a config pin like
+/// `~/src/fno` is common). `~user` and non-tilde paths pass through literally.
+fn expand_tilde(p: &str) -> PathBuf {
+    expand_tilde_with(p, home_dir())
+}
+
+/// Pure core of `expand_tilde` (home injected for testing without touching the
+/// process-global `$HOME`). No home resolvable -> the value passes through.
+fn expand_tilde_with(p: &str, home: Option<PathBuf>) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        return home
+            .map(|h| h.join(rest))
+            .unwrap_or_else(|| PathBuf::from(p));
+    }
+    if p == "~" {
+        return home.unwrap_or_else(|| PathBuf::from(p));
+    }
+    PathBuf::from(p)
+}
+
+/// Read the `config.dev.source` pin from `~/.fno/config.toml`, fno-free: we are
+/// in recovery precisely because `fno` is broken, so shelling `fno config get`
+/// is impossible. Global config only (the bootstrap runs independent of cwd).
+/// Best-effort: an absent or malformed file is "no pin" (US2/AC2-ERR).
+fn read_dev_source_pin() -> Option<String> {
+    let cfg = home_dir()?.join(".fno/config.toml");
+    parse_dev_source(&fs::read_to_string(cfg).ok()?)
+}
+
+/// Parse `[dev].source` from a flat config.toml body. Pure (mirrors
+/// `digest_overlay::read_mux_value`); malformed toml, absent key, or an
+/// empty/whitespace value all resolve to `None`.
+fn parse_dev_source(content: &str) -> Option<String> {
+    let t = content.parse::<toml::Table>().ok()?;
+    match t.get("dev")?.as_table()?.get("source")? {
+        toml::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        _ => None,
     }
 }
 
@@ -493,20 +578,119 @@ mod tests {
         assert!(decide_identity("fno", "").is_err());
     }
 
+    /// A unique temp dir laid out as a valid fno checkout (`cli/pyproject.toml`).
+    fn valid_checkout() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let root = env::temp_dir().join(format!(
+            "fno-boot-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("cli")).unwrap();
+        fs::write(root.join("cli/pyproject.toml"), "[project]\nname=\"fno\"\n").unwrap();
+        root
+    }
+
     #[test]
     fn install_source_defaults_to_by_name() {
-        assert_eq!(install_source(None), "fno");
-        assert_eq!(install_source(Some("")), "fno");
-        assert_eq!(install_source(Some("   ")), "fno");
+        // US4/AC (end-user path): no env, no pin -> "fno", byte-identical.
+        assert_eq!(install_source(None, None).unwrap(), "fno");
+        assert_eq!(install_source(Some(""), None).unwrap(), "fno");
+        assert_eq!(install_source(Some("   "), Some("  ")).unwrap(), "fno");
     }
 
     #[test]
     fn install_source_honors_override() {
         assert_eq!(
-            install_source(Some("/tmp/fno-0.1.0-py3-none-any.whl")),
+            install_source(Some("/tmp/fno-0.1.0-py3-none-any.whl"), None).unwrap(),
             "/tmp/fno-0.1.0-py3-none-any.whl"
         );
-        assert_eq!(install_source(Some("  fno==0.1.0  ")), "fno==0.1.0");
+        assert_eq!(
+            install_source(Some("  fno==0.1.0  "), None).unwrap(),
+            "fno==0.1.0"
+        );
+    }
+
+    #[test]
+    fn install_source_env_wins_over_pin() {
+        // AC4-EDGE: rung-1 env override beats a set rung-2 pin.
+        let root = valid_checkout();
+        assert_eq!(
+            install_source(Some("/env/wheel.whl"), Some(root.to_str().unwrap())).unwrap(),
+            "/env/wheel.whl"
+        );
+    }
+
+    #[test]
+    fn install_source_valid_pin_expands_to_cli() {
+        // US1/AC1-HP: a valid pin -> `<checkout>/cli` (the wheel-build path).
+        let root = valid_checkout();
+        assert_eq!(
+            install_source(None, Some(root.to_str().unwrap())).unwrap(),
+            root.join("cli").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn install_source_invalid_pin_fails_loud() {
+        // US3/AC3-FR: a set-but-invalid pin errors naming config.dev.source and
+        // the bad path; it does NOT fall through to "fno".
+        let e = install_source(None, Some("/no/such/checkout"))
+            .unwrap_err()
+            .msg;
+        assert!(e.contains("config.dev.source"), "{e}");
+        assert!(e.contains("/no/such/checkout"), "{e}");
+    }
+
+    #[test]
+    fn install_source_pin_at_repo_root_without_cli_fails() {
+        // A pin to a dir that exists but lacks cli/pyproject.toml is invalid
+        // (strict check catches "pinned the repo root, not cli/").
+        let root = env::temp_dir().join(format!("fno-boot-bare-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        assert!(install_source(None, Some(root.to_str().unwrap())).is_err());
+    }
+
+    #[test]
+    fn expand_tilde_expands_leading_home() {
+        let home = PathBuf::from("/home/me");
+        assert_eq!(
+            expand_tilde_with("~/src/fno", Some(home.clone())),
+            home.join("src/fno")
+        );
+        assert_eq!(expand_tilde_with("~", Some(home.clone())), home);
+        // absolute + `~user` (no slash) pass through unchanged.
+        assert_eq!(
+            expand_tilde_with("/abs/fno", Some(home.clone())),
+            PathBuf::from("/abs/fno")
+        );
+        assert_eq!(expand_tilde_with("~foo", Some(home)), PathBuf::from("~foo"));
+        // no home -> literal, never a panic.
+        assert_eq!(expand_tilde_with("~/x", None), PathBuf::from("~/x"));
+    }
+
+    #[test]
+    fn parse_dev_source_reads_the_pin() {
+        // US2: pure parse of [dev].source from a flat config.toml body.
+        assert_eq!(
+            parse_dev_source("[dev]\nsource = \"/home/me/fno\"\n").as_deref(),
+            Some("/home/me/fno")
+        );
+        // trims whitespace-padded value
+        assert_eq!(
+            parse_dev_source("[dev]\nsource = \"  /p  \"\n").as_deref(),
+            Some("/p")
+        );
+    }
+
+    #[test]
+    fn parse_dev_source_degrades_on_missing_and_malformed() {
+        // AC2-ERR: malformed/absent config is "no pin", never fatal.
+        assert_eq!(parse_dev_source("not valid toml {{{"), None);
+        assert_eq!(parse_dev_source(""), None);
+        assert_eq!(parse_dev_source("[other]\nkey = 1\n"), None);
+        assert_eq!(parse_dev_source("[dev]\nsource = \"\"\n"), None);
     }
 
     #[test]
