@@ -3547,6 +3547,7 @@ async fn handle_stdin(
                         let _ = raw_out(b"\x07");
                     }
                 }
+                break;
             }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
@@ -8111,7 +8112,7 @@ mod tests {
         let mut carry = Vec::new();
         let mut buf: Vec<u8> = Vec::new();
 
-        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x02>", &mut buf)
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x02>leak", &mut buf)
             .await
             .unwrap();
 
@@ -8124,6 +8125,11 @@ mod tests {
                 tab: 1,
                 delta: 1
             })
+        );
+        assert_eq!(
+            cur.position() as usize,
+            cur.get_ref().len(),
+            "same-chunk bytes after the chord are swallowed"
         );
     }
 
