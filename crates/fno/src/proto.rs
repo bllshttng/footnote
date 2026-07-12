@@ -138,7 +138,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// `AgentRow` reads are `#[serde(default)]`, keeping a v24 reader wire-tolerant.
 /// (v24 was taken by x-0090's `AgentRow.tab`/`cwd_base`, so this re-bumps per
 /// the second-to-merge rule the v17/v18/v20 churn established.)
-pub const PROTO_VERSION: u32 = 25;
+///
+/// v26 (x-76ea): `Command::StopAgent { name }` / `Command::RemoveAgent { name }`
+/// give the sideline a per-row lifecycle verb (`x` on a live row stops it, on an
+/// exited row removes it), server-shelled to `fno-agents stop|rm <name>`. Both
+/// validate the name against the current agents catalog server-side and refuse
+/// an `external: true` roster row (owned by the claude daemon, not the fno
+/// registry) with a notice.
+pub const PROTO_VERSION: u32 = 26;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -688,6 +695,23 @@ pub enum Command {
     DismissMember {
         squad: u64,
         attach_id: String,
+    },
+    /// (v26, x-76ea) Stop a live agent row from the sideline: the server shells
+    /// `fno-agents stop <name>` (idempotent - already-exited is a clean no-op).
+    /// `name` is validated against the current agents catalog server-side; a
+    /// stale name is refused fail-closed with a notice, like `FocusPane`. An
+    /// `external: true` roster row is refused (the claude daemon owns it, not the
+    /// fno registry). The row's exited flag flips on the next registry poll.
+    StopAgent {
+        name: String,
+    },
+    /// (v26, x-76ea) Remove an EXITED agent row: the server shells `fno-agents
+    /// rm <name>`. Refused with a notice when the named row is still live
+    /// (stop-then-rm ordering, mirrored by the CLI's own live-row refusal) or
+    /// `external`. Same catalog validation as `StopAgent`; the row vanishes on
+    /// the next registry poll.
+    RemoveAgent {
+        name: String,
     },
 }
 
