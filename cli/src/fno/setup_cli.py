@@ -547,6 +547,16 @@ def wizard_cmd(
     typer.echo("\nCodex/Gemini SessionStart context hooks:")
     offer_cli_hooks(confirm_fn=rules_confirm_fn)
 
+    # Optional capstone: append a marker-fenced footnote guidance block to the
+    # host's AGENTS.md/CLAUDE.md so codex/gemini (and humans) read it natively.
+    # Opt-in, default No; a first-time decline is durable, so setup never re-nags.
+    from fno.setup.managed_block import offer_managed_block
+
+    typer.echo("\nHost AGENTS.md/CLAUDE.md footnote block:")
+    offer_managed_block(
+        _repo_root(), confirm_fn=rules_confirm_fn, echo_fn=typer.echo
+    )
+
     # Optional capstone: wire the /fno:* slash commands into the agent CLIs on
     # PATH. A CLI-only install has the binary but not the slash commands; this
     # lets that user opt into the agent door without hunting the docs.
