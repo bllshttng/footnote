@@ -711,6 +711,46 @@ if [[ ! -f "$STATE_FILE" ]]; then
     fi
   fi
 
+  # ── in_review dispatch guard (x-2dc5) ─────────────────────────────
+  # A FRESH named-node dispatch (/target <id>, fno target start <id>, direct
+  # init) must not re-launch a node that already carries an open, unmerged PR
+  # (derives _status == in_review) - it would redo shipped work and race a
+  # second PR. Lives inside this fresh-init branch ONLY: a resume (valid state
+  # file present) never reaches here, so same-worktree resume and handoff-into-
+  # existing-state are exempt. Runs BEFORE the manifest write so a refusal
+  # leaves no stub for the stop hook to archive. The live-double-dispatch case
+  # is already caught by the claim acquire below; this closes the dead-prior-
+  # session, PR-still-open gap the free claim does not. Fail-open: refuse only
+  # on an exact in_review read - any error/empty/other-status proceeds
+  # unchanged. _GRAPH_FILE is hoisted here (was defined in the claim block).
+  _GRAPH_FILE="${HOME}/.fno/graph.json"
+  _GUARD_NODE=""
+  if [[ "$INITIAL_INPUT" =~ ^ab-[0-9a-f]{8}$ ]] \
+     || { [[ "$INITIAL_INPUT" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
+          && grep -q "\"${INITIAL_INPUT}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
+    _GUARD_NODE="$INITIAL_INPUT"
+  fi
+  if [[ -n "$_GUARD_NODE" && "${TARGET_ALLOW_IN_REVIEW:-}" != "1" ]]; then
+    _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field _status 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$_GUARD_STATUS" == "in_review" ]]; then
+      _GUARD_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
+      cat >&2 <<EOF
+[init-target-state] REFUSED: node $_GUARD_NODE is in_review (open PR${_GUARD_PR:+ #$_GUARD_PR}).
+
+A fresh /target would redo shipped work and race a second PR against the open one.
+
+Pick ONE:
+  1) Address review on the existing PR:   /pr check
+  2) The PR is stale/abandoned and you really want a fresh run:
+       TARGET_ALLOW_IN_REVIEW=1 <re-run your target command>
+
+Refusing to write state file.
+EOF
+      exit 1
+    fi
+  fi
+  unset TARGET_ALLOW_IN_REVIEW
+
   # ── Provider + cross-project ──────────────────────────────────────
   CROSS_PROJECT="${TARGET_CROSS_PROJECT:-false}"
   PROVIDER="$(detect_provider)"
@@ -899,10 +939,12 @@ EOF
   mv "$local_temp" "$STATE_FILE"
 
   # ── Graph + node claim (gate-provenance phase 02b; ab-fcf9cec5) ───
-  _GRAPH_FILE="${HOME}/.fno/graph.json"
+  # _GRAPH_FILE + node-id resolution hoisted to the in_review guard above (same
+  # fresh-init branch): _GUARD_NODE already holds the resolved id-input, so reuse
+  # it instead of re-running the identical regex + graph grep.
   _NODE_ID=""
-  if [[ "$INITIAL_INPUT" =~ ^ab-[0-9a-f]{8}$ ]] || { [[ "$INITIAL_INPUT" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] && grep -q "\"${INITIAL_INPUT}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
-    _NODE_ID="$INITIAL_INPUT"
+  if [[ -n "$_GUARD_NODE" ]]; then
+    _NODE_ID="$_GUARD_NODE"
   elif [[ -f "$_GRAPH_FILE" && -n "$INITIAL_PLAN_PATH" ]]; then
     _NODE_ID=$(python3 - "$_GRAPH_FILE" "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' 2>/dev/null || true
 import json, os, sys
