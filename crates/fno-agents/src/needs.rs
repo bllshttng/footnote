@@ -198,8 +198,15 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
 /// check is a green OPEN unreviewed block past the fires floor is `review_wedged`
 /// - a later `allow` or a termination clears it (the latest event wins).
 fn classify(acc: &SessionAcc, fires_floor: u64) -> Option<(&'static str, String, String)> {
+    // Compare by epoch, not lexically: a Python-isoformat termination ts
+    // (`...00.5`, no Z) would sort BEFORE a same-second Z-suffixed loop_check
+    // (`.` 46 < `Z` 90) and misclassify a real stop as still-looping. Fall back
+    // to a lexical compare only when a ts is unparseable.
     let terminated = match (&acc.latest_term, &acc.latest_loop) {
-        (Some(t), Some(l)) => t.ts >= l.ts,
+        (Some(t), Some(l)) => match (to_epoch_lenient(&t.ts), to_epoch_lenient(&l.ts)) {
+            (Some(ts), Some(ls)) => ts >= ls,
+            _ => t.ts >= l.ts,
+        },
         (Some(_), None) => true,
         (None, _) => false,
     };
@@ -592,6 +599,32 @@ mod tests {
         .join("\n");
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
         assert_eq!(items[0].kind, "review_wedged");
+    }
+
+    #[test]
+    fn termination_with_fractional_ts_still_wins_over_z_loop_check() {
+        // Lexically ".5" < "Z", so a same-second fractional termination would
+        // sort BEFORE the loop_check and misclassify a real stop; epoch compare
+        // fixes it (gemini HIGH finding).
+        let events = [
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "s",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                5,
+            ),
+            termination("2026-07-03T02:00:00.5", "s", "Budget"),
+        ]
+        .join("\n");
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].kind, "budget_stop",
+            "the termination wins despite its fractional ts"
+        );
     }
 
     #[test]
