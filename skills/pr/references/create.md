@@ -226,6 +226,8 @@ through the whole review window and a lapsed claim lets the 5-min dispatcher
 re-spawn a finished node (x-a166). Best-effort: a stamp failure is logged, never
 fatal; re-stamping the same PR is a no-op.
 
+This is the *fast path* only: `fno-agents finalize` re-runs the same stamp at every terminal loop decision as a deterministic backstop (`stamp_node_pr`), so a skipped step here still gets stamped at session end. Both are idempotent - do NOT dedupe them into one.
+
 ```bash
 NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | tr -d "\"'")
 if [[ -n "$NODE_ID" && "$NODE_ID" != "null" && -n "$PR_NUMBER" ]]; then
