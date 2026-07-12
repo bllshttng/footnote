@@ -22,12 +22,16 @@ token, bearer, or credential material is ever logged, emitted, or persisted.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -35,12 +39,21 @@ from fno.adapters.providers.model import ProviderRecord
 
 logger = logging.getLogger(__name__)
 
-PROBE_TIMEOUT_SECONDS = 5
+PROBE_TIMEOUT_SECONDS = 10  # matches Claude Code / orca's own 10s usage-fetch budget
 
-# [VERIFY-AT-IMPL] The claude OAuth usage endpoint orca's `claude-usage` module
-# and Claude Code's own `/usage` read. Confirm host, path, auth header shape,
-# and response schema against a real account before merge.
+# The claude OAuth usage endpoint Claude Code's `/usage` and orca's claude-fetcher
+# read. Verified live against a real account (x-6bcf): the response is top-level
+# window objects (five_hour / seven_day), each `{utilization: 0-100 float,
+# resets_at: ISO-8601 string}` - NOT a `windows[]` array of epoch floats.
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_CLAUDE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
+_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item (orca-verified)
+# The API's known window keys mapped to our short labels. The response also
+# carries model-specific weekly windows (seven_day_opus, seven_day_sonnet, ...);
+# those are captured generically by _parse_claude_windows (any five_hour /
+# seven_day* object) so a maxed Opus weekly binds headroom instead of being
+# dropped, letting Opus work dispatch until the reactive 429 (x-6bcf review).
+_CLAUDE_KNOWN_LABELS = {"five_hour": "5h", "seven_day": "weekly"}
 
 
 def _clamp_pct(value: float) -> float:
@@ -99,59 +112,156 @@ class UsageSnapshot:
 def _read_claude_bearer(record: ProviderRecord) -> str | None:
     """Read the OAuth access token from the record's resolved credentials dir.
 
-    The token lives at ``<credentials_source>/.credentials.json`` (Claude
-    Code's store) and rotates on CLI refresh, so it is read fresh per probe
-    and never cached. Returns None on any failure (missing dir, keychain-only
-    auth in a headless shell, malformed JSON, missing key).
+    Deprecated single-token shim: returns the FIRST candidate (see
+    :func:`_claude_bearer_candidates`). Kept for callers/tests that want one
+    token; the probe itself tries every candidate because a scoped Keychain
+    item can hold a STALE token (401) while the unscoped one is live.
     """
-    src = record.credentials_source
-    if src is None:
+    cands = _claude_bearer_candidates(record)
+    return cands[0] if cands else None
+
+
+def _token_from_blob(blob: str | None) -> str | None:
+    """Extract ``claudeAiOauth.accessToken`` from a credential JSON blob."""
+    if not blob:
         return None
-    # [VERIFY-AT-IMPL] credentials.json layout: {"claudeAiOauth": {"accessToken": ...}}
-    cred_path = Path(src) / ".credentials.json"
     try:
-        raw = json.loads(cred_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = json.loads(blob)
+    except (json.JSONDecodeError, ValueError):
         return None
-    if not isinstance(raw, dict):
-        return None
-    oauth = raw.get("claudeAiOauth")
-    if isinstance(oauth, dict):
-        token = oauth.get("accessToken")
-        if isinstance(token, str) and token:
-            return token
+    if isinstance(raw, dict):
+        oauth = raw.get("claudeAiOauth")
+        if isinstance(oauth, dict):
+            token = oauth.get("accessToken")
+            if isinstance(token, str) and token:
+                return token
     return None
 
 
-def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
-    """Parse the claude usage payload into windows. [VERIFY-AT-IMPL] shape.
+def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
+    """All candidate OAuth bearer tokens for ``record``, in preference order.
 
-    Expected shape (confirm against a real account): a ``windows`` list of
-    ``{label, utilization | used_pct, resets_at | reset_at}``. A malformed
-    entry is skipped, not raised - drift degrades to fewer/no windows.
+    Claude Code stores the token in a ``<credentials_source>/.credentials.json``
+    file (Linux / symlinked setups) OR the macOS Keychain (the darwin default,
+    where no file exists - the reason a file-only read returned None here). The
+    Keychain item is scoped by config dir (``Claude Code-credentials-<sha256[:8]>``)
+    with the unscoped ``Claude Code-credentials`` as fallback. BOTH can exist,
+    and a stale scoped item yields a 401 while the unscoped one is live - so we
+    return every distinct token and let the probe try each until one works. All
+    read fresh per probe (tokens rotate); never cached, never logged.
+    """
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def _add(tok: str | None) -> None:
+        if tok and tok not in seen:
+            seen.add(tok)
+            tokens.append(tok)
+
+    src = record.credentials_source
+    if src is not None:
+        try:
+            _add(_token_from_blob((Path(src) / ".credentials.json").read_text(encoding="utf-8")))
+        except OSError:
+            pass
+    for blob in _read_claude_keychain_blobs(src):
+        _add(_token_from_blob(blob))
+    return tokens
+
+
+def _read_claude_keychain_blobs(config_dir: Path | None) -> list[str]:
+    """Return the raw credential blobs from every candidate Keychain item.
+
+    Tries the config-dir-scoped item first, then the unscoped one (orca's
+    ordering). Returns BOTH when both exist (a stale scoped + a live unscoped is
+    the observed reality). Non-darwin or a denied access prompt yields [].
+    """
+    if sys.platform != "darwin":
+        return []
+    account = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+    services: list[str] = []
+    if config_dir is not None:
+        suffix = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
+        services.append(f"{_CLAUDE_KEYCHAIN_SERVICE}-{suffix}")
+    services.append(_CLAUDE_KEYCHAIN_SERVICE)
+    blobs: list[str] = []
+    for service in services:
+        try:
+            out = subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode == 0 and out.stdout.strip():
+            blobs.append(out.stdout.strip())
+    return blobs
+
+
+def _iso_to_epoch(value: Any) -> float | None:
+    """Parse an ISO-8601 string (or a bare epoch) to unix epoch seconds, or None.
+
+    The claude usage API returns ``resets_at`` as an ISO-8601 string
+    (``2026-07-12T02:09:59.521372+00:00``); accept a numeric epoch too for
+    forward-safety if the shape ever changes.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        # Py<3.11's fromisoformat rejects a trailing 'Z'; normalize to +00:00.
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _claude_window_label(api_key: str) -> str:
+    """Short label for a claude usage window key.
+
+    ``five_hour`` -> ``5h``, ``seven_day`` -> ``weekly``, and a model-specific
+    ``seven_day_opus`` -> ``weekly-opus`` so display + attribution stay legible.
+    """
+    known = _CLAUDE_KNOWN_LABELS.get(api_key)
+    if known is not None:
+        return known
+    if api_key.startswith("seven_day_"):
+        return "weekly-" + api_key[len("seven_day_"):]
+    return api_key
+
+
+def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
+    """Parse the claude ``/api/oauth/usage`` payload into windows.
+
+    Verified live (x-6bcf): the payload has top-level window OBJECTS keyed by
+    name, each ``{utilization: float already on a 0-100 scale, resets_at:
+    ISO-8601 string, ...dollar fields}``. Includes the general ``five_hour`` /
+    ``seven_day`` AND every model-specific weekly (``seven_day_opus``,
+    ``seven_day_sonnet``, ...) so a maxed model window binds headroom rather than
+    being silently dropped (x-6bcf review). The obfuscated promo/experimental
+    buckets (``tangelo``, ``nimbus_quill``, ...) do not match the
+    ``five_hour``/``seven_day*`` prefix and are excluded. A window whose object
+    is absent/null or missing either field is skipped (never a raise).
     """
     if not isinstance(payload, dict):
         return ()
-    raw_windows = payload.get("windows")
-    if not isinstance(raw_windows, list):
-        return ()
     out: list[UsageWindow] = []
-    for entry in raw_windows:
-        if not isinstance(entry, dict):
+    for api_key, w in payload.items():
+        if not (api_key == "five_hour" or api_key.startswith("seven_day")):
             continue
-        label = entry.get("label") or entry.get("name")
-        pct = entry.get("used_pct")
-        if pct is None:
-            pct = entry.get("utilization")
-        resets = entry.get("resets_at")
-        if resets is None:
-            resets = entry.get("reset_at")
+        if not isinstance(w, dict):
+            continue
+        util = w.get("utilization")
+        epoch = _iso_to_epoch(w.get("resets_at"))
+        if util is None or epoch is None:
+            continue
         try:
             out.append(
                 UsageWindow(
-                    label=str(label) if label else "window",
-                    used_pct=float(pct),
-                    resets_at=float(resets),
+                    label=_claude_window_label(api_key),
+                    used_pct=float(util),
+                    resets_at=epoch,
                 )
             )
         except (TypeError, ValueError):
@@ -160,34 +270,42 @@ def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
 
 
 def _probe_claude(record: ProviderRecord, now: float) -> UsageSnapshot | None:
-    """Probe the claude OAuth usage endpoint. [VERIFY-AT-IMPL] endpoint + auth."""
-    bearer = _read_claude_bearer(record)
-    if not bearer:
-        return None
-    req = urllib.request.Request(
-        _CLAUDE_USAGE_URL,
-        headers={
-            "Authorization": f"Bearer {bearer}",
-            "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "fno-quota-probe",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_SECONDS) as resp:
-            body = resp.read()
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return None
-    try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    windows = _parse_claude_windows(payload)
-    return UsageSnapshot(
-        provider_id=record.id,
-        windows=windows,
-        probed_at=now,
-        source="oauth-endpoint",
-    )
+    """Probe the claude ``/api/oauth/usage`` endpoint (verified x-6bcf).
+
+    Tries every candidate bearer token until one returns 200: a stale scoped
+    Keychain item 401s while the live unscoped item succeeds, so a single-token
+    probe would silently fail. A 401/403 skips to the next token; any other
+    network error aborts (fail-open None).
+    """
+    for bearer in _claude_bearer_candidates(record):
+        req = urllib.request.Request(
+            _CLAUDE_USAGE_URL,
+            headers={
+                "Authorization": f"Bearer {bearer}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": _CLAUDE_USER_AGENT,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_SECONDS) as resp:
+                body = resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                continue  # stale/invalid token - try the next candidate
+            return None
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return None
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return UsageSnapshot(
+            provider_id=record.id,
+            windows=_parse_claude_windows(payload),
+            probed_at=now,
+            source="oauth-endpoint",
+        )
+    return None
 
 
 def _codex_home() -> Path:
@@ -217,40 +335,53 @@ def _latest_codex_session(record: ProviderRecord) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _parse_codex_rate_limits(payload: Any) -> tuple[UsageWindow, ...]:
-    """Parse a codex ``rate_limits`` payload into windows. [VERIFY-AT-IMPL].
+def _find_rate_limits(obj: Any) -> dict | None:
+    """Recursively locate the first ``rate_limits`` dict in a codex event.
 
-    Expected shape (confirm against a live codex): a ``rate_limits`` object
-    with ``primary`` (~5h) and ``secondary`` (weekly) sub-objects, each
-    ``{used_percent, resets_in_seconds}``. Offsets are converted to absolute
-    epochs against the event's own timestamp when present, else ``now``.
+    Verified live (x-6bcf): the shape is an ``event_msg`` line
+    ``{timestamp, type, payload}`` with ``rate_limits`` at ``payload.rate_limits``.
+    Searching recursively keeps the probe robust if a codex version re-nests it.
     """
-    if not isinstance(payload, dict):
+    if isinstance(obj, dict):
+        rl = obj.get("rate_limits")
+        if isinstance(rl, dict):
+            return rl
+        for v in obj.values():
+            found = _find_rate_limits(v)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_rate_limits(v)
+            if found is not None:
+                return found
+    return None
+
+
+def _parse_codex_rate_limits(payload: Any) -> tuple[UsageWindow, ...]:
+    """Parse a codex ``rate_limits`` payload into windows.
+
+    Verified live (x-6bcf): ``rate_limits`` has ``primary`` (~5h) and
+    ``secondary`` (weekly) sub-objects, each ``{used_percent: 0-100 float,
+    resets_at: ABSOLUTE unix epoch seconds, window_minutes: int}``. ``resets_at``
+    is absolute (NOT an offset), so it is used directly. A sub-object missing
+    either field is skipped.
+    """
+    rl = _find_rate_limits(payload)
+    if rl is None:
         return ()
-    rl = payload.get("rate_limits")
-    if not isinstance(rl, dict):
-        return ()
-    base_ts = payload.get("ts")
-    try:
-        anchor = float(base_ts) if base_ts is not None else time.time()
-    except (TypeError, ValueError):
-        anchor = time.time()
     out: list[UsageWindow] = []
     for key, label in (("primary", "5h"), ("secondary", "weekly")):
         sub = rl.get(key)
         if not isinstance(sub, dict):
             continue
         pct = sub.get("used_percent")
-        resets_in = sub.get("resets_in_seconds")
-        if pct is None or resets_in is None:
+        resets_at = sub.get("resets_at")
+        if pct is None or resets_at is None:
             continue
         try:
             out.append(
-                UsageWindow(
-                    label=label,
-                    used_pct=float(pct),
-                    resets_at=anchor + float(resets_in),
-                )
+                UsageWindow(label=label, used_pct=float(pct), resets_at=float(resets_at))
             )
         except (TypeError, ValueError):
             continue
