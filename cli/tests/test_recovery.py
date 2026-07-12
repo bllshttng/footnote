@@ -703,7 +703,7 @@ class TestDefaultFailover:
         from fno.adapters.providers.failover import SwapDecision
 
         self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude", auth="oauth_dir")
-        monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: None)
+        monkeypatch.setattr(recovery, "_worktree_is_node_less", lambda cwd: True)
         seen: dict = {}
         monkeypatch.setattr(
             recovery, "_revive_bg_thread",
@@ -716,13 +716,13 @@ class TestDefaultFailover:
         assert seen == {"short": "cccc3333", "root": str(tmp_path), "managed": False}
 
     def test_node_bound_worker_skips_revival(self, monkeypatch, tmp_path):
-        # A candidate whose cwd DOES resolve a node stays on the _redispatch path.
+        # A candidate whose worktree HAS a manifest stays on the _redispatch path.
         from fno.adapters.providers.failover import SwapDecision
 
         calls: list = []
         self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
                     redispatch_result=True, calls=calls, auth="oauth_dir")
-        monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: "x-node")
+        monkeypatch.setattr(recovery, "_worktree_is_node_less", lambda cwd: False)
         monkeypatch.setattr(
             recovery, "_revive_bg_thread",
             lambda *a, **k: pytest.fail("revival must not run for a node-bound worker"))
@@ -731,6 +731,27 @@ class TestDefaultFailover:
         err = recovery.classify_session_error("rate limit")
         assert recovery._default_failover(cand, err) == "swapped"
         assert calls == ["dddd4444"]
+
+    def test_unreadable_manifest_stays_node_bound(self, monkeypatch, tmp_path):
+        # Finding 1: a real node-bound worker whose manifest read transiently fails
+        # (._node_id_from_worktree -> None) must NOT misroute into revival. The
+        # gate is confirmed manifest ABSENCE, so an unreadable manifest (is_node_less
+        # False) falls through to _redispatch and its bounded nudge, not a revival.
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result=False, calls=calls, auth="oauth_dir")
+        monkeypatch.setattr(recovery, "_worktree_is_node_less", lambda cwd: False)
+        monkeypatch.setattr(
+            recovery, "_revive_bg_thread",
+            lambda *a, **k: pytest.fail("a read-miss worker must not revive"))
+        cand = recovery.Candidate(short_id="eeee0000", sock_path="/tmp/e0.sock",
+                                  jobs_dir=tmp_path, cwd=str(tmp_path), name="node-w")
+        err = recovery.classify_session_error("rate limit")
+        # redispatch returned False -> rotated-no-worker (nudge), never notified.
+        assert recovery._default_failover(cand, err) == "rotated-no-worker"
+        assert calls == ["eeee0000"]
 
 
 class TestMaterializeManagedSwitch:
@@ -1117,6 +1138,44 @@ class TestRespawnBgResume:
     def test_spawn_failure_returns_false(self, monkeypatch):
         self._patch_run(monkeypatch, spawn_rc=1)
         assert recovery._respawn_bg_resume(self._cand(), "U-abc") is False
+
+    def test_no_name_bails_without_spawn(self, monkeypatch):
+        # Finding 2: with no name we cannot stop the dead thread, and the node-less
+        # path has no claim+init backstop against a double, so a blind --resume
+        # spawn could put two supervisors on one transcript. Bail (False), spawn
+        # nothing (the caller notifies).
+        calls = self._patch_run(monkeypatch)
+        cand = recovery.Candidate(short_id="ffff6666", sock_path="/tmp/f.sock",
+                                  jobs_dir=None, cwd="/wt/thread", name=None)
+        assert recovery._respawn_bg_resume(cand, "U-abc") is False
+        assert calls == []   # neither stop nor spawn ran
+
+
+class TestWorktreeIsNodeLess:
+    """Finding 1: revival gates on confirmed manifest ABSENCE, so an unreadable /
+    transiently-unreachable manifest never misroutes a node-bound worker."""
+
+    def test_absent_manifest_is_node_less(self, tmp_path):
+        (tmp_path / ".fno").mkdir()
+        assert recovery._worktree_is_node_less(str(tmp_path)) is True
+
+    def test_present_manifest_is_not_node_less(self, tmp_path):
+        fno = tmp_path / ".fno"
+        fno.mkdir()
+        (fno / "target-state.md").write_text("graph_node_id: x-1\n", encoding="utf-8")
+        assert recovery._worktree_is_node_less(str(tmp_path)) is False
+
+    def test_existing_manifest_is_not_node_less_regardless_of_content(self, tmp_path):
+        # A present-but-garbage manifest still means a /target worker (a read miss
+        # must not read as node-less): it exists, so treat it as node-bound.
+        fno = tmp_path / ".fno"
+        fno.mkdir()
+        (fno / "target-state.md").write_text("\x00 not utf parseable", encoding="latin-1")
+        assert recovery._worktree_is_node_less(str(tmp_path)) is False
+
+    def test_missing_fno_dir_is_not_node_less(self, tmp_path):
+        # No .fno at all, or a broken .fno symlink: cannot confirm node-less-ness.
+        assert recovery._worktree_is_node_less(str(tmp_path)) is False
 
 
 class TestNotifyManualResume:

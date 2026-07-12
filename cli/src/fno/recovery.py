@@ -447,6 +447,30 @@ def _node_id_from_worktree(cwd: str) -> Optional[str]:
     return None
 
 
+def _worktree_is_node_less(cwd: str) -> bool:
+    """True ONLY when we can POSITIVELY confirm the worktree runs no ``/target``
+    session - a genuine node-less bg thread.
+
+    ``_node_id_from_worktree`` returns None for two different things (no node in
+    the manifest AND an unreadable manifest), so it cannot gate revival: a
+    node-bound worker whose ``.fno`` symlink transiently breaks mid-repack would
+    read as node-less and be misrouted into transcript revival (which lacks the
+    claim handling ``_redispatch`` does). Gate on manifest ABSENCE instead: the
+    ``.fno`` dir must be reachable AND carry no ``target-state.md``. Any ambiguity
+    (unreachable ``.fno`` symlink, an existing-but-unreadable manifest, a stat
+    error) returns False, so a transient failure falls through to the node-bound
+    path and its bounded nudge rather than a wrong revival."""
+    try:
+        fno_dir = Path(cwd) / ".fno"
+        if not fno_dir.is_dir():
+            # No .fno, OR a transiently-broken .fno symlink: cannot confirm
+            # node-less-ness, so treat as node-bound (conservative).
+            return False
+        return not (fno_dir / "target-state.md").exists()
+    except OSError:
+        return False
+
+
 def _node_is_done(node: str) -> bool:
     """True iff ``node`` resolves in the graph and is already ``done``.
 
@@ -672,8 +696,10 @@ def _target_projects_dir(provider_id: str, repo_root: Optional[str]) -> Path:
 
     ``dispatch_env`` gives the account's ``CLAUDE_CONFIG_DIR`` (managed shares the
     default ``~/.claude``; oauth_dir points at its own dir). Any lookup miss
-    degrades to ``~/.claude`` - a wrong guess only costs a degrade to the notify
-    path, never a resume against a missing transcript."""
+    degrades to ``~/.claude``. A wrong guess here only mis-decides visibility; the
+    real backstop against a resume onto a missing transcript is the respawn itself,
+    which spawns under the same account env and fails (falling to notify) when that
+    env cannot reach the transcript."""
     base = Path.home() / ".claude"
     try:
         from fno.adapters.providers.dispatch import dispatch_env
@@ -749,16 +775,21 @@ def _respawn_bg_resume(
     cwd = getattr(candidate, "cwd", None)
     name = getattr(candidate, "name", None)
     agent = f"revive-{candidate.short_id}"
+    if not name:
+        # No name to stop the dead thread by. The node-less path has no claim +
+        # `target init` backstop against a double (unlike _redispatch), so a blind
+        # --resume spawn could put two live supervisors on one transcript. Bail so
+        # the caller notifies instead of risking the double.
+        return False
     try:
-        if name:
-            stopped = subprocess.run(
-                [*_subprocess_util.fno_py_cmd(), "agents", "stop", name],
-                cwd=cwd, capture_output=True, timeout=30, check=False,
-            )
-            if stopped.returncode != 0:
-                # The thread may still be live; a second --resume supervisor would
-                # double it. Bail so the caller notifies instead.
-                return False
+        stopped = subprocess.run(
+            [*_subprocess_util.fno_py_cmd(), "agents", "stop", name],
+            cwd=cwd, capture_output=True, timeout=30, check=False,
+        )
+        if stopped.returncode != 0:
+            # The thread may still be live; a second --resume supervisor would
+            # double it. Bail so the caller notifies instead.
+            return False
         if pre_spawn is not None and not pre_spawn():
             return False
         argv = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude",
@@ -850,12 +881,15 @@ def _default_failover(candidate: "Candidate", error) -> str:
             return "rotated-no-worker"
         repo_root = getattr(candidate, "cwd", None)
         managed = getattr(snap, "auth", None) == "managed"
-        # US4: a node-less bg thread (a live worktree cwd with no target-state
-        # node) has no /target to redispatch; resume its transcript under the new
-        # account instead, or notify when it is not visible there. A missing cwd,
-        # and a cwd we cannot read a node from, both stay on the node-bound path
-        # below (its _redispatch handles the no-node miss -> nudge).
-        if repo_root and _node_id_from_worktree(repo_root) is None:
+        # US4: a node-less bg thread (a live worktree with NO target-state
+        # manifest) has no /target to redispatch; resume its transcript under the
+        # new account instead, or notify when it is not visible there. Gate on
+        # confirmed manifest absence (not "no node id"): a missing cwd, an
+        # unreadable/transiently-unreachable manifest, and a real node-bound worker
+        # all stay on the node-bound path below (its _redispatch handles the miss
+        # -> nudge), so a transient .fno read failure never misroutes a worker into
+        # revival.
+        if repo_root and _worktree_is_node_less(repo_root):
             return _revive_bg_thread(candidate, snap, repo_root, managed=managed)
         # A managed record shares ONE credential slot, so the swap only flipped
         # the routing pointer - the slot still holds the exhausted account's
