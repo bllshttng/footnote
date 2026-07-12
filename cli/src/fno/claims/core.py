@@ -514,6 +514,8 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     }
     if claim.reason is not None:
         out["reason"] = claim.reason
+    if claim.harness is not None:
+        out["harness"] = claim.harness
     if claim.metadata:
         out["metadata"] = claim.metadata
     return out

@@ -934,6 +934,109 @@ fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &s
         .all(|entry| latest_pass.get(entry.trim_start_matches('/')) == Some(&true))
 }
 
+/// An operator review finding (x-f8d4) still open: a `review_finding` event for
+/// the node with no later `review_finding_resolved` for the same id.
+#[derive(Debug, Clone)]
+struct OpenFinding {
+    id: String,
+    first_line: String,
+}
+
+/// Scan events.jsonl for OPEN operator review findings scoped to `node`.
+///
+/// Returns `(open findings sorted by id, malformed-line count)`. A finding is
+/// open until an explicit `review_finding_resolved` clears it - node-scoped and
+/// NOT head-pinned, so a new commit never auto-clears an operator's comment
+/// (Locked Decision 2). Malformed finding lines notice-not-block (AC3-FR): a
+/// line that is unparseable JSON but carries the literal `review_finding`, or a
+/// parsed `review_finding` missing its id, is our own writer's corrupted output;
+/// it is counted for the deny/audit notice but NEVER holds the gate. Any read
+/// failure yields no findings (the gate is only ADDED by evidence, never
+/// invented from an unreadable file).
+fn open_review_findings(events_path: &Path, node: &str) -> (Vec<OpenFinding>, usize) {
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return (Vec::new(), 0);
+    };
+    // Preserve first-seen order via a Vec of (id, first_line); a later duplicate
+    // id (shouldn't happen - ids are minted) just refreshes the first_line.
+    let mut findings: Vec<(String, String)> = Vec::new();
+    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut malformed = 0usize;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            // Only OUR corrupted output counts toward the notice; unrelated
+            // corruption from another writer is not a finding concern.
+            if line.contains("review_finding") {
+                malformed += 1;
+            }
+            continue;
+        };
+        match val.get("type").and_then(|v| v.as_str()) {
+            Some("review_finding") => {
+                if val.pointer("/data/node").and_then(|v| v.as_str()) != Some(node) {
+                    continue;
+                }
+                match val.pointer("/data/finding_id").and_then(|v| v.as_str()) {
+                    Some(id) => {
+                        let first = val
+                            .pointer("/data/text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(slot) = findings.iter_mut().find(|(fid, _)| fid == id) {
+                            slot.1 = first;
+                        } else {
+                            findings.push((id.to_string(), first));
+                        }
+                    }
+                    None => malformed += 1, // review_finding without an id
+                }
+            }
+            Some("review_finding_resolved") => {
+                if let Some(id) = val.pointer("/data/finding_id").and_then(|v| v.as_str()) {
+                    resolved.insert(id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut open: Vec<OpenFinding> = findings
+        .into_iter()
+        .filter(|(id, _)| !resolved.contains(id))
+        .map(|(id, first_line)| OpenFinding { id, first_line })
+        .collect();
+    open.sort_by(|a, b| a.id.cmp(&b.id)); // deterministic deny reason
+    (open, malformed)
+}
+
+/// Deny reason for an open-finding gate: quote the first finding (id + first
+/// line) + the resolve remedy, plus a `[+N more]` count and any malformed-line
+/// notice so nothing vanishes silently.
+fn build_findings_block_reason(open: &[OpenFinding], malformed: usize) -> String {
+    let f = &open[0];
+    let more = if open.len() > 1 {
+        format!(" [+{} more]", open.len() - 1)
+    } else {
+        String::new()
+    };
+    let notice = if malformed > 0 {
+        format!(" ({malformed} malformed finding line(s) ignored)")
+    } else {
+        String::new()
+    };
+    format!(
+        "open review finding {}: {} - address it, then `fno annotate resolve {}`{}{}",
+        f.id, f.first_line, f.id, more, notice
+    )
+}
+
 /// Run done() reads. Returns Ok(PrInfo) or Err((read_name, stderr_tail)) on gh failure.
 #[allow(clippy::too_many_arguments)]
 fn read_pr_info(
@@ -2836,6 +2939,32 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // done() fails simply blocks with the named reason.
     const MUTE_PROBE_N: u64 = 2;
 
+    // Operator review-finding gate input (x-f8d4). Resolve this session's node
+    // (graph_node_id in the frontmatter; the appended target_claim_key is the
+    // fallback) and scan events.jsonl for open findings. Node-scoped, NOT
+    // head-pinned: read here so both the promise arms and the mute-probe
+    // DonePRGreen path below see the same evidence. A malformed finding line
+    // never blocks (AC3-FR) but is surfaced as an audit notice so a truncated
+    // write can't vanish.
+    let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
+        scan_manifest_field(&manifest_content, "target_claim_key")
+            .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
+    });
+    let (open_findings, malformed_findings) = match node_id.as_deref() {
+        Some(n) => open_review_findings(&project_events, n),
+        None => (Vec::new(), 0),
+    };
+    if malformed_findings > 0 {
+        emit(
+            "loop_check_malformed_finding",
+            serde_json::json!({
+                "session_id": session_id,
+                "node": node_id,
+                "malformed_lines": malformed_findings
+            }),
+        );
+    }
+
     // Run done() on intent OR backstop OR mute-probe
     if intent != Intent::None || backstop_tripped || consecutive_after >= MUTE_PROBE_N {
         // Handle aborted first
@@ -2873,6 +3002,45 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     this_fire,
                     Some(fingerprint),
                 ),
+            );
+        }
+
+        // Operator review-finding gate (x-f8d4, Locked Decision 3): an open
+        // review_finding for this node HOLDS every success terminal-allow
+        // (DonePlanned / DoneAdvisory / DoneBatched / DonePRGreen) until an
+        // explicit resolve - a promise cannot self-authorize past an operator's
+        // open comment. Placed AFTER the Aborted arm and gated on
+        // `!backstop_tripped` so the anti-wedge safety valves still win: an
+        // Aborted tag exits, and once the NoProgress backstop streak is reached
+        // the session gives up rather than looping forever on an unresolved
+        // finding. Fires on a promise OR a mute-probe (the paths that would
+        // otherwise terminate-allow), never on an ordinary working fire.
+        if !open_findings.is_empty()
+            && !backstop_tripped
+            && (intent == Intent::Promise || consecutive_after >= MUTE_PROBE_N)
+        {
+            let reason = build_findings_block_reason(&open_findings, malformed_findings);
+            emit(
+                "loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "fingerprint": fingerprint,
+                    "fires": this_fire,
+                    "consecutive_unchanged": consecutive_after,
+                    "decision": "block",
+                    "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
+                    "intent_source": intent_source,
+                    "pr_state": fp_pr_state.as_str(),
+                    "ci": fp_ci.render(),
+                    "reviewed": false,
+                    "open_findings": open_findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+                    "malformed_findings": malformed_findings,
+                    "fp_read_failed": fp_read_failed
+                }),
+            );
+            return (
+                0,
+                allow_output("block", None, &reason, this_fire, Some(fingerprint)),
             );
         }
 
@@ -4870,6 +5038,89 @@ mod tests {
             reviewers_all_attested(&fp, &["sigma".to_string()], "h"),
             "a pass posted after a fail must restore satisfaction"
         );
+    }
+
+    // ── operator review-finding gate (x-f8d4) ────────────────────────────────
+
+    #[test]
+    fn review_finding_open_then_resolved_clears() {
+        // AC2-HP: an open review_finding gates; an explicit resolve clears it.
+        let tmp = tempfile::tempdir().unwrap();
+        let open = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t1","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-1","text":"off-by-one in the loop\nsecond line"}}"#,
+            ],
+        );
+        let (findings, malformed) = open_review_findings(&open, "x-1");
+        assert_eq!(malformed, 0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, "f1");
+        assert_eq!(findings[0].first_line, "off-by-one in the loop"); // first line only
+
+        // resolve clears it (node-scoped, only an explicit resolve).
+        let resolved = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t1","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-1","text":"off-by-one"}}"#,
+                r#"{"ts":"t2","type":"review_finding_resolved","source":"observer","data":{"finding_id":"f1"}}"#,
+            ],
+        );
+        assert!(open_review_findings(&resolved, "x-1").0.is_empty());
+    }
+
+    #[test]
+    fn review_finding_is_node_scoped() {
+        // A finding for a different node must not gate this node.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-OTHER","text":"not mine"}}"#,
+            ],
+        );
+        assert!(open_review_findings(&p, "x-mine").0.is_empty());
+        assert_eq!(open_review_findings(&p, "x-OTHER").0.len(), 1);
+    }
+
+    #[test]
+    fn review_finding_malformed_notices_not_blocks() {
+        // AC3-FR: a structurally-unparseable review_finding line does NOT block
+        // (no open finding), but is counted for the audit notice. A review_finding
+        // missing its id is likewise a malformed notice, never a gating finding.
+        let tmp = tempfile::tempdir().unwrap();
+        // A truncated (unparseable) line that still carries the review_finding marker.
+        let truncated = r#"{"ts":"t","type":"review_finding","data":{"finding_id":"f1"#;
+        let id_less = r#"{"ts":"t","type":"review_finding","source":"observer","data":{"node":"x-1","text":"no id"}}"#;
+        let good = r#"{"ts":"t","type":"review_finding","source":"observer","data":{"finding_id":"good","node":"x-1","text":"real one"}}"#;
+        let p = write_events(tmp.path(), &[truncated, id_less, good]);
+        let (findings, malformed) = open_review_findings(&p, "x-1");
+        assert_eq!(findings.len(), 1, "only the well-formed finding gates");
+        assert_eq!(findings[0].id, "good");
+        assert_eq!(
+            malformed, 2,
+            "the truncated line + the id-less line are noticed"
+        );
+    }
+
+    #[test]
+    fn review_finding_block_reason_quotes_first_plus_count() {
+        let open = vec![
+            OpenFinding {
+                id: "aaa".into(),
+                first_line: "the bug".into(),
+            },
+            OpenFinding {
+                id: "bbb".into(),
+                first_line: "another".into(),
+            },
+        ];
+        let r = build_findings_block_reason(&open, 1);
+        assert!(r.contains("aaa"));
+        assert!(r.contains("the bug"));
+        assert!(r.contains("fno annotate resolve aaa"));
+        assert!(r.contains("[+1 more]"));
+        assert!(r.contains("1 malformed"));
     }
 
     #[test]

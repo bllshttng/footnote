@@ -2241,6 +2241,74 @@ fn findings_cwd(session: &str) -> TempDir {
     tmp
 }
 
+/// x-f8d4 AC2-HP: an OPEN operator `review_finding` holds the success terminal
+/// even with a green + reviewed PR and a promise; an explicit `resolve` clears
+/// it and the next fire terminates DonePRGreen. The manifest is never mutated.
+#[test]
+fn operator_review_finding_blocks_until_resolved() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    // graph_node_id lets the gate scope findings to this node.
+    let manifest = format!(
+        "{}graph_node_id: x-gate\n",
+        new_manifest("sess-finding", "2026-06-05T00:00:00Z", true)
+    );
+    let manifest_path = cwd.join("target-state.md");
+    fs::write(&manifest_path, &manifest).unwrap();
+    fs::write(cwd.join("transcript.jsonl"), transcript_with_promise()).unwrap();
+
+    // Seed one OPEN finding for x-gate.
+    let events = cwd.join(".fno/events.jsonl");
+    fs::write(
+        &events,
+        "{\"ts\":\"t\",\"type\":\"review_finding\",\"source\":\"observer\",\"data\":{\"finding_id\":\"f9\",\"node\":\"x-gate\",\"text\":\"operator says fix the retry\"}}\n",
+    )
+    .unwrap();
+
+    let mock = MockBins::green();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+
+    let (code, d) = fire_findings(cwd, &mock);
+    assert_eq!(code, 0);
+    assert_eq!(
+        d.decision, "block",
+        "an open operator finding must hold the gate even on a green PR: {}",
+        d.message
+    );
+    assert!(d.termination_reason.is_none());
+    assert!(
+        d.message.contains("f9") && d.message.contains("fno annotate resolve f9"),
+        "reason must quote the finding id + resolve remedy; got: {}",
+        d.message
+    );
+    assert_eq!(
+        manifest_before,
+        fs::read(&manifest_path).unwrap(),
+        "target-state.md must not be mutated"
+    );
+
+    // Resolve it -> the gate clears and the promise terminates DonePRGreen.
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new().append(true).open(&events).unwrap();
+    writeln!(
+        f,
+        "{{\"ts\":\"t2\",\"type\":\"review_finding_resolved\",\"source\":\"observer\",\"data\":{{\"finding_id\":\"f9\"}}}}"
+    )
+    .unwrap();
+    drop(f);
+
+    let (_, d2) = fire_findings(cwd, &mock);
+    assert_eq!(
+        d2.decision, "allow",
+        "a resolved finding must no longer block: {}",
+        d2.message
+    );
+    assert_eq!(d2.termination_reason.as_deref(), Some("DonePRGreen"));
+}
+
 const CODEX_P1_NO_REPLY: &str = r#"[
   {"id": 100, "in_reply_to_id": null,
    "user": {"login": "chatgpt-codex-connector[bot]"},
