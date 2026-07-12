@@ -22,4 +22,10 @@ grep -Fq 'HARNESS_SESSION_MARKERS' "$PF" \
 grep -Fq 'hardcoded fallback list' "$PF" \
   || fail "no fail-closed fallback for the marker fetch"
 
+# The fallback must key on the fetch's EXIT STATUS, not only on empty output: a
+# broken venv that prints a partial line before erroring must still fall back
+# (AC4-ERR). A revert to `|| true` + a bare `-z` check reds here.
+grep -Fq '&& [[ -n "$HARNESS_MARKERS" ]]; then' "$PF" \
+  || fail "fallback not keyed on fetch exit status (partial-stdout+nonzero would slip past)"
+
 echo "PASS: hermetic env scrubs harness markers + drops canonical config"
