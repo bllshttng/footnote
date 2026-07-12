@@ -371,6 +371,34 @@ def active_backlog_cmd(
         )
 
 
+@app.command("status-sinks")
+def status_sinks_cmd(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON list of fanout targets for the daemon."
+    ),
+) -> None:
+    """Resolve which projects the status-fanout supervisor should tick (x-2057).
+
+    A project is a target when it has >=1 enabled ``status_sinks`` entry -
+    INDEPENDENT of ``config.active_backlog``. The daemon shells this to discover
+    its fanout loops. Read-only and best-effort: a malformed config yields an
+    empty list, never an error.
+    """
+    import json as _json
+
+    from fno.active_backlog import fanout_targets_as_dicts
+
+    targets = fanout_targets_as_dicts()
+    if json_out:
+        typer.echo(_json.dumps(targets))
+        return
+    if not targets:
+        typer.echo("status-sinks: no projects with enabled sinks")
+        return
+    for t in targets:
+        typer.echo(f"{t['project']}\t{t['cwd']}\tinterval={t['interval_seconds']}s")
+
+
 @app.command("get")
 def get_cmd(
     key: str = typer.Argument(

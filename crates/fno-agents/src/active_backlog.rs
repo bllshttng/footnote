@@ -859,6 +859,53 @@ pub fn resolve_targets(abi_bin: &str) -> Vec<ResolvedTarget> {
     }
 }
 
+/// A project the status-fanout supervisor should tick (x-2057). Enablement is
+/// "has >=1 enabled status sink", INDEPENDENT of the drain's active_backlog set -
+/// a project can fan status out without opting into the backlog drain.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct FanoutTarget {
+    pub project: String,
+    pub cwd: String,
+    pub interval_seconds: u64,
+}
+
+/// Shell `fno config status-sinks --json` to discover fanout targets. Best-effort:
+/// any failure (missing fno, non-zero exit, unparseable output) yields an empty
+/// list, so a broken config never crashes the daemon - it just runs no fanout.
+fn resolve_fanout_targets(abi_bin: &str) -> Vec<FanoutTarget> {
+    match abi_cmd(abi_bin)
+        .args(["config", "status-sinks", "--json"])
+        .output()
+    {
+        Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// One project's status-fanout loop: shell `fno status-fanout tick` in the
+/// project cwd every `interval_seconds`, best-effort. Independent of the drain
+/// loops; a tick failure is swallowed and the next tick retries. Exits on
+/// shutdown. The Python tick no-ops when the project's sinks were removed, so a
+/// stale loop is harmless until the next `recheck` reconciles the target set.
+async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown: Arc<AtomicBool>) {
+    let interval = Duration::from_secs(target.interval_seconds.max(1));
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        let bin = abi_bin.clone();
+        let cwd = target.cwd.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::process::Command::new(&bin)
+                .args(["status-fanout", "tick"])
+                .current_dir(&cwd)
+                .output();
+        })
+        .await;
+        sleep_interruptible(interval, &shutdown).await;
+    }
+}
+
 /// Build the per-project loop journal (project events.jsonl fatal, global mirror
 /// best-effort) for a drain target's cwd.
 fn journal_for(cwd: &Path) -> Journal {
@@ -969,6 +1016,10 @@ pub async fn run_supervisor(
     shutdown: Arc<AtomicBool>,
 ) {
     let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    // Sibling loop family (x-2057): status-fanout ticks, keyed by project. A
+    // separate enablement set (projects with >=1 status sink) from the drain
+    // above, so a sinks-only project fans out without opting into the drain.
+    let mut fanout_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let recheck = Duration::from_secs(60);
 
     loop {
@@ -977,6 +1028,7 @@ pub async fn run_supervisor(
         }
         // Drop handles for loops that have exited (e.g. a project was disabled).
         tasks.retain(|_, h| !h.is_finished());
+        fanout_tasks.retain(|_, h| !h.is_finished());
 
         let targets = resolve_targets(&abi_bin);
         live.store(!targets.is_empty(), Ordering::SeqCst);
@@ -995,10 +1047,26 @@ pub async fn run_supervisor(
             tasks.insert(project, h);
         }
 
+        for ft in resolve_fanout_targets(&abi_bin) {
+            if fanout_tasks.contains_key(&ft.project) {
+                continue;
+            }
+            let project = ft.project.clone();
+            let h = tokio::spawn(per_project_fanout_loop(
+                ft,
+                abi_bin.clone(),
+                Arc::clone(&shutdown),
+            ));
+            fanout_tasks.insert(project, h);
+        }
+
         sleep_interruptible(recheck, &shutdown).await;
     }
 
     for (_, h) in tasks {
+        h.abort();
+    }
+    for (_, h) in fanout_tasks {
         h.abort();
     }
     live.store(false, Ordering::SeqCst);
@@ -1091,6 +1159,22 @@ async fn per_project_drain_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_fanout_targets_parse_from_json() {
+        let json = br#"[{"project":"fno","cwd":"/repo/fno","interval_seconds":5}]"#;
+        let targets: Vec<FanoutTarget> = serde_json::from_slice(json).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].project, "fno");
+        assert_eq!(targets[0].cwd, "/repo/fno");
+        assert_eq!(targets[0].interval_seconds, 5);
+    }
+
+    #[test]
+    fn status_fanout_targets_empty_on_garbage() {
+        let targets: Vec<FanoutTarget> = serde_json::from_slice(b"not json").unwrap_or_default();
+        assert!(targets.is_empty());
+    }
 
     #[test]
     fn lane_receipts_counts_by_status() {
