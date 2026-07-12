@@ -8,7 +8,7 @@ import {
   loadFootnoteAgents,
   createTaskTool,
   isActivated,
-} from "../plugin/fno.ts"
+} from "../plugins/fno.ts"
 
 test("isActivated is opt-in (off by default)", () => {
   expect(isActivated({})).toBe(false)

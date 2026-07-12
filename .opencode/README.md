@@ -9,9 +9,9 @@ agent registration.
 
 | Path | What it is |
 |---|---|
-| `plugin/fno.ts` | The plugin. opencode auto-scans `.opencode/plugin/*.ts` and loads it directly — no build step. |
+| `plugins/fno.ts` | The plugin. opencode auto-scans `.opencode/plugins/*.ts` and loads it directly — no build step. |
 | `fno-orchestrator.md` | The orchestrator system prompt injected at session start. |
-| `agent/{explore,oracle,librarian}.md` | Three native opencode agents, auto-loaded from `.opencode/agent/`. |
+| `agents/{explore,oracle,librarian}.md` | Three native opencode agents, auto-loaded from `.opencode/agents/`. |
 | `tests/fno.test.ts` | `bun test` unit coverage for the pure helpers + task tool. |
 
 ## What it does (and what opencode does natively)
@@ -27,7 +27,7 @@ The plugin only supplies what opencode can't infer on its own:
   fetches a backgrounded result. Guards: depth 3, 5 concurrent sync
   delegations, 120s sync timeout, empty-output detection.
 
-opencode does the rest **natively** — it auto-loads `.opencode/agent/*.md`,
+opencode does the rest **natively** — it auto-loads `.opencode/agents/*.md`,
 discovers `skills/**/SKILL.md` (footnote's skills already ship in that shape),
 and exposes its own `skill` tool. That's why there is no custom skill tool,
 no build toolchain, and no vendored agent framework here.
@@ -48,16 +48,16 @@ With `FNO_OPENCODE` unset, the plugin registers nothing.
 
 When you're ready to make fno the sole orchestration plugin, edit your global
 `~/.config/opencode/opencode.json` and drop `oh-my-openagent@latest` from the
-`plugin` array. footnote's plugin auto-loads from this repo's `.opencode/plugin/`
+`plugin` array. footnote's plugin auto-loads from this repo's `.opencode/plugins/`
 for sessions in this project; for other projects, add a `file:` entry pointing at
-`plugin/fno.ts` or publish the plugin to npm. Once oh-my-openagent is gone you
+`plugins/fno.ts` or publish the plugin to npm. Once oh-my-openagent is gone you
 can also run without the `FNO_OPENCODE` gate if you edit `isActivated` to default
 on. This is a local-machine change and is deliberately not automated.
 
 ## Model routing
 
 Category -> model routing is best-effort and off by default: `CATEGORY_MODEL` in
-`plugin/fno.ts` is empty, so delegation rides each agent's own `model:` field
+`plugins/fno.ts` is empty, so delegation rides each agent's own `model:` field
 plus opencode's default. To force a model per category, add entries (e.g.
 `ship: "anthropic/claude-haiku-4-5"`); the plugin only applies one when the
 provider registry actually has it, and otherwise falls back silently. A

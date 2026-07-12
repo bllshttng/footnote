@@ -3,11 +3,11 @@
 // Replaces the oh-my-openagent dependency. Built on opencode's plugin API:
 // a config hook (register footnote's agents), a system-prompt transform
 // (inject the orchestrator identity), and a `task` delegation tool. opencode's
-// NATIVE machinery does the rest — it auto-loads `.opencode/agent/*.md` and
+// NATIVE machinery does the rest — it auto-loads `.opencode/agents/*.md` and
 // discovers `skills/**/SKILL.md`, so this plugin only supplies what opencode
 // can't infer: footnote's identity, its existing agents, and delegation.
 //
-// No build step: opencode auto-scans `.opencode/plugin/*.{ts,js}` and loads
+// No build step: opencode auto-scans `.opencode/plugins/*.{ts,js}` and loads
 // this .ts directly. See .opencode/README.md for the dogfood/cutover contract.
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin"
@@ -68,7 +68,7 @@ export function inferCategory(subagentType?: string): string | undefined {
  * would be over-engineering for three fields.
  */
 export function parseFrontmatter(raw: string): { data: Record<string, string>; body: string } {
-  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
+  const m = raw.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?([\s\S]*)$/)
   if (!m) return { data: {}, body: raw }
   const data: Record<string, string> = {}
   for (const line of m[1].split(/\r?\n/)) {
@@ -181,7 +181,9 @@ async function sessionDepth(client: SessionClient, sessionId: string): Promise<n
   let depth = 0
   let id: string | undefined = sessionId
   const seen = new Set<string>()
-  while (id && !seen.has(id) && depth < 32) {
+  // Stop at MAX_DEPTH: the caller rejects once depth >= MAX_DEPTH, so walking
+  // deeper only adds redundant session.get round-trips.
+  while (id && !seen.has(id) && depth < MAX_DEPTH) {
     seen.add(id)
     const res: { data?: { parentID?: string } } | null = await client.session
       .get({ path: { id } })
@@ -248,14 +250,16 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
       const model = resolveModel(category, deps.availableModels())
       const title = `${args.description ?? agent} (@${agent})`
 
-      const created = await deps.client.session.create({
-        body: {
-          parentID: context.sessionID,
-          title,
-          ...(model ? { model: { id: model.modelID, providerID: model.providerID } } : {}),
-        },
-        query: { directory: deps.directory },
-      })
+      const created = await deps.client.session
+        .create({
+          body: {
+            parentID: context.sessionID,
+            title,
+            ...(model ? { model: { id: model.modelID, providerID: model.providerID } } : {}),
+          },
+          query: { directory: deps.directory },
+        })
+        .catch((err) => ({ error: err, data: undefined }))
       const childId = created?.data?.id
       if (created?.error || !childId) {
         return `error: failed to create child session: ${String(created?.error ?? "no session id")}`
@@ -268,7 +272,9 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
       }
 
       if (background) {
-        const res = await deps.client.session.promptAsync({ path: { id: childId }, body })
+        const res = await deps.client.session
+          .promptAsync({ path: { id: childId }, body })
+          .catch((err) => ({ error: err }))
         if (res?.error) return `error: failed to launch background task: ${String(res.error)}`
         return `task_id: ${childId}\nBackground task launched (@${agent}). Fetch the result later with task_result({ task_id: "${childId}" }).`
       }
@@ -279,7 +285,7 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
           deps.client.session.prompt({ path: { id: childId }, body }),
           timeoutMs,
           () => deps.client.session.abort({ path: { id: childId } }),
-        )
+        ).catch((err) => ({ error: err, data: undefined }))
         if (res === TIMEOUT) {
           return `error: child session timed out after ${timeoutMs}ms and was aborted.`
         }
@@ -302,7 +308,9 @@ export function createTaskResultTool(deps: Pick<TaskDeps, "client">): ToolDefini
       task_id: tool.schema.string().describe("The task_id returned by the background task() call."),
     },
     async execute(args) {
-      const res = await deps.client.session.messages({ path: { id: args.task_id } })
+      const res = await deps.client.session
+        .messages({ path: { id: args.task_id } })
+        .catch((err) => ({ error: err, data: undefined }))
       if (res?.error) return `error: failed to read task ${args.task_id}: ${String(res.error)}`
       const messages = res?.data ?? []
       const assistant = messages.filter((m) => m.info?.role === "assistant")
@@ -358,18 +366,18 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void):
 // Plugin wiring
 // ---------------------------------------------------------------------------
 
-function loadOrchestratorPrompt(): string {
-  // Resolve relative to this plugin file so it works regardless of cwd.
+function loadOrchestratorPrompt(projectDir: string): string {
+  // The orchestrator prompt lives at a fixed project-root-relative path, so
+  // resolve from projectDir rather than the non-standard import.meta.dir.
   try {
-    const dir = (import.meta as { dir?: string }).dir ?? join(process.cwd(), ".opencode", "plugin")
-    return readFileSync(join(dir, "..", "fno-orchestrator.md"), "utf8")
+    return readFileSync(join(projectDir, ".opencode", "fno-orchestrator.md"), "utf8")
   } catch {
     return "You are footnote's delivery orchestrator. Set a target, walk away, say f[no] to mostly done."
   }
 }
 
 /**
- * Activation gate. The plugin auto-loads (opencode scans `.opencode/plugin/`),
+ * Activation gate. The plugin auto-loads (opencode scans `.opencode/plugins/`),
  * but stays INERT unless explicitly opted in — so merely opening this repo in
  * opencode while oh-my-openagent is still globally active never collides on the
  * `task` tool. Dogfood with `FNO_OPENCODE=1 opencode`; flip the global cutover
@@ -385,7 +393,7 @@ const plugin: Plugin = async (input: PluginInput) => {
   const client = input.client as unknown as SessionClient
   const projectDir = input.directory
 
-  const orchestratorPrompt = loadOrchestratorPrompt()
+  const orchestratorPrompt = loadOrchestratorPrompt(projectDir)
   const footnoteAgents = loadFootnoteAgents(projectDir)
 
   // Available models, fetched once for best-effort category routing (AC5-ERR).
@@ -402,9 +410,9 @@ const plugin: Plugin = async (input: PluginInput) => {
   }
 
   // Registered-agent set: footnote's translated agents plus the native
-  // `.opencode/agent/*.md` (explore/oracle/librarian) opencode auto-loads.
+  // `.opencode/agents/*.md` (explore/oracle/librarian) opencode auto-loads.
   const nativeAgents = new Set<string>()
-  const nativeDir = join(projectDir, ".opencode", "agent")
+  const nativeDir = join(projectDir, ".opencode", "agents")
   if (existsSync(nativeDir)) {
     for (const f of readdirSync(nativeDir)) if (f.endsWith(".md")) nativeAgents.add(basename(f, ".md"))
   }
