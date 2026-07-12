@@ -3563,6 +3563,24 @@ impl Core {
                     .iter()
                     .find(|s| s.name.as_deref() == Some(name.as_str()))
                     .map(|s| s.id);
+                // A name that exists ONLY in the persisted store (another mux
+                // server created it after this server's one-time restore, or
+                // restore skipped it on a spawn failure) must NOT be re-created
+                // here: the create path would upsert by name and DROP that
+                // entry's persisted members (codex review). Refuse fail-closed,
+                // like NewSquad - restore/attach it first, or pick another name.
+                if sid.is_none()
+                    && crate::squad_store::load()
+                        .squads
+                        .iter()
+                        .any(|s| s.name == name)
+                {
+                    self.notice(
+                        client_id,
+                        "name taken by a persisted workspace not restored here",
+                    );
+                    return Flow::Continue;
+                }
                 let mut recruited = 0usize;
                 let mut skipped: Vec<String> = Vec::new();
                 for id in &ids {
@@ -6570,6 +6588,56 @@ mod tests {
         );
         assert_eq!(core.session.squads.len(), 1, "no new workspace on all-skip");
         assert!(!core.squad_members.contains_key(&2), "no squad 2 minted");
+    }
+
+    #[test]
+    fn recruit_refuses_a_name_persisted_but_not_live() {
+        // codex P2: recruiting into a name that exists only in the store (another
+        // server created it, or restore skipped it) must NOT create a new live
+        // squad - that would upsert by name and drop the persisted members.
+        let _s = StoreScratch::new("recruit-persisted");
+        crate::squad_store::upsert(
+            "ghost",
+            &["/repo".into()],
+            &[stored_member("c19cd2c3", false)],
+        )
+        .unwrap();
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RecruitAgents {
+                squad: "ghost".into(),
+                ids: vec!["deadbeef".into()],
+            },
+        );
+        // The persisted entry is untouched; no live squad was minted for it.
+        let loaded = crate::squad_store::load();
+        assert_eq!(loaded.squads.len(), 1);
+        assert_eq!(
+            loaded.squads[0].members,
+            vec![stored_member("c19cd2c3", false)],
+            "the persisted members are not clobbered"
+        );
+        assert!(
+            !core
+                .session
+                .squads
+                .iter()
+                .any(|s| s.name.as_deref() == Some("ghost")),
+            "no live squad created for the persisted name"
+        );
     }
 
     #[test]
