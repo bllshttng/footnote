@@ -1316,6 +1316,7 @@ def _claude_create_path(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1347,6 +1348,7 @@ def _claude_create_path(
             model=model,
             permission_mode=effective_mode,
             effort=effort,
+            resume_session_id=resume_session_id,
         )
     except claude_mod.ProviderSubprocessError as exc:
         events.emit(
@@ -1763,6 +1765,7 @@ def dispatch_spawn(
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
     headless: bool = False,
+    resume_session_id: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -1926,6 +1929,7 @@ def dispatch_spawn(
                         model=model,
                         permission_mode=permission_mode,
                         effort=effort,
+                        resume_session_id=resume_session_id,
                     )
                     return SpawnResult(
                         kind="created",

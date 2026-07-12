@@ -173,6 +173,27 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
     assert json.loads(result.output)["permission_mode"] == "acceptEdits"
 
 
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        [],  # default pane substrate: --resume is a bg-only lever
+        ["--substrate", "bg", "--provider", "codex"],  # bg but non-claude
+    ],
+)
+def test_resume_requires_claude_bg(runner, monkeypatch, extra_args):
+    """US4: --resume continues a claude --bg transcript, so it is rejected on any
+    non-(claude, bg) lane with exit 2 before dispatch."""
+    _stub_pane_path(monkeypatch)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--resume", "U-abc123", *extra_args],
+    )
+    assert result.exit_code == 2
+    assert "--resume requires --substrate bg" in result.output
+
+
 def test_bg_permission_mode_non_claude_fails_closed(runner, monkeypatch):
     """codex bg/headless via the Python fallback refuses --permission-mode
     (its one-shot lane hardcodes its bypass); mirrors the Rust guard."""

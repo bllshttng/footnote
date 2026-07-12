@@ -410,6 +410,15 @@ def cmd_spawn(
             "validated against the selected provider; unset uses its default."
         ),
     ),
+    resume: str | None = typer.Option(
+        None,
+        "--resume",
+        help=(
+            "Resume an existing claude session UUID instead of starting fresh: "
+            "the new --bg supervisor continues that transcript (US4 bg-thread "
+            "revival). claude + --substrate bg only; forwarded as --resume <uuid>."
+        ),
+    ),
     node: str | None = typer.Option(
         None,
         "--node",
@@ -498,6 +507,17 @@ def cmd_spawn(
     if substrate not in ("pane", "bg", "headless"):
         print(
             f"--substrate must be one of: pane, bg, headless (got {substrate})",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    # US4 revival: --resume continues an existing claude --bg transcript, so it
+    # only applies to the claude bg lane (the Python bg_create path forwards
+    # --resume <uuid>). provider None defaults to claude downstream.
+    if resume is not None and (substrate != "bg" or provider not in (None, "claude")):
+        print(
+            "--resume requires --substrate bg on provider claude "
+            "(it continues an existing claude --bg session)",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -608,6 +628,7 @@ def cmd_spawn(
                 permission_mode=permission_mode,
                 effort=effort,
                 headless=substrate == "headless",
+                resume_session_id=resume,
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)

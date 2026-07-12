@@ -137,6 +137,7 @@ def _build_argv(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
 ) -> list[str]:
     """Render the argv list for ``claude --bg``.
 
@@ -151,7 +152,14 @@ def _build_argv(
 
     A truthy ``model`` (x-571f per-node pin) appends ``--model <m>`` between
     ``--name`` and the message; unset/empty means today's argv byte-for-byte.
-    Kept identical to the Rust ``build_argv`` (AC2-FR cross-runtime parity).
+    The model/permission/effort flags are kept identical to the Rust
+    ``build_argv`` (AC2-FR cross-runtime parity).
+
+    A truthy ``resume_session_id`` (US4 bg-thread revival) appends
+    ``--resume <uuid>`` so the new supervisor continues that transcript instead
+    of starting fresh. Spawn-only: the Rust ask-hop ``build_argv`` never resumes,
+    so this flag is deliberately outside the parity set; unset means today's argv
+    byte-for-byte.
     """
     argv = ["claude", "--bg", "--name", name]
     # x-dfa4: exact passthrough to claude's own --permission-mode; the caller
@@ -163,6 +171,8 @@ def _build_argv(
         argv += ["--effort", effort]
     if model:
         argv += ["--model", model]
+    if resume_session_id:
+        argv += ["--resume", resume_session_id]
     if not use_stdin:
         argv.append(message)
     return argv
@@ -219,6 +229,7 @@ def bg_create(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -254,6 +265,7 @@ def bg_create(
         model=model,
         permission_mode=permission_mode,
         effort=effort,
+        resume_session_id=resume_session_id,
     )
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
