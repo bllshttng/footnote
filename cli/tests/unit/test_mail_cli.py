@@ -21,17 +21,26 @@ def runner():
     return CliRunner()
 
 
-@pytest.fixture
-def mailbox(tmp_path, monkeypatch):
-    """Co-isolate the md render (FNO_INBOX_ROOT), the bus log, and the roster under tmp."""
+def isolate_mailbox(tmp_path, monkeypatch):
+    """Co-isolate the md render (FNO_INBOX_ROOT), the bus log, and the roster under tmp.
+
+    A plain helper (not a fixture) so tests can invoke it imperatively after
+    seeding an ambient env, without depending on fixture setup ordering.
+    """
     # FNO_BUS_DIR outranks FNO_INBOX_ROOT in bus_dir(); clear it so FNO_INBOX_ROOT wins.
     monkeypatch.delenv("FNO_BUS_DIR", raising=False)
     # FNO_CLAUDE_DAEMON_DIR is process-global (set by spawn_gate) and defaults to the
     # real ~/.claude/daemon; pin an empty dir so no real live session leaks in. Tests
-    # that need a roster (_isolate_claude_roster) setenv after the fixture and win.
+    # that need a roster (_isolate_claude_roster) setenv after this and win.
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "daemon-empty"))
     monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path))
     use_tmpdir(monkeypatch, tmp_path)
+
+
+@pytest.fixture
+def mailbox(tmp_path, monkeypatch):
+    """Co-isolate the md render (FNO_INBOX_ROOT), the bus log, and the roster under tmp."""
+    isolate_mailbox(tmp_path, monkeypatch)
     return tmp_path
 
 
@@ -343,23 +352,16 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
 # symlinked worktree where a live worker session has exported them.
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def poison_bus(tmp_path, monkeypatch):
-    """Export an ambient FNO_BUS_DIR before the mailbox fixture runs.
-
-    Listed before `mailbox` in the test signature so it sets up first; the
-    mailbox fixture must then clear it (same function-scoped monkeypatch).
-    """
-    bus = tmp_path / "poison-bus"
-    bus.mkdir()
-    monkeypatch.setenv("FNO_BUS_DIR", str(bus))
-    return bus
-
-
-def test_mailbox_fixture_neutralizes_ambient_bus_dir(
-    poison_bus, runner, mailbox, monkeypatch, tmp_path
-):
+def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_path):
     from fno.paths import bus_dir
+
+    # Seed an ambient, poisoning FNO_BUS_DIR, then run the isolation helper
+    # imperatively (as the mailbox fixture does) so ordering is explicit, not
+    # dependent on fixture argument position.
+    poison_bus = tmp_path / "poison-bus"
+    poison_bus.mkdir()
+    monkeypatch.setenv("FNO_BUS_DIR", str(poison_bus))
+    isolate_mailbox(tmp_path, monkeypatch)
 
     # Root-cause invariant: FNO_BUS_DIR cleared ⟹ bus resolves under FNO_INBOX_ROOT.
     resolved = bus_dir()
