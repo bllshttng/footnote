@@ -6147,6 +6147,20 @@ mod tests {
     }
 
     #[test]
+    fn reorder_tab_refuses_a_stale_tab_id() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(1, Command::ReorderTab { tab: 999, delta: 1 });
+
+        assert_eq!(core.session.find_tab(5), Some((1, 0)));
+        assert_eq!(drain_notice(&mut rx).as_deref(), Some("no such tab"));
+    }
+
+    #[test]
     fn move_tab_follows_the_viewing_client_into_dst() {
         // Invariant (view validity): a viewer of the moved tab follows it into
         // the destination squad - content continuity beats spatial position.
