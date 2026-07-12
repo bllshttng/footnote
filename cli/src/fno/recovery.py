@@ -47,6 +47,7 @@ suspended-session recovery is ever observed in the wild.
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -281,7 +282,7 @@ def recovery_sweep(
             err = classify_session_error(getattr(snap, "output_result", None))
             if err is not None and getattr(err, "triggers_swap", False):
                 outcome = failover_fn(c, err)
-                if outcome in ("swapped", "rotated-no-worker"):
+                if outcome in ("swapped", "rotated-no-worker", "notified"):
                     # Either way the global active provider rotated, so no
                     # further swap this tick.
                     rotated = True
@@ -292,7 +293,12 @@ def recovery_sweep(
                         "short_id": c.short_id,
                         "redispatched": outcome == "swapped",
                     })
-                    if outcome == "swapped":
+                    if outcome != "rotated-no-worker":
+                        # "swapped" (worker/thread respawned) and "notified" (US4/US5:
+                        # the human got the exact resume command for a session we
+                        # could not auto-revive) are both terminal for this session -
+                        # nudging a swapped-away/exhausted session just re-hits the
+                        # dead provider, which is exactly what failover avoids.
                         continue
                     # "rotated-no-worker": the swap landed on a provider we
                     # cannot bg-redispatch a /target onto (non-claude) or the
@@ -440,6 +446,30 @@ def _node_id_from_worktree(cwd: str) -> Optional[str]:
             val = s.split(":", 1)[1].strip().strip('"').strip("'")
             return val or None
     return None
+
+
+def _worktree_is_node_less(cwd: str) -> bool:
+    """True ONLY when we can POSITIVELY confirm the worktree runs no ``/target``
+    session - a genuine node-less bg thread.
+
+    ``_node_id_from_worktree`` returns None for two different things (no node in
+    the manifest AND an unreadable manifest), so it cannot gate revival: a
+    node-bound worker whose ``.fno`` symlink transiently breaks mid-repack would
+    read as node-less and be misrouted into transcript revival (which lacks the
+    claim handling ``_redispatch`` does). Gate on manifest ABSENCE instead: the
+    ``.fno`` dir must be reachable AND carry no ``target-state.md``. Any ambiguity
+    (unreachable ``.fno`` symlink, an existing-but-unreadable manifest, a stat
+    error) returns False, so a transient failure falls through to the node-bound
+    path and its bounded nudge rather than a wrong revival."""
+    try:
+        fno_dir = Path(cwd) / ".fno"
+        if not fno_dir.is_dir():
+            # No .fno, OR a transiently-broken .fno symlink: cannot confirm
+            # node-less-ness, so treat as node-bound (conservative).
+            return False
+        return not (fno_dir / "target-state.md").exists()
+    except OSError:
+        return False
 
 
 def _node_is_done(node: str) -> bool:
@@ -632,6 +662,181 @@ def _materialize_managed_switch(record_id: str, repo_root: Optional[str] = None)
         return False
 
 
+# ---------------------------------------------------------------------------
+# US4/US5: node-less bg-thread revival + interactive notify
+#
+# A failover swap rotates the active account, but a node-LESS bg thread (a
+# footnote-launched ``claude --bg`` session whose cwd has no target-state.md - an
+# ask/relay worker, a bare bg thread) has no node for ``_redispatch`` to /target.
+# Revival maps the session kind to an action (epic x-e4a7 revival table):
+#   - transcript visible to the new account -> respawn ``claude --bg --resume
+#     <uuid> "keep going"`` under the new env (US4).
+#   - transcript NOT visible (unshared two-dir) -> notify the human with the exact
+#     copy-paste resume command (US5 / AC3-FR); never resume a missing transcript.
+# An interactive session never reaches the sweep (``locate_session`` filters
+# ``kind == "bg"``), so the same notify helper is the "footnote cannot revive it"
+# path for it too.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_session_uuid(short_id: str) -> Optional[str]:
+    """Full session UUID for a bg ``short_id`` (the ``--resume`` key), or None.
+
+    Best-effort: a registry-read miss degrades to None so revival falls back to the
+    bounded nudge rather than crashing the sweep."""
+    try:
+        from fno.agents.providers._claude_session_registry import resolve_session_uuid
+
+        return resolve_session_uuid(short_id)
+    except Exception:  # noqa: BLE001 - a resolve miss must never crash the sweep
+        return None
+
+
+def _target_projects_dir(provider_id: str, repo_root: Optional[str]) -> Path:
+    """The ``projects/`` dir the NEW account reads transcripts from.
+
+    ``dispatch_env`` gives the account's ``CLAUDE_CONFIG_DIR`` (managed shares the
+    default ``~/.claude``; oauth_dir points at its own dir). Any lookup miss
+    degrades to ``~/.claude``. A wrong guess here only mis-decides visibility; the
+    real backstop against a resume onto a missing transcript is the respawn itself,
+    which spawns under the same account env and fails (falling to notify) when that
+    env cannot reach the transcript."""
+    base = Path.home() / ".claude"
+    try:
+        from fno.adapters.providers.dispatch import dispatch_env
+
+        env = dispatch_env(provider_id, repo_root=Path(repo_root) if repo_root else None)
+        override = env.get("CLAUDE_CONFIG_DIR")
+        if override:
+            base = Path(override)
+    except Exception:  # noqa: BLE001 - degrade to the default slot
+        pass
+    return base / "projects"
+
+
+def _transcript_visible(session_uuid: str, projects_dir: Path) -> bool:
+    """Is ``<session_uuid>.jsonl`` present under ``projects_dir``? (AC3/AC4-FR)."""
+    try:
+        from fno.relay.registry import transcript_path_for
+
+        return transcript_path_for(session_uuid, projects_dir=projects_dir) is not None
+    except Exception:  # noqa: BLE001 - unreadable -> treat as not visible (notify)
+        return False
+
+
+def _resume_command(provider_id: str, repo_root: Optional[str], session_uuid: str) -> str:
+    """The exact copy-paste resume command for the notify path (US5).
+
+    Prefixes the new account's env (``CLAUDE_CONFIG_DIR=<dir> ``) when the record
+    needs one; a managed record shares the default slot, so the prefix is empty."""
+    prefix = ""
+    try:
+        from fno.adapters.providers.dispatch import dispatch_env
+
+        env = dispatch_env(provider_id, repo_root=Path(repo_root) if repo_root else None)
+        cfg = env.get("CLAUDE_CONFIG_DIR")
+        if cfg:
+            # shell-quote: a config dir with spaces (e.g. macOS "Application
+            # Support") must stay one token when the human pastes the command.
+            prefix = f"CLAUDE_CONFIG_DIR={shlex.quote(cfg)} "
+    except Exception:  # noqa: BLE001 - best-effort prefix; bare command still resumes
+        pass
+    return f"{prefix}claude --resume {session_uuid}"
+
+
+def _notify_manual_resume(candidate: "Candidate", snap, session_uuid: str) -> None:
+    """US5: one OS notification carrying the exact resume command for a session
+    footnote could not auto-revive (unshared transcript / interactive). Best-effort."""
+    try:
+        from fno.notify._impl import send_notification
+
+        cmd = _resume_command(snap.id, getattr(candidate, "cwd", None), session_uuid)
+        send_notification(
+            f"footnote: switched to {snap.id}",
+            f"Session {candidate.short_id} needs a manual resume:\n{cmd}",
+        )
+    except Exception:  # noqa: BLE001 - a notify miss must never crash the sweep
+        pass
+
+
+def _respawn_bg_resume(
+    candidate: "Candidate",
+    session_uuid: str,
+    *,
+    pre_spawn: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """Stop the dead node-less thread and respawn a bg supervisor RESUMING its
+    transcript under the now-active account, seeding the continue turn. Returns
+    True iff the replacement spawned.
+
+    Mirrors ``_redispatch``'s stop -> pre_spawn -> spawn ordering, minus the claim
+    handling (a node-less thread holds no node claim). ``pre_spawn`` runs the
+    managed materialize between the stop (which unpins the shared slot) and the
+    spawn (which must read the new creds); a False result aborts the respawn."""
+    import subprocess
+
+    cwd = getattr(candidate, "cwd", None)
+    name = getattr(candidate, "name", None)
+    agent = f"revive-{candidate.short_id}"
+    if not name:
+        # No name to stop the dead thread by. The node-less path has no claim +
+        # `target init` backstop against a double (unlike _redispatch), so a blind
+        # --resume spawn could put two live supervisors on one transcript. Bail so
+        # the caller notifies instead of risking the double.
+        return False
+    try:
+        stopped = subprocess.run(
+            [*_subprocess_util.fno_py_cmd(), "agents", "stop", name],
+            cwd=cwd, capture_output=True, timeout=30, check=False,
+        )
+        if stopped.returncode != 0:
+            # The thread may still be live; a second --resume supervisor would
+            # double it. Bail so the caller notifies instead.
+            return False
+        if pre_spawn is not None and not pre_spawn():
+            return False
+        argv = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude",
+                "--substrate", "bg", "--resume", session_uuid]
+        if cwd:
+            argv += ["--cwd", cwd]
+        argv += [agent, CONTINUE_MESSAGE]
+        proc = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=60, check=False)
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _revive_bg_thread(
+    candidate: "Candidate", snap, repo_root: Optional[str], *, managed: bool
+) -> str:
+    """US4: revive a node-less bg thread after an auto-switch swap. Returns:
+      - ``"swapped"``           resumed under the new account (a replacement started),
+      - ``"notified"``          couldn't resume (unshared transcript / spawn miss) ->
+                                OS-notified the human with the exact resume command,
+      - ``"rotated-no-worker"`` nothing actionable (no uuid / disarmed) -> nudge."""
+    uuid = _resolve_session_uuid(candidate.short_id)
+    if not uuid:
+        # No resolvable session id: cannot resume OR build a resume command; leave
+        # it to the bounded nudge (same fallback a node-bound respawn miss uses).
+        return "rotated-no-worker"
+    if managed and not _auto_switch_enabled(repo_root):
+        # Disarmed managed swap: the slot is never materialized, so a resume would
+        # land on the exhausted account. Behave like the node-bound disarmed path.
+        return "rotated-no-worker"
+    projects_dir = _target_projects_dir(snap.id, repo_root)
+    if not _transcript_visible(uuid, projects_dir):
+        # AC3-FR: never resume against a transcript the new account cannot see.
+        _notify_manual_resume(candidate, snap, uuid)
+        return "notified"
+    pre_spawn = (lambda: _materialize_managed_switch(snap.id, repo_root)) if managed else None
+    if _respawn_bg_resume(candidate, uuid, pre_spawn=pre_spawn):
+        return "swapped"
+    # A stop / materialize / spawn miss after the transcript was visible: don't
+    # nudge the exhausted thread; hand the human the resume command instead.
+    _notify_manual_resume(candidate, snap, uuid)
+    return "notified"
+
+
 def _default_failover(candidate: "Candidate", error) -> str:
     """Real ``failover_fn``: rotate the active provider via the shipped controller.
 
@@ -677,6 +882,18 @@ def _default_failover(candidate: "Candidate", error) -> str:
         # be bg-redispatched (the Rust client rejects --substrate bg for it).
         if snap.cli != "claude":
             return "rotated-no-worker"
+        repo_root = getattr(candidate, "cwd", None)
+        managed = getattr(snap, "auth", None) == "managed"
+        # US4: a node-less bg thread (a live worktree with NO target-state
+        # manifest) has no /target to redispatch; resume its transcript under the
+        # new account instead, or notify when it is not visible there. Gate on
+        # confirmed manifest absence (not "no node id"): a missing cwd, an
+        # unreadable/transiently-unreachable manifest, and a real node-bound worker
+        # all stay on the node-bound path below (its _redispatch handles the miss
+        # -> nudge), so a transient .fno read failure never misroutes a worker into
+        # revival.
+        if repo_root and _worktree_is_node_less(repo_root):
+            return _revive_bg_thread(candidate, snap, repo_root, managed=managed)
         # A managed record shares ONE credential slot, so the swap only flipped
         # the routing pointer - the slot still holds the exhausted account's
         # creds. The replacement must read the NEW account's creds, so the slot is
@@ -686,8 +903,7 @@ def _default_failover(candidate: "Candidate", error) -> str:
         # leaves the worker alive for the bounded nudge rather than stopping it
         # for a switch that will not happen. oauth_dir/api_key records need no
         # materialization (env-var switch at spawn), so they redispatch as before.
-        repo_root = getattr(candidate, "cwd", None)
-        if getattr(snap, "auth", None) == "managed":
+        if managed:
             if not _auto_switch_enabled(repo_root):
                 return "rotated-no-worker"
             if _redispatch(candidate,

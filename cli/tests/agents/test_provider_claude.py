@@ -324,6 +324,34 @@ def test_build_argv_model_pin_parity() -> None:
     ]
 
 
+def test_build_argv_resume_session() -> None:
+    """US4 bg-thread revival: a resume_session_id inserts ``--resume <uuid>`` so a
+    replacement bg supervisor continues the dead session's transcript under the
+    new account's env. Unset is byte-identical to today. This flag is spawn-only
+    (the Rust ask-hop build_argv never resumes), so cross-runtime parity is scoped
+    to the model/permission/effort flags, not this one."""
+    from fno.agents.providers.claude import _build_argv
+
+    assert _build_argv("a", "hi", False, resume_session_id="U-123") == [
+        "claude", "--bg", "--name", "a", "--resume", "U-123", "hi",
+    ]
+    # stdin path (large message): message omitted, resume still present.
+    assert _build_argv("a", "hi", True, resume_session_id="U-123") == [
+        "claude", "--bg", "--name", "a", "--resume", "U-123",
+    ]
+    # Unset/empty == today (byte-identical, no flag).
+    assert _build_argv("a", "hi", False, resume_session_id=None) == [
+        "claude", "--bg", "--name", "a", "hi",
+    ]
+    assert _build_argv("a", "hi", False, resume_session_id="") == _build_argv(
+        "a", "hi", False, resume_session_id=None
+    )
+    # Composes with a model pin (resume after model, before message).
+    assert _build_argv("a", "hi", False, "fable", resume_session_id="U-9") == [
+        "claude", "--bg", "--name", "a", "--model", "fable", "--resume", "U-9", "hi",
+    ]
+
+
 def test_build_argv_tier3_parity() -> None:
     """x-b6e2: the Tier-3 passthrough bundle maps to claude's own spellings in a
     fixed order (--add-dir/--agent/--allowedTools/--disallowedTools), riding

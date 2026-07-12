@@ -1318,6 +1318,7 @@ def _claude_create_path(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
     add_dir: Optional[str] = None,
     agent: Optional[str] = None,
     tools: Optional[str] = None,
@@ -1353,6 +1354,7 @@ def _claude_create_path(
             model=model,
             permission_mode=effective_mode,
             effort=effort,
+            resume_session_id=resume_session_id,
             add_dir=add_dir,
             agent=agent,
             tools=tools,
@@ -1777,6 +1779,7 @@ def dispatch_spawn(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     headless: bool = False,
+    resume_session_id: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -1944,6 +1947,7 @@ def dispatch_spawn(
                         model=model,
                         permission_mode=permission_mode,
                         effort=effort,
+                        resume_session_id=resume_session_id,
                         add_dir=add_dir,
                         agent=agent,
                         tools=tools,
