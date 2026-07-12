@@ -28,11 +28,16 @@ review from the bot account and never satisfies a `required_bots` gate.
   - branch name -> review that branch's diff vs base.
   - nothing -> review the current branch vs base (`origin/main` unless overridden).
 - **provider** (optional, trailing word): `codex` (default) or `gemini`. A bare
-  `claude` is rejected (it is the same model as the author - see Hard rules), but
-  a **routed** `claude` peer IS allowed: a `config.review.peers` entry of the form
-  `{provider: claude, model: "zai,glm-5.2"}` runs the claude CLI as transport over
-  a genuinely different model (GLM via z.ai), which satisfies the distinct-model
-  trust invariant (see step 3b).
+  peer whose provider **matches the invoking harness** is rejected - it is the
+  author's own model, so it cannot be a cross-model second opinion (see Hard
+  rules). The invoking harness is read from the ambient markers in precedence
+  order `$CODEX_THREAD_ID` > `$CLAUDE_CODE_SESSION_ID` > `$CODEX_SESSION_ID` >
+  `$GEMINI_SESSION_ID` (the shared order in `harness_identity.py` / `claims.rs`):
+  a claude session rejects a bare `claude`, a codex session a bare `codex`, a
+  gemini session a bare `gemini`. A **routed** peer IS allowed: a
+  `config.review.peers` entry of the form `{provider: claude, model: "zai,glm-5.2"}`
+  runs the claude CLI as transport over a genuinely different model (GLM via
+  z.ai), which satisfies the distinct-model trust invariant (see step 3b).
 - **base** (optional): override the diff base (default `origin/main`).
 - **`adversarial`** (optional token, anywhere in the args): swaps the brief from
   defect-hunting to a design-challenge framing (`MODE=adversarial`; default
@@ -59,7 +64,12 @@ review from the bot account and never satisfies a `required_bots` gate.
 `MODE=adversarial` (default `MODE=defect`). Then resolve the target
 deterministically: the target is the single token that is a PR number (all digits)
 or resolves to a git ref (`git rev-parse --verify <tok>`); `codex`/`gemini` is the
-provider; `--*` are flags. In adversarial mode, every remaining token is collected
+provider; `--*` are flags. **Reject a bare provider that matches the invoking
+harness** here (Hard rule 3): if the resolved provider equals the harness from
+`$CODEX_THREAD_ID` > `$CLAUDE_CODE_SESSION_ID` > `$CODEX_SESSION_ID` >
+`$GEMINI_SESSION_ID` and carries no `model` route, STOP - it is the author's own
+model, so point the request at `/review sigma` or a different provider. In
+adversarial mode, every remaining token is collected
 verbatim (in order) into `FOCUS`. Because only a PR#/branch token can be the target,
 a focus word is never swallowed as the target; if no token resolves, the target is
 the current branch and all leftovers are focus. `FOCUS` is only consumed by the
@@ -342,14 +352,20 @@ review, or whose post to GitHub failed, must be reported, not papered over.
    `! fno agents spawn ...` recreates the exact bug this skill fixes.
 2. **Never fabricate a review.** Empty/non-zero is FAILED-or-abstained, reported
    as such. A peer review you did not actually get is worse than none.
-3. **codex, gemini, or a ROUTED claude only.** A bare `claude` peer is rejected -
-   it is the author's own model (`claude --once` also has no one-shot lane), so
-   point a bare-claude request at `/review sigma` or a normal Claude subagent. The
-   ONE exception is a routed claude peer (`{provider: claude, model: "zai,glm-5.2"}`,
-   step 3b): the claude CLI is transport for a genuinely different model (GLM), so
-   it satisfies the distinct-model invariant and is generated via `claude -p` with
-   the routed env, never `fno agents spawn`. The config loader enforces this - a
-   `claude` peers entry with no `model` route is rejected at load.
+3. **A cross-model peer only - never the author's own model.** At RESOLVE time,
+   reject a bare peer whose provider matches the **invoking harness** (read from
+   `$CODEX_THREAD_ID` > `$CLAUDE_CODE_SESSION_ID` > `$CODEX_SESSION_ID` >
+   `$GEMINI_SESSION_ID`): a claude session rejects a bare `claude`, a codex session
+   a bare `codex`, a gemini session a bare `gemini` - each is the author's own
+   model, not a second opinion. Point such a request at `/review sigma` or a
+   different provider. The ONE exception is a **routed** peer
+   (`{provider: <p>, model: "route_provider,route_model"}`, step 3b): the CLI is
+   transport for a genuinely different model, so it satisfies the distinct-model
+   invariant (generated via `<p> -p` with the routed env, never `fno agents spawn`).
+   Layered defense: the loader rejects a bare/anthropic-routed `claude` peer at
+   load (fail-early for the dominant claude author) and loop-check's gate-time
+   guard (x-c2e7) holds the gate for any same-model author - this RESOLVE refusal
+   is the earliest, advisory layer.
 4. **Advisory by default; a gate only with `--post`.** Bare `/review peer` is a
    coding-account read that never satisfies a review gate. With `--post` it is
    posted under the distinct `peer_identity` (NOT the author account) and DOES
