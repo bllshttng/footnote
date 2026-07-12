@@ -883,15 +883,25 @@ fn resolve_fanout_targets(abi_bin: &str) -> Vec<FanoutTarget> {
 }
 
 /// One project's status-fanout loop: shell `fno status-fanout tick` in the
-/// project cwd every `interval_seconds`, best-effort. Independent of the drain
-/// loops; a tick failure is swallowed and the next tick retries. Exits on
-/// shutdown. The Python tick no-ops when the project's sinks were removed, so a
-/// stale loop is harmless until the next `recheck` reconciles the target set.
+/// project cwd on the configured cadence, best-effort. Independent of the drain
+/// loops; a tick failure is swallowed and the next tick retries. Between ticks it
+/// re-resolves its own enablement (codex P2): a new `interval_secs` is picked up,
+/// and removing the project's sinks EXITS the loop (so `retain(!is_finished)`
+/// reaps it) rather than ticking forever. Exits on shutdown.
 async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown: Arc<AtomicBool>) {
-    let interval = Duration::from_secs(target.interval_seconds.max(1));
+    let project = target.project.clone();
+    let mut interval = Duration::from_secs(target.interval_seconds.max(1));
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
+        }
+        // Re-resolve between ticks so config changes land without a daemon restart.
+        match resolve_fanout_targets(&abi_bin)
+            .into_iter()
+            .find(|t| t.project == project)
+        {
+            Some(t) => interval = Duration::from_secs(t.interval_seconds.max(1)),
+            None => break, // sinks removed for this project -> stop ticking.
         }
         let bin = abi_bin.clone();
         let cwd = target.cwd.clone();
@@ -1031,7 +1041,15 @@ pub async fn run_supervisor(
         fanout_tasks.retain(|_, h| !h.is_finished());
 
         let targets = resolve_targets(&abi_bin);
-        live.store(!targets.is_empty(), Ordering::SeqCst);
+        let fanout_targets = resolve_fanout_targets(&abi_bin);
+        // `live` keeps the daemon out of idle-exit while ANY supervised work
+        // exists - drain OR fanout. A sink-only project (no active_backlog) must
+        // keep the daemon alive, else the daemon idle-exits and kills its fanout
+        // loop (codex P1).
+        live.store(
+            !targets.is_empty() || !fanout_targets.is_empty(),
+            Ordering::SeqCst,
+        );
 
         for target in targets {
             if tasks.contains_key(&target.project) {
@@ -1047,17 +1065,18 @@ pub async fn run_supervisor(
             tasks.insert(project, h);
         }
 
-        for ft in resolve_fanout_targets(&abi_bin) {
-            if fanout_tasks.contains_key(&ft.project) {
-                continue;
+        for ft in fanout_targets {
+            // Entry API: one lookup, and only spawn when this project has no live
+            // loop yet. A loop that already exists self-reconciles config changes.
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                fanout_tasks.entry(ft.project.clone())
+            {
+                slot.insert(tokio::spawn(per_project_fanout_loop(
+                    ft,
+                    abi_bin.clone(),
+                    Arc::clone(&shutdown),
+                )));
             }
-            let project = ft.project.clone();
-            let h = tokio::spawn(per_project_fanout_loop(
-                ft,
-                abi_bin.clone(),
-                Arc::clone(&shutdown),
-            ));
-            fanout_tasks.insert(project, h);
         }
 
         sleep_interruptible(recheck, &shutdown).await;

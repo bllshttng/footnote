@@ -98,6 +98,11 @@ def _read_events(path: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, A
                     events.append(ev)
     except FileNotFoundError:
         return [], 0
+    except (OSError, UnicodeDecodeError):
+        # A permission error or a corrupt (non-utf8) byte mid-read must not crash
+        # the tick; return what parsed so far (the cursor simply does not advance
+        # past the unread tail, which retries next tick).
+        return events, skipped
     return events, skipped
 
 
@@ -170,10 +175,11 @@ def _errors_path(name: str, project_root: Optional[Path]) -> Path:
 
 
 def _read_cursor(name: str, project_root: Optional[Path]) -> "Optional[tuple[str, int]]":
-    """Read a sink's ``(ts, n)`` cursor, or None if absent/malformed (fresh)."""
+    """Read a sink's ``(ts, n)`` cursor, or None if absent/unreadable/malformed
+    (all treated as fresh - a harmless re-init at EOF)."""
     try:
         raw = _cursor_path(name, project_root).read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:  # FileNotFoundError, PermissionError, ... - never crash the tick
         return None
     try:
         obj = json.loads(raw)
@@ -346,8 +352,13 @@ class _TickLock:
     def acquire(self) -> bool:
         import fcntl
 
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            # A read-only fs / permission error creating the lockfile: treat as
+            # "cannot lock" (the tick skips as locked_out) rather than crashing.
+            return False
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -395,11 +406,11 @@ def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
     import urllib.request
 
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
     try:
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             code = resp.getcode()
             return _HttpResult(ok=200 <= code < 300, status=code)
@@ -410,6 +421,11 @@ def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
         except (TypeError, ValueError):
             retry_after = None
         return _HttpResult(ok=False, status=e.code, retry_after=retry_after)
+    except ValueError:
+        # A malformed URL (e.g. missing scheme) raises ValueError from urlopen and
+        # is NOT a URLError/OSError - a permanent client error, so drop (status 400)
+        # rather than retry-forever as connect-class.
+        return _HttpResult(ok=False, status=400)
     except (urllib.error.URLError, OSError):
         return _HttpResult(ok=False, status=None)  # connect-class
 
@@ -627,7 +643,8 @@ status_fanout_app = typer.Typer(
 @status_fanout_app.command("tick")
 def tick_cmd(
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Preview per-sink matched counts; send nothing, advance no cursor."
+        False, "--dry-run", "-N",
+        help="Preview per-sink matched counts; send nothing, advance no cursor.",
     ),
 ) -> None:
     """Run one fanout pass over this project's events.jsonl."""

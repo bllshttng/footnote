@@ -916,3 +916,12 @@ def test_config_nonlist_status_sinks_warns_and_degrades(caplog):
         # The `[status_sinks.discord]` table typo -> a dict, degraded to [] with a warning.
         assert ConfigBlock(status_sinks={"discord": {}}).status_sinks == []
     assert any("status_sinks" in r.message for r in caplog.records)
+
+
+def test_post_json_malformed_url_is_permanent_drop():
+    # gemini HIGH: a URL with no scheme raises ValueError from urlopen (not
+    # URLError/OSError); classify as a permanent 4xx so it drops, not retries.
+    from fno import status_fanout as sf
+
+    r = sf._post_json("not-a-url", {"x": 1}, 1.0)  # fails on URL parse, no network
+    assert r.ok is False and r.status == 400
