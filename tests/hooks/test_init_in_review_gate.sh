@@ -75,16 +75,17 @@ make_repo() {
 }
 
 # Run init isolated. cwd is a per-scenario worktree-like repo on a feature
-# branch (so the location gate never fires). The self-contained stub shadows
-# fno for every call, so no real fno/state is touched; the guard uses the ab-
-# id path which never reads the graph.
+# branch (so the location gate never fires). HOME is redirected to the repo so
+# the guard's graph grep, the claim root, and any stamp read/write hit the
+# scratch tree, never the real ~/.fno; the self-contained stub shadows fno for
+# every call, so no real fno is invoked (no reprovision) either.
 run_init() {
     local cwd="$1"; shift
     (
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_ALLOW_IN_REVIEW \
               TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER
-        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" \
+        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
             PATH="$STUB_BIN:$PATH" "$@" bash "$INIT_SCRIPT" 2>&1
     )
     return $?
