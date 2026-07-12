@@ -429,6 +429,9 @@ struct View {
     /// spawns the shell-out and clears it, keeping the channel sender out of the
     /// deep stdin handler.
     needs_want: bool,
+    /// (x-feec) A fold shell-out is running; bounds concurrent folds to one so
+    /// mashing leader+a on a stale cache cannot spawn a pile of children (P2-5).
+    needs_inflight: bool,
     /// (x-feec) Generation token, bumped on every open/close so a fold result
     /// landing after the overlay closed or re-opened is discarded (AC6-FR).
     needs_gen: u64,
@@ -589,6 +592,7 @@ impl View {
             needs_fold_at: None,
             needs_degraded: false,
             needs_want: false,
+            needs_inflight: false,
             needs_gen: 0,
             digest: None,
             notice: None,
@@ -641,6 +645,7 @@ impl View {
                     name: a.name.clone(),
                     reason,
                     ts: String::new(),
+                    id_key: a.name.clone(),
                     answerable: a.answerable.clone(),
                     pane_id: a.pane_id,
                     attach_id: a.attach_id.clone(),
@@ -653,6 +658,7 @@ impl View {
                     name: a.name.clone(),
                     reason: a.reason.clone().unwrap_or_else(|| "done, unseen".into()),
                     ts: String::new(),
+                    id_key: a.name.clone(),
                     answerable: None,
                     pane_id: a.pane_id,
                     attach_id: a.attach_id.clone(),
@@ -678,6 +684,7 @@ impl View {
                         name: a.name.clone(),
                         reason: item.evidence.clone(),
                         ts: item.ts.clone(),
+                        id_key: item.session_id.clone(),
                         answerable: None,
                         pane_id: a.pane_id,
                         attach_id: a.attach_id.clone(),
@@ -693,6 +700,7 @@ impl View {
                             .unwrap_or_else(|| item.session_id.clone()),
                         reason: item.evidence.clone(),
                         ts: item.ts.clone(),
+                        id_key: item.session_id.clone(),
                         answerable: None,
                         pane_id: None,
                         attach_id: None,
@@ -2383,6 +2391,9 @@ struct NeedRow {
     /// The deciding event ts for a fold row (oldest-first tie-break); `""` for a
     /// live badge row (name-ordered within its band).
     ts: String,
+    /// A STABLE re-anchor key: a fold row's session id (survives a joined <->
+    /// squadless flip, where `name` changes), a badge row's name. Not shown.
+    id_key: String,
     /// Present only on a `BlockedAnswerable` row - the digit-answer payload.
     answerable: Option<AnswerablePrompt>,
     pane_id: Option<u64>,
@@ -2393,9 +2404,11 @@ struct NeedRow {
 
 impl NeedRow {
     /// The re-anchor identity: a scrape tick / fold merge keeps the cursor on
-    /// the same item, not the same index (AC3-UI).
+    /// the same item, not the same index (AC3-UI). Keyed on `(kind, id_key)` -
+    /// a stable session id for fold rows so a joined<->squadless transition (its
+    /// `name` flips) does not drop the cursor (codex P2).
     fn id(&self) -> (NeedKind, String) {
-        (self.kind, self.name.clone())
+        (self.kind, self.id_key.clone())
     }
 }
 
@@ -2918,6 +2931,25 @@ async fn attach_and_run(
         .map_err(|e| format!("draw: {e}"))?;
 
     let exit: Result<i32, String> = loop {
+        // x-feec: kick a wanted event-fold off the UI loop, at most ONE in
+        // flight (P2-5). Runs at loop top so a want re-armed from either the
+        // stdin arm (OpenAnswers) or the needs_rx arm (superseded refold) fires
+        // without needing another keypress. The sender lives in this scope, out
+        // of the deep stdin handler; the result reports back on needs_rx tagged
+        // with this generation.
+        if view.needs_want && !view.needs_inflight {
+            view.needs_want = false;
+            view.needs_inflight = true;
+            let tx = needs_tx.clone();
+            let gen = view.needs_gen;
+            let since = crate::digest_overlay::now_secs()
+                .saturating_sub(NEEDS_WINDOW_SECS)
+                .to_string();
+            tokio::spawn(async move {
+                let result = crate::needs_overlay::fold_now(&since).await;
+                let _ = tx.send((gen, result));
+            });
+        }
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
         // The which-key hint fires once per pending chord (US4, AC4-HP).
@@ -3043,22 +3075,6 @@ async fn attach_and_run(
                                 leader_since = None;
                                 view.hint = false;
                             }
-                            // x-feec: OpenAnswers requested a fresh event-fold.
-                            // Kick it off the UI loop here (the sender lives in
-                            // this scope, out of the deep stdin handler); it
-                            // reports back on `needs_rx`, tagged with this gen.
-                            if view.needs_want {
-                                view.needs_want = false;
-                                let tx = needs_tx.clone();
-                                let gen = view.needs_gen;
-                                let since = crate::digest_overlay::now_secs()
-                                    .saturating_sub(NEEDS_WINDOW_SECS)
-                                    .to_string();
-                                tokio::spawn(async move {
-                                    let result = crate::needs_overlay::fold_now(&since).await;
-                                    let _ = tx.send((gen, result));
-                                });
-                            }
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -3099,29 +3115,41 @@ async fn attach_and_run(
                 }
             }
             Some((gen, result)) = needs_rx.recv() => {
-                // x-feec: an event-fold landed. Merge it only if the overlay is
-                // still open under the same generation it was kicked for; a
-                // result for a closed/superseded overlay is discarded (AC6-FR).
+                // x-feec: an event-fold landed; the in-flight fold is done, so a
+                // later open may spawn a fresh one (P2-5 bound).
+                view.needs_inflight = false;
+                // Merge only if the overlay is still open under the same
+                // generation it was kicked for; a result for a closed/superseded
+                // overlay is discarded (AC6-FR). If the overlay is still open but
+                // moved on (re-opened, still live-only), re-arm a fresh fold.
                 if gen == view.needs_gen && view.answers.is_some() {
                     let prev = view.answers_selected_id();
                     match result {
                         Some(items) => {
                             view.needs_fold = Some(items);
                             view.needs_degraded = false;
+                            // Only a SUCCESS seeds the re-open cache; a failure is
+                            // never cached, so the next open retries instead of
+                            // silently serving the failed empty fold (P2-6).
+                            view.needs_fold_at = Some(Instant::now());
                         }
-                        // Fold failed/timed out: keep the live badge leg, flip
-                        // the loud degraded notice (AC2-ERR), never a silent
-                        // partial queue. An empty Some keeps leg-1 rendering.
+                        // Fold failed/timed out: keep the live badge leg, flip the
+                        // loud degraded notice (AC2-ERR), never a silent partial
+                        // queue. An empty Some keeps leg-1 rendering; leave
+                        // needs_fold_at untouched so the next open re-folds.
                         None => {
                             view.needs_fold = Some(Vec::new());
                             view.needs_degraded = true;
                         }
                     }
-                    view.needs_fold_at = Some(Instant::now());
                     view.reanchor_answers(prev);
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
+                } else if view.answers.is_some() && view.needs_fold.is_none() {
+                    // A superseded fold returned while the current overlay still
+                    // needs one (re-opened past the cache): kick a fresh fold.
+                    view.needs_want = true;
                 }
             }
             _ = winch.recv() => {
@@ -7540,6 +7568,7 @@ mod tests {
             name: "x".into(),
             reason: "stopped".into(),
             ts: String::new(),
+            id_key: "x".into(),
             answerable: None,
             pane_id: Some(1),
             attach_id: None,
@@ -7726,6 +7755,32 @@ mod tests {
             v.needs_gen,
             g + 1,
             "close bumps gen (in-flight fold discarded)"
+        );
+    }
+
+    // codex P2 (x-feec): a fold row's cursor re-anchor survives a squadless ->
+    // joined transition, because identity is the stable session id, not the
+    // display name (which flips from session id to the roster row's name).
+    #[test]
+    fn needs_fold_row_id_is_stable_across_join_flip() {
+        // Squadless first: no roster row, item is live -> name is the session id.
+        let mut v = view_with_agents(vec![]);
+        v.needs_fold = Some(vec![fold_item("budget_stop", "wkr", true)]);
+        let squadless_id = v.needs_view().0[0].id();
+        // Now the roster row appears: the item joins and its name flips to "wkr"
+        // (already the same here, so use a distinct roster name to prove it).
+        let mut joined_row = agent_row("wkr-pane", 5, Some(AgentBadge::Working), false);
+        joined_row.cwd_base = Some("wkr".into()); // join by cwd_base, name differs
+        v.layout.agents = vec![joined_row];
+        let joined = &v.needs_view().0[0];
+        assert_eq!(
+            joined.name, "wkr-pane",
+            "display name flips to the roster row"
+        );
+        assert_eq!(
+            joined.id(),
+            squadless_id,
+            "but the re-anchor identity (session id) is unchanged"
         );
     }
 
