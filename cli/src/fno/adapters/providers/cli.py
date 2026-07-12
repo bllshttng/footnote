@@ -79,11 +79,14 @@ def list_providers() -> None:
             "No providers configured. Run `fno providers add` to add one."
         )
         return
+    slot_active: dict[str, Optional[str]] = {}  # per-CLI slot occupant, read once
     for record in config.records:
         # For managed accounts the meaningful "active" is which one is
         # materialized in that CLI's slot; fall back to routing-active otherwise.
+        if record.auth == "managed" and record.cli not in slot_active:
+            slot_active[record.cli] = managed.active_slot_id(record.cli)
         is_active = (
-            record.id == managed.active_slot_id(record.cli)
+            record.id == slot_active[record.cli]
             if record.auth == "managed"
             else record.id == config.active
         )
@@ -504,7 +507,7 @@ def register_provider(
     # stamp write failure is non-fatal (the record is saved) but must be loud,
     # not a raw traceback - it degrades to no active-marker + no first capture.
     try:
-        managed._atomic_write_private(managed._active_stamp_path(record.cli), record.id)
+        managed.stamp_active_slot(record.cli, record.id)
     except OSError as exc:
         typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
 
@@ -629,7 +632,19 @@ def use_provider(
     try:
         save_providers(new_config, scope=scope)  # type: ignore[arg-type]
     except OSError as exc:
-        typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
+        # For a managed record the slot + its per-CLI stamp are already switched
+        # (that IS the operative state managed dispatch reads); only the routing
+        # pointer failed to persist. Say so, so the user retries the save rather
+        # than believing the switch did not happen.
+        if record.auth == "managed":
+            typer.echo(
+                f"warning: slot switched to '{provider_id}' but saving the active "
+                f"routing pointer failed ({exc}); re-run `fno providers use "
+                f"{provider_id}` to persist it.",
+                err=True,
+            )
+        else:
+            typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
         raise typer.Exit(1)
 
     typer.echo(f"Active provider set to '{provider_id}' (scope={scope}).")

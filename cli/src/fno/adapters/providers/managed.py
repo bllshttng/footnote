@@ -126,12 +126,19 @@ def _atomic_write_private(path: Path, content: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
+    fd_open = False
     try:
         os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd_open = True  # fdopen now owns fd; its context manager closes it
             fh.write(content)
         os.replace(tmp, path)
     except BaseException:
+        if not fd_open:  # os.fchmod raised before fdopen took ownership - close it ourselves
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         tmp.unlink(missing_ok=True)
         raise
 
@@ -208,7 +215,10 @@ def _write_slot_blob(cli: str, blob: str, config_dir: Path | None = None) -> Non
     writing both guarantees claude reads a consistent token, pitfall 2).
     claude/linux + codex: overwrite the credential file (0600)."""
     if cli == "codex":
-        _atomic_write_private(_codex_slot_auth_path(), blob)
+        try:
+            _atomic_write_private(_codex_slot_auth_path(), blob)
+        except OSError as exc:
+            raise ManagedStoreError(f"failed to write codex credential to slot: {exc}") from exc
         return
 
     cfg = config_dir or _claude_slot_config_dir()
@@ -232,8 +242,11 @@ def _write_slot_blob(cli: str, blob: str, config_dir: Path | None = None) -> Non
                     f"{out.returncode}: {out.stderr.strip()}"
                 )
         return
-    cfg.mkdir(parents=True, exist_ok=True)
-    _atomic_write_private(cfg / ".credentials.json", blob)
+    try:
+        cfg.mkdir(parents=True, exist_ok=True)
+        _atomic_write_private(cfg / ".credentials.json", blob)
+    except OSError as exc:
+        raise ManagedStoreError(f"failed to write credential to slot: {exc}") from exc
 
 
 def verify_slot(record: ProviderRecord, expected_blob: str) -> bool:
@@ -278,7 +291,10 @@ def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
     unreadable is treated as pinning, because deferring a switch is safe but
     rotating under a live session corrupts it.
     """
-    slot = config_dir or _claude_slot_config_dir()
+    _slot_raw = config_dir or _claude_slot_config_dir()
+    slot = _safe_resolve(_slot_raw) or _slot_raw
+    _def_raw = Path.home() / ".claude"
+    default_dir = _safe_resolve(_def_raw) or _def_raw
     me = os.getpid()
     found: list[PinningSession] = []
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
@@ -293,12 +309,24 @@ def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
             except Exception:  # noqa: BLE001 - unreadable env: assume it pins the default slot
                 found.append(PinningSession(proc.info["pid"], " ".join(cmdline)))
                 continue
-            proc_dir = Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else (Path.home() / ".claude")
-            if proc_dir == slot:
+            override = env.get("CLAUDE_CONFIG_DIR")
+            proc_dir = _safe_resolve(Path(override)) if override else default_dir
+            # Resolve both sides so a symlinked/relative path still matches; an
+            # unresolvable proc dir (proc_dir is None) is treated as pinning
+            # (conservative: under-detecting a live session is the unsafe way).
+            if proc_dir is None or proc_dir == slot:
                 found.append(PinningSession(proc.info["pid"], " ".join(cmdline)))
         except Exception:  # noqa: BLE001 - a vanished/denied process is not our switch's problem
             continue
     return found
+
+
+def _safe_resolve(p: Path) -> Optional[Path]:
+    """Resolve symlinks/relative segments; None if the path can't be resolved."""
+    try:
+        return p.resolve()
+    except OSError:
+        return None
 
 
 def _looks_like_claude(name: Optional[str], cmdline: list[str]) -> bool:
@@ -307,7 +335,11 @@ def _looks_like_claude(name: Optional[str], cmdline: list[str]) -> bool:
     # claude entrypoint path if that distribution reappears (US3 daemon needs it).
     if name and Path(name).name == "claude":
         return True
-    return any(Path(part.split()[0] if part else part).name == "claude" for part in cmdline if part)
+    for part in cmdline:
+        toks = part.split() if part else []
+        if toks and Path(toks[0]).name == "claude":
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -327,17 +359,20 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
             f"no current {record.cli} login to snapshot for '{record.id}' "
             "(sign in first, then register)"
         )
-    adir = account_dir(record.id, root)
-    adir.mkdir(parents=True, exist_ok=True)
-    os.chmod(adir, 0o700)
-    _atomic_write_private(_blob_path(record.id, root), blob)
-    meta = {
-        "cli": record.cli,
-        "account_id": record.account_id or record.id,
-        "captured_at": _utc_now_iso(),
-        "kind": "keychain" if (record.cli == "claude" and sys.platform == "darwin") else "file",
-    }
-    _atomic_write_private(_meta_path(record.id, root), json.dumps(meta, indent=2))
+    try:
+        adir = account_dir(record.id, root)
+        adir.mkdir(parents=True, exist_ok=True)
+        os.chmod(adir, 0o700)
+        _atomic_write_private(_blob_path(record.id, root), blob)
+        meta = {
+            "cli": record.cli,
+            "account_id": record.account_id or record.id,
+            "captured_at": _utc_now_iso(),
+            "kind": "keychain" if (record.cli == "claude" and sys.platform == "darwin") else "file",
+        }
+        _atomic_write_private(_meta_path(record.id, root), json.dumps(meta, indent=2))
+    except OSError as exc:
+        raise ManagedStoreError(f"failed to write snapshot for '{record.id}': {exc}") from exc
     return adir
 
 
@@ -378,6 +413,12 @@ def active_slot_id(cli: str, root: Path | None = None) -> Optional[str]:
         return _active_stamp_path(cli, root).read_text(encoding="utf-8").strip() or None
     except FileNotFoundError:
         return None
+
+
+def stamp_active_slot(cli: str, record_id: str, root: Path | None = None) -> None:
+    """Record which account is materialized in ``cli``'s slot (public entry so
+    callers don't reach into the private stamp path)."""
+    _atomic_write_private(_active_stamp_path(cli, root), record_id)
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +477,12 @@ def _switch_locked(
         raise ManagedStoreError(f"credential snapshot for '{target.id}' is empty; refusing to materialize")
 
     outgoing_id = active_slot_id(target.cli, root)  # this CLI's slot occupant
-    if outgoing_id == target.id:
-        return SwitchResult(active=target.id)  # already materialized: no-op
+    if outgoing_id == target.id and verify_slot(target, target_blob):
+        # Stamp says target AND the slot actually reads back target's blob:
+        # a true no-op. If the slot was changed out-of-band (manual /login,
+        # stale stamp after a partial failure), verify_slot is False and we
+        # fall through to re-materialize rather than falsely report success.
+        return SwitchResult(active=target.id)
 
     # Live-pin gate INSIDE the critical section (a session starting between
     # check and write is caught: the mutex is held across both).
@@ -488,7 +533,7 @@ def _switch_locked(
     # stamp naming the previous account while the slot holds target. Rare and
     # self-correcting on the next successful switch; journaling is not worth it
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
-    _atomic_write_private(_active_stamp_path(target.cli, root), target.id)
+    stamp_active_slot(target.cli, target.id, root)
     if emit_fn is not None:
         emit_fn(
             "account_switched",

@@ -126,6 +126,14 @@ class TestSwitch:
         result = managed.switch(by_id["work-b"], by_id=by_id, root=tmp_path)
         assert result.active == "work-b"
 
+    def test_stale_stamp_rematerializes_not_silent_noop(self, fake_slot, tmp_path):
+        """codex P2: stamp names the target but the slot holds different creds
+        (out-of-band /login) - re-materialize instead of a false no-op."""
+        by_id = _register_two(fake_slot, tmp_path)  # stamp=work-b, slot=B0
+        fake_slot["claude"] = _blob("SOMEONE_ELSE")  # slot changed out-of-band
+        managed.switch(by_id["work-b"], by_id=by_id, root=tmp_path)
+        assert fake_slot["claude"] == _blob("B0")  # re-materialized work-b's stored blob
+
     def test_emits_account_switched(self, fake_slot, tmp_path):
         by_id = _register_two(fake_slot, tmp_path)
         events: list[tuple] = []
@@ -272,6 +280,26 @@ class TestAtomicWrite:
         assert target.read_text() == "original"  # untouched
         # No leftover temp files.
         assert list(tmp_path.glob(".blob.*.tmp")) == []
+
+    def test_fchmod_failure_cleans_up_temp(self, tmp_path, monkeypatch):
+        """A fchmod failure before fdopen takes the fd must still clean the temp
+        (and not leak the fd - covered by closing it in the except)."""
+        monkeypatch.setattr(
+            managed.os, "fchmod", lambda *a, **k: (_ for _ in ()).throw(OSError("denied"))
+        )
+        with pytest.raises(OSError):
+            managed._atomic_write_private(tmp_path / "blob", "secret")
+        assert list(tmp_path.glob(".blob.*.tmp")) == []
+
+
+class TestLooksLikeClaude:
+    def test_whitespace_only_cmdline_part_no_indexerror(self):
+        # A whitespace-only arg used to crash on part.split()[0]; now safe.
+        assert managed._looks_like_claude(None, ["   ", ""]) is False
+
+    def test_matches_claude_binary(self):
+        assert managed._looks_like_claude("claude", []) is True
+        assert managed._looks_like_claude(None, ["/opt/homebrew/bin/claude --resume"]) is True
 
 
 # ---------------------------------------------------------------------------
