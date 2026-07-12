@@ -137,10 +137,13 @@ see below):
   headless codex/gemini worker is already BOUNDED - sandboxed AND never-prompt
   (codex `--sandbox workspace-write --ask-for-approval never`, gemini
   `--approval-mode yolo --sandbox`) - so it neither hangs nor roams outside the
-  workspace. Reach for `yolo` only when you genuinely want no sandbox. Ignored
-  for claude. "full auto" / "no sandbox" / "unsandboxed" map here. (To make full
-  yolo the standing default for a provider instead of per-launch, set
-  `config.agents.<provider>.headless_yolo: true`.)
+  workspace. Reach for `yolo` only when you genuinely want no sandbox. For claude
+  (which has no `--yolo` flag) it maps to `--permission-mode bypassPermissions`,
+  the equivalent full-auto/no-gates posture, so a yolo'd claude worker runs
+  gate-free instead of stalling on a permission prompt; an explicit
+  `--permission-mode` you pass wins over this default. "full auto" / "no sandbox"
+  / "unsandboxed" map here. (To make full yolo the standing default for a provider
+  instead of per-launch, set `config.agents.<provider>.headless_yolo: true`.)
 - **`model <name>`** (optional): exact model for the worker, plumbed to `fno
   agents spawn --model` (each provider's own `--model`). Two-word posture so a
   model name that is not a posture word is read as the value: `spawn ab-X model
