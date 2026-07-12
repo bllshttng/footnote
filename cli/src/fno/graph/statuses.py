@@ -18,7 +18,7 @@ from fno.graph._constants import LOCK_TTL_HOURS, PRIORITY_MIGRATION
 # together; importers go through this name rather than hard-coding the
 # strings at compare sites.
 VALID_STATUSES: frozenset[str] = frozenset(
-    {"done", "deferred", "superseded", "blocked", "claimed", "idea", "ready"}
+    {"done", "deferred", "superseded", "in_review", "blocked", "claimed", "idea", "ready"}
 )
 
 # Sentinel prefix used by the pre-feature workaround that overloaded
@@ -51,7 +51,8 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     """Recompute _status for all entries based on graph state.
 
     Called inside locked_mutate_graph() after every mutation.
-    Derives status from: completed_at, blocked_by, locked_by.
+    Derives status from: completed_at, superseded_by, deferred_at, pr_number,
+    blocked_by, locked_by.
     """
     # Reconcile the locked_by/session_id mirror first so derivation keys on the
     # canonical field even when called directly on legacy (session_id-only)
@@ -108,10 +109,27 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["_status"] = "deferred"
             continue
 
+        # Reap a stale lock BEFORE the in_review branch: a PR-bearing node with
+        # an expired claim (the stampede case) must still shed the dead owner,
+        # else `_normalize_lock_fields` later mirrors the stale `locked_by` back
+        # into `session_id` at canonicalize/done time and overwrites the
+        # merge-time provenance.
         if e.get("locked_by") and is_stale_lock(e):
             e["locked_by"] = None
             e["session_id"] = None  # keep the one-release mirror in sync
             e["claimed_at"] = None
+
+        # A node carrying a PR that has not closed (merge sets completed_at, so
+        # `done` wins above) is IN REVIEW: hold it out of the dispatch pool
+        # durably, independent of the builder session's ephemeral PID claim.
+        # This promotes the selection-time `_has_unmerged_open_pr` predicate
+        # into a persisted status, so the hold is visible to every consumer -
+        # explicit named-node dispatch, kanban, triage, `backlog get` - not
+        # just the `next`/`ready` candidate filter. Wins over blocked/claimed/
+        # idea/ready; defer/supersede/done still win above.
+        if e.get("pr_number"):
+            e["_status"] = "in_review"
+            continue
 
         has_open_blockers = False
         for blocker_id in e.get("blocked_by", []):
@@ -124,7 +142,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
                 has_open_blockers = True
                 break
 
-        # Precedence: done > superseded > deferred > blocked > claimed > idea > ready.
+        # Precedence: done > superseded > deferred > in_review > blocked > claimed > idea > ready.
         # Lifecycle states (claim/blocker/completion/deferral) win over
         # plan-existence so a plan-less node that gets claimed shows
         # `claimed`, one with an open blocker shows `blocked` rather than

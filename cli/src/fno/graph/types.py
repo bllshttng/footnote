@@ -19,6 +19,7 @@ class Status(str, Enum):
     superseded = "superseded"  # Fix 2: added to match _derive_status bare-string return
     idea = "idea"
     deferred = "deferred"
+    in_review = "in_review"  # node carries an open, unmerged PR; held out of dispatch
 
 
 class Priority(str, Enum):
@@ -52,6 +53,10 @@ def _derive_status(data: dict) -> str:
         return "superseded"
     if data.get("deferred_at"):
         return "deferred"
+    # Open, unmerged PR -> in_review (see recompute_statuses for the rationale).
+    # Merge sets completed_at, so `done` above wins once the PR lands.
+    if data.get("pr_number"):
+        return "in_review"
     if data.get("blocked_by"):
         return "blocked"
     # locked_by-first; tolerate a raw pre-rename dict passed straight in (not via
@@ -250,6 +255,7 @@ class Entry(BaseModel):
           completed_at set    -> "done"
           superseded_by set   -> "superseded"
           deferred_at set     -> "deferred"
+          pr_number set       -> "in_review"
           non-empty blocked_by -> "blocked"
               (single-entry cannot verify sibling completed_at -- just
                a non-empty list is the best approximation here;
@@ -262,6 +268,7 @@ class Entry(BaseModel):
             "completed_at": self.completed_at,
             "superseded_by": self.superseded_by,
             "deferred_at": self.deferred_at,
+            "pr_number": self.pr_number,
             "blocked_by": self.blocked_by,
             # locked_by-first; fall back to the legacy session_id mirror in case
             # this Entry was built from a pre-rename node not yet normalized.
