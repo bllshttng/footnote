@@ -2813,11 +2813,8 @@ mod tests {
         assert_eq!(p["tools"], "Read,Edit");
         assert_eq!(p["deny_tools"], "Bash");
         // Equals form (VALUE_FLAGS normalization) is equivalent.
-        let (_m2, eq) = build_request(
-            "spawn",
-            &["wk".to_string(), "--add-dir=/extra".to_string()],
-        )
-        .expect("--add-dir= must parse");
+        let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--add-dir=/extra".to_string()])
+            .expect("--add-dir= must parse");
         assert_eq!(eq["add_dir"], "/extra");
     }
 

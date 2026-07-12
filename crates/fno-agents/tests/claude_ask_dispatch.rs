@@ -190,7 +190,9 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         &[("PATH", path.as_str())],
         None,
         None,
-        None, fno_agents::claude_ask::HarnessFlags::default());
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+    );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     // spawn returns JSON receipt, not bare short_id.
     let receipt: serde_json::Value =
@@ -252,7 +254,9 @@ fn spawn_yolo_maps_to_bypass_permissions() {
         ],
         None,
         None,
-        None, fno_agents::claude_ask::HarnessFlags::default());
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+    );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     assert!(
         !out.stderr.contains("--yolo has no effect"),
@@ -561,7 +565,9 @@ fn spawn_missing_cli_exit_14() {
         &[("PATH", path.as_str())],
         None,
         None,
-        None, fno_agents::claude_ask::HarnessFlags::default());
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+    );
     assert_eq!(out.exit_code, 14, "stderr={}", out.stderr);
 }
 

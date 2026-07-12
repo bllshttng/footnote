@@ -84,8 +84,14 @@ fn argv_once_user_add_dir_is_additive() {
         .filter(|(_, a)| a.as_str() == "--add-dir")
         .map(|(i, _)| &argv[i + 1])
         .collect();
-    assert!(dirs.iter().any(|d| d.as_str() == "/repo"), "internal cwd kept");
-    assert!(dirs.iter().any(|d| d.as_str() == "/extra"), "user dir added");
+    assert!(
+        dirs.iter().any(|d| d.as_str() == "/repo"),
+        "internal cwd kept"
+    );
+    assert!(
+        dirs.iter().any(|d| d.as_str() == "/extra"),
+        "user dir added"
+    );
     assert_eq!(dirs.len(), 2, "exactly the two --add-dir values");
     // Empty user value is unset: only the internal cwd injection survives.
     let bare = build_argv_once("hi", Path::new("/repo"), None, Some(""));

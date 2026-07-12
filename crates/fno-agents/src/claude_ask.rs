@@ -1027,7 +1027,15 @@ pub fn bg_create(
     use std::process::{Command, Stdio};
 
     let use_stdin = use_stdin_for(message);
-    let argv = build_argv(name, message, use_stdin, model, permission_mode, effort, flags);
+    let argv = build_argv(
+        name,
+        message,
+        use_stdin,
+        model,
+        permission_mode,
+        effort,
+        flags,
+    );
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -2357,7 +2365,6 @@ fn followup(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn create(
     home: &AgentsHome,
     claude_home: &ClaudeHome,
@@ -2815,7 +2822,15 @@ mod tests {
     #[test]
     fn build_argv_appends_permission_mode() {
         assert_eq!(
-            build_argv("a", "hi", false, None, Some("acceptEdits"), None, HarnessFlags::default()),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                None,
+                Some("acceptEdits"),
+                None,
+                HarnessFlags::default()
+            ),
             vec![
                 "claude",
                 "--bg",
@@ -2828,15 +2843,29 @@ mod tests {
         );
         // Empty mode == unset: no flag, byte-identical to the None case (AC7).
         assert_eq!(
-            build_argv("a", "hi", false, None, Some(""), None, HarnessFlags::default()),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                None,
+                Some(""),
+                None,
+                HarnessFlags::default()
+            ),
             build_argv("a", "hi", false, None, None, None, HarnessFlags::default())
         );
         // Does NOT stack with --dangerously-skip-permissions (bg never had it).
-        assert!(
-            !build_argv("a", "hi", false, None, Some("acceptEdits"), None, HarnessFlags::default())
-                .iter()
-                .any(|t| t == "--dangerously-skip-permissions")
-        );
+        assert!(!build_argv(
+            "a",
+            "hi",
+            false,
+            None,
+            Some("acceptEdits"),
+            None,
+            HarnessFlags::default()
+        )
+        .iter()
+        .any(|t| t == "--dangerously-skip-permissions"));
     }
 
     // x-571f: a per-node model pin appends `--model <m>` between --name and the
@@ -2845,16 +2874,40 @@ mod tests {
     #[test]
     fn build_argv_appends_model_pin() {
         assert_eq!(
-            build_argv("a", "hi", false, Some("fable"), None, None, HarnessFlags::default()),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                Some("fable"),
+                None,
+                None,
+                HarnessFlags::default()
+            ),
             vec!["claude", "--bg", "--name", "a", "--model", "fable", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true, Some("fable"), None, None, HarnessFlags::default()),
+            build_argv(
+                "a",
+                "hi",
+                true,
+                Some("fable"),
+                None,
+                None,
+                HarnessFlags::default()
+            ),
             vec!["claude", "--bg", "--name", "a", "--model", "fable"]
         );
         // Empty pin == unset: no flag, byte-identical to the None case.
         assert_eq!(
-            build_argv("a", "hi", false, Some(""), None, None, HarnessFlags::default()),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                Some(""),
+                None,
+                None,
+                HarnessFlags::default()
+            ),
             build_argv("a", "hi", false, None, None, None, HarnessFlags::default())
         );
     }
@@ -2862,7 +2915,15 @@ mod tests {
     #[test]
     fn build_argv_appends_effort() {
         assert_eq!(
-            build_argv("a", "hi", false, None, None, Some("high"), HarnessFlags::default()),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                None,
+                None,
+                Some("high"),
+                HarnessFlags::default()
+            ),
             vec!["claude", "--bg", "--name", "a", "--effort", "high", "hi"]
         );
     }

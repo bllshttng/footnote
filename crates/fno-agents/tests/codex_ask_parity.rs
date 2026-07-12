@@ -223,7 +223,9 @@ fn rust_codex_create(
         Some(std::time::Duration::from_secs(timeout_sec)),
         None,
         None,
-        None, None);
+        None,
+        None,
+    );
 
     match old_path {
         Some(p) => unsafe { std::env::set_var("PATH", p) },

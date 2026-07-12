@@ -333,7 +333,9 @@ fn spawn_claude_receipt_byte_shape() {
         &[("PATH", path.as_str())],
         None,
         None,
-        None, fno_agents::claude_ask::HarnessFlags::default());
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+    );
 
     assert_eq!(
         out.exit_code, 0,
@@ -398,7 +400,9 @@ fn spawn_claude_collision_exits_2() {
         &[],
         None,
         None,
-        None, fno_agents::claude_ask::HarnessFlags::default());
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+    );
 
     assert_eq!(
         out.exit_code, 2,
@@ -445,7 +449,9 @@ fn spawn_codex_once_happy_path() {
         false,
         Some(Duration::from_secs(10)),
         None,
-        None, None);
+        None,
+        None,
+    );
 
     match old_path {
         Some(p) => unsafe { std::env::set_var("PATH", p) },
@@ -513,7 +519,9 @@ fn spawn_codex_once_collision_exits_2() {
         false,
         None,
         None,
-        None, None);
+        None,
+        None,
+    );
 
     assert_eq!(out.exit_code, 2, "collision must exit 2: {}", out.stderr);
     assert!(
@@ -548,7 +556,9 @@ fn spawn_codex_once_create_failure_no_registry_entry() {
         false,
         Some(Duration::from_secs(3)),
         None,
-        None, None);
+        None,
+        None,
+    );
 
     match old_path {
         Some(p) => unsafe { std::env::set_var("PATH", p) },
