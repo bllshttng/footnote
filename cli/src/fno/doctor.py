@@ -1029,6 +1029,13 @@ def _emit_human(
             f"for a dead handle ({handles}); no live session will ever drain them."
         )
 
+    mb = result.get("managed_block") or {}
+    if mb.get("stale"):
+        out(
+            f"fno doctor: {mb['file']} footnote block is v{mb['stamped']} "
+            f"(current v{mb['current']}); re-run `fno setup` to refresh it."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -1273,6 +1280,41 @@ def _dead_letter_report() -> dict:
     }
 
 
+def _managed_block_report() -> dict:
+    """Advisory: flag a host AGENTS.md/CLAUDE.md footnote block older than the
+    current template (US8). Reports only when a block actually exists - a repo
+    that never opted in is silent. Never blocks/exits."""
+    try:
+        from fno.setup.managed_block import BLOCK_VERSION, stamped_version
+
+        # Walk up to the repo root so `fno doctor` from a subdirectory still finds
+        # the host file (the block lives at the repo root, not the cwd).
+        root = Path.cwd()
+        for parent in [root, *root.parents]:
+            if (parent / ".git").exists() or (parent / ".fno").is_dir():
+                root = parent
+                break
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            p = root / name
+            if not p.is_file():
+                continue
+            try:
+                v = stamped_version(p.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if v is None:
+                continue
+            return {
+                "file": name,
+                "stamped": v,
+                "current": BLOCK_VERSION,
+                "stale": v < BLOCK_VERSION,
+            }
+    except Exception:
+        pass
+    return {}
+
+
 def doctor_command(
     fix: bool = typer.Option(
         False,
@@ -1369,6 +1411,10 @@ def doctor_command(
     # Advisory dead-letter visibility (US7): an unwired drain hook + stale bus
     # mail to a dead handle are silent quicksand. Never changes status/exit.
     result["dead_letter"] = _dead_letter_report()
+
+    # Advisory managed-block staleness (US8): a host AGENTS.md/CLAUDE.md footnote
+    # block older than the current template. Never changes status/exit.
+    result["managed_block"] = _managed_block_report()
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).

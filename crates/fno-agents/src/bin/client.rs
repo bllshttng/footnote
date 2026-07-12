@@ -214,6 +214,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::digest::run_digest(&args[1..], &AgentsHome::from_env()).await;
     }
 
+    // `needs` (x-feec): read-only needs-me-queue fold over events.jsonl +
+    // ledger.json across ALL sessions, emitting review_wedged / budget_stop
+    // items. Never touches the daemon; exits 0 on empty. The mux client shells
+    // this off-loop when the leader+a overlay opens.
+    if verb == "needs" {
+        return fno_agents::needs::run_needs(&args[1..], &AgentsHome::from_env()).await;
+    }
+
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
     // describe it as up. A down daemon is exit 13 (AC10-ERR).
     if verb == "status" {
@@ -771,6 +779,24 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // this arm handles the claude bg/headless lanes only.
     let permission_mode = params.get("permission_mode").and_then(|v| v.as_str());
     let effort = params.get("effort").and_then(|v| v.as_str());
+    // x-b6e2: Tier-3 harness-native passthrough. add_dir has 3 real cells
+    // (claude/codex/agy); agent/tools/deny_tools are claude-only on this
+    // bg/headless lane. Every non-equivalent cell fails closed below (mirrors
+    // --permission-mode / x-dfa4). The pane substrate re-execs the Python CLI,
+    // which owns its own per-provider mapping + fail-closed for these.
+    // Normalize empty-as-None once: an empty value is UNSET (the builders omit an
+    // empty flag), so the guard below must not trip on `--add-dir=""` and the
+    // bundle must carry None, not Some("").
+    let empty_as_none = |k: &str| {
+        params
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let add_dir = empty_as_none("add_dir");
+    let agent = empty_as_none("agent");
+    let tools = empty_as_none("tools");
+    let deny_tools = empty_as_none("deny_tools");
 
     // Validate the provider FIRST so an unknown provider is a client-side
     // error (exit 2) for every substrate, never a fall-through to the daemon.
@@ -829,6 +855,49 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             }
         }
     }
+
+    // x-b6e2 fail-closed matrix for the client-owned bg/headless lanes (pane
+    // re-execs Python, which guards there). A flag with no equivalent for the
+    // resolved provider is a hard error BEFORE launch - never a silent drop.
+    // Message shape mirrors --permission-mode. (opencode is already refused by
+    // the substrate arm below, so it never reaches these checks.)
+    if substrate != "pane" {
+        // No "use --substrate pane" advice: unlike --permission-mode, pane does
+        // NOT map these cells any wider than bg/headless does (gemini --add-dir,
+        // codex --agent fail closed on pane too), so that advice would mislead.
+        let unsupported = |flag: &str| {
+            eprintln!(
+                "{} is not supported for provider {}; drop it or use a provider that maps it",
+                flag,
+                py_repr(provider)
+            );
+        };
+        // --add-dir: claude/codex/agy map it; gemini has no verified equivalent.
+        if add_dir.is_some() && !matches!(provider, "claude" | "codex" | "agy") {
+            unsupported("--add-dir");
+            return Some(2);
+        }
+        // --agent / --tools / --deny-tools: claude-only on this lane.
+        if agent.is_some() && provider != "claude" {
+            unsupported("--agent");
+            return Some(2);
+        }
+        if tools.is_some() && provider != "claude" {
+            unsupported("--tools");
+            return Some(2);
+        }
+        if deny_tools.is_some() && provider != "claude" {
+            unsupported("--deny-tools");
+            return Some(2);
+        }
+    }
+    // The claude-only bundle, resolved once for both claude lanes.
+    let claude_flags = fno_agents::claude_ask::HarnessFlags {
+        add_dir,
+        agent,
+        allowed_tools: tools,
+        disallowed_tools: deny_tools,
+    };
 
     // Spawn gate (x-c5cc): cap + RAM floor for the CLIENT-SIDE substrates only.
     // `pane` re-execs into the Python CLI whose mirrored gate is the sole gate
@@ -901,6 +970,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 model,
                 permission_mode,
                 effort,
+                claude_flags,
             );
             if !outcome.stderr.is_empty() {
                 eprint!("{}", outcome.stderr);
@@ -953,6 +1023,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 model,
                 permission_mode,
                 effort,
+                claude_flags,
             ))
         }
 
@@ -960,7 +1031,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
         // passthrough to the provider CLI's own --model).
         ("codex", "headless") => emit!(dispatch_codex_once(
-            home, name, message, from_name, &cwd, yolo, timeout, model, effort,
+            home, name, message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
         )),
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, message, from_name, &cwd, yolo, timeout, model,
@@ -981,7 +1052,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // It ignores `yolo` (headless create always passes
             // --dangerously-skip-permissions) and honors an optional --model.
             emit!(dispatch_agy_once(
-                home, name, message, from_name, &cwd, model, timeout,
+                home, name, message, from_name, &cwd, model, timeout, add_dir,
             ))
         }
 
@@ -1298,6 +1369,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--substrate",
         "--permission-mode",
         "--effort",
+        "--add-dir",
+        "--agent",
+        "--tools",
+        "--deny-tools",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -1422,6 +1497,22 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--effort" => {
                 params.insert("effort".into(), str_arg(&mut it, "--effort")?);
+            }
+            // x-b6e2: Tier-3 harness-native passthrough. Parsed here (space +
+            // equals form via VALUE_FLAGS) so the pane re-exec is not blocked by
+            // an unknown-flag error; the mapping + fail-closed live at the spawn
+            // seam (maybe_run_spawn) and the Python pane builder.
+            "--add-dir" => {
+                params.insert("add_dir".into(), str_arg(&mut it, "--add-dir")?);
+            }
+            "--agent" => {
+                params.insert("agent".into(), str_arg(&mut it, "--agent")?);
+            }
+            "--tools" => {
+                params.insert("tools".into(), str_arg(&mut it, "--tools")?);
+            }
+            "--deny-tools" => {
+                params.insert("deny_tools".into(), str_arg(&mut it, "--deny-tools")?);
             }
             "--substrate" => {
                 // The session-substrate selector (x-2c27): pane (owned-PTY,
@@ -2110,6 +2201,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "wait --agent <name> --state idle|blocked|done [--timeout-ms <n>] [--json]",
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",
     "digest --session <s> [--since <ts> | --since-epoch <secs>] [--json]",
+    "needs [--since-epoch <secs>] [--fires-floor <n>] [--json]",
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
@@ -2185,6 +2277,7 @@ mod tests {
             "wait",
             "subscribe",
             "digest",
+            "needs",
         ];
         let listed: std::collections::HashSet<&str> = CLIENT_VERB_USAGE
             .iter()
@@ -2716,6 +2809,35 @@ mod tests {
         )
         .expect("--permission-mode= must parse");
         assert_eq!(eq["permission_mode"], "plan");
+    }
+
+    // x-b6e2 (US1): the Tier-3 passthrough flags land in params under their
+    // snake_case keys, in both space and equals form.
+    #[test]
+    fn spawn_forwards_tier3_flags() {
+        let (_m, p) = build_request(
+            "spawn",
+            &[
+                "wk".to_string(),
+                "--add-dir".to_string(),
+                "/work".to_string(),
+                "--agent".to_string(),
+                "reviewer".to_string(),
+                "--tools".to_string(),
+                "Read,Edit".to_string(),
+                "--deny-tools".to_string(),
+                "Bash".to_string(),
+            ],
+        )
+        .expect("tier-3 flags must parse");
+        assert_eq!(p["add_dir"], "/work");
+        assert_eq!(p["agent"], "reviewer");
+        assert_eq!(p["tools"], "Read,Edit");
+        assert_eq!(p["deny_tools"], "Bash");
+        // Equals form (VALUE_FLAGS normalization) is equivalent.
+        let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--add-dir=/extra".to_string()])
+            .expect("--add-dir= must parse");
+        assert_eq!(eq["add_dir"], "/extra");
     }
 
     #[test]

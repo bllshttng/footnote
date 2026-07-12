@@ -172,6 +172,13 @@ see below):
   spawn --timeout` (CLI default 600).
 - **`--fresh` / `--here`** (optional): `--fresh` resolves the worker cwd to the
   canonical main root; `--here`/`--in-place` opts out and keeps the caller cwd.
+- **Tier-3 harness passthrough** (all optional, x-b6e2): forwarded straight to
+  `fno agents spawn`, opaque to the skill; the CLI maps or fails closed per
+  provider. `--add-dir <dir>` grants the worker extra write access (claude/codex/
+  agy; additive to its own workspace). `--agent <name>` pins its sub-agent
+  (claude/opencode). `--tools <list>` / `--deny-tools <list>` scope its tool set
+  (claude `--allowedTools`/`--disallowedTools`). A no-equivalent provider cell is
+  rejected before spawn.
 
 `normalize.sh` is the deterministic backstop: it recognizes this closed posture
 vocabulary as a contiguous TRAILING run (right-anchored), so a posture word that

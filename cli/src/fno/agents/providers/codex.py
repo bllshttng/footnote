@@ -622,6 +622,7 @@ def create(
     headless_yolo: Optional[bool] = None,
     role: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
 ) -> CodexResult:
     """Spawn ``codex exec --json --cd <cwd> --skip-git-repo-check ...``.
 
@@ -656,6 +657,9 @@ def create(
         config_args += ["-c", f"model_reasoning_effort={reasoning_effort}"]
     # Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     # flag and follows it. See `approval_flag` / `sandbox_flag`.
+    # x-b6e2: a user --add-dir grants extra write access on `codex exec`
+    # (additive; codex's own cwd rides -C). Empty/None = unchanged argv.
+    add_dir_args = ["--add-dir", add_dir] if add_dir else []
     argv = [
         "codex",
         *config_args,
@@ -663,6 +667,7 @@ def create(
         "exec", "--json",
         "-C", str(cwd),
         "--skip-git-repo-check",
+        *add_dir_args,
         *sandbox_flag(eff_yolo),
         full_prompt,
     ]

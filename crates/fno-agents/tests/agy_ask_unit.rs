@@ -36,7 +36,7 @@ fn inject_from_name_no_escaping() {
 
 #[test]
 fn argv_once_basic_shape() {
-    let argv = build_argv_once("do the thing", Path::new("/tmp/repo"), None);
+    let argv = build_argv_once("do the thing", Path::new("/tmp/repo"), None, None);
     assert_eq!(argv[0], "agy");
     // -p is the LAST flag and its value is the prompt (the wrapper's ordering rule).
     let p_idx = argv.iter().position(|a| a == "-p").expect("has -p");
@@ -56,7 +56,7 @@ fn argv_once_basic_shape() {
 
 #[test]
 fn argv_once_with_model() {
-    let argv = build_argv_once("hi", Path::new("/r"), Some("Gemini 3.5 Flash (High)"));
+    let argv = build_argv_once("hi", Path::new("/r"), Some("Gemini 3.5 Flash (High)"), None);
     let m_idx = argv
         .iter()
         .position(|a| a == "--model")
@@ -68,8 +68,35 @@ fn argv_once_with_model() {
 
 #[test]
 fn argv_once_empty_model_is_omitted() {
-    let argv = build_argv_once("hi", Path::new("/r"), Some(""));
+    let argv = build_argv_once("hi", Path::new("/r"), Some(""), None);
     assert!(!argv.iter().any(|a| a == "--model"));
+}
+
+// x-b6e2 (US5, AC1-EDGE): a user --add-dir is ADDITIVE - both the internal cwd
+// injection and the user dir appear as --add-dir values; the internal one is
+// never replaced. Empty user value = unchanged argv.
+#[test]
+fn argv_once_user_add_dir_is_additive() {
+    let argv = build_argv_once("hi", Path::new("/repo"), None, Some("/extra"));
+    let dirs: Vec<&String> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.as_str() == "--add-dir")
+        .map(|(i, _)| &argv[i + 1])
+        .collect();
+    assert!(
+        dirs.iter().any(|d| d.as_str() == "/repo"),
+        "internal cwd kept"
+    );
+    assert!(
+        dirs.iter().any(|d| d.as_str() == "/extra"),
+        "user dir added"
+    );
+    assert_eq!(dirs.len(), 2, "exactly the two --add-dir values");
+    // Empty user value is unset: only the internal cwd injection survives.
+    let bare = build_argv_once("hi", Path::new("/repo"), None, Some(""));
+    let n = bare.iter().filter(|a| a.as_str() == "--add-dir").count();
+    assert_eq!(n, 1);
 }
 
 // ---------------------------------------------------------------------------

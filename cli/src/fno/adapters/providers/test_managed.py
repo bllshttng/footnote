@@ -321,6 +321,7 @@ class TestCodexFileBackend:
     def test_codex_switch_captures_and_materializes(self, tmp_path, monkeypatch):
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
         a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
         managed._write_slot_blob("codex", _blob("A0"))
         managed.snapshot_current(a, root=tmp_path)
@@ -332,6 +333,157 @@ class TestCodexFileBackend:
         managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert managed._read_slot_blob("codex") == _blob("A0")
         assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+    def test_codex_switch_pin_defers(self, tmp_path, monkeypatch):
+        """US6 Invariant: a live codex session pinning the slot defers the switch,
+        names the session, and mutates nothing - claude parity for codex."""
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(a, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+        managed._write_slot_blob("codex", _blob("B0"))
+        managed.snapshot_current(b, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        monkeypatch.setattr(
+            managed, "codex_pinning_sessions",
+            lambda auth_path=None: [managed.PinningSession(555, "codex exec")],
+        )
+        before = managed._read_slot_blob("codex")
+        with pytest.raises(managed.SwitchDeferred) as exc:
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert "555" in str(exc.value) and "codex" in str(exc.value)
+        assert managed._read_slot_blob("codex") == before  # slot untouched
+        assert (tmp_path / "cx-a" / "blob").read_text() == _blob("A0")  # store untouched
+
+    def test_codex_session_launched_mid_switch_rolls_back(self, tmp_path, monkeypatch):
+        """TOCTOU narrowing (cv-f578cbe7): the pre-write pin check is clear, but a
+        codex session appears during the write. The post-write re-scan catches it,
+        rolls the slot back to the outgoing creds, and defers - never leaving
+        auth.json rewritten under the session that started mid-switch."""
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(a, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+        managed._write_slot_blob("codex", _blob("B0"))  # slot holds outgoing B
+        managed.snapshot_current(b, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        # First scan (pre-write) clear; second scan (post-write) finds a session.
+        calls = {"n": 0}
+
+        def _scan(auth_path=None):
+            calls["n"] += 1
+            return [] if calls["n"] == 1 else [managed.PinningSession(777, "codex")]
+
+        monkeypatch.setattr(managed, "codex_pinning_sessions", _scan)
+        with pytest.raises(managed.SwitchDeferred) as exc:
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert "777" in str(exc.value) and "during the switch" in str(exc.value)
+        assert managed._read_slot_blob("codex") == _blob("B0")  # rolled back to outgoing
+        assert managed.active_slot_id("codex", tmp_path) == "cx-b"  # stamp not advanced
+        assert calls["n"] == 2  # both scans ran
+
+    def test_claude_switch_has_single_pin_check(self, fake_slot, tmp_path, monkeypatch):
+        """The post-write re-scan is codex-only: claude keeps G1's single pre-write
+        check (byte-for-byte), so a clean claude switch scans exactly once."""
+        by_id = _register_two(fake_slot, tmp_path)
+        calls = {"n": 0}
+
+        def _scan(config_dir=None):
+            calls["n"] += 1
+            return []
+
+        monkeypatch.setattr(managed, "pinning_sessions", _scan)
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert calls["n"] == 1  # claude scanned once, not twice
+
+
+class _FakeProc:
+    """A psutil-proc stand-in for the pin matcher's process scan."""
+
+    def __init__(self, pid, name, cmdline, environ=None, environ_raises=False):
+        self.info = {"pid": pid, "name": name, "cmdline": cmdline}
+        self._environ = environ or {}
+        self._environ_raises = environ_raises
+
+    def environ(self):
+        if self._environ_raises:
+            raise PermissionError("denied")
+        return self._environ
+
+
+class TestLooksLikeCodex:
+    def test_matches_codex_binary(self):
+        assert managed._looks_like_codex("codex", []) is True
+        assert managed._looks_like_codex(None, ["/opt/homebrew/bin/codex exec"]) is True
+
+    def test_non_codex_is_false(self):
+        assert managed._looks_like_codex("claude", []) is False
+        assert managed._looks_like_codex(None, ["   ", ""]) is False
+
+    def test_codex_as_later_arg_does_not_match(self):
+        # 'codex' in a non-argv[0] position (grep target, commit message) must
+        # NOT match - else a random command spuriously defers a switch.
+        assert managed._looks_like_codex(None, ["grep", "codex"]) is False
+        assert managed._looks_like_codex(None, ["git", "commit", "-m", "codex fix"]) is False
+        assert managed._looks_like_codex(None, ["nano", "codex.json"]) is False
+
+    def test_matches_argv0_joined_or_split(self):
+        assert managed._looks_like_codex(None, ["/opt/homebrew/bin/codex", "exec"]) is True
+        assert managed._looks_like_codex(None, ["/opt/homebrew/bin/codex exec"]) is True
+
+
+class TestCodexPinningSessions:
+    def _iter(self, monkeypatch, proc):
+        monkeypatch.setattr(managed.psutil, "process_iter", lambda attrs=None: iter([proc]))
+
+    def test_codex_home_at_slot_pins(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(
+            4242, "codex", ["codex", "exec"], environ={"CODEX_HOME": str(tmp_path / ".codex")}
+        ))
+        assert [p.pid for p in managed.codex_pinning_sessions()] == [4242]
+
+    def test_codex_home_elsewhere_does_not_pin(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(
+            1, "codex", ["codex"], environ={"CODEX_HOME": str(tmp_path / "other")}
+        ))
+        assert managed.codex_pinning_sessions() == []
+
+    def test_unreadable_env_is_conservative_pin(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(7, "codex", ["codex"], environ_raises=True))
+        assert [p.pid for p in managed.codex_pinning_sessions()] == [7]
+
+    def test_non_codex_process_ignored(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(
+            9, "claude", ["claude"], environ={"CODEX_HOME": str(tmp_path / ".codex")}
+        ))
+        assert managed.codex_pinning_sessions() == []
+
+
+class TestPinningSessionsFor:
+    def test_dispatches_claude_and_codex(self, monkeypatch):
+        monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: ["C"])
+        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: ["X"])
+        assert managed.pinning_sessions_for("claude") == ["C"]
+        assert managed.pinning_sessions_for("codex") == ["X"]
+
+    def test_unsupported_cli_refuses_before_mutation(self):
+        # A cli with no managed matcher must fail loud with a receipt, not fall
+        # back to the claude scan (which would let the switch corrupt the claude
+        # slot via the downstream slot ops).
+        with pytest.raises(managed.ManagedStoreError, match="not supported for cli 'gemini'"):
+            managed.pinning_sessions_for("gemini")
 
 
 # ---------------------------------------------------------------------------

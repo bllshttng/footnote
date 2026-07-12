@@ -71,6 +71,7 @@ pub mod loop_target;
 pub mod loopcheck;
 pub mod mail_inject;
 pub mod manifest;
+pub mod needs;
 pub mod nudge;
 pub mod opencode_ask;
 pub mod osc;

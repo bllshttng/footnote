@@ -130,6 +130,28 @@ def parse_short_id(stdout: str) -> str:
     return match.group(1)
 
 
+def _tier3_tokens(
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
+) -> list[str]:
+    """x-b6e2: claude's own spellings for the Tier-3 passthrough flags, in a fixed
+    order (--add-dir/--agent/--allowedTools/--disallowedTools), skipping empty.
+    claude-only (the fail-closed for other providers lives at the CLI/client
+    guard); kept identical to the Rust HarnessFlags::push_onto for argv parity."""
+    out: list[str] = []
+    for flag, value in (
+        ("--add-dir", add_dir),
+        ("--agent", agent),
+        ("--allowedTools", tools),
+        ("--disallowedTools", deny_tools),
+    ):
+        if value:
+            out += [flag, value]
+    return out
+
+
 def _build_argv(
     name: str,
     message: str,
@@ -138,6 +160,10 @@ def _build_argv(
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
     resume_session_id: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
 ) -> list[str]:
     """Render the argv list for ``claude --bg``.
 
@@ -169,6 +195,8 @@ def _build_argv(
         argv += ["--permission-mode", permission_mode]
     if effort:
         argv += ["--effort", effort]
+    # x-b6e2: Tier-3 passthrough, same order as the Rust build_argv (parity).
+    argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     if model:
         argv += ["--model", model]
     if resume_session_id:
@@ -185,6 +213,10 @@ def headless_create(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
 ) -> ProviderResult:
     """Run a one-shot ``claude -p`` without creating a background session."""
     argv = ["claude", "-p"]
@@ -196,6 +228,8 @@ def headless_create(
         argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
+    # x-b6e2: Tier-3 passthrough, same order as the Rust headless builder.
+    argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     argv.append(message or "hello")
     started = time.monotonic()
     try:
@@ -230,6 +264,10 @@ def bg_create(
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
     resume_session_id: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -266,6 +304,10 @@ def bg_create(
         permission_mode=permission_mode,
         effort=effort,
         resume_session_id=resume_session_id,
+        add_dir=add_dir,
+        agent=agent,
+        tools=tools,
+        deny_tools=deny_tools,
     )
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls

@@ -191,6 +191,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     // spawn returns JSON receipt, not bare short_id.
@@ -254,6 +255,7 @@ fn spawn_yolo_maps_to_bypass_permissions() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     assert!(
@@ -564,6 +566,7 @@ fn spawn_missing_cli_exit_14() {
         None,
         None,
         None,
+        fno_agents::claude_ask::HarnessFlags::default(),
     );
     assert_eq!(out.exit_code, 14, "stderr={}", out.stderr);
 }

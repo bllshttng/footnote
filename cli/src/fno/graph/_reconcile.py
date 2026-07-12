@@ -352,6 +352,7 @@ def reverse_map_unstamped(
     # ponytail: group by cwd string; two worktrees of one repo -> two identical
     # gh calls. Collapse to git-common-dir only if that ever shows on a profile.
     by_cwd: dict[str, list[dict]] = {}
+    skipped_dead_cwd: list[str] = []
     for node in entries:
         nid = node.get("id")
         if not isinstance(nid, str):
@@ -371,7 +372,28 @@ def reverse_map_unstamped(
         # node's project root when it's gone (also collapses same-project gone
         # worktrees to one gh call).
         cwd = _effective_reconcile_cwd(cwd, node.get("project"))
+        # Original dead AND project-root fallback unresolvable: this ref-less node
+        # cannot be reverse-mapped at all - handing the missing dir to
+        # subprocess(cwd=) raises Errno 2, one hard failure per node on EVERY
+        # reconcile (SessionStart + every merge). Skip it and surface ONE
+        # aggregated advisory below instead of that permanent per-node spam.
+        if not os.path.isdir(cwd):
+            skipped_dead_cwd.append(nid)
+            continue
         by_cwd.setdefault(cwd, []).append(node)
+
+    if skipped_dead_cwd:
+        # Name EVERY skipped id (not a capped subset): the id is the only handle
+        # an operator has to heal a genuinely-merged-but-archived node via
+        # `fno backlog update`, so a truncated list would leave the tail
+        # un-healable - the exact visibility the aggregated advisory exists to
+        # preserve. One line, however many ids; the count is realistically small.
+        print(
+            f"reverse-map: skipped {len(skipped_dead_cwd)} ref-less node(s) with "
+            f"missing cwd: {' '.join(skipped_dead_cwd)} "
+            f"(heal with: fno backlog update <id> --project <p> --cwd <path>)",
+            file=sys.stderr,
+        )
 
     records: list[MergeDriftRecord] = []
     for cwd, nodes in by_cwd.items():
@@ -515,7 +537,18 @@ def scan_merge_drift(
         if not refs:
             continue
 
+        # Same dead-cwd defect as the reverse path: subprocess(cwd=<missing>)
+        # raises Errno 2 even when --repo was parsed from pr_url and the cwd is
+        # irrelevant. Resolve through the project-root fallback; if still gone,
+        # degrade to None so a repo-scoped query still succeeds via --repo and a
+        # repo-less node lands on the explicit `no repo context` error, not Errno 2.
         cwd = node.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            cwd = _effective_reconcile_cwd(cwd, node.get("project"))
+            if not os.path.isdir(cwd):
+                cwd = None
+        else:
+            cwd = None
         merged: Optional[PrMergeState] = None
         first_error: Optional[str] = None
 

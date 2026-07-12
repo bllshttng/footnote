@@ -408,6 +408,40 @@ fn head_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// x-b6e2: the Tier-3 harness-native passthrough flags that claude maps but the
+/// other providers largely don't. Bundled so the deep claude dispatch chain
+/// threads ONE param, not four. Each is an opaque value forwarded to claude's
+/// own flag; empty/None = the flag is omitted. codex/agy take only `add_dir`
+/// individually (their sole real cell); `agent`/`tools`/`deny_tools` fail closed
+/// for every non-claude provider at the client.rs guard, so a non-claude builder
+/// never receives them.
+#[derive(Clone, Copy, Default)]
+pub struct HarnessFlags<'a> {
+    pub add_dir: Option<&'a str>,
+    pub agent: Option<&'a str>,
+    pub allowed_tools: Option<&'a str>,
+    pub disallowed_tools: Option<&'a str>,
+}
+
+impl<'a> HarnessFlags<'a> {
+    /// Append the mapped `--flag <value>` tokens (claude's own spellings) to an
+    /// argv, skipping empty/None. Shared by the bg and headless claude builders
+    /// so their token order stays identical (parity).
+    fn push_onto(&self, argv: &mut Vec<String>) {
+        for (flag, value) in [
+            ("--add-dir", self.add_dir),
+            ("--agent", self.agent),
+            ("--allowedTools", self.allowed_tools),
+            ("--disallowedTools", self.disallowed_tools),
+        ] {
+            if let Some(v) = value.filter(|v| !v.is_empty()) {
+                argv.push(flag.to_string());
+                argv.push(v.to_string());
+            }
+        }
+    }
+}
+
 /// Render the argv for `claude --bg` (`_build_argv`). When `use_stdin`, the
 /// message is omitted from argv and fed via stdin instead. A non-empty `model`
 /// (x-571f per-node pin) appends `--model <m>` between `--name` and the
@@ -420,6 +454,7 @@ pub fn build_argv(
     model: Option<&str>,
     permission_mode: Option<&str>,
     effort: Option<&str>,
+    flags: HarnessFlags,
 ) -> Vec<String> {
     let mut argv = vec![
         "claude".to_string(),
@@ -438,6 +473,9 @@ pub fn build_argv(
         argv.push("--effort".to_string());
         argv.push(value.to_string());
     }
+    // x-b6e2: Tier-3 passthrough (--add-dir/--agent/--allowedTools/
+    // --disallowedTools). Kept identical to the Python _build_argv (parity).
+    flags.push_onto(&mut argv);
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
         argv.push(m.to_string());
@@ -984,11 +1022,20 @@ pub fn bg_create(
     model: Option<&str>,
     permission_mode: Option<&str>,
     effort: Option<&str>,
+    flags: HarnessFlags,
 ) -> Result<CreateResult, AskError> {
     use std::process::{Command, Stdio};
 
     let use_stdin = use_stdin_for(message);
-    let argv = build_argv(name, message, use_stdin, model, permission_mode, effort);
+    let argv = build_argv(
+        name,
+        message,
+        use_stdin,
+        model,
+        permission_mode,
+        effort,
+        flags,
+    );
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -1766,6 +1813,7 @@ pub fn dispatch_claude_spawn(
     model: Option<&str>,
     permission_mode: Option<&str>,
     effort: Option<&str>,
+    flags: HarnessFlags,
 ) -> AskOutcome {
     // spawn allows an empty initial message (Python dispatch_spawn parity).
     if let Err(msg) = validate_spawn_inputs(name, from_name) {
@@ -1845,6 +1893,7 @@ pub fn dispatch_claude_spawn(
         model,
         effective_mode,
         effort,
+        flags,
     );
     if inner.exit_code != 0 {
         return inner;
@@ -1907,6 +1956,7 @@ pub fn dispatch_claude_headless(
     model: Option<&str>,
     permission_mode: Option<&str>,
     effort: Option<&str>,
+    flags: HarnessFlags,
 ) -> AskOutcome {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1942,6 +1992,8 @@ pub fn dispatch_claude_headless(
         argv.push("--effort".to_string());
         argv.push(value.to_string());
     }
+    // x-b6e2: Tier-3 passthrough, same token order as the Python headless_create.
+    flags.push_onto(&mut argv);
     if !use_stdin {
         argv.push(effective.to_string());
     }
@@ -2313,7 +2365,6 @@ fn followup(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn create(
     home: &AgentsHome,
     claude_home: &ClaudeHome,
@@ -2331,6 +2382,7 @@ fn create(
     // --yolo -> bypassPermissions before calling); None = the claude default.
     permission_mode: Option<&str>,
     effort: Option<&str>,
+    flags: HarnessFlags,
 ) -> AskOutcome {
     let pre_stderr = String::new();
 
@@ -2346,6 +2398,7 @@ fn create(
         model,
         permission_mode,
         effort,
+        flags,
     ) {
         Ok(r) => r,
         Err(AskError::Subprocess { exit_code, stderr }) => {
@@ -2755,11 +2808,11 @@ mod tests {
     #[test]
     fn build_argv_inline_vs_stdin() {
         assert_eq!(
-            build_argv("a", "hi", false, None, None, None),
+            build_argv("a", "hi", false, None, None, None, HarnessFlags::default()),
             vec!["claude", "--bg", "--name", "a", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true, None, None, None),
+            build_argv("a", "hi", true, None, None, None, HarnessFlags::default()),
             vec!["claude", "--bg", "--name", "a"]
         );
     }
@@ -2769,7 +2822,15 @@ mod tests {
     #[test]
     fn build_argv_appends_permission_mode() {
         assert_eq!(
-            build_argv("a", "hi", false, None, Some("acceptEdits"), None),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                None,
+                Some("acceptEdits"),
+                None,
+                HarnessFlags::default()
+            ),
             vec![
                 "claude",
                 "--bg",
@@ -2782,15 +2843,29 @@ mod tests {
         );
         // Empty mode == unset: no flag, byte-identical to the None case (AC7).
         assert_eq!(
-            build_argv("a", "hi", false, None, Some(""), None),
-            build_argv("a", "hi", false, None, None, None)
+            build_argv(
+                "a",
+                "hi",
+                false,
+                None,
+                Some(""),
+                None,
+                HarnessFlags::default()
+            ),
+            build_argv("a", "hi", false, None, None, None, HarnessFlags::default())
         );
         // Does NOT stack with --dangerously-skip-permissions (bg never had it).
-        assert!(
-            !build_argv("a", "hi", false, None, Some("acceptEdits"), None)
-                .iter()
-                .any(|t| t == "--dangerously-skip-permissions")
-        );
+        assert!(!build_argv(
+            "a",
+            "hi",
+            false,
+            None,
+            Some("acceptEdits"),
+            None,
+            HarnessFlags::default()
+        )
+        .iter()
+        .any(|t| t == "--dangerously-skip-permissions"));
     }
 
     // x-571f: a per-node model pin appends `--model <m>` between --name and the
@@ -2799,25 +2874,99 @@ mod tests {
     #[test]
     fn build_argv_appends_model_pin() {
         assert_eq!(
-            build_argv("a", "hi", false, Some("fable"), None, None),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                Some("fable"),
+                None,
+                None,
+                HarnessFlags::default()
+            ),
             vec!["claude", "--bg", "--name", "a", "--model", "fable", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true, Some("fable"), None, None),
+            build_argv(
+                "a",
+                "hi",
+                true,
+                Some("fable"),
+                None,
+                None,
+                HarnessFlags::default()
+            ),
             vec!["claude", "--bg", "--name", "a", "--model", "fable"]
         );
         // Empty pin == unset: no flag, byte-identical to the None case.
         assert_eq!(
-            build_argv("a", "hi", false, Some(""), None, None),
-            build_argv("a", "hi", false, None, None, None)
+            build_argv(
+                "a",
+                "hi",
+                false,
+                Some(""),
+                None,
+                None,
+                HarnessFlags::default()
+            ),
+            build_argv("a", "hi", false, None, None, None, HarnessFlags::default())
         );
     }
 
     #[test]
     fn build_argv_appends_effort() {
         assert_eq!(
-            build_argv("a", "hi", false, None, None, Some("high")),
+            build_argv(
+                "a",
+                "hi",
+                false,
+                None,
+                None,
+                Some("high"),
+                HarnessFlags::default()
+            ),
             vec!["claude", "--bg", "--name", "a", "--effort", "high", "hi"]
+        );
+    }
+
+    // x-b6e2: the Tier-3 passthrough bundle maps to claude's own spellings, in a
+    // fixed order (--add-dir, --agent, --allowedTools, --disallowedTools), riding
+    // after --effort and before the message. Empty/None fields are omitted. This
+    // token order must match the Python _build_argv (AC2-EDGE parity).
+    #[test]
+    fn build_argv_appends_harness_flags() {
+        let flags = HarnessFlags {
+            add_dir: Some("/work"),
+            agent: Some("reviewer"),
+            allowed_tools: Some("Read,Edit"),
+            disallowed_tools: Some("Bash"),
+        };
+        assert_eq!(
+            build_argv("a", "hi", false, None, None, None, flags),
+            vec![
+                "claude",
+                "--bg",
+                "--name",
+                "a",
+                "--add-dir",
+                "/work",
+                "--agent",
+                "reviewer",
+                "--allowedTools",
+                "Read,Edit",
+                "--disallowedTools",
+                "Bash",
+                "hi"
+            ]
+        );
+        // A partially-filled bundle emits only the set fields (empty == unset).
+        let only_dir = HarnessFlags {
+            add_dir: Some("/work"),
+            allowed_tools: Some(""),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_argv("a", "hi", false, None, None, None, only_dir),
+            vec!["claude", "--bg", "--name", "a", "--add-dir", "/work", "hi"]
         );
     }
 
