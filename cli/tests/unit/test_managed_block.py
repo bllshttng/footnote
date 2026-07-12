@@ -56,6 +56,16 @@ def test_restamp_same_version_is_current_noop(tmp_path: Path) -> None:
     assert f.read_text(encoding="utf-8") == snapshot  # byte-identical no-op
 
 
+def test_stamp_empty_file_has_no_leading_blanks(tmp_path: Path) -> None:
+    """An existing empty/whitespace-only file gets the block with no leading
+    blank lines (the block starts at byte 0)."""
+    f = tmp_path / "AGENTS.md"
+    f.write_text("   \n\n", encoding="utf-8")  # whitespace only
+    res = stamp_block(f, version=BLOCK_VERSION)
+    assert res.action == "appended"
+    assert f.read_text(encoding="utf-8").startswith("<!-- fno:begin")
+
+
 def test_malformed_single_marker_refuses(tmp_path: Path) -> None:
     """AC2-ERR: a file with fno:begin but no fno:end is refused untouched."""
     f = tmp_path / "AGENTS.md"

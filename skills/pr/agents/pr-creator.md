@@ -174,7 +174,7 @@ NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-stat
 
 For each item line under that heading, in order:
 
-1. **Cite first.** If the item's deferred work is already tracked - a `<prefix>-<hex>` node id, a `cv-<hex>` carveout id, or an inline `oos-ok: <rationale>` already appears on the line, in the plan frontmatter, a commit trailer, or `.fno/carveouts.jsonl` - leave the line byte-identical. File nothing.
+1. **Cite first.** If a `<prefix>-<hex>` node id, a `cv-<hex>` carveout id, or an inline `oos-ok: <rationale>` is **already on the item line**, leave the line byte-identical (idempotent). If the item's deferred work is tracked **elsewhere** - a node/`cv-` id in the plan frontmatter, a commit trailer, or `.fno/carveouts.jsonl` - append that existing id to the line (` - tracked as <id>`) rather than filing a new one; the gate reads only the item line, so an off-line citation must be brought onto it. File nothing new in either case.
 2. **File second, with inherited weight.** Otherwise classify the item and file it. Strip markdown/backticks from the item text and pass a concise title (the trimmed item line, not the whole paragraph) as a double-quoted argument:
    - a pre-existing **bug** being deferred (a missed defect, not a new feature):
      ```bash

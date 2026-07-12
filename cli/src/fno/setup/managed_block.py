@@ -120,10 +120,14 @@ def stamp_block(path: Path, *, version: int = BLOCK_VERSION) -> StampResult:
         return StampResult("refused-malformed", None, path)
 
     if state == "none":
-        # Append with exactly one blank line of separation, whatever the file's
-        # trailing whitespace was.
-        sep = "" if text.endswith("\n\n") else "\n" if text.endswith("\n") else "\n\n"
-        path.write_text(text + sep + block + "\n", encoding="utf-8")
+        if not text.strip():
+            # Empty / whitespace-only file: no prose to separate from.
+            path.write_text(block + "\n", encoding="utf-8")
+        else:
+            # Append with exactly one blank line of separation, whatever the
+            # file's trailing whitespace was.
+            sep = "" if text.endswith("\n\n") else "\n" if text.endswith("\n") else "\n\n"
+            path.write_text(text + sep + block + "\n", encoding="utf-8")
         return StampResult("appended", version, path)
 
     # state == "both": splice the fenced region, preserving outside bytes exactly.
@@ -147,7 +151,7 @@ def offer_managed_block(
     confirm_fn: Callable[[str], bool],
     echo_fn: Callable[[str], None] = lambda _m: None,
     version: int = BLOCK_VERSION,
-) -> "dict[str, str]":
+) -> dict[str, str]:
     """Offer the managed block for the host's AGENTS.md/CLAUDE.md (opt-in).
 
     Returns a ``{"status": ..., "path": ...}`` receipt. Never writes without an
@@ -157,7 +161,7 @@ def offer_managed_block(
     repo_root = Path(repo_root)
     target = resolve_target(repo_root)
     decline = _decline_marker(repo_root)
-    text = target.read_text(encoding="utf-8") if target.exists() else ""
+    text = target.read_text(encoding="utf-8") if target.is_file() else ""
     state = marker_state(text)
 
     if state == "malformed":
