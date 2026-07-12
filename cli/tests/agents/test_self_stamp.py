@@ -64,6 +64,22 @@ def test_ac2_edge_no_ambient_identity_floors(monkeypatch):
     assert self_stamp.resolve_self_model() == "unknown"
 
 
+def test_ac1_hp_floors_unknown_when_markers_unset_despite_reachable_transcript(
+    tmp_path, monkeypatch
+):
+    """The markers gate identity: a reachable transcript must NOT resurrect a
+    model when no ambient marker is set. This is the hermetic-preflight posture -
+    a fresh CI checkout has no marker and floors to "unknown" even though a
+    transcript store happens to be reachable (x-bbe7 US3a)."""
+    sid = "9a063cd3-aaaa-bbbb-cccc-dddddddddddd"
+    projects = tmp_path / "projects"
+    _write_claude_transcript(projects, session_id=sid, model="claude-opus-4-8")
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
+    for name in _IDENTITY_MARKERS:
+        monkeypatch.delenv(name, raising=False)
+    assert self_stamp.resolve_self_model() == "unknown"
+
+
 def test_ac3_hp_claude_model_from_own_transcript(tmp_path, monkeypatch):
     sid = "9a063cd3-aaaa-bbbb-cccc-dddddddddddd"
     projects = tmp_path / "projects"

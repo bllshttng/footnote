@@ -128,19 +128,39 @@ TMPHOME="$(mktemp -d)"
 # FNO_GLOBAL_SETTINGS_PATH: pinning either one diverges from CI and breaks the
 # suite's own config-fixture tests (an empty FNO_CONFIG clobbers a test's
 # monkeypatched config; a /dev/null global path redirects config WRITES into
-# /dev/). The one class this env cannot isolate is the config candidate chain:
-# a worktree reaches the canonical checkout's .fno/config.toml via the shared
-# git-common-dir (not via HOME/cwd), so a handful of tests that assert on the
-# absence of that config stay red locally. That leak is the separately-tracked
-# root-cause fix; preflight surfaces those in --keep-going but they are the
-# known residual, not a preflight regression. See docs/preflight.md.
+# /dev/). Two other ambient inputs a bare FNO_* scrub misses are sealed below:
+#   - Ambient harness identity: preflight always runs inside a live harness, so
+#     CLAUDE_CODE_SESSION_ID / CODEX_* / GEMINI_SESSION_ID are set and
+#     resolve_self_model() would resolve the real session's model instead of the
+#     "unknown" floor a fresh checkout produces. run_hermetic unsets every
+#     HARNESS_SESSION_MARKERS name (derived from the Python single source of
+#     truth, fail-closed to a literal list).
+#   - Canonical config climb: a linked worktree reaches the main checkout's
+#     .fno/config.toml via the shared git-common-dir (not HOME/cwd), leaking
+#     worktrees_base into path/worktree tests. run_hermetic exports
+#     FNO_NO_CANONICAL_CONFIG=1 so _settings_yaml_locations() drops that one
+#     candidate. See docs/preflight.md.
+
+# Derive the ambient harness marker names from the Python single source of truth
+# (HARNESS_SESSION_MARKERS) so the scrub list never drifts from the tuple. Fail
+# closed: if the fetch errors or prints nothing (broken venv), warn and fall
+# back to a hardcoded literal list - never silently skip the scrub.
+HARNESS_MARKERS="$(PYTHONPATH="$PREFLIGHT_WT/cli/src" python3 -c \
+    'from fno.harness_identity import HARNESS_SESSION_MARKERS; print(" ".join(m[0] for m in HARNESS_SESSION_MARKERS))' 2>/dev/null || true)"
+if [[ -z "$HARNESS_MARKERS" ]]; then
+    echo "preflight: WARN harness-marker fetch failed; using hardcoded fallback list" >&2
+    HARNESS_MARKERS="CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID"
+fi
+
 run_hermetic() {
     (
         cd "$PREFLIGHT_WT" || exit 1
         local v
         for v in $(compgen -v | grep '^FNO_' || true); do unset "$v"; done
+        for v in $HARNESS_MARKERS; do unset "$v"; done
         export HOME="$TMPHOME"
         export FNO_THINK_SPAWN=0
+        export FNO_NO_CANONICAL_CONFIG=1
         export PYTHONPATH="$PREFLIGHT_WT/cli/src"
         export CARGO_HOME="${CARGO_HOME:-$REAL_HOME/.cargo}"
         export RUSTUP_HOME="${RUSTUP_HOME:-$REAL_HOME/.rustup}"
