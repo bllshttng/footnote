@@ -479,6 +479,17 @@ class TestFailoverSweep:
         assert h.event_types() == ["failover_blocked"]
         assert h.events[0][1]["reason"] == "blocked-thrash"
 
+    def test_notified_emits_swapped_and_does_not_nudge(self, tmp_path):
+        # US4/US5 (AC3-FR + AC4-FR "dead one not also nudged"): a revival that
+        # degraded to the manual-resume notification rotated the provider but
+        # started no worker, so it reports redispatched=False and must NOT also
+        # nudge the exhausted session.
+        h = _FailoverHarness(output_result="usage limit reached", outcome="notified")
+        self._run(h, tmp_path)
+        assert h.sends == []                           # NOT nudged
+        assert h.event_types() == ["failover_swapped"]
+        assert h.events[0][1]["redispatched"] is False
+
     def test_queue_exhausted_falls_through_to_nudge(self, tmp_path):
         # AC1-EDGE (watchdog reading): no eligible alternate -> nothing to swap
         # to, so fall back to the bounded x-f47c nudge (the rate-limit window may
@@ -683,6 +694,43 @@ class TestDefaultFailover:
         assert called["mat"] is False         # no materialize for oauth_dir
         assert called["gate"] is False        # auto_switch gate not consulted either
         assert calls == [_stale_candidate(tmp_path).short_id]
+
+    # --- US4: node-bound vs node-less routing ---------------------------------
+
+    def test_node_less_thread_routes_to_revival(self, monkeypatch, tmp_path):
+        # US4: a claude swap whose candidate has a live cwd but NO target-state
+        # node routes to _revive_bg_thread (resume the transcript), NOT _redispatch.
+        from fno.adapters.providers.failover import SwapDecision
+
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude", auth="oauth_dir")
+        monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: None)
+        seen: dict = {}
+        monkeypatch.setattr(
+            recovery, "_revive_bg_thread",
+            lambda cand, snap, repo_root, *, managed: seen.update(
+                short=cand.short_id, root=repo_root, managed=managed) or "swapped")
+        cand = recovery.Candidate(short_id="cccc3333", sock_path="/tmp/c.sock",
+                                  jobs_dir=tmp_path, cwd=str(tmp_path), name="thread-w")
+        err = recovery.classify_session_error("usage limit reached")
+        assert recovery._default_failover(cand, err) == "swapped"
+        assert seen == {"short": "cccc3333", "root": str(tmp_path), "managed": False}
+
+    def test_node_bound_worker_skips_revival(self, monkeypatch, tmp_path):
+        # A candidate whose cwd DOES resolve a node stays on the _redispatch path.
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result=True, calls=calls, auth="oauth_dir")
+        monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: "x-node")
+        monkeypatch.setattr(
+            recovery, "_revive_bg_thread",
+            lambda *a, **k: pytest.fail("revival must not run for a node-bound worker"))
+        cand = recovery.Candidate(short_id="dddd4444", sock_path="/tmp/d.sock",
+                                  jobs_dir=tmp_path, cwd=str(tmp_path), name="node-w")
+        err = recovery.classify_session_error("rate limit")
+        assert recovery._default_failover(cand, err) == "swapped"
+        assert calls == ["dddd4444"]
 
 
 class TestMaterializeManagedSwitch:
@@ -923,3 +971,184 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
         assert self._index_of(calls, ["fno-py", "claim", "lane-release"]) is not None
+
+
+class TestReviveBgThread:
+    """US4/US5: node-less bg-thread revival - resume under the new account, or
+    degrade to the manual-resume notify path (never a resume against a missing
+    transcript)."""
+
+    def _cand(self, tmp_path):
+        return recovery.Candidate(short_id="eeee5555", sock_path="/tmp/e.sock",
+                                  jobs_dir=tmp_path, cwd=str(tmp_path), name="thread-w")
+
+    def _snap(self, auth="oauth_dir"):
+        from types import SimpleNamespace
+        return SimpleNamespace(id="claude-secondary", cli="claude", auth=auth)
+
+    def test_no_uuid_falls_through_to_nudge(self, monkeypatch, tmp_path):
+        # No resolvable session id: can't resume or build a command -> bounded nudge.
+        monkeypatch.setattr(recovery, "_resolve_session_uuid", lambda s: None)
+        assert recovery._revive_bg_thread(
+            self._cand(tmp_path), self._snap(), str(tmp_path), managed=False
+        ) == "rotated-no-worker"
+
+    def test_visible_transcript_resumes_returns_swapped(self, monkeypatch, tmp_path):
+        # AC4-FR: transcript visible -> respawn resuming the uuid; not notified.
+        monkeypatch.setattr(recovery, "_resolve_session_uuid", lambda s: "U-1")
+        monkeypatch.setattr(recovery, "_transcript_visible", lambda u, d: True)
+        seen: dict = {}
+        monkeypatch.setattr(recovery, "_respawn_bg_resume",
+                            lambda cand, uuid, *, pre_spawn=None: seen.update(uuid=uuid) or True)
+        notified = {"n": False}
+        monkeypatch.setattr(recovery, "_notify_manual_resume",
+                            lambda *a: notified.__setitem__("n", True))
+        assert recovery._revive_bg_thread(
+            self._cand(tmp_path), self._snap(), str(tmp_path), managed=False
+        ) == "swapped"
+        assert seen["uuid"] == "U-1"
+        assert notified["n"] is False
+
+    def test_unshared_transcript_notifies(self, monkeypatch, tmp_path):
+        # AC3-FR: transcript not visible to the new account -> notify, never resume.
+        monkeypatch.setattr(recovery, "_resolve_session_uuid", lambda s: "U-1")
+        monkeypatch.setattr(recovery, "_transcript_visible", lambda u, d: False)
+        monkeypatch.setattr(recovery, "_respawn_bg_resume",
+                            lambda *a, **k: pytest.fail("must not resume a missing transcript"))
+        seen: dict = {}
+        monkeypatch.setattr(recovery, "_notify_manual_resume",
+                            lambda cand, snap, uuid: seen.update(uuid=uuid))
+        assert recovery._revive_bg_thread(
+            self._cand(tmp_path), self._snap(), str(tmp_path), managed=False
+        ) == "notified"
+        assert seen["uuid"] == "U-1"
+
+    def test_respawn_failure_notifies(self, monkeypatch, tmp_path):
+        # Visible but the respawn missed (stop/spawn failure): notify, don't nudge.
+        monkeypatch.setattr(recovery, "_resolve_session_uuid", lambda s: "U-1")
+        monkeypatch.setattr(recovery, "_transcript_visible", lambda u, d: True)
+        monkeypatch.setattr(recovery, "_respawn_bg_resume", lambda *a, **k: False)
+        notified = {"n": False}
+        monkeypatch.setattr(recovery, "_notify_manual_resume",
+                            lambda *a: notified.__setitem__("n", True))
+        assert recovery._revive_bg_thread(
+            self._cand(tmp_path), self._snap(), str(tmp_path), managed=False
+        ) == "notified"
+        assert notified["n"] is True
+
+    def test_managed_disarmed_falls_through_to_nudge(self, monkeypatch, tmp_path):
+        # A disarmed managed swap never materializes the slot, so a resume would
+        # land on the exhausted account: fall to the nudge, never reach visibility.
+        monkeypatch.setattr(recovery, "_resolve_session_uuid", lambda s: "U-1")
+        monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: False)
+        monkeypatch.setattr(recovery, "_transcript_visible",
+                            lambda u, d: pytest.fail("disarmed managed must not reach visibility"))
+        assert recovery._revive_bg_thread(
+            self._cand(tmp_path), self._snap(auth="managed"), str(tmp_path), managed=True
+        ) == "rotated-no-worker"
+
+    def test_managed_visible_materializes_via_pre_spawn(self, monkeypatch, tmp_path):
+        # A managed revival threads the materialize into _respawn_bg_resume's
+        # pre_spawn (stop -> materialize -> spawn), mirroring _redispatch.
+        monkeypatch.setattr(recovery, "_resolve_session_uuid", lambda s: "U-1")
+        monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: True)
+        monkeypatch.setattr(recovery, "_transcript_visible", lambda u, d: True)
+        mat: list = []
+        monkeypatch.setattr(recovery, "_materialize_managed_switch",
+                            lambda rid, repo_root=None: mat.append(rid) or True)
+        captured: dict = {}
+
+        def _fake_respawn(cand, uuid, *, pre_spawn=None):
+            captured["pre_spawn_result"] = pre_spawn() if pre_spawn else None
+            return True
+        monkeypatch.setattr(recovery, "_respawn_bg_resume", _fake_respawn)
+        assert recovery._revive_bg_thread(
+            self._cand(tmp_path), self._snap(auth="managed"), str(tmp_path), managed=True
+        ) == "swapped"
+        assert captured["pre_spawn_result"] is True   # materialize ran as pre_spawn
+        assert mat == ["claude-secondary"]
+
+
+class TestRespawnBgResume:
+    """The node-less resume respawn: stop -> pre_spawn -> ``claude --bg --resume``."""
+
+    def _cand(self):
+        return recovery.Candidate(short_id="ffff6666", sock_path="/tmp/f.sock",
+                                  jobs_dir=None, cwd="/wt/thread", name="thread-w")
+
+    def _patch_run(self, monkeypatch, *, stop_rc=0, spawn_rc=0):
+        from types import SimpleNamespace
+        import subprocess as sp
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:3] == ["fno-py", "agents", "stop"]:
+                return SimpleNamespace(returncode=stop_rc)
+            if cmd[:3] == ["fno-py", "agents", "spawn"]:
+                return SimpleNamespace(returncode=spawn_rc)
+            return SimpleNamespace(returncode=0)
+        monkeypatch.setattr(sp, "run", fake_run)
+        return calls
+
+    def test_happy_path_builds_resume_spawn(self, monkeypatch):
+        calls = self._patch_run(monkeypatch)
+        assert recovery._respawn_bg_resume(self._cand(), "U-abc") is True
+        spawn = next(c for c in calls if c[:3] == ["fno-py", "agents", "spawn"])
+        assert "--substrate" in spawn and "bg" in spawn
+        assert "--resume" in spawn and "U-abc" in spawn
+        assert "--cwd" in spawn and "/wt/thread" in spawn
+        assert spawn[-1] == recovery.CONTINUE_MESSAGE   # seeds the continue turn
+
+    def test_stop_failure_skips_spawn(self, monkeypatch):
+        # A non-zero stop means the thread may be live; a second --resume would
+        # double it. Bail (the caller notifies).
+        calls = self._patch_run(monkeypatch, stop_rc=1)
+        assert recovery._respawn_bg_resume(self._cand(), "U-abc") is False
+        assert not any(c[:3] == ["fno-py", "agents", "spawn"] for c in calls)
+
+    def test_pre_spawn_false_skips_spawn(self, monkeypatch):
+        # A False pre_spawn (managed materialize deferred/failed) aborts the spawn.
+        calls = self._patch_run(monkeypatch)
+        assert recovery._respawn_bg_resume(self._cand(), "U-abc",
+                                           pre_spawn=lambda: False) is False
+        assert not any(c[:3] == ["fno-py", "agents", "spawn"] for c in calls)
+
+    def test_spawn_failure_returns_false(self, monkeypatch):
+        self._patch_run(monkeypatch, spawn_rc=1)
+        assert recovery._respawn_bg_resume(self._cand(), "U-abc") is False
+
+
+class TestNotifyManualResume:
+    """US5: the manual-resume OS notification carries the exact resume command."""
+
+    def _cand(self):
+        return recovery.Candidate(short_id="9999aaaa", sock_path="/tmp/g.sock",
+                                  jobs_dir=None, cwd="/wt/thread", name="thread-w")
+
+    def test_managed_command_has_no_env_prefix(self, monkeypatch):
+        # Managed shares the default slot, so the resume command needs no env.
+        from fno.adapters.providers import dispatch as dispatch_mod
+        monkeypatch.setattr(dispatch_mod, "dispatch_env", lambda pid, **k: {})
+        assert recovery._resume_command("claude-secondary", "/wt/thread", "U-1") == \
+            "claude --resume U-1"
+
+    def test_oauth_dir_command_prefixes_config_dir(self, monkeypatch):
+        # A two-dir account resumes under its own CLAUDE_CONFIG_DIR.
+        from fno.adapters.providers import dispatch as dispatch_mod
+        monkeypatch.setattr(dispatch_mod, "dispatch_env",
+                            lambda pid, **k: {"CLAUDE_CONFIG_DIR": "/home/u/.claude-b"})
+        assert recovery._resume_command("claude-b", "/wt/thread", "U-1") == \
+            "CLAUDE_CONFIG_DIR=/home/u/.claude-b claude --resume U-1"
+
+    def test_notify_sends_os_notification_with_command(self, monkeypatch):
+        from types import SimpleNamespace
+        from fno.notify import _impl as notify_impl
+        sent: dict = {}
+        monkeypatch.setattr(notify_impl, "send_notification",
+                            lambda title, body: sent.update(title=title, body=body) or (0, ""))
+        monkeypatch.setattr(recovery, "_resume_command", lambda *a: "claude --resume U-1")
+        recovery._notify_manual_resume(self._cand(),
+                                       SimpleNamespace(id="claude-secondary"), "U-1")
+        assert "claude --resume U-1" in sent["body"]
+        assert "claude-secondary" in sent["title"]
