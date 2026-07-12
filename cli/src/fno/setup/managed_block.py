@@ -96,7 +96,7 @@ def resolve_target(repo_root: Path) -> Path:
     repo_root = Path(repo_root)
     for name in ("AGENTS.md", "CLAUDE.md"):
         p = repo_root / name
-        if p.exists():
+        if p.is_file():
             return p
     return repo_root / "AGENTS.md"
 

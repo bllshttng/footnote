@@ -1287,7 +1287,13 @@ def _managed_block_report() -> dict:
     try:
         from fno.setup.managed_block import BLOCK_VERSION, stamped_version
 
+        # Walk up to the repo root so `fno doctor` from a subdirectory still finds
+        # the host file (the block lives at the repo root, not the cwd).
         root = Path.cwd()
+        for parent in [root, *root.parents]:
+            if (parent / ".git").exists() or (parent / ".fno").is_dir():
+                root = parent
+                break
         for name in ("AGENTS.md", "CLAUDE.md"):
             p = root / name
             if not p.is_file():
