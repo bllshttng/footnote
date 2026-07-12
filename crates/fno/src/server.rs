@@ -3612,14 +3612,16 @@ impl Core {
                     if new == idx {
                         false
                     } else {
-                        let active = squad.tabs[squad.active_tab].id;
+                        let active = squad.tabs.get(squad.active_tab).map(|tab| tab.id);
                         let moved = squad.tabs.remove(idx);
                         squad.tabs.insert(new, moved);
-                        squad.active_tab = squad
-                            .tabs
-                            .iter()
-                            .position(|candidate| candidate.id == active)
-                            .expect("active tab survives reorder");
+                        squad.active_tab = active
+                            .and_then(|id| {
+                                squad.tabs.iter().position(|candidate| candidate.id == id)
+                            })
+                            .unwrap_or_else(|| {
+                                squad.active_tab.min(squad.tabs.len().saturating_sub(1))
+                            });
                         true
                     }
                 };
@@ -6166,6 +6168,33 @@ mod tests {
             rx.try_recv().is_err(),
             "edge bumps push neither Layout nor Notice"
         );
+    }
+
+    #[test]
+    fn reorder_tab_recovers_from_an_invalid_active_index() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        let squad = core.session.squad_mut(1).unwrap();
+        squad.tabs.push(leaf_tab(6, 2));
+        squad.active_tab = usize::MAX;
+        core.clients.push(client(1, 5, (24, 80), false));
+
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 5,
+                delta: 1,
+            },
+        );
+
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(
+            squad.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![6, 5]
+        );
+        assert_eq!(squad.active_tab, 1);
     }
 
     #[test]
