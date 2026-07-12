@@ -725,6 +725,11 @@ class ReviewBlock(BaseModel):
         # from the Claude author. A bare `claude` peer (no route) IS the author's
         # own model, which defeats the "distinct model" trust invariant - reject
         # it at load, fail-closed, rather than let it masquerade as a peer.
+        # This is the fail-EARLY layer for the dominant (claude) author only; the
+        # config is harness-agnostic so load time cannot know a codex/gemini
+        # author. The SYMMETRIC coverage lives at gate time: loop-check resolves
+        # the invoking harness and holds the gate for any same-model peer
+        # (crates/fno-agents/src/loopcheck.rs, the same-model guard, x-c2e7).
         for e in self.peers:
             prov: object
             model: object
