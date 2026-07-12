@@ -3527,6 +3527,28 @@ async fn handle_stdin(
                     }
                 }
             }
+            Event::ReorderTab(delta) => {
+                let tab = view
+                    .layout
+                    .squads
+                    .iter()
+                    .find(|s| s.id == view.layout.active_squad)
+                    .and_then(|s| s.tabs.get(s.active_tab))
+                    .map(|t| t.id);
+                match tab {
+                    Some(tab) => {
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::Command(Command::ReorderTab { tab, delta }),
+                        )
+                        .await
+                        .map_err(|e| format!("command send failed: {e}"))?;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
             }
@@ -8075,6 +8097,25 @@ mod tests {
             })
         );
         assert_eq!(v.rename, None, "submit closes the overlay");
+    }
+
+    #[tokio::test]
+    async fn leader_reorder_sends_the_active_tab_id_and_delta() {
+        let mut v = two_pane_view();
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x02>", &mut buf)
+            .await
+            .unwrap();
+
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::ReorderTab { tab: 1, delta: 1 })
+        );
     }
 
     #[tokio::test]

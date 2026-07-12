@@ -3596,6 +3596,37 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::ReorderTab { tab, delta } => {
+                let Some((squad_id, idx)) = self.session.find_tab(tab) else {
+                    self.notice(client_id, "no such tab");
+                    return Flow::Continue;
+                };
+                let changed = {
+                    let squad = self
+                        .session
+                        .squad_mut(squad_id)
+                        .expect("find_tab live squad");
+                    let new =
+                        (idx as i64 + delta as i64).clamp(0, squad.tabs.len() as i64 - 1) as usize;
+                    if new == idx {
+                        false
+                    } else {
+                        let active = squad.tabs[squad.active_tab].id;
+                        let moved = squad.tabs.remove(idx);
+                        squad.tabs.insert(new, moved);
+                        squad.active_tab = squad
+                            .tabs
+                            .iter()
+                            .position(|candidate| candidate.id == active)
+                            .expect("active tab survives reorder");
+                        true
+                    }
+                };
+                if changed {
+                    self.push_layout(true);
+                }
+                Flow::Continue
+            }
             Command::RecruitAgents { squad, ids } => {
                 // Bulk recruit (x-8f11 US3). The server is the authoritative
                 // gate: blank name / empty ids refused fail-closed; each id
@@ -6065,6 +6096,31 @@ mod tests {
             vec![1, 3, 2],
             "an at-edge bump changes nothing"
         );
+    }
+
+    #[test]
+    fn reorder_tab_moves_within_its_squad_and_keeps_the_same_tab_active() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session
+            .squad_mut(1)
+            .unwrap()
+            .tabs
+            .extend([leaf_tab(6, 2), leaf_tab(7, 3)]);
+        core.session.squad_mut(1).unwrap().active_tab = 1;
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(1, Command::ReorderTab { tab: 6, delta: 1 });
+
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(
+            squad.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![5, 7, 6]
+        );
+        assert_eq!(squad.tabs[squad.active_tab].id, 6);
+        assert!(rx.try_recv().is_ok(), "a successful reorder pushes Layout");
     }
 
     #[test]
