@@ -1,14 +1,14 @@
-//! `fno-agents needs` — the needs-me-queue events-fold leg (x-feec).
+//! `fno-agents needs` - the needs-me-queue events-fold leg (x-feec).
 //!
 //! A pure read-time fold over events.jsonl producing the two event-derived
 //! attention reasons the mux client cannot see from live badges alone:
 //!   - `review_wedged`: a green OPEN PR whose loop keeps blocking on review that
-//!     will not self-heal (the codex usage-limit lesson — surface it EARLY).
+//!     will not self-heal (the codex usage-limit lesson - surface it EARLY).
 //!   - `budget_stop`: a loop that terminated on `Budget` / `NoProgress` and
 //!     needs a human to re-arm.
 //!
 //! Unlike [`crate::digest`] (which folds ONE session's activity), this folds
-//! ALL sessions and emits at most one [`NeedItem`] per session — the worst
+//! ALL sessions and emits at most one [`NeedItem`] per session - the worst
 //! reason its latest events imply. Each item is resolved to a node/name/title
 //! via the ledger bridge so the client can join it to a sideline row.
 //!
@@ -28,7 +28,7 @@ const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
 /// `fires` floor for `review_wedged`: the loop must have re-checked at least
 /// this many times before a green-PR block counts as wedged (a fresh block
 /// during a normal review wait is not yet a wedge). Hardcoded heuristic, not a
-/// config knob — tune the const if it misfires (ponytail: no config for a value
+/// config knob - tune the const if it misfires (ponytail: no config for a value
 /// that never changes); a hidden `--fires-floor` overrides it for tests.
 const DEFAULT_FIRES_FLOOR: u64 = 2;
 
@@ -56,7 +56,7 @@ pub struct NeedItem {
 }
 
 /// Read `<field>` regardless of envelope: nested under `/data` (unified) or
-/// top-level (retired flat). Mirrors [`crate::digest`] — kept local so this
+/// top-level (retired flat). Mirrors [`crate::digest`] - kept local so this
 /// module stays a self-contained leaf (x-7fdd: no function-local cross-imports).
 fn field<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     v.get("data")
@@ -93,7 +93,7 @@ fn to_epoch_lenient(ts: &str) -> Option<u64> {
 }
 
 /// A row's ts is in-window when it parses to `>= since` (an unparseable ts is
-/// included — never silently dropped by the bound).
+/// included - never silently dropped by the bound).
 fn in_window(ts: &str, since: u64) -> bool {
     to_epoch_lenient(ts).is_none_or(|secs| secs >= since)
 }
@@ -149,7 +149,9 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                     decision: str_field(&v, "decision").unwrap_or("").to_string(),
                     ci: str_field(&v, "ci").unwrap_or("").to_string(),
                     pr_state: str_field(&v, "pr_state").unwrap_or("").to_string(),
-                    reviewed: field(&v, "reviewed").and_then(|r| r.as_bool()).unwrap_or(false),
+                    reviewed: field(&v, "reviewed")
+                        .and_then(|r| r.as_bool())
+                        .unwrap_or(false),
                     fires: field(&v, "fires").and_then(|f| f.as_u64()).unwrap_or(0),
                     ts: ts.to_string(),
                 });
@@ -182,7 +184,10 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
             });
         }
     }
-    items.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.session_id.cmp(&b.session_id)));
+    items.sort_by(|a, b| {
+        a.ts.cmp(&b.ts)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
     items
 }
 
@@ -191,7 +196,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
 /// `NoProgress` is a `budget_stop`; any other termination (DonePRGreen, NoWork,
 /// Interrupted, ...) means nothing needs me. A still-live loop whose latest
 /// check is a green OPEN unreviewed block past the fires floor is `review_wedged`
-/// — a later `allow` or a termination clears it (the latest event wins).
+/// - a later `allow` or a termination clears it (the latest event wins).
 fn classify(acc: &SessionAcc, fires_floor: u64) -> Option<(&'static str, String, String)> {
     let terminated = match (&acc.latest_term, &acc.latest_loop) {
         (Some(t), Some(l)) => t.ts >= l.ts,
@@ -227,7 +232,7 @@ fn classify(acc: &SessionAcc, fires_floor: u64) -> Option<(&'static str, String,
 
 /// A minimal ledger index: maps a session id to its node/name/title. Reuses the
 /// digest bridge's match keys (scalar `session_id`, `sessions[]` membership,
-/// `graph_node_id`, `worktree`/`root_path` basename) but inverted — given a
+/// `graph_node_id`, `worktree`/`root_path` basename) but inverted - given a
 /// session, return its display identity.
 struct LedgerIndex {
     entries: Vec<Value>,
@@ -259,9 +264,13 @@ impl LedgerIndex {
 
     /// `(node, name, title)` for a session. `name` prefers the worktree basename
     /// (what a sideline orphan row carries), else the node id. All `None` when
-    /// unresolved — the client renders a session-id-only squadless row then.
+    /// unresolved - the client renders a session-id-only squadless row then.
     fn resolve(&self, sid: &str) -> (Option<String>, Option<String>, Option<String>) {
-        let Some(entry) = self.entries.iter().find(|e| Self::entry_has_session(e, sid)) else {
+        let Some(entry) = self
+            .entries
+            .iter()
+            .find(|e| Self::entry_has_session(e, sid))
+        else {
             return (None, None, None);
         };
         let node = entry
@@ -431,7 +440,7 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     } else {
         for item in &items {
             let name = item.name.as_deref().unwrap_or(&item.session_id);
-            println!("{} {} — {}", item.kind, name, item.evidence);
+            println!("{} {} - {}", item.kind, name, item.evidence);
         }
     }
     0
@@ -466,7 +475,15 @@ mod tests {
 
     #[test]
     fn green_open_unreviewed_block_is_review_wedged() {
-        let events = loop_check("2026-07-03T02:00:00Z", "s", "block", "SUCCESS", "OPEN", false, 5);
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "s",
+            "block",
+            "SUCCESS",
+            "OPEN",
+            false,
+            5,
+        );
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, "review_wedged");
@@ -500,15 +517,39 @@ mod tests {
     fn merged_pr_block_is_not_wedged() {
         // The real-data false positive: a MERGED PR whose loop still fires is
         // done, not wedged on review. pr_state OPEN gate excludes it.
-        let events = loop_check("2026-07-03T02:00:00Z", "s", "block", "SUCCESS", "MERGED", false, 144);
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "s",
+            "block",
+            "SUCCESS",
+            "MERGED",
+            false,
+            144,
+        );
         assert!(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR).is_empty());
     }
 
     #[test]
     fn later_allow_clears_the_wedge() {
         let events = [
-            loop_check("2026-07-03T02:00:00Z", "s", "block", "SUCCESS", "OPEN", false, 5),
-            loop_check("2026-07-03T03:00:00Z", "s", "allow", "SUCCESS", "OPEN", true, 5),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "s",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                5,
+            ),
+            loop_check(
+                "2026-07-03T03:00:00Z",
+                "s",
+                "allow",
+                "SUCCESS",
+                "OPEN",
+                true,
+                5,
+            ),
         ]
         .join("\n");
         assert!(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR).is_empty());
@@ -518,7 +559,15 @@ mod tests {
     fn termination_after_wedge_wins() {
         // A green-block session that then terminates on DonePRGreen is done.
         let events = [
-            loop_check("2026-07-03T02:00:00Z", "s", "block", "SUCCESS", "OPEN", false, 5),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "s",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                5,
+            ),
             termination("2026-07-03T03:00:00Z", "s", "DonePRGreen"),
         ]
         .join("\n");
@@ -530,7 +579,15 @@ mod tests {
         // A budget stop followed by a fresh loop (re-armed) is live again.
         let events = [
             termination("2026-07-03T02:00:00Z", "s", "Budget"),
-            loop_check("2026-07-03T03:00:00Z", "s", "block", "SUCCESS", "OPEN", false, 9),
+            loop_check(
+                "2026-07-03T03:00:00Z",
+                "s",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                9,
+            ),
         ]
         .join("\n");
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
@@ -539,13 +596,29 @@ mod tests {
 
     #[test]
     fn fires_below_floor_is_not_wedged() {
-        let events = loop_check("2026-07-03T02:00:00Z", "s", "block", "SUCCESS", "OPEN", false, 1);
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "s",
+            "block",
+            "SUCCESS",
+            "OPEN",
+            false,
+            1,
+        );
         assert!(fold(&events, "", ALL, 2).is_empty());
     }
 
     #[test]
     fn since_window_excludes_old_events() {
-        let events = loop_check("2026-07-03T02:00:00Z", "s", "block", "SUCCESS", "OPEN", false, 5);
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "s",
+            "block",
+            "SUCCESS",
+            "OPEN",
+            false,
+            5,
+        );
         let future = crate::state::rfc3339_like_to_secs("2099-01-01T00:00:00Z").unwrap();
         assert!(fold(&events, "", future, DEFAULT_FIRES_FLOOR).is_empty());
     }
@@ -554,7 +627,15 @@ mod tests {
     fn malformed_line_is_skipped_not_aborted() {
         let events = [
             "{ this is not valid json".to_string(),
-            loop_check("2026-07-03T02:00:00Z", "s", "block", "SUCCESS", "OPEN", false, 5),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "s",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                5,
+            ),
         ]
         .join("\n");
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
@@ -565,7 +646,15 @@ mod tests {
     fn one_item_per_session_latest_wins() {
         // Two sessions, each with a distinct reason.
         let events = [
-            loop_check("2026-07-03T02:00:00Z", "a", "block", "SUCCESS", "OPEN", false, 5),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "a",
+                "block",
+                "SUCCESS",
+                "OPEN",
+                false,
+                5,
+            ),
             termination("2026-07-03T02:30:00Z", "b", "Budget"),
         ]
         .join("\n");
@@ -578,7 +667,15 @@ mod tests {
 
     #[test]
     fn ledger_resolves_node_name_title() {
-        let events = loop_check("2026-07-03T02:00:00Z", "sess-x", "block", "SUCCESS", "OPEN", false, 5);
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "sess-x",
+            "block",
+            "SUCCESS",
+            "OPEN",
+            false,
+            5,
+        );
         let ledger = r#"{"entries":[{"session_id":"sess-x","graph_node_id":"x-feec","title":"needs queue","worktree":"/w/footnote/x-feec"}]}"#;
         let items = fold(&events, ledger, ALL, DEFAULT_FIRES_FLOOR);
         assert_eq!(items[0].node.as_deref(), Some("x-feec"));

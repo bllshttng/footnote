@@ -2596,7 +2596,12 @@ fn needs_overlay_lines(
                 _ => "",
             };
             lines.push(pad_to(
-                &format!(" {marker} {} {}  {}{tag}", need_glyph(r.kind), r.name, r.reason),
+                &format!(
+                    " {marker} {} {}  {}{tag}",
+                    need_glyph(r.kind),
+                    r.name,
+                    r.reason
+                ),
                 ANSWER_OVERLAY_W,
             ));
         }
@@ -2609,7 +2614,10 @@ fn needs_overlay_lines(
                 ));
             }
             for o in &ans.options {
-                lines.push(pad_to(&format!("     {}. {}", o.idx, o.label), ANSWER_OVERLAY_W));
+                lines.push(pad_to(
+                    &format!("     {}. {}", o.idx, o.label),
+                    ANSWER_OVERLAY_W,
+                ));
             }
         }
     }
@@ -2886,10 +2894,9 @@ async fn attach_and_run(
     // here, tagged with the generation token it was kicked under, so a slow
     // `fno-agents needs` never blocks the overlay and a result landing after the
     // overlay closed/re-opened is discarded (AC6-FR). `None` = the fold failed.
-    let (needs_tx, mut needs_rx) = tokio::sync::mpsc::unbounded_channel::<(
-        u64,
-        Option<Vec<crate::needs_overlay::FoldItem>>,
-    )>();
+    let (needs_tx, mut needs_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::needs_overlay::FoldItem>>)>(
+        );
 
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
@@ -4536,9 +4543,12 @@ async fn answer_keys(
                         .await
                         .map_err(|e| format!("command send failed: {e}"))?;
                 } else if let Some(id) = &row.attach_id {
-                    write_msg(sock_w, &ClientMsg::Command(Command::AttachAgent(id.clone())))
-                        .await
-                        .map_err(|e| format!("command send failed: {e}"))?;
+                    write_msg(
+                        sock_w,
+                        &ClientMsg::Command(Command::AttachAgent(id.clone())),
+                    )
+                    .await
+                    .map_err(|e| format!("command send failed: {e}"))?;
                 } else {
                     view.set_notice("no pane here - focus it manually".into());
                 }
@@ -7506,7 +7516,11 @@ mod tests {
         ]);
         let (queue, dropped) = v.needs_view();
         let lines = needs_overlay_lines(&queue, 0, dropped, NeedsFooter::AsOf);
-        assert!(lines[1].contains('▸') && lines[1].contains("peer"), "{:?}", lines[1]);
+        assert!(
+            lines[1].contains('▸') && lines[1].contains("peer"),
+            "{:?}",
+            lines[1]
+        );
         assert!(lines[2].contains("other") && lines[2].contains("⚠ focus"));
         assert!(lines.iter().any(|l| l.contains("1. Yes")));
         assert!(lines.iter().any(|l| l.contains("2. No")));
@@ -7533,7 +7547,9 @@ mod tests {
             tab: None,
         }];
         let degraded = needs_overlay_lines(&one, 0, 0, NeedsFooter::Degraded);
-        assert!(degraded.iter().any(|l| l.contains("events fold unavailable")));
+        assert!(degraded
+            .iter()
+            .any(|l| l.contains("events fold unavailable")));
         let capped = needs_overlay_lines(&one, 0, 7, NeedsFooter::AsOf);
         assert!(capped.iter().any(|l| l.contains("7 more hidden")));
     }
@@ -7551,7 +7567,10 @@ mod tests {
             blocked_row("b", 4, None),
         ]);
         assert_eq!(
-            v.needs_queue().iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            v.needs_queue()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>(),
             vec!["a", "b"],
             "only live blocked rows"
         );
@@ -7627,7 +7646,10 @@ mod tests {
             fold_item("review_wedged", "rw", false),
         ]);
         assert_eq!(
-            v.needs_queue().iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            v.needs_queue()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>(),
             vec!["ans", "foc", "rw", "bs", "dn"]
         );
     }
@@ -7658,7 +7680,10 @@ mod tests {
         answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
         let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-        assert!(matches!(msg, ClientMsg::Command(Command::FocusPane(5))), "{msg:?}");
+        assert!(
+            matches!(msg, ClientMsg::Command(Command::FocusPane(5))),
+            "{msg:?}"
+        );
         assert_eq!(v.answers, None);
     }
 
@@ -7697,7 +7722,11 @@ mod tests {
         let g = v.needs_gen;
         let mut buf: Vec<u8> = Vec::new();
         answer_keys(&mut v, b"q", &mut buf).await.unwrap();
-        assert_eq!(v.needs_gen, g + 1, "close bumps gen (in-flight fold discarded)");
+        assert_eq!(
+            v.needs_gen,
+            g + 1,
+            "close bumps gen (in-flight fold discarded)"
+        );
     }
 
     // AC1-HP: a digit on an answerable pane sends PaneAnswer with the exact

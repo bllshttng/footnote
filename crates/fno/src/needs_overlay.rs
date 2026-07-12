@@ -37,7 +37,7 @@ pub struct FoldItem {
 }
 
 /// Fold the needs-me events leg over the `since_epoch` window. `None` on any
-/// failure (timeout, nonzero exit, unparseable JSON) — the caller shows the
+/// failure (timeout, nonzero exit, unparseable JSON) - the caller shows the
 /// degraded notice; `Some(vec)` (possibly empty) is a clean fold.
 pub async fn fold_now(since_epoch: &str) -> Option<Vec<FoldItem>> {
     let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
@@ -48,7 +48,10 @@ pub async fn fold_now(since_epoch: &str) -> Option<Vec<FoldItem>> {
         // orphan a process on each overlay open.
         .kill_on_drop(true)
         .output();
-    let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut).await.ok()?.ok()?;
+    let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
+        .await
+        .ok()?
+        .ok()?;
     if !output.status.success() {
         return None;
     }
