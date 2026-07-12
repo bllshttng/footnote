@@ -317,7 +317,92 @@ class _TickLock:
                 self._fd = None
 
 
-# ── adapter router (adapters land in US3-US5) ───────────────────────────────
+# ── HTTP delivery (shared by the two webhook adapters) ──────────────────────
+
+# Backoff schedule between retries (seconds); index by attempt number, clamped
+# to the last entry. Small and bounded - the tick holds the per-project lock.
+_BACKOFF = (1.0, 3.0)
+_MAX_RETRY_AFTER = 30.0  # cap a server's Retry-After so one sink can't wedge a tick
+
+
+def _sleep(seconds: float) -> None:
+    import time
+
+    time.sleep(seconds)
+
+
+@dataclass
+class _HttpResult:
+    ok: bool
+    status: Optional[int] = None  # None => connect-class (no HTTP response)
+    retry_after: Optional[float] = None
+
+
+def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
+    """POST a JSON body. A connect-class failure (timeout / DNS / refused) returns
+    status=None; an HTTP error response returns its status code."""
+    import urllib.error
+    import urllib.request
+
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = resp.getcode()
+            return _HttpResult(ok=200 <= code < 300, status=code)
+    except urllib.error.HTTPError as e:
+        ra = e.headers.get("Retry-After") if e.headers else None
+        try:
+            retry_after = float(ra) if ra is not None else None
+        except (TypeError, ValueError):
+            retry_after = None
+        return _HttpResult(ok=False, status=e.code, retry_after=retry_after)
+    except (urllib.error.URLError, OSError):
+        return _HttpResult(ok=False, status=None)  # connect-class
+
+
+def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tuple[str, str]":
+    """Retry/failure-class driver shared by the webhook adapters.
+
+    - 4xx except 429  -> DROPPED immediately (permanent; advance past it).
+    - connect-class / 5xx / 429 -> bounded retry, then SHORT_CIRCUIT (transient;
+      hold the cursor and retry next tick). 429 honors Retry-After within budget.
+    """
+    attempts = max(1, fanout.retries + 1)
+    result = _HttpResult(ok=False)
+    for i in range(attempts):
+        result = _post_json(url, body, float(fanout.http_timeout_secs))
+        if result.ok:
+            return DELIVERED, ""
+        if result.status is not None and 400 <= result.status < 500 and result.status != 429:
+            return DROPPED, f"http {result.status}"
+        if i < attempts - 1:
+            if result.status == 429 and result.retry_after:
+                delay = min(result.retry_after, _MAX_RETRY_AFTER)
+            else:
+                delay = _BACKOFF[min(i, len(_BACKOFF) - 1)]
+            _sleep(delay)
+    reason = f"http {result.status}" if result.status else "connect-class"
+    return SHORT_CIRCUIT, f"exhausted retries ({reason})"
+
+
+def _resolve_url(sink: StatusSinkConfig) -> "tuple[Optional[str], Optional[str]]":
+    """Resolve a webhook URL from ``url`` or ``url_env``. Returns (url, error);
+    a missing env secret is short-circuit-worthy (fixable), not a hard drop."""
+    if sink.url:
+        return sink.url, None
+    if sink.url_env:
+        val = os.environ.get(sink.url_env)
+        if val:
+            return val, None
+        return None, f"url_env {sink.url_env} unset"
+    return None, "no url configured"
+
+
+# ── adapter router + adapters ───────────────────────────────────────────────
 
 
 def dispatch_event(
@@ -326,8 +411,52 @@ def dispatch_event(
     fanout: StatusFanoutConfig,
     project_root: Path,
 ) -> "tuple[str, str]":
-    """Route an event to the sink's adapter by type. Filled across US3-US5."""
-    raise NotImplementedError(f"adapter for {sink.type!r} not implemented")
+    """Route an event to the sink's adapter by type."""
+    if sink.type == "json-webhook":
+        return _dispatch_json_webhook(sink, event, fanout)
+    if sink.type == "text-webhook":
+        return _dispatch_text_webhook(sink, event, fanout)
+    if sink.type == "backlog-progress":
+        return _dispatch_backlog_progress(sink, event, project_root)
+    return DROPPED, f"unknown sink type {sink.type}"
+
+
+def _cloudevents_wrap(event: dict[str, Any]) -> dict[str, Any]:
+    """Wrap the canonical event in the 5-field CloudEvents envelope. `id` is
+    derived from run+ts+type so a re-delivered event carries a stable id (a
+    receiver can dedupe on it)."""
+    return {
+        "id": f"{event.get('run', '')}:{event.get('ts', '')}:{event.get('type', '')}",
+        "source": event.get("source", "fno"),
+        "type": event.get("type", ""),
+        "time": event.get("ts", ""),
+        "data": event,
+    }
+
+
+def _dispatch_json_webhook(
+    sink: StatusSinkConfig, event: dict[str, Any], fanout: StatusFanoutConfig
+) -> "tuple[str, str]":
+    """POST the canonical event JSON verbatim (optionally CloudEvents-wrapped).
+    The escape hatch: n8n / Zapier / Sheets glue / any receiver maps the raw
+    payload."""
+    url, err = _resolve_url(sink)
+    if url is None:
+        return SHORT_CIRCUIT, err or "no url"
+    body = _cloudevents_wrap(event) if sink.cloudevents else event
+    return _deliver(url, body, fanout)
+
+
+def _dispatch_text_webhook(
+    sink: StatusSinkConfig, event: dict[str, Any], fanout: StatusFanoutConfig
+) -> "tuple[str, str]":  # implemented in US4
+    raise NotImplementedError("text-webhook adapter (US4)")
+
+
+def _dispatch_backlog_progress(
+    sink: StatusSinkConfig, event: dict[str, Any], project_root: Path
+) -> "tuple[str, str]":  # implemented in US5
+    raise NotImplementedError("backlog-progress adapter (US5)")
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

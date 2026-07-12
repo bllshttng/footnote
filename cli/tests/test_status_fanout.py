@@ -333,3 +333,129 @@ def test_tick_lock_blocks_overlapping_tick(tmp_path):
         assert res.locked_out is True
     finally:
         lock.release()
+
+
+# ── US3: json-webhook adapter (failure classes) ─────────────────────────────
+
+
+def _json_sink(name="j", cloudevents=False, url="https://x", url_env=None):
+    return StatusSinkConfig(
+        name=name, type="json-webhook", events=["run_summary"],
+        url=url, url_env=url_env, cloudevents=cloudevents,
+    )
+
+
+def test_json_webhook_delivers_verbatim(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    posted = {}
+
+    def fake_post(url, body, timeout):
+        posted["url"] = url
+        posted["body"] = body
+        return sf._HttpResult(ok=True, status=200)
+
+    monkeypatch.setattr(sf, "_post_json", fake_post)
+    ev = _ev("2026-07-12T00:00:05Z", "run_summary", **{"node": "x-9", "outcome": "SUCCESS"})
+    status, _ = sf._dispatch_json_webhook(_json_sink(), ev, StatusFanoutConfig())
+    assert status == sf.DELIVERED
+    assert posted["url"] == "https://x"
+    assert posted["body"] == ev  # verbatim, unwrapped
+
+
+def test_json_webhook_cloudevents_wrap(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    posted = {}
+    monkeypatch.setattr(sf, "_post_json",
+                        lambda u, b, t: (posted.update(body=b) or sf._HttpResult(ok=True, status=200)))
+    ev = _ev("2026-07-12T00:00:05Z", "run_summary", **{"run": "R1"})
+    sf._dispatch_json_webhook(_json_sink(cloudevents=True), ev, StatusFanoutConfig())
+    body = posted["body"]
+    assert set(body) == {"id", "source", "type", "time", "data"}
+    assert body["type"] == "run_summary" and body["time"] == "2026-07-12T00:00:05Z"
+    assert body["data"] == ev
+    assert body["id"] == "R1:2026-07-12T00:00:05Z:run_summary"
+
+
+def test_json_webhook_4xx_drops_immediately_no_retry(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    calls = {"n": 0}
+
+    def fake_post(url, body, timeout):
+        calls["n"] += 1
+        return sf._HttpResult(ok=False, status=404)
+
+    monkeypatch.setattr(sf, "_post_json", fake_post)
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    status, detail = sf._dispatch_json_webhook(
+        _json_sink(), _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig(retries=2))
+    assert status == sf.DROPPED
+    assert calls["n"] == 1  # permanent: no retry
+    assert "404" in detail
+
+
+def test_json_webhook_connect_class_retries_then_short_circuits(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    calls = {"n": 0}
+
+    def fake_post(url, body, timeout):
+        calls["n"] += 1
+        return sf._HttpResult(ok=False, status=None)  # connect-class
+
+    monkeypatch.setattr(sf, "_post_json", fake_post)
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    status, detail = sf._dispatch_json_webhook(
+        _json_sink(), _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig(retries=2))
+    assert status == sf.SHORT_CIRCUIT
+    assert calls["n"] == 3  # 1 + 2 retries
+    assert "connect-class" in detail
+
+
+def test_json_webhook_5xx_retries_then_short_circuits(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=503))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    status, _ = sf._dispatch_json_webhook(
+        _json_sink(), _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig(retries=1))
+    assert status == sf.SHORT_CIRCUIT
+
+
+def test_json_webhook_429_honors_retry_after(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    slept = []
+    seq = [sf._HttpResult(ok=False, status=429, retry_after=2.0),
+           sf._HttpResult(ok=True, status=200)]
+    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: seq.pop(0))
+    monkeypatch.setattr(sf, "_sleep", lambda s: slept.append(s))
+    status, _ = sf._dispatch_json_webhook(
+        _json_sink(), _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig(retries=2))
+    assert status == sf.DELIVERED
+    assert slept == [2.0]  # honored Retry-After, not the backoff schedule
+
+
+def test_json_webhook_missing_url_env_short_circuits(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    monkeypatch.delenv("OPS_MISSING", raising=False)
+    sink = _json_sink(url=None, url_env="OPS_MISSING")
+    status, detail = sf._dispatch_json_webhook(
+        sink, _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig())
+    assert status == sf.SHORT_CIRCUIT
+    assert "OPS_MISSING" in detail
+
+
+def test_json_webhook_url_env_resolves(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    monkeypatch.setenv("OPS_URL", "https://from-env")
+    posted = {}
+    monkeypatch.setattr(sf, "_post_json",
+                        lambda u, b, t: (posted.update(url=u) or sf._HttpResult(ok=True, status=200)))
+    sink = _json_sink(url=None, url_env="OPS_URL")
+    sf._dispatch_json_webhook(sink, _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig())
+    assert posted["url"] == "https://from-env"
