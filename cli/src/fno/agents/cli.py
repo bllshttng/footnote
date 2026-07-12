@@ -582,9 +582,12 @@ def cmd_spawn(
         elif deny_tools and provider != "claude":
             bad = "--deny-tools"
         if bad is not None:
+            # No "use --substrate pane" advice: pane rejects the same tier3 cells
+            # (gemini --add-dir, codex --agent), so it would mislead. Mirror the
+            # tier3_pane_tokens wording instead.
             print(
-                f"{bad} is not supported for provider {provider!r} on "
-                "--substrate bg/headless; use --substrate pane",
+                f"{bad} is not supported for provider {provider!r}; "
+                "drop it or use a provider that maps it",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)

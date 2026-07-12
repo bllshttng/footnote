@@ -854,9 +854,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // Message shape mirrors --permission-mode. (opencode is already refused by
     // the substrate arm below, so it never reaches these checks.)
     if substrate != "pane" {
+        // No "use --substrate pane" advice: unlike --permission-mode, pane does
+        // NOT map these cells any wider than bg/headless does (gemini --add-dir,
+        // codex --agent fail closed on pane too), so that advice would mislead.
         let unsupported = |flag: &str| {
             eprintln!(
-                "{} is not supported for provider {} on --substrate bg/headless; use --substrate pane",
+                "{} is not supported for provider {}; drop it or use a provider that maps it",
                 flag,
                 py_repr(provider)
             );
