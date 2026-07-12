@@ -354,10 +354,21 @@ def codex_pinning_sessions(auth_path: Path | None = None) -> list[PinningSession
 
 
 def pinning_sessions_for(cli: str) -> list[PinningSession]:
-    """Dispatch the live-pin scan to the matcher for ``cli``'s slot."""
+    """Dispatch the live-pin scan to the matcher for ``cli``'s slot.
+
+    Only claude and codex have a managed slot + a matcher. Any other cli is
+    refused HERE (this runs first in _switch_locked, before any slot is read or
+    written): without a matcher we cannot prove the slot is unpinned, and the
+    downstream slot ops would otherwise mis-route it to the claude slot and
+    corrupt it. Fail loud with a receipt rather than a silent claude fallback."""
     if cli == "codex":
         return codex_pinning_sessions()
-    return pinning_sessions()
+    if cli == "claude":
+        return pinning_sessions()
+    raise ManagedStoreError(
+        f"managed account switching is not supported for cli '{cli}' "
+        "(only claude and codex have a managed credential slot)"
+    )
 
 
 def _safe_resolve(p: Path) -> Optional[Path]:
@@ -382,13 +393,14 @@ def _looks_like_claude(name: Optional[str], cmdline: list[str]) -> bool:
 
 
 def _looks_like_codex(name: Optional[str], cmdline: list[str]) -> bool:
-    # ponytail: matches the standalone `codex` binary (name or argv[0]), same
-    # shape as _looks_like_claude. A node-launched wrapper would slip past;
-    # upgrade to the codex entrypoint path if that distribution appears.
+    # ponytail: matches the standalone `codex` binary by name or argv[0] only -
+    # NOT any arg, or `grep codex` / `git commit -m "codex fix"` would false-match
+    # (and spuriously defer a switch when CODEX_HOME is exported). A node-launched
+    # wrapper slips past; upgrade to the entrypoint path if that distribution appears.
     if name and Path(name).name == "codex":
         return True
-    for part in cmdline:
-        toks = part.split() if part else []
+    if cmdline:
+        toks = cmdline[0].split() if cmdline[0] else []
         if toks and Path(toks[0]).name == "codex":
             return True
     return False

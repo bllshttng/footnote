@@ -381,6 +381,17 @@ class TestLooksLikeCodex:
         assert managed._looks_like_codex("claude", []) is False
         assert managed._looks_like_codex(None, ["   ", ""]) is False
 
+    def test_codex_as_later_arg_does_not_match(self):
+        # 'codex' in a non-argv[0] position (grep target, commit message) must
+        # NOT match - else a random command spuriously defers a switch.
+        assert managed._looks_like_codex(None, ["grep", "codex"]) is False
+        assert managed._looks_like_codex(None, ["git", "commit", "-m", "codex fix"]) is False
+        assert managed._looks_like_codex(None, ["nano", "codex.json"]) is False
+
+    def test_matches_argv0_joined_or_split(self):
+        assert managed._looks_like_codex(None, ["/opt/homebrew/bin/codex", "exec"]) is True
+        assert managed._looks_like_codex(None, ["/opt/homebrew/bin/codex exec"]) is True
+
 
 class TestCodexPinningSessions:
     def _iter(self, monkeypatch, proc):
@@ -415,6 +426,21 @@ class TestCodexPinningSessions:
             9, "claude", ["claude"], environ={"CODEX_HOME": str(tmp_path / ".codex")}
         ))
         assert managed.codex_pinning_sessions() == []
+
+
+class TestPinningSessionsFor:
+    def test_dispatches_claude_and_codex(self, monkeypatch):
+        monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: ["C"])
+        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: ["X"])
+        assert managed.pinning_sessions_for("claude") == ["C"]
+        assert managed.pinning_sessions_for("codex") == ["X"]
+
+    def test_unsupported_cli_refuses_before_mutation(self):
+        # A cli with no managed matcher must fail loud with a receipt, not fall
+        # back to the claude scan (which would let the switch corrupt the claude
+        # slot via the downstream slot ops).
+        with pytest.raises(managed.ManagedStoreError, match="not supported for cli 'gemini'"):
+            managed.pinning_sessions_for("gemini")
 
 
 # ---------------------------------------------------------------------------
