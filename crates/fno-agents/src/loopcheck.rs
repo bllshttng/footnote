@@ -5525,11 +5525,15 @@ mod tests {
         assert_eq!(route_provider("zai,"), None); // empty model -> malformed
         assert_eq!(route_provider(",glm"), None); // empty provider -> malformed
         assert_eq!(route_provider("a,b,c"), None); // three parts -> malformed
+
         // peer_family: bare provider, valid route wins, malformed falls back.
         assert_eq!(peer_family(&bare("codex")), Some("openai"));
         assert_eq!(peer_family(&bare("grok")), None); // unknown -> never matches
         assert_eq!(peer_family(&routed("claude", "zai,glm-5.2")), None); // route wins
-        assert_eq!(peer_family(&routed("codex", "openai,gpt-5")), Some("openai"));
+        assert_eq!(
+            peer_family(&routed("codex", "openai,gpt-5")),
+            Some("openai")
+        );
         assert_eq!(peer_family(&routed("codex", "gpt-5")), Some("openai")); // malformed -> provider
     }
 
