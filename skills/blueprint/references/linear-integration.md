@@ -38,7 +38,7 @@ linearis issues create "[Feature Name]" \
 [Feature description]
 
 ## Plan
-See: {plans_path}/YYYY-MM-DD-feature-name.md
+See: {plans_path}/YYYYMMDD-feature-name.md
 
 ## Phases
 - [ ] Phase 1: Database

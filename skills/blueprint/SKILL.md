@@ -573,10 +573,10 @@ fi
      (`os.replace` onto the resolved path), so an already-node-bearing name is
      preserved as-is and the `-<node-id>` suffix is never dropped or duplicated
      into `…-x-8af8-x-8af8.md` (US4). Do NOT rename a supplied doc.
-   - **Creating fresh** (no design doc): write to `{quick_path}/YYYY-MM-DD-{slug}.md`,
-     but when this is **node-seeded** (`$CLAIMS_ID` set, e.g. a direct
-     `/blueprint x-8af8` with no prior `/think`), append the node id to the name:
-     `{quick_path}/YYYY-MM-DD-{slug}-$CLAIMS_ID.md`. `/blueprint` is the first
+   - **Creating fresh** (no design doc): write to `{quick_path}/YYYYMMDD-{slug}.md`
+     (compact date, no dashes), but when this is **node-seeded** (`$CLAIMS_ID` set,
+     e.g. a direct `/blueprint x-8af8` with no prior `/think`), append the node id
+     to the name: `{quick_path}/YYYYMMDD-{slug}-$CLAIMS_ID.md`. `/blueprint` is the first
      artifact author on the direct path and cannot lean on `/think`'s save rule,
      so it must produce the node-bearing name itself. First **reuse if claimed**:
      if a plans-dir file already carries `$CLAIMS_ID` in its frontmatter or ends
