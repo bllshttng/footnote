@@ -388,8 +388,6 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);
         assert_eq!(scan_all(&[b"\x02d"]), vec![Event::Detach]);
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
-        assert_eq!(scan_all(&[b"\x02<"]), vec![Event::ReorderTab(-1)]);
-        assert_eq!(scan_all(&[b"\x02>"]), vec![Event::ReorderTab(1)]);
         // leader+/ opens in-scrollback search (x-e780); the `/` never leaks.
         let searched = scan_all(&[b"a\x02/b"]);
         assert_eq!(
@@ -411,6 +409,22 @@ mod tests {
             ]
         );
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
+    }
+
+    #[test]
+    fn client_keys_tab_organize_chords_leave_existing_bindings_intact() {
+        assert_eq!(scan_all(&[b"\x02<"]), vec![Event::ReorderTab(-1)]);
+        assert_eq!(scan_all(&[b"\x02>"]), vec![Event::ReorderTab(1)]);
+        assert_eq!(scan_all(&[b"\x02,"]), vec![Event::OpenRename]);
+        assert_eq!(
+            scan_all(&[b"\x02J"]),
+            vec![Event::Cmd(Command::ResizeDir(Dir::Down))]
+        );
+        assert_eq!(
+            scan_all(&[b"\x02K"]),
+            vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
+        );
+        assert_eq!(scan_all(&[b"\x02x"]), vec![Event::Cmd(Command::ClosePane)]);
     }
 
     #[test]
