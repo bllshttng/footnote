@@ -594,6 +594,37 @@ def _switch_locked(
             f"stale/revoked); {tail}"
         )
 
+    # Codex TOCTOU narrowing (cv-f578cbe7): the pin gate above runs BEFORE the
+    # write, so a codex launched in the snapshot+write window - having read the
+    # OUTGOING creds at startup - is not caught by it. Re-scan once here; if one
+    # appeared, roll the slot back to the outgoing creds and defer, so we never
+    # LEAVE auth.json rewritten under a session that started mid-switch. This is
+    # best-effort, not a full fix: a launch in the tiny write->recheck gap is
+    # irreducible without a lease the external codex binary honors. claude keeps
+    # G1's single pre-write check (this arm only, by request).
+    if target.cli == "codex":
+        late_pins = pinning_sessions_for(target.cli)
+        if late_pins:
+            names = ", ".join(f"pid {p.pid}" for p in late_pins)
+            if not rollback_blob:
+                raise SwitchDeferred(
+                    f"a live {target.cli} session ({names}) started during the switch "
+                    "(no prior creds to restore); retry once it exits",
+                    sessions=late_pins,
+                )
+            try:
+                _write_slot_blob(target.cli, rollback_blob)
+            except ManagedStoreError as rb:
+                raise ManagedStoreError(
+                    f"a live {target.cli} session started mid-switch and the rollback "
+                    f"ALSO failed ({rb}); slot may hold '{target.id}' under a live session"
+                ) from rb
+            raise SwitchDeferred(
+                f"a live {target.cli} session ({names}) started during the switch; "
+                "slot rolled back to the previous account, retry once it exits",
+                sessions=late_pins,
+            )
+
     # Crash window: a kill between the slot write above and this stamp leaves the
     # stamp naming the previous account while the slot holds target. Rare and
     # self-correcting on the next successful switch; journaling is not worth it

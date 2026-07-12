@@ -357,6 +357,49 @@ class TestCodexFileBackend:
         assert managed._read_slot_blob("codex") == before  # slot untouched
         assert (tmp_path / "cx-a" / "blob").read_text() == _blob("A0")  # store untouched
 
+    def test_codex_session_launched_mid_switch_rolls_back(self, tmp_path, monkeypatch):
+        """TOCTOU narrowing (cv-f578cbe7): the pre-write pin check is clear, but a
+        codex session appears during the write. The post-write re-scan catches it,
+        rolls the slot back to the outgoing creds, and defers - never leaving
+        auth.json rewritten under the session that started mid-switch."""
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(a, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+        managed._write_slot_blob("codex", _blob("B0"))  # slot holds outgoing B
+        managed.snapshot_current(b, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        # First scan (pre-write) clear; second scan (post-write) finds a session.
+        calls = {"n": 0}
+
+        def _scan(auth_path=None):
+            calls["n"] += 1
+            return [] if calls["n"] == 1 else [managed.PinningSession(777, "codex")]
+
+        monkeypatch.setattr(managed, "codex_pinning_sessions", _scan)
+        with pytest.raises(managed.SwitchDeferred) as exc:
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert "777" in str(exc.value) and "during the switch" in str(exc.value)
+        assert managed._read_slot_blob("codex") == _blob("B0")  # rolled back to outgoing
+        assert managed.active_slot_id("codex", tmp_path) == "cx-b"  # stamp not advanced
+        assert calls["n"] == 2  # both scans ran
+
+    def test_claude_switch_has_single_pin_check(self, fake_slot, tmp_path, monkeypatch):
+        """The post-write re-scan is codex-only: claude keeps G1's single pre-write
+        check (byte-for-byte), so a clean claude switch scans exactly once."""
+        by_id = _register_two(fake_slot, tmp_path)
+        calls = {"n": 0}
+
+        def _scan(config_dir=None):
+            calls["n"] += 1
+            return []
+
+        monkeypatch.setattr(managed, "pinning_sessions", _scan)
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert calls["n"] == 1  # claude scanned once, not twice
+
 
 class _FakeProc:
     """A psutil-proc stand-in for the pin matcher's process scan."""
