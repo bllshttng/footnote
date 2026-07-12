@@ -610,8 +610,11 @@ while [ "$_VERIFY_ELAPSED" -lt "$VERIFY_TIMEOUT" ]; do
     # delegation instead of parking (x-1adb). to_session stays CHILD_NAME; a row
     # that also lacks short_id/session_id leaves CHILD_SID empty -> "unknown".
     if [ -z "$CHILD_SID" ]; then
+      # jq's // treats "" as truthy, and registry.py defaults short_id to ""
+      # (not null) for non-stream rows, so select(. != "") is required for the
+      # fallback to session_id to fire on an empty short_id (gemini PR #378).
       set +o pipefail
-      CHILD_SID="$(printf '%s' "$_LIST_ROW" | jq -r '.short_id // .session_id // empty' 2>/dev/null || true)"
+      CHILD_SID="$(printf '%s' "$_LIST_ROW" | jq -r '(.short_id | select(. != "")) // (.session_id | select(. != "")) // empty' 2>/dev/null || true)"
       set -o pipefail
     fi
     break

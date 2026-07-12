@@ -1057,16 +1057,18 @@ check_eq "AC3-FR: no delegated event emitted" "0" "$phantom_delegated"
 
 # ---------------------------------------------------------------------------
 # Scenario 22: AC4-EDGE - clean-rc/empty-receipt, child live but the registry
-# row also lacks short_id -> delegation still commits (exit 0) with
-# child_session degraded to "unknown"; to_session stays CHILD_NAME.
+# row's short_id is EMPTY ("", registry.py's non-stream default) AND no
+# session_id -> delegation still commits (exit 0) with child_session degraded to
+# "unknown"; to_session stays CHILD_NAME. Uses short_id:"" not an absent key,
+# because "" is the real registry shape (jq // treats "" as truthy).
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Scenario 22: AC4-EDGE live child, row missing short_id ==="
+echo "=== Scenario 22: AC4-EDGE live child, empty short_id, no session_id ==="
 SBX="$(make_sandbox s22)"
 printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
-# Live row but NO short_id and NO session_id -> nothing to backfill.
-printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live"}]}\n' \
+# Live row with empty short_id and empty session_id -> nothing to backfill.
+printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":""}]}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
 
 CALL_LOG="$SBX/call-log"
@@ -1081,6 +1083,29 @@ set -e
 check_contains "AC4-EDGE: child_session is unknown" '"child_session":"unknown"' "$edge_child"
 check_contains "AC4-EDGE: to_session stays CHILD_NAME" \
   "\"to_session\":\"tgt-${NODE_ID:3:8}-${TEST_HARNESS}-g2\"" "$edge_to"
+
+# ---------------------------------------------------------------------------
+# Scenario 22b: AC4-EDGE - empty short_id but a present session_id -> the jq
+# fallback must fire (select(. != "") drops the empty short_id) and backfill
+# from session_id, NOT degrade to "unknown" (gemini finding, PR #378).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 22b: AC4-EDGE empty short_id falls back to session_id ==="
+SBX="$(make_sandbox s22b)"
+printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":"sess456"}]}\n' \
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+
+check_exit "AC4-EDGE-fallback: exits 0" "0" "$handoff_rc"
+check_contains "AC4-EDGE-fallback: backfills from session_id, not unknown" "session=sess456" "$output"
+set +e
+fb_child=$(grep '"type":"delegated"' "$SBX/.fno/events.jsonl" 2>/dev/null | grep -o '"child_session":"[^"]*"' | head -1)
+set -e
+check_contains "AC4-EDGE-fallback: child_session=sess456" '"child_session":"sess456"' "$fb_child"
 
 # ---------------------------------------------------------------------------
 # Scenario 23: AC5-EDGE - clean-rc/empty-receipt, child never goes live AND the
