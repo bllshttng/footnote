@@ -3782,16 +3782,27 @@ async fn selector_keys(
                     .map_err(|e| format!("dismiss send failed: {e}"))?;
                     continue;
                 }
-                // A non-tombstone agent row gets the lifecycle verb (x-76ea),
-                // staged by its own state: a live row (`!exited`) stops, an
-                // exited row removes. The registry poll's state flip IS the stage
-                // separator - stop, wait ≤1s for the row to flip exited, then `x`
-                // again removes (no double-tap timer). The captured name (not the
-                // row index) rides the confirm, so a row that races out resolves
-                // to the server's stale-name refusal. Too-short terminal refuses
-                // rather than arm an invisible confirm (x-260a), like RemoveSquad.
+                // A WATCH-ONLY (paneless) agent row gets the lifecycle verb
+                // (x-76ea): a live row (`!exited`) stops, an exited row removes.
+                // The registry poll's state flip IS the stage separator - stop,
+                // wait ≤1s for the row to flip exited, then `x` again removes (no
+                // double-tap timer). The captured name (not the row index) rides
+                // the confirm, so a row that races out resolves to the server's
+                // stale-name refusal; too-short terminal refuses rather than arm
+                // an invisible confirm (x-260a), like RemoveSquad.
+                //
+                // `pane_id.is_none()` is load-bearing (codex review): a PANE-hosted
+                // Agent row is either a real agent's pane or a bare shell pane that
+                // agent_rows() surfaces as a first-class Agent row labelled from its
+                // cmd/cwd - NOT a registry entry. Arming the verb there would shell
+                // `fno-agents` on a label that could collide with an unrelated
+                // agent's name and stop the wrong one. Pane-hosted rows are managed
+                // via their tab (CloseTab); only the paneless rows - the bg/headless
+                // agents that today linger until GC - are the gap this closes.
                 let agent = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) if !a.tombstone => Some((a.name.clone(), a.exited)),
+                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => {
+                        Some((a.name.clone(), a.exited))
+                    }
                     _ => None,
                 };
                 if let Some((name, exited)) = agent {
@@ -6623,6 +6634,30 @@ mod tests {
             Some(ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "worker-b"),
             _ => panic!("expected a RemoveAgent confirm"),
         }
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_pane_hosted_agent_does_not_arm_lifecycle() {
+        // codex review: a PANE-hosted Agent row (a real agent's pane or a bare
+        // shell pane agent_rows() surfaces) must NOT arm stop/remove - its name
+        // can be a cmd/cwd label with no registry entry, and it is managed via
+        // its tab. `x` there falls through to a bell, arming nothing, sending
+        // nothing.
+        let mut pane_hosted = lifecycle_row("shell", false, false);
+        pane_hosted.pane_id = Some(99);
+        let mut v = view_with_agents(vec![pane_hosted]);
+        v.expanded.insert(1);
+        v.selector = Some(agent_row_at(&v, |a| a.name == "shell"));
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert!(
+            buf.is_empty(),
+            "a pane-hosted row sends no lifecycle command"
+        );
+        assert!(
+            v.confirm.is_none(),
+            "a pane-hosted row arms no lifecycle confirm"
+        );
     }
 
     #[tokio::test]

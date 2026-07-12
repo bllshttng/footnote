@@ -1614,6 +1614,30 @@ impl Core {
         });
     }
 
+    /// Resolve a sideline lifecycle target (x-76ea `StopAgent`/`RemoveAgent`) by
+    /// name against the current catalog, returning the exited flag of the single
+    /// resolved registry row. `name` is NOT a unique key (codex review): the
+    /// catalog dedups by `attach_id`, so an external roster row and a registry
+    /// row can carry the same name. Fail-closed on every ambiguity - absent, any
+    /// external row sharing the name (never act on a registry agent an external
+    /// shadows), or a >1 non-external collision - so a keypress can only ever act
+    /// on exactly one unambiguous registry agent, never a guessed match.
+    fn resolve_lifecycle_target(&self, name: &str) -> Result<bool, String> {
+        let matches: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.name == name).collect();
+        if matches.is_empty() {
+            return Err(format!("no such agent: {name}"));
+        }
+        if matches.iter().any(|a| a.external) {
+            return Err(format!(
+                "{name} is external - manage it from its own session"
+            ));
+        }
+        match matches.as_slice() {
+            [one] => Ok(one.exited),
+            _ => Err(format!("{name} is ambiguous - use the CLI")),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn attach(
         &mut self,
@@ -3734,44 +3758,28 @@ impl Core {
                 Flow::Continue
             }
             Command::StopAgent { name } => {
-                // Stop a live sideline row (x-76ea). Validate the name against
-                // THIS server's agents catalog (a row that raced out between the
-                // client's render and this send is refused fail-closed, like
-                // FocusPane); an external roster row is the claude daemon's, not
-                // the fno registry's, so `fno-agents stop` can't own it - refuse
-                // with a notice rather than a guaranteed AgentNotFound. The shell
-                // is idempotent (already-exited is a clean no-op), so no live
-                // check is needed here.
-                let decision = match self.agents.iter().find(|a| a.name == name) {
-                    None => Err(format!("no such agent: {name}")),
-                    Some(a) if a.external => {
-                        Err(format!("{name} is external - stop it from its own session"))
-                    }
-                    Some(_) => Ok(()),
-                };
-                match decision {
+                // Stop a live sideline row (x-76ea). `resolve_lifecycle_target`
+                // validates the name against THIS server's catalog fail-closed;
+                // the shell is idempotent (already-exited is a clean no-op), so
+                // the exited flag is unused here.
+                match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(()) => self.agent_action(client_id, "stop", name),
+                    Ok(_exited) => self.agent_action(client_id, "stop", name),
                 }
                 Flow::Continue
             }
             Command::RemoveAgent { name } => {
-                // Remove an exited sideline row (x-76ea). Same catalog + external
-                // validation as StopAgent, plus the stop-then-rm ordering: a
-                // still-live row is refused with the stop-first reason (the CLI
-                // enforces this too, but refusing here keeps the notice specific
-                // and skips a doomed subprocess).
-                let decision = match self.agents.iter().find(|a| a.name == name) {
-                    None => Err(format!("no such agent: {name}")),
-                    Some(a) if a.external => Err(format!(
-                        "{name} is external - remove it from its own session"
-                    )),
-                    Some(a) if !a.exited => Err(format!("{name} is still live - stop it first")),
-                    Some(_) => Ok(()),
-                };
-                match decision {
+                // Remove an exited sideline row (x-76ea). Same resolution as
+                // StopAgent, plus the stop-then-rm ordering: a still-live row is
+                // refused with the stop-first reason (the CLI enforces this too,
+                // but refusing here keeps the notice specific and skips a doomed
+                // subprocess).
+                match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(()) => self.agent_action(client_id, "rm", name),
+                    Ok(exited) if !exited => {
+                        self.notice(client_id, format!("{name} is still live - stop it first"))
+                    }
+                    Ok(_) => self.agent_action(client_id, "rm", name),
                 }
                 Flow::Continue
             }
@@ -6210,6 +6218,42 @@ mod tests {
             core.command(1, cmd);
             assert!(drain_notice(&mut rx).unwrap().contains("external"));
         }
+    }
+
+    #[test]
+    fn lifecycle_name_collision_refused_fail_closed() {
+        // codex review: `name` is not a unique catalog key (dedup is by
+        // attach_id). When an external roster row shares a name with a registry
+        // row, the verb must refuse on provenance and NEVER act on the registry
+        // agent the external shadows; two same-named registry rows are ambiguous.
+        // Both are fail-closed refusals, so no unrelated agent is ever stopped.
+        let shared = |external, exited, attach: &str| RegistryAgent {
+            external,
+            exited,
+            ..bg_row("dup", "/tmp", Some(attach))
+        };
+
+        // External shadows a registry row -> refuse as external, act on neither.
+        let mut core = empty_core();
+        core.agents = vec![
+            shared(false, false, "reg00001"),
+            shared(true, false, "ext00001"),
+        ];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(1, Command::StopAgent { name: "dup".into() });
+        assert!(drain_notice(&mut rx).unwrap().contains("external"));
+
+        // Two non-external rows with one name -> ambiguous refusal.
+        let mut core = empty_core();
+        core.agents = vec![
+            shared(false, true, "reg00001"),
+            shared(false, true, "reg00002"),
+        ];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(1, Command::RemoveAgent { name: "dup".into() });
+        assert!(drain_notice(&mut rx).unwrap().contains("ambiguous"));
     }
 
     #[test]
