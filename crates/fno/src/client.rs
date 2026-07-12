@@ -968,6 +968,11 @@ impl View {
         // usize to match the renderer (`draw_tab_bar` accumulates in usize).
         if row < TAB_BAR_ROWS {
             let col = col as usize;
+            if let Some((start, text)) = self.notice_overlay(self.term.1 as usize) {
+                if col >= start && col < start + text.chars().count() {
+                    return None;
+                }
+            }
             let mut c = 0usize;
             for span in self.tab_bar_spans() {
                 let w = span.text.chars().count();
@@ -1987,9 +1992,7 @@ impl View {
         }
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
         // event handler already sounded).
-        if let Some((text, _)) = &self.notice {
-            let text: String = text.chars().take(cols.saturating_sub(1)).collect();
-            let start = cols.saturating_sub(text.chars().count() + 1);
+        if let Some((start, text)) = self.notice_overlay(cols) {
             for (i, ch) in text.chars().enumerate() {
                 let idx = start + i;
                 if idx < cols {
@@ -2002,6 +2005,13 @@ impl View {
                 }
             }
         }
+    }
+
+    fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
+        let (text, _) = self.notice.as_ref()?;
+        let text: String = text.chars().take(cols.saturating_sub(1)).collect();
+        let start = cols.saturating_sub(text.chars().count() + 1);
+        Some((start, text))
     }
 
     /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
@@ -5876,6 +5886,11 @@ mod tests {
         assert!(
             text.lines().next().unwrap().contains("no such tab"),
             "the stale-refusal notice remains visible over a dense tab bar"
+        );
+        let notice_start = 80 - "no such tab".chars().count() - 1;
+        assert!(
+            view.chrome_hit(0, notice_start as u16).is_none(),
+            "clicks on the visible notice do not activate hidden tabs"
         );
     }
 
