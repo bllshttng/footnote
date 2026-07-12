@@ -321,6 +321,7 @@ class TestCodexFileBackend:
     def test_codex_switch_captures_and_materializes(self, tmp_path, monkeypatch):
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
         a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
         managed._write_slot_blob("codex", _blob("A0"))
         managed.snapshot_current(a, root=tmp_path)
@@ -332,6 +333,88 @@ class TestCodexFileBackend:
         managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert managed._read_slot_blob("codex") == _blob("A0")
         assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+    def test_codex_switch_pin_defers(self, tmp_path, monkeypatch):
+        """US6 Invariant: a live codex session pinning the slot defers the switch,
+        names the session, and mutates nothing - claude parity for codex."""
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(a, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+        managed._write_slot_blob("codex", _blob("B0"))
+        managed.snapshot_current(b, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        monkeypatch.setattr(
+            managed, "codex_pinning_sessions",
+            lambda auth_path=None: [managed.PinningSession(555, "codex exec")],
+        )
+        before = managed._read_slot_blob("codex")
+        with pytest.raises(managed.SwitchDeferred) as exc:
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert "555" in str(exc.value) and "codex" in str(exc.value)
+        assert managed._read_slot_blob("codex") == before  # slot untouched
+        assert (tmp_path / "cx-a" / "blob").read_text() == _blob("A0")  # store untouched
+
+
+class _FakeProc:
+    """A psutil-proc stand-in for the pin matcher's process scan."""
+
+    def __init__(self, pid, name, cmdline, environ=None, environ_raises=False):
+        self.info = {"pid": pid, "name": name, "cmdline": cmdline}
+        self._environ = environ or {}
+        self._environ_raises = environ_raises
+
+    def environ(self):
+        if self._environ_raises:
+            raise PermissionError("denied")
+        return self._environ
+
+
+class TestLooksLikeCodex:
+    def test_matches_codex_binary(self):
+        assert managed._looks_like_codex("codex", []) is True
+        assert managed._looks_like_codex(None, ["/opt/homebrew/bin/codex exec"]) is True
+
+    def test_non_codex_is_false(self):
+        assert managed._looks_like_codex("claude", []) is False
+        assert managed._looks_like_codex(None, ["   ", ""]) is False
+
+
+class TestCodexPinningSessions:
+    def _iter(self, monkeypatch, proc):
+        monkeypatch.setattr(managed.psutil, "process_iter", lambda attrs=None: iter([proc]))
+
+    def test_codex_home_at_slot_pins(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(
+            4242, "codex", ["codex", "exec"], environ={"CODEX_HOME": str(tmp_path / ".codex")}
+        ))
+        assert [p.pid for p in managed.codex_pinning_sessions()] == [4242]
+
+    def test_codex_home_elsewhere_does_not_pin(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(
+            1, "codex", ["codex"], environ={"CODEX_HOME": str(tmp_path / "other")}
+        ))
+        assert managed.codex_pinning_sessions() == []
+
+    def test_unreadable_env_is_conservative_pin(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(7, "codex", ["codex"], environ_raises=True))
+        assert [p.pid for p in managed.codex_pinning_sessions()] == [7]
+
+    def test_non_codex_process_ignored(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        self._iter(monkeypatch, _FakeProc(
+            9, "claude", ["claude"], environ={"CODEX_HOME": str(tmp_path / ".codex")}
+        ))
+        assert managed.codex_pinning_sessions() == []
 
 
 # ---------------------------------------------------------------------------

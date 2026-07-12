@@ -17,9 +17,10 @@ The slot read/write and the verification are behind small module-level
 functions (``_read_slot_blob`` / ``_write_slot_blob`` / ``verify_slot``) so
 tests exercise the orchestration without touching the real Keychain or network.
 
-Auto-switch (US3), session revival (US4/US5), and codex parity (US6) build on
-this store in later groups; this module is claude-focused with a codex-file
-path stubbed where it is a trivial file copy.
+Auto-switch (US3) and session revival (US4/US5) build on this store in later
+groups. codex parity (US6) is complete: the slot backend, snapshot, switch, and
+the live-pin gate all dispatch per-CLI (claude Keychain/credential-file, codex
+``auth.json`` file copy; live-pin keyed off ``CODEX_HOME`` for codex).
 """
 from __future__ import annotations
 
@@ -283,19 +284,23 @@ def _token_present(blob: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
-    """Live claude processes using the slot ``config_dir`` (default ~/.claude).
+def _pinning_sessions(
+    *,
+    looks_like: Callable[[Optional[str], list[str]], bool],
+    env_var: str,
+    slot_dir: Path,
+    default_dir: Path,
+) -> list[PinningSession]:
+    """Live processes pinning a shared slot dir, generic over the CLI.
 
-    A process pins the slot when its effective ``CLAUDE_CONFIG_DIR`` resolves to
-    the slot dir (an account on its own dir does NOT pin the shared slot).
-    Conservative on ambiguity: a claude-looking process whose environ is
-    unreadable is treated as pinning, because deferring a switch is safe but
-    rotating under a live session corrupts it.
+    A process pins when its effective ``env_var`` resolves to ``slot_dir`` (a
+    process on its own dir does NOT pin the shared slot). Conservative on
+    ambiguity: a matching process whose environ is unreadable, or whose slot
+    override cannot be resolved, is treated as pinning - deferring a switch is
+    safe, rotating credentials under a live session corrupts it.
     """
-    _slot_raw = config_dir or _claude_slot_config_dir()
-    slot = _safe_resolve(_slot_raw) or _slot_raw
-    _def_raw = Path.home() / ".claude"
-    default_dir = _safe_resolve(_def_raw) or _def_raw
+    slot = _safe_resolve(slot_dir) or slot_dir
+    default_resolved = _safe_resolve(default_dir) or default_dir
     me = os.getpid()
     found: list[PinningSession] = []
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
@@ -303,15 +308,15 @@ def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
             if proc.info["pid"] == me:
                 continue
             cmdline = proc.info.get("cmdline") or []
-            if not _looks_like_claude(proc.info.get("name"), cmdline):
+            if not looks_like(proc.info.get("name"), cmdline):
                 continue
             try:
                 env = proc.environ()
             except Exception:  # noqa: BLE001 - unreadable env: assume it pins the default slot
                 found.append(PinningSession(proc.info["pid"], " ".join(cmdline)))
                 continue
-            override = env.get("CLAUDE_CONFIG_DIR")
-            proc_dir = _safe_resolve(Path(override)) if override else default_dir
+            override = env.get(env_var)
+            proc_dir = _safe_resolve(Path(override)) if override else default_resolved
             # Resolve both sides so a symlinked/relative path still matches; an
             # unresolvable proc dir (proc_dir is None) is treated as pinning
             # (conservative: under-detecting a live session is the unsafe way).
@@ -320,6 +325,39 @@ def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
         except Exception:  # noqa: BLE001 - a vanished/denied process is not our switch's problem
             continue
     return found
+
+
+def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
+    """Live claude processes pinning the slot ``config_dir`` (default ~/.claude)
+    via their effective ``CLAUDE_CONFIG_DIR``."""
+    return _pinning_sessions(
+        looks_like=_looks_like_claude,
+        env_var="CLAUDE_CONFIG_DIR",
+        slot_dir=config_dir or _claude_slot_config_dir(),
+        default_dir=Path.home() / ".claude",
+    )
+
+
+def codex_pinning_sessions(auth_path: Path | None = None) -> list[PinningSession]:
+    """Live codex processes pinning the slot via their effective ``CODEX_HOME``.
+
+    The codex slot is a file (``auth.json``); the pin is on its parent dir
+    (``CODEX_HOME``), so a process whose ``CODEX_HOME`` resolves to that dir
+    pins the slot. Same conservative-on-ambiguity posture as claude."""
+    slot_dir = (auth_path or _codex_slot_auth_path()).parent
+    return _pinning_sessions(
+        looks_like=_looks_like_codex,
+        env_var="CODEX_HOME",
+        slot_dir=slot_dir,
+        default_dir=Path.home() / ".codex",
+    )
+
+
+def pinning_sessions_for(cli: str) -> list[PinningSession]:
+    """Dispatch the live-pin scan to the matcher for ``cli``'s slot."""
+    if cli == "codex":
+        return codex_pinning_sessions()
+    return pinning_sessions()
 
 
 def _safe_resolve(p: Path) -> Optional[Path]:
@@ -339,6 +377,19 @@ def _looks_like_claude(name: Optional[str], cmdline: list[str]) -> bool:
     for part in cmdline:
         toks = part.split() if part else []
         if toks and Path(toks[0]).name == "claude":
+            return True
+    return False
+
+
+def _looks_like_codex(name: Optional[str], cmdline: list[str]) -> bool:
+    # ponytail: matches the standalone `codex` binary (name or argv[0]), same
+    # shape as _looks_like_claude. A node-launched wrapper would slip past;
+    # upgrade to the codex entrypoint path if that distribution appears.
+    if name and Path(name).name == "codex":
+        return True
+    for part in cmdline:
+        toks = part.split() if part else []
+        if toks and Path(toks[0]).name == "codex":
             return True
     return False
 
@@ -486,15 +537,16 @@ def _switch_locked(
         return SwitchResult(active=target.id)
 
     # Live-pin gate INSIDE the critical section (a session starting between
-    # check and write is caught: the mutex is held across both).
-    if target.cli == "claude":
-        pins = pinning_sessions()
-        if pins:
-            names = ", ".join(f"pid {p.pid}" for p in pins)
-            raise SwitchDeferred(
-                f"slot is pinned by a live claude session ({names}); stop it or retry",
-                sessions=pins,
-            )
+    # check and write is caught: the mutex is held across both). Per-CLI: claude
+    # keys off CLAUDE_CONFIG_DIR, codex off CODEX_HOME (both never rewrite the
+    # slot under a live session on it).
+    pins = pinning_sessions_for(target.cli)
+    if pins:
+        names = ", ".join(f"pid {p.pid}" for p in pins)
+        raise SwitchDeferred(
+            f"slot is pinned by a live {target.cli} session ({names}); stop it or retry",
+            sessions=pins,
+        )
 
     # Capture-before-overwrite: the slot currently holds the outgoing account's
     # (possibly rotated) creds. Re-snapshot them before we overwrite the slot.
