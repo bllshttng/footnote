@@ -23,7 +23,13 @@ def runner():
 
 @pytest.fixture
 def mailbox(tmp_path, monkeypatch):
-    """Co-isolate the md render (FNO_INBOX_ROOT) and the bus log under tmp."""
+    """Co-isolate the md render (FNO_INBOX_ROOT), the bus log, and the roster under tmp."""
+    # FNO_BUS_DIR outranks FNO_INBOX_ROOT in bus_dir(); clear it so FNO_INBOX_ROOT wins.
+    monkeypatch.delenv("FNO_BUS_DIR", raising=False)
+    # FNO_CLAUDE_DAEMON_DIR is process-global (set by spawn_gate) and defaults to the
+    # real ~/.claude/daemon; pin an empty dir so no real live session leaks in. Tests
+    # that need a roster (_isolate_claude_roster) setenv after the fixture and win.
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "daemon-empty"))
     monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path))
     use_tmpdir(monkeypatch, tmp_path)
     return tmp_path
@@ -329,3 +335,48 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
     assert 'from="claude-abcd1234"' in body
     assert 'model="claude-opus-4-8"' in body
+
+
+# ---------------------------------------------------------------------------
+# Regression (x-3392): the mailbox fixture must neutralize an ambient, poisoning
+# FNO_BUS_DIR / FNO_CLAUDE_DAEMON_DIR so mail-send tests stay hermetic under a
+# symlinked worktree where a live worker session has exported them.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def poison_bus(tmp_path, monkeypatch):
+    """Export an ambient FNO_BUS_DIR before the mailbox fixture runs.
+
+    Listed before `mailbox` in the test signature so it sets up first; the
+    mailbox fixture must then clear it (same function-scoped monkeypatch).
+    """
+    bus = tmp_path / "poison-bus"
+    bus.mkdir()
+    monkeypatch.setenv("FNO_BUS_DIR", str(bus))
+    return bus
+
+
+def test_mailbox_fixture_neutralizes_ambient_bus_dir(
+    poison_bus, runner, mailbox, monkeypatch, tmp_path
+):
+    from fno.paths import bus_dir
+
+    # Root-cause invariant: FNO_BUS_DIR cleared ⟹ bus resolves under FNO_INBOX_ROOT.
+    resolved = bus_dir()
+    assert resolved == tmp_path / ".bus"
+    assert resolved != poison_bus
+
+    # And the send→drain round-trip works on the tmp bus, not the ambient one.
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    sent = runner.invoke(
+        app, ["mail", "send", "claude-9a063cd3", "hi bg worker", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and payload[0]["to"] == "claude-9a063cd3"
+    assert "hi bg worker" in payload[0]["body"]
