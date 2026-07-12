@@ -589,3 +589,132 @@ def test_integration_tick_permanent_4xx_drops_and_advances(tmp_path, monkeypatch
     res = sf.run_tick(tmp_path, [sink])
     assert res.sinks[0].dropped == 1
     assert (ss / "d.cursor").read_text().strip() == "2026-07-12T00:00:05Z"  # advanced past drop
+
+
+# ── US5: fno backlog note + backlog-progress adapter ────────────────────────
+
+
+@pytest.fixture
+def tmp_graph(tmp_path, monkeypatch):
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": []}\n')
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+    for mod in (gc, gs):
+        monkeypatch.setattr(mod, "GRAPH_JSON", g, raising=False)
+        monkeypatch.setattr(mod, "GRAPH_LOCK_FILE", tmp_path / "graph.lock", raising=False)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md", raising=False)
+    monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html", raising=False)
+    return g
+
+
+def _seed(graph_path, entry):
+    import json as _json
+    graph_path.write_text(_json.dumps({"entries": [entry]}) + "\n")
+
+
+def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):
+    from fno.graph.store import append_progress_note
+
+    _seed(tmp_graph, {"id": "x-9", "title": "t", "plan_path": "/tmp/plan.md"})
+    found, plan_path = append_progress_note(tmp_graph, "x-9", {"ts": "T1", "text": "hi"})
+    assert found is True and plan_path == "/tmp/plan.md"
+    # Second note accumulates (append-only, never replaces).
+    append_progress_note(tmp_graph, "x-9", {"ts": "T2", "text": "again"})
+    import json as _json
+    entry = _json.loads(tmp_graph.read_text())["entries"][0]
+    assert [n["text"] for n in entry["progress_notes"]] == ["hi", "again"]
+
+
+def test_backlog_note_missing_node_returns_not_found(tmp_graph):
+    from fno.graph.store import append_progress_note
+
+    _seed(tmp_graph, {"id": "x-9", "title": "t"})
+    found, _ = append_progress_note(tmp_graph, "x-nope", {"ts": "T", "text": "x"})
+    assert found is False
+
+
+def test_backlog_note_cli_verb(tmp_graph):
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(tmp_graph, {"id": "x-9", "title": "t"})
+    res = CliRunner().invoke(app, ["backlog", "note", "x-9", "shipped wave 1", "-J"],
+                             catch_exceptions=False)
+    assert res.exit_code == 0
+    import json as _json
+    payload = _json.loads(res.stdout)
+    assert payload["id"] == "x-9" and payload["note"]["text"] == "shipped wave 1"
+
+
+def test_backlog_progress_adapter_task_done_stamps_node_and_plan(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+    import fno.graph.store as gs
+
+    calls = []
+    plan_doc = tmp_path / "plan.md"
+    plan_doc.write_text("---\ntitle: t\n---\n\n# Plan\n")
+    monkeypatch.setattr(gs, "append_progress_note",
+                        lambda path, nid, note: (calls.append((nid, note)) or (True, str(plan_doc))))
+    ev = _ev("2026-07-12T00:00:05Z", "task_done", **{"node": "x-9", "outcome": "SUCCESS"})
+    status, _ = sf._dispatch_backlog_progress(
+        StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
+    assert status == sf.DELIVERED
+    assert calls[0][0] == "x-9"
+    assert "## Progress" in plan_doc.read_text()
+    # Frontmatter untouched.
+    assert plan_doc.read_text().startswith("---\ntitle: t\n---")
+
+
+def test_backlog_progress_adapter_ignores_wrong_kind(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gs, "append_progress_note",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("should not be called")))
+    ev = _ev("t", "task_started", **{"node": "x-9"})
+    status, _ = sf._dispatch_backlog_progress(
+        StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
+    assert status == sf.DELIVERED  # no-op, cursor advances
+
+
+def test_backlog_progress_adapter_nodeless_is_noop(tmp_path):
+    from fno import status_fanout as sf
+
+    ev = _ev("t", "run_summary")  # no node
+    status, _ = sf._dispatch_backlog_progress(
+        StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
+    assert status == sf.DELIVERED
+
+
+def test_backlog_progress_adapter_node_not_found_drops(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gs, "append_progress_note", lambda *a: (False, None))
+    ev = _ev("t", "run_summary", **{"node": "x-gone"})
+    status, detail = sf._dispatch_backlog_progress(
+        StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
+    assert status == sf.DROPPED and "not found" in detail
+
+
+def test_plan_progress_creates_then_appends(tmp_path):
+    from fno import status_fanout as sf
+
+    p = tmp_path / "plan.md"
+    p.write_text("---\ntitle: t\n---\n\n# Plan\n\nbody\n")
+    sf._append_plan_progress(str(p), "T1 first", tmp_path)
+    sf._append_plan_progress(str(p), "T2 second", tmp_path)
+    text = p.read_text()
+    assert text.count("## Progress") == 1        # heading created once
+    assert "- T1 first" in text and "- T2 second" in text
+    assert text.startswith("---\ntitle: t\n---")  # frontmatter intact
+
+
+def test_plan_progress_missing_path_is_silent(tmp_path):
+    from fno import status_fanout as sf
+
+    # Non-existent path: no crash, no file created.
+    sf._append_plan_progress(str(tmp_path / "nope.md"), "x", tmp_path)
+    sf._append_plan_progress("", "x", tmp_path)  # empty path
+    assert not (tmp_path / "nope.md").exists()

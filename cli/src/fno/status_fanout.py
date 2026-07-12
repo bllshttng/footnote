@@ -236,7 +236,6 @@ def _run_locked(
     events, skipped = _stream_since(active, min_cursor)
 
     state = {s.name: SinkResult(name=s.name, new_cursor=cursors[s.name]) for s in sinks}
-    by_name = {s.name: s for s in sinks}
 
     for event in events:
         ets = event["ts"]
@@ -495,10 +494,76 @@ def _dispatch_text_webhook(
     return _deliver(url, body, fanout)
 
 
+def _progress_line(event: dict[str, Any]) -> str:
+    """One-line human summary of a task-boundary event for the node/plan."""
+    kind = event.get("type", "")
+    outcome = event.get("outcome")
+    reason = event.get("data", {}).get("reason") if isinstance(event.get("data"), dict) else None
+    bits = [kind]
+    if outcome:
+        bits.append(str(outcome))
+    if reason:
+        bits.append(str(reason))
+    return " - ".join(bits)
+
+
+def _append_plan_progress(plan_path: str, text: str, project_root: Path) -> None:
+    """Append ``- <ts> <text>`` under a ``## Progress`` heading in the node's plan
+    doc. Body-only: NEVER touches frontmatter (the ship-gate stamp owns that).
+    Best-effort - a missing/unresolvable path or any IO error is skipped silently
+    (a vault miss is never a delivery failure). The heading is created at EOF on
+    first use; since this adapter is the sole body-appender, Progress stays the
+    trailing section and later notes append beneath it."""
+    if not plan_path:
+        return
+    p = Path(plan_path)
+    if not p.is_absolute():
+        p = project_root / plan_path
+    try:
+        p = p.resolve()
+        if not p.is_file():
+            return
+        content = p.read_text(encoding="utf-8")
+    except OSError:
+        return
+    line = f"- {text}"
+    if "## Progress" in content:
+        new = content.rstrip("\n") + "\n" + line + "\n"
+    else:
+        new = content.rstrip("\n") + "\n\n## Progress\n\n" + line + "\n"
+    try:
+        p.write_text(new, encoding="utf-8")
+    except OSError:
+        return
+
+
 def _dispatch_backlog_progress(
     sink: StatusSinkConfig, event: dict[str, Any], project_root: Path
-) -> "tuple[str, str]":  # implemented in US5
-    raise NotImplementedError("backlog-progress adapter (US5)")
+) -> "tuple[str, str]":
+    """On ``task_done`` / ``run_summary`` carrying a ``node``: append a timestamped
+    progress note to the graph node AND to its plan doc's ``## Progress`` section.
+    Other kinds / node-less events are a no-op (advance the cursor)."""
+    if event.get("type") not in ("task_done", "run_summary"):
+        return DELIVERED, ""
+    node_id = event.get("node")
+    if not node_id:
+        return DELIVERED, ""
+
+    from fno import paths as _paths
+    from fno.graph.store import append_progress_note
+
+    text = _progress_line(event)
+    note = {"ts": event.get("ts", ""), "text": text}
+    try:
+        found, plan_path = append_progress_note(_paths.graph_json(), node_id, note)
+    except Exception as exc:  # a graph write failure is a real (droppable) failure
+        return DROPPED, f"graph note failed: {exc}"
+    if not found:
+        return DROPPED, f"node {node_id} not found in graph"
+    # Plan-doc append is best-effort and never fails the delivery.
+    if plan_path:
+        _append_plan_progress(plan_path, f"{note['ts']} {text}", project_root)
+    return DELIVERED, ""
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

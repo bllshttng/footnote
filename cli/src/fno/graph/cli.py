@@ -1336,6 +1336,39 @@ def cmd_intake(
 
 # -- update --
 
+@cli.command("note")
+def cmd_note(
+    task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
+    text: str = typer.Argument(..., help="Progress note text (one line)."),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the appended note as JSON."
+    ),
+) -> None:
+    """Append a timestamped progress note to a backlog node (append-only).
+
+    Distinct from ``update --details`` (which REPLACES the rationale) and the
+    single ``completion_note``: ``note`` accumulates a list of ``{ts, text}``
+    entries. The status-fanout backlog-progress adapter stamps one per
+    ``task_done``/``run_summary`` (x-2057); it is also hand-runnable.
+    """
+    from fno.graph.store import append_progress_note
+
+    text = text.strip()
+    if not text:
+        typer.echo("Error: note text is empty", err=True)
+        raise typer.Exit(code=1)
+
+    note = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
+    found, _ = append_progress_note(_graph_path(), task_id, note)
+    if not found:
+        typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
+    else:
+        typer.echo(f"noted {task_id}: {text}")
+
+
 @cli.command("update")
 def cmd_update(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
