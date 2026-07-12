@@ -85,6 +85,10 @@ def _complete_lines(path: Path, max_bytes: Optional[int]) -> Optional[list[bytes
 
 
 def _last_model(path: Path, extract_model: Callable[[object], Optional[str]]) -> Optional[str]:
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return None
     for max_bytes in (_TAIL_BYTES, _EXPANDED_TAIL_BYTES, None):
         lines = _complete_lines(path, max_bytes)
         if lines is None:
@@ -97,6 +101,10 @@ def _last_model(path: Path, extract_model: Callable[[object], Optional[str]]) ->
             model = extract_model(record)
             if model:
                 return model
+        # This window already spanned the whole file; a larger one re-reads
+        # identical bytes for an identical result, so stop escalating.
+        if max_bytes is None or file_size <= max_bytes:
+            break
     return None
 
 
