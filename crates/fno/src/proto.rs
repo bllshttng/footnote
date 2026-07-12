@@ -123,7 +123,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// v23: `AgentRow.seen` - server-side per-pane seen bit (x-4328), set when the
 /// operator focuses a `Done` pane, cleared when it leaves `Done`; distinguishes
 /// a looked-at finished agent (`Idle`) from one still surfaced (`DoneUnseen`).
-pub const PROTO_VERSION: u32 = 23;
+/// v24 (x-0090, agents-first sideline): `AgentRow.tab` - the `TabId` hosting a
+/// pane-hosted row, so the sideline renders a tab-ordinal suffix (client derives
+/// the ordinal from the Layout); `AgentRow.cwd_base` - the cwd basename of an
+/// orphan watch-only row, for the ` (basename)` suffix under `~ elsewhere`. Both
+/// `#[serde(default)]`, keeping a v23 reader wire-tolerant. Parallel-branch
+/// hazard: if another mux branch takes v24 first, the second-to-merge re-bumps
+/// (same rule as the v17/v18/v20 churn).
+pub const PROTO_VERSION: u32 = 24;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -444,6 +451,23 @@ pub struct AgentRow {
     /// pre-feature `done == unseen`).
     #[serde(default)]
     pub seen: bool,
+    /// (v24, x-0090) The tab hosting this row's pane, for the agents-first
+    /// sideline: the client derives the display ordinal from the `Layout` it
+    /// already holds (a `TabId`, not a precomputed ordinal, so a closed tab
+    /// recomputes correctly - Discretion 2). `Some` only on a pane-hosted row
+    /// (`pane_id: Some`); a watch-only row has no tab. `#[serde(default)]`
+    /// keeps a v23 reader wire-tolerant (`None` -> no ordinal suffix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<TabId>,
+    /// (v24, x-0090) The cwd basename of an ORPHAN watch-only row (matched no
+    /// squad), rendered as a ` (basename)` suffix under the `~ elsewhere`
+    /// header so two same-named workers in different repos are distinguishable.
+    /// The client can't derive it (an orphan matches no squad, so its cwd is
+    /// not among the `Layout`'s squads), hence the wire carries it. `None` for
+    /// any pane-hosted or squad-matched row. `#[serde(default)]` keeps a v23
+    /// reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_base: Option<String>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1557,6 +1581,8 @@ mod tests {
                         attach_id: None,
                         external: false,
                         seen: false,
+                        cwd_base: None,
+                        tab: None,
                     },
                     AgentRow {
                         squad: None,
@@ -1569,6 +1595,8 @@ mod tests {
                         attach_id: None,
                         external: false,
                         seen: false,
+                        cwd_base: None,
+                        tab: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
