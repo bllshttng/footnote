@@ -52,7 +52,7 @@ class SinkResult:
     dispatched: int = 0
     dropped: int = 0
     short_circuited: bool = False
-    new_cursor: Optional[str] = None
+    new_cursor: "Optional[tuple[str, int]]" = None
 
 
 @dataclass
@@ -76,11 +76,13 @@ def _parse_line(line: str) -> Optional[dict[str, Any]]:
     return obj if isinstance(obj, dict) and isinstance(obj.get("ts"), str) else None
 
 
-def _read_events(path: Path, after_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
-    """Return (events with ts > after_ts, malformed_line_count) from one file.
+def _read_events(path: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
+    """Return (events with ts >= since_ts, malformed_line_count) from one file.
 
-    Streams line-by-line; never loads the whole file as one string. A malformed
-    or ts-less line is skipped and counted (digest.rs posture), never fatal.
+    The bound is INCLUSIVE so a boundary event sharing the cursor's second is
+    still seen; the per-sink ``(ts, n)`` tiebreak decides whether it is new (see
+    _run_locked). Streams line-by-line; a malformed / ts-less line is skipped and
+    counted (digest.rs posture), never fatal.
     """
     events: list[dict[str, Any]] = []
     skipped = 0
@@ -92,46 +94,68 @@ def _read_events(path: Path, after_ts: Optional[str]) -> "tuple[list[dict[str, A
                     if raw.strip():
                         skipped += 1
                     continue
-                if after_ts is None or ev["ts"] > after_ts:
+                if since_ts is None or ev["ts"] >= since_ts:
                     events.append(ev)
     except FileNotFoundError:
         return [], 0
     return events, skipped
 
 
-def _stream_since(active: Path, after_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
-    """All events with ts > after_ts, draining the rotated ``.1`` first when the
-    cursor predates the active file's first line. Rotated history is prepended so
-    the returned list stays ts-ordered (both files are individually ordered and
-    ``.1`` is strictly older)."""
-    rotated = active.with_name(active.name + ".1")
-    active_events, active_skipped = _read_events(active, after_ts)
-    # Only touch .1 when the cursor is behind the active file's first retained
-    # line - otherwise the rotated tail is already covered by the cursor.
-    need_rotated = rotated.exists() and (
-        after_ts is None
-        or not active_events
-        or after_ts < active_events[0]["ts"]
-    )
-    if not need_rotated:
-        return active_events, active_skipped
-    rotated_events, rotated_skipped = _read_events(rotated, after_ts)
-    return rotated_events + active_events, active_skipped + rotated_skipped
-
-
-def _eof_ts(active: Path) -> Optional[str]:
-    """The max ts currently in the active log, or None if empty/absent. A fresh
-    sink initializes its cursor here so no historical event is replayed."""
-    last: Optional[str] = None
+def _first_ts(active: Path) -> Optional[str]:
+    """The ts of the active file's first parseable line, or None if empty/absent.
+    Used to decide whether the rotated ``.1`` could still hold un-cursored events."""
     try:
         with active.open("r", encoding="utf-8") as fh:
             for raw in fh:
                 ev = _parse_line(raw)
                 if ev is not None:
-                    last = ev["ts"]
+                    return str(ev["ts"])
     except FileNotFoundError:
         return None
-    return last
+    return None
+
+
+def _stream_since(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
+    """All events with ts >= since_ts, draining the rotated ``.1`` first ONLY when
+    the cursor predates the active file's first line (else ``.1`` is fully covered
+    and re-scanning its up-to-8MB tail every tick is wasted IO). Rotated history is
+    prepended so the returned list stays ts-ordered (both files are individually
+    ordered and ``.1`` is strictly older)."""
+    active_events, active_skipped = _read_events(active, since_ts)
+    rotated = active.with_name(active.name + ".1")
+    if not rotated.exists():
+        return active_events, active_skipped
+    active_first = _first_ts(active)
+    # .1 only matters if the cursor is at/before the active file's first line;
+    # once the cursor is inside the active file, the rotated tail is consumed.
+    if since_ts is not None and active_first is not None and since_ts >= active_first:
+        return active_events, active_skipped
+    rotated_events, rotated_skipped = _read_events(rotated, since_ts)
+    return rotated_events + active_events, active_skipped + rotated_skipped
+
+
+def _eof_cursor(active: Path) -> "tuple[str, int]":
+    """The fresh-sink starting cursor: (max_ts, count_of_events_at_max_ts) so no
+    historical event is replayed AND a later event in the SAME second as EOF is
+    still delivered (it lands at occurrence index >= count). ("", 0) for an
+    empty/absent log means "deliver everything henceforth" (nothing to backfill)."""
+    last_ts = ""
+    count = 0
+    try:
+        with active.open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                ev = _parse_line(raw)
+                if ev is None:
+                    continue
+                ts = ev["ts"]
+                if ts == last_ts:
+                    count += 1
+                elif ts > last_ts:
+                    last_ts, count = ts, 1
+                # ts < last_ts (clock skew): leave the max-ts count untouched.
+    except FileNotFoundError:
+        pass
+    return last_ts, count
 
 
 # ── cursor io (atomic) ──────────────────────────────────────────────────────
@@ -145,18 +169,24 @@ def _errors_path(name: str, project_root: Optional[Path]) -> Path:
     return paths.status_sinks_dir(project_root) / f"{name}.errors.jsonl"
 
 
-def _read_cursor(name: str, project_root: Optional[Path]) -> Optional[str]:
+def _read_cursor(name: str, project_root: Optional[Path]) -> "Optional[tuple[str, int]]":
+    """Read a sink's ``(ts, n)`` cursor, or None if absent/malformed (fresh)."""
     try:
-        return _cursor_path(name, project_root).read_text(encoding="utf-8").strip() or None
+        raw = _cursor_path(name, project_root).read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    try:
+        obj = json.loads(raw)
+        return str(obj["ts"]), int(obj["n"])
+    except (ValueError, KeyError, TypeError):
+        return None  # a torn/legacy cursor reads as fresh (harmless re-init at EOF)
 
 
-def _write_cursor(name: str, ts: str, project_root: Optional[Path]) -> None:
+def _write_cursor(name: str, cursor: "tuple[str, int]", project_root: Optional[Path]) -> None:
     path = _cursor_path(name, project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(ts, encoding="utf-8")
+    tmp.write_text(json.dumps({"ts": cursor[0], "n": cursor[1]}), encoding="utf-8")
     os.replace(tmp, path)  # atomic: a concurrent read never sees a torn value
 
 
@@ -220,31 +250,40 @@ def _run_locked(
     dispatch: Dispatcher,
 ) -> TickResult:
     active = paths.project_log("events.jsonl", project_root=project_root)
-    eof = _eof_ts(active)
+    eof = _eof_cursor(active)  # (ts, count_at_ts) - the fresh-sink floor
 
-    # Resolve each sink's starting cursor; a fresh sink (no file) initializes at
-    # EOF so no history is replayed. In dry-run we do not persist that init.
-    cursors: dict[str, Optional[str]] = {}
+    # Each sink's starting (ts, n) cursor: a fresh sink (no file) starts at EOF so
+    # no history is replayed; an existing sink resumes from its stored cursor.
     fresh: dict[str, bool] = {}
+    start: dict[str, tuple[str, int]] = {}
     for s in sinks:
         cur = _read_cursor(s.name, project_root)
         fresh[s.name] = cur is None
-        cursors[s.name] = cur if cur is not None else eof
+        start[s.name] = cur if cur is not None else eof
 
-    non_null = [c for c in cursors.values() if c is not None]
-    min_cursor = min(non_null) if non_null else None
-    events, skipped = _stream_since(active, min_cursor)
+    # Read from the oldest cursor ts INCLUSIVE so every sink sees its own same-ts
+    # boundary events; the per-sink (ts, n) tiebreak below decides what is new.
+    min_ts = min(c[0] for c in start.values())
+    events, skipped = _stream_since(active, min_ts)
 
-    state = {s.name: SinkResult(name=s.name, new_cursor=cursors[s.name]) for s in sinks}
+    state = {s.name: SinkResult(name=s.name, new_cursor=start[s.name]) for s in sinks}
 
+    # occurrence index of each event among its same-ts peers, in file order. The
+    # ts is seconds-granularity, so two events routinely share one ts; (ts, idx)
+    # is the stable identity a bare-ts cursor lacked (the same-second drop bug).
+    occ: dict[str, int] = {}
     for event in events:
         ets = event["ts"]
+        idx = occ.get(ets, 0)
+        occ[ets] = idx + 1
         for s in sinks:
             st = state[s.name]
             if st.short_circuited:
                 continue
-            cur = st.new_cursor
-            if cur is not None and ets <= cur:
+            cts, cn = st.new_cursor  # type: ignore[misc]  # always a tuple here
+            # Already processed: a strictly-older ts, or a same-ts occurrence the
+            # cursor already advanced past.
+            if ets < cts or (ets == cts and idx < cn):
                 continue
             if not _matches(s, event):
                 continue
@@ -257,26 +296,37 @@ def _run_locked(
                 status, detail = DROPPED, f"adapter raised: {exc}"
             if status == DELIVERED:
                 st.dispatched += 1
-                st.new_cursor = ets
-            elif status == DROPPED:
-                st.dropped += 1
-                st.new_cursor = ets
-                _log_error(s.name, project_root, {
-                    "sink": s.name, "event_ts": ets,
-                    "type": event.get("type"), "reason": detail, "class": "dropped"})
-            else:  # SHORT_CIRCUIT: hold the cursor, retry this + later events next tick
+                st.new_cursor = (ets, idx + 1)
+            elif status == SHORT_CIRCUIT:
+                # Hold the cursor: this event + everything after retries next tick.
                 st.short_circuited = True
                 _log_error(s.name, project_root, {
-                    "sink": s.name, "event_ts": ets,
-                    "type": event.get("type"), "reason": detail, "class": "short_circuit"})
+                    "sink": s.name, "event_ts": ets, "type": event.get("type"),
+                    "reason": detail, "class": "short_circuit"})
+            else:
+                # DROPPED, or any unrecognized status -> drop + log and advance,
+                # never a silent short-circuit-forever on a typo'd dispatcher.
+                st.dropped += 1
+                st.new_cursor = (ets, idx + 1)
+                reason = detail if status == DROPPED else f"unknown dispatch status {status!r}"
+                _log_error(s.name, project_root, {
+                    "sink": s.name, "event_ts": ets, "type": event.get("type"),
+                    "reason": reason, "class": "dropped"})
 
-    # Persist advanced cursors (fresh sinks persist their EOF init even with zero
-    # dispatch, so the next tick has a floor and never backfills).
+    # Persist advanced cursors, ISOLATED per sink: one sink's cursor-write failure
+    # (disk full / perms) must not abort the others' persistence and drive a
+    # silent re-delivery storm. A fresh sink persists its EOF floor even with zero
+    # dispatch so the next tick never backfills.
     if not dry_run:
         for s in sinks:
             st = state[s.name]
-            if st.new_cursor is not None and (st.dispatched or st.dropped or fresh[s.name]):
-                _write_cursor(s.name, st.new_cursor, project_root)
+            if st.dispatched or st.dropped or fresh[s.name]:
+                try:
+                    _write_cursor(s.name, st.new_cursor, project_root)  # type: ignore[arg-type]
+                except OSError as exc:
+                    _log_error(s.name, project_root, {
+                        "sink": s.name, "reason": f"cursor write failed: {exc}",
+                        "class": "cursor_write_failed"})
 
     return TickResult(sinks=[state[s.name] for s in sinks], skipped_lines=skipped)
 

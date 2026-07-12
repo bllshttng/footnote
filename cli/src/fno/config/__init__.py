@@ -2317,13 +2317,18 @@ def _status_sink_match_keys() -> frozenset[str]:
 
 
 class StatusFanoutConfig(BaseModel):
-    """Fanout dispatcher tuning (config.status_fanout)."""
+    """Fanout dispatcher tuning (config.status_fanout).
+
+    Non-positive tuning values fail loud at config load (matching this file's
+    convention) rather than reaching ``urllib`` as a negative timeout - which
+    raises deep inside a per-sink try/except and silently drops every event.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
-    interval_secs: int = 5
-    http_timeout_secs: int = 5
-    retries: int = 2
+    interval_secs: int = Field(default=5, ge=1)
+    http_timeout_secs: int = Field(default=5, ge=1)
+    retries: int = Field(default=2, ge=0)
 
 
 class StatusSinkConfig(BaseModel):
@@ -2348,6 +2353,19 @@ class StatusSinkConfig(BaseModel):
     field: str = "content"
     cloudevents: bool = False
     enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _safe_name(cls, v: str) -> str:
+        # name keys the cursor/errors filenames (`<name>.cursor`), so it must be
+        # a bare filesystem-safe token - no separators, no leading dot - to keep
+        # a sink from ever resolving a path outside `.fno/status-sinks/`.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", v):
+            raise ValueError(
+                f"status sink name {v!r} must match [A-Za-z0-9][A-Za-z0-9._-]* "
+                "(it keys the cursor filename; no path separators or leading dot)"
+            )
+        return v
 
     @field_validator("type")
     @classmethod
@@ -2422,10 +2440,22 @@ class ConfigBlock(BaseModel):
     @field_validator("status_sinks", mode="before")
     @classmethod
     def _coerce_status_sinks(cls, v: object) -> object:
-        """Fail-safe container: a non-list ``status_sinks`` degrades to []. A
-        well-formed list with a semantically-invalid sink still raises (x-2057:
-        loud config error, not a silent drop)."""
-        return v if isinstance(v, list) else []
+        """Fail-safe container: a non-list ``status_sinks`` degrades to [] so a
+        stray scalar never bricks settings load. But a non-list that is present
+        (e.g. the `[status_sinks.x]` table typo instead of the `[[status_sinks]]`
+        array) is WARNED, not silently dropped - that shape mistake is exactly
+        the misconfiguration an operator most needs surfaced (they'd otherwise
+        believe their sinks are wired). A well-formed list with a semantically-
+        invalid sink still raises (x-2057: loud config error)."""
+        if isinstance(v, list):
+            return v
+        if v is not None:
+            _LOG.warning(
+                "config.status_sinks is %s, not an array of tables - ignoring it "
+                "(use [[status_sinks]], not [status_sinks.<name>])",
+                type(v).__name__,
+            )
+        return []
 
     @field_validator("status_sinks")
     @classmethod

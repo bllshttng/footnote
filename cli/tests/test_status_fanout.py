@@ -45,6 +45,16 @@ class _Recorder:
         return self._script.get(sink.name, (sf.DELIVERED, ""))
 
 
+def _seed_cursor(ss, name, ts, n=0):
+    import json as _json
+    (ss / f"{name}.cursor").write_text(_json.dumps({"ts": ts, "n": n}))
+
+
+def _cursor(ss, name):
+    import json as _json
+    return _json.loads((ss / f"{name}.cursor").read_text())
+
+
 # ── US1: config model ───────────────────────────────────────────────────────
 
 
@@ -181,9 +191,12 @@ def test_tick_fresh_cursor_starts_at_eof_no_backfill(tmp_path):
     # Fresh sink initializes at EOF -> nothing historical replayed.
     assert rec.calls == []
     assert res.sinks[0].dispatched == 0
-    # Cursor persisted at EOF ts so the next tick has a floor.
-    cur = (tmp_path / ".fno" / "status-sinks" / "s.cursor").read_text().strip()
-    assert cur == "2026-07-12T00:00:02Z"
+    # Cursor persisted at EOF (ts, count-at-ts) so the next tick has a floor and
+    # a later same-second event is still delivered (idx >= n).
+    import json as _json
+    cur = _json.loads(
+        (tmp_path / ".fno" / "status-sinks" / "s.cursor").read_text())
+    assert cur == {"ts": "2026-07-12T00:00:02Z", "n": 1}
 
 
 def test_tick_matched_event_delivers_once_and_advances(tmp_path):
@@ -192,14 +205,14 @@ def test_tick_matched_event_delivers_once_and_advances(tmp_path):
     # Pre-seed a cursor so the blocked event is "new".
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "s.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked", **{"node": "x-9"})])
 
     rec = _Recorder()
     res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
     assert rec.calls == [("s", "2026-07-12T00:00:05Z")]
     assert res.sinks[0].matched == 1 and res.sinks[0].dispatched == 1
-    assert (ss / "s.cursor").read_text().strip() == "2026-07-12T00:00:05Z"
+    assert _cursor(ss, "s")["ts"] == "2026-07-12T00:00:05Z"
 
 
 def test_tick_match_filter_and_events_filter(tmp_path):
@@ -207,7 +220,7 @@ def test_tick_match_filter_and_events_filter(tmp_path):
 
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "s.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
         _ev("2026-07-12T00:00:01Z", "task_started", **{"project": "fno"}),   # wrong kind
         _ev("2026-07-12T00:00:02Z", "blocked", **{"project": "other"}),      # wrong match
@@ -225,13 +238,13 @@ def test_tick_dry_run_matches_but_sends_nothing(tmp_path):
 
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "s.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
     rec = _Recorder()
     res = sf.run_tick(tmp_path, [_text_sink()], dry_run=True, dispatch_fn=rec)
     assert rec.calls == []               # nothing sent
     assert res.sinks[0].matched == 1     # but counted
-    assert (ss / "s.cursor").read_text().strip() == "2026-07-12T00:00:00Z"  # not advanced
+    assert _cursor(ss, "s")["ts"] == "2026-07-12T00:00:00Z"  # not advanced
 
 
 def test_tick_malformed_line_skipped_and_counted(tmp_path):
@@ -241,7 +254,7 @@ def test_tick_malformed_line_skipped_and_counted(tmp_path):
     fno_dir.mkdir(parents=True)
     ss = fno_dir / "status-sinks"
     ss.mkdir()
-    (ss / "s.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     with (fno_dir / "events.jsonl").open("w") as fh:
         fh.write("not json at all\n")
         import json as _json
@@ -259,7 +272,7 @@ def test_tick_rotation_drains_dot1_before_active(tmp_path):
     fno_dir.mkdir(parents=True)
     ss = fno_dir / "status-sinks"
     ss.mkdir()
-    (ss / "s.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     import json as _json
     # Rotated history holds an older blocked event; active holds a newer one.
     with (fno_dir / "events.jsonl.1").open("w") as fh:
@@ -279,7 +292,7 @@ def test_tick_short_circuit_holds_cursor_for_retry(tmp_path):
 
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "s.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
         _ev("2026-07-12T00:00:01Z", "blocked", **{"node": "a"}),
         _ev("2026-07-12T00:00:02Z", "blocked", **{"node": "b"}),
@@ -291,7 +304,7 @@ def test_tick_short_circuit_holds_cursor_for_retry(tmp_path):
     assert len(rec.calls) == 1                    # only the first attempted
     assert res.sinks[0].short_circuited is True
     # Cursor NOT advanced past the short-circuited event.
-    assert (ss / "s.cursor").read_text().strip() == "2026-07-12T00:00:00Z"
+    assert _cursor(ss, "s")["ts"] == "2026-07-12T00:00:00Z"
 
 
 def test_tick_per_sink_isolation_one_raises(tmp_path):
@@ -299,8 +312,8 @@ def test_tick_per_sink_isolation_one_raises(tmp_path):
 
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "bad.cursor").write_text("2026-07-12T00:00:00Z")
-    (ss / "good.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "bad", "2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "good", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
 
     calls = []
@@ -539,7 +552,7 @@ def test_integration_tick_text_webhook_delivers_and_advances(tmp_path, monkeypat
                         lambda u, b, t: (posts.append(b) or sf._HttpResult(ok=True, status=200)))
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "d.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     ev = _ev("2026-07-12T00:00:05Z", "blocked", **{"node": "x-9"})
     ev["data"] = {"reason": "why"}
     _write_events(tmp_path, [ev])
@@ -548,7 +561,7 @@ def test_integration_tick_text_webhook_delivers_and_advances(tmp_path, monkeypat
     res = sf.run_tick(tmp_path, [sink])  # default dispatch_fn -> real router
     assert len(posts) == 1 and posts[0]["content"] == "x-9: why"
     assert res.sinks[0].dispatched == 1
-    assert (ss / "d.cursor").read_text().strip() == "2026-07-12T00:00:05Z"
+    assert _cursor(ss, "d")["ts"] == "2026-07-12T00:00:05Z"
 
 
 def test_integration_tick_connect_class_short_circuit_holds_batch(tmp_path, monkeypatch):
@@ -560,7 +573,7 @@ def test_integration_tick_connect_class_short_circuit_holds_batch(tmp_path, monk
     monkeypatch.setattr(sf, "_sleep", lambda s: None)
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "d.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
         _ev("2026-07-12T00:00:01Z", "blocked"),
         _ev("2026-07-12T00:00:02Z", "blocked"),
@@ -571,7 +584,7 @@ def test_integration_tick_connect_class_short_circuit_holds_batch(tmp_path, monk
     res = sf.run_tick(tmp_path, [sink], StatusFanoutConfig(retries=1))
     assert res.sinks[0].short_circuited is True
     assert res.sinks[0].dispatched == 0
-    assert (ss / "d.cursor").read_text().strip() == "2026-07-12T00:00:00Z"  # held
+    assert _cursor(ss, "d")["ts"] == "2026-07-12T00:00:00Z"  # held
     assert (ss / "d.errors.jsonl").exists()
 
 
@@ -582,13 +595,13 @@ def test_integration_tick_permanent_4xx_drops_and_advances(tmp_path, monkeypatch
     monkeypatch.setattr(sf, "_sleep", lambda s: None)
     ss = tmp_path / ".fno" / "status-sinks"
     ss.mkdir(parents=True)
-    (ss / "d.cursor").write_text("2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
     sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
                             url="https://x", template="hi", field="content")
     res = sf.run_tick(tmp_path, [sink])
     assert res.sinks[0].dropped == 1
-    assert (ss / "d.cursor").read_text().strip() == "2026-07-12T00:00:05Z"  # advanced past drop
+    assert _cursor(ss, "d")["ts"] == "2026-07-12T00:00:05Z"  # advanced past drop
 
 
 # ── US5: fno backlog note + backlog-progress adapter ────────────────────────
@@ -775,3 +788,131 @@ def test_config_status_sinks_json_command(monkeypatch):
     import json as _json
     payload = _json.loads(res.stdout)
     assert payload == [{"project": "p", "cwd": "/p", "interval_seconds": 5}]
+
+
+# ── review follow-ups: same-second tiebreak, tick_cmd surface, new validators ─
+
+
+def test_tick_same_second_events_both_delivered(tmp_path):
+    # Finding #1 (the critical one): two matched events sharing one second must
+    # BOTH deliver. A bare-ts cursor dropped the second forever.
+    from fno import status_fanout as sf
+
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [
+        _ev("2026-07-12T00:00:05Z", "blocked", **{"node": "a"}),
+        _ev("2026-07-12T00:00:05Z", "blocked", **{"node": "b"}),  # SAME second
+    ])
+    rec = _Recorder()
+    res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert [ts for _, ts in rec.calls] == [
+        "2026-07-12T00:00:05Z", "2026-07-12T00:00:05Z"]
+    assert res.sinks[0].dispatched == 2
+    assert _cursor(ss, "s") == {"ts": "2026-07-12T00:00:05Z", "n": 2}
+
+
+def test_tick_same_second_across_ticks_not_dropped(tmp_path):
+    # Cursor already advanced past occurrence 0 at :05; occurrence 1 (a later
+    # same-second event) is still NEW next tick.
+    from fno import status_fanout as sf
+
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:05Z", n=1)
+    _write_events(tmp_path, [
+        _ev("2026-07-12T00:00:05Z", "blocked", **{"node": "a"}),  # occ 0 - seen
+        _ev("2026-07-12T00:00:05Z", "blocked", **{"node": "b"}),  # occ 1 - NEW
+    ])
+    rec = _Recorder()
+    res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert res.sinks[0].dispatched == 1
+    assert _cursor(ss, "s") == {"ts": "2026-07-12T00:00:05Z", "n": 2}
+
+
+def test_tick_cmd_exits_0_and_logs_counts_on_drop(tmp_path, monkeypatch):
+    # AC1-ERR (tick exits 0) + AC1-UI (real tick logs counts), at the CLI surface.
+    from typer.testing import CliRunner
+    from fno.cli import app
+    from fno.config import SettingsModel
+    from fno import paths as _paths
+    from fno import status_fanout as sf
+
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    monkeypatch.setattr(_paths, "resolve_repo_root", lambda *a, **k: tmp_path)
+    monkeypatch.setattr("fno.config.load_settings", lambda: SettingsModel(status_sinks=[
+        {"name": "d", "type": "text-webhook", "events": ["blocked"],
+         "url": "https://x", "template": "hi", "field": "content"}]))
+    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=404))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    res = CliRunner().invoke(app, ["status-fanout", "tick"], catch_exceptions=False)
+    assert res.exit_code == 0
+    assert "matched=1" in res.stdout and "dropped=1" in res.stdout
+
+
+def test_tick_cursor_write_failure_isolated_per_sink(tmp_path, monkeypatch):
+    # Finding #2: one sink's cursor-write failure must not abort the others'.
+    from fno import status_fanout as sf
+
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "a", "2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "b", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    real_write = sf._write_cursor
+
+    def flaky(name, cursor, root):
+        if name == "a":
+            raise OSError("disk full")
+        return real_write(name, cursor, root)
+
+    monkeypatch.setattr(sf, "_write_cursor", flaky)
+    sf.run_tick(tmp_path, [_text_sink(name="a"), _text_sink(name="b")], dispatch_fn=_Recorder())
+    assert _cursor(ss, "b")["ts"] == "2026-07-12T00:00:05Z"  # b unaffected
+    assert (ss / "a.errors.jsonl").exists()                  # a's failure logged
+
+
+def test_tick_unknown_dispatch_status_drops_not_shortcircuits(tmp_path):
+    # Finding #5: a typo'd dispatcher return must not silently retry forever.
+    from fno import status_fanout as sf
+
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [
+        _ev("2026-07-12T00:00:01Z", "blocked"),
+        _ev("2026-07-12T00:00:02Z", "blocked"),
+    ])
+    rec = _Recorder(script={"s": ("typo-status", "oops")})
+    res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert res.sinks[0].dropped == 2 and res.sinks[0].short_circuited is False
+    assert _cursor(ss, "s")["ts"] == "2026-07-12T00:00:02Z"
+
+
+def test_config_negative_fanout_tuning_rejected():
+    from fno.config import StatusFanoutConfig
+
+    with pytest.raises(ValueError):
+        StatusFanoutConfig(http_timeout_secs=-1)
+    with pytest.raises(ValueError):
+        StatusFanoutConfig(interval_secs=0)
+
+
+def test_config_unsafe_sink_name_rejected():
+    with pytest.raises(ValueError, match="name"):
+        StatusSinkConfig(name="../evil", type="backlog-progress")
+    with pytest.raises(ValueError, match="name"):
+        StatusSinkConfig(name="a/b", type="backlog-progress")
+
+
+def test_config_nonlist_status_sinks_warns_and_degrades(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        # The `[status_sinks.discord]` table typo -> a dict, degraded to [] with a warning.
+        assert ConfigBlock(status_sinks={"discord": {}}).status_sinks == []
+    assert any("status_sinks" in r.message for r in caplog.records)
