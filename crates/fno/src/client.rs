@@ -531,6 +531,12 @@ enum ConfirmKind {
         panes: usize,
         last: bool,
     },
+    /// Stop a live agent row (x-76ea). The captured `name`, not the row index,
+    /// commits - a row that raced out between confirm and Enter resolves to the
+    /// server's stale-name refusal.
+    StopAgent { name: String },
+    /// Remove an exited agent row (x-76ea). Same captured-name commit.
+    RemoveAgent { name: String },
 }
 
 /// The entity a rename overlay is editing (x-96e8 widened x-c150's tab-only
@@ -1865,6 +1871,8 @@ impl View {
             } => {
                 format!(" close workspace {label} ({panes} panes)? ⏎/esc")
             }
+            ConfirmKind::StopAgent { .. } => format!(" stop {label}? ⏎/esc"),
+            ConfirmKind::RemoveAgent { .. } => format!(" remove {label}? ⏎/esc"),
         };
         for (i, ch) in text.chars().take(cols).enumerate() {
             cells[r * cols + i] = Cell {
@@ -3575,6 +3583,8 @@ async fn confirm_keys(
         let cmd = match action.action {
             ConfirmKind::Dispatch { node } => Command::DispatchNode(node),
             ConfirmKind::RemoveSquad { squad, .. } => Command::RemoveSquad(squad),
+            ConfirmKind::StopAgent { name } => Command::StopAgent { name },
+            ConfirmKind::RemoveAgent { name } => Command::RemoveAgent { name },
         };
         write_msg(sock_w, &ClientMsg::Command(cmd))
             .await
@@ -3770,6 +3780,45 @@ async fn selector_keys(
                     )
                     .await
                     .map_err(|e| format!("dismiss send failed: {e}"))?;
+                    continue;
+                }
+                // A WATCH-ONLY (paneless) agent row gets the lifecycle verb
+                // (x-76ea): a live row (`!exited`) stops, an exited row removes.
+                // The registry poll's state flip IS the stage separator - stop,
+                // wait ≤1s for the row to flip exited, then `x` again removes (no
+                // double-tap timer). The captured name (not the row index) rides
+                // the confirm, so a row that races out resolves to the server's
+                // stale-name refusal; too-short terminal refuses rather than arm
+                // an invisible confirm (x-260a), like RemoveSquad.
+                //
+                // `pane_id.is_none()` is load-bearing (codex review): a PANE-hosted
+                // Agent row is either a real agent's pane or a bare shell pane that
+                // agent_rows() surfaces as a first-class Agent row labelled from its
+                // cmd/cwd - NOT a registry entry. Arming the verb there would shell
+                // `fno-agents` on a label that could collide with an unrelated
+                // agent's name and stop the wrong one. Pane-hosted rows are managed
+                // via their tab (CloseTab); only the paneless rows - the bg/headless
+                // agents that today linger until GC - are the gap this closes.
+                let agent = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => {
+                        Some((a.name.clone(), a.exited))
+                    }
+                    _ => None,
+                };
+                if let Some((name, exited)) = agent {
+                    if view.term.0 < MIN_ROWS_FOR_STATUS {
+                        view.set_notice("terminal too short for the confirm prompt".into());
+                    } else if exited {
+                        view.open_confirm(ConfirmAction {
+                            action: ConfirmKind::RemoveAgent { name: name.clone() },
+                            label: name,
+                        });
+                    } else {
+                        view.open_confirm(ConfirmAction {
+                            action: ConfirmKind::StopAgent { name: name.clone() },
+                            label: name,
+                        });
+                    }
                     continue;
                 }
                 let squad = match view.display_rows().get(cur) {
@@ -6527,6 +6576,131 @@ mod tests {
                 attach_id: "deadbeef".into()
             })
         );
+    }
+
+    // -- x-76ea agent-row lifecycle -------------------------------------
+
+    /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
+    fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
+        AgentRow {
+            squad: Some(1),
+            name: name.into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: None,
+            external,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_live_agent_arms_stop_confirm() {
+        // US1 / AC1-HP (client half): x on a live (non-tombstone) agent row arms
+        // a StopAgent confirm carrying the row's name; nothing is sent until the
+        // confirm commits, and the selector closes (open_confirm).
+        let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
+        v.expanded.insert(1);
+        v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "arming a confirm sends nothing");
+        assert_eq!(v.selector, None, "the confirm closes the selector");
+        match v.confirm.as_ref().map(|c| (&c.action, c.label.as_str())) {
+            Some((ConfirmKind::StopAgent { name }, label)) => {
+                assert_eq!(name, "worker-a");
+                assert_eq!(label, "worker-a");
+            }
+            _ => panic!("expected a StopAgent confirm"),
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_exited_agent_arms_remove_confirm() {
+        // US2 / AC2-HP (client half): x on an exited row arms a RemoveAgent
+        // confirm - the row's own state (exited) selects the verb, no timer.
+        let mut v = view_with_agents(vec![lifecycle_row("worker-b", true, false)]);
+        v.expanded.insert(1);
+        v.selector = Some(agent_row_at(&v, |a| a.name == "worker-b"));
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "worker-b"),
+            _ => panic!("expected a RemoveAgent confirm"),
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_pane_hosted_agent_does_not_arm_lifecycle() {
+        // codex review: a PANE-hosted Agent row (a real agent's pane or a bare
+        // shell pane agent_rows() surfaces) must NOT arm stop/remove - its name
+        // can be a cmd/cwd label with no registry entry, and it is managed via
+        // its tab. `x` there falls through to a bell, arming nothing, sending
+        // nothing.
+        let mut pane_hosted = lifecycle_row("shell", false, false);
+        pane_hosted.pane_id = Some(99);
+        let mut v = view_with_agents(vec![pane_hosted]);
+        v.expanded.insert(1);
+        v.selector = Some(agent_row_at(&v, |a| a.name == "shell"));
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert!(
+            buf.is_empty(),
+            "a pane-hosted row sends no lifecycle command"
+        );
+        assert!(
+            v.confirm.is_none(),
+            "a pane-hosted row arms no lifecycle confirm"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_agent_refuses_on_short_terminal() {
+        // AC4-UI (x-260a): a too-short terminal refuses with a notice rather than
+        // arm an invisible confirm - same rule the squad arm follows.
+        let mut v = view_with_agents(vec![lifecycle_row("worker-c", false, false)]);
+        v.expanded.insert(1);
+        v.term.0 = MIN_ROWS_FOR_STATUS - 1;
+        v.selector = Some(agent_row_at(&v, |a| a.name == "worker-c"));
+        selector_keys(&mut v, b"x", &mut Vec::new()).await.unwrap();
+        assert!(
+            v.confirm.is_none(),
+            "no invisible confirm on a short terminal"
+        );
+        assert!(v.notice.is_some(), "the refusal is surfaced");
+    }
+
+    #[tokio::test]
+    async fn confirm_keys_enter_sends_stop_then_remove_agent() {
+        // US1/US2 (client half): Enter on an armed StopAgent/RemoveAgent confirm
+        // sends the captured-name command (the row index is never re-read).
+        for (kind, want) in [
+            (
+                ConfirmKind::StopAgent { name: "w".into() },
+                Command::StopAgent { name: "w".into() },
+            ),
+            (
+                ConfirmKind::RemoveAgent { name: "w".into() },
+                Command::RemoveAgent { name: "w".into() },
+            ),
+        ] {
+            let mut v = view_with_agents(vec![]);
+            v.confirm = Some(ConfirmAction {
+                action: kind,
+                label: "w".into(),
+            });
+            let mut buf: Vec<u8> = Vec::new();
+            confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+            let mut cur = std::io::Cursor::new(buf);
+            let decoded: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+            assert_eq!(decoded, ClientMsg::Command(want));
+        }
     }
 
     #[test]

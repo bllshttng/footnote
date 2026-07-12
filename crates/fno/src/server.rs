@@ -908,6 +908,29 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
     }
 }
 
+/// Shell `fno-agents <verb> <name>` for a sideline lifecycle gesture (x-76ea),
+/// bounded + fail-open (the `run_dispatch_one` idiom): a short outcome notice,
+/// never a wedge. The registry poll owns the row's truth, so a lost/failed
+/// notice degrades to "the row updates a beat later or stays put", not a silent
+/// mutation. `verb` is always a fixed literal; the argv is never a shell string.
+async fn run_agent_action(verb: &str, name: &str) -> String {
+    const AGENT_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
+    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+        .args([verb, name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    let past = if verb == "stop" { "stopped" } else { "removed" };
+    match tokio::time::timeout(AGENT_ACTION_TIMEOUT, fut).await {
+        Err(_) => format!("{verb} {name}: timed out"),
+        Ok(Err(_)) => format!("{verb} {name}: unavailable"),
+        Ok(Ok(status)) if status.success() => format!("{past} {name}"),
+        Ok(Ok(_)) => format!("{verb} {name}: failed"),
+    }
+}
+
 /// x-0296 CI diagnostics: timestamped breadcrumbs for the e2e server log
 /// (`<session>.log`, dumped by the test harness on a wait_screen timeout).
 /// FNO_E2E-gated so a production server writes none of it; the gate is
@@ -1575,6 +1598,44 @@ impl Core {
             let notice = run_dispatch_one(&session, node.as_deref()).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
+    }
+
+    /// Shell `fno-agents <verb> <name>` OFF the core loop (x-76ea), mirroring
+    /// `dispatch_next`: the one-line outcome routes back as a `DispatchResult`
+    /// notice, but the AUTHORITATIVE row change is the registry poll's exited
+    /// flip / row vanish, not this notice. `verb` is a fixed literal
+    /// (`"stop"`/`"rm"`), never operator text; `name` was catalog-validated by
+    /// the caller.
+    fn agent_action(&self, id: u64, verb: &'static str, name: String) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_agent_action(verb, &name).await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
+    /// Resolve a sideline lifecycle target (x-76ea `StopAgent`/`RemoveAgent`) by
+    /// name against the current catalog, returning the exited flag of the single
+    /// resolved registry row. `name` is NOT a unique key (codex review): the
+    /// catalog dedups by `attach_id`, so an external roster row and a registry
+    /// row can carry the same name. Fail-closed on every ambiguity - absent, any
+    /// external row sharing the name (never act on a registry agent an external
+    /// shadows), or a >1 non-external collision - so a keypress can only ever act
+    /// on exactly one unambiguous registry agent, never a guessed match.
+    fn resolve_lifecycle_target(&self, name: &str) -> Result<bool, String> {
+        let matches: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.name == name).collect();
+        if matches.is_empty() {
+            return Err(format!("no such agent: {name}"));
+        }
+        if matches.iter().any(|a| a.external) {
+            return Err(format!(
+                "{name} is external - manage it from its own session"
+            ));
+        }
+        match matches.as_slice() {
+            [one] => Ok(one.exited),
+            _ => Err(format!("{name} is ambiguous - use the CLI")),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3694,6 +3755,32 @@ impl Core {
                 }
                 self.persist_squad(squad);
                 self.push_layout(true);
+                Flow::Continue
+            }
+            Command::StopAgent { name } => {
+                // Stop a live sideline row (x-76ea). `resolve_lifecycle_target`
+                // validates the name against THIS server's catalog fail-closed;
+                // the shell is idempotent (already-exited is a clean no-op), so
+                // the exited flag is unused here.
+                match self.resolve_lifecycle_target(&name) {
+                    Err(msg) => self.notice(client_id, msg),
+                    Ok(_exited) => self.agent_action(client_id, "stop", name),
+                }
+                Flow::Continue
+            }
+            Command::RemoveAgent { name } => {
+                // Remove an exited sideline row (x-76ea). Same resolution as
+                // StopAgent, plus the stop-then-rm ordering: a still-live row is
+                // refused with the stop-first reason (the CLI enforces this too,
+                // but refusing here keeps the notice specific and skips a doomed
+                // subprocess).
+                match self.resolve_lifecycle_target(&name) {
+                    Err(msg) => self.notice(client_id, msg),
+                    Ok(exited) if !exited => {
+                        self.notice(client_id, format!("{name} is still live - stop it first"))
+                    }
+                    Ok(_) => self.agent_action(client_id, "rm", name),
+                }
                 Flow::Continue
             }
             Command::CopySelection => {
@@ -6040,6 +6127,133 @@ mod tests {
                 "un-surfaced/malformed jobId {bad:?} must not spawn a pane"
             );
         }
+    }
+
+    // -- x-76ea agent-row lifecycle (server-side validation) ------------
+
+    fn client_with_rx(id: u64) -> (Client, mpsc::Receiver<ServerMsg>) {
+        let (tx, rx) = mpsc::channel::<ServerMsg>(8);
+        let mut c = client(id, 5, (24, 80), false);
+        c.reliable_tx = tx;
+        (c, rx)
+    }
+
+    fn drain_notice(rx: &mut mpsc::Receiver<ServerMsg>) -> Option<String> {
+        let mut out = None;
+        while let Ok(ServerMsg::Notice { text }) = rx.try_recv() {
+            out = Some(text);
+        }
+        out
+    }
+
+    #[test]
+    fn stop_agent_unknown_name_refused() {
+        // US5 / AC3-ERR: a StopAgent naming a row absent from the catalog is
+        // refused fail-closed with a notice. A plain #[test] has no tokio
+        // runtime, so reaching agent_action's spawn would panic - the clean
+        // refusal is also proof the happy path is never taken here.
+        let mut core = empty_core();
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        let flow = core.command(
+            1,
+            Command::StopAgent {
+                name: "ghost".into(),
+            },
+        );
+        assert!(matches!(flow, Flow::Continue));
+        assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));
+    }
+
+    #[test]
+    fn remove_agent_live_row_refused_stop_first() {
+        // US2 (stop-then-rm ordering): RemoveAgent on a still-live registry row
+        // is refused with the stop-first reason (mirrors the CLI's own refusal).
+        let mut core = empty_core();
+        core.agents = vec![bg_row("live-worker", "/tmp", None)]; // exited: false
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::RemoveAgent {
+                name: "live-worker".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("still live"));
+    }
+
+    #[test]
+    fn external_row_stop_and_remove_refused() {
+        // US4: an external roster row belongs to the claude daemon, not the fno
+        // registry, so BOTH verbs refuse with a notice rather than fire a doomed
+        // `fno-agents` call. The external arm is checked before the live/exited
+        // arms, so a dead external row still refuses on provenance.
+        let ext_live = RegistryAgent {
+            external: true,
+            ..bg_row("ext-a", "/tmp", Some("deadbee1"))
+        };
+        let ext_dead = RegistryAgent {
+            external: true,
+            exited: true,
+            ..bg_row("ext-b", "/tmp", Some("deadbee2"))
+        };
+        for (row, cmd) in [
+            (
+                ext_live,
+                Command::StopAgent {
+                    name: "ext-a".into(),
+                },
+            ),
+            (
+                ext_dead,
+                Command::RemoveAgent {
+                    name: "ext-b".into(),
+                },
+            ),
+        ] {
+            let mut core = empty_core();
+            core.agents = vec![row];
+            let (c, mut rx) = client_with_rx(1);
+            core.clients.push(c);
+            core.command(1, cmd);
+            assert!(drain_notice(&mut rx).unwrap().contains("external"));
+        }
+    }
+
+    #[test]
+    fn lifecycle_name_collision_refused_fail_closed() {
+        // codex review: `name` is not a unique catalog key (dedup is by
+        // attach_id). When an external roster row shares a name with a registry
+        // row, the verb must refuse on provenance and NEVER act on the registry
+        // agent the external shadows; two same-named registry rows are ambiguous.
+        // Both are fail-closed refusals, so no unrelated agent is ever stopped.
+        let shared = |external, exited, attach: &str| RegistryAgent {
+            external,
+            exited,
+            ..bg_row("dup", "/tmp", Some(attach))
+        };
+
+        // External shadows a registry row -> refuse as external, act on neither.
+        let mut core = empty_core();
+        core.agents = vec![
+            shared(false, false, "reg00001"),
+            shared(true, false, "ext00001"),
+        ];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(1, Command::StopAgent { name: "dup".into() });
+        assert!(drain_notice(&mut rx).unwrap().contains("external"));
+
+        // Two non-external rows with one name -> ambiguous refusal.
+        let mut core = empty_core();
+        core.agents = vec![
+            shared(false, true, "reg00001"),
+            shared(false, true, "reg00002"),
+        ];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(1, Command::RemoveAgent { name: "dup".into() });
+        assert!(drain_notice(&mut rx).unwrap().contains("ambiguous"));
     }
 
     #[test]
