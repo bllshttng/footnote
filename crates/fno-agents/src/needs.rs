@@ -102,6 +102,7 @@ fn in_window(ts: &str, since: u64) -> bool {
 #[derive(Default, Clone)]
 struct LoopState {
     decision: String,
+    intent: String,
     ci: String,
     pr_state: String,
     reviewed: bool,
@@ -147,6 +148,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                 let acc = sessions.entry(sid.to_string()).or_default();
                 acc.latest_loop = Some(LoopState {
                     decision: str_field(&v, "decision").unwrap_or("").to_string(),
+                    intent: str_field(&v, "intent").unwrap_or("").to_string(),
                     ci: str_field(&v, "ci").unwrap_or("").to_string(),
                     pr_state: str_field(&v, "pr_state").unwrap_or("").to_string(),
                     reviewed: field(&v, "reviewed")
@@ -222,7 +224,13 @@ fn classify(acc: &SessionAcc, fires_floor: u64) -> Option<(&'static str, String,
         };
     }
     let l = acc.latest_loop.as_ref()?;
+    // `intent == "promise"` is load-bearing: loopcheck Step 5 also blocks a
+    // still-WORKING session that has opened a green PR with `intent:"none"`
+    // (no promise, no backstop) - that is not wedged on review, it just has not
+    // promised yet. Only a promise-intent block on a green OPEN unreviewed PR
+    // that keeps re-firing is a review wedge (codex P2).
     let wedged = l.decision == "block"
+        && l.intent == "promise"
         && l.ci == "SUCCESS"
         && l.pr_state == "OPEN"
         && !l.reviewed
@@ -457,6 +465,8 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
 mod tests {
     use super::*;
 
+    // A promise-intent loop_check (the review-wedge case). Non-wedge tests care
+    // about the other fields, so a promise intent is the convenient default.
     fn loop_check(
         ts: &str,
         session: &str,
@@ -466,8 +476,24 @@ mod tests {
         reviewed: bool,
         fires: u64,
     ) -> String {
+        loop_check_i(
+            ts, session, decision, "promise", ci, pr_state, reviewed, fires,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn loop_check_i(
+        ts: &str,
+        session: &str,
+        decision: &str,
+        intent: &str,
+        ci: &str,
+        pr_state: &str,
+        reviewed: bool,
+        fires: u64,
+    ) -> String {
         format!(
-            r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{session}","decision":"{decision}","ci":"{ci}","pr_state":"{pr_state}","reviewed":{reviewed},"fires":{fires}}}}}"#
+            r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{session}","decision":"{decision}","intent":"{intent}","ci":"{ci}","pr_state":"{pr_state}","reviewed":{reviewed},"fires":{fires}}}}}"#
         )
     }
 
@@ -517,6 +543,23 @@ mod tests {
     #[test]
     fn done_pr_green_termination_yields_nothing() {
         let events = termination("2026-07-03T02:00:00Z", "s", "DonePRGreen");
+        assert!(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR).is_empty());
+    }
+
+    #[test]
+    fn intent_none_block_is_not_wedged() {
+        // A still-WORKING session that opened a green OPEN PR blocks with
+        // intent:none (no promise yet); it is not wedged on review (codex P2).
+        let events = loop_check_i(
+            "2026-07-03T02:00:00Z",
+            "s",
+            "block",
+            "none",
+            "SUCCESS",
+            "OPEN",
+            false,
+            9,
+        );
         assert!(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR).is_empty());
     }
 
