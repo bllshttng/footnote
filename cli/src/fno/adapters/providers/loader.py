@@ -232,6 +232,7 @@ def _parse_providers_block(
                 records=records,
                 active=active,
                 failover=config_obj.failover,
+                auto_switch=auto_switch,
                 agents=parsed_agents,
             )
         except pydantic.ValidationError as exc:

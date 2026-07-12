@@ -128,6 +128,20 @@ class TestLoadProvidersValid:
         _write_settings(settings, block)
         assert load_providers(repo_root=tmp_path).auto_switch is True
 
+    def test_auto_switch_survives_agents_reconstruction(self, tmp_path: Path):
+        """US3 review (PR#366): the agents-path ProvidersConfig rebuild must keep
+        auto_switch, or it reverts to False for anyone using per-agent routing."""
+        from fno.adapters.providers.loader import load_providers
+
+        block = _valid_providers_block()
+        block["config"]["providers"]["auto_switch"] = True
+        block["config"]["agents"] = {"reviewer": {"provider": "claude-primary"}}
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+        result = load_providers(repo_root=tmp_path)
+        assert result.auto_switch is True
+        assert "reviewer" in result.agents
+
 
 # ---------------------------------------------------------------------------
 # AC01.3-EDGE: Empty list / missing section is not an error

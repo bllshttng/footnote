@@ -490,7 +490,7 @@ def _release_lane_slot(node: str, cwd: str) -> None:
         log.warning("recovery: lane-release failed for %s: %s", node, exc)
 
 
-def _redispatch(candidate: "Candidate") -> bool:
+def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool]] = None) -> bool:
     """Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
@@ -551,6 +551,16 @@ def _redispatch(candidate: "Candidate") -> bool:
             # Claim still held → a spawn would refuse on it. Bail so the caller
             # nudges instead of reporting a respawn that cannot start.
             return False
+        # US3 managed auto-switch: materialize the swapped-to account into the
+        # shared slot HERE - after the exhausted worker is stopped (so it no
+        # longer pins the slot; the live-pin gate would otherwise defer) and its
+        # claim is freed, but BEFORE the replacement spawns (which must read the
+        # NEW account's creds). A False result (disarmed / live-pin defer by
+        # ANOTHER live session / store failure) aborts the respawn: free the lane
+        # slot and bail to the nudge, same as a spawn failure.
+        if pre_spawn is not None and not pre_spawn():
+            _release_lane_slot(node, cwd)
+            return False
         # --provider claude: the swap already installed the new claude record as
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
@@ -572,17 +582,36 @@ def _redispatch(candidate: "Candidate") -> bool:
         return False
 
 
-def _materialize_managed_switch(record_id: str) -> bool:
+def _auto_switch_enabled(repo_root: Optional[str] = None) -> bool:
+    """``config.providers.auto_switch`` (default False), read from the dead
+    session's project-local config when its worktree (``repo_root``) is known.
+
+    Fail-safe: any read miss returns False, so an unreadable config never arms the
+    shared-slot mutation. The caller checks this BEFORE stopping the exhausted
+    worker, so a disarmed managed swap leaves the worker alive for the bounded
+    nudge rather than stopping it for a switch that will not happen.
+    """
+    try:
+        from fno.adapters.providers.loader import load_providers
+
+        return bool(getattr(load_providers(repo_root=repo_root), "auto_switch", False))
+    except Exception:  # noqa: BLE001 - config read must never crash the sweep
+        return False
+
+
+def _materialize_managed_switch(record_id: str, repo_root: Optional[str] = None) -> bool:
     """Materialize a managed account's credentials into the shared slot after an
     auto-switch swap landed on it (US3). Returns True iff the slot now holds the
     new account's verified credentials, so the redispatch reads live creds.
 
-    Gated on ``config.providers.auto_switch`` (default False): with it off, the
-    swap does NOT touch the shared slot (the credential mutation the knob arms)
-    and this returns False, so the caller degrades to the bounded nudge. A
-    live-pin defer (``SwitchDeferred``) or any store/keychain failure also
-    returns False - never redispatch onto un-switched (exhausted) creds. Reuses
-    ``managed.switch`` (capture-before-overwrite + live-pin gate) and its
+    Runs as ``_redispatch``'s ``pre_spawn`` hook, i.e. AFTER the exhausted worker
+    is stopped (so it no longer pins the slot) and BEFORE the replacement spawns.
+    Loads the dead session's project-local config (``repo_root`` = its worktree)
+    so a worktree-local ``auto_switch`` / record set is honored. Re-checks
+    ``auto_switch`` as defense-in-depth (the caller already gated it). A live-pin
+    defer by ANOTHER live session (``SwitchDeferred``) or any store/keychain
+    failure returns False - never redispatch onto un-switched (exhausted) creds.
+    Reuses ``managed.switch`` (capture-before-overwrite + live-pin gate) and its
     ``account_switched`` emit from the manual `use` path (US2); no new switch
     logic here.
     """
@@ -591,7 +620,7 @@ def _materialize_managed_switch(record_id: str) -> bool:
         from fno.adapters.providers import managed
         from fno.agents.events import emit as _emit
 
-        config = load_providers()
+        config = load_providers(repo_root=repo_root)
         if not getattr(config, "auto_switch", False):
             return False
         record = config.by_id.get(record_id)
@@ -650,11 +679,20 @@ def _default_failover(candidate: "Candidate", error) -> str:
             return "rotated-no-worker"
         # A managed record shares ONE credential slot, so the swap only flipped
         # the routing pointer - the slot still holds the exhausted account's
-        # creds. Materialize the new account into the slot (US3) before redispatch,
-        # or the replacement worker reads the exhausted creds and dies again. A
-        # disarmed knob / live-pin defer / store failure returns False, so we
-        # degrade to the nudge instead of redispatching onto un-switched creds.
-        if getattr(snap, "auth", None) == "managed" and not _materialize_managed_switch(snap.id):
+        # creds. The replacement must read the NEW account's creds, so the slot is
+        # materialized as _redispatch's pre_spawn step (AFTER the exhausted worker
+        # is stopped, so it no longer pins the slot; BEFORE the replacement
+        # spawns). Gate on auto_switch BEFORE stopping: a disarmed managed swap
+        # leaves the worker alive for the bounded nudge rather than stopping it
+        # for a switch that will not happen. oauth_dir/api_key records need no
+        # materialization (env-var switch at spawn), so they redispatch as before.
+        repo_root = getattr(candidate, "cwd", None)
+        if getattr(snap, "auth", None) == "managed":
+            if not _auto_switch_enabled(repo_root):
+                return "rotated-no-worker"
+            if _redispatch(candidate,
+                           pre_spawn=lambda: _materialize_managed_switch(snap.id, repo_root)):
+                return "swapped"
             return "rotated-no-worker"
         if _redispatch(candidate):
             return "swapped"
