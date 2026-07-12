@@ -2963,7 +2963,8 @@ def _settings_yaml_locations() -> list[Path]:
          project-local keys (e.g. config.post_merge.parking_lot_path) empty. Deduped
          when canonical == worktree (i.e. running from the main checkout).
          Config climbs to canonical on purpose; session state does not - see
-         fno.paths.resolve_canonical_repo_root.
+         fno.paths.resolve_canonical_repo_root. Preflight's hermetic runner sets
+         FNO_NO_CANONICAL_CONFIG=1 to drop THIS candidate only (see docs/preflight.md).
       4. ~/.fno/settings.yaml (per-user global; honors
          $FNO_GLOBAL_SETTINGS_PATH override for test isolation)
     """
@@ -2983,7 +2984,13 @@ def _settings_yaml_locations() -> list[Path]:
 
     candidates = [repo_root / ".fno" / "settings.yaml"]
     canonical_candidate = canonical_root / ".fno" / "settings.yaml"
-    if canonical_candidate not in candidates:
+    # Preflight-internal seam: the hermetic runner sets FNO_NO_CANONICAL_CONFIG=1
+    # so a linked worktree stops climbing to the main checkout's config (which
+    # reaches it via the shared git-common-dir, not HOME/cwd). Drops ONLY this
+    # candidate: #1 (FNO_CONFIG) and #2 (worktree-local) still win, so real
+    # worktrees are byte-for-byte unchanged. Exactly "1"; any other value inert.
+    suppress_canonical = os.environ.get("FNO_NO_CANONICAL_CONFIG") == "1"
+    if canonical_candidate not in candidates and not suppress_canonical:
         candidates.append(canonical_candidate)
     candidates.append(_global_settings_path())
     return _apply_search_ceiling(candidates)
