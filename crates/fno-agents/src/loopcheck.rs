@@ -1750,12 +1750,10 @@ fn apply_same_model_guard(
     author_harness: &str,
     author_fam: &str,
 ) {
-    let base_set: Vec<&String> = settings
+    let base_set = settings
         .github_apps
         .as_ref()
-        .or(settings.required_bots.as_ref())
-        .map(|l| l.iter().collect())
-        .unwrap_or_default();
+        .or(settings.required_bots.as_ref());
 
     // Per distinct peer login, in first-seen order: does any backing peer differ
     // in model family, and the first same-model provider (for the message)?
@@ -1763,20 +1761,20 @@ fn apply_same_model_guard(
     for peer in &settings.peers {
         let Some(login) = peer
             .identity
-            .clone()
-            .or_else(|| settings.peer_identity.clone())
+            .as_deref()
+            .or(settings.peer_identity.as_deref())
         else {
             continue;
         };
         let cross = peer_family(peer) != Some(author_fam);
-        match seen.iter_mut().find(|(l, _, _)| *l == login) {
+        match seen.iter_mut().find(|(l, _, _)| l.as_str() == login) {
             Some(entry) => entry.1 = entry.1 || cross,
-            None => seen.push((login, cross, peer.provider.clone())),
+            None => seen.push((login.to_string(), cross, peer.provider.clone())),
         }
     }
 
     for (login, any_cross, provider) in seen {
-        if any_cross || base_set.iter().any(|b| **b == login) {
+        if any_cross || base_set.is_some_and(|set| set.contains(&login)) {
             continue;
         }
         if let Some(slot) = logins.iter_mut().find(|l| **l == login) {
