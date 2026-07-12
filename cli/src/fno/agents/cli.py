@@ -410,6 +410,39 @@ def cmd_spawn(
             "validated against the selected provider; unset uses its default."
         ),
     ),
+    add_dir: str | None = typer.Option(
+        None,
+        "--add-dir",
+        help=(
+            "Grant the worker extra write access to a directory (x-b6e2). Maps to "
+            "the harness's own --add-dir on claude/codex/agy (additive to the "
+            "worker's own workspace); opencode/gemini reject it (fail-closed)."
+        ),
+    ),
+    agent: str | None = typer.Option(
+        None,
+        "--agent",
+        help=(
+            "Pin the worker's sub-agent by name (x-b6e2). Maps to --agent on "
+            "claude/opencode; codex/agy/gemini reject it (fail-closed)."
+        ),
+    ),
+    tools: str | None = typer.Option(
+        None,
+        "--tools",
+        help=(
+            "Scope the worker's allowed tools (x-b6e2). Opaque list forwarded to "
+            "claude --allowedTools; other providers reject it (fail-closed)."
+        ),
+    ),
+    deny_tools: str | None = typer.Option(
+        None,
+        "--deny-tools",
+        help=(
+            "Scope the worker's disallowed tools (x-b6e2). Opaque list forwarded "
+            "to claude --disallowedTools; other providers reject it (fail-closed)."
+        ),
+    ),
     node: str | None = typer.Option(
         None,
         "--node",
@@ -532,6 +565,28 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    # x-b6e2: Tier-3 fail-closed for the bg/headless lanes (the pane substrate
+    # maps every provider via build_pane_argv, so it's exempt and validated
+    # there). Mirrors the --permission-mode guard above; the same per-cell matrix
+    # as the Rust client. Validate BEFORE any spawn.
+    if substrate != "pane" or once:
+        bad = None
+        if add_dir is not None and provider not in ("claude", "codex", "agy"):
+            bad = "--add-dir"
+        elif agent is not None and provider != "claude":
+            bad = "--agent"
+        elif tools is not None and provider != "claude":
+            bad = "--tools"
+        elif deny_tools is not None and provider != "claude":
+            bad = "--deny-tools"
+        if bad is not None:
+            print(
+                f"{bad} is not supported for provider {provider!r} on "
+                "--substrate bg/headless; use --substrate pane",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
     # that reaches cmd_spawn (the front door execs the binary for bg/headless,
@@ -564,6 +619,10 @@ def cmd_spawn(
                     model=model,
                     permission_mode=permission_mode,
                     effort=effort,
+                    add_dir=add_dir,
+                    agent=agent,
+                    tools=tools,
+                    deny_tools=deny_tools,
                     provenance=resolve_provenance(node, slug, plan),
                 )
             except DispatchAskError as exc:
@@ -607,6 +666,10 @@ def cmd_spawn(
                 model=model,
                 permission_mode=permission_mode,
                 effort=effort,
+                add_dir=add_dir,
+                agent=agent,
+                tools=tools,
+                deny_tools=deny_tools,
                 headless=substrate == "headless",
             )
         except DispatchAskError as exc:

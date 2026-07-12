@@ -185,6 +185,57 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
     raise DispatchAskError(f"provider {provider!r} has no permission-mode mapping", exit_code=2)
 
 
+def tier3_pane_tokens(
+    provider: str,
+    *,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
+) -> list[str]:
+    """Map the Tier-3 harness-native passthrough flags to provider-native pane
+    argv tokens (x-b6e2), in a fixed order (add-dir, agent, allowedTools,
+    disallowedTools). Fail-closed per cell: a set flag with no equivalent for
+    ``provider`` raises before spawn - never a silent drop. An empty/None value
+    is unset (no token). Mirrors the Rust HarnessFlags mapping + the client.rs
+    guard, so pane and bg/headless agree on which cells exist."""
+
+    def unsupported(flag: str) -> "list[str]":
+        raise DispatchAskError(
+            f"{flag} is not supported for provider {provider!r}; drop it or pick "
+            "a provider that maps it",
+            exit_code=2,
+        )
+
+    out: list[str] = []
+    # --add-dir: claude/codex/agy grant extra write access. opencode --dir SETS
+    # cwd (not additive) and gemini is unverified, so both fail closed.
+    if add_dir:
+        if provider in ("claude", "codex", "agy"):
+            out += ["--add-dir", add_dir]
+        else:
+            unsupported("--add-dir")
+    # --agent: claude and opencode select a sub-agent by name.
+    if agent:
+        if provider in ("claude", "opencode"):
+            out += ["--agent", agent]
+        else:
+            unsupported("--agent")
+    # --tools / --deny-tools: claude only (--allowedTools / --disallowedTools).
+    # codex/opencode tool scope is a different axis (sandbox / config presets).
+    if tools:
+        if provider == "claude":
+            out += ["--allowedTools", tools]
+        else:
+            unsupported("--tools")
+    if deny_tools:
+        if provider == "claude":
+            out += ["--disallowedTools", deny_tools]
+        else:
+            unsupported("--deny-tools")
+    return out
+
+
 _EFFORT_SUPERSET = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 _EFFORT_ALLOWED = {
     "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
@@ -265,6 +316,10 @@ def build_pane_argv(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -279,6 +334,12 @@ def build_pane_argv(
     ``--model <provider/model>``). Exact passthrough, no fuzzy resolution;
     empty/None = provider default. A CLI ``--model`` arg beats any role-routing
     model set via env (``resolve_route``), so explicit intent wins."""
+    # x-b6e2: resolve the Tier-3 passthrough tokens once, up front, so an
+    # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
+    # an argv. Supported cells return the tokens; every arm splices them in below.
+    tier3 = tier3_pane_tokens(
+        provider, add_dir=add_dir, agent=agent, tools=tools, deny_tools=deny_tools
+    )
     if provider == "claude":
         # `claude --session-id <uuid> [message]`: the pinned session id makes
         # the transcript discoverable and keys the inside-leg reports
@@ -295,6 +356,7 @@ def build_pane_argv(
             argv += ["--permission-mode", "bypassPermissions"]
         if effort:
             argv += effort_tokens("claude", effort)
+        argv += tier3
         if message:
             argv.append(message)
         return argv
@@ -313,6 +375,7 @@ def build_pane_argv(
             argv += ["--model", model]
         if effort:
             argv += effort_tokens("codex", effort)
+        argv += tier3
         if message:
             argv.append(message)
         return argv
@@ -349,6 +412,7 @@ def build_pane_argv(
             argv += permission_pane_tokens("agy", permission_mode)
         if model:
             argv += ["--model", model]
+        argv += tier3
         if message:
             argv.append(message)
         return argv
@@ -368,6 +432,7 @@ def build_pane_argv(
         # opencode expects the provider/model form and is always launched with a
         # model: an explicit --model wins, else the z-ai/glm-5.2 default.
         argv += ["--model", model or _OPENCODE_DEFAULT_MODEL]
+        argv += tier3
         if permission_mode:
             argv += permission_pane_tokens("opencode", permission_mode)
         elif yolo:
@@ -508,6 +573,10 @@ def dispatch_spawn_pane(
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
     session: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
@@ -540,7 +609,18 @@ def dispatch_spawn_pane(
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
     argv = build_pane_argv(
-        provider, message, cwd, yolo, session_uuid, model, permission_mode, effort
+        provider,
+        message,
+        cwd,
+        yolo,
+        session_uuid,
+        model,
+        permission_mode,
+        effort,
+        add_dir=add_dir,
+        agent=agent,
+        tools=tools,
+        deny_tools=deny_tools,
     )
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(

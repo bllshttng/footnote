@@ -322,3 +322,27 @@ def test_build_argv_model_pin_parity() -> None:
     assert _build_argv("a", "hi", False, None) == [
         "claude", "--bg", "--name", "a", "hi",
     ]
+
+
+def test_build_argv_tier3_parity() -> None:
+    """x-b6e2: the Tier-3 passthrough bundle maps to claude's own spellings in a
+    fixed order (--add-dir/--agent/--allowedTools/--disallowedTools), riding
+    after --effort and before --model. Must byte-match the Rust
+    HarnessFlags::push_onto order (AC2-EDGE cross-runtime parity)."""
+    from fno.agents.providers.claude import _build_argv
+
+    assert _build_argv(
+        "a", "hi", False, None, None, None,
+        add_dir="/work", agent="reviewer", tools="Read,Edit", deny_tools="Bash",
+    ) == [
+        "claude", "--bg", "--name", "a",
+        "--add-dir", "/work",
+        "--agent", "reviewer",
+        "--allowedTools", "Read,Edit",
+        "--disallowedTools", "Bash",
+        "hi",
+    ]
+    # Empty fields are unset: byte-identical to the bare argv.
+    assert _build_argv("a", "hi", False, add_dir="", agent=None) == [
+        "claude", "--bg", "--name", "a", "hi",
+    ]
