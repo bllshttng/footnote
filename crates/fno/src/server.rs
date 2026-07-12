@@ -3596,6 +3596,40 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::ReorderTab { squad, tab, delta } => {
+                let Some((current_squad, idx)) = self.session.find_tab(tab) else {
+                    self.notice(client_id, "no such tab");
+                    return Flow::Continue;
+                };
+                if current_squad != squad {
+                    self.notice(client_id, "tab moved to another workspace");
+                    return Flow::Continue;
+                }
+                let changed = {
+                    let squad = self.session.squad_mut(squad).expect("find_tab live squad");
+                    let new =
+                        (idx as i64 + delta as i64).clamp(0, squad.tabs.len() as i64 - 1) as usize;
+                    if new == idx {
+                        false
+                    } else {
+                        let active = squad.tabs.get(squad.active_tab).map(|tab| tab.id);
+                        let moved = squad.tabs.remove(idx);
+                        squad.tabs.insert(new, moved);
+                        squad.active_tab = active
+                            .and_then(|id| {
+                                squad.tabs.iter().position(|candidate| candidate.id == id)
+                            })
+                            .unwrap_or_else(|| {
+                                squad.active_tab.min(squad.tabs.len().saturating_sub(1))
+                            });
+                        true
+                    }
+                };
+                if changed {
+                    self.push_layout(true);
+                }
+                Flow::Continue
+            }
             Command::RecruitAgents { squad, ids } => {
                 // Bulk recruit (x-8f11 US3). The server is the authoritative
                 // gate: blank name / empty ids refused fail-closed; each id
@@ -6065,6 +6099,160 @@ mod tests {
             vec![1, 3, 2],
             "an at-edge bump changes nothing"
         );
+    }
+
+    #[test]
+    fn reorder_tab_moves_within_its_squad_and_keeps_the_same_tab_active() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session
+            .squad_mut(1)
+            .unwrap()
+            .tabs
+            .extend([leaf_tab(6, 2), leaf_tab(7, 3)]);
+        core.session.squad_mut(1).unwrap().active_tab = 1;
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 6,
+                delta: 1,
+            },
+        );
+
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(
+            squad.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![5, 7, 6]
+        );
+        assert_eq!(squad.tabs[squad.active_tab].id, 6);
+        assert!(rx.try_recv().is_ok(), "a successful reorder pushes Layout");
+    }
+
+    #[test]
+    fn reorder_tab_at_an_edge_is_a_silent_noop() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session.squad_mut(1).unwrap().tabs.push(leaf_tab(6, 2));
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 5,
+                delta: -1,
+            },
+        );
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 6,
+                delta: 1,
+            },
+        );
+
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(
+            squad.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "edge bumps push neither Layout nor Notice"
+        );
+    }
+
+    #[test]
+    fn reorder_tab_recovers_from_an_invalid_active_index() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        let squad = core.session.squad_mut(1).unwrap();
+        squad.tabs.push(leaf_tab(6, 2));
+        squad.active_tab = usize::MAX;
+        core.clients.push(client(1, 5, (24, 80), false));
+
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 5,
+                delta: 1,
+            },
+        );
+
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(
+            squad.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![6, 5]
+        );
+        assert_eq!(squad.active_tab, 1);
+    }
+
+    #[test]
+    fn reorder_tab_refuses_a_stale_tab_id() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 999,
+                delta: 1,
+            },
+        );
+
+        assert_eq!(core.session.find_tab(5), Some((1, 0)));
+        assert_eq!(drain_notice(&mut rx).as_deref(), Some("no such tab"));
+    }
+
+    #[test]
+    fn reorder_tab_refuses_when_the_tab_moved_to_another_squad() {
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session.squad_mut(1).unwrap().tabs.push(leaf_tab(6, 2));
+        core.session
+            .add_squad(2, vec!["/b".into()], None, leaf_tab(7, 3));
+        core.session.squad_mut(2).unwrap().tabs.push(leaf_tab(8, 4));
+        let (client, mut rx) = client_with_rx(1);
+        core.clients.push(client);
+
+        core.command(1, Command::MoveTab { tab: 6, squad: 2 });
+        while rx.try_recv().is_ok() {}
+        core.command(
+            1,
+            Command::ReorderTab {
+                squad: 1,
+                tab: 6,
+                delta: -1,
+            },
+        );
+
+        assert_eq!(
+            core.session
+                .squad(2)
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 6],
+            "a stale reorder must not mutate the destination squad"
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("moved"));
     }
 
     #[test]

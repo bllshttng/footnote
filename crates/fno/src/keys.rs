@@ -13,7 +13,7 @@
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
 //! block (x-38c4) · `,` rename tab (x-c150) · leader-leader = one literal
-//! leader byte. Leader + anything
+//! leader byte · `<`/`>` reorder the active tab (x-0333). Leader + anything
 //! unmapped is swallowed with BEL - a chord typo must never leak half a chord
 //! into the pane (AC2-UI's never-leak guarantee).
 //!
@@ -91,6 +91,9 @@ pub enum Event {
     /// `rename-window` convention, x-c150). The client owns the typing mode
     /// and resolves the active tab's stable id; the chord only opens it.
     OpenRename,
+    /// Reorder the active tab one slot within its squad (leader+`<`/`>`,
+    /// x-0333). The client resolves the active tab's stable id before sending.
+    ReorderTab(i32),
     /// Swallowed unmapped chord: the client sounds BEL.
     Bell,
 }
@@ -268,6 +271,8 @@ fn chord(b: u8) -> Event {
         // Rename the active tab (leader+,, tmux rename-window convention,
         // x-c150). Same client-owned typing mode shape as search.
         b',' => Event::OpenRename,
+        b'<' => Event::ReorderTab(-1),
+        b'>' => Event::ReorderTab(1),
         _ => Event::Bell,
     }
 }
@@ -404,6 +409,22 @@ mod tests {
             ]
         );
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
+    }
+
+    #[test]
+    fn client_keys_tab_organize_chords_leave_existing_bindings_intact() {
+        assert_eq!(scan_all(&[b"\x02<"]), vec![Event::ReorderTab(-1)]);
+        assert_eq!(scan_all(&[b"\x02>"]), vec![Event::ReorderTab(1)]);
+        assert_eq!(scan_all(&[b"\x02,"]), vec![Event::OpenRename]);
+        assert_eq!(
+            scan_all(&[b"\x02J"]),
+            vec![Event::Cmd(Command::ResizeDir(Dir::Down))]
+        );
+        assert_eq!(
+            scan_all(&[b"\x02K"]),
+            vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
+        );
+        assert_eq!(scan_all(&[b"\x02x"]), vec![Event::Cmd(Command::ClosePane)]);
     }
 
     #[test]

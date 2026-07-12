@@ -145,7 +145,10 @@ use crate::tree::{Dir, Rect, TabId};
 /// validate the name against the current agents catalog server-side and refuse
 /// an `external: true` roster row (owned by the claude daemon, not the fno
 /// registry) with a notice.
-pub const PROTO_VERSION: u32 = 26;
+///
+/// v27 (x-0333): `Command::ReorderTab { squad, tab, delta }` moves a tab within
+/// its client-captured squad while preserving the active tab by stable id.
+pub const PROTO_VERSION: u32 = 27;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -674,6 +677,15 @@ pub enum Command {
     MoveTab {
         tab: TabId,
         squad: u64,
+    },
+    /// (v27, x-0333) Reorder a tab within its current squad. The target index is
+    /// clamped to the sibling bounds; an already-at-edge move is a silent no-op.
+    /// The server remaps `active_tab` so the same stable tab remains active. A
+    /// stale/unknown tab id is refused with a notice.
+    ReorderTab {
+        squad: u64,
+        tab: TabId,
+        delta: i32,
     },
     /// (v25, x-8f11) Recruit N watch-only agents into a NAMED workspace
     /// (create-if-absent, no origin). `squad` is a workspace name; `ids` are

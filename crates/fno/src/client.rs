@@ -968,6 +968,11 @@ impl View {
         // usize to match the renderer (`draw_tab_bar` accumulates in usize).
         if row < TAB_BAR_ROWS {
             let col = col as usize;
+            if let Some((start, text)) = self.notice_overlay(self.term.1 as usize) {
+                if col >= start && col < start + text.chars().count() {
+                    return None;
+                }
+            }
             let mut c = 0usize;
             for span in self.tab_bar_spans() {
                 let w = span.text.chars().count();
@@ -1987,12 +1992,10 @@ impl View {
         }
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
         // event handler already sounded).
-        if let Some((text, _)) = &self.notice {
-            let text: String = text.chars().take(cols.saturating_sub(1)).collect();
-            let start = cols.saturating_sub(text.chars().count() + 1);
+        if let Some((start, text)) = self.notice_overlay(cols) {
             for (i, ch) in text.chars().enumerate() {
                 let idx = start + i;
-                if idx > c && idx < cols {
+                if idx < cols {
                     cells[idx] = Cell {
                         c: ch,
                         fg: Color::Default,
@@ -2002,6 +2005,13 @@ impl View {
                 }
             }
         }
+    }
+
+    fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
+        let (text, _) = self.notice.as_ref()?;
+        let text: String = text.chars().take(cols.saturating_sub(1)).collect();
+        let start = cols.saturating_sub(text.chars().count() + 1);
+        Some((start, text))
     }
 
     /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
@@ -2533,7 +2543,7 @@ const KEY_TABLE: &[&str] = &[
     "  &  close tab          w  panel selector ",
     "     selector ⏎ acts on the row: squad/tab ",
     "     · agent focus/attach · card dispatch · + create ",
-    "     · r rename · x remove/dismiss · J/K reorder · m move tab ",
+    "     organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder",
     "     · space mark agent · R recruit marked → workspace ",
     "  a  answer queue       b  toggle sideline ",
     "  s  toggle status      ?  this key table  ",
@@ -3526,6 +3536,28 @@ async fn handle_stdin(
                         let _ = raw_out(b"\x07");
                     }
                 }
+            }
+            Event::ReorderTab(delta) => {
+                let target = view
+                    .layout
+                    .squads
+                    .iter()
+                    .find(|s| s.id == view.layout.active_squad)
+                    .and_then(|s| s.tabs.get(s.active_tab).map(|tab| (s.id, tab.id)));
+                match target {
+                    Some((squad, tab)) => {
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::Command(Command::ReorderTab { squad, tab, delta }),
+                        )
+                        .await
+                        .map_err(|e| format!("command send failed: {e}"))?;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+                break;
             }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
@@ -5824,6 +5856,7 @@ mod tests {
     fn client_compose_overlay_renders_key_table() {
         // AC4-EDGE: leader+? renders the full table over the content area.
         let mut view = two_pane_view();
+        view.term = (30, 80);
         view.overlay = true;
         let text = frame_text(&view.compose());
         assert!(text.contains("fno keys"), "table header present");
@@ -5831,6 +5864,34 @@ mod tests {
         // x-653d AC5-HP: the table documents leader+f and its filters.
         assert!(text.contains("f  find"), "key table documents leader+f");
         assert!(text.contains("Tab state"), "and its type/Tab/goto filters");
+        assert!(
+            text.contains(
+                "organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder"
+            ),
+            "80-column key table documents every organize gesture"
+        );
+    }
+
+    #[test]
+    fn client_compose_notice_overlays_a_full_tab_bar() {
+        let mut view = two_pane_view();
+        view.term = (30, 80);
+        view.layout.squads[0] = meta(1, "long-workspace", 6, 5);
+        for tab in &mut view.layout.squads[0].tabs {
+            tab.name = "very-long-tab-name".into();
+        }
+        view.set_notice("no such tab".into());
+
+        let text = frame_text(&view.compose());
+        assert!(
+            text.lines().next().unwrap().contains("no such tab"),
+            "the stale-refusal notice remains visible over a dense tab bar"
+        );
+        let notice_start = 80 - "no such tab".chars().count() - 1;
+        assert!(
+            view.chrome_hit(0, notice_start as u16).is_none(),
+            "clicks on the visible notice do not activate hidden tabs"
+        );
     }
 
     #[test]
@@ -8075,6 +8136,34 @@ mod tests {
             })
         );
         assert_eq!(v.rename, None, "submit closes the overlay");
+    }
+
+    #[tokio::test]
+    async fn leader_reorder_sends_the_active_tab_id_and_delta() {
+        let mut v = two_pane_view();
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x02>leak", &mut buf)
+            .await
+            .unwrap();
+
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::ReorderTab {
+                squad: 1,
+                tab: 1,
+                delta: 1
+            })
+        );
+        assert_eq!(
+            cur.position() as usize,
+            cur.get_ref().len(),
+            "same-chunk bytes after the chord are swallowed"
+        );
     }
 
     #[tokio::test]
