@@ -15,6 +15,7 @@ from typing import Optional
 
 import typer
 
+from fno.adapters.providers import managed
 from fno.adapters.providers.dispatch import dispatch_env
 from fno.adapters.providers.loader import load_providers, save_providers
 from fno.adapters.providers.model import (
@@ -79,12 +80,22 @@ def list_providers() -> None:
         )
         return
     for record in config.records:
-        marker = "*" if record.id == config.active else " "
+        # For managed accounts the meaningful "active" is which one is
+        # materialized in that CLI's slot; fall back to routing-active otherwise.
+        is_active = (
+            record.id == managed.active_slot_id(record.cli)
+            if record.auth == "managed"
+            else record.id == config.active
+        )
+        marker = "*" if is_active else " "
         headroom_col = _headroom_label(record.id)
-        typer.echo(
+        line = (
             f"{marker} {record.id}  [{record.cli}] {record.auth}  "
             f"priority={record.priority}  headroom={headroom_col}"
         )
+        if record.auth == "managed":
+            line += f"  snapshot={managed.snapshot_age_label(record.id)}"
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +444,74 @@ def add_provider(
 
 
 # ---------------------------------------------------------------------------
+# register (managed credential store, US1)
+# ---------------------------------------------------------------------------
+
+@cli.command("register")
+def register_provider(
+    provider_id: str = typer.Argument(..., help="Unique account id (lowercase alphanumeric + hyphens)"),
+    cli_name: str = typer.Option("claude", "--cli", "-c", help="claude|codex"),
+    priority: int = typer.Option(100, "--priority", "-p"),
+    name: Optional[str] = typer.Option(None, "--name"),
+    scope: str = typer.Option("global", "--scope", "-s", help="global|project"),
+) -> None:
+    """Snapshot the CURRENT login into a managed account store and record it.
+
+    Sign into the account you want to register (`claude /login`), then run this.
+    It captures the live credential (Keychain blob on darwin, credential file
+    elsewhere; codex `auth.json`) into ``~/.fno/providers/<id>/`` and writes an
+    ``auth: managed`` ProviderRecord. Idempotent: re-running refreshes the
+    snapshot for an already-registered account (US1).
+    """
+    try:
+        record = ProviderRecord(
+            id=provider_id,
+            name=name or provider_id,
+            cli=cli_name,  # type: ignore[arg-type]
+            auth="managed",
+            priority=priority,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface pydantic validation receipts
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    # Snapshot the current login FIRST - refuse cleanly if nothing to capture.
+    try:
+        adir = managed.snapshot_current(record)
+    except managed.ManagedStoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    repo_root = _get_repo_root()
+    try:
+        config = load_providers(repo_root=repo_root)
+    except ProviderConfigError as exc:
+        typer.echo(f"error loading existing config: {exc}", err=True)
+        raise typer.Exit(1)
+
+    from fno.adapters.providers.model import ProvidersConfig
+
+    new_records = [r for r in config.records if r.id != record.id]
+    new_records.append(record)
+    try:
+        save_providers(ProvidersConfig(records=new_records, active=config.active), scope=scope)  # type: ignore[arg-type]
+    except OSError as exc:
+        typer.echo(f"error: failed to write config: {exc}", err=True)
+        raise typer.Exit(1)
+
+    # The captured login IS what currently sits in this CLI's slot: stamp it
+    # active so the next switch captures-before-overwrite the right account. A
+    # stamp write failure is non-fatal (the record is saved) but must be loud,
+    # not a raw traceback - it degrades to no active-marker + no first capture.
+    try:
+        managed._atomic_write_private(managed._active_stamp_path(record.cli), record.id)
+    except OSError as exc:
+        typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
+
+    typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
+
+
+# ---------------------------------------------------------------------------
 # test
 # ---------------------------------------------------------------------------
 
@@ -525,6 +604,24 @@ def use_provider(
     if provider_id not in config.by_id:
         typer.echo(f"error: provider '{provider_id}' not found", err=True)
         raise typer.Exit(1)
+
+    record = config.by_id[provider_id]
+
+    # Managed records materialize the account's credentials into the shared
+    # slot (capture-before-overwrite + live-pin gate); oauth_dir/api_key records
+    # only re-point active routing (spawns pick up the env), as before.
+    if record.auth == "managed":
+        from fno.agents.events import emit as _emit
+
+        try:
+            result = managed.switch(record, by_id=config.by_id, emit_fn=_emit)
+        except managed.SwitchDeferred as exc:
+            typer.echo(f"switch deferred: {exc}", err=True)
+            raise typer.Exit(2)
+        except managed.ManagedStoreError as exc:
+            typer.echo(f"switch failed: {exc}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Materialized managed account '{result.active}' into the slot (verified).")
 
     from fno.adapters.providers.model import ProvidersConfig
     new_config = ProvidersConfig(records=config.records, active=provider_id)

@@ -1,0 +1,372 @@
+"""Tests for the managed credential store (US1 register, US2 switch).
+
+The slot backend (Keychain / credential file) is patched to a fake dict so the
+orchestration - capture-before-overwrite, live-pin gate, verification+rollback,
+atomic store writes - is exercised without touching the real Keychain/network.
+
+Run: cd cli && uv run pytest src/fno/adapters/providers/test_managed.py -v
+"""
+from __future__ import annotations
+
+import json
+import stat
+import subprocess
+
+import pytest
+from typer.testing import CliRunner
+
+from fno.adapters.providers import managed
+from fno.adapters.providers.cli import cli as providers_app
+from fno.adapters.providers.model import ProviderRecord
+
+runner = CliRunner()
+
+
+def _blob(token: str) -> str:
+    return json.dumps({"claudeAiOauth": {"accessToken": token}})
+
+
+def _rec(id_: str, cli: str = "claude") -> ProviderRecord:
+    return ProviderRecord(id=id_, name=id_, cli=cli, auth="managed")
+
+
+@pytest.fixture()
+def fake_slot(monkeypatch):
+    """A fake credential slot: {cli: blob}. Patches the read/write seam and
+    forces the live-pin gate clear by default."""
+    slot: dict[str, str | None] = {}
+    monkeypatch.setattr(managed, "_read_slot_blob", lambda cli, config_dir=None: slot.get(cli))
+    monkeypatch.setattr(
+        managed, "_write_slot_blob", lambda cli, blob, config_dir=None: slot.__setitem__(cli, blob)
+    )
+    monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
+    return slot
+
+
+# ---------------------------------------------------------------------------
+# US1: register / snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestRegister:
+    def test_snapshot_creates_store_with_private_modes(self, fake_slot, tmp_path):
+        """AC1-HP: register captures the current login into a 700 dir / 600 blob."""
+        fake_slot["claude"] = _blob("A0")
+        adir = managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        assert adir == tmp_path / "work-a"
+        assert stat.S_IMODE(adir.stat().st_mode) == 0o700
+        blob_path = tmp_path / "work-a" / "blob"
+        assert blob_path.read_text() == _blob("A0")
+        assert stat.S_IMODE(blob_path.stat().st_mode) == 0o600
+        meta = managed.read_meta("work-a", root=tmp_path)
+        assert meta["cli"] == "claude" and meta["account_id"] == "work-a"
+
+    def test_snapshot_refuses_when_no_login(self, fake_slot, tmp_path):
+        """US1 boundary: never store an empty blob when there is no current login."""
+        fake_slot.pop("claude", None)
+        with pytest.raises(managed.ManagedStoreError):
+            managed.snapshot_current(_rec("work-a"), root=tmp_path)
+
+    def test_reregister_refreshes_snapshot(self, fake_slot, tmp_path):
+        """US1: registering again refreshes the stored blob (idempotent)."""
+        fake_slot["claude"] = _blob("A0")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        fake_slot["claude"] = _blob("A1")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        assert (tmp_path / "work-a" / "blob").read_text() == _blob("A1")
+
+
+# ---------------------------------------------------------------------------
+# US2: switch (materialize)
+# ---------------------------------------------------------------------------
+
+
+def _register_two(fake_slot, tmp_path):
+    """work-a stored from A0, work-b stored from B0, slot left holding B (active)."""
+    a, b = _rec("work-a"), _rec("work-b")
+    fake_slot["claude"] = _blob("A0")
+    managed.snapshot_current(a, root=tmp_path)
+    managed._atomic_write_private(managed._active_stamp_path("claude", tmp_path), "work-a")
+    fake_slot["claude"] = _blob("B0")
+    managed.snapshot_current(b, root=tmp_path)
+    managed._atomic_write_private(managed._active_stamp_path("claude", tmp_path), "work-b")
+    return {"work-a": a, "work-b": b}
+
+
+class TestSwitch:
+    def test_materializes_and_verifies(self, fake_slot, tmp_path):
+        """AC2-HP: use work-a materializes A's blob into the slot and verifies."""
+        by_id = _register_two(fake_slot, tmp_path)
+        result = managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert result.active == "work-a"
+        assert fake_slot["claude"] == _blob("A0")
+        assert managed.active_slot_id("claude", tmp_path) == "work-a"
+
+    def test_capture_before_overwrite_saves_outgoing_rotated_token(self, fake_slot, tmp_path):
+        """AC2-HP: switching away re-snapshots the outgoing account's CURRENT
+        (rotated) slot token before the slot is overwritten."""
+        by_id = _register_two(fake_slot, tmp_path)
+        # B's token rotated in the slot since register (B0 -> B1).
+        fake_slot["claude"] = _blob("B1")
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        # work-b's store now holds B1, not the stale B0.
+        assert (tmp_path / "work-b" / "blob").read_text() == _blob("B1")
+
+    def test_round_trip_capture(self, fake_slot, tmp_path):
+        """AC2-HP round-trip: use A then use B captures A's switch-away token."""
+        by_id = _register_two(fake_slot, tmp_path)
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)  # slot -> A0
+        fake_slot["claude"] = _blob("A1")  # A rotates while active
+        managed.switch(by_id["work-b"], by_id=by_id, root=tmp_path)
+        assert (tmp_path / "work-a" / "blob").read_text() == _blob("A1")
+        assert fake_slot["claude"] == _blob("B0")
+
+    def test_already_active_is_noop(self, fake_slot, tmp_path):
+        by_id = _register_two(fake_slot, tmp_path)  # active = work-b
+        result = managed.switch(by_id["work-b"], by_id=by_id, root=tmp_path)
+        assert result.active == "work-b"
+
+    def test_emits_account_switched(self, fake_slot, tmp_path):
+        by_id = _register_two(fake_slot, tmp_path)
+        events: list[tuple] = []
+        managed.switch(
+            by_id["work-a"], by_id=by_id, root=tmp_path,
+            emit_fn=lambda kind, **d: events.append((kind, d)),
+        )
+        assert events and events[0][0] == "account_switched"
+        assert events[0][1]["provider"] == "work-a" and events[0][1]["outgoing"] == "work-b"
+
+
+class TestSwitchGuards:
+    def test_live_pin_refuses_and_leaves_slot_untouched(self, fake_slot, tmp_path, monkeypatch):
+        """AC1-ERR: a pinned slot defers, names the session, and mutates nothing."""
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(4242, "claude")],
+        )
+        before = fake_slot["claude"]
+        stored_b = (tmp_path / "work-b" / "blob").read_text()
+        with pytest.raises(managed.SwitchDeferred) as exc:
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert "4242" in str(exc.value)
+        assert fake_slot["claude"] == before  # slot untouched
+        assert (tmp_path / "work-b" / "blob").read_text() == stored_b  # store untouched
+
+    def test_missing_snapshot_refuses(self, fake_slot, tmp_path):
+        """Boundary: never materialize an account with no stored snapshot."""
+        by_id = {"work-a": _rec("work-a")}
+        managed._atomic_write_private(managed._active_stamp_path("claude", tmp_path), "work-b")
+        with pytest.raises(managed.ManagedStoreError):
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+
+    def test_failed_verify_rolls_back(self, fake_slot, tmp_path, monkeypatch):
+        """AC3-ERR shape: a stale/revoked stored token fails verification and the
+        slot rolls back to the captured outgoing blob."""
+        by_id = _register_two(fake_slot, tmp_path)
+        outgoing_blob = fake_slot["claude"]  # B0
+        monkeypatch.setattr(managed, "verify_slot", lambda record, expected_blob: False)
+        with pytest.raises(managed.ManagedStoreError):
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert fake_slot["claude"] == outgoing_blob  # rolled back to B
+        assert managed.active_slot_id("claude", tmp_path) == "work-b"  # stamp not advanced
+
+    def test_capture_keychain_error_aborts_without_overwrite(self, fake_slot, tmp_path, monkeypatch):
+        """A Keychain read failure during capture-before-overwrite must ABORT the
+        switch (not be swallowed), so the outgoing account's token is never lost."""
+        by_id = _register_two(fake_slot, tmp_path)
+        before = fake_slot["claude"]  # B0, still in the slot
+
+        def _boom(record, root=None):
+            raise managed.KeychainError("security find-generic-password timed out")
+
+        monkeypatch.setattr(managed, "snapshot_current", _boom)
+        with pytest.raises(managed.KeychainError):
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert fake_slot["claude"] == before  # slot never overwritten
+
+    def test_rollback_failure_reported_truthfully(self, fake_slot, tmp_path, monkeypatch):
+        """When verify fails AND the rollback write also fails, the receipt says
+        the slot is indeterminate - it never lies 'rolled back'."""
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(managed, "verify_slot", lambda record, expected_blob: False)
+        calls = {"n": 0}
+
+        def _write(cli, blob, config_dir=None):
+            calls["n"] += 1
+            if calls["n"] >= 2:  # the rollback write
+                raise managed.KeychainError("rollback write denied")
+            fake_slot[cli] = blob
+
+        monkeypatch.setattr(managed, "_write_slot_blob", _write)
+        with pytest.raises(managed.ManagedStoreError) as exc:
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert "indeterminate" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Model: managed auth strategy takes neither credentials_source nor env
+# ---------------------------------------------------------------------------
+
+
+class TestManagedRecordValidation:
+    def test_managed_rejects_credentials_source(self):
+        from pathlib import Path
+
+        with pytest.raises(ValueError, match="auth=managed"):
+            ProviderRecord(
+                id="bad", name="bad", cli="claude", auth="managed",
+                credentials_source=Path("/tmp/x"),
+            )
+
+    def test_managed_rejects_env(self):
+        with pytest.raises(ValueError, match="auth=managed"):
+            ProviderRecord(
+                id="bad", name="bad", cli="claude", auth="managed",
+                env={"ANTHROPIC_API_KEY": "x"},
+            )
+
+    def test_managed_bare_record_ok(self):
+        rec = ProviderRecord(id="ok", name="ok", cli="claude", auth="managed")
+        assert rec.auth == "managed" and rec.account_id == "ok"
+
+
+# ---------------------------------------------------------------------------
+# AC2-ERR: Keychain denial / timeout surfaces a receipt, never a hang
+# ---------------------------------------------------------------------------
+
+
+class TestKeychainErrors:
+    def test_security_timeout_raises_receipt(self, monkeypatch):
+        def _boom(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="security", timeout=5)
+
+        monkeypatch.setattr(managed.subprocess, "run", _boom)
+        with pytest.raises(managed.KeychainError):
+            managed._run_security(["find-generic-password"])
+
+    def test_security_oserror_raises_receipt(self, monkeypatch):
+        monkeypatch.setattr(
+            managed.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("nope"))
+        )
+        with pytest.raises(managed.KeychainError):
+            managed._run_security(["add-generic-password"])
+
+
+# ---------------------------------------------------------------------------
+# AC1-FR: atomic store write leaves no partial on failure
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicWrite:
+    def test_no_partial_on_write_error(self, tmp_path, monkeypatch):
+        target = tmp_path / "blob"
+        target.write_text("original")
+
+        def _boom(*a, **k):
+            raise RuntimeError("disk full mid-write")
+
+        monkeypatch.setattr(managed.os, "replace", _boom)
+        with pytest.raises(RuntimeError):
+            managed._atomic_write_private(target, "new-secret")
+        assert target.read_text() == "original"  # untouched
+        # No leftover temp files.
+        assert list(tmp_path.glob(".blob.*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# Real file-backed slot (codex auth.json) - exercises the un-mocked backend
+# ---------------------------------------------------------------------------
+
+
+class TestCodexFileBackend:
+    def test_file_slot_round_trip(self, tmp_path, monkeypatch):
+        """The codex file backend reads/writes auth.json (0600) via the real
+        _read_slot_blob/_write_slot_blob path (not the fake-slot seam)."""
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        assert managed._read_slot_blob("codex") is None  # no login yet
+        managed._write_slot_blob("codex", _blob("cx"))
+        assert managed._read_slot_blob("codex") == _blob("cx")
+        assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+
+    def test_codex_switch_captures_and_materializes(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(a, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+        managed._write_slot_blob("codex", _blob("B0"))
+        managed.snapshot_current(b, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        # switch to A: captures B's current slot, materializes A0, verifies.
+        managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+
+# ---------------------------------------------------------------------------
+# CLI surface (register / use / list)
+# ---------------------------------------------------------------------------
+
+
+def _cli_slot(monkeypatch):
+    slot: dict[str, str | None] = {}
+    monkeypatch.setattr(managed, "_read_slot_blob", lambda cli, config_dir=None: slot.get(cli))
+    monkeypatch.setattr(
+        managed, "_write_slot_blob", lambda cli, blob, config_dir=None: slot.__setitem__(cli, blob)
+    )
+    monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
+    return slot
+
+
+class TestCliSurface:
+    def test_register_then_list_marks_active(self, tmp_path, monkeypatch):
+        slot = _cli_slot(monkeypatch)
+        env = {"HOME": str(tmp_path), "PWD": str(tmp_path)}
+        slot["claude"] = _blob("A0")
+        r1 = runner.invoke(providers_app, ["register", "work-a"], env=env, catch_exceptions=False)
+        assert r1.exit_code == 0, r1.output
+        slot["claude"] = _blob("B0")
+        r2 = runner.invoke(providers_app, ["register", "work-b"], env=env, catch_exceptions=False)
+        assert r2.exit_code == 0, r2.output
+        rl = runner.invoke(providers_app, ["list"], env=env, catch_exceptions=False)
+        assert rl.exit_code == 0
+        active = [ln for ln in rl.output.splitlines() if "work-b" in ln]
+        assert active and active[0].lstrip().startswith("*")
+        assert "snapshot=" in active[0]
+
+    def test_register_no_login_errors(self, tmp_path, monkeypatch):
+        _cli_slot(monkeypatch)  # slot empty
+        env = {"HOME": str(tmp_path), "PWD": str(tmp_path)}
+        r = runner.invoke(providers_app, ["register", "work-a"], env=env, catch_exceptions=False)
+        assert r.exit_code == 1
+        assert "no current" in r.output
+
+    def test_use_managed_materializes(self, tmp_path, monkeypatch):
+        slot = _cli_slot(monkeypatch)
+        env = {"HOME": str(tmp_path), "PWD": str(tmp_path)}
+        slot["claude"] = _blob("A0")
+        runner.invoke(providers_app, ["register", "work-a"], env=env, catch_exceptions=False)
+        slot["claude"] = _blob("B0")
+        runner.invoke(providers_app, ["register", "work-b"], env=env, catch_exceptions=False)
+        r = runner.invoke(providers_app, ["use", "work-a"], env=env, catch_exceptions=False)
+        assert r.exit_code == 0, r.output
+        assert slot["claude"] == _blob("A0")
+        assert "Materialized managed account 'work-a'" in r.output
+
+    def test_use_managed_live_pin_defers(self, tmp_path, monkeypatch):
+        slot = _cli_slot(monkeypatch)
+        env = {"HOME": str(tmp_path), "PWD": str(tmp_path)}
+        slot["claude"] = _blob("A0")
+        runner.invoke(providers_app, ["register", "work-a"], env=env, catch_exceptions=False)
+        slot["claude"] = _blob("B0")
+        runner.invoke(providers_app, ["register", "work-b"], env=env, catch_exceptions=False)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(99, "claude")],
+        )
+        r = runner.invoke(providers_app, ["use", "work-a"], env=env, catch_exceptions=False)
+        assert r.exit_code == 2
+        assert "deferred" in r.output and "99" in r.output
