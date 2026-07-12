@@ -383,12 +383,14 @@ def reverse_map_unstamped(
         by_cwd.setdefault(cwd, []).append(node)
 
     if skipped_dead_cwd:
-        shown = skipped_dead_cwd[:10]
-        more = len(skipped_dead_cwd) - len(shown)
-        suffix = f" (+{more} more)" if more > 0 else ""
+        # Name EVERY skipped id (not a capped subset): the id is the only handle
+        # an operator has to heal a genuinely-merged-but-archived node via
+        # `fno backlog update`, so a truncated list would leave the tail
+        # un-healable - the exact visibility the aggregated advisory exists to
+        # preserve. One line, however many ids; the count is realistically small.
         print(
             f"reverse-map: skipped {len(skipped_dead_cwd)} ref-less node(s) with "
-            f"missing cwd: {' '.join(shown)}{suffix} "
+            f"missing cwd: {' '.join(skipped_dead_cwd)} "
             f"(heal with: fno backlog update <id> --project <p> --cwd <path>)",
             file=sys.stderr,
         )

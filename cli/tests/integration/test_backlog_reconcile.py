@@ -418,6 +418,23 @@ def test_reverse_map_advisory_aggregates_and_is_silent_when_clean(tmp_path, monk
     assert "reverse-map: skipped" not in capsys.readouterr().err
 
 
+def test_reverse_map_advisory_names_every_id_no_truncation(tmp_path, monkeypatch, capsys):
+    """Visibility invariant: a large batch names EVERY skipped id on one line -
+    no cap, no `(+N more)` collapse (a truncated tail would be un-healable)."""
+    import fno.graph._intake as intake
+    monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
+
+    gone = str(tmp_path / "gone")
+    ids = [f"ab-dead{i:02d}" for i in range(12)]  # > the old 10-id cap
+    scan_merge_drift([_node(nid, cwd=gone) for nid in ids],
+                     list_merged=lambda **kw: [])
+    err = capsys.readouterr().err
+    assert "skipped 12 ref-less node(s)" in err
+    assert "more)" not in err  # no truncation suffix
+    for nid in ids:
+        assert nid in err
+
+
 def test_forward_dead_cwd_with_pr_url_queries_with_repo(tmp_path, monkeypatch):
     """AC4-EDGE / US3: a stamped node whose cwd is gone but pr_url is parseable
     resolves via --repo with cwd=None and closes on MERGED - no Errno 2."""
