@@ -1530,7 +1530,12 @@ impl Core {
         let Some((sid, name, origins, attach_id)) = ctx else {
             return;
         };
-        let members = self.squad_members.entry(sid).or_default();
+        // member_ctx only returns Some when squad_members holds sid, so get_mut
+        // is guaranteed present - never insert an empty vec via entry() (gemini
+        // review).
+        let Some(members) = self.squad_members.get_mut(&sid) else {
+            return;
+        };
         if churn {
             if let Some(mm) = members.iter_mut().find(|m| m.attach_id == attach_id) {
                 mm.tombstone = true;
@@ -3400,7 +3405,10 @@ impl Core {
                                 return Flow::Continue;
                             }
                         }
-                        let tracked = self.squad_members.contains_key(&squad);
+                        // Snapshot membership once (a rename never changes it);
+                        // its presence is what marks the squad persisted (gemini
+                        // review: one lookup, not contains_key + get).
+                        let tracked_members = self.squad_members.get(&squad).cloned();
                         self.session
                             .squad_mut(squad)
                             .expect("squad() live above")
@@ -3411,7 +3419,7 @@ impl Core {
                         // + upsert-new (so a concurrent restore never sees a
                         // window with neither name); a CLEAR turns the workspace
                         // unnamed, so it leaves the store entirely.
-                        if tracked {
+                        if let Some(members) = tracked_members {
                             match (old_name, new_name) {
                                 (Some(old), Some(new)) => {
                                     let origins = self
@@ -3419,8 +3427,6 @@ impl Core {
                                         .squad(squad)
                                         .map(|s| s.origins.clone())
                                         .unwrap_or_default();
-                                    let members =
-                                        self.squad_members.get(&squad).cloned().unwrap_or_default();
                                     if let Err(e) =
                                         crate::squad_store::rename(&old, &new, &origins, &members)
                                     {

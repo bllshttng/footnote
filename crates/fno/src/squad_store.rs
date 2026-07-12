@@ -239,11 +239,20 @@ fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
         .open(&lock_path)?;
     let _guard = FlockGuard::acquire(lock)?;
 
+    // Read the current file to apply the delta onto. ONLY a genuinely absent
+    // (or empty) file is a fresh start; any OTHER read error (PermissionDenied,
+    // transient I/O) or a parse failure must FAIL LOUD rather than clobber the
+    // existing file with just this server's delta (silent data loss). A failed
+    // write degrades persistence with a notice; it never overwrites unread
+    // content (gemini review). Corrupt content is quarantined by the load path
+    // at next restart, not clobbered here.
     let mut squads = match std::fs::read_to_string(&path) {
-        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str::<StoreFile>(&raw)
+        Ok(raw) if raw.trim().is_empty() => Vec::new(),
+        Ok(raw) => serde_json::from_str::<StoreFile>(&raw)
             .map(|sf| sf.squads)
-            .unwrap_or_default(),
-        _ => Vec::new(),
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
     };
     f(&mut squads);
 
@@ -453,6 +462,23 @@ mod tests {
         let names: Vec<_> = loaded.squads.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["aa"], "a renamed, b removed");
         assert_eq!(loaded.squads[0].origins, vec!["/x".to_string()]);
+    }
+
+    #[test]
+    fn write_onto_a_corrupt_file_fails_loud_and_never_clobbers() {
+        // gemini review: the write path must NOT clobber unreadable content. A
+        // corrupt existing file makes upsert fail (Err) rather than overwrite it
+        // with just this delta - the load path owns quarantine, not the writer.
+        let s = Scratch::new("write-corrupt");
+        std::fs::write(s.file(), "{garbage not json").unwrap();
+        let before = std::fs::read_to_string(s.file()).unwrap();
+        let res = upsert("w", &[], &[m("c19cd2c3")]);
+        assert!(res.is_err(), "a write onto corrupt content fails loud");
+        assert_eq!(
+            std::fs::read_to_string(s.file()).unwrap(),
+            before,
+            "the corrupt file is left intact, not clobbered"
+        );
     }
 
     #[test]
