@@ -599,13 +599,16 @@ enum Flow {
     Shutdown,
 }
 
-/// Unlink the socket on every exit path out of `run` (a SIGKILL leaves it
-/// behind by design; the stale-socket path in `bind_or_probe` covers that).
+/// Unlink the socket AND its wire-version sidecar (x-1a85) on every exit path
+/// out of `run` (a SIGKILL leaves them behind by design; the stale-socket path
+/// in `bind_or_probe` covers that, and a lingering `.ver` is inert - `ls` only
+/// reads it for a LIVE server, and a dead one probes `Stale`).
 struct SocketGuard(PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(crate::proto::version_sidecar_path(&self.0));
     }
 }
 
@@ -642,6 +645,18 @@ pub fn run(socket: PathBuf) -> i32 {
         }
     };
     let _guard = SocketGuard(socket.clone());
+
+    // Stamp this server's wire version next to its socket (x-1a85) so `fno mux
+    // ls` can flag a stale-wire server after a binary upgrade. Best-effort: a
+    // write failure only means `ls` reads no version and treats the server as
+    // stale (conservative - a spurious restart, never a missed skew), so it must
+    // never abort the server.
+    if let Err(e) = std::fs::write(
+        crate::proto::version_sidecar_path(&socket),
+        crate::proto::PROTO_VERSION.to_string(),
+    ) {
+        eprintln!("fno mux: warn: could not write version sidecar: {e}");
+    }
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,

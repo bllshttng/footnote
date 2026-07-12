@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -415,32 +416,47 @@ def _live_mux_sessions(
     ]
 
 
-def stale_mux_servers() -> list[str]:
-    """Live mux sessions whose SERVER predates the installed mux binary - i.e. a
-    long-running server still speaking the old proto after an upgrade (the fix is
-    `fno restart --mux`). Proto-agnostic: the socket file is created when the
-    server binds at startup, and the cargo binary's mtime bumps on every
-    (re)install, so `socket mtime < binary mtime` means the server is older than
-    the binary. Best-effort and advisory: any missing binary / unreadable socket
-    yields `[]`, never a false alarm. `fno doctor` renders this; `fno update`
-    nudges on it after a mux refresh."""
-    mux = _cargo_installed_mux()
-    if mux is None:
+def stale_mux_servers(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> list[str]:
+    """Live mux sessions on a STALE WIRE VERSION: the running server predates the
+    installed binary's ``PROTO_VERSION``, so a new client's handshake is rejected
+    and the server is already unreachable (the fix is `fno restart`, which now
+    auto-cuts these over). The precise signal is the ``stale`` field
+    ``fno mux ls --json`` computes from each server's ``.ver`` sidecar (x-1a85); a
+    pre-sidecar server has no ``.ver`` and reads as stale, so the check works
+    across the very upgrade that introduces it. This replaces the old
+    ``socket mtime < binary mtime`` heuristic, which flagged EVERY server after
+    any reinstall (a wire-agnostic false alarm). Best-effort and advisory: any
+    missing binary / non-zero exit / unparseable JSON yields ``[]``. `fno doctor`
+    renders this; `fno update` nudges on it; `fno restart` auto-restarts it."""
+    fno = _cargo_installed_mux() or shutil.which("fno")
+    if not fno:
         return []
     try:
-        bin_mtime = mux.stat().st_mtime
-    except OSError:
+        proc = runner(
+            [str(fno), "mux", "ls", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
         return []
-    stale: list[str] = []
-    mux_dir = _mux_dir()
-    for sess in _live_mux_sessions():
-        sock = mux_dir / f"{sess}.sock"
-        try:
-            if sock.stat().st_mtime < bin_mtime:
-                stale.append(sess)
-        except OSError:
-            continue
-    return stale
+    if proc.returncode != 0:
+        return []
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except (ValueError, TypeError):
+        return []
+    return [
+        r["session"]
+        for r in rows
+        if isinstance(r, dict)
+        and r.get("state") == "live"
+        and r.get("stale")
+        and r.get("session")
+    ]
 
 
 def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) -> None:
@@ -782,8 +798,9 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # silently blocks agent dispatch until restarted. Nothing else nudges for it.
     for sess in stale_mux_servers():
         typer.echo(
-            f"fno update: note: mux server '{sess}' is running the OLD binary;"
-            " run 'fno restart --mux' to cut it over (ends live sessions)",
+            f"fno update: note: mux server '{sess}' speaks an OLD wire version"
+            " (a new client can't attach it); run 'fno restart' to auto-cut it"
+            " over (ends that session's panes)",
             err=True,
         )
 
