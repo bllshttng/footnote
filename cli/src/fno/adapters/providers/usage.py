@@ -48,8 +48,12 @@ PROBE_TIMEOUT_SECONDS = 10  # matches Claude Code / orca's own 10s usage-fetch b
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item (orca-verified)
-# The API's window keys mapped to our short labels. Order fixed for stability.
-_CLAUDE_WINDOW_LABELS = (("five_hour", "5h"), ("seven_day", "weekly"))
+# The API's known window keys mapped to our short labels. The response also
+# carries model-specific weekly windows (seven_day_opus, seven_day_sonnet, ...);
+# those are captured generically by _parse_claude_windows (any five_hour /
+# seven_day* object) so a maxed Opus weekly binds headroom instead of being
+# dropped, letting Opus work dispatch until the reactive 429 (x-6bcf review).
+_CLAUDE_KNOWN_LABELS = {"five_hour": "5h", "seven_day": "weekly"}
 
 
 def _clamp_pct(value: float) -> float:
@@ -213,20 +217,39 @@ def _iso_to_epoch(value: Any) -> float | None:
     return None
 
 
+def _claude_window_label(api_key: str) -> str:
+    """Short label for a claude usage window key.
+
+    ``five_hour`` -> ``5h``, ``seven_day`` -> ``weekly``, and a model-specific
+    ``seven_day_opus`` -> ``weekly-opus`` so display + attribution stay legible.
+    """
+    known = _CLAUDE_KNOWN_LABELS.get(api_key)
+    if known is not None:
+        return known
+    if api_key.startswith("seven_day_"):
+        return "weekly-" + api_key[len("seven_day_"):]
+    return api_key
+
+
 def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
     """Parse the claude ``/api/oauth/usage`` payload into windows.
 
     Verified live (x-6bcf): the payload has top-level window OBJECTS keyed by
-    name (``five_hour``, ``seven_day``), each ``{utilization: float already on a
-    0-100 scale, resets_at: ISO-8601 string, ...dollar fields}``. A window whose
-    object is absent/null or missing either field is skipped (drift degrades to
-    fewer/no windows, never a raise).
+    name, each ``{utilization: float already on a 0-100 scale, resets_at:
+    ISO-8601 string, ...dollar fields}``. Includes the general ``five_hour`` /
+    ``seven_day`` AND every model-specific weekly (``seven_day_opus``,
+    ``seven_day_sonnet``, ...) so a maxed model window binds headroom rather than
+    being silently dropped (x-6bcf review). The obfuscated promo/experimental
+    buckets (``tangelo``, ``nimbus_quill``, ...) do not match the
+    ``five_hour``/``seven_day*`` prefix and are excluded. A window whose object
+    is absent/null or missing either field is skipped (never a raise).
     """
     if not isinstance(payload, dict):
         return ()
     out: list[UsageWindow] = []
-    for api_key, label in _CLAUDE_WINDOW_LABELS:
-        w = payload.get(api_key)
+    for api_key, w in payload.items():
+        if not (api_key == "five_hour" or api_key.startswith("seven_day")):
+            continue
         if not isinstance(w, dict):
             continue
         util = w.get("utilization")
@@ -234,7 +257,13 @@ def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
         if util is None or epoch is None:
             continue
         try:
-            out.append(UsageWindow(label=label, used_pct=float(util), resets_at=epoch))
+            out.append(
+                UsageWindow(
+                    label=_claude_window_label(api_key),
+                    used_pct=float(util),
+                    resets_at=epoch,
+                )
+            )
         except (TypeError, ValueError):
             continue
     return tuple(out)

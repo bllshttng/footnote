@@ -159,6 +159,42 @@ class TestProbeFailOpen:
         import datetime as _dt
         assert snap.windows[0].resets_at == _dt.datetime.fromisoformat("2026-07-12T02:09:59+00:00").timestamp()
 
+    def test_claude_probe_includes_model_weekly_windows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # x-6bcf review: a populated seven_day_opus must NOT be dropped - a maxed
+        # Opus weekly has to bind headroom even when the general weekly has room.
+        # Obfuscated promo buckets (tangelo) are excluded.
+        (tmp_path / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        )
+        import fno.adapters.providers.usage as usage_mod
+
+        class _Resp:
+            def __enter__(self):  # noqa: ANN001
+                return self
+
+            def __exit__(self, *a):  # noqa: ANN001
+                return False
+
+            def read(self):  # noqa: ANN001
+                return json.dumps({
+                    "five_hour": {"utilization": 5.0, "resets_at": "2026-07-12T02:00:00+00:00"},
+                    "seven_day": {"utilization": 40.0, "resets_at": "2026-07-12T10:00:00+00:00"},
+                    "seven_day_opus": {"utilization": 100.0, "resets_at": "2026-07-12T11:00:00+00:00"},
+                    "seven_day_sonnet": None,
+                    "tangelo": {"utilization": 99.0, "resets_at": "2026-07-12T12:00:00+00:00"},
+                }).encode()
+
+        monkeypatch.setattr(usage_mod.urllib.request, "urlopen", lambda *a, **k: _Resp())
+        snap = probe_usage(_claude_record(tmp_path), now=1000.0)
+        assert snap is not None
+        labels = {w.label: w.used_pct for w in snap.windows}
+        # opus included (as weekly-opus); sonnet null skipped; tangelo excluded.
+        assert labels == {"5h": 5.0, "weekly": 40.0, "weekly-opus": 100.0}
+        # The maxed opus window binds: headroom would read it as the worst.
+        assert max(w.used_pct for w in snap.windows) == 100.0
+
     def test_claude_probe_skips_stale_token_then_succeeds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
