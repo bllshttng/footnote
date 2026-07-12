@@ -78,7 +78,8 @@ The author's model is a proxy for its invoking harness, resolved from the ambien
 | harness/provider `claude` (no route) | anthropic |
 | harness/provider `codex` | openai |
 | harness/provider `gemini` | google |
-| peer with a valid route `"route_provider,route_model"` | `route_provider`'s family (e.g. `zai,glm-5.2` -> zai, which is no known author family) |
+| **claude** peer with a valid route `"route_provider,route_model"` | `route_provider`'s family (e.g. `zai,glm-5.2` -> zai, which is no known author family) |
+| codex/gemini peer with a `model` route | the bare provider's family - the route is IGNORED (only the claude transport executes a route; codex/gemini dispatch runs the bare provider) |
 | unknown provider | none (never matches any author family) |
 
 A peer whose effective family equals the author's family is a **same-model peer** for that run. (The route provider `zai` maps to no known author family, so a `zai`-routed claude peer is genuinely cross-model.)

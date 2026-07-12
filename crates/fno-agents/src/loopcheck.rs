@@ -1650,11 +1650,17 @@ fn route_provider(model: &str) -> Option<&str> {
 }
 
 /// A peer's effective model family: its route provider's family when it names a
-/// valid route, else its bare provider's family.
+/// valid route, else its bare provider's family. A `model` route is only honored
+/// for a **claude** peer, because only the claude transport actually executes a
+/// route (`claude -p` over the routed model); codex/gemini dispatch ignores the
+/// route and runs the bare provider, so trusting a codex/gemini route would
+/// classify a same-model review as cross-model and re-open the bypass this guard
+/// exists to close. Matches the loader, which validates routes for claude only.
 fn peer_family(peer: &PeerEntry) -> Option<&'static str> {
     let effective = peer
         .model
         .as_deref()
+        .filter(|_| peer.provider.trim().eq_ignore_ascii_case("claude"))
         .and_then(route_provider)
         .unwrap_or(peer.provider.as_str());
     harness_family(effective)
@@ -1741,11 +1747,14 @@ fn resolved_required_bots_for_author(
 /// Replace every peer-contributed login backed ONLY by same-model peers with
 /// SAME_MODEL_PEER_SENTINEL and print one loud line per such login. A login with
 /// >=1 cross-model peer (a different family, or an unknown provider) is left
-/// alone. Logins present in the github_apps/required_bots base set are exempt -
-/// an explicit App requirement is never loosened by this guard. Peers are walked
-/// in config order so the output is deterministic.
+/// alone. When a same-model peer login COLLIDES with a github_apps/required_bots
+/// base login (`peer_identity` == an App login), the base login is kept (its App
+/// requirement is not loosened) AND the sentinel is appended, so a same-model
+/// review posted under that shared login can never be the thing that clears the
+/// gate - the collision is a fail-closed hold, not an exemption (codex peer
+/// review on PR #375). Peers are walked in config order so output is deterministic.
 fn apply_same_model_guard(
-    logins: &mut [String],
+    logins: &mut Vec<String>,
     settings: &Settings,
     author_harness: &str,
     author_fam: &str,
@@ -1774,10 +1783,18 @@ fn apply_same_model_guard(
     }
 
     for (login, any_cross, provider) in seen {
-        if any_cross || base_set.is_some_and(|set| set.contains(&login)) {
+        if any_cross {
             continue;
         }
-        if let Some(slot) = logins.iter_mut().find(|l| **l == login) {
+        if base_set.is_some_and(|set| set.contains(&login)) {
+            // Collision: the peer posts under a required App login. Keep the App
+            // requirement, but add the sentinel so this same-model login can't be
+            // what clears the gate (never an exemption - fail closed).
+            if !logins.iter().any(|l| l == SAME_MODEL_PEER_SENTINEL) {
+                logins.push(SAME_MODEL_PEER_SENTINEL.to_string());
+            }
+        } else if let Some(slot) = logins.iter_mut().find(|l| **l == login) {
+            // Peer-only login: replace it with the sentinel.
             *slot = SAME_MODEL_PEER_SENTINEL.to_string();
         }
         eprintln!(
@@ -5659,10 +5676,12 @@ mod tests {
             .any(|l| l == SAME_MODEL_PEER_SENTINEL));
     }
 
-    /// The github_apps base set is never loosened: a same-model peer whose
-    /// identity coincides with a required App login keeps that App requirement.
+    /// A same-model peer whose identity COLLIDES with a required App login is
+    /// fail-closed, not exempt (codex peer review on PR #375): the App login is
+    /// kept (its requirement is not loosened) AND the sentinel is added, so a
+    /// same-model review under the shared login cannot clear the gate.
     #[test]
-    fn base_app_login_exempt_from_guard() {
+    fn base_app_login_collision_is_fail_closed() {
         let s = Settings {
             github_apps: Some(vec!["fno-peer-bot".into()]),
             peers: vec![PeerEntry {
@@ -5674,8 +5693,31 @@ mod tests {
             ..Default::default()
         };
         let logins = resolved_required_bots_for_author(&s, Some("codex"));
-        assert_eq!(logins, vec!["fno-peer-bot".to_string()]);
-        assert!(!logins.iter().any(|l| l == SAME_MODEL_PEER_SENTINEL));
+        assert!(logins.iter().any(|l| l == "fno-peer-bot")); // App requirement kept
+        assert!(logins.iter().any(|l| l == SAME_MODEL_PEER_SENTINEL)); // gate held
+    }
+
+    /// A codex/gemini peer's `model` route is NOT honored (only claude transport
+    /// executes a route; codex/gemini dispatch runs the bare provider). A codex
+    /// peer with a zai route stays openai-family -> same-model on a codex author,
+    /// closing the route-bypass codex flagged on PR #375.
+    #[test]
+    fn non_claude_route_is_ignored() {
+        let routed_codex = PeerEntry {
+            provider: "codex".into(),
+            model: Some("zai,glm-5.2".into()),
+            identity: None,
+        };
+        assert_eq!(peer_family(&routed_codex), Some("openai"));
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![routed_codex],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        let logins = resolved_required_bots_for_author(&s, Some("codex"));
+        assert!(logins.iter().any(|l| l == SAME_MODEL_PEER_SENTINEL));
+        assert!(!logins.iter().any(|l| l == "fno-peer-bot"));
     }
 
     #[test]

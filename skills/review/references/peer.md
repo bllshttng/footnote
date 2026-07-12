@@ -358,10 +358,13 @@ review, or whose post to GitHub failed, must be reported, not papered over.
    `$GEMINI_SESSION_ID`): a claude session rejects a bare `claude`, a codex session
    a bare `codex`, a gemini session a bare `gemini` - each is the author's own
    model, not a second opinion. Point such a request at `/review sigma` or a
-   different provider. The ONE exception is a **routed** peer
-   (`{provider: <p>, model: "route_provider,route_model"}`, step 3b): the CLI is
-   transport for a genuinely different model, so it satisfies the distinct-model
-   invariant (generated via `<p> -p` with the routed env, never `fno agents spawn`).
+   different provider. The ONE exception is a **routed claude** peer
+   (`{provider: claude, model: "route_provider,route_model"}`, step 3b): only the
+   claude CLI is used as transport for a genuinely different model (GLM via z.ai),
+   generated via `claude -p` with the routed env, never `fno agents spawn`. A
+   `model` route on a codex/gemini peer is NOT executed (that dispatch runs the
+   bare provider), so it never turns a same-model peer cross-model - the gate
+   guard honors a route for claude only.
    Layered defense: the loader rejects a bare/anthropic-routed `claude` peer at
    load (fail-early for the dominant claude author) and loop-check's gate-time
    guard (x-c2e7) holds the gate for any same-model author - this RESOLVE refusal
