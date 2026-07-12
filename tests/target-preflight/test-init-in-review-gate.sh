@@ -9,23 +9,19 @@
 #
 # in_review is a DERIVED status (open PR), so we cannot fabricate it in a temp
 # graph. Instead we stub `fno` on PATH to answer the `backlog get --field
-# _status|pr_number` probe from STUB_STATUS/STUB_PR and delegate everything else
-# to the real binary. A marker file proves the guard never probed (free-text,
-# resume).
+# _status|pr_number` probe from STUB_STATUS/STUB_PR. The stub is SELF-CONTAINED:
+# every other verb is a benign success, so the proceed path needs no real fno
+# (CI smoke has none on PATH). A marker file proves the guard never probed
+# (free-text, resume).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INIT_SCRIPT="$REPO_ROOT/hooks/helpers/init-target-state.sh"
-REAL_FNO="$(command -v fno || true)"
 
 if [[ ! -f "$INIT_SCRIPT" ]]; then
     echo "FAIL: init-target-state.sh not found at $INIT_SCRIPT" >&2
-    exit 1
-fi
-if [[ -z "$REAL_FNO" ]]; then
-    echo "FAIL: real fno not found on PATH (needed for stub delegation)" >&2
     exit 1
 fi
 
@@ -34,34 +30,31 @@ FAIL=0
 pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 
-# The proceed path acquires a real claim for the fake node into ~/.fno/claims;
-# release it on exit so a test run leaves no footprint in real state.
 NODE="ab-12345678"
-cleanup() {
-    rm -rf "$TMP_BASE"
-    FNO_CLAIMS_ROOT="$HOME" "$REAL_FNO" claim release "node:$NODE" >/dev/null 2>&1 || true
-}
 TMP_BASE="$(mktemp -d -t target-init-review-XXXXXX)"
-trap cleanup EXIT
+trap 'rm -rf "$TMP_BASE"' EXIT
 
-# ── fno stub: intercept only `backlog get ... --field _status|pr_number` ─────
+# ── Self-contained fno stub ─────────────────────────────────────────────────
+# Answers the guard's backlog-get probe; every other verb (claim acquire/
+# session-pid, config, ...) is a benign exit 0 so init's proceed path completes
+# with no real fno and writes no real claim.
 STUB_BIN="$TMP_BASE/bin"
 mkdir -p "$STUB_BIN"
-cat > "$STUB_BIN/fno" <<STUB
+cat > "$STUB_BIN/fno" <<'STUB'
 #!/usr/bin/env bash
-if [[ "\${1:-}" == "backlog" && "\${2:-}" == "get" ]]; then
+if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
     field=""; prev=""
-    for a in "\$@"; do [[ "\$prev" == "--field" ]] && field="\$a"; prev="\$a"; done
-    case "\$field" in
+    for a in "$@"; do [[ "$prev" == "--field" ]] && field="$a"; prev="$a"; done
+    case "$field" in
         _status)
-            [[ -n "\${STUB_MARKER:-}" ]] && : > "\$STUB_MARKER"
-            [[ "\${STUB_STATUS:-}" == "__fail__" ]] && exit 1
-            printf '%s\n' "\${STUB_STATUS:-}"; exit 0;;
+            [[ -n "${STUB_MARKER:-}" ]] && : > "$STUB_MARKER"
+            [[ "${STUB_STATUS:-}" == "__fail__" ]] && exit 1
+            printf '%s\n' "${STUB_STATUS:-}"; exit 0;;
         pr_number)
-            printf '%s\n' "\${STUB_PR:-}"; exit 0;;
+            printf '%s\n' "${STUB_PR:-}"; exit 0;;
     esac
 fi
-exec "$REAL_FNO" "\$@"
+exit 0
 STUB
 chmod +x "$STUB_BIN/fno"
 
@@ -82,10 +75,9 @@ make_repo() {
 }
 
 # Run init isolated. cwd is a per-scenario worktree-like repo on a feature
-# branch (so the location gate never fires). Real HOME is kept so the delegated
-# real fno works without re-provisioning; the guard uses the ab- id path which
-# never reads the graph, so real state is untouched (the transient claim is
-# released in cleanup).
+# branch (so the location gate never fires). The self-contained stub shadows
+# fno for every call, so no real fno/state is touched; the guard uses the ab-
+# id path which never reads the graph.
 run_init() {
     local cwd="$1"; shift
     (
