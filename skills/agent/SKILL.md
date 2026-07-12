@@ -355,8 +355,14 @@ compute the decision:
 bash "${SKILL_DIR}/scripts/confirm-decision.sh" \
   --node "$node" --provider "$provider" --mode "$mode" \
   --payload-mode "$payload_mode" --yolo "$yolo" --yes "$yes" \
-  --allow-merge "$allow_merge"
+  --permission-mode "$permission_mode" --allow-merge "$allow_merge"
 ```
+
+Pass `--permission-mode "$permission_mode"` so a gate-bypass launch still surfaces
+its caveat: normalize maps `--yolo` on claude to `permission_mode=bypassPermissions`
+and clears `yolo`, so the yolo caveat alone would go silent - the helper instead
+caveats on the effective `bypassPermissions` mode (whether it came from `--yolo` or
+an explicit `--permission-mode`).
 
 It emits `confirm_required` (0|1), `caveat` (0|1), `caveat_text`, a `warn` line,
 and `reason`. `config.agents.confirm` (`always|auto|never`, model default `auto`)
