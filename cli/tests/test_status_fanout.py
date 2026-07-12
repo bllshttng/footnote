@@ -925,3 +925,29 @@ def test_post_json_malformed_url_is_permanent_drop():
 
     r = sf._post_json("not-a-url", {"x": 1}, 1.0)  # fails on URL parse, no network
     assert r.ok is False and r.status == 400
+
+
+def test_tick_same_second_split_across_rotation_boundary(tmp_path):
+    # codex peer P1: a single second split across .1 and the active file. Cursor is
+    # (T, 2) - two T-events already processed (both in .1). The 2 active-file
+    # T-events are occurrences 2 and 3 and MUST deliver. With the old `>=` guard,
+    # .1 was skipped, the occurrence index reset to 0, and both were dropped forever.
+    from fno import status_fanout as sf
+    import json as _json
+
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True)
+    ss = fno_dir / "status-sinks"
+    ss.mkdir()
+    T = "2026-07-12T00:00:05Z"
+    _seed_cursor(ss, "s", T, n=2)
+    with (fno_dir / "events.jsonl.1").open("w") as fh:
+        fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t1"})) + "\n")
+        fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t2"})) + "\n")
+    with (fno_dir / "events.jsonl").open("w") as fh:
+        fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t3"})) + "\n")
+        fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t4"})) + "\n")
+    rec = _Recorder()
+    res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert res.sinks[0].dispatched == 2  # t3, t4 delivered, not lost
+    assert _cursor(ss, "s") == {"ts": T, "n": 4}

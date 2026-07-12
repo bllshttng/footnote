@@ -131,9 +131,12 @@ def _stream_since(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str
     if not rotated.exists():
         return active_events, active_skipped
     active_first = _first_ts(active)
-    # .1 only matters if the cursor is at/before the active file's first line;
-    # once the cursor is inside the active file, the rotated tail is consumed.
-    if since_ts is not None and active_first is not None and since_ts >= active_first:
+    # Skip .1 only when the cursor is STRICTLY inside the active file. On equality
+    # (since_ts == active_first) a second was split across the rotation boundary,
+    # so .1 still holds same-ts events whose occurrence index must be counted
+    # ahead of the active file's - dropping .1 here would reset the index to 0 and
+    # mis-align it against the cursor's n, losing same-second events (codex peer).
+    if since_ts is not None and active_first is not None and since_ts > active_first:
         return active_events, active_skipped
     rotated_events, rotated_skipped = _read_events(rotated, since_ts)
     return rotated_events + active_events, active_skipped + rotated_skipped
