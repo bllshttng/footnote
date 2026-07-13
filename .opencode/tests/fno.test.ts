@@ -254,14 +254,18 @@ test("plugin is inert when FNO_OPENCODE unset — returns {} and never fetches (
   expect(called).toBe(false)
 })
 
-test("collectModels folds a provider.list response into the set", () => {
+test("collectModels folds a provider.list response (data.all shape) into the set", () => {
+  // The SDK 200 body nests providers under data.all (with default/connected
+  // siblings) — NOT directly under data. Iterating data itself throws.
   const into = new Set<string>()
   collectModels(
     {
-      data: [
-        { id: "anthropic", models: { "claude-haiku-4-5": {}, "claude-opus-4-6": {} } },
-        { id: "zai", models: { "glm-5": {} } },
-      ],
+      data: {
+        all: [
+          { id: "anthropic", models: { "claude-haiku-4-5": {}, "claude-opus-4-6": {} } },
+          { id: "zai", models: { "glm-5": {} } },
+        ],
+      },
     },
     into,
   )
@@ -271,10 +275,11 @@ test("collectModels folds a provider.list response into the set", () => {
     "zai/glm-5",
   ])
   expect(collectModels(undefined, new Set()).size).toBe(0) // missing shape is safe
-  expect(collectModels({ data: [{ id: "p" }] }, new Set()).size).toBe(0) // no models key
+  expect(collectModels({ data: { all: [{ id: "p" }] } }, new Set()).size).toBe(0) // no models key
+  expect(collectModels({ data: {} }, new Set()).size).toBe(0) // no all key
   // malformed entries (null provider / missing id) are skipped, not thrown on
   const guarded = collectModels(
-    { data: [null as any, { models: { m: {} } } as any, { id: "ok", models: { m: {} } }] },
+    { data: { all: [null as any, { models: { m: {} } } as any, { id: "ok", models: { m: {} } }] } },
     new Set(),
   )
   expect([...guarded]).toEqual(["ok/m"])
@@ -295,7 +300,7 @@ test("plugin init issues the populate fetch exactly once when activated", async 
       provider: {
         list: async () => {
           calls++
-          return { data: [{ id: "anthropic", models: { "claude-haiku-4-5": {} } }] }
+          return { data: { all: [{ id: "anthropic", models: { "claude-haiku-4-5": {} } }] } }
         },
       },
     },

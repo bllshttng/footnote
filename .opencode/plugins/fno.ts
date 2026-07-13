@@ -139,12 +139,18 @@ export function resolveModel(
   return { providerID, modelID }
 }
 
-/** Fold a provider.list() response into the available-model set (in place). */
+/**
+ * Fold a provider.list() response into the available-model set (in place).
+ * The SDK response body nests the providers under `data.all` (alongside
+ * `default`/`connected`), NOT directly under `data` - iterating `data` itself
+ * would throw on the object and the fire-and-forget .catch would silently
+ * swallow it, leaving the set empty.
+ */
 export function collectModels(
-  providers: { data?: Array<{ id: string; models?: Record<string, unknown> }> } | undefined,
+  providers: { data?: { all?: Array<{ id: string; models?: Record<string, unknown> }> } } | undefined,
   into: Set<string>,
 ): Set<string> {
-  for (const p of providers?.data ?? []) {
+  for (const p of providers?.data?.all ?? []) {
     if (!p?.id) continue // skip malformed entries (no "undefined/model" pollution)
     for (const modelID of Object.keys(p.models ?? {})) into.add(`${p.id}/${modelID}`)
   }
@@ -418,7 +424,7 @@ const plugin: Plugin = async (input: PluginInput) => {
   const available = new Set<string>()
   try {
     ;(input.client as unknown as {
-      provider: { list(): Promise<{ data?: Array<{ id: string; models?: Record<string, unknown> }> }> }
+      provider: { list(): Promise<{ data?: { all?: Array<{ id: string; models?: Record<string, unknown> }> } }> }
     }).provider
       .list()
       .then((providers) => collectModels(providers, available))
