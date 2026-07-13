@@ -447,11 +447,7 @@ class TestCodexFileBackend:
         self, tmp_path, monkeypatch
     ):
         auth = tmp_path / ".codex" / "auth.json"
-        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
-        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
-        target = _rec("cx-a", cli="codex")
-        managed._write_slot_blob("codex", _blob("A0"))
-        managed.snapshot_current(target, root=tmp_path)
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
         auth.unlink()
         monkeypatch.setattr(
             managed,
@@ -462,15 +458,58 @@ class TestCodexFileBackend:
 
         with pytest.raises(managed.ManagedStoreError, match="nothing to roll back"):
             managed.switch(
-                target,
-                by_id={"cx-a": target},
+                a,
+                by_id={"cx-a": a, "cx-b": b},
                 root=tmp_path,
                 emit_fn=lambda kind, **data: events.append((kind, data)),
             )
 
         assert managed._read_slot_blob("codex") == _blob("A0")
         assert managed.active_slot_id("codex", tmp_path) is None
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
         assert events == []
+
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=True),
+        )
+        managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert managed.active_slot_id("codex", tmp_path) == "cx-a"
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+    def test_codex_structural_failure_with_failed_rollback_clears_stamp(
+        self, tmp_path, monkeypatch
+    ):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        original_verify = managed.verify_slot
+        original_write = managed._write_slot_blob
+        calls = {"count": 0}
+
+        monkeypatch.setattr(managed, "verify_slot", lambda record, expected_blob: False)
+
+        def _write(cli, blob, config_dir=None):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise managed.ManagedStoreError("rollback denied")
+            return original_write(cli, blob, config_dir)
+
+        monkeypatch.setattr(managed, "_write_slot_blob", _write)
+        with pytest.raises(managed.ManagedStoreError, match="indeterminate"):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert managed.active_slot_id("codex", tmp_path) is None
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+        monkeypatch.setattr(managed, "verify_slot", original_verify)
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=True),
+        )
+        managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert managed.active_slot_id("codex", tmp_path) == "cx-a"
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
 
     def test_codex_hard_probe_error_rolls_back(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -522,10 +561,10 @@ class TestCodexFileBackend:
         monkeypatch.setattr(managed, "_write_slot_blob", _write)
         with pytest.raises(KeyboardInterrupt) as caught:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
-        assert caught.value.__notes__ == [
-            "codex login verification interrupted; rollback ALSO failed (rollback denied); "
-            "slot is in an indeterminate state"
-        ]
+        assert "rollback ALSO failed (rollback denied)" in caught.value.__notes__[0]
+        assert "active stamp cleared" in caught.value.__notes__[0]
+        assert managed.active_slot_id("codex", tmp_path) is None
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
 
     def test_codex_rejection_reports_rollback_failure(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -546,6 +585,17 @@ class TestCodexFileBackend:
         monkeypatch.setattr(managed, "_write_slot_blob", _write)
         with pytest.raises(managed.ManagedStoreError, match="indeterminate"):
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert managed.active_slot_id("codex", tmp_path) is None
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=True),
+        )
+        managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert managed.active_slot_id("codex", tmp_path) == "cx-a"
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
 
     def test_codex_switch_event_records_verification_strength(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -632,7 +682,8 @@ class TestCodexFileBackend:
         managed._write_slot_blob("codex", _blob("B0"))  # slot holds outgoing B
         managed.snapshot_current(b, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
-        # First scan (pre-write) clear; second scan (post-write) finds a session.
+        # First scan (pre-write) clear; second scan (immediately post-write) finds
+        # a session before the native probe can widen the rollback race.
         calls = {"n": 0}
 
         def _scan(auth_path=None):
@@ -643,7 +694,7 @@ class TestCodexFileBackend:
         monkeypatch.setattr(
             managed,
             "_codex_login_ok",
-            lambda: managed._CodexLoginResult(ok=True),
+            lambda: pytest.fail("late pin must defer before probing codex"),
         )
         with pytest.raises(managed.SwitchDeferred) as exc:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
@@ -651,6 +702,119 @@ class TestCodexFileBackend:
         assert managed._read_slot_blob("codex") == _blob("B0")  # rolled back to outgoing
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"  # stamp not advanced
         assert calls["n"] == 2  # both scans ran
+
+    def test_codex_late_pin_without_rollback_blob_clears_stamp(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        auth.unlink()
+        calls = {"count": 0}
+
+        def _scan(auth_path=None):
+            calls["count"] += 1
+            return [] if calls["count"] == 1 else [managed.PinningSession(891, "codex")]
+
+        monkeypatch.setattr(managed, "codex_pinning_sessions", _scan)
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: pytest.fail("late pin must defer before probing codex"),
+        )
+
+        with pytest.raises(managed.SwitchDeferred, match="active stamp cleared"):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed.active_slot_id("codex", tmp_path) is None
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+    def test_codex_session_started_during_successful_probe_keeps_target(self, tmp_path, monkeypatch):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        pin_active = {"value": False}
+        scans = {"count": 0}
+
+        def _scan(auth_path=None):
+            scans["count"] += 1
+            if pin_active["value"]:
+                return [managed.PinningSession(888, "codex")]
+            return []
+
+        def _probe():
+            pin_active["value"] = True
+            return managed._CodexLoginResult(ok=True)
+
+        monkeypatch.setattr(managed, "codex_pinning_sessions", _scan)
+        monkeypatch.setattr(managed, "_codex_login_ok", _probe)
+
+        result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert result.verification == "codex-recognized"
+        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed.active_slot_id("codex", tmp_path) == "cx-a"
+        assert scans["count"] == 2
+
+    def test_codex_rejection_with_pin_during_probe_withholds_rollback(
+        self, tmp_path, monkeypatch
+    ):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        pin_active = {"value": False}
+
+        def _scan(auth_path=None):
+            if pin_active["value"]:
+                return [managed.PinningSession(889, "codex")]
+            return []
+
+        def _probe():
+            pin_active["value"] = True
+            return managed._CodexLoginResult(ok=False)
+
+        monkeypatch.setattr(managed, "codex_pinning_sessions", _scan)
+        monkeypatch.setattr(managed, "_codex_login_ok", _probe)
+
+        with pytest.raises(managed.ManagedStoreError, match="rollback withheld.*pid 889"):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed.active_slot_id("codex", tmp_path) is None
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+        pin_active["value"] = False
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=True),
+        )
+        result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert result.verification == "codex-recognized"
+        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed.active_slot_id("codex", tmp_path) == "cx-a"
+        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+
+    def test_codex_interrupt_with_pin_during_probe_withholds_rollback(
+        self, tmp_path, monkeypatch
+    ):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        pin_active = {"value": False}
+
+        def _scan(auth_path=None):
+            if pin_active["value"]:
+                return [managed.PinningSession(890, "codex")]
+            return []
+
+        def _probe():
+            pin_active["value"] = True
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(managed, "codex_pinning_sessions", _scan)
+        monkeypatch.setattr(managed, "_codex_login_ok", _probe)
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert "rollback withheld" in caught.value.__notes__[0]
+        assert "pid 890" in caught.value.__notes__[0]
+        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed.active_slot_id("codex", tmp_path) is None
 
     def test_claude_switch_has_single_pin_check(self, fake_slot, tmp_path, monkeypatch):
         """The post-write re-scan is codex-only: claude keeps G1's single pre-write

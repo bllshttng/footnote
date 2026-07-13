@@ -536,6 +536,36 @@ def _rollback_materialized_slot(cli: str, rollback_blob: Optional[str]) -> tuple
     return "slot rolled back to the previous account", True
 
 
+def _rollback_after_codex_probe(
+    target_id: str, rollback_blob: Optional[str], root: Path
+) -> tuple[str, bool]:
+    pins = pinning_sessions_for("codex")
+    if pins:
+        names = ", ".join(f"pid {pin.pid}" for pin in pins)
+        stamp_receipt = _clear_unverified_codex_stamp(root)
+        return (
+            f"rollback withheld because the slot is pinned by a live codex session "
+            f"({names}); slot may hold '{target_id}'; {stamp_receipt}",
+            False,
+        )
+    return _rollback_codex_slot(rollback_blob, root)
+
+
+def _rollback_codex_slot(rollback_blob: Optional[str], root: Path) -> tuple[str, bool]:
+    tail, rolled_back = _rollback_materialized_slot("codex", rollback_blob)
+    if rolled_back:
+        return tail, True
+    return f"{tail}; {_clear_unverified_codex_stamp(root)}", False
+
+
+def _clear_unverified_codex_stamp(root: Path) -> str:
+    try:
+        stamp_active_slot("codex", "", root)
+    except OSError as exc:
+        return f"active stamp could not be cleared ({exc})"
+    return "active stamp cleared because the slot occupant is unverified"
+
+
 def switch(
     target: ProviderRecord,
     *,
@@ -626,11 +656,44 @@ def _switch_locked(
     if not verify_slot(target, target_blob):
         # Verification failed: roll the slot back to the captured outgoing blob.
         # Tell the truth about the resulting slot state - operators act on it.
-        tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+        if target.cli == "codex":
+            tail, _ = _rollback_codex_slot(rollback_blob, root)
+        else:
+            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
         raise ManagedStoreError(
             f"switch to '{target.id}' failed verification (stored token may be "
             f"stale/revoked); {tail}"
         )
+
+    # Codex TOCTOU narrowing (cv-f578cbe7): the pin gate above runs BEFORE the
+    # write, so a codex launched in the snapshot+write window - having read the
+    # OUTGOING creds at startup - is not caught by it. Re-scan immediately after
+    # structural verification; if one appeared, roll the slot back and defer so
+    # the native status probe never widens the accepted write->recheck race. This
+    # is best-effort, not a full fix: a launch in the tiny write->recheck gap is
+    # irreducible without a lease the external codex binary honors. claude keeps
+    # G1's single pre-write check (this arm only, by request).
+    if target.cli == "codex":
+        late_pins = pinning_sessions_for(target.cli)
+        if late_pins:
+            names = ", ".join(f"pid {p.pid}" for p in late_pins)
+            tail, rolled_back = _rollback_codex_slot(rollback_blob, root)
+            if not rolled_back:
+                if rollback_blob:
+                    raise ManagedStoreError(
+                        f"a live {target.cli} session started mid-switch; {tail}; "
+                        f"slot may hold '{target.id}' under a live session"
+                    )
+                raise SwitchDeferred(
+                    f"a live {target.cli} session ({names}) started during the switch "
+                    f"({tail}); retry once it exits",
+                    sessions=late_pins,
+                )
+            raise SwitchDeferred(
+                f"a live {target.cli} session ({names}) started during the switch; "
+                "slot rolled back to the previous account, retry once it exits",
+                sessions=late_pins,
+            )
 
     verification = "structural"
     verification_reason: Optional[str] = None
@@ -638,17 +701,16 @@ def _switch_locked(
         try:
             login = _codex_login_ok()
         except ManagedStoreError as exc:
-            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+            tail, _ = _rollback_after_codex_probe(target.id, rollback_blob, root)
             raise ManagedStoreError(f"codex login verification failed ({exc}); {tail}") from exc
         except KeyboardInterrupt as exc:
-            # Never convert a BaseException into a caught Exception: best-effort
-            # rollback, then let the interrupt propagate so the top-level handler
-            # exits cleanly instead of an outer `except Exception` swallowing it.
-            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+            # Preserve the interrupt while carrying a truthful rollback receipt
+            # through Click's BaseException handling.
+            tail, _ = _rollback_after_codex_probe(target.id, rollback_blob, root)
             exc.add_note(f"codex login verification interrupted; {tail}")
             raise
         if login.ok is False:
-            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+            tail, _ = _rollback_after_codex_probe(target.id, rollback_blob, root)
             raise ManagedStoreError(
                 f"switch to '{target.id}' was not recognized by `codex login status`; {tail}"
             )
@@ -656,37 +718,6 @@ def _switch_locked(
             verification = "codex-recognized"
         else:
             verification_reason = login.reason
-
-    # Codex TOCTOU narrowing (cv-f578cbe7): the pin gate above runs BEFORE the
-    # write, so a codex launched in the snapshot+write window - having read the
-    # OUTGOING creds at startup - is not caught by it. Re-scan once here; if one
-    # appeared, roll the slot back to the outgoing creds and defer, so we never
-    # LEAVE auth.json rewritten under a session that started mid-switch. This is
-    # best-effort, not a full fix: a launch in the tiny write->recheck gap is
-    # irreducible without a lease the external codex binary honors. claude keeps
-    # G1's single pre-write check (this arm only, by request).
-    if target.cli == "codex":
-        late_pins = pinning_sessions_for(target.cli)
-        if late_pins:
-            names = ", ".join(f"pid {p.pid}" for p in late_pins)
-            if not rollback_blob:
-                raise SwitchDeferred(
-                    f"a live {target.cli} session ({names}) started during the switch "
-                    "(no prior creds to restore); retry once it exits",
-                    sessions=late_pins,
-                )
-            try:
-                _write_slot_blob(target.cli, rollback_blob)
-            except ManagedStoreError as rb:
-                raise ManagedStoreError(
-                    f"a live {target.cli} session started mid-switch and the rollback "
-                    f"ALSO failed ({rb}); slot may hold '{target.id}' under a live session"
-                ) from rb
-            raise SwitchDeferred(
-                f"a live {target.cli} session ({names}) started during the switch; "
-                "slot rolled back to the previous account, retry once it exits",
-                sessions=late_pins,
-            )
 
     # Crash window: a kill between the slot write above and this stamp leaves the
     # stamp naming the previous account while the slot holds target. Rare and
