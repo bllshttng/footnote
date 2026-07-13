@@ -1231,16 +1231,6 @@ impl Core {
         out
     }
 
-    /// `pane run`: spawn `argv` as a new tab-pane in the squad `squad_key`
-    /// names (created if absent). PTY-first ordering (Locked 7): a spawn
-    /// failure mutates no model. Each call is its own pane, so three runs into
-    /// one cwd land three panes in one squad (no mux-layer dedup - that lives
-    /// in the spawn front half).
-    /// Resolve a placement target to a concrete squad id, BEFORE any PTY spawn
-    /// (Locked 4 / AC4 fail-closed). `CurrentRoute` yields `current` (the
-    /// caller's cwd/owner default, `None` when no squad exists yet and one must
-    /// be born). An explicit name/id that is missing, ambiguous, or stale is
-    /// refused - it never spawns a PTY and never creates a named squad.
     fn resolve_placement_target(
         &self,
         target: &PaneTarget,
@@ -1250,6 +1240,9 @@ impl Core {
             PaneTarget::CurrentRoute => Ok(current),
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
+                if n.is_empty() {
+                    return Err("target squad name cannot be blank".into());
+                }
                 let mut hits = self
                     .session
                     .squads
@@ -1269,15 +1262,7 @@ impl Core {
         }
     }
 
-    /// Commit an already-spawned pane `pid` per `split`, the single atomic
-    /// placement helper shared by pane-run and fresh attach (Locked 1). `dest`
-    /// is `None` only for a CurrentRoute miss, where a squad is born from
-    /// `squad_key` with `pid` as its first tab (split collapses to first-tab -
-    /// AC6-EDGE, a lone pane has no sibling to split against). Otherwise a
-    /// `None` split mints a new tab; a `Some` split inserts beside the
-    /// destination's active-tab focus. On a split refusal the pane is reaped and
-    /// the prior tree is left byte-for-byte unchanged (AC7). Returns the
-    /// `(squad, tab)` the pane landed in and leaves it focused.
+    /// Place a spawned pane, reaping it on every post-spawn refusal.
     fn place_spawned_pane(
         &mut self,
         dest: Option<u64>,
@@ -1302,14 +1287,10 @@ impl Core {
                 return Ok((sid, tid));
             }
         };
-        let squad = self
-            .session
-            .squad(sid)
-            .ok_or_else(|| "target squad vanished".to_string())?;
-        // First-pane-of-an-empty-squad and split-omitted both mint a fresh tab.
-        // A squad always carries >=1 tab in practice; the empty guard keeps the
-        // active-tab index safe (AC6-EDGE first-tab collapse) rather than
-        // underflowing.
+        let Some(squad) = self.session.squad(sid) else {
+            self.reap_pane(pid);
+            return Err("target squad vanished".into());
+        };
         if split.is_none() || squad.tabs.is_empty() {
             let tid = self.session.mint_tab_id();
             let tab = Tab {
@@ -1337,8 +1318,6 @@ impl Core {
         match tree::split_directional(tab, vp, dir, pid) {
             Ok(()) => Ok((sid, tid)),
             Err(e) => {
-                // Refused split: reap the pre-spawned pane; the tree, claim
-                // eligibility, and mappings are all cleared/untouched (AC7).
                 self.reap_pane(pid);
                 Err(e.to_string())
             }
@@ -1355,18 +1334,14 @@ impl Core {
         claim: bool,
         placement: PanePlacement,
     ) -> Result<u64, String> {
-        // Resolve an explicit target before spawning a PTY - a missing squad
-        // must fail closed with no process wasted (AC4).
         let current = self.session.find_by_cwd(&squad_key);
         let dest = self.resolve_placement_target(&placement.target, current)?;
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
-            // The claim itself is acquired per-burst via PaneClaim. A later
-            // placement refusal reaps the pane, which clears this again.
+            // The claim itself is acquired per-burst via PaneClaim.
             self.claim_eligible.insert(pid);
         }
-        // place_spawned_pane reaps `pid` (clearing claim eligibility) on refusal.
         self.place_spawned_pane(dest, &squad_key, pid, placement.split)?;
         // Keep any attached client's view consistent; a script-only session
         // has no clients, so this is then a cheap no-op.
@@ -3320,7 +3295,7 @@ impl Core {
                 }
                 Flow::Continue
             }
-            Command::AttachAgent { id, placement: _ } => {
+            Command::AttachAgent { id, placement } => {
                 // Validate the jobId shape (8 hex digits) BEFORE it reaches the
                 // argv - defense in depth even though spawn_pane_cmd never
                 // builds a shell string (the id can only ever be `claude
@@ -3357,67 +3332,86 @@ impl Core {
                             // The focus arm clears a Done pane's unseen bit, like
                             // FocusPane - AttachAgent is no longer spawn-only.
                             self.mark_seen_if_done(pid);
+                            // A repeated attach never mints a second pane; the
+                            // notice makes the idempotent focus visible (AC3-HP).
+                            self.notice(client_id, "already attached; focused existing pane");
                             self.push_layout(true);
                             return Flow::Continue;
                         }
                     }
                     self.attached.remove(&id);
                 }
-                // Resolve the OWNING squad (Locked 2): the first squad whose
-                // `owns_path` matches the watch-only row's registry cwd, so the
-                // attach lands where the agent lives, not the viewer's squad;
-                // fall back to the viewed squad for an orphan (AC1-EDGE).
-                let owner = self
+                // The watch-only row's OWN cwd anchors the attach process
+                // (AC8-EDGE): squad target selection never rewrites it, so an
+                // origin-less named target still starts claude in the agent's
+                // dir. Captured before target resolution because owner routing
+                // and the spawn cwd both derive from this one row.
+                let row_cwd = self
                     .agents
                     .iter()
                     .find(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id))
                     .map(|a| a.cwd.clone())
-                    .and_then(|cwd| {
-                        self.session
-                            .squads
-                            .iter()
-                            .find(|s| s.owns_path(&cwd))
-                            .map(|s| s.id)
-                    })
+                    .unwrap_or_default();
+                // Resolve the OWNING squad (Locked 2) as the CurrentRoute
+                // default: the squad whose `owns_path` matches the row cwd, so
+                // the attach lands where the agent lives, not the viewer's
+                // squad; fall back to the viewed squad for an orphan (AC1-EDGE).
+                let owner = self
+                    .session
+                    .squads
+                    .iter()
+                    .find(|s| !row_cwd.is_empty() && s.owns_path(&row_cwd))
+                    .map(|s| s.id)
                     .unwrap_or(view.0);
-                // Spawn `claude attach <id>` as a new tab in the owning squad: the
-                // claude supervisor PTYs the detached bg session into this pane.
-                // cwd is the squad's, like a new tab - attach connects by id, so
-                // the dir is cosmetic.
+                // An explicit UI target overrides owner routing for a fresh
+                // attach (Locked 7); a stale/unknown target fails closed with no
+                // spawn (AC4). Owner is always live, so resolution yields Some.
+                let dest = match self.resolve_placement_target(&placement.target, Some(owner)) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        self.notice(client_id, e);
+                        return Flow::Continue;
+                    }
+                };
+                // Spawn `claude attach <id>`: the claude supervisor PTYs the
+                // detached bg session into this pane. cwd is the agent row's,
+                // falling back to the owner squad's only when the row lacks one.
                 let (rows, cols) = self
                     .clients
                     .iter()
                     .find(|c| c.id == client_id)
                     .map(|c| c.dims)
                     .unwrap_or((vp.rows, vp.cols));
-                let squad_cwd = self
-                    .session
-                    .squad(owner)
-                    .map(|s| s.canonical_cwd().to_string())
-                    .unwrap_or_default();
+                let spawn_cwd = if row_cwd.is_empty() {
+                    self.session
+                        .squad(owner)
+                        .map(|s| s.canonical_cwd().to_string())
+                        .unwrap_or_default()
+                } else {
+                    row_cwd
+                };
                 let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
-                let pid = match self.spawn_pane_cmd(&argv, rows, cols, &squad_cwd) {
+                let pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                     Ok(p) => p,
                     Err(e) => {
                         self.notice(client_id, format!("attach failed: {e}"));
                         return Flow::Continue;
                     }
                 };
-                let tid = self.session.mint_tab_id();
-                let Some(squad) = self.session.squad_mut(owner) else {
-                    return Flow::Continue;
+                // Place through the shared helper (Locked 1): a new tab, or a
+                // directional split beside the target's active-tab focus. A
+                // refusal reaps the pane and leaves the row watch-only (AC7);
+                // the mapping is recorded ONLY after placement succeeds.
+                let (sid, tid) = match self.place_spawned_pane(dest, &spawn_cwd, pid, placement.split)
+                {
+                    Ok(landing) => landing,
+                    Err(e) => {
+                        self.notice(client_id, e);
+                        return Flow::Continue;
+                    }
                 };
-                squad.tabs.push(Tab {
-                    name: None,
-                    id: tid,
-                    root: Node::Leaf(pid),
-                    focus: pid,
-                });
-                // Record the reconcile mapping AFTER the spawn+model mutation
-                // succeed (PTY-first: a failed spawn returned above, writing no
-                // entry - AC1-ERR leaves the row watch-only).
                 self.attached.insert(id, pid);
-                self.set_view(client_id, owner, tid);
+                self.set_view(client_id, sid, tid);
                 self.push_layout(true);
                 Flow::Continue
             }
@@ -6701,6 +6695,59 @@ mod tests {
     }
 
     #[test]
+    fn repeated_attach_focuses_existing_pane_with_notice() {
+        // x-3e38 AC3-HP: a second attach of a mapped agent focuses the live
+        // pane and says so, never minting a second pane. The notice makes the
+        // idempotent focus visible to the operator.
+        let (mut core, client_id, _p1, p2, mut rx) = seen_test_core();
+        core.agents = vec![bg_row("spawn-fix-c3d4", "/tmp/seen", Some("deadbee1"))];
+        core.attached.insert("deadbee1".into(), p2);
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::attach_agent("deadbee1"));
+        assert_eq!(core.panes.len(), panes_before, "reconcile spawns no pane");
+        let mut saw_notice = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Notice { text } = msg {
+                saw_notice |= text.contains("already attached");
+            }
+        }
+        assert!(saw_notice, "a repeated attach reports the idempotent focus");
+    }
+
+    #[test]
+    fn fresh_attach_unknown_target_fails_closed_before_spawn() {
+        // x-3e38 AC4: an explicit target that names no live squad refuses BEFORE
+        // any PTY spawn - no pane, no attach mapping, a visible reason.
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        core.agents = vec![bg_row("spawn-fix-c3d4", "/tmp/seen", Some("deadbee1"))];
+        let panes_before = core.panes.len();
+
+        core.command(
+            client_id,
+            Command::AttachAgent {
+                id: "deadbee1".into(),
+                placement: PanePlacement {
+                    target: PaneTarget::SquadName("ghost".into()),
+                    split: None,
+                },
+            },
+        );
+        assert_eq!(core.panes.len(), panes_before, "no PTY spawned");
+        assert!(
+            !core.attached.contains_key("deadbee1"),
+            "no attach mapping recorded on a refused target"
+        );
+        let mut saw = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Notice { text } = msg {
+                saw |= text.contains("no such squad");
+            }
+        }
+        assert!(saw, "the refusal names the missing squad");
+    }
+
+    #[test]
     fn agent_rows_presents_mapped_watch_only_pane_hosted() {
         // x-0090 AC1-HP (presentation): a watch-only row whose attach maps to a
         // live pane renders pane-hosted under the pane's squad, with attach_id
@@ -7604,6 +7651,7 @@ mod tests {
                 focus: 1,
             },
         );
+        core.next_pane_id = 2;
         core.next_squad_id = 8;
         core
     }
@@ -7665,6 +7713,51 @@ mod tests {
         assert_eq!(squad.tabs.len(), 1);
         assert_eq!(squad.tabs[0].root, Node::Leaf(1));
         assert_eq!(squad.tabs[0].focus, 1);
+    }
+
+    #[test]
+    fn pane_placement_target_does_not_replace_child_cwd() {
+        let mut core = placement_core();
+        let root = std::env::temp_dir().join(format!(
+            "fno-placement-cwd-{}",
+            std::process::id()
+        ));
+        let child_cwd = root.join("child");
+        std::fs::create_dir_all(&child_cwd).unwrap();
+        let marker = child_cwd.join("cwd.txt");
+        let pid = core
+            .run_pane(
+                "/repo/default".into(),
+                child_cwd.to_string_lossy().into_owned(),
+                vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "pwd > cwd.txt; sleep 30".into(),
+                ],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadName("review".into()),
+                    split: None,
+                },
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let reported = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(reported.trim()).unwrap(),
+            std::fs::canonicalize(&child_cwd).unwrap()
+        );
+        let (sid, _) = core.session.find_pane(pid).unwrap();
+        assert_eq!(sid, 7);
+
+        core.reap_pane(pid);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn client(id: u64, view_tab: TabId, dims: (u16, u16), passive: bool) -> Client {
