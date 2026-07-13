@@ -4035,14 +4035,62 @@ async fn peek_keys(
                     }
                 }
             }
+            b'0'..=b'9' => {
+                // Answer a blocked peeked row in place (x-c929 reuse): send the
+                // EXACT PaneAnswer payload (fingerprint, region_lines, keystroke)
+                // only when the row is answerable AND pane-hosted; else BEL,
+                // nothing sent (x-c929 AC1-ERR carried over). The overlay stays
+                // open; the answered row drops from blocked on the next scrape
+                // tick. The daemon-pinned keystroke is relayed opaquely - the
+                // client never fabricates bytes.
+                let payload = match view.display_rows().into_iter().nth(cursor) {
+                    Some(DisplayRow::Agent(a)) => {
+                        a.answerable
+                            .as_ref()
+                            .zip(a.pane_id)
+                            .and_then(|(ans, pane)| {
+                                ans.options
+                                    .iter()
+                                    .find(|o| o.idx.as_bytes().first() == Some(&k))
+                                    .map(|o| {
+                                        (
+                                            pane,
+                                            ans.fingerprint,
+                                            ans.region_lines as u16,
+                                            o.keystroke.clone(),
+                                        )
+                                    })
+                            })
+                    }
+                    _ => None,
+                };
+                match payload {
+                    Some((pane, fingerprint, region_lines, keystroke)) => {
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::PaneAnswer {
+                                pane,
+                                fingerprint,
+                                region_lines,
+                                keystroke,
+                            },
+                        )
+                        .await
+                        .map_err(|e| format!("answer send failed: {e}"))?;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
             0x1b | b'q' => {
                 // Close peek only; the selector stays open with its cursor synced
                 // to the last-peeked row (AC2-UI).
                 view.clear_peek();
                 view.selector = Some(cursor);
             }
-            // Digit (US3) and l/Enter attach (US4) land here in later stories;
-            // everything else is swallowed - never a pane leak.
+            // l/Enter attach (US4) lands here in a follow-up commit; everything
+            // else is swallowed - never a pane leak (leader-layer invariant).
             _ => {}
         }
     }
@@ -7190,6 +7238,44 @@ mod tests {
         assert!(!out.contains("loading"), "no placeholder once loaded");
         // A vanished row renders a safe placeholder, never a panic.
         assert!(peek_overlay_lines(None, &loaded)[0].contains("row gone"));
+    }
+
+    // x-c376 AC3-HP / AC2-ERR: a digit on a blocked, pane-hosted peeked row sends
+    // the exact x-c929 PaneAnswer payload and keeps the overlay open; a digit on a
+    // non-answerable row sends nothing (BEL).
+    #[tokio::test]
+    async fn peek_digit_answers_blocked_row_and_bels_non_answerable() {
+        let mut v = view_with_agents(vec![
+            blocked_row("peer", 4, Some(answerable(&[("1", "Yes"), ("2", "No")], 9))),
+            blocked_row("plain", 5, None),
+        ]);
+        let mut buf: Vec<u8> = Vec::new();
+        let blocked = agent_row_at(&v, |a| a.name == "peer");
+        v.selector = Some(blocked);
+        v.open_peek(blocked);
+        peek_keys(&mut v, b"1", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::PaneAnswer {
+                pane,
+                fingerprint,
+                region_lines,
+                keystroke,
+            } => {
+                assert_eq!(pane, 4);
+                assert_eq!(fingerprint, [9u8; 32]);
+                assert_eq!(region_lines, 8);
+                assert_eq!(keystroke, b"1");
+            }
+            other => panic!("expected PaneAnswer, got {other:?}"),
+        }
+        assert!(v.peek.is_some(), "overlay stays open after answering");
+        // A non-answerable (focus-only) row: a digit sends nothing.
+        let plain = agent_row_at(&v, |a| a.name == "plain");
+        v.open_peek(plain);
+        let mut buf2: Vec<u8> = Vec::new();
+        peek_keys(&mut v, b"1", &mut buf2).await.unwrap();
+        assert!(buf2.is_empty(), "no PaneAnswer for a non-answerable row");
     }
 
     #[tokio::test]
