@@ -414,7 +414,7 @@ def classify_presence(
 # ---------------------------------------------------------------------------
 
 
-def assemble_seed(node: dict) -> ThinkSeed:
+def assemble_seed(node: dict, *, chain_blueprint: bool = False) -> ThinkSeed:
     """Build a /think seed carrying the *resolved* origin pointer.
 
     Resolves the node's x-30f6 provenance pointers to a real transcript path
@@ -423,6 +423,11 @@ def assemble_seed(node: dict) -> ThinkSeed:
     it degrades to the stored ``(harness, session_id, cwd)`` triple with
     ``resolved=False`` (AC1-EDGE) - it NEVER paraphrases the why (the exact bug
     being fixed).
+
+    ``chain_blueprint`` (x-edf7 US3): a decompose fan-out worker must not stop at
+    /think - it chains into /blueprint on the produced doc, which claims the child
+    and links its plan_path (the event that flips it `ready`). A bare /think seed
+    would leave the child designless/`idea`, so the prompt spells the chain out.
     """
     node_id = node.get("id") or "?"
     slug = node.get("slug") or ""
@@ -472,6 +477,18 @@ def assemble_seed(node: dict) -> ThinkSeed:
             f"\nWRITE YOUR /think OUTPUT to this exact path so node {node_id} can "
             f"point at it:\n  {output_path}\n"
             if output_path
+            else ""
+        )
+        + (
+            f"\nTHEN, in this SAME session, CONTINUE into /blueprint - do not stop "
+            f"at /think. Run:\n"
+            f"  /blueprint {output_path or '<your /think doc>'}\n"
+            f"which turns the design into an execution plan and links it to node "
+            f"{node_id} (that link is what flips this child `ready` for dispatch). "
+            f"A design pass that ends without a linked plan_path is a FAILED pass; "
+            f"if /blueprint did not link it, run "
+            f"`fno backlog update {node_id} --plan-path <doc>` yourself.\n"
+            if chain_blueprint
             else ""
         )
     )
@@ -1079,6 +1096,7 @@ def maybe_spawn_think(
     run_state: Optional[RunState] = None,
     invocation_suffix: Optional[str] = None,
     quiet: bool = False,
+    chain_blueprint: bool = False,
 ) -> ThinkSpawnResult:
     """Evaluate + execute the context /think spawn for a node at a trigger moment.
 
@@ -1151,7 +1169,7 @@ def maybe_spawn_think(
 
     # 5. Presence + seed.
     presence = classify_presence(project_root=project_root, env=environ)
-    seed = assemble_seed(node)
+    seed = assemble_seed(node, chain_blueprint=chain_blueprint)
 
     # 5b. Relevance filter (A2, Locked Decision 3): a LIFECYCLE trigger fires only
     #     when the origin pointer resolves - a high-volume work-start/retro moment

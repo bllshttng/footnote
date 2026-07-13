@@ -1040,8 +1040,12 @@ def cmd_decompose(
                 if child is None or child.get("plan_path"):
                     continue  # already-linked children are done; nothing to design
                 if slug_by_id.get(cid) in flagged_slugs:
+                    # chain_blueprint: the worker must continue /think -> /blueprint
+                    # -> link, else the flagged child stays designless/idea forever
+                    # (a bare /think never links plan_path).
                     res = maybe_spawn_think(
-                        child, run_state=born_rs, env=forced_env, quiet=json_mode(ctx)
+                        child, run_state=born_rs, env=forced_env,
+                        quiet=json_mode(ctx), chain_blueprint=True,
                     )
                     if res.decision != "spawned" and not json_mode(ctx):
                         typer.echo(

@@ -65,6 +65,22 @@ def _node(**over) -> dict:
     return base
 
 
+def test_assemble_seed_chain_blueprint_appends_chain(monkeypatch):
+    # x-edf7 US3: a fan-out seed must instruct the worker to continue into
+    # /blueprint + link, else the flagged child stays designless/idea.
+    _resolved(monkeypatch, ok=True)
+    seed = st.assemble_seed(_node(), chain_blueprint=True)
+    assert "/blueprint" in seed.prompt
+    assert "FAILED pass" in seed.prompt
+    assert "--plan-path" in seed.prompt
+
+
+def test_assemble_seed_default_has_no_blueprint_chain(monkeypatch):
+    _resolved(monkeypatch, ok=True)
+    seed = st.assemble_seed(_node())  # default: born-with-why /think only
+    assert "/blueprint" not in seed.prompt
+
+
 @pytest.fixture
 def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     """Patch the spawn seam + forward stamp; return (spawn_calls, stamp_calls)."""
