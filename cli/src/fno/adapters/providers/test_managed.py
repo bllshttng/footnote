@@ -26,6 +26,19 @@ def _blob(token: str) -> str:
     return json.dumps({"claudeAiOauth": {"accessToken": token}})
 
 
+def _codex_blob(token: str) -> str:
+    return json.dumps(
+        {
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": token,
+                "refresh_token": f"refresh-{token}",
+                "id_token": f"id-{token}",
+            },
+        }
+    )
+
+
 def _rec(id_: str, cli: str = "claude") -> ProviderRecord:
     return ProviderRecord(id=id_, name=id_, cli=cli, auth="managed")
 
@@ -321,16 +334,53 @@ def _register_codex_pair(tmp_path, monkeypatch):
     monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
     monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
     a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
-    managed._write_slot_blob("codex", _blob("A0"))
+    managed._write_slot_blob("codex", _codex_blob("A0"))
     managed.snapshot_current(a, root=tmp_path)
     managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
-    managed._write_slot_blob("codex", _blob("B0"))
+    managed._write_slot_blob("codex", _codex_blob("B0"))
     managed.snapshot_current(b, root=tmp_path)
     managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
     return a, b
 
 
 class TestCodexFileBackend:
+    @pytest.mark.parametrize(
+        "blob",
+        [
+            json.dumps({"OPENAI_API_KEY": "sk-test"}),
+            _codex_blob("token"),
+            json.dumps({"personal_access_token": "pat"}),
+            json.dumps({"agent_identity": "jwt"}),
+            json.dumps(
+                {
+                    "agent_identity": {
+                        "agent_runtime_id": "runtime",
+                        "agent_private_key": "private",
+                    }
+                }
+            ),
+            json.dumps({"bedrock_api_key": {"api_key": "key", "region": "us-east-1"}}),
+        ],
+    )
+    def test_codex_auth_requires_supported_credential_material(self, blob):
+        assert managed._codex_auth_present(blob) is True
+
+    @pytest.mark.parametrize(
+        "blob",
+        [
+            "not-json",
+            "[]",
+            "{}",
+            json.dumps({"foo": "bar"}),
+            json.dumps({"OPENAI_API_KEY": " "}),
+            json.dumps({"tokens": {"access_token": "only"}}),
+            json.dumps({"agent_identity": {"agent_runtime_id": "only"}}),
+            json.dumps({"bedrock_api_key": {"api_key": "only"}}),
+        ],
+    )
+    def test_codex_auth_rejects_malformed_or_tokenless_blobs(self, blob):
+        assert managed._codex_auth_present(blob) is False
+
     def test_codex_login_status_uses_slot_home_and_exit_code(self, tmp_path, monkeypatch):
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
@@ -379,8 +429,8 @@ class TestCodexFileBackend:
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
         assert managed._read_slot_blob("codex") is None  # no login yet
-        managed._write_slot_blob("codex", _blob("cx"))
-        assert managed._read_slot_blob("codex") == _blob("cx")
+        managed._write_slot_blob("codex", _codex_blob("cx"))
+        assert managed._read_slot_blob("codex") == _codex_blob("cx")
         assert stat.S_IMODE(auth.stat().st_mode) == 0o600
 
     def test_codex_switch_captures_and_materializes(self, tmp_path, monkeypatch):
@@ -392,8 +442,8 @@ class TestCodexFileBackend:
             lambda: managed._CodexLoginResult(ok=True),
         )
         result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
-        assert managed._read_slot_blob("codex") == _blob("A0")
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert managed._read_slot_blob("codex") == _codex_blob("A0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
         assert result.slot_changed is True
         assert result.verification == "codex-recognized"
         assert result.reason is None
@@ -439,9 +489,24 @@ class TestCodexFileBackend:
                 emit_fn=lambda kind, **data: events.append((kind, data)),
             )
 
-        assert managed._read_slot_blob("codex") == _blob("B0")
+        assert managed._read_slot_blob("codex") == _codex_blob("B0")
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"
         assert events == []
+
+    def test_tokenless_codex_snapshot_rolls_back_before_native_probe(self, tmp_path, monkeypatch):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        (tmp_path / "cx-a" / "blob").write_text(json.dumps({"foo": "bar"}))
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: pytest.fail("tokenless auth must fail structural verification"),
+        )
+
+        with pytest.raises(managed.ManagedStoreError, match="failed verification"):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert managed._read_slot_blob("codex") == _codex_blob("B0")
+        assert managed.active_slot_id("codex", tmp_path) == "cx-b"
 
     def test_codex_login_rejection_without_rollback_blob_reports_slot_state(
         self, tmp_path, monkeypatch
@@ -464,9 +529,9 @@ class TestCodexFileBackend:
                 emit_fn=lambda kind, **data: events.append((kind, data)),
             )
 
-        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed._read_slot_blob("codex") == _codex_blob("A0")
         assert managed.active_slot_id("codex", tmp_path) is None
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
         assert events == []
 
         monkeypatch.setattr(
@@ -476,7 +541,7 @@ class TestCodexFileBackend:
         )
         managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert managed.active_slot_id("codex", tmp_path) == "cx-a"
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
     def test_codex_structural_failure_with_failed_rollback_clears_stamp(
         self, tmp_path, monkeypatch
@@ -499,7 +564,7 @@ class TestCodexFileBackend:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
 
         assert managed.active_slot_id("codex", tmp_path) is None
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
         monkeypatch.setattr(managed, "verify_slot", original_verify)
         monkeypatch.setattr(
@@ -509,7 +574,7 @@ class TestCodexFileBackend:
         )
         managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert managed.active_slot_id("codex", tmp_path) == "cx-a"
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
     def test_codex_hard_probe_error_rolls_back(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -520,7 +585,7 @@ class TestCodexFileBackend:
         monkeypatch.setattr(managed, "_codex_login_ok", _raise)
         with pytest.raises(managed.ManagedStoreError, match="permission denied"):
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
-        assert managed._read_slot_blob("codex") == _blob("B0")
+        assert managed._read_slot_blob("codex") == _codex_blob("B0")
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"
 
     def test_codex_probe_interrupt_rolls_back_then_reraises(self, tmp_path, monkeypatch):
@@ -535,7 +600,7 @@ class TestCodexFileBackend:
         assert caught.value.__notes__ == [
             "codex login verification interrupted; slot rolled back to the previous account"
         ]
-        assert managed._read_slot_blob("codex") == _blob("B0")
+        assert managed._read_slot_blob("codex") == _codex_blob("B0")
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"
 
     def test_codex_probe_interrupt_reraises_even_when_rollback_fails(
@@ -564,7 +629,7 @@ class TestCodexFileBackend:
         assert "rollback ALSO failed (rollback denied)" in caught.value.__notes__[0]
         assert "active stamp cleared" in caught.value.__notes__[0]
         assert managed.active_slot_id("codex", tmp_path) is None
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
     def test_codex_rejection_reports_rollback_failure(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -586,7 +651,7 @@ class TestCodexFileBackend:
         with pytest.raises(managed.ManagedStoreError, match="indeterminate"):
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert managed.active_slot_id("codex", tmp_path) is None
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
         monkeypatch.setattr(
             managed,
@@ -595,7 +660,7 @@ class TestCodexFileBackend:
         )
         managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert managed.active_slot_id("codex", tmp_path) == "cx-a"
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
     def test_codex_switch_event_records_verification_strength(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -630,7 +695,7 @@ class TestCodexFileBackend:
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
         target = _rec("cx-a", cli="codex")
-        managed._write_slot_blob("codex", _blob("A0"))
+        managed._write_slot_blob("codex", _codex_blob("A0"))
         managed.snapshot_current(target, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
         monkeypatch.setattr(
@@ -651,10 +716,10 @@ class TestCodexFileBackend:
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
         a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
-        managed._write_slot_blob("codex", _blob("A0"))
+        managed._write_slot_blob("codex", _codex_blob("A0"))
         managed.snapshot_current(a, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
-        managed._write_slot_blob("codex", _blob("B0"))
+        managed._write_slot_blob("codex", _codex_blob("B0"))
         managed.snapshot_current(b, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
         monkeypatch.setattr(
@@ -666,7 +731,7 @@ class TestCodexFileBackend:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert "555" in str(exc.value) and "codex" in str(exc.value)
         assert managed._read_slot_blob("codex") == before  # slot untouched
-        assert (tmp_path / "cx-a" / "blob").read_text() == _blob("A0")  # store untouched
+        assert (tmp_path / "cx-a" / "blob").read_text() == _codex_blob("A0")  # store untouched
 
     def test_codex_session_launched_mid_switch_rolls_back(self, tmp_path, monkeypatch):
         """TOCTOU narrowing (cv-f578cbe7): the pre-write pin check is clear, but a
@@ -676,10 +741,10 @@ class TestCodexFileBackend:
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
         a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
-        managed._write_slot_blob("codex", _blob("A0"))
+        managed._write_slot_blob("codex", _codex_blob("A0"))
         managed.snapshot_current(a, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
-        managed._write_slot_blob("codex", _blob("B0"))  # slot holds outgoing B
+        managed._write_slot_blob("codex", _codex_blob("B0"))  # slot holds outgoing B
         managed.snapshot_current(b, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
         # First scan (pre-write) clear; second scan (immediately post-write) finds
@@ -699,7 +764,7 @@ class TestCodexFileBackend:
         with pytest.raises(managed.SwitchDeferred) as exc:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert "777" in str(exc.value) and "during the switch" in str(exc.value)
-        assert managed._read_slot_blob("codex") == _blob("B0")  # rolled back to outgoing
+        assert managed._read_slot_blob("codex") == _codex_blob("B0")  # rolled back to outgoing
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"  # stamp not advanced
         assert calls["n"] == 2  # both scans ran
 
@@ -723,9 +788,9 @@ class TestCodexFileBackend:
         with pytest.raises(managed.SwitchDeferred, match="active stamp cleared"):
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
 
-        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed._read_slot_blob("codex") == _codex_blob("A0")
         assert managed.active_slot_id("codex", tmp_path) is None
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
     def test_codex_session_started_during_successful_probe_keeps_target(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -748,7 +813,7 @@ class TestCodexFileBackend:
         result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
 
         assert result.verification == "codex-recognized"
-        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed._read_slot_blob("codex") == _codex_blob("A0")
         assert managed.active_slot_id("codex", tmp_path) == "cx-a"
         assert scans["count"] == 2
 
@@ -773,9 +838,9 @@ class TestCodexFileBackend:
         with pytest.raises(managed.ManagedStoreError, match="rollback withheld.*pid 889"):
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
 
-        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed._read_slot_blob("codex") == _codex_blob("A0")
         assert managed.active_slot_id("codex", tmp_path) is None
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
         pin_active["value"] = False
         monkeypatch.setattr(
@@ -786,9 +851,9 @@ class TestCodexFileBackend:
         result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
 
         assert result.verification == "codex-recognized"
-        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed._read_slot_blob("codex") == _codex_blob("A0")
         assert managed.active_slot_id("codex", tmp_path) == "cx-a"
-        assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert (tmp_path / "cx-b" / "blob").read_text() == _codex_blob("B0")
 
     def test_codex_interrupt_with_pin_during_probe_withholds_rollback(
         self, tmp_path, monkeypatch
@@ -813,7 +878,7 @@ class TestCodexFileBackend:
 
         assert "rollback withheld" in caught.value.__notes__[0]
         assert "pid 890" in caught.value.__notes__[0]
-        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed._read_slot_blob("codex") == _codex_blob("A0")
         assert managed.active_slot_id("codex", tmp_path) is None
 
     def test_claude_switch_has_single_pin_check(self, fake_slot, tmp_path, monkeypatch):

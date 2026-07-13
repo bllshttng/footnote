@@ -260,6 +260,8 @@ def verify_slot(record: ProviderRecord, expected_blob: str) -> bool:
     got = _read_slot_blob(record.cli)
     if got is None or got.strip() != expected_blob.strip():
         return False
+    if record.cli == "codex":
+        return _codex_auth_present(got)
     return _token_present(got)
 
 
@@ -293,8 +295,8 @@ def _codex_login_ok() -> _CodexLoginResult:
 def _token_present(blob: str) -> bool:
     """A materialized blob must decode to something with an access token.
 
-    Mirrors usage.py's tolerance: the token can sit at a couple of known paths;
-    a non-JSON codex file counts as present (its shape is opaque here)."""
+    Mirrors usage.py's tolerance for Claude credentials: the token can sit at
+    a couple of known paths, and an opaque non-JSON keychain blob counts."""
     try:
         data = json.loads(blob)
     except (ValueError, TypeError):
@@ -305,6 +307,41 @@ def _token_present(blob: str) -> bool:
     if isinstance(oauth, dict) and oauth.get("accessToken"):
         return True
     return bool(data.get("accessToken") or data.get("access_token") or data)
+
+
+def _codex_auth_present(blob: str) -> bool:
+    """Require credential material from Codex's AuthDotJson schema."""
+    try:
+        data = json.loads(blob)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    def nonempty(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    if nonempty(data.get("OPENAI_API_KEY")) or nonempty(data.get("personal_access_token")):
+        return True
+
+    tokens = data.get("tokens")
+    if isinstance(tokens, dict) and all(
+        nonempty(tokens.get(field)) for field in ("access_token", "refresh_token", "id_token")
+    ):
+        return True
+
+    identity = data.get("agent_identity")
+    if nonempty(identity):
+        return True
+    if isinstance(identity, dict) and all(
+        nonempty(identity.get(field)) for field in ("agent_runtime_id", "agent_private_key")
+    ):
+        return True
+
+    bedrock = data.get("bedrock_api_key")
+    return isinstance(bedrock, dict) and all(
+        nonempty(bedrock.get(field)) for field in ("api_key", "region")
+    )
 
 
 # ---------------------------------------------------------------------------
