@@ -328,6 +328,16 @@ enum CoreMsg {
         name: String,
         lines: Vec<String>,
     },
+    /// (x-7561) A refreshed external-lifecycle record set from an off-loop
+    /// external action (`claude stop|rm`) or the startup reconcile, routed back
+    /// so the render snapshot update + layout push run on the core loop. `to`
+    /// targets one client (an action outcome) or every client (`None`, the
+    /// reconcile broadcast); `notices` are the bounded per-record messages.
+    ExternalLifecycleSync {
+        to: Option<u64>,
+        records: Vec<crate::squad_store::ExternalLifecycle>,
+        notices: Vec<String>,
+    },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
@@ -780,6 +790,12 @@ struct Core {
     /// inert (ids never reused; no GC - ponytail: a dead-sid leak is one small
     /// map entry per closed workspace per session, bounded by session length).
     squad_members: HashMap<u64, Vec<crate::squad_store::StoredMember>>,
+    /// (x-7561) Machine-global external-row lifecycle tombstones the sideline
+    /// renders (stopped -> exited `x`-removable; failed/unknown/stopping/removing
+    /// -> `!exited` with an in-flight reason). Loaded at restore, refreshed after
+    /// every external action and the startup reconcile. The durable truth is
+    /// `squads.json`'s `external_lifecycle`; this is the render snapshot.
+    external_lifecycle: Vec<crate::squad_store::ExternalLifecycle>,
     /// (x-8f11) Latch for the one-shot "persistence degraded" notice (AC3-ERR):
     /// a store-write failure notices every client exactly once, then stays
     /// silent so a full disk never spams a bell per keystroke.
@@ -985,6 +1001,83 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
         }
     };
     body.lines().map(str::to_string).collect()
+}
+
+/// Shell `fno-agents reap --json` once for the bulk-reap gesture (x-7561),
+/// bounded + fail-open like [`run_agent_action`]: on success parse the `reaped`
+/// array length into a visible `reaped N` count (zero is a successful `reaped
+/// 0`), else a bounded failure notice. The argv is a fixed literal.
+async fn run_reap() -> String {
+    const REAP_TIMEOUT: Duration = Duration::from_secs(20);
+    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+        .args(["reap", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(REAP_TIMEOUT, fut).await {
+        Err(_) => "reap: timed out".to_string(),
+        Ok(Err(_)) => "reap: unavailable".to_string(),
+        Ok(Ok(out)) if out.status.success() => reap_notice(&String::from_utf8_lossy(&out.stdout)),
+        Ok(Ok(_)) => "reap: failed".to_string(),
+    }
+}
+
+/// Shell `claude <verb> <attach_id>` for an external lifecycle action (x-7561):
+/// `stop` preserves the conversation, `rm` deletes the session + worktree
+/// (Domain Pitfall 2 - they are not interchangeable). Bounded + argv-safe (the
+/// id is 8-hex validated at load, never a shell string). Returns `(ok, reason)`:
+/// the caller's `complete_external` maps `ok` to stopped/removed vs failed.
+async fn run_claude_lifecycle(verb: &'static str, attach_id: &str) -> (bool, Option<String>) {
+    const CLAUDE_TIMEOUT: Duration = Duration::from_secs(20);
+    let fut = tokio::process::Command::new("claude")
+        .args([verb, attach_id])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    match tokio::time::timeout(CLAUDE_TIMEOUT, fut).await {
+        Err(_) => (false, Some(format!("{verb} timed out"))),
+        Ok(Err(_)) => (false, Some("claude unavailable".to_string())),
+        Ok(Ok(status)) if status.success() => (true, None),
+        Ok(Ok(_)) => (false, Some(format!("{verb} failed"))),
+    }
+}
+
+/// Shell `claude agents --json --all` ONCE for the startup reconcile (x-7561),
+/// bounded + fail-open: parse the tracked-id liveness map, or `None` on missing
+/// binary / non-zero exit / timeout / schema drift so the caller holds tracked
+/// rows as `unknown` rather than deleting an id it could not observe (AC1-FR).
+async fn run_claude_agents_all(
+    tracked: &std::collections::HashSet<String>,
+) -> Option<HashMap<String, crate::agents_view::ObservedExternal>> {
+    const AGENTS_TIMEOUT: Duration = Duration::from_secs(10);
+    let fut = tokio::process::Command::new("claude")
+        .args(["agents", "--json", "--all"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(AGENTS_TIMEOUT, fut).await.ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    crate::agents_view::parse_claude_agents(&String::from_utf8_lossy(&output.stdout), tracked)
+}
+
+/// Map `fno-agents reap --json` stdout to the `reaped N` notice. The verb
+/// exited zero, so the reap ran; unparseable output still reports a success
+/// with an unknown count rather than a false failure (the row-vanish is the
+/// authoritative truth, this notice is advisory).
+fn reap_notice(stdout: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        Ok(v) => match v.get("reaped").and_then(|r| r.as_array()) {
+            Some(arr) => format!("reaped {}", arr.len()),
+            None => "reaped 0".to_string(),
+        },
+        Err(_) => "reap: done".to_string(),
+    }
 }
 
 /// x-0296 CI diagnostics: timestamped breadcrumbs for the e2e server log
@@ -1546,6 +1639,12 @@ impl Core {
         if let Some(n) = loaded.notice {
             self.notice_all(n);
         }
+        // (x-7561) Stash the external-lifecycle tombstones so the sideline can
+        // render them BEFORE the squads-empty early-out - a store with no named
+        // squads can still hold stopped/failed external rows to act on. The
+        // startup reconcile against `claude agents --all` runs off-loop from the
+        // attach path and refreshes this via `ExternalLifecycleSync`.
+        self.external_lifecycle = loaded.external_lifecycle;
         if loaded.squads.is_empty() {
             return;
         }
@@ -1766,6 +1865,130 @@ impl Core {
         });
     }
 
+    /// Bulk-reap OFF the core loop (x-7561): shell `fno-agents reap --json` once,
+    /// parse the reaped count, route it back as a `reaped N` notice. Same
+    /// off-loop + advisory-notice contract as `agent_action`; the registry poll
+    /// owns the row-vanish, not this notice.
+    fn reap_action(&self, id: u64) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_reap().await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
+    /// Resolve a `StopExternal` target by attach id (x-7561): return the
+    /// `(name, cwd)` snapshot for the CAS, from a LIVE external roster row (the
+    /// normal live stop) OR a persisted retry-eligible tombstone (a
+    /// failed/unknown/stopping record whose `x` retries the stop). Fail-closed
+    /// when the id names neither - the AC1-ERR stale-target refusal, so a row
+    /// that raced out between confirm and command launches no subprocess.
+    fn resolve_external_stop_target(&self, attach_id: &str) -> Result<(String, String), String> {
+        if let Some(a) = self
+            .agents
+            .iter()
+            .find(|a| a.external && a.attach_id.as_deref() == Some(attach_id))
+        {
+            return Ok((a.name.clone(), a.cwd.clone()));
+        }
+        use crate::squad_store::ExternalState as S;
+        if let Some(r) = self.external_lifecycle.iter().find(|r| {
+            r.attach_id == attach_id && matches!(r.state, S::Failed | S::Unknown | S::Stopping)
+        }) {
+            return Ok((r.name.clone(), r.cwd.clone()));
+        }
+        Err(format!("{attach_id} is no longer a live external row"))
+    }
+
+    /// Re-read the durable `external_lifecycle` into the render snapshot and
+    /// re-push the sideline (x-7561), so an in-flight `stopping…`/`removing…`
+    /// state is visible the instant the CAS commits (AC1-UI), before the
+    /// off-loop subprocess even starts.
+    fn refresh_external_lifecycle(&mut self) {
+        self.external_lifecycle = crate::squad_store::load().external_lifecycle;
+        self.push_layout(true);
+    }
+
+    /// Run an external lifecycle subprocess (`claude stop|rm <attach_id>`) OFF
+    /// the core loop (x-7561), then durably record the completion under the
+    /// captured `generation` (a stale generation is ignored by
+    /// `complete_external`) and route the refreshed record set + outcome notice
+    /// back for the render update. `verb` is a fixed literal; `attach_id` was
+    /// 8-hex validated at load, so it can never be a shell injection.
+    fn external_action(
+        &self,
+        client_id: u64,
+        verb: &'static str,
+        attach_id: String,
+        generation: u64,
+        action: crate::squad_store::ExternalState,
+    ) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let (ok, reason) = run_claude_lifecycle(verb, &attach_id).await;
+            let _ = crate::squad_store::complete_external(
+                &attach_id,
+                generation,
+                action,
+                ok,
+                reason.clone(),
+            );
+            let records = crate::squad_store::load().external_lifecycle;
+            let past = if verb == "stop" { "stopped" } else { "removed" };
+            let notice = if ok {
+                format!("{past} {attach_id}")
+            } else {
+                reason.unwrap_or_else(|| format!("{verb} {attach_id}: failed"))
+            };
+            let _ = core_tx
+                .send(CoreMsg::ExternalLifecycleSync {
+                    to: Some(client_id),
+                    records,
+                    notices: vec![notice],
+                })
+                .await;
+        });
+    }
+
+    /// Reconcile the persisted external tombstones against `claude agents --json
+    /// --all` ONCE at startup (x-7561, AC1-FR/AC3-FR), OFF the core loop. Filters
+    /// the daemon's full history to tracked ids only, applies the pure reconcile
+    /// table, commits the result, and routes the refreshed set + notices back to
+    /// every client. A no-tracked-id store spawns nothing.
+    fn reconcile_external_lifecycle(&self) {
+        // Snapshot attach_id -> generation BEFORE the off-lock query, so the
+        // atomic locked apply can leave any record a concurrent operator action
+        // advanced past its baseline untouched (lost-update guard, code review).
+        let baseline: std::collections::HashMap<String, u64> = self
+            .external_lifecycle
+            .iter()
+            .map(|r| (r.attach_id.clone(), r.generation))
+            .collect();
+        if baseline.is_empty() {
+            return;
+        }
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let tracked: std::collections::HashSet<String> = baseline.keys().cloned().collect();
+            let observed = run_claude_agents_all(&tracked).await;
+            // Read-compute-write is atomic under the store lock: reconcile only
+            // the baseline-generation-matching records; a concurrent stop/rm's
+            // record (advanced generation) is left for its own completion.
+            let notices = crate::squad_store::reconcile_lifecycle(&baseline, |reconcilable| {
+                crate::agents_view::reconcile_external(reconcilable, observed.as_ref())
+            })
+            .unwrap_or_default();
+            let records = crate::squad_store::load().external_lifecycle;
+            let _ = core_tx
+                .send(CoreMsg::ExternalLifecycleSync {
+                    to: None,
+                    records,
+                    notices,
+                })
+                .await;
+        });
+    }
+
     /// Resolve a sideline lifecycle target (x-76ea `StopAgent`/`RemoveAgent`) by
     /// name against the current catalog, returning the exited flag of the single
     /// resolved registry row. `name` is NOT a unique key (codex review): the
@@ -1935,6 +2158,10 @@ impl Core {
         if !self.restored && !passive {
             self.restored = true;
             self.restore_squads(rows, cols, view.0);
+            // (x-7561) One bounded `claude agents --all` reconcile of the loaded
+            // external tombstones, off the core loop; a no-tombstone store is a
+            // no-op. Runs after restore so `self.external_lifecycle` is populated.
+            self.reconcile_external_lifecycle();
         }
     }
 
@@ -2577,6 +2804,67 @@ impl Core {
                     tombstone: true,
                 });
             }
+        }
+        // 4. External-lifecycle tombstone rows (x-7561): a persisted external
+        //    record NOT currently live renders so `x` can act on it. The state
+        //    maps onto the existing `exited` flag - stopped -> `exited` (rm);
+        //    failed/unknown/stopping/removing -> `!exited` (stop / stop-retry),
+        //    with the state as the row reason so an in-flight action is visible
+        //    (AC1-UI). Deduped against live external rows (a still-live roster
+        //    row wins; the record is stale until the next reconcile clears it).
+        let live_ext: std::collections::HashSet<&str> = self
+            .agents
+            .iter()
+            .filter(|a| a.external)
+            .filter_map(|a| a.attach_id.as_deref())
+            .collect();
+        for r in &self.external_lifecycle {
+            if live_ext.contains(r.attach_id.as_str()) {
+                continue;
+            }
+            use crate::squad_store::ExternalState as S;
+            let (exited, reason) = match r.state {
+                S::Stopped => (true, None),
+                S::Failed => (
+                    false,
+                    Some(r.reason.clone().unwrap_or_else(|| "stop failed".into())),
+                ),
+                S::Unknown => (false, Some("state unknown".to_string())),
+                S::Stopping => (false, Some("stopping…".to_string())),
+                S::Removing => (false, Some("removing…".to_string())),
+            };
+            let squad = self
+                .session
+                .squads
+                .iter()
+                .find(|s| s.owns_path(&r.cwd))
+                .map(|s| s.id);
+            let cwd_base = squad.is_none().then(|| {
+                Path::new(&r.cwd)
+                    .file_name()
+                    .and_then(|b| b.to_str())
+                    .unwrap_or(r.cwd.as_str())
+                    .to_string()
+            });
+            out.push(AgentRow {
+                squad,
+                name: r.name.clone(),
+                pane_id: None,
+                badge: None,
+                reason,
+                exited,
+                answerable: None,
+                // Carried on an exited row so the client can send RemoveExternal;
+                // on a live-ish row it is the StopExternal target. Either way the
+                // attach-catalog gate (attach_id + !exited) never treats a stopped
+                // tombstone as attachable.
+                attach_id: Some(r.attach_id.clone()),
+                external: true,
+                tab: None,
+                seen: false,
+                cwd_base,
+                tombstone: false,
+            });
         }
         out
     }
@@ -3997,6 +4285,83 @@ impl Core {
                 self.peek_agent(client_id, name, seq);
                 Flow::Continue
             }
+            Command::ReapAgents => {
+                // Bulk-reap every exited fno-agent registry row (x-7561). The
+                // requester is already known-interactive (the `mutating_sender`
+                // gate drops a passive client's Command upstream). The reap verb
+                // owns the candidate set, so there is no per-row resolution and
+                // zero candidates is a visible successful `reaped 0`. Off-loop +
+                // bounded, mirroring `agent_action`; the registry poll owns the
+                // row-vanish, this notice is advisory. The immediate `reaping…`
+                // notice gives visible in-flight feedback (codex P2) before the
+                // up-to-20s subprocess, since reap has no row-level state.
+                self.notice(client_id, "reaping exited agents…");
+                self.reap_action(client_id);
+                Flow::Continue
+            }
+            Command::StopExternal { attach_id, name: _ } => {
+                // Stop a live external claude-daemon row (or retry a failed/unknown
+                // tombstone) by stable attach id (x-7561). Validate the id names
+                // an actionable external target NOW (AC1-ERR stale refusal), then
+                // the durable CAS gates the spawn.
+                if !crate::squad_store::valid_attach_id(&attach_id) {
+                    // The id rides from the client (which read it off an
+                    // unvalidated roster row); reject a non-8-hex value before it
+                    // is persisted or reaches the `claude stop` argv (codex P2 -
+                    // a dash-prefixed id could be read as a CLI option).
+                    self.notice(client_id, "invalid external id");
+                    return Flow::Continue;
+                }
+                match self.resolve_external_stop_target(&attach_id) {
+                    Err(msg) => self.notice(client_id, msg),
+                    Ok((rname, cwd)) => {
+                        match crate::squad_store::begin_external_stop(&attach_id, &rname, &cwd) {
+                            Err(e) => self.persist_degraded(&e),
+                            Ok(crate::squad_store::LifecycleCas::Refused(r)) => {
+                                self.notice(client_id, r)
+                            }
+                            Ok(crate::squad_store::LifecycleCas::Committed { generation }) => {
+                                self.refresh_external_lifecycle();
+                                self.notice(client_id, format!("stopping {rname}…"));
+                                self.external_action(
+                                    client_id,
+                                    "stop",
+                                    attach_id,
+                                    generation,
+                                    crate::squad_store::ExternalState::Stopping,
+                                );
+                            }
+                        }
+                    }
+                }
+                Flow::Continue
+            }
+            Command::RemoveExternal { attach_id, name } => {
+                // Remove a STOPPED external tombstone by attach id (x-7561). No
+                // live-row lookup - the target is a persisted tombstone; the CAS
+                // itself is the stop-before-rm gate (refuses any non-stopped
+                // state with a specific reason).
+                if !crate::squad_store::valid_attach_id(&attach_id) {
+                    self.notice(client_id, "invalid external id");
+                    return Flow::Continue;
+                }
+                match crate::squad_store::begin_external_rm(&attach_id) {
+                    Err(e) => self.persist_degraded(&e),
+                    Ok(crate::squad_store::LifecycleCas::Refused(r)) => self.notice(client_id, r),
+                    Ok(crate::squad_store::LifecycleCas::Committed { generation }) => {
+                        self.refresh_external_lifecycle();
+                        self.notice(client_id, format!("removing {name}…"));
+                        self.external_action(
+                            client_id,
+                            "rm",
+                            attach_id,
+                            generation,
+                            crate::squad_store::ExternalState::Removing,
+                        );
+                    }
+                }
+                Flow::Continue
+            }
             Command::CopySelection => {
                 // Keyboard copy (leader+y): the focused pane's selection, else the
                 // newest completed block (precedence + refusals in copy_source).
@@ -4202,6 +4567,27 @@ impl Core {
                     let _ = c
                         .reliable_tx
                         .try_send(ServerMsg::PeekBody { seq, name, lines });
+                }
+                Flow::Continue
+            }
+            CoreMsg::ExternalLifecycleSync {
+                to,
+                records,
+                notices,
+            } => {
+                // (x-7561) An off-loop external action / reconcile finished: swap
+                // in the fresh render snapshot, re-push the sideline, and surface
+                // the outcome (to one client for an action, to all for a
+                // reconcile). This is the ONLY writer of `external_lifecycle` on
+                // the core loop, so a stale action's late sync just re-renders
+                // the durable truth it already re-read.
+                self.external_lifecycle = records;
+                self.push_layout(true);
+                for n in notices {
+                    match to {
+                        Some(cid) => self.notice(cid, n),
+                        None => self.notice_all(n),
+                    }
                 }
                 Flow::Continue
             }
@@ -4596,6 +4982,7 @@ async fn serve(
         seen: HashSet::new(),
         attached: HashMap::new(),
         squad_members: HashMap::new(),
+        external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
         restored: false,
     };
@@ -6741,6 +7128,149 @@ mod tests {
         }
     }
 
+    fn ext_record(
+        id: &str,
+        state: crate::squad_store::ExternalState,
+    ) -> crate::squad_store::ExternalLifecycle {
+        crate::squad_store::ExternalLifecycle {
+            attach_id: id.into(),
+            name: format!("ext-{id}"),
+            cwd: "/tmp".into(),
+            state,
+            generation: 1,
+            updated_at: String::new(),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn stop_external_stale_id_refused_without_spawn() {
+        // AC1-ERR: a StopExternal whose attach id names neither a live external
+        // row nor a retry-eligible tombstone is refused fail-closed - no
+        // subprocess. A plain #[test] has no tokio runtime, so reaching the
+        // spawn would panic; the clean refusal proves it never does.
+        let mut core = empty_core();
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::StopExternal {
+                attach_id: "deadbeef".into(),
+                name: "ext".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx)
+            .unwrap()
+            .contains("no longer a live external row"));
+    }
+
+    #[test]
+    fn external_lifecycle_invalid_id_refused_before_spawn() {
+        // codex P2: a non-8-hex attach id from the client is rejected before it
+        // is persisted or reaches a `claude` argv (a dash-prefixed id could be
+        // read as a CLI option). Both verbs guard; the refusal precedes any
+        // resolve/CAS, so a #[test] with no tokio runtime never panics.
+        for cmd in [
+            Command::StopExternal {
+                attach_id: "--oops".into(),
+                name: "x".into(),
+            },
+            Command::RemoveExternal {
+                attach_id: "nothex!".into(),
+                name: "x".into(),
+            },
+        ] {
+            let mut core = empty_core();
+            let (c, mut rx) = client_with_rx(1);
+            core.clients.push(c);
+            core.command(1, cmd);
+            assert!(drain_notice(&mut rx)
+                .unwrap()
+                .contains("invalid external id"));
+        }
+    }
+
+    #[test]
+    fn remove_external_without_stopped_record_refused() {
+        // AC2-ERR: rm is reachable only from a persisted `stopped` tombstone. An
+        // absent record refuses; a `stopping` record refuses "stop it first".
+        // Both stay off the spawn path (no tokio runtime in a #[test]).
+        let _s = StoreScratch::new("rm-external-refused");
+        let mut core = empty_core();
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        // Absent record.
+        core.command(
+            1,
+            Command::RemoveExternal {
+                attach_id: "deadbeef".into(),
+                name: "ext".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx)
+            .unwrap()
+            .contains("no such stopped row"));
+        // A stopping record refuses with the stop-first ordering.
+        crate::squad_store::begin_external_stop("deadbeef", "ext", "/tmp").unwrap();
+        core.command(
+            1,
+            Command::RemoveExternal {
+                attach_id: "deadbeef".into(),
+                name: "ext".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("stop it first"));
+    }
+
+    #[test]
+    fn agent_rows_render_external_tombstones_by_state() {
+        // A stopped record renders an EXITED external row carrying its attach_id
+        // (so `x` sends RemoveExternal); a failed record renders `!exited` (so
+        // `x` retries the stop). Both are external.
+        use crate::squad_store::ExternalState as S;
+        let mut core = empty_core();
+        core.external_lifecycle = vec![
+            ext_record("deadbeef", S::Stopped),
+            ext_record("cafef00d", S::Failed),
+        ];
+        let rows = core.agent_rows();
+        let stopped = rows
+            .iter()
+            .find(|r| r.attach_id.as_deref() == Some("deadbeef"))
+            .expect("a stopped tombstone row");
+        assert!(
+            stopped.external && stopped.exited,
+            "stopped -> exited external"
+        );
+        let failed = rows
+            .iter()
+            .find(|r| r.attach_id.as_deref() == Some("cafef00d"))
+            .expect("a failed tombstone row");
+        assert!(
+            failed.external && !failed.exited,
+            "failed -> live-ish external"
+        );
+    }
+
+    #[test]
+    fn agent_rows_dedup_external_tombstone_against_live_row() {
+        // A record whose attach_id is ALSO a live external roster row is skipped
+        // (the live row wins) so a stop mid-flight never double-renders.
+        use crate::squad_store::ExternalState as S;
+        let mut core = empty_core();
+        core.agents = vec![RegistryAgent {
+            external: true,
+            ..bg_row("ext-live", "/tmp", Some("deadbeef"))
+        }];
+        core.external_lifecycle = vec![ext_record("deadbeef", S::Stopping)];
+        let n = core
+            .agent_rows()
+            .iter()
+            .filter(|r| r.attach_id.as_deref() == Some("deadbeef"))
+            .count();
+        assert_eq!(n, 1, "the live row wins; the record row is deduped away");
+    }
+
     #[test]
     fn lifecycle_name_collision_refused_fail_closed() {
         // codex review: `name` is not a unique catalog key (dedup is by
@@ -7745,6 +8275,7 @@ mod tests {
             seen: HashSet::new(),
             attached: HashMap::new(),
             squad_members: HashMap::new(),
+            external_lifecycle: Vec::new(),
             persist_degraded_notified: false,
             restored: false,
         }
@@ -8302,6 +8833,23 @@ mod tests {
             dispatch_notice(r#"{"outcome":"???"}"#),
             "grab work: dispatch failed"
         );
+    }
+
+    #[test]
+    fn reap_notice_maps_reaped_count() {
+        // AC1-HP: the reaped array length is the visible count.
+        assert_eq!(
+            reap_notice(r#"{"reaped":["a","b","c"],"kept_dirty":[]}"#),
+            "reaped 3"
+        );
+        // AC1-EDGE: zero candidates is a successful visible `reaped 0`, not an
+        // error and not silence.
+        assert_eq!(reap_notice(r#"{"reaped":[],"kept_dirty":[]}"#), "reaped 0");
+        // A missing `reaped` key (schema drift) reads as zero reaped.
+        assert_eq!(reap_notice(r#"{"kept_dirty":[]}"#), "reaped 0");
+        // The verb exited zero, so unparseable stdout still reports success (the
+        // row-vanish is authoritative), never a false failure.
+        assert_eq!(reap_notice("not json"), "reap: done");
     }
 
     fn block(complete: bool, truncated: bool, implicit: bool, text: &str) -> vt::BlockRead {

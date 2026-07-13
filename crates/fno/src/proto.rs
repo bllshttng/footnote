@@ -155,7 +155,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// sideline row's recent transcript (shelled `fno agents peek <name>`, read-only)
 /// and `ServerMsg::PeekBody { seq, name, lines }` returns it to the requesting
 /// client only; the client drops any body whose `seq` is not the current request.
-pub const PROTO_VERSION: u32 = 29;
+///
+/// v30 (x-7561): `Command::ReapAgents` bulk-reaps every exited fno-agent
+/// registry row (uppercase `X`, server-shelled to `fno-agents reap`), and
+/// `Command::{StopExternal, RemoveExternal}` route an external claude-daemon
+/// row's lifecycle through `claude stop|rm <attach_id>` keyed by stable attach
+/// id, gated by a durable generation-checked compare-and-set in `squads.json`
+/// (`external_lifecycle` collection).
+pub const PROTO_VERSION: u32 = 30;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -767,6 +774,33 @@ pub enum Command {
     PeekAgent {
         name: String,
         seq: u64,
+    },
+    /// (v30, x-7561) Bulk-reap every EXITED fno-agent registry row: the server
+    /// shells `fno-agents reap` once, off-loop, and reports the bounded count
+    /// (`reaped N`; zero candidates is a visible successful `reaped 0`). No
+    /// payload - the reap verb owns the candidate set. Refused for a passive
+    /// (observer) client; external rows are never touched (the reap verb only
+    /// knows the fno registry). The uppercase-`X` sibling of per-row `x`.
+    ReapAgents,
+    /// (v30, x-7561) Stop a LIVE external claude-daemon row by its stable
+    /// `attach_id` (8-hex). The server re-validates the exact live external
+    /// catalog row (`external` + matching `attach_id`), durably records
+    /// `stopping` via a generation-checked compare-and-set BEFORE spawning
+    /// `claude stop <attach_id>`, and refuses fail-closed (stale-target notice,
+    /// no subprocess) when the id no longer names a live external row. `name` is
+    /// a cosmetic display snapshot; identity is the attach id.
+    StopExternal {
+        attach_id: String,
+        name: String,
+    },
+    /// (v30, x-7561) Remove a STOPPED external tombstone by `attach_id`: a second
+    /// durable compare-and-set records `removing` before `claude rm <attach_id>`
+    /// may spawn. Refused unless the persisted lifecycle record for that id is
+    /// `stopped` - a live/`stopping`/`failed`/`unknown` target cannot reach rm
+    /// (stop-before-rm ordering). `name` is cosmetic.
+    RemoveExternal {
+        attach_id: String,
+        name: String,
     },
 }
 

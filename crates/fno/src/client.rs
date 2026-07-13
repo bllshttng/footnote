@@ -550,6 +550,15 @@ enum ConfirmKind {
     StopAgent { name: String },
     /// Remove an exited agent row (x-76ea). Same captured-name commit.
     RemoveAgent { name: String },
+    /// Bulk-reap every exited fno-agent registry row (x-7561, uppercase `X`).
+    /// No payload - the server's reap verb owns the candidate set.
+    ReapAgents,
+    /// Stop a live external claude-daemon row by stable `attach_id` (x-7561).
+    /// The captured attach id, not the row index, commits; `name` is cosmetic.
+    StopExternal { attach_id: String, name: String },
+    /// Remove a stopped external tombstone by `attach_id` (x-7561). Same
+    /// captured-id commit; the server gates rm on a persisted `stopped` state.
+    RemoveExternal { attach_id: String, name: String },
 }
 
 /// The entity a rename overlay is editing (x-96e8 widened x-c150's tab-only
@@ -2069,6 +2078,11 @@ impl View {
             }
             ConfirmKind::StopAgent { .. } => format!(" stop {label}? ⏎/esc"),
             ConfirmKind::RemoveAgent { .. } => format!(" remove {label}? ⏎/esc"),
+            ConfirmKind::ReapAgents => " reap all exited fno agents? ⏎/esc".to_string(),
+            ConfirmKind::StopExternal { .. } => format!(" stop {label}? ⏎/esc"),
+            ConfirmKind::RemoveExternal { .. } => {
+                format!(" remove {label} and worktree? ⏎/esc")
+            }
         };
         for (i, ch) in text.chars().take(cols).enumerate() {
             cells[r * cols + i] = Cell {
@@ -3955,6 +3969,13 @@ async fn confirm_keys(
             ConfirmKind::RemoveSquad { squad, .. } => Command::RemoveSquad(squad),
             ConfirmKind::StopAgent { name } => Command::StopAgent { name },
             ConfirmKind::RemoveAgent { name } => Command::RemoveAgent { name },
+            ConfirmKind::ReapAgents => Command::ReapAgents,
+            ConfirmKind::StopExternal { attach_id, name } => {
+                Command::StopExternal { attach_id, name }
+            }
+            ConfirmKind::RemoveExternal { attach_id, name } => {
+                Command::RemoveExternal { attach_id, name }
+            }
         };
         write_msg(sock_w, &ClientMsg::Command(cmd))
             .await
@@ -4318,6 +4339,24 @@ async fn selector_keys(
                     None => view.set_notice("placement requires an attachable agent".into()),
                 }
             }
+            b'X' => {
+                // Bulk reap (x-7561): uppercase `X` from ANY agent row confirms
+                // `fno-agents reap`. Contextual on agent rows only (headers stay
+                // inert - no selector surgery); a non-agent row BELs. Too-short
+                // terminal refuses rather than arm an invisible confirm (x-260a).
+                let on_agent = matches!(view.display_rows().get(cur), Some(DisplayRow::Agent(_)));
+                if !on_agent {
+                    let _ = raw_out(b"\x07");
+                } else if view.term.0 < MIN_ROWS_FOR_STATUS {
+                    view.set_notice("terminal too short for the confirm prompt".into());
+                } else {
+                    view.open_confirm(ConfirmAction {
+                        action: ConfirmKind::ReapAgents,
+                        label: String::new(),
+                    });
+                }
+                continue;
+            }
             b'x' => {
                 // A TOMBSTONE member row dismisses (x-8f11); a squad-header row
                 // removes the squad (x-96e8), behind a confirm - disambiguated by
@@ -4355,26 +4394,43 @@ async fn selector_keys(
                 // agent's name and stop the wrong one. Pane-hosted rows are managed
                 // via their tab (CloseTab); only the paneless rows - the bg/headless
                 // agents that today linger until GC - are the gap this closes.
+                //
+                // An EXTERNAL row (claude-daemon roster or a persisted external
+                // tombstone, x-7561) routes by stable `attach_id` to the
+                // External verbs instead of `fno-agents` by name: a live row
+                // (`!exited`) stops (`claude stop <id>`), a stopped tombstone
+                // (`exited`) removes (`claude rm <id>`). The server re-validates
+                // the exact id + gates rm on a persisted `stopped` state; a
+                // failed/unknown tombstone renders `!exited` so its `x` retries
+                // the stop. An external row without an attach_id (degenerate)
+                // falls through to the by-name path, which the server refuses.
                 let agent = match view.display_rows().get(cur) {
                     Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => {
-                        Some((a.name.clone(), a.exited))
+                        Some((a.name.clone(), a.exited, a.external, a.attach_id.clone()))
                     }
                     _ => None,
                 };
-                if let Some((name, exited)) = agent {
+                if let Some((name, exited, external, attach_id)) = agent {
                     if view.term.0 < MIN_ROWS_FOR_STATUS {
                         view.set_notice("terminal too short for the confirm prompt".into());
-                    } else if exited {
-                        view.open_confirm(ConfirmAction {
-                            action: ConfirmKind::RemoveAgent { name: name.clone() },
-                            label: name,
-                        });
-                    } else {
-                        view.open_confirm(ConfirmAction {
-                            action: ConfirmKind::StopAgent { name: name.clone() },
-                            label: name,
-                        });
+                        continue;
                     }
+                    let action = match (external, attach_id) {
+                        (true, Some(id)) if exited => ConfirmKind::RemoveExternal {
+                            attach_id: id,
+                            name: name.clone(),
+                        },
+                        (true, Some(id)) => ConfirmKind::StopExternal {
+                            attach_id: id,
+                            name: name.clone(),
+                        },
+                        _ if exited => ConfirmKind::RemoveAgent { name: name.clone() },
+                        _ => ConfirmKind::StopAgent { name: name.clone() },
+                    };
+                    view.open_confirm(ConfirmAction {
+                        action,
+                        label: name,
+                    });
                     continue;
                 }
                 let squad = match view.display_rows().get(cur) {
@@ -7604,6 +7660,154 @@ mod tests {
             "no invisible confirm on a short terminal"
         );
         assert!(v.notice.is_some(), "the refusal is surfaced");
+    }
+
+    #[tokio::test]
+    async fn selector_uppercase_x_on_agent_arms_reap_confirm() {
+        // AC1-HP (client half): uppercase `X` on ANY agent row arms a ReapAgents
+        // confirm (no payload) and sends nothing until it commits. Contextual on
+        // an agent row - headers stay inert, no selector surgery.
+        let mut v = view_with_agents(vec![lifecycle_row("worker-a", true, false)]);
+        v.expanded.insert(1);
+        v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"X", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "arming a confirm sends nothing");
+        assert_eq!(v.selector, None, "the confirm closes the selector");
+        assert!(
+            matches!(
+                v.confirm.as_ref().map(|c| &c.action),
+                Some(ConfirmKind::ReapAgents)
+            ),
+            "expected a ReapAgents confirm"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_uppercase_x_on_non_agent_row_arms_nothing() {
+        // Contextual: `X` on a squad-header row (not an agent row) BELs and arms
+        // no confirm - the bulk-reap gesture only fires from an agent row.
+        let mut v = view_with_agents(vec![lifecycle_row("worker-a", true, false)]);
+        let squad_row = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none()))
+            .expect("a squad-header row");
+        v.selector = Some(squad_row);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"X", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "a non-agent row sends nothing");
+        assert!(v.confirm.is_none(), "a non-agent row arms no reap confirm");
+    }
+
+    #[tokio::test]
+    async fn selector_uppercase_x_refuses_on_short_terminal() {
+        // AC1-UI (x-260a): a too-short terminal refuses with a notice rather than
+        // arm an invisible confirm, matching the per-row `x` arm.
+        let mut v = view_with_agents(vec![lifecycle_row("worker-a", true, false)]);
+        v.expanded.insert(1);
+        v.term.0 = MIN_ROWS_FOR_STATUS - 1;
+        v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
+        selector_keys(&mut v, b"X", &mut Vec::new()).await.unwrap();
+        assert!(
+            v.confirm.is_none(),
+            "no invisible confirm on a short terminal"
+        );
+        assert!(v.notice.is_some(), "the refusal is surfaced");
+    }
+
+    #[tokio::test]
+    async fn confirm_keys_enter_sends_reap_agents() {
+        // AC1-HP (client half): Enter on an armed ReapAgents confirm sends the
+        // payload-free ReapAgents command.
+        let mut v = view_with_agents(vec![]);
+        v.confirm = Some(ConfirmAction {
+            action: ConfirmKind::ReapAgents,
+            label: String::new(),
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let decoded: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(decoded, ClientMsg::Command(Command::ReapAgents));
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_live_external_arms_stop_external() {
+        // AC2-HP (client half): x on a live external row routes to StopExternal
+        // by its stable attach_id, NOT fno-agents-by-name.
+        let mut row = lifecycle_row("ext-a", false, true);
+        row.attach_id = Some("deadbeef".into());
+        let mut v = view_with_agents(vec![row]);
+        v.expanded.insert(1);
+        v.selector = Some(agent_row_at(&v, |a| a.name == "ext-a"));
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "arming a confirm sends nothing");
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(ConfirmKind::StopExternal { attach_id, name }) => {
+                assert_eq!(attach_id, "deadbeef");
+                assert_eq!(name, "ext-a");
+            }
+            _ => panic!("expected a StopExternal confirm"),
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_x_on_stopped_external_arms_remove_external() {
+        // AC3-HP (client half): x on an exited external tombstone routes to
+        // RemoveExternal by attach_id (the stopped tombstone `exited` maps to rm).
+        let mut row = lifecycle_row("ext-b", true, true);
+        row.attach_id = Some("cafef00d".into());
+        let mut v = view_with_agents(vec![row]);
+        v.expanded.insert(1);
+        v.selector = Some(agent_row_at(&v, |a| a.name == "ext-b"));
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(ConfirmKind::RemoveExternal { attach_id, name }) => {
+                assert_eq!(attach_id, "cafef00d");
+                assert_eq!(name, "ext-b");
+            }
+            _ => panic!("expected a RemoveExternal confirm"),
+        }
+    }
+
+    #[tokio::test]
+    async fn confirm_keys_enter_sends_external_commands() {
+        for (kind, want) in [
+            (
+                ConfirmKind::StopExternal {
+                    attach_id: "deadbeef".into(),
+                    name: "e".into(),
+                },
+                Command::StopExternal {
+                    attach_id: "deadbeef".into(),
+                    name: "e".into(),
+                },
+            ),
+            (
+                ConfirmKind::RemoveExternal {
+                    attach_id: "cafef00d".into(),
+                    name: "e".into(),
+                },
+                Command::RemoveExternal {
+                    attach_id: "cafef00d".into(),
+                    name: "e".into(),
+                },
+            ),
+        ] {
+            let mut v = view_with_agents(vec![]);
+            v.confirm = Some(ConfirmAction {
+                action: kind,
+                label: "e".into(),
+            });
+            let mut buf: Vec<u8> = Vec::new();
+            confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+            let mut cur = std::io::Cursor::new(buf);
+            let decoded: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+            assert_eq!(decoded, ClientMsg::Command(want));
+        }
     }
 
     #[tokio::test]

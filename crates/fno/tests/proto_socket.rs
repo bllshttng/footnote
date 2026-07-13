@@ -46,6 +46,33 @@ fn proto_fresh_bind_wins() {
 }
 
 #[test]
+fn proto_v28_commands_round_trip_over_the_wire() {
+    // x-7561: the new v28 commands (ReapAgents + the external lifecycle verbs)
+    // serialize and deserialize byte-for-byte through the length-prefixed
+    // framing a real client/server pair uses.
+    use fno::proto::{read_msg_sync, write_msg_sync, ClientMsg, Command};
+
+    let cmds = [
+        Command::ReapAgents,
+        Command::StopExternal {
+            attach_id: "deadbeef".into(),
+            name: "ext-a".into(),
+        },
+        Command::RemoveExternal {
+            attach_id: "cafef00d".into(),
+            name: "ext-b".into(),
+        },
+    ];
+    for cmd in cmds {
+        let mut buf: Vec<u8> = Vec::new();
+        write_msg_sync(&mut buf, &ClientMsg::Command(cmd.clone())).unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let decoded: ClientMsg = read_msg_sync(&mut cur).unwrap();
+        assert_eq!(decoded, ClientMsg::Command(cmd));
+    }
+}
+
+#[test]
 fn proto_live_server_is_detected_not_clobbered() {
     let scratch = Scratch::new("live");
     let sock = scratch.path("s.sock");

@@ -704,6 +704,135 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     out
 }
 
+/// One tracked external session's observed liveness from `claude agents --json
+/// --all` (x-7561). `Live`/`Terminal` are the mapped states; `Unknown` is a
+/// tracked id PRESENT in the catalog but with an unrecognized/missing state (a
+/// per-id schema drift) - distinct from absence-from-the-map (the row is gone)
+/// and from a `None` map (the whole query failed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedExternal {
+    Live,
+    Terminal,
+    Unknown,
+}
+
+/// Parse `claude agents --json --all` into a tracked-id -> liveness map, keeping
+/// ONLY ids in `tracked` (Domain Pitfall 4: never flood the sideline with
+/// historical sessions). `working|blocked` -> Live; `stopped|done|failed` ->
+/// Terminal; any other state is dropped (treated as absent). Returns `None` on
+/// unparseable or schema-drifted output (not a JSON array of objects) so the
+/// caller retains rows as `unknown` rather than deleting a tracked id it could
+/// not observe (AC1-FR "query unavailable").
+pub fn parse_claude_agents(
+    raw: &str,
+    tracked: &std::collections::HashSet<String>,
+) -> Option<HashMap<String, ObservedExternal>> {
+    // Deserialize straight into a vec of objects: a non-array body or a
+    // non-object element fails the parse -> `None` (schema drift), the same
+    // fail-closed behavior as a manual `as_array`/`as_object` walk but without
+    // the intermediate `Value` tree or the array clone.
+    let arr: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(raw.trim()).ok()?;
+    let mut out = HashMap::new();
+    for obj in arr {
+        let Some(id) = obj.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !tracked.contains(id) {
+            continue;
+        }
+        let observed = match obj.get("state").and_then(|v| v.as_str()) {
+            Some("working") | Some("blocked") => ObservedExternal::Live,
+            Some("stopped") | Some("done") | Some("failed") => ObservedExternal::Terminal,
+            // A new/malformed/missing state for a PRESENT tracked id is per-id
+            // schema drift, NOT absence (codex P2): keep it in the map as
+            // `Unknown` so reconcile holds the record rather than deleting it as
+            // authoritatively gone.
+            _ => ObservedExternal::Unknown,
+        };
+        out.insert(id.to_string(), observed);
+    }
+    Some(out)
+}
+
+/// Reconcile persisted external-lifecycle records against the observed catalog
+/// (x-7561, the AC1-FR/AC3-FR table). `observed` is `None` when the `claude
+/// agents` query failed or schema-drifted: every non-`unknown` record is
+/// retained as `unknown` (permitting only a safe stop retry), never deleted.
+/// Otherwise, per record by `(persisted state, observed)`:
+///
+/// - absent (not in map): deleted as removed;
+/// - live: `stopping`/`failed`/`unknown` -> `failed` (stop retry); `stopped` ->
+///   deleted (roster owns the live row again); `removing` -> `unknown` anomaly;
+/// - terminal: any -> `stopped`, except `removing` -> `stopped` (rm retry).
+///
+/// Pure so the whole table is unit-testable without a subprocess or the store.
+/// Returns the new record set plus bounded per-record notices for transitions
+/// that need operator attention.
+pub fn reconcile_external(
+    persisted: Vec<crate::squad_store::ExternalLifecycle>,
+    observed: Option<&HashMap<String, ObservedExternal>>,
+) -> (Vec<crate::squad_store::ExternalLifecycle>, Vec<String>) {
+    use crate::squad_store::ExternalState as S;
+    let mut out = Vec::new();
+    let mut notices = Vec::new();
+    for mut r in persisted {
+        let Some(map) = observed else {
+            // Query unavailable: hold every row as unknown (safe stop retry).
+            if r.state != S::Unknown {
+                r.state = S::Unknown;
+                notices.push(format!("{}: external state unknown - retry stop", r.name));
+            }
+            out.push(r);
+            continue;
+        };
+        match map.get(&r.attach_id) {
+            None => {
+                // Authoritative absence: the session is gone -> removed. An
+                // in-flight action resolving to gone is worth one notice.
+                if matches!(r.state, S::Stopping | S::Removing) {
+                    notices.push(format!("{}: removed", r.name));
+                }
+            }
+            Some(ObservedExternal::Live) => match r.state {
+                S::Stopped => { /* clear tombstone: the live roster owns the row */ }
+                S::Removing => {
+                    r.state = S::Unknown;
+                    notices.push(format!("{}: external state unknown - retry stop", r.name));
+                    out.push(r);
+                }
+                _ => {
+                    r.state = S::Failed;
+                    notices.push(format!("{}: stop failed - retry", r.name));
+                    out.push(r);
+                }
+            },
+            Some(ObservedExternal::Terminal) => {
+                let was_action = matches!(r.state, S::Stopping | S::Removing);
+                if r.state == S::Removing {
+                    notices.push(format!("{}: remove interrupted - retry", r.name));
+                } else if was_action {
+                    notices.push(format!("{}: stopped", r.name));
+                }
+                r.state = S::Stopped;
+                r.reason = None;
+                out.push(r);
+            }
+            Some(ObservedExternal::Unknown) => {
+                // Present but indeterminate (per-id schema drift): hold the
+                // record as unknown, never delete it as absent (codex P2). Same
+                // safe-stop-retry rest state as the whole-query-unavailable case.
+                if r.state != S::Unknown {
+                    r.state = S::Unknown;
+                    notices.push(format!("{}: external state unknown - retry stop", r.name));
+                }
+                out.push(r);
+            }
+        }
+    }
+    (out, notices)
+}
+
 /// The reader's between-tick memory. The interval task itself lives in
 /// server.rs (it owns the `CoreMsg` sender); this holds the mtime-gated
 /// document caches (registry + roster) and the last-sent MERGED row set so
@@ -1469,5 +1598,169 @@ mod tests {
         assert_eq!(ages.get(SID), Some(&120)); // 01:05 -> 2m
         let empty = newest_fire_ages(&t.0.join("nope.jsonl"), now);
         assert!(empty.is_empty());
+    }
+
+    // -- external lifecycle reconcile (x-7561) --------------------------------
+
+    use crate::squad_store::{ExternalLifecycle, ExternalState};
+
+    fn tracked(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn record(id: &str, state: ExternalState) -> ExternalLifecycle {
+        ExternalLifecycle {
+            attach_id: id.into(),
+            name: format!("row-{id}"),
+            cwd: "/w".into(),
+            state,
+            generation: 1,
+            updated_at: String::new(),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn parse_claude_agents_filters_to_tracked_and_maps_state() {
+        // Domain Pitfall 4: only tracked ids survive, so the historical rows the
+        // daemon returns never flood the sideline.
+        let raw = r#"[
+            {"id":"deadbeef","state":"working"},
+            {"id":"cafef00d","state":"stopped"},
+            {"id":"11112222","state":"blocked"},
+            {"id":"99998888","state":"done"},
+            {"id":"aaaabbbb","state":"working"}
+        ]"#;
+        let got = parse_claude_agents(
+            raw,
+            &tracked(&["deadbeef", "cafef00d", "11112222", "99998888"]),
+        )
+        .unwrap();
+        assert_eq!(got.get("deadbeef"), Some(&ObservedExternal::Live));
+        assert_eq!(got.get("11112222"), Some(&ObservedExternal::Live));
+        assert_eq!(got.get("cafef00d"), Some(&ObservedExternal::Terminal));
+        assert_eq!(got.get("99998888"), Some(&ObservedExternal::Terminal));
+        assert!(!got.contains_key("aaaabbbb"), "untracked id is dropped");
+    }
+
+    #[test]
+    fn parse_claude_agents_maps_unknown_state_to_unknown_not_absence() {
+        // codex P2: a tracked id PRESENT with a new/malformed/missing state is
+        // per-id schema drift, kept in the map as `Unknown` - never dropped
+        // (which reconcile would read as absence and delete).
+        let raw = r#"[
+            {"id":"deadbeef","state":"paused"},
+            {"id":"cafef00d"}
+        ]"#;
+        let got = parse_claude_agents(raw, &tracked(&["deadbeef", "cafef00d"])).unwrap();
+        assert_eq!(got.get("deadbeef"), Some(&ObservedExternal::Unknown));
+        assert_eq!(got.get("cafef00d"), Some(&ObservedExternal::Unknown));
+    }
+
+    #[test]
+    fn reconcile_holds_a_record_observed_unknown() {
+        // codex P2: a tracked id observed as Unknown (present but indeterminate)
+        // is HELD as unknown, never deleted as absent.
+        let mut obs = HashMap::new();
+        obs.insert("deadbeef".to_string(), ObservedExternal::Unknown);
+        let (out, _) = reconcile_external(
+            vec![record("deadbeef", ExternalState::Stopping)],
+            Some(&obs),
+        );
+        assert_eq!(out.len(), 1, "an unknown-observed record is not deleted");
+        assert_eq!(out[0].state, ExternalState::Unknown);
+    }
+
+    #[test]
+    fn parse_claude_agents_none_on_schema_drift() {
+        // A non-array (or an unparseable body) is schema drift -> None, so the
+        // caller retains rows as unknown instead of deleting them (AC1-FR).
+        assert!(parse_claude_agents(r#"{"agents":[]}"#, &tracked(&["deadbeef"])).is_none());
+        assert!(parse_claude_agents("not json", &tracked(&["deadbeef"])).is_none());
+        // An empty array is a valid observation (nothing tracked is live).
+        assert!(parse_claude_agents("[]", &tracked(&["deadbeef"]))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn reconcile_stopping_resolves_by_observation() {
+        // AC1-FR: stopping + terminal -> stopped; + live -> failed (retry); +
+        // absent -> removed (dropped).
+        let mut obs = HashMap::new();
+        obs.insert("deadbeef".to_string(), ObservedExternal::Terminal);
+        let (out, _) = reconcile_external(
+            vec![record("deadbeef", ExternalState::Stopping)],
+            Some(&obs),
+        );
+        assert_eq!(out[0].state, ExternalState::Stopped);
+
+        obs.insert("deadbeef".to_string(), ObservedExternal::Live);
+        let (out, _) = reconcile_external(
+            vec![record("deadbeef", ExternalState::Stopping)],
+            Some(&obs),
+        );
+        assert_eq!(out[0].state, ExternalState::Failed);
+
+        // absent from the map -> deleted as removed.
+        let (out, _) = reconcile_external(
+            vec![record("deadbeef", ExternalState::Stopping)],
+            Some(&HashMap::new()),
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn reconcile_removing_returns_to_stopped_for_retry() {
+        // AC3-FR: removing + terminal -> stopped (explicit rm retry); + absent ->
+        // deleted as already removed.
+        let mut obs = HashMap::new();
+        obs.insert("deadbeef".to_string(), ObservedExternal::Terminal);
+        let (out, _) = reconcile_external(
+            vec![record("deadbeef", ExternalState::Removing)],
+            Some(&obs),
+        );
+        assert_eq!(out[0].state, ExternalState::Stopped);
+
+        let (out, _) = reconcile_external(
+            vec![record("deadbeef", ExternalState::Removing)],
+            Some(&HashMap::new()),
+        );
+        assert!(out.is_empty(), "removing + absent is fully removed");
+    }
+
+    #[test]
+    fn reconcile_stopped_live_clears_and_terminal_remains() {
+        // A stopped tombstone seen live again clears (roster owns the row); seen
+        // terminal it remains a tombstone.
+        let mut obs = HashMap::new();
+        obs.insert("deadbeef".to_string(), ObservedExternal::Live);
+        let (out, _) =
+            reconcile_external(vec![record("deadbeef", ExternalState::Stopped)], Some(&obs));
+        assert!(out.is_empty(), "a stopped row that is live again clears");
+
+        obs.insert("deadbeef".to_string(), ObservedExternal::Terminal);
+        let (out, _) =
+            reconcile_external(vec![record("deadbeef", ExternalState::Stopped)], Some(&obs));
+        assert_eq!(out[0].state, ExternalState::Stopped);
+    }
+
+    #[test]
+    fn reconcile_unavailable_holds_everything_unknown() {
+        // AC1-FR "query unavailable": every non-unknown row is held as unknown
+        // (safe stop retry), never deleted; an already-unknown row stays put.
+        let (out, _) = reconcile_external(
+            vec![
+                record("deadbeef", ExternalState::Removing),
+                record("cafef00d", ExternalState::Unknown),
+            ],
+            None,
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "nothing is deleted when the query is unavailable"
+        );
+        assert!(out.iter().all(|r| r.state == ExternalState::Unknown));
     }
 }

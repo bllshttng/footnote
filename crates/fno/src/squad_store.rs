@@ -80,11 +80,64 @@ pub struct StoredSquad {
     pub created_at: String,
 }
 
+/// The lifecycle state of a tracked EXTERNAL (claude-daemon) row (x-7561). A
+/// LIVE external row is never persisted (the daemon roster owns it); a record
+/// is born when we act on one. `stopping`/`removing` are in-flight (a spawn is
+/// or was outstanding); `stopped` is the terminal tombstone `x` can rm;
+/// `failed`/`unknown` are safe retryable rest states. Declaration order is
+/// irrelevant (serde uses the name), but kept in lifecycle order for reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalState {
+    Stopping,
+    Stopped,
+    Removing,
+    Failed,
+    Unknown,
+}
+
+/// One tracked external-row lifecycle record. Identity is `attach_id` (8-hex);
+/// `name`/`cwd` are cosmetic display/routing snapshots, never authority
+/// (Locked Decision 6). `generation` bumps on every begin-stop/begin-rm so a
+/// stale subprocess completion can never overwrite a newer action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalLifecycle {
+    pub attach_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub cwd: String,
+    pub state: ExternalState,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub updated_at: String,
+    /// A bounded failure reason for `failed` / a retry hint; `None` otherwise.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 struct StoreFile {
     version: u32,
     #[serde(default)]
     squads: Vec<StoredSquad>,
+    /// (x-7561) Machine-global external-row lifecycle tombstones. A defaulted
+    /// field on the version-1 object: a v1 reader without it stays wire-tolerant
+    /// and STORE_VERSION does not bump (which would quarantine existing squads).
+    #[serde(default)]
+    external_lifecycle: Vec<ExternalLifecycle>,
+}
+
+/// The outcome of a durable compare-and-set gate (x-7561). `Committed` carries
+/// the new action generation the caller correlates the subprocess result
+/// against; `Refused` is a fail-closed reason (no spawn) that is NOT a
+/// persistence error. An `io::Err` from the CAS helper is a persistence failure
+/// (AC2-FR): no spawn, the row keeps its prior state, notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleCas {
+    Committed { generation: u64 },
+    Refused(String),
 }
 
 /// What [`load`] read: the (member-validated) squads plus an optional one-line
@@ -92,6 +145,10 @@ struct StoreFile {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Loaded {
     pub squads: Vec<StoredSquad>,
+    /// (x-7561) The tracked external-row lifecycle tombstones, `attach_id`
+    /// validated exactly like squad members (a malformed id never reaches an
+    /// argv). Empty when the store has none.
+    pub external_lifecycle: Vec<ExternalLifecycle>,
     pub notice: Option<String>,
 }
 
@@ -142,11 +199,11 @@ pub fn load() -> Loaded {
             let aside = path.with_file_name(format!("squads.json.corrupt-{stamp}"));
             let _ = std::fs::rename(&path, &aside);
             return Loaded {
-                squads: Vec::new(),
                 notice: Some(format!(
                     "quarantined corrupt squads.json to {}",
                     aside.display()
                 )),
+                ..Loaded::default()
             };
         }
     };
@@ -161,9 +218,27 @@ pub fn load() -> Loaded {
             sq
         })
         .collect();
+    // Same argv-safety gate for lifecycle records: a malformed attach_id never
+    // survives load, so a reconcile / rm can never shell it (epic Boundaries).
+    let before_lc = file.external_lifecycle.len();
+    let external_lifecycle: Vec<ExternalLifecycle> = file
+        .external_lifecycle
+        .into_iter()
+        .filter(|r| valid_attach_id(&r.attach_id))
+        .collect();
+    let dropped_lc = before_lc - external_lifecycle.len();
+    let notice = match (dropped, dropped_lc) {
+        (0, 0) => None,
+        (s, 0) => Some(format!("dropped {s} malformed squad member(s)")),
+        (0, l) => Some(format!("dropped {l} malformed lifecycle record(s)")),
+        (s, l) => Some(format!(
+            "dropped {s} malformed squad member(s) and {l} lifecycle record(s)"
+        )),
+    };
     Loaded {
         squads,
-        notice: (dropped > 0).then(|| format!("dropped {dropped} malformed squad member(s)")),
+        external_lifecycle,
+        notice,
     }
 }
 
@@ -219,6 +294,156 @@ pub fn rename(
     })
 }
 
+/// Begin an external STOP (x-7561, AC2-FR gate): under the store lock, move the
+/// record for `id` to `stopping` with a FRESH generation, snapshotting
+/// `name`/`cwd` (cosmetic). A LIVE row carries no record yet, so an absent id
+/// inserts one at generation 1. Refused (no state change) when the current state
+/// cannot be stopped - `stopped` (use rm) or `removing` (rm in flight);
+/// `failed`/`unknown`/`stopping` all permit a stop retry. Returns the committed
+/// generation the caller correlates the subprocess result against. An `io::Err`
+/// is a persistence failure - the caller must NOT spawn (AC2-FR).
+pub fn begin_external_stop(id: &str, name: &str, cwd: &str) -> io::Result<LifecycleCas> {
+    let mut outcome = LifecycleCas::Refused("internal".into());
+    mutate_lifecycle(|records| {
+        outcome = match records.iter_mut().find(|r| r.attach_id == id) {
+            None => {
+                records.push(ExternalLifecycle {
+                    attach_id: id.to_string(),
+                    name: name.to_string(),
+                    cwd: cwd.to_string(),
+                    state: ExternalState::Stopping,
+                    generation: 1,
+                    updated_at: now_iso(),
+                    reason: None,
+                });
+                LifecycleCas::Committed { generation: 1 }
+            }
+            Some(r) => match r.state {
+                ExternalState::Stopped => {
+                    LifecycleCas::Refused(format!("{name} already stopped - remove it instead"))
+                }
+                ExternalState::Removing => {
+                    LifecycleCas::Refused(format!("{name} is being removed"))
+                }
+                // An in-flight stop must NOT launch a second `claude stop` (codex
+                // P1): a duplicate spawn discards the first completion and assumes
+                // stop is concurrency-safe. Only a SETTLED rest state (failed /
+                // unknown) is retryable; a stuck `stopping` is made retryable by
+                // startup reconciliation flipping it to failed, not by a re-press.
+                ExternalState::Stopping => {
+                    LifecycleCas::Refused(format!("{name} is already stopping"))
+                }
+                ExternalState::Failed | ExternalState::Unknown => {
+                    r.generation += 1;
+                    r.state = ExternalState::Stopping;
+                    r.name = name.to_string();
+                    r.cwd = cwd.to_string();
+                    r.reason = None;
+                    r.updated_at = now_iso();
+                    LifecycleCas::Committed {
+                        generation: r.generation,
+                    }
+                }
+            },
+        };
+    })?;
+    Ok(outcome)
+}
+
+/// Begin an external RM (x-7561, stop-then-rm ordering): refuse unless the
+/// record is `stopped`. On commit, bump generation and set `removing` before the
+/// caller spawns `claude rm`. A live/`stopping`/`failed` target refuses with
+/// `stop it first`; `unknown` refuses with `state unknown; retry stop`; an
+/// absent record refuses (nothing to remove). Same persistence-error contract as
+/// [`begin_external_stop`].
+pub fn begin_external_rm(id: &str) -> io::Result<LifecycleCas> {
+    let mut outcome = LifecycleCas::Refused(format!("no such stopped row: {id}"));
+    mutate_lifecycle(|records| {
+        if let Some(r) = records.iter_mut().find(|r| r.attach_id == id) {
+            outcome = match r.state {
+                ExternalState::Stopped => {
+                    r.generation += 1;
+                    r.state = ExternalState::Removing;
+                    r.reason = None;
+                    r.updated_at = now_iso();
+                    LifecycleCas::Committed {
+                        generation: r.generation,
+                    }
+                }
+                ExternalState::Unknown => LifecycleCas::Refused("state unknown; retry stop".into()),
+                _ => LifecycleCas::Refused("stop it first".into()),
+            };
+        }
+    })?;
+    Ok(outcome)
+}
+
+/// Record a subprocess completion (x-7561). Applied ONLY when the record exists,
+/// its `generation` matches, AND its current state is the in-flight `action` -
+/// so a stale retry's late completion (older generation, or a state a newer
+/// action already moved on from) is ignored and can never overwrite a newer
+/// action. `stopping`: ok -> `stopped`, err -> `failed`. `removing`: ok ->
+/// deleted, err -> `stopped` (rm stays retryable). `reason` is a bounded blurb
+/// on the err paths.
+pub fn complete_external(
+    id: &str,
+    generation: u64,
+    action: ExternalState,
+    ok: bool,
+    reason: Option<String>,
+) -> io::Result<()> {
+    mutate_lifecycle(|records| {
+        let Some(idx) = records
+            .iter()
+            .position(|r| r.attach_id == id && r.generation == generation && r.state == action)
+        else {
+            return; // stale generation / state moved on / gone: ignore
+        };
+        match (action, ok) {
+            (ExternalState::Removing, true) => {
+                records.remove(idx);
+                return;
+            }
+            (ExternalState::Stopping, true) => records[idx].state = ExternalState::Stopped,
+            (ExternalState::Stopping, false) => records[idx].state = ExternalState::Failed,
+            (ExternalState::Removing, false) => records[idx].state = ExternalState::Stopped,
+            _ => return, // action is only ever Stopping/Removing
+        }
+        records[idx].reason = if ok { None } else { reason };
+        records[idx].updated_at = now_iso();
+    })
+}
+
+/// Apply the startup reconcile ATOMICALLY under the store lock (x-7561): the
+/// `claude agents` liveness query runs off-lock (it must - a subprocess cannot
+/// be awaited while holding the flock), but the load -> compute -> write is
+/// serialized here so a concurrent operator action is never clobbered
+/// (lost-update). `baseline` is the `attach_id -> generation` snapshot taken
+/// BEFORE the query; under the lock, a record whose generation still matches its
+/// baseline is fed to `reconcile` (the pure `agents_view` table), while a record
+/// the baseline never saw or whose generation ADVANCED (a concurrent stop/rm
+/// owns it) is left untouched - reconciling it against a pre-action liveness
+/// snapshot would drop the action's completion. Returns the reconcile notices.
+pub fn reconcile_lifecycle<F>(
+    baseline: &std::collections::HashMap<String, u64>,
+    reconcile: F,
+) -> io::Result<Vec<String>>
+where
+    F: FnOnce(Vec<ExternalLifecycle>) -> (Vec<ExternalLifecycle>, Vec<String>),
+{
+    let mut notices = Vec::new();
+    mutate_lifecycle(|records| {
+        let (reconcilable, mut untouched): (Vec<_>, Vec<_>) = std::mem::take(records)
+            .into_iter()
+            .partition(|r| baseline.get(&r.attach_id) == Some(&r.generation));
+        let (reconciled, ns) = reconcile(reconcilable);
+        notices = ns;
+        untouched.extend(reconciled);
+        *records = untouched;
+    })?;
+    Ok(notices)
+}
+
 /// The locked read-modify-write core: acquire an exclusive, NON-BLOCKING lock
 /// on a sibling lockfile (bounded retry, then give up), re-read the current
 /// file, apply `f`, and atomically rename a tmp over the target. Two mux
@@ -226,6 +451,24 @@ pub fn rename(
 /// corrupt file read here is treated as empty (the load path owns quarantine),
 /// so a write never fails on unreadable prior content.
 fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
+    mutate_file(|sf| f(&mut sf.squads))
+}
+
+/// The lifecycle-collection twin of [`mutate`] (x-7561): the SAME locked atomic
+/// read-modify-write, applying `f` to `external_lifecycle` while preserving
+/// `squads` byte-for-byte. Both collections ride one version-1 object, so a
+/// squad write can never drop a lifecycle record and vice-versa.
+fn mutate_lifecycle(f: impl FnOnce(&mut Vec<ExternalLifecycle>)) -> io::Result<()> {
+    mutate_file(|sf| f(&mut sf.external_lifecycle))
+}
+
+/// The locked read-modify-write core over the WHOLE [`StoreFile`]: acquire the
+/// exclusive non-blocking lock, re-read the current file (empty/absent = fresh,
+/// any other read/parse error FAILS LOUD rather than clobber unread content),
+/// apply `f` to both collections at once, pin the version, and atomically
+/// rename a tmp over the target. `mutate` / `mutate_lifecycle` are thin views
+/// onto it, so every mutation preserves both collections.
+fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
     let path = squads_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -239,27 +482,16 @@ fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
         .open(&lock_path)?;
     let _guard = FlockGuard::acquire(lock)?;
 
-    // Read the current file to apply the delta onto. ONLY a genuinely absent
-    // (or empty) file is a fresh start; any OTHER read error (PermissionDenied,
-    // transient I/O) or a parse failure must FAIL LOUD rather than clobber the
-    // existing file with just this server's delta (silent data loss). A failed
-    // write degrades persistence with a notice; it never overwrites unread
-    // content (gemini review). Corrupt content is quarantined by the load path
-    // at next restart, not clobbered here.
-    let mut squads = match std::fs::read_to_string(&path) {
-        Ok(raw) if raw.trim().is_empty() => Vec::new(),
+    let mut file = match std::fs::read_to_string(&path) {
+        Ok(raw) if raw.trim().is_empty() => StoreFile::default(),
         Ok(raw) => serde_json::from_str::<StoreFile>(&raw)
-            .map(|sf| sf.squads)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => StoreFile::default(),
         Err(e) => return Err(e),
     };
-    f(&mut squads);
+    f(&mut file);
+    file.version = STORE_VERSION;
 
-    let file = StoreFile {
-        version: STORE_VERSION,
-        squads,
-    };
     let bytes = serde_json::to_vec_pretty(&file)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let tmp = path.with_file_name(format!("squads.json.tmp.{}", std::process::id()));
@@ -444,6 +676,7 @@ mod tests {
                 ],
                 created_at: "2026-07-11T00:00:00Z".into(),
             }],
+            ..StoreFile::default()
         };
         std::fs::write(s.file(), serde_json::to_string(&file).unwrap()).unwrap();
         let loaded = load();
@@ -495,5 +728,258 @@ mod tests {
         assert!(!valid_attach_id("c19cd2c33")); // 9
         assert!(!valid_attach_id("c19cd2cg")); // non-hex
         assert!(!valid_attach_id(""));
+    }
+
+    fn lc(id: &str) -> Option<ExternalLifecycle> {
+        load()
+            .external_lifecycle
+            .into_iter()
+            .find(|r| r.attach_id == id)
+    }
+
+    #[test]
+    fn squad_and_lifecycle_collections_never_drop_each_other() {
+        // The version-1 object carries both collections; a squad write must
+        // preserve lifecycle records and a lifecycle CAS must preserve squads.
+        let _s = Scratch::new("both-collections");
+        upsert("w", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
+        assert!(matches!(
+            begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
+            LifecycleCas::Committed { generation: 1 }
+        ));
+        // A SECOND squad write must not clobber the lifecycle record.
+        upsert("w2", &[], &[m("11111111")]).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 2, "both squads survive");
+        assert_eq!(
+            loaded.external_lifecycle.len(),
+            1,
+            "lifecycle survives a squad write"
+        );
+        // And a lifecycle CAS must not clobber the squads.
+        complete_external("deadbeef", 1, ExternalState::Stopping, true, None).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 2, "squads survive a lifecycle write");
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopped);
+    }
+
+    #[test]
+    fn begin_stop_inserts_then_bumps_generation_on_retry() {
+        // A LIVE row has no record -> insert at generation 1 (stopping). A retry
+        // from a rest state bumps the generation, so a stale completion cannot
+        // clobber the newer action.
+        let _s = Scratch::new("begin-stop-gen");
+        assert!(matches!(
+            begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
+            LifecycleCas::Committed { generation: 1 }
+        ));
+        // Land it in `failed`, then retry the stop: generation must advance.
+        complete_external(
+            "deadbeef",
+            1,
+            ExternalState::Stopping,
+            false,
+            Some("boom".into()),
+        )
+        .unwrap();
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Failed);
+        assert!(matches!(
+            begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
+            LifecycleCas::Committed { generation: 2 }
+        ));
+    }
+
+    #[test]
+    fn begin_stop_refused_from_stopped_and_removing() {
+        // stop-then-rm: a stopped tombstone is removed, not re-stopped; a row
+        // already being removed refuses a concurrent stop.
+        let _s = Scratch::new("begin-stop-refused");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap();
+        complete_external("deadbeef", 1, ExternalState::Stopping, true, None).unwrap(); // -> stopped
+        assert!(matches!(
+            begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
+            LifecycleCas::Refused(_)
+        ));
+        begin_external_rm("deadbeef").unwrap(); // -> removing (gen 2)
+        assert!(matches!(
+            begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
+            LifecycleCas::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn begin_stop_refused_while_already_stopping() {
+        // codex P1: a stop in flight must NOT launch a second `claude stop`. A
+        // `stopping` record refuses "already stopping" (only failed/unknown rest
+        // states retry) - the generation never advances, so the first
+        // completion is never orphaned by a duplicate spawn.
+        let _s = Scratch::new("begin-stop-inflight");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen1 Stopping
+        match begin_external_stop("deadbeef", "ext", "/tmp").unwrap() {
+            LifecycleCas::Refused(r) => assert!(r.contains("already stopping")),
+            _ => panic!("a second stop while stopping must refuse"),
+        }
+        assert_eq!(
+            lc("deadbeef").unwrap().generation,
+            1,
+            "generation must not advance"
+        );
+    }
+
+    #[test]
+    fn begin_rm_requires_a_stopped_record() {
+        // rm is reachable ONLY from `stopped` (stop-before-rm). A live/stopping
+        // row refuses "stop it first"; an unknown row refuses "retry stop"; an
+        // absent id refuses.
+        let _s = Scratch::new("begin-rm");
+        assert!(matches!(
+            begin_external_rm("deadbeef").unwrap(),
+            LifecycleCas::Refused(_) // absent
+        ));
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // -> stopping
+        match begin_external_rm("deadbeef").unwrap() {
+            LifecycleCas::Refused(r) => assert!(r.contains("stop it first")),
+            _ => panic!("rm on a stopping row must refuse"),
+        }
+        complete_external("deadbeef", 1, ExternalState::Stopping, true, None).unwrap(); // -> stopped
+        assert!(matches!(
+            begin_external_rm("deadbeef").unwrap(),
+            LifecycleCas::Committed { generation: 2 }
+        ));
+    }
+
+    #[test]
+    fn complete_external_ignores_a_stale_generation() {
+        // A stale retry's late completion (older generation) must never overwrite
+        // the newer action - the core anti-clobber invariant.
+        let _s = Scratch::new("stale-gen");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen 1, stopping
+        complete_external("deadbeef", 1, ExternalState::Stopping, false, None).unwrap(); // -> failed
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen 2, stopping
+                                                                 // A gen-1 completion arriving late is ignored; the gen-2 stopping stands.
+        complete_external("deadbeef", 1, ExternalState::Stopping, true, None).unwrap();
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopping);
+        assert_eq!(lc("deadbeef").unwrap().generation, 2);
+    }
+
+    #[test]
+    fn complete_rm_deletes_on_ok_and_retains_on_err() {
+        let _s = Scratch::new("complete-rm");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap();
+        complete_external("deadbeef", 1, ExternalState::Stopping, true, None).unwrap(); // stopped
+        begin_external_rm("deadbeef").unwrap(); // gen 2 removing
+                                                // Failure keeps the tombstone stopped (rm stays retryable).
+        complete_external(
+            "deadbeef",
+            2,
+            ExternalState::Removing,
+            false,
+            Some("nope".into()),
+        )
+        .unwrap();
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopped);
+        begin_external_rm("deadbeef").unwrap(); // gen 3 removing
+        complete_external("deadbeef", 3, ExternalState::Removing, true, None).unwrap();
+        assert!(
+            lc("deadbeef").is_none(),
+            "a successful rm deletes the tombstone"
+        );
+    }
+
+    #[test]
+    fn reconcile_lifecycle_leaves_a_generation_advanced_record_untouched() {
+        // Lost-update guard (code review): a record a concurrent operator action
+        // advanced PAST the reconcile's baseline generation is excluded from the
+        // reconcile and left untouched - reconciling it against a pre-action
+        // liveness snapshot would drop the action's completion.
+        let _s = Scratch::new("reconcile-gen-guard");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen1 Stopping
+        complete_external("deadbeef", 1, ExternalState::Stopping, false, None).unwrap(); // gen1 Failed
+        let baseline: std::collections::HashMap<String, u64> =
+            [("deadbeef".to_string(), 1u64)].into_iter().collect();
+        // A concurrent retry advances the record to gen2 BEFORE reconcile applies.
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen2 Stopping
+        let notices = reconcile_lifecycle(&baseline, |recs| {
+            let n = recs.len();
+            let mapped = recs
+                .into_iter()
+                .map(|mut r| {
+                    r.state = ExternalState::Stopped;
+                    r
+                })
+                .collect();
+            (mapped, (0..n).map(|_| "reconciled".to_string()).collect())
+        })
+        .unwrap();
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopping);
+        assert_eq!(lc("deadbeef").unwrap().generation, 2);
+        assert!(
+            notices.is_empty(),
+            "the advanced record was excluded from reconcile"
+        );
+    }
+
+    #[test]
+    fn reconcile_lifecycle_applies_to_a_baseline_matching_record() {
+        // The other half: with no concurrent action, a baseline-matching record
+        // IS reconciled and its notices flow out.
+        let _s = Scratch::new("reconcile-applies");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen1 Stopping
+        complete_external("deadbeef", 1, ExternalState::Stopping, false, None).unwrap(); // gen1 Failed
+        let baseline: std::collections::HashMap<String, u64> =
+            [("deadbeef".to_string(), 1u64)].into_iter().collect();
+        let notices = reconcile_lifecycle(&baseline, |recs| {
+            let mapped = recs
+                .into_iter()
+                .map(|mut r| {
+                    r.state = ExternalState::Stopped;
+                    r
+                })
+                .collect();
+            (mapped, vec!["done".to_string()])
+        })
+        .unwrap();
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopped);
+        assert_eq!(notices, vec!["done".to_string()]);
+    }
+
+    #[test]
+    fn load_drops_a_malformed_lifecycle_attach_id() {
+        // Boundaries: a malformed attach_id never survives load, so a reconcile
+        // or rm can never shell it.
+        let s = Scratch::new("bad-lifecycle-id");
+        let file = StoreFile {
+            version: STORE_VERSION,
+            external_lifecycle: vec![
+                ExternalLifecycle {
+                    attach_id: "deadbeef".into(),
+                    name: "good".into(),
+                    cwd: "/tmp".into(),
+                    state: ExternalState::Stopped,
+                    generation: 1,
+                    updated_at: String::new(),
+                    reason: None,
+                },
+                ExternalLifecycle {
+                    attach_id: "; rm -rf".into(), // shell metachar
+                    name: "evil".into(),
+                    cwd: "/tmp".into(),
+                    state: ExternalState::Stopped,
+                    generation: 1,
+                    updated_at: String::new(),
+                    reason: None,
+                },
+            ],
+            ..StoreFile::default()
+        };
+        std::fs::write(s.file(), serde_json::to_string(&file).unwrap()).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.external_lifecycle.len(), 1);
+        assert_eq!(loaded.external_lifecycle[0].attach_id, "deadbeef");
+        assert!(loaded
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("lifecycle record"));
     }
 }
