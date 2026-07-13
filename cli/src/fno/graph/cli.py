@@ -2572,6 +2572,8 @@ def cmd_provenance(
                 _edge("node_birth", birth_result),
                 _edge("spawn", spawn_result),
             ],
+            # Append-only lifecycle provenance in raw append order (x-b6e4).
+            "sessions": e.get("sessions", []),
         }
         typer.echo(json.dumps(output, indent=2))
         return
@@ -2597,6 +2599,19 @@ def cmd_provenance(
 
     _fmt_edge("node-birth", birth_result, birth_session, birth_harness)
     _fmt_edge("spawn", spawn_result, spawn_session, spawn_harness)
+
+    # Lifecycle rows (x-b6e4): raw append order, phase-forward. Distinct from the
+    # birth/spawn edges above -- those are single parent pointers; this is the
+    # per-phase who-did-what across sessions and harnesses.
+    sessions = e.get("sessions", [])
+    if sessions:
+        lines.append("  lifecycle:")
+        for s in sessions:
+            lines.append(
+                f"    {s.get('phase', '?'):<9} "
+                f"{s.get('harness', '?')}:{s.get('session_id', '?')} "
+                f"@ {s.get('at', '?')}"
+            )
 
     typer.echo("\n".join(lines))
 
