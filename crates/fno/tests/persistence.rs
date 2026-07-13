@@ -442,3 +442,50 @@ fn persistence_last_pane_exit_with_zero_clients_ends_the_server() {
         "the SocketGuard must unlink the socket on the way out"
     );
 }
+
+/// The external-lifecycle store's PRODUCTION path (x-7561): the `#[cfg(test)]`
+/// thread-local store override is compiled OUT of the library when it is a
+/// dependency, so this integration test is the only place `squads_path()`'s
+/// real `FNO_AGENTS_HOME` branch is exercised. A begin-stop -> complete
+/// round-trips through the real `squads.json` (each `load()` re-reads the file),
+/// proving durability across the CAS boundary. Env is set + restored under
+/// `PTY_GATE` so it never races the file's other serialized tests.
+#[test]
+fn external_lifecycle_round_trips_through_the_production_store() {
+    use fno::squad_store::{
+        begin_external_stop, complete_external, load, ExternalState, LifecycleCas,
+    };
+
+    let _gate = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fno-ext-lc-int-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prev = std::env::var_os("FNO_AGENTS_HOME");
+    std::env::set_var("FNO_AGENTS_HOME", &dir);
+
+    let loaded = |id: &str| {
+        load()
+            .external_lifecycle
+            .into_iter()
+            .find(|r| r.attach_id == id)
+            .map(|r| r.state)
+    };
+
+    assert!(matches!(
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
+        LifecycleCas::Committed { generation: 1 }
+    ));
+    assert_eq!(loaded("deadbeef"), Some(ExternalState::Stopping));
+    complete_external("deadbeef", 1, ExternalState::Stopping, true, None).unwrap();
+    assert_eq!(loaded("deadbeef"), Some(ExternalState::Stopped));
+    assert!(
+        dir.join("squads.json").exists(),
+        "the record lands at the production squads.json path"
+    );
+
+    match prev {
+        Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+        None => std::env::remove_var("FNO_AGENTS_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
