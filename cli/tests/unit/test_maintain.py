@@ -493,3 +493,134 @@ def test_collect_evidence_caps_packet_size():
     pkt = m.collect_evidence(node, [node], now=now)
     size = len(json.dumps(pkt.to_json()).encode("utf-8"))
     assert size <= m.PACKET_MAX_BYTES
+
+
+# --- leg 8: validity sweep - validation + command rendering (x-af5e) --------
+
+
+def _packet(node_id: str, **over) -> m.EvidencePacket:
+    base = dict(
+        node_id=node_id, fingerprint=f"fp-{node_id}", title="t", details="d",
+        project=None, cwd=None, age_days=90, items={}, unavailable=[],
+    )
+    base.update(over)
+    return m.EvidencePacket(**base)
+
+
+def test_validate_row_supersede_requires_evidenced_target():
+    pkt = _packet("ab-x", items={"graph:title-match:ab-new": "done"})
+    ok = m.validate_row(
+        {"classification": "supersede", "confidence": 0.9,
+         "rationale": "dup", "evidence_ids": ["graph:title-match:ab-new"],
+         "target": "ab-new"},
+        pkt,
+    )
+    assert ok.classification == "supersede" and ok.target == "ab-new"
+    assert ok.command == (
+        "fno backlog supersede ab-new --replaces ab-x "
+        "--reason 'validity sweep: superseded by ab-new'"
+    )
+    # A target the graph evidence does not name -> needs-human, no command.
+    bad = m.validate_row(
+        {"classification": "supersede", "confidence": 0.9, "rationale": "dup",
+         "evidence_ids": ["graph:title-match:ab-new"], "target": "ab-ghost"},
+        pkt,
+    )
+    assert bad.classification == "needs-human" and bad.command is None
+
+
+def test_validate_row_uncited_or_low_conf_destructive_downgrades():
+    pkt = _packet("ab-x", items={"path:a/b.py": "missing"})
+    uncited = m.validate_row(
+        {"classification": "promote", "confidence": 0.9, "rationale": "r", "evidence_ids": []},
+        pkt,
+    )
+    assert uncited.classification == "needs-human"
+    lowconf = m.validate_row(
+        {"classification": "promote", "confidence": 0.2, "rationale": "r",
+         "evidence_ids": ["path:a/b.py"]},
+        pkt,
+    )
+    assert lowconf.classification == "needs-human"
+
+
+def test_validate_row_unknown_class_and_bad_citation():
+    pkt = _packet("ab-x", items={"path:a/b.py": "exists"})
+    assert m.validate_row({"classification": "delete"}, pkt).classification == "needs-human"
+    # A citation not present in the packet is dropped (injection boundary).
+    row = m.validate_row(
+        {"classification": "keep", "confidence": 0.8, "rationale": "r",
+         "evidence_ids": ["path:a/b.py", "git:__import__('os')"]},
+        pkt,
+    )
+    assert row.classification == "keep" and row.evidence_ids == ["path:a/b.py"]
+
+
+def test_validate_row_missing_result_is_needs_human():
+    assert m.validate_row(None, _packet("ab-x")).classification == "needs-human"
+
+
+def test_render_command_never_embeds_rationale():
+    # Trusted-render only: no analyzer text reaches the command string.
+    cmd = m.render_command("promote", "ab-x", None)
+    assert cmd == "fno backlog update ab-x --priority p3"
+    assert m.render_command("keep", "ab-x", None) is None
+    assert m.render_command("needs-human", "ab-x", None) is None
+
+
+# --- leg 8: validity sweep - JSON-last deck + watermark ---------------------
+
+
+def test_write_deck_json_last_and_grouped(tmp_path):
+    pkts = {"ab-a": _packet("ab-a", title="Alpha"), "ab-b": _packet("ab-b", title="Beta")}
+    rows = [
+        m.ValidityRow("ab-a", "fp-a", "keep", 0.8, "still good", ["path:x"]),
+        m.ValidityRow("ab-b", "fp-b", "needs-human", 0.0, "unclear", []),
+    ]
+    md, js = m.write_validity_deck(
+        rows, pkts, tmp_path, deck_id="validity-1", created_iso="2026-07-12T00:00:00Z"
+    )
+    md_text = (tmp_path / "validity-1.md").read_text()
+    assert "## Keep / Cool-Later (1)" in md_text and "## Needs Human (1)" in md_text
+    side = json.loads((tmp_path / "validity-1.json").read_text())
+    assert side["counts"]["keep"] == 1 and side["counts"]["needs-human"] == 1
+    assert side["md_hash"] and len(side["rows"]) == 2
+
+
+def test_watermark_only_from_valid_committed_rows(tmp_path):
+    pkts = {"ab-a": _packet("ab-a")}
+    good = [m.ValidityRow("ab-a", "fp-good", "keep", 0.8, "r", [])]
+    m.write_validity_deck(good, pkts, tmp_path, deck_id="d1", created_iso="t")
+    # A degraded (analyzer-failure) deck must NOT watermark, so its batch retries.
+    degraded = m.evidence_only_rows([_packet("ab-b", fingerprint="fp-degraded")])
+    m.write_validity_deck(degraded, {}, tmp_path, deck_id="d2", created_iso="t", degraded=True)
+    seen = m.read_watermarked_fingerprints(tmp_path)
+    assert "fp-good" in seen and "fp-degraded" not in seen
+
+
+def test_read_watermarks_skips_malformed_sidecar(tmp_path):
+    (tmp_path / "broken.json").write_text("{not json")
+    (tmp_path / "ok.json").write_text(
+        json.dumps({"rows": [{"fingerprint": "fp-1", "watermark": True}]})
+    )
+    assert m.read_watermarked_fingerprints(tmp_path) == frozenset({"fp-1"})
+
+
+def test_run_validity_analysis_refuses_real_call_under_pytest(monkeypatch):
+    import pytest
+    monkeypatch.delenv("FNO_VALIDITY_STUB", raising=False)
+    with pytest.raises(RuntimeError, match="refusing real claude"):
+        m._run_validity_analysis([_packet("ab-x")])
+
+
+def test_run_validity_analysis_parses_stub(tmp_path, monkeypatch):
+    stub = tmp_path / "stub.sh"
+    stub.write_text(
+        '#!/usr/bin/env bash\n'
+        'echo \'{"results":[{"node_id":"ab-x","classification":"keep",'
+        '"confidence":0.8,"rationale":"good","evidence_ids":[]}]}\'\n'
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("FNO_VALIDITY_STUB", str(stub))
+    out = m._run_validity_analysis([_packet("ab-x")])
+    assert out["ab-x"]["classification"] == "keep"
