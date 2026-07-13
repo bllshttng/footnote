@@ -457,3 +457,106 @@ def test_e2e_blocker_done_auto_readies_dependents(tmp_graph):
     by_id = {e["id"]: e for e in _read(tmp_graph)}
     assert by_id["ab-blkE2E"]["_status"] == "done"
     assert by_id["ab-depE2E"]["_status"] == "ready"  # auto-unblocked
+
+
+# --- leg 8: validity sweep (x-af5e) ----------------------------------------
+
+
+def _old_idea(node_id: str, age_days: int, **over) -> dict:
+    created = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat()
+    # plan_path None -> idea status; created_at old enough to be eligible.
+    return _node(node_id, created_at=created, **over)
+
+
+@pytest.fixture
+def validity_env(tmp_path, monkeypatch):
+    """Point deck output at tmp and install a keep-everything analyzer stub."""
+    deck_root = tmp_path / "state"
+    import fno.paths as p
+
+    monkeypatch.setattr(p, "state_dir", lambda: deck_root)
+    stub = tmp_path / "stub.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "ctx = json.loads(sys.stdin.read().split('CONTEXT:\\n', 1)[1])\n"
+        "print(json.dumps({'results': [\n"
+        "  {'node_id': pk['node_id'], 'classification': 'keep',\n"
+        "   'confidence': 0.8, 'rationale': 'stub keep', 'evidence_ids': []}\n"
+        "  for pk in ctx['packets']]}))\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("FNO_VALIDITY_STUB", str(stub))
+    return deck_root
+
+
+def test_validity_ac1_hp_bounded_deck(tmp_graph, validity_env):
+    # AC1-HP: >25 ideas older than 60d -> reviews the 25 oldest, writes a deck.
+    _seed(tmp_graph, [_old_idea(f"ab-i{i:03d}", 100 + i) for i in range(30)])
+    r = _invoke([])
+    assert r.exit_code == 0, r.output
+    assert "validity: reviewed 25 ideas" in r.output
+    decks = list((validity_env / "validity-decks").glob("*.json"))
+    assert len(decks) == 1
+    side = json.loads(decks[0].read_text())
+    assert len(side["rows"]) == 25
+    # Oldest-first: ab-i029 (age 129) selected, freshest ab-i000..i004 not.
+    reviewed = {row["node_id"] for row in side["rows"]}
+    assert "ab-i029" in reviewed and "ab-i000" not in reviewed
+
+
+def test_validity_ac3_ui_no_eligible(tmp_graph, validity_env):
+    # AC3-UI: nothing older than threshold -> clean no-work, no deck.
+    _seed(tmp_graph, [_old_idea("ab-fresh", 5)])
+    r = _invoke([])
+    assert r.exit_code == 0, r.output
+    assert "validity: 0 eligible ideas" in r.output
+    assert not (validity_env / "validity-decks").exists()
+
+
+def test_validity_ac2_err_analyzer_failure_degraded_deck(tmp_graph, tmp_path, monkeypatch):
+    # AC2-ERR: analyzer fails -> evidence-only deck, all needs-human, degraded.
+    deck_root = tmp_path / "state"
+    import fno.paths as p
+
+    monkeypatch.setattr(p, "state_dir", lambda: deck_root)
+    boom = tmp_path / "boom.sh"
+    boom.write_text("#!/usr/bin/env bash\nexit 1\n")
+    boom.chmod(0o755)
+    monkeypatch.setenv("FNO_VALIDITY_STUB", str(boom))
+    _seed(tmp_graph, [_old_idea(f"ab-d{i}", 90 + i) for i in range(3)])
+    r = _invoke([])
+    assert r.exit_code == 0, r.output
+    assert "DEGRADED" in r.output
+    side = json.loads(next((deck_root / "validity-decks").glob("*.json")).read_text())
+    assert side["degraded"] is True
+    assert all(row["classification"] == "needs-human" for row in side["rows"])
+    # Degraded rows never watermark -> the same batch retries next sweep.
+    assert all(row["watermark"] is False for row in side["rows"])
+
+
+def test_validity_is_proposal_only_under_apply(tmp_graph, validity_env):
+    # US3: --apply must NOT mutate a validity candidate's graph state.
+    _seed(tmp_graph, [_old_idea("ab-keepme", 90)])
+    before = _read(tmp_graph)
+    r = _invoke(["--apply"])
+    assert r.exit_code == 0, r.output
+    assert _read(tmp_graph) == before  # graph untouched by the validity leg
+
+
+def test_validity_watermark_then_recheck(tmp_graph, validity_env):
+    # AC5-FR: a second sweep skips watermarked ideas; --recheck re-reviews them.
+    _seed(tmp_graph, [_old_idea("ab-wm1", 90)])
+    assert "reviewed 1 ideas" in _invoke([]).output
+    # Second run: same idea is watermarked -> 0 eligible.
+    assert "validity: 0 eligible ideas" in _invoke([]).output
+    # --recheck bypasses the watermark.
+    assert "reviewed 1 ideas" in _invoke(["--recheck"]).output
+
+
+def test_validity_skipped_with_no_validity_flag(tmp_graph, validity_env):
+    _seed(tmp_graph, [_old_idea("ab-skip", 90)])
+    r = _invoke(["--no-validity"])
+    assert r.exit_code == 0, r.output
+    assert "validity:" not in r.output
+    assert not (validity_env / "validity-decks").exists()
