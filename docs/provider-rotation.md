@@ -140,6 +140,32 @@ Staging creates an empty marker directory (`~/.fno/providers/<id>/`);
 no symlinks. `dispatch_env()` resolves all `${...}` references and returns the
 resolved dict.
 
+### managed
+
+Use for multiple accounts that must share one CLI credential slot. Registering
+an account snapshots its credentials under `~/.fno/providers/<id>/`; `fno
+providers use <id>` captures the outgoing account, materializes the selected
+snapshot, verifies it, and only then marks the slot active. A live CLI process
+that is using the shared slot defers the switch instead of rotating credentials
+under that process.
+
+Codex switches add a native local-schema check after materialization: Footnote
+runs `codex login status` with the slot's exact `CODEX_HOME`. Exit zero means
+Codex recognized the stored auth. Any completed nonzero result rejects the
+switch and attempts to restore the outgoing credentials. If a Codex process
+started during the check, rollback is withheld rather than rewriting its live
+credential slot, and the receipt says the slot may still hold the selected
+account. Footnote clears the active-slot stamp in that case so a later retry
+cannot misattribute and overwrite another account's saved credentials. A missing
+Codex binary or a five-second timeout falls back to structural verification and
+is disclosed as a weaker guarantee in the command receipt. This check does not
+contact the service or prove that a remotely revoked token is still valid.
+Claude managed switches retain structural verification only.
+
+If verification is interrupted, Footnote attempts rollback before propagating
+Ctrl-C. When rollback cannot restore a known outgoing slot, the CLI prints the
+bounded indeterminate-state receipt before exiting with the interrupt status.
+
 ---
 
 ## env-value reference resolution

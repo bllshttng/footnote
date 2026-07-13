@@ -43,6 +43,8 @@ from fno.adapters.providers.model import ProviderRecord
 # macOS Keychain item claude reads (mirrors usage.py._CLAUDE_KEYCHAIN_SERVICE).
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _SECURITY_TIMEOUT_S = 5  # ponytail: same 5s ceiling usage.py uses for `security`
+_CODEX_LOGIN_TIMEOUT_S = 5
+_CODEX_AUTH_ENV_VARS = ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY")
 
 
 class ManagedStoreError(RuntimeError):
@@ -259,14 +261,45 @@ def verify_slot(record: ProviderRecord, expected_blob: str) -> bool:
     got = _read_slot_blob(record.cli)
     if got is None or got.strip() != expected_blob.strip():
         return False
+    if record.cli == "codex":
+        return _codex_auth_present(got)
     return _token_present(got)
+
+
+@dataclass(frozen=True)
+class _CodexLoginResult:
+    ok: Optional[bool]
+    reason: Optional[str] = None
+
+
+def _codex_login_ok() -> _CodexLoginResult:
+    """Ask Codex to recognize the materialized auth schema in its exact home."""
+    env = os.environ.copy()
+    for name in _CODEX_AUTH_ENV_VARS:
+        env.pop(name, None)
+    env["CODEX_HOME"] = str(_codex_slot_auth_path().parent)
+    try:
+        result = subprocess.run(
+            ["codex", "login", "status"],
+            capture_output=True,
+            text=True,
+            timeout=_CODEX_LOGIN_TIMEOUT_S,
+            env=env,
+        )
+    except FileNotFoundError:
+        return _CodexLoginResult(ok=None, reason="codex-login-status-missing")
+    except subprocess.TimeoutExpired:
+        return _CodexLoginResult(ok=None, reason="codex-login-status-timeout")
+    except OSError as exc:
+        raise ManagedStoreError(f"`codex login status` failed to run: {exc}") from exc
+    return _CodexLoginResult(ok=result.returncode == 0)
 
 
 def _token_present(blob: str) -> bool:
     """A materialized blob must decode to something with an access token.
 
-    Mirrors usage.py's tolerance: the token can sit at a couple of known paths;
-    a non-JSON codex file counts as present (its shape is opaque here)."""
+    Mirrors usage.py's tolerance for Claude credentials: the token can sit at
+    a couple of known paths, and an opaque non-JSON keychain blob counts."""
     try:
         data = json.loads(blob)
     except (ValueError, TypeError):
@@ -277,6 +310,79 @@ def _token_present(blob: str) -> bool:
     if isinstance(oauth, dict) and oauth.get("accessToken"):
         return True
     return bool(data.get("accessToken") or data.get("access_token") or data)
+
+
+def _codex_auth_present(blob: str) -> bool:
+    """Require credential material for Codex's effective AuthDotJson mode."""
+    try:
+        data = json.loads(blob)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    def nonempty(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    def tokens_present(*, refresh_required: bool) -> bool:
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return False
+        if not all(nonempty(tokens.get(field)) for field in ("access_token", "id_token")):
+            return False
+        refresh = tokens.get("refresh_token")
+        return nonempty(refresh) if refresh_required else isinstance(refresh, str)
+
+    def identity_present() -> bool:
+        identity = data.get("agent_identity")
+        if nonempty(identity):
+            return True
+        if not isinstance(identity, dict):
+            return False
+        return (
+            all(
+                nonempty(identity.get(field))
+                for field in (
+                    "agent_runtime_id",
+                    "agent_private_key",
+                    "account_id",
+                    "chatgpt_user_id",
+                )
+            )
+            and nonempty(identity.get("plan_type"))
+            and isinstance(identity.get("chatgpt_account_is_fedramp"), bool)
+        )
+
+    def bedrock_present() -> bool:
+        bedrock = data.get("bedrock_api_key")
+        return isinstance(bedrock, dict) and all(
+            nonempty(bedrock.get(field)) for field in ("api_key", "region")
+        )
+
+    mode = data.get("auth_mode")
+    if mode is None:
+        if data.get("personal_access_token") is not None:
+            mode = "personalAccessToken"
+        elif data.get("bedrock_api_key") is not None:
+            mode = "bedrockApiKey"
+        elif data.get("OPENAI_API_KEY") is not None:
+            mode = "apikey"
+        else:
+            mode = "chatgpt"
+
+    if mode == "apikey":
+        return nonempty(data.get("OPENAI_API_KEY"))
+    if mode == "chatgpt":
+        return tokens_present(refresh_required=True)
+    if mode == "chatgptAuthTokens":
+        return tokens_present(refresh_required=False)
+    if mode == "agentIdentity":
+        return identity_present()
+    if mode == "personalAccessToken":
+        return nonempty(data.get("personal_access_token"))
+    if mode == "bedrockApiKey":
+        return bedrock_present()
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +599,49 @@ def stamp_active_slot(cli: str, record_id: str, root: Path | None = None) -> Non
 @dataclass(frozen=True)
 class SwitchResult:
     active: str  # a returned result is always verified; failure raises instead
+    slot_changed: bool = True
+    verification: str = "structural"
+    reason: Optional[str] = None
+
+
+def _rollback_materialized_slot(cli: str, rollback_blob: Optional[str]) -> tuple[str, bool]:
+    if not rollback_blob:
+        return "nothing to roll back to; slot may hold the unverified target", False
+    try:
+        _write_slot_blob(cli, rollback_blob)
+    except ManagedStoreError as exc:
+        return f"rollback ALSO failed ({exc}); slot is in an indeterminate state", False
+    return "slot rolled back to the previous account", True
+
+
+def _rollback_after_codex_probe(
+    target_id: str, rollback_blob: Optional[str], root: Path
+) -> tuple[str, bool]:
+    pins = pinning_sessions_for("codex")
+    if pins:
+        names = ", ".join(f"pid {pin.pid}" for pin in pins)
+        stamp_receipt = _clear_unverified_codex_stamp(root)
+        return (
+            f"rollback withheld because the slot is pinned by a live codex session "
+            f"({names}); slot may hold '{target_id}'; {stamp_receipt}",
+            False,
+        )
+    return _rollback_codex_slot(rollback_blob, root)
+
+
+def _rollback_codex_slot(rollback_blob: Optional[str], root: Path) -> tuple[str, bool]:
+    tail, rolled_back = _rollback_materialized_slot("codex", rollback_blob)
+    if rolled_back:
+        return tail, True
+    return f"{tail}; {_clear_unverified_codex_stamp(root)}", False
+
+
+def _clear_unverified_codex_stamp(root: Path) -> str:
+    try:
+        stamp_active_slot("codex", "", root)
+    except OSError as exc:
+        return f"active stamp could not be cleared ({exc})"
+    return "active stamp cleared because the slot occupant is unverified"
 
 
 def switch(
@@ -546,7 +695,11 @@ def _switch_locked(
         # a true no-op. If the slot was changed out-of-band (manual /login,
         # stale stamp after a partial failure), verify_slot is False and we
         # fall through to re-materialize rather than falsely report success.
-        return SwitchResult(active=target.id)
+        return SwitchResult(
+            active=target.id,
+            slot_changed=False,
+            reason="slot-already-active" if target.cli == "codex" else None,
+        )
 
     # Live-pin gate INSIDE the critical section (a session starting between
     # check and write is caught: the mutex is held across both). Per-CLI: claude
@@ -581,14 +734,10 @@ def _switch_locked(
     if not verify_slot(target, target_blob):
         # Verification failed: roll the slot back to the captured outgoing blob.
         # Tell the truth about the resulting slot state - operators act on it.
-        if not rollback_blob:
-            tail = "nothing to roll back to; slot may hold the unverified target"
+        if target.cli == "codex":
+            tail, _ = _rollback_codex_slot(rollback_blob, root)
         else:
-            try:
-                _write_slot_blob(target.cli, rollback_blob)
-                tail = "slot rolled back to the previous account"
-            except ManagedStoreError as rb:
-                tail = f"rollback ALSO failed ({rb}); slot is in an indeterminate state"
+            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
         raise ManagedStoreError(
             f"switch to '{target.id}' failed verification (stored token may be "
             f"stale/revoked); {tail}"
@@ -596,34 +745,57 @@ def _switch_locked(
 
     # Codex TOCTOU narrowing (cv-f578cbe7): the pin gate above runs BEFORE the
     # write, so a codex launched in the snapshot+write window - having read the
-    # OUTGOING creds at startup - is not caught by it. Re-scan once here; if one
-    # appeared, roll the slot back to the outgoing creds and defer, so we never
-    # LEAVE auth.json rewritten under a session that started mid-switch. This is
-    # best-effort, not a full fix: a launch in the tiny write->recheck gap is
+    # OUTGOING creds at startup - is not caught by it. Re-scan immediately after
+    # structural verification; if one appeared, roll the slot back and defer so
+    # the native status probe never widens the accepted write->recheck race. This
+    # is best-effort, not a full fix: a launch in the tiny write->recheck gap is
     # irreducible without a lease the external codex binary honors. claude keeps
     # G1's single pre-write check (this arm only, by request).
     if target.cli == "codex":
         late_pins = pinning_sessions_for(target.cli)
         if late_pins:
             names = ", ".join(f"pid {p.pid}" for p in late_pins)
-            if not rollback_blob:
+            tail, rolled_back = _rollback_codex_slot(rollback_blob, root)
+            if not rolled_back:
+                if rollback_blob:
+                    raise ManagedStoreError(
+                        f"a live {target.cli} session started mid-switch; {tail}; "
+                        f"slot may hold '{target.id}' under a live session"
+                    )
                 raise SwitchDeferred(
                     f"a live {target.cli} session ({names}) started during the switch "
-                    "(no prior creds to restore); retry once it exits",
+                    f"({tail}); retry once it exits",
                     sessions=late_pins,
                 )
-            try:
-                _write_slot_blob(target.cli, rollback_blob)
-            except ManagedStoreError as rb:
-                raise ManagedStoreError(
-                    f"a live {target.cli} session started mid-switch and the rollback "
-                    f"ALSO failed ({rb}); slot may hold '{target.id}' under a live session"
-                ) from rb
             raise SwitchDeferred(
                 f"a live {target.cli} session ({names}) started during the switch; "
                 "slot rolled back to the previous account, retry once it exits",
                 sessions=late_pins,
             )
+
+    verification = "structural"
+    verification_reason: Optional[str] = None
+    if target.cli == "codex":
+        try:
+            login = _codex_login_ok()
+        except ManagedStoreError as exc:
+            tail, _ = _rollback_after_codex_probe(target.id, rollback_blob, root)
+            raise ManagedStoreError(f"codex login verification failed ({exc}); {tail}") from exc
+        except KeyboardInterrupt as exc:
+            # Preserve the interrupt while carrying a truthful rollback receipt
+            # through Click's BaseException handling.
+            tail, _ = _rollback_after_codex_probe(target.id, rollback_blob, root)
+            exc.add_note(f"codex login verification interrupted; {tail}")
+            raise
+        if login.ok is False:
+            tail, _ = _rollback_after_codex_probe(target.id, rollback_blob, root)
+            raise ManagedStoreError(
+                f"switch to '{target.id}' was not recognized by `codex login status`; {tail}"
+            )
+        if login.ok is True:
+            verification = "codex-recognized"
+        else:
+            verification_reason = login.reason
 
     # Crash window: a kill between the slot write above and this stamp leaves the
     # stamp naming the previous account while the slot holds target. Rare and
@@ -631,10 +803,21 @@ def _switch_locked(
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.cli, target.id, root)
     if emit_fn is not None:
-        emit_fn(
-            "account_switched",
-            provider=target.id,
-            account_id=target.account_id or target.id,
-            outgoing=outgoing_id or "",
-        )
-    return SwitchResult(active=target.id)
+        event = {
+            "provider": target.id,
+            "account_id": target.account_id or target.id,
+            "outgoing": outgoing_id or "",
+        }
+        if target.cli == "codex":
+            event.update(
+                slot_changed=True,
+                verification=verification,
+            )
+            if verification_reason:
+                event["reason"] = verification_reason
+        emit_fn("account_switched", **event)
+    return SwitchResult(
+        active=target.id,
+        verification=verification,
+        reason=verification_reason,
+    )
