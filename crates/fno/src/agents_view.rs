@@ -705,13 +705,15 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
 }
 
 /// One tracked external session's observed liveness from `claude agents --json
-/// --all` (x-7561). Only the two states reconcile cares about; absence from the
-/// observed map is the third case, a `None` map the fourth ("query
-/// unavailable").
+/// --all` (x-7561). `Live`/`Terminal` are the mapped states; `Unknown` is a
+/// tracked id PRESENT in the catalog but with an unrecognized/missing state (a
+/// per-id schema drift) - distinct from absence-from-the-map (the row is gone)
+/// and from a `None` map (the whole query failed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedExternal {
     Live,
     Terminal,
+    Unknown,
 }
 
 /// Parse `claude agents --json --all` into a tracked-id -> liveness map, keeping
@@ -742,7 +744,11 @@ pub fn parse_claude_agents(
         let observed = match obj.get("state").and_then(|v| v.as_str()) {
             Some("working") | Some("blocked") => ObservedExternal::Live,
             Some("stopped") | Some("done") | Some("failed") => ObservedExternal::Terminal,
-            _ => continue, // unknown state: treat as absent for this id
+            // A new/malformed/missing state for a PRESENT tracked id is per-id
+            // schema drift, NOT absence (codex P2): keep it in the map as
+            // `Unknown` so reconcile holds the record rather than deleting it as
+            // authoritatively gone.
+            _ => ObservedExternal::Unknown,
         };
         out.insert(id.to_string(), observed);
     }
@@ -810,6 +816,16 @@ pub fn reconcile_external(
                 }
                 r.state = S::Stopped;
                 r.reason = None;
+                out.push(r);
+            }
+            Some(ObservedExternal::Unknown) => {
+                // Present but indeterminate (per-id schema drift): hold the
+                // record as unknown, never delete it as absent (codex P2). Same
+                // safe-stop-retry rest state as the whole-query-unavailable case.
+                if r.state != S::Unknown {
+                    r.state = S::Unknown;
+                    notices.push(format!("{}: external state unknown - retry stop", r.name));
+                }
                 out.push(r);
             }
         }
@@ -1625,6 +1641,34 @@ mod tests {
         assert_eq!(got.get("cafef00d"), Some(&ObservedExternal::Terminal));
         assert_eq!(got.get("99998888"), Some(&ObservedExternal::Terminal));
         assert!(!got.contains_key("aaaabbbb"), "untracked id is dropped");
+    }
+
+    #[test]
+    fn parse_claude_agents_maps_unknown_state_to_unknown_not_absence() {
+        // codex P2: a tracked id PRESENT with a new/malformed/missing state is
+        // per-id schema drift, kept in the map as `Unknown` - never dropped
+        // (which reconcile would read as absence and delete).
+        let raw = r#"[
+            {"id":"deadbeef","state":"paused"},
+            {"id":"cafef00d"}
+        ]"#;
+        let got = parse_claude_agents(raw, &tracked(&["deadbeef", "cafef00d"])).unwrap();
+        assert_eq!(got.get("deadbeef"), Some(&ObservedExternal::Unknown));
+        assert_eq!(got.get("cafef00d"), Some(&ObservedExternal::Unknown));
+    }
+
+    #[test]
+    fn reconcile_holds_a_record_observed_unknown() {
+        // codex P2: a tracked id observed as Unknown (present but indeterminate)
+        // is HELD as unknown, never deleted as absent.
+        let mut obs = HashMap::new();
+        obs.insert("deadbeef".to_string(), ObservedExternal::Unknown);
+        let (out, _) = reconcile_external(
+            vec![record("deadbeef", ExternalState::Stopping)],
+            Some(&obs),
+        );
+        assert_eq!(out.len(), 1, "an unknown-observed record is not deleted");
+        assert_eq!(out[0].state, ExternalState::Unknown);
     }
 
     #[test]

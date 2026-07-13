@@ -4292,7 +4292,10 @@ impl Core {
                 // owns the candidate set, so there is no per-row resolution and
                 // zero candidates is a visible successful `reaped 0`. Off-loop +
                 // bounded, mirroring `agent_action`; the registry poll owns the
-                // row-vanish, this notice is advisory.
+                // row-vanish, this notice is advisory. The immediate `reaping…`
+                // notice gives visible in-flight feedback (codex P2) before the
+                // up-to-20s subprocess, since reap has no row-level state.
+                self.notice(client_id, "reaping exited agents…");
                 self.reap_action(client_id);
                 Flow::Continue
             }
@@ -4301,6 +4304,14 @@ impl Core {
                 // tombstone) by stable attach id (x-7561). Validate the id names
                 // an actionable external target NOW (AC1-ERR stale refusal), then
                 // the durable CAS gates the spawn.
+                if !crate::squad_store::valid_attach_id(&attach_id) {
+                    // The id rides from the client (which read it off an
+                    // unvalidated roster row); reject a non-8-hex value before it
+                    // is persisted or reaches the `claude stop` argv (codex P2 -
+                    // a dash-prefixed id could be read as a CLI option).
+                    self.notice(client_id, "invalid external id");
+                    return Flow::Continue;
+                }
                 match self.resolve_external_stop_target(&attach_id) {
                     Err(msg) => self.notice(client_id, msg),
                     Ok((rname, cwd)) => {
@@ -4330,6 +4341,10 @@ impl Core {
                 // live-row lookup - the target is a persisted tombstone; the CAS
                 // itself is the stop-before-rm gate (refuses any non-stopped
                 // state with a specific reason).
+                if !crate::squad_store::valid_attach_id(&attach_id) {
+                    self.notice(client_id, "invalid external id");
+                    return Flow::Continue;
+                }
                 match crate::squad_store::begin_external_rm(&attach_id) {
                     Err(e) => self.persist_degraded(&e),
                     Ok(crate::squad_store::LifecycleCas::Refused(r)) => self.notice(client_id, r),
@@ -7147,6 +7162,32 @@ mod tests {
         assert!(drain_notice(&mut rx)
             .unwrap()
             .contains("no longer a live external row"));
+    }
+
+    #[test]
+    fn external_lifecycle_invalid_id_refused_before_spawn() {
+        // codex P2: a non-8-hex attach id from the client is rejected before it
+        // is persisted or reaches a `claude` argv (a dash-prefixed id could be
+        // read as a CLI option). Both verbs guard; the refusal precedes any
+        // resolve/CAS, so a #[test] with no tokio runtime never panics.
+        for cmd in [
+            Command::StopExternal {
+                attach_id: "--oops".into(),
+                name: "x".into(),
+            },
+            Command::RemoveExternal {
+                attach_id: "nothex!".into(),
+                name: "x".into(),
+            },
+        ] {
+            let mut core = empty_core();
+            let (c, mut rx) = client_with_rx(1);
+            core.clients.push(c);
+            core.command(1, cmd);
+            assert!(drain_notice(&mut rx)
+                .unwrap()
+                .contains("invalid external id"));
+        }
     }
 
     #[test]

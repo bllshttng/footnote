@@ -325,7 +325,15 @@ pub fn begin_external_stop(id: &str, name: &str, cwd: &str) -> io::Result<Lifecy
                 ExternalState::Removing => {
                     LifecycleCas::Refused(format!("{name} is being removed"))
                 }
-                _ => {
+                // An in-flight stop must NOT launch a second `claude stop` (codex
+                // P1): a duplicate spawn discards the first completion and assumes
+                // stop is concurrency-safe. Only a SETTLED rest state (failed /
+                // unknown) is retryable; a stuck `stopping` is made retryable by
+                // startup reconciliation flipping it to failed, not by a re-press.
+                ExternalState::Stopping => {
+                    LifecycleCas::Refused(format!("{name} is already stopping"))
+                }
+                ExternalState::Failed | ExternalState::Unknown => {
                     r.generation += 1;
                     r.state = ExternalState::Stopping;
                     r.name = name.to_string();
@@ -797,6 +805,25 @@ mod tests {
             begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
             LifecycleCas::Refused(_)
         ));
+    }
+
+    #[test]
+    fn begin_stop_refused_while_already_stopping() {
+        // codex P1: a stop in flight must NOT launch a second `claude stop`. A
+        // `stopping` record refuses "already stopping" (only failed/unknown rest
+        // states retry) - the generation never advances, so the first
+        // completion is never orphaned by a duplicate spawn.
+        let _s = Scratch::new("begin-stop-inflight");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen1 Stopping
+        match begin_external_stop("deadbeef", "ext", "/tmp").unwrap() {
+            LifecycleCas::Refused(r) => assert!(r.contains("already stopping")),
+            _ => panic!("a second stop while stopping must refuse"),
+        }
+        assert_eq!(
+            lc("deadbeef").unwrap().generation,
+            1,
+            "generation must not advance"
+        );
     }
 
     #[test]

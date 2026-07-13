@@ -782,7 +782,7 @@ pub enum Command {
     /// (observer) client; external rows are never touched (the reap verb only
     /// knows the fno registry). The uppercase-`X` sibling of per-row `x`.
     ReapAgents,
-    /// (v29, x-7561) Stop a LIVE external claude-daemon row by its stable
+    /// (v30, x-7561) Stop a LIVE external claude-daemon row by its stable
     /// `attach_id` (8-hex). The server re-validates the exact live external
     /// catalog row (`external` + matching `attach_id`), durably records
     /// `stopping` via a generation-checked compare-and-set BEFORE spawning
@@ -793,7 +793,7 @@ pub enum Command {
         attach_id: String,
         name: String,
     },
-    /// (v29, x-7561) Remove a STOPPED external tombstone by `attach_id`: a second
+    /// (v30, x-7561) Remove a STOPPED external tombstone by `attach_id`: a second
     /// durable compare-and-set records `removing` before `claude rm <attach_id>`
     /// may spawn. Refused unless the persisted lifecycle record for that id is
     /// `stopped` - a live/`stopping`/`failed`/`unknown` target cannot reach rm
