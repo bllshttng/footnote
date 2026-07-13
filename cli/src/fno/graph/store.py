@@ -116,6 +116,9 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "spawned_by_session",
     "spawned_by_harness",
     "spawned_by_cwd",
+    # Append-only lifecycle provenance (x-b6e4): {phase, harness, session_id, at}
+    # per phase boundary. Sits in the provenance tail after the birth/spawn edges.
+    "sessions",
     "queued_at",
     "queued_reason",
 ]
@@ -375,6 +378,8 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("spawned_by_session", None)
         e.setdefault("spawned_by_harness", None)
         e.setdefault("spawned_by_cwd", None)
+        # Append-only lifecycle provenance (x-b6e4): empty on legacy nodes.
+        e.setdefault("sessions", [])
         # Queued: orthogonal to _status. A queued node is still ready (has a
         # plan, unblocked); the queued_at field marks the user's intent to
         # pick it up next/today. Cleared on completion.
@@ -547,3 +552,77 @@ def append_progress_note(
 
     locked_mutate_graph(path, mutator)
     return result["found"], result["plan_path"]
+
+
+# Bounded ceiling for harness / session-id strings (x-b6e4). Real ids are UUIDs
+# (~36) or short markers; 200 leaves headroom while rejecting a runaway value
+# that would bloat the graph. ponytail: fixed cap, widen only if a real id
+# legitimately exceeds it.
+_SESSION_STR_MAX = 200
+
+
+def append_session_record(
+    path: Path,
+    node_id: str,
+    *,
+    phase: str,
+    harness: str,
+    session_id: str,
+    at: "str | None" = None,
+) -> "tuple[bool, bool]":
+    """Append a ``{phase, harness, session_id, at}`` lifecycle record to a node's
+    append-only ``sessions`` list, returning ``(found, added)`` (x-b6e4).
+
+    The single graph-owned mutation primitive behind ``fno backlog session add``.
+    Idempotent under the graph lock: appends only when ``(phase, harness,
+    session_id)`` is absent, so a retried or concurrent duplicate stamp collapses
+    to one row and the first observation owns ``at``. Never edits or removes an
+    entry.
+
+    Raises ``ValueError`` on an unknown phase, an empty/over-long harness or
+    session id, or an unparseable ``at`` -- validation lives here so every caller
+    (CLI, tests, future backfill) is bound by the same contract. ``found=False``
+    when the node is absent (no mutation).
+    """
+    from fno.graph._intake import _find_node  # function-local: avoid import cycle
+    from fno.graph.types import SESSION_PHASES
+
+    if phase not in SESSION_PHASES:
+        raise ValueError(
+            f"invalid phase {phase!r}; expected one of {sorted(SESSION_PHASES)}"
+        )
+    harness = (harness or "").strip()
+    session_id = (session_id or "").strip()
+    for label, value in (("harness", harness), ("session_id", session_id)):
+        if not value:
+            raise ValueError(f"{label} must be a non-empty string")
+        if len(value) > _SESSION_STR_MAX:
+            raise ValueError(f"{label} exceeds {_SESSION_STR_MAX} chars")
+
+    if at is None:
+        at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        at = at.strip()
+        try:
+            datetime.fromisoformat(at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"at must be an ISO-8601 timestamp, got {at!r}") from exc
+
+    result = {"found": False, "added": False}
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is None:
+            return entries
+        result["found"] = True
+        rows = node.setdefault("sessions", [])
+        key = (phase, harness, session_id)
+        if any((r.get("phase"), r.get("harness"), r.get("session_id")) == key for r in rows):
+            return entries  # duplicate: first observation owns `at`
+        rows.append({"phase": phase, "harness": harness,
+                     "session_id": session_id, "at": at})
+        result["added"] = True
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    return result["found"], result["added"]

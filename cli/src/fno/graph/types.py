@@ -29,6 +29,13 @@ class Priority(str, Enum):
     p3 = "p3"
 
 
+# Lifecycle phases stamped into a node's append-only `sessions` list (x-b6e4).
+# Exactly these four; review/plan-validation are deliberately excluded (Locked
+# Decision 2). The single source of truth for phase validation in
+# store.append_session_record and the `session add` CLI.
+SESSION_PHASES: frozenset[str] = frozenset({"think", "blueprint", "do", "ship"})
+
+
 # Re-export the canonical PRIORITY_ORDER from _constants so this module
 # stays in sync without a parallel literal.
 from fno.graph._constants import PRIORITY_ORDER  # noqa: E402,F401
@@ -169,6 +176,13 @@ class Entry(BaseModel):
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
+
+    # Append-only lifecycle provenance (x-b6e4): one {phase, harness, session_id,
+    # at} record per phase boundary a session crossed. Unique per
+    # (phase, harness, session_id); the same session may appear across phases and
+    # a takeover appends another entry for the same phase. Written only through
+    # store.append_session_record. Empty on legacy nodes.
+    sessions: list[dict] = Field(default_factory=list)
 
     model_config = {"extra": "allow"}
 
