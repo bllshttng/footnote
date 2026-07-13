@@ -269,31 +269,47 @@ def is_shipped(node: dict) -> bool:
     )
 
 
+def group_child_slug(node: dict, base: str) -> Optional[str]:
+    """The group slug of a child node, or None if it is not a group child.
+
+    Identity is the durable ``group_slug`` field (x-edf7 US2) - present on every
+    child born unlinked, so a child with no ``plan_path`` yet is still
+    identifiable. Falls back to deriving the slug from a legacy ``plan_path`` (the
+    ``fragment`` form ``<base>#group-<slug>`` or the ``separate`` form
+    ``<dir>/<stem>.group-<slug>.md``) for children created before the field
+    existed, so re-decompose stays idempotent across the migration.
+    """
+    gslug = node.get("group_slug")
+    if isinstance(gslug, str) and gslug:
+        return gslug
+    pp = node.get("plan_path") or ""
+    frag_prefix = f"{base}#group-"
+    p = Path(base)
+    stem = p.stem if p.name.endswith(".md") else p.name
+    sep_prefix = str(p.with_name(f"{stem}.group-"))  # path minus "<slug>.md"
+    if pp.startswith(frag_prefix):
+        return pp[len(frag_prefix):]
+    if pp.startswith(sep_prefix) and pp.endswith(".md"):
+        return pp[len(sep_prefix):-3]
+    return None
+
+
 def find_orphans(
     entries: list[dict], epic_id: str, base: str, keep_slugs: set[str]
 ) -> list[dict]:
     """Existing group children of the epic whose slug is absent from the new spec.
 
-    A child is a group node when it is parented to the epic and its plan_path is
-    either the `fragment` form `<base>#group-<slug>` or the `separate` form
-    `<dir>/<stem>.group-<slug>.md`. Returns those whose slug is not in keep_slugs,
+    A child is a group node when it is parented to the epic and carries a
+    resolvable group slug (the ``group_slug`` field, else a legacy plan_path -
+    see :func:`group_child_slug`). Returns those whose slug is not in keep_slugs,
     in graph order, so a re-decomposition can surface or refuse the orphans
-    regardless of which packaging mode created them.
+    regardless of packaging mode or whether the child was ever linked.
     """
-    frag_prefix = f"{base}#group-"
-    p = Path(base)
-    stem = p.stem if p.name.endswith(".md") else p.name
-    sep_prefix = str(p.with_name(f"{stem}.group-"))  # path minus "<slug>.md"
     orphans: list[dict] = []
     for e in entries:
         if e.get("parent") != epic_id:
             continue
-        pp = e.get("plan_path") or ""
-        slug: Optional[str] = None
-        if pp.startswith(frag_prefix):
-            slug = pp[len(frag_prefix):]
-        elif pp.startswith(sep_prefix) and pp.endswith(".md"):
-            slug = pp[len(sep_prefix):-3]
+        slug = group_child_slug(e, base)
         if slug and slug not in keep_slugs:
             orphans.append(e)
     return orphans

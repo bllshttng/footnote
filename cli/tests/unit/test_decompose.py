@@ -99,6 +99,12 @@ def _groups_json(groups) -> str:
     return json.dumps(groups)
 
 
+def _child(entries, slug):
+    """The group child with the given slug (x-edf7: identity is group_slug, not
+    plan_path - children are born unlinked until inline-fill links a real plan)."""
+    return next(e for e in entries if e.get("group_slug") == slug)
+
+
 def _invoke(args, input_text=None):
     from fno.cli import app
 
@@ -126,17 +132,16 @@ def test_ac1_hp_creates_group_children(graph_env):
     children = [e for e in entries if e.get("parent") == "ab-epic0001"]
     assert len(children) == 3
 
-    # Each child gets its own self-contained .group-<slug>.md plan (separate
-    # packaging), never a #group- fragment of the shared doc.
-    by_slug = {e["plan_path"]: e for e in children}
-    assert any(pp.endswith("big.group-1.md") for pp in by_slug)
-    assert any(pp.endswith("big.group-2.md") for pp in by_slug)
-    assert any(pp.endswith("big.group-3.md") for pp in by_slug)
-
+    # x-edf7 US2: children are born UNLINKED (no plan_path), identified by
+    # group_slug. Linking a filled plan is the later fill step, so NO child is
+    # `ready` yet. The unblocked group derives `idea`; a group with an open
+    # inter-group blocker derives `blocked` - never `ready`.
+    assert {c["group_slug"] for c in children} == {"1", "2", "3"}
     for c in children:
         assert c["parent"] == "ab-epic0001"
-        assert "#group-" not in c["plan_path"]
-        assert c["plan_path"].endswith(".md")
+        assert c["plan_path"] is None
+        assert c["_status"] != "ready"
+    assert _child(children, "1")["_status"] == "idea"  # no blockers -> idea
 
 
 def test_ac1_hp_inter_group_blocked_by_resolves_to_ids(graph_env):
@@ -144,9 +149,9 @@ def test_ac1_hp_inter_group_blocked_by_resolves_to_ids(graph_env):
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
 
     entries = read_entries()
-    g1 = next(e for e in entries if e["plan_path"].endswith(".group-1.md"))
-    g2 = next(e for e in entries if e["plan_path"].endswith(".group-2.md"))
-    g3 = next(e for e in entries if e["plan_path"].endswith(".group-3.md"))
+    g1 = _child(entries, "1")
+    g2 = _child(entries, "2")
+    g3 = _child(entries, "3")
 
     assert g1["blocked_by"] == []
     assert g2["blocked_by"] == [g1["id"]]
@@ -156,7 +161,7 @@ def test_ac1_hp_inter_group_blocked_by_resolves_to_ids(graph_env):
 def test_wave_range_persisted_to_details(graph_env):
     g, read_entries = graph_env
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
-    g1 = next(e for e in read_entries() if e["plan_path"].endswith(".group-1.md"))
+    g1 = _child(read_entries(), "1")
     # AC1-UI wave range is not just echoed - it persists on the child node.
     assert "1-3" in (g1.get("details") or "")
 
@@ -194,8 +199,8 @@ def test_per_group_project_derives_cwd_from_workmap(graph_env, tmp_path, monkeyp
     result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
     assert result.exit_code == 0, result.output
     children = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
-    g1 = next(e for e in children if e["plan_path"].endswith(".group-1.md"))
-    g2 = next(e for e in children if e["plan_path"].endswith(".group-2.md"))
+    g1 = _child(children, "1")
+    g2 = _child(children, "2")
     # G1 inherits the epic's repo; G2 routed into web.
     assert (g1["project"], g1["cwd"]) == ("fno", str(tmp_path))
     assert (g2["project"], g2["cwd"]) == ("web", "/repos/web")
@@ -357,6 +362,30 @@ def test_ac1_edge_fewer_groups_than_ceiling(graph_env):
 # -- AC1-FR / US4: atomic, idempotent re-decompose --
 
 
+def test_ac2_edge_redecompose_preserves_filled_child_plan_path(graph_env):
+    """x-edf7 AC2-EDGE: a child that was inline-filled + linked keeps its
+    plan_path across re-decompose; a designed plan is never unset or clobbered."""
+    g, read_entries = graph_env
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
+
+    # Simulate group 1 being inline-filled + linked (the design-completion event).
+    entries = read_entries()
+    child1 = _child(entries, "1")
+    filled_path = "/plans/big.group-1.md"
+    child1["plan_path"] = filled_path
+    Path(g).write_text(json.dumps({"entries": entries}) + "\n")
+
+    # Re-decompose with an edited group set (titles bumped).
+    changed = [dict(grp, title=grp["title"] + " v2") for grp in THREE_GROUPS]
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(changed)])
+
+    after = read_entries()
+    assert _child(after, "1")["plan_path"] == filled_path   # designed plan untouched
+    assert _child(after, "1")["_status"] == "ready"          # stays ready
+    # An unfilled sibling stays unlinked - re-decompose never spuriously links it.
+    assert _child(after, "2")["plan_path"] is None
+
+
 def test_us4_rerun_updates_in_place_no_duplicates(graph_env):
     g, read_entries = graph_env
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
@@ -474,7 +503,7 @@ def test_redecompose_orphaning_shipped_group_rejected(graph_env):
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
     # Mark group 3 as shipped, then try to drop it.
     entries = read_entries()
-    g3 = next(e for e in entries if e["plan_path"].endswith(".group-3.md"))
+    g3 = _child(entries, "3")
     g3["pr_number"] = 999
     g.write_text(json.dumps({"entries": entries}) + "\n")
     before = read_entries()
@@ -493,7 +522,7 @@ def test_redecompose_orphaning_shipped_group_allowed_with_force(graph_env):
     g, read_entries = graph_env
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
     entries = read_entries()
-    g3 = next(e for e in entries if e["plan_path"].endswith(".group-3.md"))
+    g3 = _child(entries, "3")
     g3["pr_number"] = 999
     g.write_text(json.dumps({"entries": entries}) + "\n")
 
@@ -558,12 +587,12 @@ def test_redecompose_clearing_waves_resets_details(graph_env):
     g, read_entries = graph_env
     one = [{"slug": "1", "title": "G1", "waves": "1-3", "blocked_by_groups": []}]
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(one)])
-    g1 = next(e for e in read_entries() if e["plan_path"].endswith(".group-1.md"))
+    g1 = _child(read_entries(), "1")
     assert "1-3" in (g1.get("details") or "")
 
     cleared = [{"slug": "1", "title": "G1", "waves": "", "blocked_by_groups": []}]
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(cleared)])
-    g1 = next(e for e in read_entries() if e["plan_path"].endswith(".group-1.md"))
+    g1 = _child(read_entries(), "1")
     assert not (g1.get("details") or ""), f"stale details: {g1.get('details')!r}"
 
 
@@ -736,6 +765,7 @@ from fno.graph._decompose import (  # noqa: E402
     extract_contract_versions,
     extract_why_digest,
     scaffold_separate_plan,
+    separate_plan_path,
     validate_groups,
 )
 
@@ -948,12 +978,12 @@ def test_ac2_hp_contract_with_pin_stamps_child(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
 
-    child = next(e for e in read_entries() if e["plan_path"].endswith(".group-2.md"))
+    child = _child(read_entries(), "2")
     assert child["dep"] == "contract"
     assert child["contract_version"] == 2
     assert child["stub_against"] == f"{doc}#interface-contract"
     # The hard sibling carries none of the contract fields (AC6-EDGE).
-    sib = next(e for e in read_entries() if e["plan_path"].endswith(".group-1.md"))
+    sib = _child(read_entries(), "1")
     assert "dep" not in sib and "stub_against" not in sib and "contract_version" not in sib
 
 
@@ -966,7 +996,7 @@ def test_ac2_hp_contract_no_pin_downgrades_loudly(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "falling back to hard" in result.output
 
-    child = next(e for e in read_entries() if e["plan_path"].endswith(".group-2.md"))
+    child = _child(read_entries(), "2")
     assert "dep" not in child
     assert "contract_version" not in child
 
@@ -985,7 +1015,7 @@ def test_contract_downgrade_in_json_output(tmp_path, monkeypatch):
 def test_redecompose_contract_to_hard_clears_stub_fields(tmp_path, monkeypatch):
     g, read_entries, doc = _contract_env(tmp_path, monkeypatch)
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(_CONTRACT_GROUPS)])
-    child = next(e for e in read_entries() if e["plan_path"].endswith(".group-2.md"))
+    child = _child(read_entries(), "2")
     assert child["dep"] == "contract"
 
     # Re-decompose group 2 back to hard (drop the dep field).
@@ -994,7 +1024,7 @@ def test_redecompose_contract_to_hard_clears_stub_fields(tmp_path, monkeypatch):
         {**_CONTRACT_GROUPS[1], "dep": "hard"},
     ]
     _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(hard_again)])
-    child = next(e for e in read_entries() if e["plan_path"].endswith(".group-2.md"))
+    child = _child(read_entries(), "2")
     assert "dep" not in child
     assert "stub_against" not in child
     assert "contract_version" not in child
@@ -1011,7 +1041,7 @@ def test_contract_non_utf8_doc_does_not_crash(tmp_path, monkeypatch):
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(_CONTRACT_GROUPS)]
     )
     assert result.exit_code == 0, result.output
-    child = next(e for e in read_entries() if e["plan_path"].endswith(".group-2.md"))
+    child = _child(read_entries(), "2")
     assert "dep" not in child  # unreadable doc -> no pin -> hard
 
 
@@ -1057,12 +1087,13 @@ def test_plans_separate_scaffolds_files_and_repoints(tmp_path, monkeypatch):
     children = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
     assert len(children) == 3
     for c in children:
-        pp = c["plan_path"]
-        assert "#group-" not in pp          # not a fragment
-        assert ".group-" in pp and pp.endswith(".md")
-        f = Path(pp)
+        # x-edf7 US2: the scaffold FILE is still written, but the node is born
+        # UNLINKED - plan_path stays None until inline-fill links the filled plan.
+        assert c["plan_path"] is None
+        f = Path(separate_plan_path(str(doc), c["group_slug"]))
         assert f.exists(), f"scaffold not written: {f}"
         body = f.read_text()
+        assert "status: stub" in body       # born stub, never ready
         assert "kind: quick-plan" in body
         assert "parent_epic: ab-epic0001" in body
 
@@ -1075,7 +1106,9 @@ def test_plans_separate_idempotent_preserves_builder_edits(tmp_path, monkeypatch
              "--groups", _groups_json(THREE_GROUPS)])
     before = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
     ids_before = sorted(e["id"] for e in before)
-    edited = Path(before[0]["plan_path"])
+    # Children are born unlinked (plan_path=None); the scaffold file lives at the
+    # slug-derived path, so a builder edits THAT file, not a linked plan_path.
+    edited = Path(separate_plan_path(str(doc), before[0]["group_slug"]))
     edited.write_text("# builder edits - keep\n", encoding="utf-8")
 
     _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
@@ -1141,7 +1174,7 @@ def test_plans_separate_title_with_quotes_emits_valid_yaml(tmp_path, monkeypatch
                       "--groups", _groups_json(groups)])
     assert result.exit_code == 0, result.output
     child = next(e for e in read_entries() if e.get("parent") == "ab-epic0001")
-    body = Path(child["plan_path"]).read_text()
+    body = Path(separate_plan_path(str(doc), child["group_slug"])).read_text()
     front = body.split("---\n", 2)[1]
     fm = yaml.safe_load(front)
     assert fm["title"] == 'Group "alpha": the \\ case'

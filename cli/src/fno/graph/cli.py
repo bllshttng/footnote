@@ -797,17 +797,19 @@ def cmd_decompose(
         for grp in norm:
             frag_path = child_plan_path(base, grp["slug"])
             sep_path = separate_plan_path(base, grp["slug"])
-            cpath = sep_path
-            # Tolerant lookup: a child is the same group whether its plan_path is
-            # currently the legacy fragment or the separate-file form, so
-            # re-decomposing a pre-removal epic upserts in place (and repoints the
-            # child to its separate file) instead of duplicating (idempotent on slug).
+            # Tolerant lookup: identity is the durable group_slug (x-edf7 US2), so
+            # a child born unlinked (no plan_path yet) is still found; the legacy
+            # plan_path match (fragment or separate form) upserts a pre-field child
+            # in place instead of duplicating (idempotent on slug across migration).
             existing = next(
                 (
                     e
                     for e in graph_entries
                     if e.get("parent") == epic_resolved_id
-                    and e.get("plan_path") in (frag_path, sep_path)
+                    and (
+                        e.get("group_slug") == grp["slug"]
+                        or e.get("plan_path") in (frag_path, sep_path)
+                    )
                 ),
                 None,
             )
@@ -815,9 +817,14 @@ def cmd_decompose(
             if existing is not None:
                 action = "updated"
                 node = existing
-                # Repoint to the requested packaging (no-op when already in that
-                # mode) so the child stays addressable under its current form.
-                node["plan_path"] = cpath
+                node["group_slug"] = grp["slug"]  # backfill identity on legacy children
+                # Preserve a designed child's plan_path; NEVER link an unlinked
+                # child here (linking is the inline-fill / fan-out step's job, US2).
+                # The one exception is the documented legacy-fragment repoint:
+                # a child still on `<doc>#group-<slug>` moves to its separate file
+                # (staying linked/ready), never unset.
+                if node.get("plan_path") == frag_path:
+                    node["plan_path"] = sep_path
                 # Re-running with an explicit route reprojects an existing child
                 # (e.g. a first pass inherited the epic's repo, a later pass adds
                 # per-group routing). No route leaves the child's repo untouched.
@@ -827,6 +834,10 @@ def cmd_decompose(
                     node["cwd"] = route_cwd
             else:
                 action = "created"
+                # Born UNLINKED (plan_path=None -> derives `idea`): linking the
+                # filled plan is the design-completion signal that flips the child
+                # `ready` (x-edf7 US2, Locked Decision 4). group_slug is the durable
+                # identity that survives the unlinked window.
                 node = _build_backlog_node(
                     title=grp["title"],
                     parent=epic_resolved_id,
@@ -834,8 +845,9 @@ def cmd_decompose(
                     cwd=route_cwd if route_cwd is not None else live_epic.get("cwd"),
                     priority=live_epic.get("priority", "p2"),
                     domain=live_epic.get("domain", "code"),
-                    plan_path=cpath,
+                    plan_path=None,
                 )
+                node["group_slug"] = grp["slug"]
                 node["id"] = mint_node_id({e.get("id") for e in graph_entries})
                 # Reuse the parent-setter's cycle detection on this path too
                 # (plan Invariants, line 88). A freshly minted id cannot be an
