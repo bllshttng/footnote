@@ -380,7 +380,7 @@ def test_detect_failure_defers_event_for_absent_node_noops():
     assert m.detect_failure_defers([_n("ab-real")], events, 3) == []
 
 
-# --- leg 8: validity sweep - selection + fingerprint (x-af5e) ---------------
+# --- leg 8: validity sweep - selection + fingerprint ---------------
 
 
 def _idea(node_id: str, age_days: int, now: datetime, **over) -> dict:
@@ -495,7 +495,7 @@ def test_collect_evidence_caps_packet_size():
     assert size <= m.PACKET_MAX_BYTES
 
 
-# --- leg 8: validity sweep - validation + command rendering (x-af5e) --------
+# --- leg 8: validity sweep - validation + command rendering --------
 
 
 def _packet(node_id: str, **over) -> m.EvidencePacket:

@@ -5287,7 +5287,7 @@ def cmd_maintain(
 
         locked_mutate_graph(_graph_path(), mutator)
 
-    # --- leg 8: validity sweep (proposal-only, ALWAYS - never mutates) (x-af5e) ---
+    # --- leg 8: validity sweep (proposal-only, ALWAYS - never mutates) ---
     # Runs even under --apply as proposal-only; a single analyzer call reviews the
     # oldest stale ideas and writes an immutable evidence deck. Self-limiting:
     # once the pile is watermarked, later runs find 0 eligible and skip the call.

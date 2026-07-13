@@ -459,7 +459,7 @@ def test_e2e_blocker_done_auto_readies_dependents(tmp_graph):
     assert by_id["ab-depE2E"]["_status"] == "ready"  # auto-unblocked
 
 
-# --- leg 8: validity sweep (x-af5e) ----------------------------------------
+# --- leg 8: validity sweep ----------------------------------------
 
 
 def _old_idea(node_id: str, age_days: int, **over) -> dict:

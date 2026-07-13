@@ -408,7 +408,7 @@ def detect_failure_defers(
 
 
 # ---------------------------------------------------------------------------
-# Leg 8: validity sweep for stale ideas (proposal-only, x-af5e)
+# Leg 8: validity sweep for stale ideas (proposal-only)
 # ---------------------------------------------------------------------------
 #
 # Age alone (leg 4 / drain) cannot tell an enduring long-tail idea from a
