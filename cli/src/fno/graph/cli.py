@@ -2636,8 +2636,14 @@ def _session_callback() -> None:
 
 @session_app.command("add")
 def cmd_session_add(
-    node: str = typer.Argument(..., help="Node id / slug / bare-hex to stamp."),
+    node: Optional[str] = typer.Argument(
+        None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr)."
+    ),
     phase: str = typer.Option(..., "--phase", help="Lifecycle phase: think|blueprint|do|ship."),
+    pr: Optional[int] = typer.Option(
+        None, "--pr", help="Resolve the UNIQUE node carrying this PR number instead of "
+                           "passing NODE (rejects 0 or multiple matches; never fans out)."
+    ),
     harness: Optional[str] = typer.Option(
         None, "--harness", help="Override harness (default: ambient session identity)."
     ),
@@ -2649,44 +2655,63 @@ def cmd_session_add(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the result as JSON."),
 ) -> None:
-    """Stamp NODE with a lifecycle phase record (idempotent, append-only).
+    """Stamp a node with a lifecycle phase record (idempotent, append-only).
 
-    Harness + session id default to the ambient session identity. With neither an
-    env marker nor an explicit flag the stamp is skipped and a warning names the
-    node and phase -- provenance is never invented (AC2-ERR). Exit 0 on append or
-    duplicate; exit 2 on missing identity, unknown phase/node, or bad input.
+    Identify the node by NODE (id/slug/hex) or by ``--pr <n>`` (the unique
+    PR-linked node) -- exactly one of the two. Harness + session id default to the
+    ambient session identity; with neither an env marker nor an explicit flag the
+    stamp is skipped and a warning names the node/PR and phase (provenance is
+    never invented, AC2-ERR). Exit 0 on append or duplicate; exit 2 on missing
+    identity, ambiguous/absent node, unknown phase, or bad input.
     """
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import append_session_record, read_graph
+    from fno.graph.store import append_session_record, read_graph, stamp_session_for_pr
 
+    if (node is None) == (pr is None):
+        typer.echo("session add: pass exactly one of NODE or --pr.", err=True)
+        raise typer.Exit(code=2)
+
+    who = node if node is not None else f"pr#{pr}"
     ident = resolve_harness_identity()
     eff_harness = (harness or ident.harness or "").strip()
     eff_session = (session_id or ident.session_id or "").strip()
     if not eff_harness or not eff_session:
         typer.echo(
-            f"session add: no ambient identity for node {node} phase={phase}; "
+            f"session add: no ambient identity for {who} phase={phase}; "
             "pass --harness/--session-id or run inside a session. Skipped.",
             err=True,
         )
         raise typer.Exit(code=2)
 
-    match = resolve_node(node, read_graph(_graph_path()))
-    if match.kind != "exact":
-        typer.echo(f"session add: no node matches {node!r} (node={node} phase={phase}).", err=True)
-        raise typer.Exit(code=2)
-    node_id = match.candidates[0]["id"]
-
     try:
-        found, added = append_session_record(
-            _graph_path(), node_id, phase=phase,
-            harness=eff_harness, session_id=eff_session, at=at,
-        )
+        if pr is not None:
+            node_id, status = stamp_session_for_pr(
+                _graph_path(), pr, phase=phase,
+                harness=eff_harness, session_id=eff_session, at=at,
+            )
+            if status in ("no-node", "ambiguous"):
+                typer.echo(
+                    f"session add: PR {pr} maps to {status} (phase={phase}); "
+                    "resolution is exact and never fans out. Skipped.",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            added = status == "added"
+        else:
+            match = resolve_node(node, read_graph(_graph_path()))
+            if match.kind != "exact":
+                typer.echo(f"session add: no node matches {node!r} (phase={phase}).", err=True)
+                raise typer.Exit(code=2)
+            node_id = match.candidates[0]["id"]
+            found, added = append_session_record(
+                _graph_path(), node_id, phase=phase,
+                harness=eff_harness, session_id=eff_session, at=at,
+            )
+            if not found:
+                typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)
+                raise typer.Exit(code=2)
     except ValueError as exc:
-        typer.echo(f"session add: {exc} (node={node_id} phase={phase})", err=True)
-        raise typer.Exit(code=2)
-
-    if not found:
-        typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)
+        typer.echo(f"session add: {exc} (target={who} phase={phase})", err=True)
         raise typer.Exit(code=2)
 
     if json_out:
