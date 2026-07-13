@@ -571,3 +571,31 @@ def unset_config_value(
         path=written,
         scope=scope,
     )
+
+
+def read_scope_value(
+    key: str,
+    *,
+    scope: str = "global",
+    repo_root: Optional[Path] = None,
+) -> Any:
+    """Read the value stored at a dotted ``key`` for ONE scope, or ``None``.
+
+    Read-only (no lock, no coercion): resolves the SAME target path
+    :func:`set_config_values` writes, so a read-merge-write ``set`` reads exactly
+    the file it will replace (no cross-scope bleed, no legacy-yaml blind spot -
+    ``_target_path`` migrates yaml->toml first). Tolerates a missing/malformed
+    file by returning ``None``. Only dict-valued keys resolve here (the caller,
+    ``fno route set``, merges the roles map)."""
+    target = _target_path(scope, repo_root)
+    if target.is_symlink():
+        target = Path(os.path.realpath(target))
+    if not target.exists():
+        return None
+    try:
+        data = tomllib.loads(target.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return _get_nested(data, _storage_parts(key.split(".")))
