@@ -34,7 +34,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional
 
 DispatchKind = Literal["create", "followup"]
 
@@ -1315,6 +1315,7 @@ def _claude_create_path(
     yolo: bool,
     lock_handle,  # type: ignore[no-untyped-def]
     role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
@@ -1351,6 +1352,7 @@ def _claude_create_path(
             cwd=cwd,
             timeout=timeout,
             role=role,
+            route_env=route_env,
             model=model,
             permission_mode=effective_mode,
             effort=effort,
@@ -1771,6 +1773,7 @@ def dispatch_spawn(
     from_name: str = _FROM_NAME_DEFAULT,
     yolo: bool = False,
     role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
@@ -1944,6 +1947,7 @@ def dispatch_spawn(
                         yolo=yolo,
                         lock_handle=lock_handle,
                         role=role,
+                        route_env=route_env,
                         model=model,
                         permission_mode=permission_mode,
                         effort=effort,

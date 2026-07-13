@@ -438,6 +438,19 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--route`` (x-b0b4).
+
+    The explicit per-dispatch ``--route provider,model`` override is parsed only
+    by the Python spawn path (``cmd_spawn`` resolves + fail-closes it via
+    ``resolve_explicit_route``). The Rust client does not know ``--route``, so a
+    ``spawn ... --route <p,m>`` auto-routed to the binary would exit ``unknown
+    flag: --route`` - identical registration to ``--role``."""
+    if verb != "spawn":
+        return False
+    return any(a == "--route" or a.startswith("--route=") for a in args)
+
+
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--node``/``--slug``/``--plan`` (x-84a8).
 
@@ -655,6 +668,7 @@ def make_agents_group_cls() -> type:
                 # parse those flags.
                 py_spawn = (
                     _is_role_bearing_spawn(verb, args)
+                    or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)
                     or _is_provenance_bearing_spawn(verb, args)
                 )

@@ -1,0 +1,193 @@
+"""`fno agents spawn --route provider,model` explicit fail-closed override (x-b0b4).
+
+Layers:
+- rust_runtime detector keeps --route Python-only (parity with --role).
+- cmd_spawn resolves + fails CLOSED before the gate (AC3-ERR).
+- dispatch_spawn threads route_env to the claude create path.
+- bg_create applies route_env, winning over --role.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict
+
+import pytest
+from typer.testing import CliRunner
+
+from fno.paths_testing import use_tmpdir
+
+runner = CliRunner()
+
+
+def _setup_tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    for k in ("FNO_AGENT_SELF", "FNO_AGENT_PROVIDER", "FNO_AGENT_SESSION"):
+        monkeypatch.delenv(k, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# rust_runtime: --route is Python-only, exactly like --role
+# ---------------------------------------------------------------------------
+
+
+def test_route_bearing_spawn_detected() -> None:
+    from fno.agents.rust_runtime import _is_route_bearing_spawn
+
+    assert _is_route_bearing_spawn("spawn", ["spawn", "w", "--route", "zai,glm-5.2"])
+    assert _is_route_bearing_spawn("spawn", ["spawn", "w", "--route=zai,glm-5.2"])
+    assert not _is_route_bearing_spawn("spawn", ["spawn", "w", "--role", "build"])
+    assert not _is_route_bearing_spawn("ask", ["ask", "w", "--route", "zai,glm-5.2"])
+
+
+# ---------------------------------------------------------------------------
+# cmd_spawn: fail CLOSED before the gate (AC3-ERR)
+# ---------------------------------------------------------------------------
+
+
+def test_route_missing_key_refused_before_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    gate_calls: list = []
+    monkeypatch.setattr(
+        spawn_gate, "run_gate", lambda *a, **k: gate_calls.append(1) or _Gate()
+    )
+    # If the refusal fails to fire, this stub prevents a real spawn.
+    monkeypatch.setattr(
+        "fno.agents.dispatch.dispatch_spawn",
+        lambda **kw: dispatch.SpawnResult(
+            kind="created", name=kw["name"], provider="claude", short_id="x"
+        ),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+         "--route", "zai,glm-5.2"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "refused" in result.output.lower()
+    # Fail-closed BEFORE the gate: no slot acquired, no worker launched.
+    assert gate_calls == []
+
+
+class _Gate:
+    def release(self) -> None:  # noqa: D401
+        pass
+
+
+def test_route_unknown_provider_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.agents.dispatch.dispatch_spawn",
+        lambda **kw: dispatch.SpawnResult(
+            kind="created", name=kw["name"], provider="claude", short_id="x"
+        ),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+         "--route", "nope,glm-5.2"],
+    )
+    assert result.exit_code == 2, result.output
+
+
+def test_route_rejected_on_pane_substrate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents.cli import agents_app
+
+    # Default substrate is pane; --route is claude+bg only.
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "claude", "--route", "zai,glm-5.2"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "bg" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# cmd_spawn -> dispatch_spawn threads route_env (resolved) to the create path
+# ---------------------------------------------------------------------------
+
+
+def test_route_threads_resolved_env_to_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+         "--route", "zai,glm-5.2"],
+    )
+    assert result.exit_code == 0, result.output
+    route_env = captured["route_env"]
+    assert route_env["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
+    assert route_env["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route_env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+
+
+# ---------------------------------------------------------------------------
+# bg_create: route_env WINS over role; anthropic creds cleared (AC "--route wins")
+# ---------------------------------------------------------------------------
+
+
+def test_bg_create_route_env_wins_over_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents.providers import claude as claude_mod
+
+    # A stale parent Anthropic credential must be cleared so the routed token wins.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic")
+
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["env"] = kwargs.get("env", {})
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(
+            argv, 0, stdout="backgrounded \xb7 abcd1234 \xb7 ok\n", stderr=""
+        )
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+
+    claude_mod.bg_create(
+        name="w",
+        message="hi",
+        cwd=tmp_path,
+        role="consolidate",  # would resolve to a different route; --route wins
+        route_env={
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "explicit-token",
+            "ANTHROPIC_MODEL": "glm-5.2",
+        },
+    )
+    env = seen["env"]
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "explicit-token"
+    assert env["ANTHROPIC_MODEL"] == "glm-5.2"
+    # The stale parent Anthropic key is popped so it can't override the route.
+    assert "ANTHROPIC_API_KEY" not in env

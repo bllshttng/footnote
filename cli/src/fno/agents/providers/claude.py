@@ -38,7 +38,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Mapping, Optional
 
 OrphanReason = Literal[
     "not-found",
@@ -260,6 +260,7 @@ def bg_create(
     cwd: Path,
     timeout: Optional[int] = None,
     role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
     model: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
@@ -281,6 +282,9 @@ def bg_create(
             tidy / orient / consolidate) with a configured provider key routes
             the worker to a secondary provider via env overrides; ``None`` or a
             production role leaves the spawn env byte-for-byte as today.
+        route_env: Optional pre-resolved explicit route env (from ``spawn
+            --route``, already fail-closed at the CLI). When present it WINS over
+            ``role`` (named intent beats auto-routing) and is merged directly.
         model: Optional per-node model pin (x-571f). Truthy appends
             ``--model <m>`` to the ``claude --bg`` argv; unset leaves it as
             today. Orthogonal to ``role``: the argv pin beats a role's env
@@ -327,9 +331,15 @@ def bg_create(
     # (fail-safe). Clear any parent Anthropic credential (a stale API key OR a
     # subscription OAuth token) so the routed auth token is the one that wins;
     # otherwise a lingering credential sends the routed worker back to Anthropic.
-    from fno.agents.model_routing import resolve_route
+    # An explicit --route (route_env, already resolved + fail-closed at the CLI
+    # boundary) WINS over the role lane: named intent beats auto-routing. Only
+    # when absent do we resolve the role's fail-safe route.
+    if route_env:
+        route = dict(route_env)
+    else:
+        from fno.agents.model_routing import resolve_route
 
-    route = resolve_route(role, notice=lambda m: print(m, file=sys.stderr))
+        route = resolve_route(role, notice=lambda m: print(m, file=sys.stderr))
     if route:
         spawn_env.pop("ANTHROPIC_API_KEY", None)
         spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
