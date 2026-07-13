@@ -93,6 +93,10 @@ id_hex_width = 8
 staleness_days = 30
 # Consecutive failures before a node auto-defers.
 max_failed_attempts = 3
+# Age (days) before a stale idea enters the validity sweep.
+validity_days = 60
+# Oldest-first validity-sweep batch size (clamped to 100).
+validity_batch_size = 25
 
 [batch]
 # Coalesce same-domain nodes into one batch PR (opt-in).

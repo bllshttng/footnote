@@ -5075,6 +5075,41 @@ def cmd_reconcile(
 
 # -- maintain (recurring backlog + kanban hygiene sweep) --
 
+def _validity_rg_search(symbol: str) -> Optional[int]:
+    """Bounded git-grep file count for a named symbol under the repo root.
+
+    Returns the number of tracked files mentioning ``symbol`` (a validity signal:
+    0 files -> the symbol likely no longer exists), or ``None`` when the source
+    is unavailable (rg/git missing, timeout, not a repo) so the sweep records it
+    unavailable rather than reading a spurious zero. 5 s cap (Locked Decision #7).
+    """
+    import subprocess
+
+    from fno.paths import resolve_repo_root
+
+    try:
+        root = str(resolve_repo_root())
+    except Exception:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "grep", "-l", "--fixed-strings", "-e", symbol],
+            capture_output=True, text=True, timeout=_maintain_source_timeout(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # git grep exits 1 with no output when there are no matches (not an error).
+    if proc.returncode not in (0, 1):
+        return None
+    return sum(1 for line in proc.stdout.splitlines() if line.strip())
+
+
+def _maintain_source_timeout() -> float:
+    from fno.graph import maintain as _m
+
+    return _m.EVIDENCE_SOURCE_TIMEOUT_S
+
+
 @cli.command("maintain")
 def cmd_maintain(
     apply: bool = typer.Option(
@@ -5090,6 +5125,16 @@ def cmd_maintain(
         False,
         "--json", "-J",
         help="Emit structured JSON instead of a human summary.",
+    ),
+    recheck: bool = typer.Option(
+        False,
+        "--recheck",
+        help="Validity sweep: re-review watermarked ideas (ignore prior decks).",
+    ),
+    no_validity: bool = typer.Option(
+        False,
+        "--no-validity",
+        help="Skip the validity sweep (the leg that calls the analyzer).",
     ),
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
@@ -5242,6 +5287,58 @@ def cmd_maintain(
 
         locked_mutate_graph(_graph_path(), mutator)
 
+    # --- leg 8: validity sweep (proposal-only, ALWAYS - never mutates) ---
+    # Runs even under --apply as proposal-only; a single analyzer call reviews the
+    # oldest stale ideas and writes an immutable evidence deck. Self-limiting:
+    # once the pile is watermarked, later runs find 0 eligible and skip the call.
+    validity_result = None
+    if not no_validity:
+        try:
+            from fno.config import load_settings
+
+            _vcfg = load_settings().backlog.maintain
+            v_days, v_batch = _vcfg.validity_days, _vcfg.validity_batch_size
+        except Exception:
+            v_days, v_batch = _maintain.VALIDITY_DAYS_DEFAULT, _maintain.VALIDITY_BATCH_DEFAULT
+
+        from fno import paths as _paths
+
+        try:
+            _deck_dir = _paths.state_dir() / "validity-decks"
+        except Exception:
+            _deck_dir = None
+
+        if _deck_dir is not None:
+            def _exists_factory(node):
+                root = node.get("cwd")
+                if not isinstance(root, str) or not os.path.isdir(root):
+                    return None  # repo unavailable -> path evidence recorded unavailable
+                root_p = os.path.abspath(os.path.expanduser(root))
+                # `rel` is extracted from untrusted node text; contained_path_exists
+                # rejects an absolute or `../` escape from the repo root (CWE-22).
+                return lambda rel: _maintain.contained_path_exists(root_p, rel)
+
+            # Re-read seam: the sweep calls this AFTER the analyzer returns, so a
+            # node that raced to claimed/done/deferred DURING analysis voids its
+            # recommendation (AC4-EDGE).
+            def _reread():
+                return recompute_statuses(read_graph(_graph_path()))
+
+            validity_result = _maintain.run_validity_sweep(
+                entries,
+                validity_days=v_days,
+                batch_size=v_batch,
+                out_dir=_deck_dir,
+                claimed_ids=frozenset(claimed | _live_claimed_node_ids()),
+                recheck=recheck,
+                exists_factory=_exists_factory,
+                search=_validity_rg_search,
+                reread=_reread,
+            )
+            if validity_result.error and not json_out:
+                typer.echo(f"validity: {validity_result.error}", err=True)
+                raise typer.Exit(code=1)
+
     # --- report leg: append a summary to health-history (best-effort) ---
     report = {
         "scope": "maintain",
@@ -5297,7 +5394,18 @@ def cmd_maintain(
                 "truncated": defer_truncated,
             },
         }
+        if validity_result is not None:
+            payload["validity"] = {
+                "eligible": validity_result.eligible,
+                "counts": validity_result.counts,
+                "deck": validity_result.deck_md,
+                "degraded": validity_result.degraded,
+                "stale": validity_result.stale,
+                "error": validity_result.error,
+            }
         typer.echo(json.dumps(payload, indent=2))
+        if validity_result is not None and validity_result.error:
+            raise typer.Exit(code=1)
         return
 
     # --- human per-leg summary (a no-op run is visibly distinct, AC1-UI) ---
@@ -5360,6 +5468,23 @@ def cmd_maintain(
             f"  skipped {len(skipped_claimed)} live-claimed node(s): "
             f"{', '.join(skipped_claimed)}"
         )
+
+    if validity_result is not None:
+        for w in validity_result.warnings:
+            typer.echo(f"  validity config: {w}", err=True)
+        if validity_result.eligible == 0:
+            typer.echo("validity: 0 eligible ideas")
+        else:
+            c = validity_result.counts
+            tag = " (DEGRADED: analyzer unavailable)" if validity_result.degraded else ""
+            stale = f", {validity_result.stale} stale" if validity_result.stale else ""
+            typer.echo(
+                f"validity: reviewed {validity_result.eligible} ideas{tag} -> "
+                f"promote {c.get('promote', 0)} | keep {c.get('keep', 0)} | "
+                f"supersede {c.get('supersede', 0)} | needs-human "
+                f"{c.get('needs-human', 0)}{stale}"
+            )
+            typer.echo(f"  deck: {validity_result.deck_md}")
 
 
 # -- reprioritize --

@@ -8,6 +8,7 @@ Filter: `python -m pytest tests/ -k maintain`
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from fno.graph import maintain as m
@@ -377,3 +378,297 @@ def test_detect_failure_defers_skips_non_ready_and_deferred():
 def test_detect_failure_defers_event_for_absent_node_noops():
     events = [_fail("ab-ghost")] * 5
     assert m.detect_failure_defers([_n("ab-real")], events, 3) == []
+
+
+# --- leg 8: validity sweep - selection + fingerprint ---------------
+
+
+def _idea(node_id: str, age_days: int, now: datetime, **over) -> dict:
+    created = (now - timedelta(days=age_days)).isoformat()
+    return _n(node_id, _status="idea", created_at=created, **over)
+
+
+def test_clamp_validity_bounds_defaults_and_hard_cap():
+    days, size, warns = m.clamp_validity_bounds(0, 0)
+    assert (days, size) == (m.VALIDITY_DAYS_DEFAULT, m.VALIDITY_BATCH_DEFAULT)
+    assert len(warns) == 2
+    # Over-large batch is clamped to the hard max (Locked Decision #7).
+    _, size2, warns2 = m.clamp_validity_bounds(60, 5000)
+    assert size2 == m.VALIDITY_BATCH_HARD_MAX
+    assert warns2
+    # A bool is not a valid int here (True == 1 must not sneak through).
+    days3, _, warns3 = m.clamp_validity_bounds(True, 25)
+    assert days3 == m.VALIDITY_DAYS_DEFAULT and warns3
+
+
+def test_select_validity_strict_age_and_oldest_first():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [
+        _idea("ab-90", 90, now),
+        _idea("ab-70", 70, now),
+        _idea("ab-60", 60, now),   # exactly 60 -> excluded (strict)
+        _idea("ab-30", 30, now),   # too fresh
+        _n("ab-ready", _status="ready", created_at=(now - timedelta(days=99)).isoformat()),
+    ]
+    cands = m.select_validity_candidates(entries, 60, 25, now=now)
+    assert [c["id"] for c in cands] == ["ab-90", "ab-70"]  # oldest first
+
+
+def test_select_validity_batch_cap_and_pagination():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [_idea(f"ab-{i:03d}", 100 + i, now) for i in range(10)]
+    first = m.select_validity_candidates(entries, 60, 3, now=now)
+    assert [c["id"] for c in first] == ["ab-009", "ab-008", "ab-007"]  # oldest = biggest age
+
+
+def test_select_validity_excludes_claimed_and_watermarked():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    claimed = _idea("ab-claim", 90, now)
+    watermarked = _idea("ab-wm", 85, now)
+    fresh = _idea("ab-fresh-idea", 80, now)
+    entries = [claimed, watermarked, fresh]
+    cands = m.select_validity_candidates(
+        entries, 60, 25, now=now,
+        claimed_ids=frozenset({"ab-claim"}),
+        seen_fingerprints=frozenset({m.node_fingerprint(watermarked)}),
+    )
+    assert [c["id"] for c in cands] == ["ab-fresh-idea"]
+
+
+def test_node_fingerprint_changes_on_edit():
+    base = _n("ab-x", title="original", details="d")
+    fp1 = m.node_fingerprint(base)
+    assert fp1 == m.node_fingerprint(dict(base))          # stable
+    edited = dict(base, title="rewritten premise")
+    assert m.node_fingerprint(edited) != fp1              # edit requalifies
+
+
+# --- leg 8: validity sweep - evidence collection ----------------------------
+
+
+def test_collect_evidence_allowlisted_ids_and_graph_dup():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea(
+        "ab-idea", 90, now,
+        title="Add spinner",
+        details="touches `Spinner` in cli/src/fno/ui.py",
+        plan_path="internal/plans/p.md",
+        blocked_by=["ab-dep"],
+    )
+    entries = [node, _n("ab-done", title="add spinner", _status="done")]
+    pkt = m.collect_evidence(
+        node, entries, now=now,
+        exists=lambda p: p == "cli/src/fno/ui.py",
+        search=lambda s: 4,
+    )
+    ids = set(pkt.items)
+    assert "graph:blocked_by" in ids
+    assert "graph:title-match:ab-done" in ids and pkt.items["graph:title-match:ab-done"] == "done"
+    assert pkt.items["path:cli/src/fno/ui.py"] == "exists"
+    assert pkt.items["pr:plan"] == "internal/plans/p.md"
+    assert pkt.items["git:Spinner"] == "4 matches"
+    # Every id carries an allowlisted prefix (injection boundary).
+    assert all(any(i.startswith(p) for p in m.ALLOWED_EVIDENCE_PREFIXES) for i in ids)
+
+
+def test_collect_evidence_records_unavailable_sources():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-idea", 90, now, title="t", details="touches a/b.py and `Sym`")
+    # No exists/search seams -> repo + git unavailable, recorded not fabricated.
+    pkt = m.collect_evidence(node, [node], now=now)
+    assert "path" in pkt.unavailable and "git" in pkt.unavailable
+    assert not any(i.startswith("path:") for i in pkt.items)
+
+
+def test_contained_path_exists_blocks_traversal(tmp_path):
+    (tmp_path / "in.py").write_text("x")
+    root = str(tmp_path)
+    assert m.contained_path_exists(root, "in.py") is True
+    assert m.contained_path_exists(root, "nope.py") is False
+    # CWE-22: an untrusted `../` or absolute path must not escape root -> missing.
+    assert m.contained_path_exists(root, "../../etc/passwd") is False
+    assert m.contained_path_exists(root, "/etc/passwd") is False
+
+
+def test_collect_evidence_missing_path_is_missing_not_dropped():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-idea", 90, now, title="t", details="cli/gone/removed.py")
+    pkt = m.collect_evidence(node, [node], now=now, exists=lambda p: False)
+    assert pkt.items["path:cli/gone/removed.py"] == "missing"
+
+
+def test_collect_evidence_caps_packet_size():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-big", 90, now, title="t", details="x" * 100_000)
+    pkt = m.collect_evidence(node, [node], now=now)
+    size = len(json.dumps(pkt.to_json()).encode("utf-8"))
+    assert size <= m.PACKET_MAX_BYTES
+
+
+# --- leg 8: validity sweep - validation + command rendering --------
+
+
+def _packet(node_id: str, **over) -> m.EvidencePacket:
+    base = dict(
+        node_id=node_id, fingerprint=f"fp-{node_id}", title="t", details="d",
+        project=None, cwd=None, age_days=90, items={}, unavailable=[],
+    )
+    base.update(over)
+    return m.EvidencePacket(**base)
+
+
+def test_validate_row_supersede_requires_evidenced_target():
+    pkt = _packet("ab-x", items={"graph:title-match:ab-new": "done"})
+    ok = m.validate_row(
+        {"classification": "supersede", "confidence": 0.9,
+         "rationale": "dup", "evidence_ids": ["graph:title-match:ab-new"],
+         "target": "ab-new"},
+        pkt,
+    )
+    assert ok.classification == "supersede" and ok.target == "ab-new"
+    assert ok.command == (
+        "fno backlog supersede ab-new --replaces ab-x "
+        "--reason 'validity sweep: superseded by ab-new'"
+    )
+    # A target the graph evidence does not name -> needs-human, no command.
+    bad = m.validate_row(
+        {"classification": "supersede", "confidence": 0.9, "rationale": "dup",
+         "evidence_ids": ["graph:title-match:ab-new"], "target": "ab-ghost"},
+        pkt,
+    )
+    assert bad.classification == "needs-human" and bad.command is None
+
+
+def test_validate_row_uncited_or_low_conf_destructive_downgrades():
+    pkt = _packet("ab-x", items={"path:a/b.py": "missing"})
+    uncited = m.validate_row(
+        {"classification": "promote", "confidence": 0.9, "rationale": "r", "evidence_ids": []},
+        pkt,
+    )
+    assert uncited.classification == "needs-human"
+    lowconf = m.validate_row(
+        {"classification": "promote", "confidence": 0.2, "rationale": "r",
+         "evidence_ids": ["path:a/b.py"]},
+        pkt,
+    )
+    assert lowconf.classification == "needs-human"
+
+
+def test_validate_row_unknown_class_and_bad_citation():
+    pkt = _packet("ab-x", items={"path:a/b.py": "exists"})
+    assert m.validate_row({"classification": "delete"}, pkt).classification == "needs-human"
+    # A citation not present in the packet is dropped (injection boundary).
+    row = m.validate_row(
+        {"classification": "keep", "confidence": 0.8, "rationale": "r",
+         "evidence_ids": ["path:a/b.py", "git:__import__('os')"]},
+        pkt,
+    )
+    assert row.classification == "keep" and row.evidence_ids == ["path:a/b.py"]
+
+
+def test_validate_row_missing_result_is_needs_human():
+    assert m.validate_row(None, _packet("ab-x")).classification == "needs-human"
+
+
+def test_render_command_never_embeds_rationale():
+    # Trusted-render only: no analyzer text reaches the command string.
+    cmd = m.render_command("promote", "ab-x", None)
+    assert cmd == "fno backlog update ab-x --priority p3"
+    assert m.render_command("keep", "ab-x", None) is None
+    assert m.render_command("needs-human", "ab-x", None) is None
+
+
+# --- leg 8: validity sweep - JSON-last deck + watermark ---------------------
+
+
+def test_write_deck_json_last_and_grouped(tmp_path):
+    pkts = {"ab-a": _packet("ab-a", title="Alpha"), "ab-b": _packet("ab-b", title="Beta")}
+    rows = [
+        m.ValidityRow("ab-a", "fp-a", "keep", 0.8, "still good", ["path:x"]),
+        m.ValidityRow("ab-b", "fp-b", "needs-human", 0.0, "unclear", []),
+    ]
+    md, js = m.write_validity_deck(
+        rows, pkts, tmp_path, deck_id="validity-1", created_iso="2026-07-12T00:00:00Z"
+    )
+    md_text = (tmp_path / "validity-1.md").read_text()
+    assert "## Keep / Cool-Later (1)" in md_text and "## Needs Human (1)" in md_text
+    side = json.loads((tmp_path / "validity-1.json").read_text())
+    assert side["counts"]["keep"] == 1 and side["counts"]["needs-human"] == 1
+    assert side["md_hash"] and len(side["rows"]) == 2
+
+
+def test_watermark_only_from_valid_committed_rows(tmp_path):
+    pkts = {"ab-a": _packet("ab-a")}
+    good = [m.ValidityRow("ab-a", "fp-good", "keep", 0.8, "r", [])]
+    m.write_validity_deck(good, pkts, tmp_path, deck_id="d1", created_iso="t")
+    # A degraded (analyzer-failure) deck must NOT watermark, so its batch retries.
+    degraded = m.evidence_only_rows([_packet("ab-b", fingerprint="fp-degraded")])
+    m.write_validity_deck(degraded, {}, tmp_path, deck_id="d2", created_iso="t", degraded=True)
+    seen = m.read_watermarked_fingerprints(tmp_path)
+    assert "fp-good" in seen and "fp-degraded" not in seen
+
+
+def test_read_watermarks_skips_malformed_sidecar(tmp_path):
+    (tmp_path / "broken.json").write_text("{not json")
+    (tmp_path / "ok.json").write_text(
+        json.dumps({"rows": [{"fingerprint": "fp-1", "watermark": True}]})
+    )
+    assert m.read_watermarked_fingerprints(tmp_path) == frozenset({"fp-1"})
+
+
+def test_apply_aggregate_budget_drops_overflow_tail():
+    # Each packet ~ >200 KiB of details; 3 of them exceed the 512 KiB aggregate,
+    # so the oldest-first prefix is kept and the tail dropped (never silent).
+    big = "y" * 200_000
+    pkts = [_packet(f"ab-{i}", details=big) for i in range(4)]
+    kept, dropped = m._apply_aggregate_budget(pkts)
+    total = sum(len(json.dumps(p.to_json()).encode()) for p in kept)
+    assert total <= m.AGGREGATE_MAX_BYTES
+    assert dropped == len(pkts) - len(kept) and dropped > 0
+    # At least one packet always survives (no permanent starvation).
+    assert len(kept) >= 1
+
+
+def test_run_validity_sweep_reread_marks_stale_after_analysis(tmp_path):
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-race", 90, now, title="t", plan_path=None)
+    entries = [node]
+
+    def analyze(packets):
+        return {
+            p.node_id: {"classification": "keep", "confidence": 0.8,
+                        "rationale": "still good", "evidence_ids": []}
+            for p in packets
+        }
+
+    # reread (called AFTER analyze) returns the node now claimed -> no longer idea.
+    def reread():
+        return [dict(node, _status="claimed", locked_by="someone")]
+
+    res = m.run_validity_sweep(
+        entries, validity_days=60, batch_size=25, out_dir=tmp_path,
+        now=now, analyze=analyze, reread=reread,
+    )
+    assert res.eligible == 1 and res.stale == 1
+    side = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert side["rows"][0]["stale"] is True and side["rows"][0]["command"] is None
+
+
+def test_run_validity_analysis_refuses_real_call_under_pytest(monkeypatch):
+    import pytest
+    monkeypatch.delenv("FNO_VALIDITY_STUB", raising=False)
+    with pytest.raises(RuntimeError, match="refusing real claude"):
+        m._run_validity_analysis([_packet("ab-x")])
+
+
+def test_run_validity_analysis_parses_stub(tmp_path, monkeypatch):
+    stub = tmp_path / "stub.sh"
+    stub.write_text(
+        '#!/usr/bin/env bash\n'
+        'echo \'{"results":[{"node_id":"ab-x","classification":"keep",'
+        '"confidence":0.8,"rationale":"good","evidence_ids":[]}]}\'\n'
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("FNO_VALIDITY_STUB", str(stub))
+    out = m._run_validity_analysis([_packet("ab-x")])
+    assert out["ab-x"]["classification"] == "keep"
