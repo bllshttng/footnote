@@ -310,7 +310,7 @@ def _token_present(blob: str) -> bool:
 
 
 def _codex_auth_present(blob: str) -> bool:
-    """Require credential material from Codex's AuthDotJson schema."""
+    """Require credential material for Codex's effective AuthDotJson mode."""
     try:
         data = json.loads(blob)
     except (ValueError, TypeError):
@@ -321,27 +321,65 @@ def _codex_auth_present(blob: str) -> bool:
     def nonempty(value: object) -> bool:
         return isinstance(value, str) and bool(value.strip())
 
-    if nonempty(data.get("OPENAI_API_KEY")) or nonempty(data.get("personal_access_token")):
-        return True
+    def tokens_present(*, refresh_required: bool) -> bool:
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return False
+        if not all(nonempty(tokens.get(field)) for field in ("access_token", "id_token")):
+            return False
+        refresh = tokens.get("refresh_token")
+        return nonempty(refresh) if refresh_required else isinstance(refresh, str)
 
-    tokens = data.get("tokens")
-    if isinstance(tokens, dict) and all(
-        nonempty(tokens.get(field)) for field in ("access_token", "refresh_token", "id_token")
-    ):
-        return True
+    def identity_present() -> bool:
+        identity = data.get("agent_identity")
+        if nonempty(identity):
+            return True
+        if not isinstance(identity, dict):
+            return False
+        return (
+            all(
+                nonempty(identity.get(field))
+                for field in (
+                    "agent_runtime_id",
+                    "agent_private_key",
+                    "account_id",
+                    "chatgpt_user_id",
+                )
+            )
+            and nonempty(identity.get("plan_type"))
+            and isinstance(identity.get("chatgpt_account_is_fedramp"), bool)
+        )
 
-    identity = data.get("agent_identity")
-    if nonempty(identity):
-        return True
-    if isinstance(identity, dict) and all(
-        nonempty(identity.get(field)) for field in ("agent_runtime_id", "agent_private_key")
-    ):
-        return True
+    def bedrock_present() -> bool:
+        bedrock = data.get("bedrock_api_key")
+        return isinstance(bedrock, dict) and all(
+            nonempty(bedrock.get(field)) for field in ("api_key", "region")
+        )
 
-    bedrock = data.get("bedrock_api_key")
-    return isinstance(bedrock, dict) and all(
-        nonempty(bedrock.get(field)) for field in ("api_key", "region")
-    )
+    mode = data.get("auth_mode")
+    if mode is None:
+        if "personal_access_token" in data:
+            mode = "personalAccessToken"
+        elif "bedrock_api_key" in data:
+            mode = "bedrockApiKey"
+        elif "OPENAI_API_KEY" in data:
+            mode = "apikey"
+        else:
+            mode = "chatgpt"
+
+    if mode == "apikey":
+        return nonempty(data.get("OPENAI_API_KEY"))
+    if mode == "chatgpt":
+        return tokens_present(refresh_required=True)
+    if mode == "chatgptAuthTokens":
+        return tokens_present(refresh_required=False)
+    if mode == "agentIdentity":
+        return identity_present()
+    if mode == "personalAccessToken":
+        return nonempty(data.get("personal_access_token"))
+    if mode == "bedrockApiKey":
+        return bedrock_present()
+    return False
 
 
 # ---------------------------------------------------------------------------

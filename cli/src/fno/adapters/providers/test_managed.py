@@ -33,7 +33,7 @@ def _codex_blob(token: str) -> str:
             "tokens": {
                 "access_token": token,
                 "refresh_token": f"refresh-{token}",
-                "id_token": f"id-{token}",
+                "id_token": "header.payload.signature",
             },
         }
     )
@@ -350,16 +350,31 @@ class TestCodexFileBackend:
             json.dumps({"OPENAI_API_KEY": "sk-test"}),
             _codex_blob("token"),
             json.dumps({"personal_access_token": "pat"}),
-            json.dumps({"agent_identity": "jwt"}),
+            json.dumps({"auth_mode": "agentIdentity", "agent_identity": "header.payload.sig"}),
             json.dumps(
                 {
+                    "auth_mode": "agentIdentity",
                     "agent_identity": {
                         "agent_runtime_id": "runtime",
                         "agent_private_key": "private",
+                        "account_id": "account",
+                        "chatgpt_user_id": "user",
+                        "plan_type": "pro",
+                        "chatgpt_account_is_fedramp": False,
                     }
                 }
             ),
             json.dumps({"bedrock_api_key": {"api_key": "key", "region": "us-east-1"}}),
+            json.dumps(
+                {
+                    "auth_mode": "chatgptAuthTokens",
+                    "tokens": {
+                        "access_token": "access",
+                        "refresh_token": "",
+                        "id_token": "header.payload.signature",
+                    },
+                }
+            ),
         ],
     )
     def test_codex_auth_requires_supported_credential_material(self, blob):
@@ -374,8 +389,19 @@ class TestCodexFileBackend:
             json.dumps({"foo": "bar"}),
             json.dumps({"OPENAI_API_KEY": " "}),
             json.dumps({"tokens": {"access_token": "only"}}),
+            json.dumps({"agent_identity": "header.payload.signature"}),
             json.dumps({"agent_identity": {"agent_runtime_id": "only"}}),
             json.dumps({"bedrock_api_key": {"api_key": "only"}}),
+            json.dumps(
+                {
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": "sk-inactive",
+                    "tokens": None,
+                }
+            ),
+            json.dumps({"personal_access_token": "", "OPENAI_API_KEY": "sk-inactive"}),
+            json.dumps({"auth_mode": "headers", "tokens": json.loads(_codex_blob("token"))["tokens"]}),
+            json.dumps({"auth_mode": "unknown", "OPENAI_API_KEY": "sk-inactive"}),
         ],
     )
     def test_codex_auth_rejects_malformed_or_tokenless_blobs(self, blob):
