@@ -155,7 +155,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// sideline row's recent transcript (shelled `fno agents peek <name>`, read-only)
 /// and `ServerMsg::PeekBody { seq, name, lines }` returns it to the requesting
 /// client only; the client drops any body whose `seq` is not the current request.
-pub const PROTO_VERSION: u32 = 29;
+///
+/// v30 (x-7561): `Command::ReapAgents` bulk-reaps every exited fno-agent
+/// registry row (uppercase `X`, server-shelled to `fno-agents reap`), and
+/// `Command::{StopExternal, RemoveExternal}` route an external claude-daemon
+/// row's lifecycle through `claude stop|rm <attach_id>` keyed by stable attach
+/// id, gated by a durable generation-checked compare-and-set in `squads.json`
+/// (`external_lifecycle` collection).
+pub const PROTO_VERSION: u32 = 30;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -768,6 +775,13 @@ pub enum Command {
         name: String,
         seq: u64,
     },
+    /// (v30, x-7561) Bulk-reap every EXITED fno-agent registry row: the server
+    /// shells `fno-agents reap` once, off-loop, and reports the bounded count
+    /// (`reaped N`; zero candidates is a visible successful `reaped 0`). No
+    /// payload - the reap verb owns the candidate set. Refused for a passive
+    /// (observer) client; external rows are never touched (the reap verb only
+    /// knows the fno registry). The uppercase-`X` sibling of per-row `x`.
+    ReapAgents,
 }
 
 impl Command {

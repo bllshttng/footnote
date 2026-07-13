@@ -987,6 +987,40 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
     body.lines().map(str::to_string).collect()
 }
 
+/// Shell `fno-agents reap --json` once for the bulk-reap gesture (x-7561),
+/// bounded + fail-open like [`run_agent_action`]: on success parse the `reaped`
+/// array length into a visible `reaped N` count (zero is a successful `reaped
+/// 0`), else a bounded failure notice. The argv is a fixed literal.
+async fn run_reap() -> String {
+    const REAP_TIMEOUT: Duration = Duration::from_secs(20);
+    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+        .args(["reap", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(REAP_TIMEOUT, fut).await {
+        Err(_) => "reap: timed out".to_string(),
+        Ok(Err(_)) => "reap: unavailable".to_string(),
+        Ok(Ok(out)) if out.status.success() => reap_notice(&String::from_utf8_lossy(&out.stdout)),
+        Ok(Ok(_)) => "reap: failed".to_string(),
+    }
+}
+
+/// Map `fno-agents reap --json` stdout to the `reaped N` notice. The verb
+/// exited zero, so the reap ran; unparseable output still reports a success
+/// with an unknown count rather than a false failure (the row-vanish is the
+/// authoritative truth, this notice is advisory).
+fn reap_notice(stdout: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        Ok(v) => match v.get("reaped").and_then(|r| r.as_array()) {
+            Some(arr) => format!("reaped {}", arr.len()),
+            None => "reaped 0".to_string(),
+        },
+        Err(_) => "reap: done".to_string(),
+    }
+}
+
 /// x-0296 CI diagnostics: timestamped breadcrumbs for the e2e server log
 /// (`<session>.log`, dumped by the test harness on a wait_screen timeout).
 /// FNO_E2E-gated so a production server writes none of it; the gate is
@@ -1763,6 +1797,18 @@ impl Core {
                     lines,
                 })
                 .await;
+        });
+    }
+
+    /// Bulk-reap OFF the core loop (x-7561): shell `fno-agents reap --json` once,
+    /// parse the reaped count, route it back as a `reaped N` notice. Same
+    /// off-loop + advisory-notice contract as `agent_action`; the registry poll
+    /// owns the row-vanish, not this notice.
+    fn reap_action(&self, id: u64) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_reap().await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
 
@@ -3995,6 +4041,17 @@ impl Core {
                 // an unknown name returns peek's own exit-13 body, which the
                 // overlay renders (fail-open, never a refusal notice).
                 self.peek_agent(client_id, name, seq);
+                Flow::Continue
+            }
+            Command::ReapAgents => {
+                // Bulk-reap every exited fno-agent registry row (x-7561). The
+                // requester is already known-interactive (the `mutating_sender`
+                // gate drops a passive client's Command upstream). The reap verb
+                // owns the candidate set, so there is no per-row resolution and
+                // zero candidates is a visible successful `reaped 0`. Off-loop +
+                // bounded, mirroring `agent_action`; the registry poll owns the
+                // row-vanish, this notice is advisory.
+                self.reap_action(client_id);
                 Flow::Continue
             }
             Command::CopySelection => {
@@ -8302,6 +8359,23 @@ mod tests {
             dispatch_notice(r#"{"outcome":"???"}"#),
             "grab work: dispatch failed"
         );
+    }
+
+    #[test]
+    fn reap_notice_maps_reaped_count() {
+        // AC1-HP: the reaped array length is the visible count.
+        assert_eq!(
+            reap_notice(r#"{"reaped":["a","b","c"],"kept_dirty":[]}"#),
+            "reaped 3"
+        );
+        // AC1-EDGE: zero candidates is a successful visible `reaped 0`, not an
+        // error and not silence.
+        assert_eq!(reap_notice(r#"{"reaped":[],"kept_dirty":[]}"#), "reaped 0");
+        // A missing `reaped` key (schema drift) reads as zero reaped.
+        assert_eq!(reap_notice(r#"{"kept_dirty":[]}"#), "reaped 0");
+        // The verb exited zero, so unparseable stdout still reports success (the
+        // row-vanish is authoritative), never a false failure.
+        assert_eq!(reap_notice("not json"), "reap: done");
     }
 
     fn block(complete: bool, truncated: bool, implicit: bool, text: &str) -> vt::BlockRead {
