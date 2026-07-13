@@ -1310,11 +1310,7 @@ impl Core {
         let ti = squad.active_tab.min(squad.tabs.len() - 1);
         let tid = squad.tabs[ti].id;
         let vp = self.tab_rect(tid);
-        let tab = &mut self
-            .session
-            .squad_mut(sid)
-            .expect("squad present")
-            .tabs[ti];
+        let tab = &mut self.session.squad_mut(sid).expect("squad present").tabs[ti];
         match tree::split_directional(tab, vp, dir, pid) {
             Ok(()) => Ok((sid, tid)),
             Err(e) => {
@@ -3402,14 +3398,14 @@ impl Core {
                 // directional split beside the target's active-tab focus. A
                 // refusal reaps the pane and leaves the row watch-only (AC7);
                 // the mapping is recorded ONLY after placement succeeds.
-                let (sid, tid) = match self.place_spawned_pane(dest, &spawn_cwd, pid, placement.split)
-                {
-                    Ok(landing) => landing,
-                    Err(e) => {
-                        self.notice(client_id, e);
-                        return Flow::Continue;
-                    }
-                };
+                let (sid, tid) =
+                    match self.place_spawned_pane(dest, &spawn_cwd, pid, placement.split) {
+                        Ok(landing) => landing,
+                        Err(e) => {
+                            self.notice(client_id, e);
+                            return Flow::Continue;
+                        }
+                    };
                 self.attached.insert(id, pid);
                 self.set_view(client_id, sid, tid);
                 self.push_layout(true);
@@ -7718,10 +7714,7 @@ mod tests {
     #[test]
     fn pane_placement_target_does_not_replace_child_cwd() {
         let mut core = placement_core();
-        let root = std::env::temp_dir().join(format!(
-            "fno-placement-cwd-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("fno-placement-cwd-{}", std::process::id()));
         let child_cwd = root.join("child");
         std::fs::create_dir_all(&child_cwd).unwrap();
         let marker = child_cwd.join("cwd.txt");

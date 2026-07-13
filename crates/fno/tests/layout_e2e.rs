@@ -8,8 +8,11 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use common::{spawn_server, FakeClient};
-use fno::proto::Command;
+use common::{connect_with_retry, spawn_server, FakeClient};
+use fno::proto::{
+    read_msg_sync, write_msg_sync, ClientMsg, Command, ControlVerb, PanePlacement, PaneTarget,
+    ServerMsg, BUILD_VERSION, PROTO_VERSION,
+};
 use fno::tree::Dir;
 
 struct Scratch(PathBuf);
@@ -48,12 +51,81 @@ fn attach_settled(scratch: &Scratch, cwd: &Path) -> (FakeClient, u64) {
     (c, layout.focus)
 }
 
+fn run_pane(scratch: &Scratch, cwd: &Path, placement: PanePlacement) -> Result<u64, String> {
+    let mut stream = connect_with_retry(&scratch.sock());
+    write_msg_sync(
+        &mut stream,
+        &ClientMsg::Control {
+            proto: PROTO_VERSION,
+            build: BUILD_VERSION.into(),
+            verb: ControlVerb::PaneRun {
+                cwd: cwd.to_string_lossy().into_owned(),
+                argv: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+                cols: None,
+                rows: None,
+                claim: false,
+                placement,
+            },
+        },
+    )
+    .unwrap();
+    match read_msg_sync(&mut stream).unwrap() {
+        ServerMsg::PaneSpawned { pane_id } => Ok(pane_id),
+        ServerMsg::Err { msg, .. } => Err(msg),
+        other => panic!("unexpected pane-run reply: {other:?}"),
+    }
+}
+
 /// `stty size` in the FOCUSED pane must report `rows cols`. Wire-level proof
 /// that the kernel winsize followed the layout rect (items 1 and 3).
 fn assert_focused_winsize(c: &mut FakeClient, pane: u64, rows: u16, cols: u16) {
     c.input(format!("echo sz=$(stty size)#\r").as_bytes());
     let want = format!("sz={rows} {cols}#");
     c.wait_pane_text(15, pane, |t| t.contains(&want));
+}
+
+#[test]
+fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
+    let scratch = Scratch::new("placed-run");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (mut c, original) = attach_settled(&scratch, &cwd);
+
+    let placed = run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Left),
+        },
+    )
+    .unwrap();
+    let layout = c.wait_layout(10, "directional pane-run", |l| {
+        l.panes.len() == 2 && l.focus == placed
+    });
+    let placed_rect = layout.panes.iter().find(|(id, _)| *id == placed).unwrap().1;
+    let original_rect = layout
+        .panes
+        .iter()
+        .find(|(id, _)| *id == original)
+        .unwrap()
+        .1;
+    assert!(placed_rect.x < original_rect.x);
+
+    c.resize(24, 16);
+    c.wait_layout(10, "narrow layout", |l| l.area == (24, 16));
+    let before = c.layout.clone().unwrap();
+    let error = run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Right),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("smaller"), "{error}");
+    assert_eq!(c.layout.as_ref().unwrap().panes, before.panes);
 }
 
 // -- item 1: splits create live shells sized to their rects ---------------

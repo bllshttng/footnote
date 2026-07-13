@@ -29,10 +29,10 @@ use crate::keys::{Event, Scanner};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, AnswerablePrompt, BacklogCard,
     BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
-    MouseKind, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, MAX_SQUAD_NAME, MAX_TAB_NAME,
-    PROTO_VERSION,
+    MouseKind, PanePlacement, PaneTarget, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION,
+    MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
-use crate::tree::{Rect, TabId};
+use crate::tree::{Dir, Rect, TabId};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -496,6 +496,8 @@ struct View {
     /// selector `m` overlay is open. A digit sends [`Command::MoveTab`]; the id
     /// is re-validated against the current catalog before it goes on the wire.
     move_pick: Option<(TabId, Vec<u64>)>,
+    /// Pending target and geometry for selector `p` placement.
+    attach_place: Option<AttachPlace>,
     /// (x-96e8) The squad the selector cursor is tracking across a `J`/`K`
     /// reorder: the next `Layout` re-points the cursor at this squad's row so it
     /// visually follows the moved workspace. Cleared by any non-reorder key or a
@@ -545,6 +547,14 @@ enum ConfirmKind {
 enum RenameTarget {
     Tab(TabId),
     Squad(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachPlace {
+    id: String,
+    target: u64,
+    squads: Vec<u64>,
+    esc: Vec<u8>,
 }
 
 /// Client-local in-scrollback search state (v12, x-e780).
@@ -616,6 +626,7 @@ impl View {
             recruit: None,
             recruit_esc: Vec::new(),
             move_pick: None,
+            attach_place: None,
             sel_follow: None,
             nav: None,
             nav_esc: Vec::new(),
@@ -807,6 +818,7 @@ impl View {
         self.search = None;
         self.rename = None;
         self.move_pick = None;
+        self.attach_place = None;
         self.nav = None;
         self.recruit = None;
         self.recruit_esc.clear();
@@ -824,6 +836,7 @@ impl View {
         self.rename = None;
         self.create = None;
         self.move_pick = None;
+        self.attach_place = None;
         self.nav = None;
         self.confirm = None;
         self.recruit = Some(String::new());
@@ -849,6 +862,7 @@ impl View {
         self.rename = None;
         self.rename_esc.clear();
         self.move_pick = None;
+        self.attach_place = None;
         // A live navigator overlay (x-653d) must not linger behind the confirm:
         // it wins stdin routing after the confirm resolves and would swallow the
         // next keys, same reasoning as the selector above.
@@ -867,6 +881,7 @@ impl View {
         self.answers = None;
         self.search = None;
         self.move_pick = None;
+        self.attach_place = None;
         self.create = None;
         self.nav = None;
         self.recruit = None;
@@ -888,7 +903,27 @@ impl View {
         self.nav = None;
         self.recruit = None;
         self.recruit_esc.clear();
+        self.attach_place = None;
         self.move_pick = Some((tab, squads));
+    }
+
+    fn open_attach_place(&mut self, id: String, target: u64, squads: Vec<u64>) {
+        self.selector = None;
+        self.answers = None;
+        self.search = None;
+        self.create = None;
+        self.rename = None;
+        self.confirm = None;
+        self.nav = None;
+        self.recruit = None;
+        self.recruit_esc.clear();
+        self.move_pick = None;
+        self.attach_place = Some(AttachPlace {
+            id,
+            target,
+            squads,
+            esc: Vec::new(),
+        });
     }
 
     /// The `display_rows()` index of squad `id`'s own row (a `Sel` with no tab),
@@ -1609,6 +1644,9 @@ impl View {
             // candidate squad, on the same inverse-video overlay chrome.
             let lines = self.move_pick_lines(squads);
             draw_lines_overlay(&mut cells, rows, cols, &lines);
+        } else if let Some(picker) = &self.attach_place {
+            let lines = self.attach_place_lines(picker);
+            draw_lines_overlay(&mut cells, rows, cols, &lines);
         } else if let Some(nav) = &self.nav {
             // x-653d navigator: the filtered flat catalog + query/chip line, on
             // the same inverse-video overlay chrome. Rows recompute per frame
@@ -1625,6 +1663,7 @@ impl View {
             && self.answers.is_none()
             && self.digest.is_none()
             && self.move_pick.is_none()
+            && self.attach_place.is_none()
             && self.nav.is_none()
         {
             if let Some((_, rect)) = self
@@ -1907,6 +1946,25 @@ impl View {
                 .unwrap_or("(gone)");
             lines.push(pad_to(&format!(" {} {name}", i + 1), W));
         }
+        lines
+    }
+
+    fn attach_place_lines(&self, picker: &AttachPlace) -> Vec<String> {
+        const W: usize = 54;
+        let mut lines = vec![pad_to(" attach placement · digit selects workspace", W)];
+        for (i, &sid) in picker.squads.iter().enumerate() {
+            let name = self
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == sid)
+                .map(|s| s.name.as_str())
+                .unwrap_or("(gone)");
+            let marker = if sid == picker.target { '›' } else { ' ' };
+            lines.push(pad_to(&format!(" {marker} {} {name}", i + 1), W));
+        }
+        lines.push(pad_to(" h left · j down · k up · l right", W));
+        lines.push(pad_to(" t/enter new tab · esc/q cancel", W));
         lines
     }
 
@@ -2543,6 +2601,7 @@ const KEY_TABLE: &[&str] = &[
     "  &  close tab          w  panel selector ",
     "     selector ⏎ acts on the row: squad/tab ",
     "     · agent focus/attach · card dispatch · + create ",
+    "     · selector p places attach into a workspace split ",
     "     organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder",
     "     · space mark agent · R recruit marked → workspace ",
     "  a  answer queue       b  toggle sideline ",
@@ -3330,6 +3389,9 @@ async fn handle_stdin(
         // the selector (which it replaced on open) so its keys can't leak there.
         return move_pick_keys(view, &passthrough, sock_w).await;
     }
+    if view.attach_place.is_some() {
+        return attach_place_keys(view, &passthrough, sock_w).await;
+    }
     if view.selector.is_some() {
         return selector_keys(view, &passthrough, sock_w).await;
     }
@@ -3794,6 +3856,31 @@ async fn selector_keys(
                     view.open_recruit();
                 }
             }
+            b'p' => {
+                let picked = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a))
+                        if a.pane_id.is_none() && a.attach_id.is_some() && !a.exited =>
+                    {
+                        Some((a.attach_id.clone().unwrap(), a.squad))
+                    }
+                    _ => None,
+                };
+                let squads: Vec<u64> = view.layout.squads.iter().map(|s| s.id).take(9).collect();
+                match picked.filter(|_| !squads.is_empty()) {
+                    Some((id, owner)) => {
+                        let target = owner
+                            .filter(|sid| squads.contains(sid))
+                            .or_else(|| {
+                                squads
+                                    .contains(&view.layout.active_squad)
+                                    .then_some(view.layout.active_squad)
+                            })
+                            .unwrap_or(squads[0]);
+                        view.open_attach_place(id, target, squads);
+                    }
+                    None => view.set_notice("placement requires an attachable agent".into()),
+                }
+            }
             b'x' => {
                 // A TOMBSTONE member row dismisses (x-8f11); a squad-header row
                 // removes the squad (x-96e8), behind a confirm - disambiguated by
@@ -3984,6 +4071,78 @@ async fn move_pick_keys(
         // Esc/q cancel silently; any other key just closes (the picker is
         // single-shot, cleared by take() above).
         _ => {}
+    }
+    Ok(StdinFlow::Continue)
+}
+
+async fn attach_place_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let keys = {
+        let Some(picker) = view.attach_place.as_mut() else {
+            return Ok(StdinFlow::Continue);
+        };
+        let mut esc = std::mem::take(&mut picker.esc);
+        let keys = fold_selector_keys(&mut esc, bytes);
+        picker.esc = esc;
+        keys
+    };
+
+    for key in keys {
+        if (b'1'..=b'9').contains(&key) {
+            let idx = (key - b'1') as usize;
+            let target = view
+                .attach_place
+                .as_ref()
+                .and_then(|picker| picker.squads.get(idx))
+                .copied();
+            match target.filter(|sid| view.layout.squads.iter().any(|s| s.id == *sid)) {
+                Some(target) => view.attach_place.as_mut().unwrap().target = target,
+                None => view.set_notice("workspace is no longer available".into()),
+            }
+            continue;
+        }
+
+        let split = match key {
+            b'h' => Some(Some(Dir::Left)),
+            b'j' => Some(Some(Dir::Down)),
+            b'k' => Some(Some(Dir::Up)),
+            b'l' => Some(Some(Dir::Right)),
+            b't' | b'\r' | b'\n' => Some(None),
+            0x1b | b'q' => {
+                view.attach_place = None;
+                return Ok(StdinFlow::Continue);
+            }
+            _ => None,
+        };
+        let Some(split) = split else { continue };
+        let picker = view.attach_place.take().unwrap();
+        let attachable = view.layout.agents.iter().any(|a| {
+            a.pane_id.is_none() && !a.exited && a.attach_id.as_deref() == Some(picker.id.as_str())
+        });
+        if !attachable {
+            view.set_notice("agent is no longer attachable".into());
+            return Ok(StdinFlow::Continue);
+        }
+        if !view.layout.squads.iter().any(|s| s.id == picker.target) {
+            view.set_notice("workspace is no longer available".into());
+            return Ok(StdinFlow::Continue);
+        }
+        write_msg(
+            sock_w,
+            &ClientMsg::Command(Command::AttachAgent {
+                id: picker.id,
+                placement: PanePlacement {
+                    target: PaneTarget::SquadId(picker.target),
+                    split,
+                },
+            }),
+        )
+        .await
+        .map_err(|e| format!("attach placement send failed: {e}"))?;
+        return Ok(StdinFlow::Continue);
     }
     Ok(StdinFlow::Continue)
 }
@@ -6816,6 +6975,90 @@ mod tests {
             other => panic!("expected AttachAgent, got {other:?}"),
         }
         assert_eq!(v.selector, None);
+    }
+
+    #[tokio::test]
+    async fn selector_p_opens_attach_placement_without_sending() {
+        let mut v = unified_rows_view();
+        v.selector = Some(5);
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        let picker = v.attach_place.as_ref().expect("placement picker opens");
+        assert_eq!(picker.id, "c19cd2c3");
+        assert_eq!(picker.target, 1);
+        assert_eq!(picker.squads, vec![1, 2]);
+        let overlay = v.attach_place_lines(picker).join("\n");
+        for label in ["left", "right", "up", "down", "new tab", "cancel"] {
+            assert!(overlay.contains(label), "missing {label}: {overlay}");
+        }
+        assert!(buf.is_empty());
+        assert_eq!(v.selector, None);
+    }
+
+    #[tokio::test]
+    async fn attach_placement_selects_target_and_direction() {
+        let mut v = unified_rows_view();
+        v.selector = Some(5);
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"2h", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::AttachAgent {
+                id: "c19cd2c3".into(),
+                placement: PanePlacement {
+                    target: PaneTarget::SquadId(2),
+                    split: Some(Dir::Left),
+                },
+            })
+        );
+        assert!(v.attach_place.is_none());
+    }
+
+    #[tokio::test]
+    async fn attach_placement_new_tab_and_cancel_are_distinct() {
+        let mut v = unified_rows_view();
+        v.selector = Some(5);
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::AttachAgent {
+                id: "c19cd2c3".into(),
+                placement: PanePlacement {
+                    target: PaneTarget::SquadId(1),
+                    split: None,
+                },
+            })
+        );
+
+        v.selector = Some(5);
+        let mut cancelled = Vec::new();
+        selector_keys(&mut v, b"p", &mut cancelled).await.unwrap();
+        attach_place_keys(&mut v, b"q", &mut cancelled)
+            .await
+            .unwrap();
+        assert!(cancelled.is_empty());
+        assert!(v.attach_place.is_none());
+    }
+
+    #[tokio::test]
+    async fn attach_placement_refuses_stale_target_without_sending() {
+        let mut v = unified_rows_view();
+        v.selector = Some(5);
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        v.attach_place.as_mut().unwrap().target = 2;
+        v.layout.squads.retain(|s| s.id != 2);
+        attach_place_keys(&mut v, b"l", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+        assert!(v.notice.is_some());
+        assert!(v.attach_place.is_none());
     }
 
     #[tokio::test]

@@ -22,6 +22,16 @@ Inside the grid:
 
 Every pane is read-only by default. Enter on a focused, drivable pane opens a take-over: your keystrokes reach that agent's PTY until you press Esc.
 
+## Place a watch-only agent from the mux sideline
+
+In the main `fno mux` sideline selector, ordinary Enter still attaches a watch-only agent as a new tab. Press `p` on an attachable row to choose placement instead:
+
+1. Press a workspace number to select the destination.
+2. Press `h`, `j`, `k`, or `l` to place the pane left, down, up, or right of that workspace's focused pane.
+3. Press `t` or Enter for a new tab, or Esc/`q` to cancel without changing the layout.
+
+The picker revalidates both the agent and workspace before sending. A repeated attach focuses the existing pane and reports that it was already attached; it never creates a duplicate or moves the existing pane.
+
 ## Grouping panes into a navigation rail (`--rail`)
 
 When you are watching agents across several repos or sessions, a wall of equal tiles is hard to scan. The `--rail` flag adds a left navigation rail that groups the panes by a switchable key and shows one focused agent at full width in the main area:
