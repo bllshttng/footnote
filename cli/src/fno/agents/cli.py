@@ -631,7 +631,11 @@ def cmd_spawn(
     # x-3e38 pane placement: --target/--split name mux geometry, which only the
     # pane substrate has. bg/headless have no pane tree, so the flags are refused
     # fail-closed before any spawn (mirrors the tier-3 guard shape above).
-    if (target or split) and (substrate != "pane" or once):
+    placement_requested = target is not None or split is not None
+    if target is not None and not target.strip():
+        print("--target needs a nonblank squad name", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if placement_requested and (substrate != "pane" or once):
         print(
             "--target/--split apply only to --substrate pane (bg/headless have "
             "no pane geometry)",

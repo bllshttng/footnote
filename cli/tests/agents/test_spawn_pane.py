@@ -638,6 +638,20 @@ def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
     assert "left, right, up, or down" in res.output
 
 
+def test_cmd_spawn_rejects_blank_target_before_dispatch(tmp_path: Path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--provider", "claude", "--target", ""],
+    )
+    assert res.exit_code == 2, res.output
+    assert "--target needs a nonblank squad name" in res.output
+
+
 def test_cmd_spawn_pane_threads_placement_to_dispatch(tmp_path: Path, monkeypatch) -> None:
     # AC1-HP/AC2-HP: a pane spawn hands --target/--split to dispatch_spawn_pane.
     from typer.testing import CliRunner

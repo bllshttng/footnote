@@ -53,6 +53,9 @@ fn attach_settled(scratch: &Scratch, cwd: &Path) -> (FakeClient, u64) {
 
 fn run_pane(scratch: &Scratch, cwd: &Path, placement: PanePlacement) -> Result<u64, String> {
     let mut stream = connect_with_retry(&scratch.sock());
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     write_msg_sync(
         &mut stream,
         &ClientMsg::Control {
