@@ -303,10 +303,17 @@ def _discover_from_registry(
             # short_id MUST be the authoritative jobId -- claude_short_id and the
             # uuid's first 8 hex are distinct fields that can differ, and the
             # jobId is what `fno mail send <short>` and mail-inject key on.
-            sid = getattr(e, "claude_session_uuid", None) or getattr(e, "claude_short_id", None)
+            # Canonical harness_session_id leads (x-ec59): a row whose only
+            # identity is the canonical field (a heal-backfilled bg row) resolves
+            # here, where before it fell through to durable-only forever.
+            sid = (
+                getattr(e, "harness_session_id", None)
+                or getattr(e, "claude_session_uuid", None)
+                or getattr(e, "claude_short_id", None)
+            )
             short = getattr(e, "claude_short_id", None) or (sid[:8] if sid else None)
         else:
-            sid = getattr(e, "session_id", None)
+            sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)
             short = sid[:8] if sid else None
         if not sid or sid in exclude or sid in seen:
             continue

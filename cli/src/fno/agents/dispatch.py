@@ -4264,7 +4264,11 @@ def _deliver_live(
     if entry.mux:
         return _mux_pane_send(entry, wrapped)
 
-    if entry.provider != "claude":
+    # Route key is the canonical harness, legacy provider as fallback (x-ec59):
+    # an unknown harness with no inject lane (e.g. opencode) falls through to the
+    # daemon deliver RPC by name and demotes to durable cleanly (never a KeyError).
+    route_harness = entry.harness or entry.provider
+    if route_harness != "claude":
         # Route codex/gemini through the daemon deliver RPC (now <fno_mail>-wrapped).
         result = _daemon_rpc(
             "agent.deliver",
@@ -4361,7 +4365,9 @@ def _deliver_live(
     # recipient, leaving control.sock the sole live path (x-3dac). The mail-inject
     # verb resolves the handle itself via ClaudeRoster (accepts the full session
     # uuid or 8-hex short id) and returns False (-> durable) when not reachable.
-    recipient = entry.claude_session_uuid or entry.claude_short_id
+    recipient = (
+        entry.harness_session_id or entry.claude_session_uuid or entry.claude_short_id
+    )
     if not recipient:
         return False
     return _mail_inject_claude(recipient, wrapped)
@@ -4496,7 +4502,8 @@ def dispatch_send(
                 # lacks one of these fields degrades to None rather than crashing
                 # the send (the fallback chain also stays intact).
                 from_session = (
-                    getattr(sender_entry, "claude_session_uuid", None)
+                    getattr(sender_entry, "harness_session_id", None)
+                    or getattr(sender_entry, "claude_session_uuid", None)
                     or getattr(sender_entry, "short_id", None)
                     or getattr(sender_entry, "claude_short_id", None)
                 )
