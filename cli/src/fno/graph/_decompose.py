@@ -38,6 +38,13 @@ class NormalizedGroup(TypedDict):
     deferring until its blocker lands; the pin check (and possible fall-back to
     `hard`) happens in the CLI, which can read the epic doc. `stub_against` is an
     optional explicit contract-ref override; absent, the CLI derives it.
+
+    `needs_think` (x-edf7 US3, default False) flags a group whose child gets a
+    dispatched `/think` + `/blueprint` design pass rather than inline-fill - set
+    it for a group that owns a feasibility spike, carries unresolved epic Open
+    Questions, or introduces a novel subsystem. The decompose invocation is the
+    operator consent for that spawn (Locked Decision 3); the RunState cap + daily
+    ceiling still bound it.
     """
 
     slug: str
@@ -48,6 +55,7 @@ class NormalizedGroup(TypedDict):
     cwd: Optional[str]
     dep: str
     stub_against: Optional[str]
+    needs_think: bool
 
 
 def extract_contract_versions(doc_text: str) -> set[int]:
@@ -405,6 +413,13 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                 f"group {slug!r} stub_against must be a non-empty string when set",
                 exit_code=1,
             )
+        # Optional design-pass flag (x-edf7 US3). Default False (inline-fill).
+        needs_think = grp.get("needs_think", False)
+        if not isinstance(needs_think, bool):
+            raise DecomposeError(
+                f"group {slug!r} needs_think must be a boolean (got {needs_think!r})",
+                exit_code=1,
+            )
         normalized.append(
             {
                 "slug": slug,
@@ -417,6 +432,7 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                 "stub_against": (
                     stub_against.strip() if isinstance(stub_against, str) else None
                 ),
+                "needs_think": needs_think,
             }
         )
 

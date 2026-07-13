@@ -1000,27 +1000,60 @@ def cmd_decompose(
         for msg in downgrades:
             typer.echo(f"warning: {msg}", err=True)
 
-    # 4b. Born-with-why (v2 A1): decompose mints child nodes; route each NEWLY
-    #     created child through the shared birth hook so the epic's why can carry
-    #     a context /think into the group (US2). One shared RunState bounds the
-    #     whole batch's blast radius (AC1-EDGE), not each child. Re-read once so
-    #     each child carries its durable cwd/slug/provenance. Strictly non-fatal +
-    #     opt-in (gate-OFF default => complete no-op); never wedges the decompose.
-    created_ids = [r["id"] for r in results if r["action"] == "created"]
-    if created_ids:
+    # 4b. Per-child design pass (x-edf7 US3) + born-with-why (v2 A1). Two lanes,
+    #     one shared RunState bounding the whole batch's blast radius (AC1-EDGE):
+    #       - `needs_think` group -> FORCE a fan-out /think+/blueprint design pass.
+    #         The decompose invocation IS the operator consent (Locked Decision 3),
+    #         so the gate + attended-offer are overridden (mirrors the
+    #         dispatch_conversational env-forcing); the caps still bound it. A spawn
+    #         that does not fire leaves the child `idea` with its stub on disk and
+    #         prints the OFFER fallback (AC2-ERR / AC1-EDGE cap clamp).
+    #       - unflagged group -> today's opt-in born-with-why OFFER (gate-OFF
+    #         default => complete no-op).
+    #     Only UNLINKED children are candidates (a re-decompose never re-designs a
+    #     child that already has a plan). Strictly non-fatal: never wedge decompose.
+    flagged_slugs = {g["slug"] for g in norm if g["needs_think"]}
+    slug_by_id = {r["id"]: r["slug"] for r in results}
+    created_ids = {r["id"] for r in results if r["action"] == "created"}
+    spec_ids = [r["id"] for r in results]
+    if spec_ids:
         try:
             from fno.graph.store import read_graph
-            from fno.provenance.spawn_think import RunState, on_node_born
+            from fno.provenance.spawn_think import (
+                RunState,
+                maybe_spawn_think,
+                on_node_born,
+            )
 
             by_id = {e.get("id"): e for e in read_graph(_graph_path())}
             born_rs = RunState()
-            for cid in created_ids:
+            # Force the gate + spawn (over the default-OFF / attended-offer) for the
+            # flagged fan-out only; reuses the exact env seams dispatch_conversational
+            # uses, so no new maybe_spawn branch.
+            forced_env = {
+                **os.environ,
+                "FNO_THINK_SPAWN": "1",
+                "FNO_THINK_SPAWN_ATTENDED": "spawn",
+            }
+            for cid in spec_ids:
                 child = by_id.get(cid)
-                if child is not None:
+                if child is None or child.get("plan_path"):
+                    continue  # already-linked children are done; nothing to design
+                if slug_by_id.get(cid) in flagged_slugs:
+                    res = maybe_spawn_think(
+                        child, run_state=born_rs, env=forced_env, quiet=json_mode(ctx)
+                    )
+                    if res.decision != "spawned" and not json_mode(ctx):
+                        typer.echo(
+                            f"fan-out /think for {cid} did not spawn "
+                            f"({res.reason}); run `/think {cid}` then `/blueprint` "
+                            f"to design it (child left idea with its stub)",
+                            err=True,
+                        )
+                elif cid in created_ids:
                     # Already the persisted, slugged node -> skip the re-read.
-                    # quiet in --json mode: the born-with-why offer is a human
-                    # prompt with no consumer in a machine pipe, and its stderr
-                    # print pollutes a captured JSON stream (test_json_output_shape).
+                    # quiet in --json mode: the offer stderr print would pollute a
+                    # captured JSON stream (test_json_output_shape).
                     on_node_born(child, run_state=born_rs, persisted=True,
                                  quiet=json_mode(ctx))
         except Exception:  # noqa: BLE001 - additive; never wedge the decompose

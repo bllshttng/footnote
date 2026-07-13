@@ -882,6 +882,107 @@ def test_extract_why_digest_no_locked_degrades_with_warning():
     assert warning is not None and "Locked Decisions" in warning
 
 
+# needs_think validation + flagged fan-out (US3) ------------------------------
+
+
+def test_validate_needs_think_defaults_false():
+    assert validate_groups([{"slug": "1", "title": "g"}], None)[0]["needs_think"] is False
+
+
+def test_validate_needs_think_accepts_bool():
+    norm = validate_groups([{"slug": "1", "title": "g", "needs_think": True}], None)
+    assert norm[0]["needs_think"] is True
+
+
+def test_validate_needs_think_rejects_non_bool():
+    import pytest as _pytest
+
+    with _pytest.raises(DecomposeError):
+        validate_groups([{"slug": "1", "title": "g", "needs_think": "yes"}], None)
+
+
+def _spy_spawn(monkeypatch):
+    """Patch both spawn lanes; return (fanout_calls, offer_calls). Each fan-out
+    call records (node_id, forced_env) and returns a `spawned` result by default."""
+    import fno.provenance.spawn_think as st
+
+    fanout: list = []
+    offers: list = []
+
+    def fake_maybe(node, *, run_state=None, env=None, quiet=False, **k):
+        fanout.append(((node or {}).get("id"), env or {}))
+        return st.ThinkSpawnResult("spawned", st.EVENT_SPAWNED, node_id=node.get("id"))
+
+    def fake_born(node, *, run_state=None, **k):
+        offers.append((node or {}).get("id"))
+
+    monkeypatch.setattr(st, "maybe_spawn_think", fake_maybe)
+    monkeypatch.setattr(st, "on_node_born", fake_born)
+    return fanout, offers
+
+
+def test_flagged_group_forces_fanout_unflagged_offers(graph_env, monkeypatch):
+    g, read_entries = graph_env
+    fanout, offers = _spy_spawn(monkeypatch)
+    groups = [
+        {"slug": "1", "title": "G1 spike", "waves": "1", "blocked_by_groups": [],
+         "needs_think": True},
+        {"slug": "2", "title": "G2 rote", "waves": "2", "blocked_by_groups": ["1"]},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+
+    # The flagged child took the fan-out lane with the gate + spawn forced on;
+    # the unflagged child got the born-with-why offer.
+    assert len(fanout) == 1 and len(offers) == 1
+    _, env = fanout[0]
+    assert env.get("FNO_THINK_SPAWN") == "1"
+    assert env.get("FNO_THINK_SPAWN_ATTENDED") == "spawn"
+
+
+def test_fanout_non_spawn_prints_offer_fallback(graph_env, monkeypatch):
+    import fno.provenance.spawn_think as st
+
+    g, read_entries = graph_env
+
+    def fake_maybe(node, *, run_state=None, env=None, quiet=False, **k):
+        # Simulate a cap/failure: no spawn.
+        return st.ThinkSpawnResult("skipped", st.EVENT_SKIPPED, reason="cap-exceeded",
+                                   node_id=node.get("id"))
+
+    monkeypatch.setattr(st, "maybe_spawn_think", fake_maybe)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": [],
+               "needs_think": True}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    # AC2-ERR / AC1-EDGE: a child that did not spawn is left idea + an OFFER line.
+    assert "did not spawn" in result.output and "/think" in result.output
+    child = _child(read_entries(), "1")
+    assert child["plan_path"] is None and child["_status"] == "idea"
+
+
+def test_redecompose_reattempts_unlinked_flagged_skips_linked(graph_env, monkeypatch):
+    g, read_entries = graph_env
+    fanout, _ = _spy_spawn(monkeypatch)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": [],
+               "needs_think": True}]
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert len(fanout) == 1  # first pass fires the fan-out
+
+    # Child still unlinked (spawn is fire-and-forget) -> re-decompose re-attempts.
+    fanout.clear()
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert len(fanout) == 1  # AC1-FR: unlinked flagged child re-designed
+
+    # Once linked (designed), re-decompose leaves it alone.
+    fanout.clear()
+    entries = read_entries()
+    _child(entries, "1")["plan_path"] = "/plans/big.group-1.md"
+    Path(g).write_text(json.dumps({"entries": entries}) + "\n")
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert fanout == []  # linked child is not re-designed
+
+
 def test_extract_why_digest_no_overview_uses_first_prose_paragraph():
     doc = "---\ntitle: E\n---\n\n# Heading\n\nFirst real prose paragraph is the intent.\n"
     digest, _ = extract_why_digest(doc)
