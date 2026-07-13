@@ -317,6 +317,17 @@ enum CoreMsg {
         id: u64,
         notice: String,
     },
+    /// (v29, x-c376) The off-loop peek task's transcript, routed back so the
+    /// `PeekBody` is sent from the core loop (which owns `clients`) to the
+    /// requesting client only. `seq` echoes the request; error/timeout text
+    /// travels in `lines`. Originates from a trusted server task, not a client,
+    /// so it is NOT in the passive-observer mutation gate.
+    PeekResult {
+        id: u64,
+        seq: u64,
+        name: String,
+        lines: Vec<String>,
+    },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
@@ -930,6 +941,50 @@ async fn run_agent_action(verb: &str, name: &str) -> String {
         Ok(Ok(status)) if status.success() => format!("{past} {name}"),
         Ok(Ok(_)) => format!("{verb} {name}: failed"),
     }
+}
+
+/// Shell `fno agents peek <name> -n 20` for the sideline peek overlay (x-c376),
+/// bounded + fail-open: the captured lines (stdout, else stderr, else a
+/// synthesized one-liner) become the overlay body verbatim. `fno agents peek`
+/// reads the peer's on-disk transcript, so it works on a suspended/watch-only
+/// worker without spawning anything; it is read-only (never writes what the peer
+/// reads). Every failure path yields a visible body line, never an empty result:
+/// the overlay renders whatever comes back and never closes on a fetch error
+/// (AC1-ERR, AC2-FR). `name` was resolved from the client's own `Layout`; the
+/// argv is never a shell string, so the value can only be `peek`'s positional.
+async fn run_agent_peek(name: &str) -> Vec<String> {
+    // A transcript read crosses a subprocess (disk tail); a hung read (locked
+    // file, dead NFS) is killed at the timeout and surfaces a timeout line
+    // rather than wedging the overlay on "loading…" forever.
+    const PEEK_TIMEOUT: Duration = Duration::from_secs(5);
+    const PEEK_LINES: &str = "20";
+    let fut = tokio::process::Command::new(fno_bin())
+        .args(["agents", "peek", name, "-n", PEEK_LINES])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let body = match tokio::time::timeout(PEEK_TIMEOUT, fut).await {
+        Err(_) => format!("peek timed out ({}s)", PEEK_TIMEOUT.as_secs()),
+        Ok(Err(_)) => "peek unavailable (fno not on server PATH?)".to_string(),
+        Ok(Ok(o)) => {
+            // Exit 13 (unknown peer) / exit 1 (no reader) print their reason to
+            // stderr; a clean read prints the transcript (or "no activity yet")
+            // to stdout. Prefer stdout when non-empty, else stderr, so an error
+            // reason is never dropped for a blank body.
+            let out = String::from_utf8_lossy(&o.stdout);
+            if out.trim().is_empty() {
+                let err = String::from_utf8_lossy(&o.stderr);
+                if err.trim().is_empty() {
+                    "no activity yet".to_string()
+                } else {
+                    err.into_owned()
+                }
+            } else {
+                out.into_owned()
+            }
+        }
+    };
+    body.lines().map(str::to_string).collect()
 }
 
 /// x-0296 CI diagnostics: timestamped breadcrumbs for the e2e server log
@@ -1686,6 +1741,28 @@ impl Core {
         tokio::spawn(async move {
             let notice = run_agent_action(verb, &name).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
+    /// Shell `fno agents peek <name>` OFF the core loop (x-c376), the
+    /// `dispatch_next` pattern: the transcript routes back as a `PeekResult` the
+    /// core loop turns into a `PeekBody` for the requesting client only. `seq`
+    /// rides through unchanged so the client can drop a stale reply. Read-only -
+    /// the peek subprocess never writes anything the peer reads. `name` was
+    /// resolved from the client's own `Layout`; no server-side catalog validation
+    /// is needed (an unknown name simply comes back as `peek`'s exit-13 body).
+    fn peek_agent(&self, id: u64, name: String, seq: u64) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let lines = run_agent_peek(&name).await;
+            let _ = core_tx
+                .send(CoreMsg::PeekResult {
+                    id,
+                    seq,
+                    name,
+                    lines,
+                })
+                .await;
         });
     }
 
@@ -3912,6 +3989,14 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::PeekAgent { name, seq } => {
+                // Read-only transcript fetch (x-c376): shell `fno agents peek`
+                // off-loop and reply to this client only. No catalog validation -
+                // an unknown name returns peek's own exit-13 body, which the
+                // overlay renders (fail-open, never a refusal notice).
+                self.peek_agent(client_id, name, seq);
+                Flow::Continue
+            }
             Command::CopySelection => {
                 // Keyboard copy (leader+y): the focused pane's selection, else the
                 // newest completed block (precedence + refusals in copy_source).
@@ -4101,6 +4186,22 @@ impl Core {
             CoreMsg::DispatchResult { id, notice } => {
                 if !notice.is_empty() {
                     self.notice(id, notice);
+                }
+                Flow::Continue
+            }
+            CoreMsg::PeekResult {
+                id,
+                seq,
+                name,
+                lines,
+            } => {
+                // Route the shelled transcript to the requesting client only
+                // (x-c376). A vanished client (detached before the read finished)
+                // is a silent no-op - the reply just drops.
+                if let Some(c) = self.clients.iter().find(|c| c.id == id) {
+                    let _ = c
+                        .reliable_tx
+                        .try_send(ServerMsg::PeekBody { seq, name, lines });
                 }
                 Flow::Continue
             }

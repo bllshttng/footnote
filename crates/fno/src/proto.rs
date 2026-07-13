@@ -150,7 +150,12 @@ use crate::tree::{Dir, Rect, TabId};
 /// its client-captured squad while preserving the active tab by stable id.
 /// v28 (x-3e38): pane-run and watch-only attach carry an explicit squad target
 /// plus optional directional split placement.
-pub const PROTO_VERSION: u32 = 28;
+///
+/// v29 (x-c376): `Command::PeekAgent { name, seq }` asks the server for a
+/// sideline row's recent transcript (shelled `fno agents peek <name>`, read-only)
+/// and `ServerMsg::PeekBody { seq, name, lines }` returns it to the requesting
+/// client only; the client drops any body whose `seq` is not the current request.
+pub const PROTO_VERSION: u32 = 29;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -749,6 +754,20 @@ pub enum Command {
     RemoveAgent {
         name: String,
     },
+    /// (v29, x-c376) Ask the server for a sideline row's recent transcript so the
+    /// operator can peek BEFORE attaching (peek reads disk; only attach spawns a
+    /// pane). `name` is an `AgentRow.name` from the last `Layout` (the same union
+    /// resolver `fno agents peek` accepts); the server shells `fno agents peek
+    /// <name>` OFF the core loop and replies with a [`ServerMsg::PeekBody`] to the
+    /// requesting client only. `seq` is a client-local monotonic counter echoed
+    /// back on the body so the client can drop a stale reply (A->B->A cycling
+    /// defeats a name-only guard). Read-only: it mutates nothing, so it is not in
+    /// the passive-observer mutation gate's own list (it rides `Command`, already
+    /// gated wholesale for a passive client).
+    PeekAgent {
+        name: String,
+        seq: u64,
+    },
 }
 
 impl Command {
@@ -865,6 +884,18 @@ pub enum ServerMsg {
         pane_id: u64,
         total: u32,
         current: u32,
+    },
+    /// (v29, x-c376) The transcript body for a [`Command::PeekAgent`], sent only
+    /// to the requesting client. `seq` echoes the request's counter so the client
+    /// drops a stale reply; `name` is the peeked row (for a defensive header
+    /// cross-check); `lines` is the shelled `fno agents peek` output (already
+    /// split into display lines), with any error/timeout text carried in-band as
+    /// lines too - the overlay renders whatever comes back and never closes on a
+    /// fetch error. Reliable (one small message per keystroke).
+    PeekBody {
+        seq: u64,
+        name: String,
+        lines: Vec<String>,
     },
 }
 
