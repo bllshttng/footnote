@@ -832,6 +832,8 @@ def _codex_create_path(
         cwd=str(cwd),
         log_path=str(output_path),
         codex_session_id=session_id,
+        harness="codex",
+        harness_session_id=session_id,
     )
 
     try:
@@ -1100,6 +1102,8 @@ def _gemini_create_path(
         cwd=str(cwd),
         log_path=str(output_path),
         gemini_session_id=session_id,
+        harness="gemini",
+        harness_session_id=session_id,
     )
 
     try:
@@ -1404,6 +1408,11 @@ def _claude_create_path(
         log_path=str(log_path),
         claude_short_id=short_id,
         claude_session_uuid=session_uuid,
+        # Canonical identity at birth (x-ec59): a bg claude row is born routable
+        # by name. A raced uuid-resolution miss leaves harness_session_id None
+        # (same as claude_session_uuid); reconcile / send-time heal backfills it.
+        harness="claude",
+        harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,

@@ -2465,8 +2465,10 @@ fn create(
         name: name.to_string(),
         short_id: String::new(),
         provider: "claude".to_string(),
-        harness: None,
-        harness_session_id: None,
+        // Canonical identity at birth (x-ec59); harness_session_id mirrors the
+        // (possibly None-on-race) resolved uuid, healed later like the legacy field.
+        harness: Some("claude".to_string()),
+        harness_session_id: session_uuid.clone(),
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
