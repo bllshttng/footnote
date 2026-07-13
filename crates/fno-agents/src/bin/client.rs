@@ -420,6 +420,10 @@ async fn run(args: Vec<String>) -> i32 {
             .get("substrate")
             .and_then(|v| v.as_str())
             .unwrap_or("pane");
+        if let Err(message) = validate_spawn_placement(&params, substrate) {
+            eprintln!("{message}");
+            return 2;
+        }
         if substrate == "pane" {
             use fno_agents::claude_ask::py_repr;
             use std::os::unix::process::CommandExt;
@@ -684,6 +688,27 @@ fn maybe_run_agy_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
 /// returns `Some(2)` with a redirect error for an opencode target, else `None`.
 fn maybe_run_opencode_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
     fno_agents::opencode_ask::maybe_run_opencode_ask(home, params, name)
+}
+
+fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), String> {
+    let squad = params.get("squad").and_then(Value::as_str);
+    let split = params.get("split").and_then(Value::as_str);
+
+    if squad.is_some_and(|name| name.trim().is_empty()) {
+        return Err("--squad/-s needs a nonblank squad name".into());
+    }
+    if (squad.is_some() || split.is_some()) && substrate != "pane" {
+        return Err("--squad/-s and --split/-x apply only to --substrate pane \
+             (bg/headless have no pane geometry)"
+            .into());
+    }
+    if split.is_some_and(|direction| !matches!(direction, "left" | "right" | "up" | "down")) {
+        return Err(format!(
+            "--split/-x must be left, right, up, or down (got {:?})",
+            split.unwrap_or_default()
+        ));
+    }
+    Ok(())
 }
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
@@ -1367,6 +1392,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--model",
         "--mode",
         "--substrate",
+        "--squad",
+        "--split",
         "--permission-mode",
         "--effort",
         "--add-dir",
@@ -1411,6 +1438,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         match a.as_str() {
             "--provider" | "-p" => {
                 params.insert("provider".into(), str_arg(&mut it, "--provider")?);
+            }
+            "--squad" | "-s" => {
+                params.insert("squad".into(), str_arg(&mut it, "-s/--squad")?);
+            }
+            "--split" | "-x" => {
+                params.insert("split".into(), str_arg(&mut it, "-x/--split")?);
             }
             "--from" => {
                 // `promote <name> --from <session-uuid>`: the session to resume
@@ -2176,7 +2209,7 @@ fn exit_code_for(code: ErrorCode) -> i32 {
 /// list against that set, so a new verb cannot land without a `--help` entry
 /// (ab-351427cb).
 const CLIENT_VERB_USAGE: &[&str] = &[
-    "spawn <name> --provider <p> [--substrate pane|bg|headless] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
+    "spawn <name> --provider <p> [--substrate pane|bg|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
     "list [--all]",
     "status",
@@ -2782,6 +2815,45 @@ mod tests {
         let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--model=pro".to_string()])
             .expect("--model= must parse");
         assert_eq!(eq["model"], "pro");
+    }
+
+    #[test]
+    fn spawn_accepts_squad_placement_aliases() {
+        let (_method, short) = build_request(
+            "spawn",
+            &[
+                "reviewer".to_string(),
+                "-s".to_string(),
+                "reviews".to_string(),
+                "-x".to_string(),
+                "right".to_string(),
+            ],
+        )
+        .expect("mobile placement aliases must parse");
+        assert_eq!(short["squad"], "reviews");
+        assert_eq!(short["split"], "right");
+
+        let (_method, long) = build_request(
+            "spawn",
+            &[
+                "reviewer".to_string(),
+                "--squad=reviews".to_string(),
+                "--split=right".to_string(),
+            ],
+        )
+        .expect("long placement options must parse");
+        assert_eq!(short, long);
+    }
+
+    #[test]
+    fn spawn_placement_is_pane_only() {
+        let params = serde_json::json!({"squad": "reviews"});
+        assert_eq!(
+            validate_spawn_placement(&params, "bg"),
+            Err("--squad/-s and --split/-x apply only to --substrate pane \
+                 (bg/headless have no pane geometry)"
+                .to_string())
+        );
     }
 
     /// x-dfa4: `--permission-mode` parses in both space and equals form so the

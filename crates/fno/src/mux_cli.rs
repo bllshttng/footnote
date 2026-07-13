@@ -34,9 +34,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, ServerMsg,
-    WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
+    self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, PanePlacement,
+    PaneTarget, ServerMsg, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
+use crate::tree::Dir;
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
 /// a hang. Generous next to a socket round-trip, tight next to a human.
@@ -1188,6 +1189,7 @@ enum PaneCmd {
         cwd: Option<String>,
         argv: Vec<String>,
         claim: bool,
+        placement: PanePlacement,
     },
     Send {
         pane: u64,
@@ -1253,13 +1255,15 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         .and_then(|a| a.to_str())
         .ok_or_else(|| "pane needs a verb: ls|read|run|send|wait|kill|claim|release".to_string())?;
 
-    // `run` is special: leading flags, then the command argv verbatim (its own
-    // flags are NOT ours to parse), optionally after a `--` separator.
+    // `run` is special: leading options/directives, then the command argv
+    // verbatim (its own flags are NOT ours to parse), optionally after `--`.
     if verb == "run" {
         let mut session = None;
         let mut json = false;
         let mut cwd = None;
         let mut claim = false;
+        let mut squad = None;
+        let mut split = None;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -1274,6 +1278,27 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 "--claim" => claim = true,
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
+                "--squad" | "-s" | "squad" => {
+                    let name = flag_value(args, &mut i, tok)?;
+                    if name.trim().is_empty() {
+                        return Err("squad/-s needs a nonblank squad name".into());
+                    }
+                    squad = Some(name);
+                }
+                "--split" | "-x" | "split" => {
+                    let value = flag_value(args, &mut i, tok)?;
+                    split = Some(match value.as_str() {
+                        "left" => Dir::Left,
+                        "right" => Dir::Right,
+                        "up" => Dir::Up,
+                        "down" => Dir::Down,
+                        _ => {
+                            return Err(format!(
+                                "split/-x must be left, right, up, or down (got {value:?})"
+                            ))
+                        }
+                    });
+                }
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -1293,7 +1318,17 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         return Ok(ParsedPane {
             session,
             json,
-            cmd: PaneCmd::Run { cwd, argv, claim },
+            cmd: PaneCmd::Run {
+                cwd,
+                argv,
+                claim,
+                placement: PanePlacement {
+                    target: squad
+                        .map(PaneTarget::SquadName)
+                        .unwrap_or(PaneTarget::CurrentRoute),
+                    split,
+                },
+            },
         });
     }
 
@@ -1430,7 +1465,12 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             ControlVerb::PaneRead { pane, lines, block },
             CONTROL_TIMEOUT,
         ),
-        PaneCmd::Run { cwd, argv, claim } => {
+        PaneCmd::Run {
+            cwd,
+            argv,
+            claim,
+            placement,
+        } => {
             let cwd = resolve_run_cwd(cwd, std::env::current_dir().ok());
             (
                 ControlVerb::PaneRun {
@@ -1439,6 +1479,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     cols: None,
                     rows: None,
                     claim,
+                    placement,
                 },
                 CONTROL_TIMEOUT,
             )
@@ -2450,6 +2491,7 @@ mod tests {
                     cwd: Some("/code/foo".into()),
                     argv: vec!["claude".into(), "--print".into(), "hi".into()],
                     claim: false,
+                    placement: PanePlacement::default(),
                 },
             }
         );
@@ -2460,6 +2502,54 @@ mod tests {
         );
         // An empty command is a usage error.
         assert!(parse_pane_args(&os(&["run", "--cwd", "/x"])).is_err());
+    }
+
+    #[test]
+    fn mux_pane_parse_run_accepts_typed_placement_before_argv() {
+        let p = parse_pane_args(&os(&[
+            "run", "squad", "review", "split", "left", "claude", "--print",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            p.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement {
+                    target: PaneTarget::SquadName(ref name),
+                    split: Some(crate::tree::Dir::Left),
+                },
+                ref argv,
+                ..
+            } if name == "review" && argv == &["claude", "--print"]
+        ));
+        let aliases =
+            parse_pane_args(&os(&["run", "-s", "review", "-x", "right", "--", "echo"])).unwrap();
+        assert!(matches!(
+            aliases.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement {
+                    target: PaneTarget::SquadName(ref name),
+                    split: Some(crate::tree::Dir::Right),
+                },
+                ..
+            } if name == "review"
+        ));
+        let long = parse_pane_args(&os(&[
+            "run", "--squad", "review", "--split", "up", "--", "echo",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            long.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement {
+                    target: PaneTarget::SquadName(ref name),
+                    split: Some(crate::tree::Dir::Up),
+                },
+                ..
+            } if name == "review"
+        ));
+        assert!(parse_pane_args(&os(&["run", "squad", " ", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&os(&["run", "split", "diagonal", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&os(&["run", "--target", "review", "--", "echo"])).is_err());
     }
 
     #[test]

@@ -578,6 +578,123 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# x-3e38 pane placement: squad/split on the outer pane-run transport
+# ---------------------------------------------------------------------------
+
+
+def test_placement_directives_ride_outer_pane_run_before_separator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # AC1-HP/AC2-HP: placement rides the OUTER pane-run argv, before the `--`
+    # fencing the provider argv; build_pane_argv stays placement-blind.
+    _result, runner = _spawn(monkeypatch, tmp_path, squad="review", split="left")
+    run_call = runner.calls[0]
+    sep = run_call.index("--")
+    outer = run_call[:sep]
+    assert outer[outer.index("squad") + 1] == "review"
+    assert outer[outer.index("split") + 1] == "left"
+    tail = run_call[sep + 1 :]
+    assert "squad" not in tail and "split" not in tail
+    assert "claude" in tail  # provider argv unchanged
+
+
+def test_placement_omitted_leaves_pane_run_argv_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # AC4-EDGE: no placement -> exactly the current one-new-tab argv.
+    _result, runner = _spawn(monkeypatch, tmp_path)
+    run_call = runner.calls[0]
+    sep = run_call.index("--")
+    assert "squad" not in run_call[:sep] and "split" not in run_call[:sep]
+
+
+def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
+    # AC4-ERR: pane geometry flags fail closed on a substrate with no pane tree,
+    # before any spawn.
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--provider", "claude", "--substrate", "bg", "-x", "left"],
+    )
+    assert res.exit_code == 2, res.output
+    assert "--squad/-s and --split/-x apply only to --substrate pane" in res.output
+
+
+def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
+    # AC4-ERR: an out-of-vocabulary direction is refused at the CLI boundary.
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--provider", "claude", "-x", "diagonal"],
+    )
+    assert res.exit_code == 2, res.output
+    assert "left, right, up, or down" in res.output
+
+
+def test_cmd_spawn_rejects_blank_squad_before_dispatch(tmp_path: Path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--provider", "claude", "-s", ""],
+    )
+    assert res.exit_code == 2, res.output
+    assert "--squad/-s needs a nonblank squad name" in res.output
+
+
+@pytest.mark.parametrize(
+    "placement_args",
+    [
+        ["--squad", "review", "--split", "right"],
+        ["-s", "review", "-x", "right"],
+    ],
+)
+def test_cmd_spawn_pane_threads_placement_to_dispatch(
+    tmp_path: Path, monkeypatch, placement_args: list[str]
+) -> None:
+    # AC1-HP/AC2-HP: long and mobile aliases reach dispatch_spawn_pane.
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            session="main",
+            pane_id=1,
+            child_pid=None,
+            session_uuid="u",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--provider", "claude", *placement_args],
+    )
+    assert res.exit_code == 0, res.output
+    assert captured["squad"] == "review"
+    assert captured["split"] == "right"
+
+
+# ---------------------------------------------------------------------------
 # _mesh_env_wrapper: a routed pane scrubs the parent's Anthropic creds (x-db50)
 # ---------------------------------------------------------------------------
 

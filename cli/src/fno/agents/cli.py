@@ -452,6 +452,24 @@ def cmd_spawn(
             "to claude --disallowedTools; other providers reject it (fail-closed)."
         ),
     ),
+    squad: str | None = typer.Option(
+        None,
+        "--squad",
+        "-s",
+        help=(
+            "Pane placement (x-3e38): send the new pane to a squad by its visible "
+            "workspace name instead of the cwd-derived default. --substrate pane only."
+        ),
+    ),
+    split: str | None = typer.Option(
+        None,
+        "--split",
+        "-x",
+        help=(
+            "Pane placement (x-3e38): tile the new pane left|right|up|down of the "
+            "squad's focused pane instead of a new tab. --substrate pane only."
+        ),
+    ),
     node: str | None = typer.Option(
         None,
         "--node",
@@ -612,6 +630,27 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
 
+    # x-3e38 pane placement: squad/split name mux geometry, which only the
+    # pane substrate has. bg/headless have no pane tree, so the controls are
+    # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
+    placement_requested = squad is not None or split is not None
+    if squad is not None and not squad.strip():
+        print("--squad/-s needs a nonblank squad name", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if placement_requested and (substrate != "pane" or once):
+        print(
+            "--squad/-s and --split/-x apply only to --substrate pane (bg/headless have "
+            "no pane geometry)",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if split is not None and split not in ("left", "right", "up", "down"):
+        print(
+            f"--split/-x must be left, right, up, or down (got {split!r})",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
     # that reaches cmd_spawn (the front door execs the binary for bg/headless,
@@ -648,6 +687,8 @@ def cmd_spawn(
                     agent=agent,
                     tools=tools,
                     deny_tools=deny_tools,
+                    squad=squad,
+                    split=split,
                     provenance=resolve_provenance(node, slug, plan),
                 )
             except DispatchAskError as exc:

@@ -29,6 +29,19 @@ Pipe it: `fno agents spawn w1 "task" -p claude | jq -r .short_id`.
 
 Plain `spawn` for codex/gemini creates a PTY-backed hosted worker under the `fno-agents` daemon (lazy-started). The receipt is the daemon's JSON payload, also carrying `.short_id`. The Python fallback runtime cannot host PTY workers and exits 13 with guidance.
 
+## Place a pane in a mux workspace
+
+Pane-hosted agents can join an existing mux workspace and tile beside its focused pane:
+
+```bash
+fno agents spawn reviewer "review the current diff" \
+  -p codex -s reviews -x right
+```
+
+`-s` / `--squad` selects a workspace by the same visible name shown in the mux sideline. `-x` / `--split` accepts `left`, `right`, `up`, or `down`; omit it to create a new tab in that squad. Omitting both options preserves the cwd-routed new-tab behavior. Placement does not change the worker's cwd, and the options are rejected for `bg` and `headless`, which have no mux geometry.
+
+The lower-level equivalent avoids option punctuation entirely: `fno mux pane run squad reviews split right echo ready`. It also accepts `-s` / `--squad` and `-x` / `--split`. A missing squad or a split that would make a pane too small fails without leaving a child process or layout mutation behind.
+
 ## Reasoning effort (`--effort`)
 
 `--effort` tunes reasoning without changing the selected model. Omit it to keep

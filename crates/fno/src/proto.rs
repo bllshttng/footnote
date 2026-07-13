@@ -148,7 +148,9 @@ use crate::tree::{Dir, Rect, TabId};
 ///
 /// v27 (x-0333): `Command::ReorderTab { squad, tab, delta }` moves a tab within
 /// its client-captured squad while preserving the active tab by stable id.
-pub const PROTO_VERSION: u32 = 27;
+/// v28 (x-3e38): pane-run and watch-only attach carry an explicit squad target
+/// plus optional directional split placement.
+pub const PROTO_VERSION: u32 = 28;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -336,6 +338,22 @@ pub enum MouseButton {
     Right,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum PaneTarget {
+    #[default]
+    CurrentRoute,
+    SquadName(String),
+    SquadId(u64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PanePlacement {
+    #[serde(default)]
+    pub target: PaneTarget,
+    #[serde(default)]
+    pub split: Option<Dir>,
+}
+
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
 /// one-shot request answered by exactly one [`ServerMsg`] reply. Versioned as
 /// part of `Control` (v4); a new verb or a shape change bumps `PROTO_VERSION`.
@@ -367,6 +385,8 @@ pub enum ControlVerb {
         rows: Option<u16>,
         #[serde(default)]
         claim: bool,
+        #[serde(default)]
+        placement: PanePlacement,
     },
     /// Write raw bytes to a pane's PTY (no focus change) -> [`ServerMsg::Ok`].
     /// `guarded` (v21) makes the send atomic against the target going busy:
@@ -609,7 +629,11 @@ pub enum Command {
     /// validated (8 hex digits) before it reaches the argv - a malformed id is
     /// refused fail-closed with a notice, and the argv is never a shell string,
     /// so the value can only ever be `claude attach`'s positional arg.
-    AttachAgent(String),
+    AttachAgent {
+        id: String,
+        #[serde(default)]
+        placement: PanePlacement,
+    },
     /// (v15) Start a targeted interactive session on a clicked work-queue card's
     /// node (id or slug), behind the client's one-keypress confirm. Reuses the
     /// `DispatchNext` porcelain (`fno dispatch one`) pinned to `--node`, so the
@@ -725,6 +749,15 @@ pub enum Command {
     RemoveAgent {
         name: String,
     },
+}
+
+impl Command {
+    pub fn attach_agent(id: impl Into<String>) -> Self {
+        Self::AttachAgent {
+            id: id.into(),
+            placement: PanePlacement::default(),
+        }
+    }
 }
 
 /// Server -> client.
@@ -1464,7 +1497,7 @@ mod tests {
             ClientMsg::Command(Command::SelectTab(3)),
             ClientMsg::Command(Command::SelectSquad(42)),
             ClientMsg::Command(Command::FocusPane(3)),
-            ClientMsg::Command(Command::AttachAgent("c19cd2c3".into())),
+            ClientMsg::Command(Command::attach_agent("c19cd2c3")),
             ClientMsg::Command(Command::DispatchNode("x-a496".into())),
             ClientMsg::Query,
             ClientMsg::KillServer,
@@ -1758,6 +1791,7 @@ mod tests {
                 cols: Some(120),
                 rows: None,
                 claim: true,
+                placement: PanePlacement::default(),
             },
             ControlVerb::PaneClaim {
                 pane: 5,
@@ -1783,6 +1817,37 @@ mod tests {
                 build: BUILD_VERSION.into(),
                 verb,
             };
+            let bytes = encode(&msg).unwrap();
+            let mut cursor = std::io::Cursor::new(bytes);
+            let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
+            assert_eq!(decoded, msg);
+        }
+    }
+
+    #[test]
+    fn proto_v28_placement_roundtrips_for_pane_run_and_attach() {
+        let placement = PanePlacement {
+            target: PaneTarget::SquadId(42),
+            split: Some(Dir::Up),
+        };
+        for msg in [
+            ClientMsg::Control {
+                proto: PROTO_VERSION,
+                build: BUILD_VERSION.into(),
+                verb: ControlVerb::PaneRun {
+                    cwd: "/code/footnote".into(),
+                    argv: vec!["claude".into()],
+                    cols: None,
+                    rows: None,
+                    claim: false,
+                    placement: placement.clone(),
+                },
+            },
+            ClientMsg::Command(Command::AttachAgent {
+                id: "c19cd2c3".into(),
+                placement,
+            }),
+        ] {
             let bytes = encode(&msg).unwrap();
             let mut cursor = std::io::Cursor::new(bytes);
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();

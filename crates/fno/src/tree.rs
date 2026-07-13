@@ -256,7 +256,27 @@ fn node_at_path<'a>(node: &'a Node, path: &[usize]) -> &'a Node {
 /// Refuses (tree unchanged) if any resulting pane would drop below
 /// [`MIN_ROWS`]x[`MIN_COLS`] in `viewport`.
 pub fn split(tab: &mut Tab, viewport: Rect, axis: Axis, new_id: PaneId) -> Result<(), SplitError> {
-    let candidate = split_node(&tab.root, tab.focus, axis, new_id)
+    let direction = match axis {
+        Axis::Horizontal => Dir::Right,
+        Axis::Vertical => Dir::Down,
+    };
+    split_directional(tab, viewport, direction, new_id)
+}
+
+/// Split the focused leaf and place the new pane on the requested side.
+pub fn split_directional(
+    tab: &mut Tab,
+    viewport: Rect,
+    direction: Dir,
+    new_id: PaneId,
+) -> Result<(), SplitError> {
+    let (axis, before) = match direction {
+        Dir::Left => (Axis::Horizontal, true),
+        Dir::Right => (Axis::Horizontal, false),
+        Dir::Up => (Axis::Vertical, true),
+        Dir::Down => (Axis::Vertical, false),
+    };
+    let candidate = split_node(&tab.root, tab.focus, axis, before, new_id)
         .ok_or(SplitError::FocusNotFound(tab.focus))?;
 
     // Per-pane, PER-AXIS: a pane fails on either dimension independently. A
@@ -279,11 +299,21 @@ pub fn split(tab: &mut Tab, viewport: Rect, axis: Axis, new_id: PaneId) -> Resul
 }
 
 /// Build the post-split tree. `None` means `target` isn't in this subtree.
-fn split_node(node: &Node, target: PaneId, split_axis: Axis, new_id: PaneId) -> Option<Node> {
+fn split_node(
+    node: &Node,
+    target: PaneId,
+    split_axis: Axis,
+    before: bool,
+    new_id: PaneId,
+) -> Option<Node> {
     match node {
         Node::Leaf(id) if *id == target => Some(Node::Branch {
             axis: split_axis,
-            children: vec![(0.5, Node::Leaf(*id)), (0.5, Node::Leaf(new_id))],
+            children: if before {
+                vec![(0.5, Node::Leaf(new_id)), (0.5, Node::Leaf(*id))]
+            } else {
+                vec![(0.5, Node::Leaf(*id)), (0.5, Node::Leaf(new_id))]
+            },
         }),
         Node::Leaf(_) => None,
         Node::Branch { axis, children } => {
@@ -297,7 +327,10 @@ fn split_node(node: &Node, target: PaneId, split_axis: Axis, new_id: PaneId) -> 
                     let half = children[idx].0 / 2.0;
                     let mut new_children = children.clone();
                     new_children[idx] = (half, Node::Leaf(target));
-                    new_children.insert(idx + 1, (half, Node::Leaf(new_id)));
+                    new_children.insert(
+                        if before { idx } else { idx + 1 },
+                        (half, Node::Leaf(new_id)),
+                    );
                     return Some(Node::Branch {
                         axis: *axis,
                         children: new_children,
@@ -307,7 +340,7 @@ fn split_node(node: &Node, target: PaneId, split_axis: Axis, new_id: PaneId) -> 
             // Not a direct same-axis match: recurse (handles both
             // cross-axis leaf-wrap and deeper nesting).
             for (i, (ratio, child)) in children.iter().enumerate() {
-                if let Some(new_child) = split_node(child, target, split_axis, new_id) {
+                if let Some(new_child) = split_node(child, target, split_axis, before, new_id) {
                     let mut new_children = children.clone();
                     new_children[i] = (*ratio, new_child);
                     return Some(Node::Branch {
@@ -883,6 +916,69 @@ mod tests {
             other => panic!("expected a Branch, got {other:?}"),
         }
         check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_split_directional_inserts_on_requested_side() {
+        let viewport = Rect {
+            x: 0,
+            y: 0,
+            rows: 41,
+            cols: 41,
+        };
+        for (direction, expected) in [(Dir::Left, vec![3, 1, 2]), (Dir::Right, vec![1, 3, 2])] {
+            let mut tab = Tab {
+                name: None,
+                id: 0,
+                root: Node::Branch {
+                    axis: Axis::Horizontal,
+                    children: vec![(0.6, Node::Leaf(1)), (0.4, Node::Leaf(2))],
+                },
+                focus: 1,
+            };
+            split_directional(&mut tab, viewport, direction, 3).unwrap();
+            assert_eq!(leaves(&tab.root), expected);
+            assert_eq!(tab.focus, 3);
+            check_invariants(&tab).unwrap();
+        }
+
+        for (direction, expected) in [(Dir::Up, vec![3, 1, 2]), (Dir::Down, vec![1, 3, 2])] {
+            let mut tab = Tab {
+                name: None,
+                id: 0,
+                root: Node::Branch {
+                    axis: Axis::Vertical,
+                    children: vec![(0.6, Node::Leaf(1)), (0.4, Node::Leaf(2))],
+                },
+                focus: 1,
+            };
+            split_directional(&mut tab, viewport, direction, 3).unwrap();
+            assert_eq!(leaves(&tab.root), expected);
+            assert_eq!(tab.focus, 3);
+            check_invariants(&tab).unwrap();
+        }
+    }
+
+    #[test]
+    fn tree_split_directional_wraps_lone_leaf_in_requested_order() {
+        for (direction, axis, expected) in [
+            (Dir::Left, Axis::Horizontal, vec![2, 1]),
+            (Dir::Right, Axis::Horizontal, vec![1, 2]),
+            (Dir::Up, Axis::Vertical, vec![2, 1]),
+            (Dir::Down, Axis::Vertical, vec![1, 2]),
+        ] {
+            let mut tab = Tab {
+                name: None,
+                id: 0,
+                root: Node::Leaf(1),
+                focus: 1,
+            };
+            split_directional(&mut tab, VIEWPORT, direction, 2).unwrap();
+            assert_eq!(leaves(&tab.root), expected);
+            assert_eq!(tab.focus, 2);
+            assert!(matches!(tab.root, Node::Branch { axis: actual, .. } if actual == axis));
+            check_invariants(&tab).unwrap();
+        }
     }
 
     #[test]
