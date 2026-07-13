@@ -505,3 +505,388 @@ def test_ac4_edge_query_returns_both_on_duplicate(tmp_path, monkeypatch):
     assert len(results) == 2
     ids = {e["id"] for e in results}
     assert ids == {"ab-dup00001", "ab-dup00002"}
+
+
+# ---------------------------------------------------------------------------
+# x-b6e4 - phase-tagged session provenance (sessions list + session add)
+# ---------------------------------------------------------------------------
+
+
+def test_sessions_defaults_empty_for_legacy_entry():
+    """AC (x-b6e4): a legacy node with no `sessions` key reads as an empty list."""
+    from fno.graph.store import _apply_graph_defaults
+
+    e = _apply_graph_defaults([{"id": "ab-nosess01", "title": "old"}])[0]
+    assert e["sessions"] == []
+
+
+def test_sessions_existing_list_preserved():
+    """AC (x-b6e4): setdefault is a no-op when sessions is already populated."""
+    from fno.graph.store import _apply_graph_defaults
+
+    rec = {"phase": "think", "harness": "claude", "session_id": "S", "at": "2026-07-12T00:00:00Z"}
+    e = _apply_graph_defaults([{"id": "ab-hassess1", "sessions": [rec]}])[0]
+    assert e["sessions"] == [rec]
+
+
+def test_entry_model_declares_sessions_field():
+    """AC (x-b6e4): Entry carries `sessions` as a first-class list, default empty."""
+    from fno.graph.types import Entry
+
+    dumped = Entry(id="ab-model002", title="m").model_dump()
+    assert dumped["sessions"] == []
+
+
+def test_sessions_survive_save_reload(tmp_path, monkeypatch):
+    """AC (x-b6e4): sessions round-trip through locked_mutate_graph unchanged + in order."""
+    rec_a = {"phase": "think", "harness": "claude", "session_id": "S1", "at": "2026-07-12T01:00:00Z"}
+    rec_b = {"phase": "blueprint", "harness": "claude", "session_id": "S1", "at": "2026-07-12T02:00:00Z"}
+    g = _make_graph(tmp_path, [{"id": "ab-rtsess01", "title": "rt", "sessions": [rec_a, rec_b]}])
+    _patch_graph(monkeypatch, g)
+
+    from fno.graph.store import read_graph, locked_mutate_graph
+
+    locked_mutate_graph(g, lambda es: es)
+    reloaded = read_graph(g)
+    assert reloaded[0]["sessions"] == [rec_a, rec_b]
+
+
+# -- append_session_record store primitive --
+
+
+def _node_sessions(g, node_id):
+    from fno.graph.store import read_graph
+    for e in read_graph(g):
+        if e["id"] == node_id:
+            return e.get("sessions", [])
+    return None
+
+
+def test_append_session_record_appends(tmp_path, monkeypatch):
+    """AC1-HP: append a think entry; found+added true, row present with all four keys."""
+    g = _make_graph(tmp_path, [{"id": "ab-add00001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    found, added = append_session_record(
+        g, "ab-add00001", phase="think", harness="claude",
+        session_id="S", at="2026-07-12T03:00:00Z",
+    )
+    assert (found, added) == (True, True)
+    rows = _node_sessions(g, "ab-add00001")
+    assert rows == [{"phase": "think", "harness": "claude",
+                     "session_id": "S", "at": "2026-07-12T03:00:00Z"}]
+
+
+def test_append_session_record_same_session_two_phases(tmp_path, monkeypatch):
+    """AC1-HP: think + blueprint in one session -> two independently-queryable entries."""
+    g = _make_graph(tmp_path, [{"id": "ab-add00002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    append_session_record(g, "ab-add00002", phase="think", harness="claude", session_id="S")
+    append_session_record(g, "ab-add00002", phase="blueprint", harness="claude", session_id="S")
+    rows = _node_sessions(g, "ab-add00002")
+    phases = [r["phase"] for r in rows]
+    assert phases == ["think", "blueprint"]
+    assert all(r["session_id"] == "S" for r in rows)
+
+
+def test_append_session_record_dedup_preserves_first_at(tmp_path, monkeypatch):
+    """AC5-FR: a retry of the same (phase,harness,session) is added:false, first `at` kept."""
+    g = _make_graph(tmp_path, [{"id": "ab-add00003", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    append_session_record(g, "ab-add00003", phase="do", harness="codex",
+                          session_id="S", at="2026-07-12T04:00:00Z")
+    found, added = append_session_record(g, "ab-add00003", phase="do", harness="codex",
+                                         session_id="S", at="2026-07-12T05:00:00Z")
+    assert (found, added) == (True, False)
+    rows = _node_sessions(g, "ab-add00003")
+    assert len(rows) == 1
+    assert rows[0]["at"] == "2026-07-12T04:00:00Z"  # first observation owns `at`
+
+
+def test_append_session_record_takeover_same_phase_diff_session(tmp_path, monkeypatch):
+    """AC4-EDGE: two distinct sessions ship -> both `ship` rows remain."""
+    g = _make_graph(tmp_path, [{"id": "ab-add00004", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    append_session_record(g, "ab-add00004", phase="ship", harness="claude", session_id="S1")
+    append_session_record(g, "ab-add00004", phase="ship", harness="claude", session_id="S2")
+    rows = _node_sessions(g, "ab-add00004")
+    assert [r["session_id"] for r in rows] == ["S1", "S2"]
+
+
+def test_append_session_record_unknown_node(tmp_path, monkeypatch):
+    """found=False when the node is absent; no mutation."""
+    g = _make_graph(tmp_path, [{"id": "ab-add00005", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    found, added = append_session_record(g, "ab-missing", phase="do",
+                                         harness="claude", session_id="S")
+    assert (found, added) == (False, False)
+
+
+@pytest.mark.parametrize("phase", ["review", "plan", "", "DO"])
+def test_append_session_record_rejects_bad_phase(tmp_path, monkeypatch, phase):
+    g = _make_graph(tmp_path, [{"id": "ab-add00006", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    with pytest.raises(ValueError):
+        append_session_record(g, "ab-add00006", phase=phase, harness="claude", session_id="S")
+
+
+@pytest.mark.parametrize("harness,sid", [("", "S"), ("claude", ""), ("  ", "S"), ("claude", "  ")])
+def test_append_session_record_rejects_empty_identity(tmp_path, monkeypatch, harness, sid):
+    g = _make_graph(tmp_path, [{"id": "ab-add00007", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    with pytest.raises(ValueError):
+        append_session_record(g, "ab-add00007", phase="do", harness=harness, session_id=sid)
+
+
+@pytest.mark.parametrize("bad_at", [
+    "not-a-timestamp",
+    "2026-07-12",              # date-only, no time/zone
+    "2026-07-12T03:00:00",     # naive (no tz)
+    "2026-07-12T03:00:00-07:00",  # non-UTC offset
+])
+def test_append_session_record_rejects_non_utc_at(tmp_path, monkeypatch, bad_at):
+    """The UTC contract rejects date-only, naive, and non-UTC-offset timestamps."""
+    g = _make_graph(tmp_path, [{"id": "ab-add00008", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    with pytest.raises(ValueError):
+        append_session_record(g, "ab-add00008", phase="do", harness="claude",
+                              session_id="S", at=bad_at)
+
+
+@pytest.mark.parametrize("good_at,stored", [
+    ("2026-07-12T03:00:00Z", "2026-07-12T03:00:00Z"),
+    ("2026-07-12T03:00:00+00:00", "2026-07-12T03:00:00Z"),  # normalized to Z
+])
+def test_append_session_record_accepts_utc_at(tmp_path, monkeypatch, good_at, stored):
+    """A tz-aware UTC timestamp is accepted and normalized to the canonical `...Z` form."""
+    g = _make_graph(tmp_path, [{"id": "ab-add00009", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record, read_graph
+
+    append_session_record(g, "ab-add00009", phase="do", harness="claude",
+                          session_id="S", at=good_at)
+    assert read_graph(g)[0]["sessions"][0]["at"] == stored
+
+
+# -- stamp_session_for_pr: resolve the unique PR-linked node (Locked Decision 9) --
+
+
+def test_stamp_session_for_pr_unique(tmp_path, monkeypatch):
+    g = _make_graph(tmp_path, [
+        {"id": "ab-pr000001", "title": "t", "pr_number": 500},
+        {"id": "ab-pr000002", "title": "u", "pr_number": 501},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(g, 500, phase="ship",
+                                           harness="claude", session_id="S")
+    assert (node_id, status) == ("ab-pr000001", "added")
+    assert _node_sessions(g, "ab-pr000001")[0]["phase"] == "ship"
+
+
+def test_stamp_session_for_pr_matches_additional_prs(tmp_path, monkeypatch):
+    g = _make_graph(tmp_path, [
+        {"id": "ab-pr000003", "title": "t", "pr_number": 600,
+         "additional_prs": [{"number": 601, "url": None, "note": None}]},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(g, 601, phase="ship",
+                                           harness="claude", session_id="S")
+    assert (node_id, status) == ("ab-pr000003", "added")
+
+
+def test_stamp_session_for_pr_no_node(tmp_path, monkeypatch):
+    g = _make_graph(tmp_path, [{"id": "ab-pr000004", "title": "t", "pr_number": 700}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    assert stamp_session_for_pr(g, 999, phase="ship",
+                                harness="claude", session_id="S") == (None, "no-node")
+
+
+def test_stamp_session_for_pr_ambiguous_never_fans_out(tmp_path, monkeypatch):
+    g = _make_graph(tmp_path, [
+        {"id": "ab-pr000005", "title": "t", "pr_number": 800},
+        {"id": "ab-pr000006", "title": "u", "pr_number": 800},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(g, 800, phase="ship",
+                                           harness="claude", session_id="S")
+    assert (node_id, status) == (None, "ambiguous")
+    # no mutation on either node
+    assert _node_sessions(g, "ab-pr000005") == []
+    assert _node_sessions(g, "ab-pr000006") == []
+
+
+def test_stamp_session_for_pr_duplicate(tmp_path, monkeypatch):
+    g = _make_graph(tmp_path, [{"id": "ab-pr000007", "title": "t", "pr_number": 900}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    stamp_session_for_pr(g, 900, phase="ship", harness="claude", session_id="S")
+    node_id, status = stamp_session_for_pr(g, 900, phase="ship",
+                                           harness="claude", session_id="S")
+    assert (node_id, status) == ("ab-pr000007", "duplicate")
+    assert len(_node_sessions(g, "ab-pr000007")) == 1
+
+
+# -- `fno backlog session add` CLI (reuses _clear_session_env above) --
+
+
+def test_cli_session_add_pr_mode_resolves_node(tmp_path, monkeypatch):
+    """`session add --pr <n>` resolves the unique PR-linked node and stamps it."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-prcli001", "title": "t", "pr_number": 1200}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1200", "--phase", "ship", "--json"])
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["node_id"] == "ab-prcli001" and out["added"] is True
+    assert read_graph(g)[0]["sessions"][0]["phase"] == "ship"
+
+
+def test_cli_session_add_pr_ambiguous_exits_nonzero(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [
+        {"id": "ab-prcli002", "title": "t", "pr_number": 1300},
+        {"id": "ab-prcli003", "title": "u", "pr_number": 1300},
+    ])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1300", "--phase", "ship"])
+    assert r.exit_code != 0
+    assert "1300" in r.output
+
+
+def test_cli_session_add_requires_node_or_pr(tmp_path, monkeypatch):
+    """Neither NODE nor --pr -> usage error; both -> usage error."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{"id": "ab-prcli004", "title": "t", "pr_number": 1400}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    assert CliRunner().invoke(C.cli, ["session", "add", "--phase", "ship"]).exit_code != 0
+    assert CliRunner().invoke(
+        C.cli, ["session", "add", "ab-prcli004", "--pr-number", "1400", "--phase", "ship"]
+    ).exit_code != 0
+
+
+def test_cli_session_add_uses_ambient_identity(tmp_path, monkeypatch):
+    """AC1-HP: `session add` defaults harness+session from ambient env; exits 0."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-cli00001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-cli-1")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00001", "--phase", "think"])
+    assert r.exit_code == 0, r.output
+    rows = read_graph(g)[0]["sessions"]
+    assert rows == [{"phase": "think", "harness": "claude",
+                     "session_id": "sess-cli-1", "at": rows[0]["at"]}]
+    assert rows[0]["at"]  # a timestamp was stamped
+
+
+def test_cli_session_add_duplicate_exits_zero_added_false(tmp_path, monkeypatch):
+    """duplicate -> exit 0, JSON added:false."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{"id": "ab-cli00002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+
+    args = ["session", "add", "ab-cli00002", "--phase", "do",
+            "--harness", "codex", "--session-id", "S", "--json"]
+    r1 = CliRunner().invoke(C.cli, args)
+    assert r1.exit_code == 0, r1.output
+    assert json.loads(r1.output)["added"] is True
+    r2 = CliRunner().invoke(C.cli, args)
+    assert r2.exit_code == 0, r2.output
+    assert json.loads(r2.output)["added"] is False
+
+
+def test_cli_session_add_missing_identity_exits_nonzero_no_mutation(tmp_path, monkeypatch):
+    """AC2-ERR: no ambient identity + no explicit flags -> nonzero, no mutation, warns node+phase."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-cli00003", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00003", "--phase", "ship"])
+    assert r.exit_code != 0
+    assert "ab-cli00003" in r.output and "ship" in r.output
+    assert read_graph(g)[0].get("sessions", []) == []
+
+
+def test_cli_session_add_bad_phase_exits_nonzero(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{"id": "ab-cli00004", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "S")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00004", "--phase", "review"])
+    assert r.exit_code != 0
+
+
+def test_cli_session_add_unknown_node_exits_nonzero(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{"id": "ab-cli00005", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "S")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "ab-nope", "--phase", "do"])
+    assert r.exit_code != 0

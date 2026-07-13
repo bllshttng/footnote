@@ -258,3 +258,61 @@ def test_ac_verify_read_only(tmp_graph, tmp_path, monkeypatch):
     after = tmp_graph.read_text()
 
     assert before == after
+
+
+# ---------------------------------------------------------------------------
+# x-b6e4 - lifecycle `sessions` rows in provenance output
+# ---------------------------------------------------------------------------
+
+_SESSIONS = [
+    {"phase": "think", "harness": "claude", "session_id": "S1", "at": "2026-07-12T01:00:00Z"},
+    {"phase": "blueprint", "harness": "claude", "session_id": "S1", "at": "2026-07-12T02:00:00Z"},
+    {"phase": "ship", "harness": "codex", "session_id": "S2", "at": "2026-07-12T03:00:00Z"},
+]
+
+
+def test_ac3_ui_lifecycle_rows_human(tmp_graph, tmp_path, monkeypatch):
+    """AC3-UI: a node with lifecycle entries shows an append-ordered phase table,
+    while the existing birth edge stays visible."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _write_node(tmp_graph, _base_node(
+        "ab-life0001", source_session_id="birth-sid", source_harness="claude",
+        sessions=list(_SESSIONS),
+    ))
+
+    r = _invoke("backlog", "provenance", "ab-life0001")
+    assert r.exit_code == 0, r.output
+    # all four phase rows present, in append order
+    for tok in ("think", "blueprint", "ship", "S1", "S2", "2026-07-12T03:00:00Z"):
+        assert tok in r.output
+    assert r.output.index("think") < r.output.index("blueprint") < r.output.index("ship")
+    # birth edge still rendered
+    assert "birth-sid" in r.output
+
+
+def test_ac3_ui_lifecycle_rows_json(tmp_graph, tmp_path, monkeypatch):
+    """AC3-UI (JSON): --json carries the sessions list in append order alongside edges."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _write_node(tmp_graph, _base_node("ab-life0002", sessions=list(_SESSIONS)))
+
+    r = _invoke("backlog", "provenance", "ab-life0002", "--json")
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["sessions"] == _SESSIONS
+    assert "edges" in data  # existing edges preserved
+
+
+def test_lifecycle_empty_sessions_no_crash(tmp_graph, tmp_path, monkeypatch):
+    """A legacy node with no lifecycle entries renders fine (empty list)."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _write_node(tmp_graph, _base_node("ab-life0003"))
+
+    r = _invoke("backlog", "provenance", "ab-life0003", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["sessions"] == []

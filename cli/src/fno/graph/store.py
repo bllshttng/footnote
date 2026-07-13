@@ -23,7 +23,7 @@ import os
 import shutil
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fno.graph._constants import GRAPH_JSON, GRAPH_LOCK_FILE, GRAPH_MD
@@ -116,6 +116,9 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "spawned_by_session",
     "spawned_by_harness",
     "spawned_by_cwd",
+    # Append-only lifecycle provenance (x-b6e4): {phase, harness, session_id, at}
+    # per phase boundary. Sits in the provenance tail after the birth/spawn edges.
+    "sessions",
     "queued_at",
     "queued_reason",
 ]
@@ -375,6 +378,8 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("spawned_by_session", None)
         e.setdefault("spawned_by_harness", None)
         e.setdefault("spawned_by_cwd", None)
+        # Append-only lifecycle provenance (x-b6e4): empty on legacy nodes.
+        e.setdefault("sessions", [])
         # Queued: orthogonal to _status. A queued node is still ready (has a
         # plan, unblocked); the queued_at field marks the user's intent to
         # pick it up next/today. Cleared on completion.
@@ -547,3 +552,128 @@ def append_progress_note(
 
     locked_mutate_graph(path, mutator)
     return result["found"], result["plan_path"]
+
+
+# Bounded ceiling for harness / session-id strings (x-b6e4). Real ids are UUIDs
+# (~36) or short markers; 200 leaves headroom while rejecting a runaway value
+# that would bloat the graph. ponytail: fixed cap, widen only if a real id
+# legitimately exceeds it.
+_SESSION_STR_MAX = 200
+
+
+def append_session_record(
+    path: Path,
+    node_id: str,
+    *,
+    phase: str,
+    harness: str,
+    session_id: str,
+    at: "str | None" = None,
+) -> "tuple[bool, bool]":
+    """Append a ``{phase, harness, session_id, at}`` lifecycle record to a node's
+    append-only ``sessions`` list, returning ``(found, added)`` (x-b6e4).
+
+    The single graph-owned mutation primitive behind ``fno backlog session add``.
+    Idempotent under the graph lock: appends only when ``(phase, harness,
+    session_id)`` is absent, so a retried or concurrent duplicate stamp collapses
+    to one row and the first observation owns ``at``. Never edits or removes an
+    entry.
+
+    Raises ``ValueError`` on an unknown phase, an empty/over-long harness or
+    session id, or an unparseable ``at`` -- validation lives here so every caller
+    (CLI, tests, future backfill) is bound by the same contract. ``found=False``
+    when the node is absent (no mutation).
+    """
+    from fno.graph._intake import _find_node  # function-local: avoid import cycle
+    from fno.graph.types import SESSION_PHASES
+
+    if phase not in SESSION_PHASES:
+        raise ValueError(
+            f"invalid phase {phase!r}; expected one of {sorted(SESSION_PHASES)}"
+        )
+    harness = (harness or "").strip()
+    session_id = (session_id or "").strip()
+    for label, value in (("harness", harness), ("session_id", session_id)):
+        if not value:
+            raise ValueError(f"{label} must be a non-empty string")
+        if len(value) > _SESSION_STR_MAX:
+            raise ValueError(f"{label} exceeds {_SESSION_STR_MAX} chars")
+
+    if at is None:
+        at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        # The `at` contract is ISO-8601 *UTC*. fromisoformat alone would accept a
+        # date-only value, a naive datetime, or a non-UTC offset -- all of which
+        # break append-order comparison and a future evidence-based backfill. So
+        # require a tz-aware instant whose offset is exactly UTC, then normalize
+        # to the canonical `...Z` form the default path emits.
+        raw = at.strip()
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"at must be an ISO-8601 timestamp, got {at!r}") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            raise ValueError(f"at must be a UTC timestamp (offset +00:00 / Z), got {at!r}")
+        at = parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    result = {"found": False, "added": False}
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is None:
+            return entries
+        result["found"] = True
+        rows = node.setdefault("sessions", [])
+        key = (phase, harness, session_id)
+        if any((r.get("phase"), r.get("harness"), r.get("session_id")) == key for r in rows):
+            return entries  # duplicate: first observation owns `at`
+        rows.append({"phase": phase, "harness": harness,
+                     "session_id": session_id, "at": at})
+        result["added"] = True
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    return result["found"], result["added"]
+
+
+def _node_carries_pr(node: dict, pr_number: int) -> bool:
+    """True if the node's primary pr_number OR any additional_prs entry == pr_number."""
+    if node.get("pr_number") == pr_number:
+        return True
+    return any(
+        isinstance(extra, dict) and extra.get("number") == pr_number
+        for extra in (node.get("additional_prs") or [])
+    )
+
+
+def stamp_session_for_pr(
+    path: Path,
+    pr_number: int,
+    *,
+    phase: str,
+    harness: str,
+    session_id: str,
+    at: "str | None" = None,
+) -> "tuple[str | None, str]":
+    """Resolve the UNIQUE node carrying ``pr_number`` and append a lifecycle
+    record, returning ``(node_id, status)`` (x-b6e4).
+
+    The shared PR->node stamp used by ``fno backlog session add --pr``, the merge
+    primitive, and the ``/pr merged`` ritual, so Locked Decision 9 ("resolve
+    exactly one same-repo PR-linked node, never fan out") lives in one place.
+    ``status`` is ``added`` | ``duplicate`` | ``no-node`` | ``ambiguous``; the
+    last two leave the graph untouched (0 or >1 matches never fans out).
+    """
+    matches = [
+        e["id"] for e in read_graph(path)
+        if isinstance(e.get("id"), str) and _node_carries_pr(e, pr_number)
+    ]
+    if not matches:
+        return None, "no-node"
+    if len(matches) > 1:
+        return None, "ambiguous"
+    node_id = matches[0]
+    _found, added = append_session_record(
+        path, node_id, phase=phase, harness=harness, session_id=session_id, at=at
+    )
+    return node_id, ("added" if added else "duplicate")

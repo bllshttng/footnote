@@ -767,6 +767,21 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
 
 > "Design doc written and reviewed (N iteration(s)). Please review and let me know if you want changes before we create the implementation plan."
 
+### 8c. Stamp think provenance (node-seeded only)
+
+Once the design doc is saved and reviewed AND this invocation is node-seeded
+(`/think <node-id>`, so exactly one node is bound), stamp the lifecycle
+provenance so the graph records which session/harness thought about the node:
+
+```bash
+fno backlog session add <node-id> --phase think
+```
+
+Harness + session id default from the ambient identity; the primitive is
+idempotent (a re-run is a no-op) and append-only. Skip silently for raw-prose
+`/think` (no node to attribute) or if the stamp warns about missing identity -
+provenance is best-effort and never blocks the design output.
+
 ### 9. Output for Target Pipeline
 
 When invoked as part of a pipeline (a **live** target manifest - `fno target status --json` reports `manifest-live` starting with `live`; this works standalone without one, and a dead manifest counts as standalone),

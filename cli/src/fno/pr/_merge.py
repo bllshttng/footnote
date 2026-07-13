@@ -138,6 +138,36 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int) -> None:
         # P2 on PR #524). KeyboardInterrupt is deliberately NOT swallowed.
         pass
 
+    # x-b6e4: stamp ship-phase lifecycle provenance on a REAL merge (not queued/
+    # failed) -- the merge primitive is one of the plan's ship boundaries. Gated
+    # here so all three merged code paths are covered in one place.
+    if merge_status == "merged":
+        _stamp_ship_provenance(pr_number)
+
+
+def _stamp_ship_provenance(pr_number: int) -> None:
+    """Append a `ship` lifecycle record to the PR's node for the merging session
+    (x-b6e4). Ambient identity of whoever ran `fno pr merge`; resolves the unique
+    PR-linked node (never fans out). Best-effort: any failure or a missing
+    identity is a silent no-op and never blocks the merge outcome."""
+    try:
+        from fno.harness_identity import resolve_harness_identity
+        from fno.paths import graph_json
+        from fno.graph.store import stamp_session_for_pr
+
+        ident = resolve_harness_identity()
+        if not ident.session_id or not ident.harness:
+            return
+        path = graph_json()
+        if not path.exists():
+            return
+        stamp_session_for_pr(
+            path, pr_number, phase="ship",
+            harness=ident.harness, session_id=ident.session_id,
+        )
+    except (Exception, SystemExit):
+        pass
+
 
 def _emit_session_satisfied(pr_url: str, state_dir: str) -> None:
     """Emit a session_satisfied{source:pr_merge} event (best-effort)."""
