@@ -152,9 +152,15 @@ def resolve_dispatch(
     cfg = dict(dispatch_cfg) if dispatch_cfg is not None else _load_dispatch_cfg(settings)
     decision: list[str] = []
 
-    # 1. harness
-    if harness:
+    # 1. harness. An explicit flag is distinguished by ``is not None`` (present
+    # vs omitted), NOT truthiness: an empty explicit ``--harness ""`` (e.g. a
+    # wrapper interpolating an unset env var) must fail loud, never silently fall
+    # through to config/claude - the epic's "never silently default to claude"
+    # invariant + the sibling resolve_dispatch_provider contract.
+    if harness is not None:
         chosen_harness = harness.strip()
+        if not chosen_harness:
+            raise DispatchResolveError("explicit --harness must not be empty")
         decision.append(f"harness=explicit({chosen_harness})")
     elif cfg.get("harness"):
         chosen_harness = str(cfg["harness"]).strip()
@@ -167,9 +173,12 @@ def resolve_dispatch(
     # 2. substrate. Validate the RESOLVED value once, whatever rung supplied it
     # (explicit flag, config, or per-harness default) - the config rung is a
     # trust boundary too, so a `config.dispatch.substrate` typo must fail loud
-    # here, not resolve silently to a launcher.
-    if substrate:
+    # here, not resolve silently to a launcher. An empty explicit flag rejects
+    # for the same reason as harness above.
+    if substrate is not None:
         chosen_substrate = substrate.strip()
+        if not chosen_substrate:
+            raise DispatchResolveError("explicit --substrate must not be empty")
         decision.append(f"substrate=explicit({chosen_substrate})")
     elif cfg.get("substrate"):
         chosen_substrate = str(cfg["substrate"]).strip()

@@ -78,6 +78,15 @@ def test_bad_template_rejected_when_substituting():
         _resolve(node_id="x-1", command="/target no-merge")
 
 
+def test_empty_explicit_harness_fails_loud():
+    """An empty explicit --harness (unset env var interpolated into a flag) must
+    fail loud, not silently fall through to config/claude."""
+    with pytest.raises(DispatchResolveError, match="must not be empty"):
+        _resolve(harness="")
+    with pytest.raises(DispatchResolveError, match="must not be empty"):
+        _resolve(harness="claude", substrate="  ")
+
+
 def test_config_substrate_typo_fails_loud():
     """A config.dispatch.substrate typo is a trust boundary too - it must raise,
     not resolve silently to a launcher."""
