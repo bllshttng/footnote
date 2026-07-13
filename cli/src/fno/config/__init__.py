@@ -228,6 +228,11 @@ class MaintainBlock(BaseModel):
 
     staleness_days: int = 30
     max_failed_attempts: int = 3
+    # Validity sweep (x-af5e). No raising validators: a nonpositive/oversized
+    # value degrades to a bounded default IN THE LEG (per Failure Modes) so a bad
+    # config never breaks the whole `maintain` command.
+    validity_days: int = 60
+    validity_batch_size: int = 25
 
     @field_validator("staleness_days")
     @classmethod

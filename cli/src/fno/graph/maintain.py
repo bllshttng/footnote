@@ -24,11 +24,13 @@ command since it owns the write target.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -403,3 +405,291 @@ def detect_failure_defers(
         if streak >= threshold:
             out.append(FailureDefer(node_id=nid, streak=streak))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Leg 8: validity sweep for stale ideas (proposal-only, x-af5e)
+# ---------------------------------------------------------------------------
+#
+# Age alone (leg 4 / drain) cannot tell an enduring long-tail idea from a
+# premise invalidated by a renamed file, a removed subsystem, or merged work.
+# This leg reviews a bounded oldest-first batch of stale ideas, builds a
+# deterministic evidence packet per idea from the current repo/graph, feeds the
+# packets (as data) to ONE tool-less schema-constrained analysis call, then
+# writes an immutable evidence deck classifying each idea keep / supersede /
+# promote / needs-human. It NEVER mutates graph state, including under --apply;
+# operators apply recommendations later via existing `fno backlog` verbs.
+
+VALIDITY_DAYS_DEFAULT = 60
+VALIDITY_BATCH_DEFAULT = 25
+VALIDITY_BATCH_HARD_MAX = 100  # Locked Decision #7: never review more than this.
+
+VALIDITY_CLASSES = ("keep", "supersede", "promote", "needs-human")
+
+# Cost budgets (Locked Decision #7). Enforced by the packet builder and the CLI.
+PACKET_MAX_BYTES = 32 * 1024
+AGGREGATE_MAX_BYTES = 512 * 1024
+EVIDENCE_SOURCE_TIMEOUT_S = 5.0
+VALIDITY_RUN_TIMEOUT_S = 120.0
+
+# Only these citation prefixes may appear in an evidence packet id or an analyzer
+# citation (injection boundary, Locked Decision #6). Anything else is dropped.
+ALLOWED_EVIDENCE_PREFIXES = ("graph:", "path:", "git:", "pr:")
+
+# Fields whose content defines a node's "premise". A change to any of them
+# re-qualifies a watermarked node for review (Locked Decision #5 / AC5-FR).
+_FINGERPRINT_FIELDS = (
+    "id", "title", "details", "description", "project", "cwd",
+    "created_at", "plan_path", "pr_number", "progress", "superseded_by",
+)
+
+# A path-like token (>=1 slash-joined segment ending in a filename); a bare
+# `fno backlog` subsystem phrase has no slash and is picked up as a symbol.
+_PATH_TOKEN_RE = re.compile(r"(?:[\w.\-]+/)+[\w.\-]+")
+# Backtick-quoted spans are the strongest "named symbol/subsystem" signal.
+_BACKTICK_RE = re.compile(r"`([^`]{2,64})`")
+
+
+def clamp_validity_bounds(
+    validity_days: object, batch_size: object
+) -> tuple[int, int, list[str]]:
+    """Degrade a nonpositive/non-int threshold or size to a bounded default and
+    clamp the batch to ``VALIDITY_BATCH_HARD_MAX`` (Failure Modes / Boundaries).
+
+    Returns ``(days, size, warnings)``; ``warnings`` is never silent - the CLI
+    surfaces each so a bad config value is visible, not swallowed.
+    """
+    warnings: list[str] = []
+    if not isinstance(validity_days, int) or isinstance(validity_days, bool) or validity_days < 1:
+        warnings.append(
+            f"validity_days {validity_days!r} invalid; using {VALIDITY_DAYS_DEFAULT}"
+        )
+        validity_days = VALIDITY_DAYS_DEFAULT
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+        warnings.append(
+            f"validity_batch_size {batch_size!r} invalid; using {VALIDITY_BATCH_DEFAULT}"
+        )
+        batch_size = VALIDITY_BATCH_DEFAULT
+    if batch_size > VALIDITY_BATCH_HARD_MAX:
+        warnings.append(
+            f"validity_batch_size {batch_size} clamped to {VALIDITY_BATCH_HARD_MAX}"
+        )
+        batch_size = VALIDITY_BATCH_HARD_MAX
+    return validity_days, batch_size, warnings
+
+
+def node_fingerprint(node: dict) -> str:
+    """Stable content hash over a node's premise fields (Locked Decision #5).
+
+    A committed valid sidecar row watermarks THIS fingerprint; an edit to any
+    premise field changes it and re-qualifies the node (AC5-FR). ``default=str``
+    keeps a stray datetime/enum from raising.
+    """
+    payload = {k: node.get(k) for k in _FINGERPRINT_FIELDS}
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def select_validity_candidates(
+    entries: list[dict],
+    validity_days: object,
+    batch_size: object,
+    *,
+    claimed_ids: frozenset[str] = frozenset(),
+    seen_fingerprints: frozenset[str] = frozenset(),
+    now: Optional[datetime] = None,
+) -> list[dict]:
+    """Oldest-first idea nodes STRICTLY older than ``validity_days``, minus the
+    live-claimed and already-watermarked ones, capped at the clamped batch size.
+
+    Deterministic pagination: sort by ``(created_at, id)`` so repeated sweeps
+    advance through the pile in a stable order (AC5-FR). An idea exactly
+    ``validity_days`` old is excluded (strictly older-than, Boundaries).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    validity_days, batch_size, _ = clamp_validity_bounds(validity_days, batch_size)
+    scored: list[tuple[datetime, str, dict]] = []
+    for e in entries:
+        if e.get("_status") != "idea":
+            continue
+        nid = e.get("id")
+        if not isinstance(nid, str) or nid in claimed_ids:
+            continue
+        created = _parse_ts(e.get("created_at"))
+        if created is None:
+            continue
+        if (now - created).days <= validity_days:
+            continue
+        if node_fingerprint(e) in seen_fingerprints:
+            continue
+        scored.append((created, nid, e))
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return [e for _, _, e in scored[:batch_size]]
+
+
+def _extract_paths(text: str, limit: int = 8) -> list[str]:
+    """Deterministic, deduped path-like tokens from node text (bounded)."""
+    out: list[str] = []
+    for m in _PATH_TOKEN_RE.finditer(text or ""):
+        tok = m.group(0).rstrip(".,;:)")
+        if tok not in out:
+            out.append(tok)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _extract_symbols(text: str, limit: int = 6) -> list[str]:
+    """Backtick-quoted named symbols/subsystems from node text (bounded)."""
+    out: list[str] = []
+    for m in _BACKTICK_RE.finditer(text or ""):
+        tok = m.group(1).strip()
+        # A backticked path is already covered by path evidence; skip it here.
+        if tok and "/" not in tok and tok not in out:
+            out.append(tok)
+        if len(out) >= limit:
+            break
+    return out
+
+
+@dataclass
+class EvidencePacket:
+    """Deterministic, allowlisted evidence for one idea (analyzer input as data).
+
+    ``items`` maps an allowlisted packet id (``graph:`` / ``path:`` / ``git:`` /
+    ``pr:``) to a short factual summary string; ``unavailable`` names sources
+    that could not be read so the analyzer lowers confidence rather than
+    inventing a verdict (Errors). ``fingerprint`` watermarks the node on a valid
+    committed row.
+    """
+
+    node_id: str
+    fingerprint: str
+    title: str
+    details: str
+    project: Optional[str]
+    cwd: Optional[str]
+    age_days: int
+    items: dict[str, str] = field(default_factory=dict)
+    unavailable: list[str] = field(default_factory=list)
+
+    def to_json(self) -> dict:
+        return {
+            "node_id": self.node_id,
+            "fingerprint": self.fingerprint,
+            "title": self.title,
+            "details": self.details,
+            "project": self.project,
+            "cwd": self.cwd,
+            "age_days": self.age_days,
+            "evidence": self.items,
+            "unavailable": self.unavailable,
+        }
+
+
+def collect_evidence(
+    node: dict,
+    entries: list[dict],
+    *,
+    now: Optional[datetime] = None,
+    exists: Optional[Callable[[str], bool]] = None,
+    search: Optional[Callable[[str], Optional[int]]] = None,
+) -> EvidencePacket:
+    """Build one node's deterministic, read-only, allowlisted evidence packet.
+
+    Seams (all injectable so the leg is hermetic under test):
+      * ``exists(relpath) -> bool`` resolves a repo path under the node's cwd;
+        when the repo is unavailable the caller passes ``None`` and path
+        evidence is recorded as unavailable rather than fabricated.
+      * ``search(symbol) -> int | None`` returns a bounded git/rg match count, or
+        ``None`` for an unavailable source (recorded, never guessed).
+
+    The packet is capped at ``PACKET_MAX_BYTES`` by truncating ``details`` and
+    dropping trailing evidence items (Boundaries / Locked Decision #7).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    nid = str(node.get("id"))
+    title = str(node.get("title") or "")
+    details = str(node.get("details") or node.get("description") or "")
+    created = _parse_ts(node.get("created_at"))
+    age_days = (now - created).days if created else -1
+    packet = EvidencePacket(
+        node_id=nid,
+        fingerprint=node_fingerprint(node),
+        title=title,
+        details=details,
+        project=node.get("project") if isinstance(node.get("project"), str) else None,
+        cwd=node.get("cwd") if isinstance(node.get("cwd"), str) else None,
+        age_days=age_days,
+    )
+
+    # graph: links + semantic-dup candidates (other nodes sharing this title).
+    blocked_by = [b for b in (node.get("blocked_by") or []) if isinstance(b, str)]
+    if blocked_by:
+        packet.items["graph:blocked_by"] = ", ".join(sorted(blocked_by))
+    key = _normalize_title(title)
+    if key:
+        matches = [
+            e.get("id")
+            for e in entries
+            if isinstance(e.get("id"), str)
+            and e.get("id") != nid
+            and _normalize_title(e.get("title")) == key
+        ]
+        for other_id in sorted(m for m in matches if m):
+            other = next((e for e in entries if e.get("id") == other_id), {})
+            packet.items[f"graph:title-match:{other_id}"] = str(
+                other.get("_status") or "unknown"
+            )
+
+    # pr: plan/PR pointers.
+    plan = node.get("plan_path")
+    if isinstance(plan, str) and plan:
+        packet.items["pr:plan"] = plan
+    pr = node.get("pr_number")
+    if pr:
+        packet.items["pr:number"] = str(pr)
+
+    # path: referenced repository paths that still exist (or not).
+    text = f"{title}\n{details}"
+    if exists is None:
+        packet.unavailable.append("path")
+    else:
+        for rel in _extract_paths(text):
+            try:
+                packet.items[f"path:{rel}"] = "exists" if exists(rel) else "missing"
+            except Exception:  # noqa: BLE001 - one unreadable path is not a verdict
+                packet.unavailable.append(f"path:{rel}")
+
+    # git: bounded match counts for named symbols/subsystems.
+    if search is None:
+        packet.unavailable.append("git")
+    else:
+        for sym in _extract_symbols(text):
+            try:
+                count = search(sym)
+            except Exception:  # noqa: BLE001 - timeout/error is unavailable, not zero
+                count = None
+            if count is None:
+                packet.unavailable.append(f"git:{sym}")
+            else:
+                packet.items[f"git:{sym}"] = f"{count} matches"
+
+    _cap_packet(packet)
+    return packet
+
+
+def _cap_packet(packet: EvidencePacket) -> None:
+    """Enforce ``PACKET_MAX_BYTES`` in place: truncate details first, then drop
+    trailing evidence items (deterministic order preserved)."""
+    def size() -> int:
+        return len(json.dumps(packet.to_json(), ensure_ascii=False).encode("utf-8"))
+
+    if size() <= PACKET_MAX_BYTES:
+        return
+    if len(packet.details) > 512:
+        packet.details = packet.details[:512] + "…[truncated]"
+    while size() > PACKET_MAX_BYTES and packet.items:
+        packet.items.pop(next(reversed(packet.items)))

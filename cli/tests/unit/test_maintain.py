@@ -8,6 +8,7 @@ Filter: `python -m pytest tests/ -k maintain`
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from fno.graph import maintain as m
@@ -377,3 +378,118 @@ def test_detect_failure_defers_skips_non_ready_and_deferred():
 def test_detect_failure_defers_event_for_absent_node_noops():
     events = [_fail("ab-ghost")] * 5
     assert m.detect_failure_defers([_n("ab-real")], events, 3) == []
+
+
+# --- leg 8: validity sweep - selection + fingerprint (x-af5e) ---------------
+
+
+def _idea(node_id: str, age_days: int, now: datetime, **over) -> dict:
+    created = (now - timedelta(days=age_days)).isoformat()
+    return _n(node_id, _status="idea", created_at=created, **over)
+
+
+def test_clamp_validity_bounds_defaults_and_hard_cap():
+    days, size, warns = m.clamp_validity_bounds(0, 0)
+    assert (days, size) == (m.VALIDITY_DAYS_DEFAULT, m.VALIDITY_BATCH_DEFAULT)
+    assert len(warns) == 2
+    # Over-large batch is clamped to the hard max (Locked Decision #7).
+    _, size2, warns2 = m.clamp_validity_bounds(60, 5000)
+    assert size2 == m.VALIDITY_BATCH_HARD_MAX
+    assert warns2
+    # A bool is not a valid int here (True == 1 must not sneak through).
+    days3, _, warns3 = m.clamp_validity_bounds(True, 25)
+    assert days3 == m.VALIDITY_DAYS_DEFAULT and warns3
+
+
+def test_select_validity_strict_age_and_oldest_first():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [
+        _idea("ab-90", 90, now),
+        _idea("ab-70", 70, now),
+        _idea("ab-60", 60, now),   # exactly 60 -> excluded (strict)
+        _idea("ab-30", 30, now),   # too fresh
+        _n("ab-ready", _status="ready", created_at=(now - timedelta(days=99)).isoformat()),
+    ]
+    cands = m.select_validity_candidates(entries, 60, 25, now=now)
+    assert [c["id"] for c in cands] == ["ab-90", "ab-70"]  # oldest first
+
+
+def test_select_validity_batch_cap_and_pagination():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [_idea(f"ab-{i:03d}", 100 + i, now) for i in range(10)]
+    first = m.select_validity_candidates(entries, 60, 3, now=now)
+    assert [c["id"] for c in first] == ["ab-009", "ab-008", "ab-007"]  # oldest = biggest age
+
+
+def test_select_validity_excludes_claimed_and_watermarked():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    claimed = _idea("ab-claim", 90, now)
+    watermarked = _idea("ab-wm", 85, now)
+    fresh = _idea("ab-fresh-idea", 80, now)
+    entries = [claimed, watermarked, fresh]
+    cands = m.select_validity_candidates(
+        entries, 60, 25, now=now,
+        claimed_ids=frozenset({"ab-claim"}),
+        seen_fingerprints=frozenset({m.node_fingerprint(watermarked)}),
+    )
+    assert [c["id"] for c in cands] == ["ab-fresh-idea"]
+
+
+def test_node_fingerprint_changes_on_edit():
+    base = _n("ab-x", title="original", details="d")
+    fp1 = m.node_fingerprint(base)
+    assert fp1 == m.node_fingerprint(dict(base))          # stable
+    edited = dict(base, title="rewritten premise")
+    assert m.node_fingerprint(edited) != fp1              # edit requalifies
+
+
+# --- leg 8: validity sweep - evidence collection ----------------------------
+
+
+def test_collect_evidence_allowlisted_ids_and_graph_dup():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea(
+        "ab-idea", 90, now,
+        title="Add spinner",
+        details="touches `Spinner` in cli/src/fno/ui.py",
+        plan_path="internal/plans/p.md",
+        blocked_by=["ab-dep"],
+    )
+    entries = [node, _n("ab-done", title="add spinner", _status="done")]
+    pkt = m.collect_evidence(
+        node, entries, now=now,
+        exists=lambda p: p == "cli/src/fno/ui.py",
+        search=lambda s: 4,
+    )
+    ids = set(pkt.items)
+    assert "graph:blocked_by" in ids
+    assert "graph:title-match:ab-done" in ids and pkt.items["graph:title-match:ab-done"] == "done"
+    assert pkt.items["path:cli/src/fno/ui.py"] == "exists"
+    assert pkt.items["pr:plan"] == "internal/plans/p.md"
+    assert pkt.items["git:Spinner"] == "4 matches"
+    # Every id carries an allowlisted prefix (injection boundary).
+    assert all(any(i.startswith(p) for p in m.ALLOWED_EVIDENCE_PREFIXES) for i in ids)
+
+
+def test_collect_evidence_records_unavailable_sources():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-idea", 90, now, title="t", details="touches a/b.py and `Sym`")
+    # No exists/search seams -> repo + git unavailable, recorded not fabricated.
+    pkt = m.collect_evidence(node, [node], now=now)
+    assert "path" in pkt.unavailable and "git" in pkt.unavailable
+    assert not any(i.startswith("path:") for i in pkt.items)
+
+
+def test_collect_evidence_missing_path_is_missing_not_dropped():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-idea", 90, now, title="t", details="cli/gone/removed.py")
+    pkt = m.collect_evidence(node, [node], now=now, exists=lambda p: False)
+    assert pkt.items["path:cli/gone/removed.py"] == "missing"
+
+
+def test_collect_evidence_caps_packet_size():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-big", 90, now, title="t", details="x" * 100_000)
+    pkt = m.collect_evidence(node, [node], now=now)
+    size = len(json.dumps(pkt.to_json()).encode("utf-8"))
+    assert size <= m.PACKET_MAX_BYTES
