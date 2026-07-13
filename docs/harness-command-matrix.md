@@ -54,7 +54,7 @@ The three re-entry verbs are easy to conflate; the axes that separate them:
 |---|---|---|---|
 | `attach` / `resume` (claude) | yes | your terminal, inside the session's TUI | `claude_short_id` (8-hex jobId) |
 | `resume` (codex/gemini) | recorded session | your terminal, provider resume CLI | provider session id |
-| `spawn --resume <uuid>` | **no - it revives the dead** | a new detached bg worker + registry row | `claude_session_uuid` (full transcript uuid) |
+| `spawn --resume <uuid>` | **no - it revives the dead** | a new detached bg worker + registry row (same conversation: `--resume` keeps the session uuid; only the supervisor and its jobId are new) | `claude_session_uuid` (full transcript uuid) |
 
 ## Verbs: registry and admin (provider-agnostic)
 
