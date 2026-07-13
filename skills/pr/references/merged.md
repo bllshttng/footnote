@@ -268,19 +268,19 @@ going so the inbox prose still lands, but flag it in the report.
 ### Step 2b: Stamp ship provenance (post-merge takeover, x-b6e4)
 
 A post-merge session that runs this ritual is a distinct ship-phase contributor
-from the one that opened the PR. Append a `ship` lifecycle entry for each node
-this PR maps to, so the takeover session is attributed alongside the original
-(append-only; both `ship` entries remain, AC4-EDGE):
+from the one that opened the PR. Append a `ship` lifecycle entry for **the node
+this specific `$PR` maps to** - NOT the whole `NODE_IDS` sweep, which may include
+unrelated nodes the unscoped reconcile closed in the same pass. `--pr` resolves
+exactly one same-repo PR-linked node and warns+skips on zero or multiple
+(Locked Decision 9: never fan out):
 
 ```bash
-for N in $NODE_IDS; do
-  fno backlog session add "$N" --phase ship || true
-done
+fno backlog session add --pr "$PR" --phase ship || true
 ```
 
 Harness + session id default from the ambient identity; idempotent (this exact
-session's `ship` entry is added once) and best-effort - a missing-identity
-warning or empty `NODE_IDS` skips silently and never blocks the ritual.
+session's `ship` entry is added once) and best-effort - a missing-identity,
+no-match, or ambiguous-PR warning skips silently and never blocks the ritual.
 
 ## Step 3: Mechanical triage harvest
 

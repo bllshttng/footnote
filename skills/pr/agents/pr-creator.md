@@ -243,6 +243,9 @@ NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-stat
 if [[ -n "$NODE_ID" && "$NODE_ID" != "null" && -n "$PR_NUMBER" ]]; then
   fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
     || echo "warn: node<->PR stamp failed for $NODE_ID PR #$PR_NUMBER (PR still created)" >&2
+  # x-b6e4: stamp ship-phase provenance for the session that created the PR
+  # (ambient identity; idempotent, best-effort - a skip never fails the PR).
+  fno backlog session add "$NODE_ID" --phase ship || true
 fi
 ```
 

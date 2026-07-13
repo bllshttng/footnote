@@ -70,26 +70,39 @@ The default mode `flat` takes a **plan path**. The `waves` mode (and its one-rel
 
 `/do` is the point where execution actually begins - the truthful `do` boundary,
 unlike `target init` which fires before design/planning. Stamp the node the live
-target is executing (Locked Decision 9). **Trust `graph_node_id` only from a LIVE
-manifest**: a dead/stale `.fno/target-state.md` left in a reused worktree still
-carries an old node id, and stamping it would attribute this do-entry to the
-wrong node. Gate on `manifest-live` first, then read the (now-trusted) manifest
-node. Stamp once, here, before dispatching any wave/task:
+target is executing (Locked Decision 9). Two guards make the attribution honest:
+
+1. **Trust `graph_node_id` only from a LIVE manifest** - a dead/stale
+   `.fno/target-state.md` left in a reused worktree still carries an old node id.
+2. **The plan being executed must agree** - if `/do <plan>` runs a plan whose
+   `claims:` names a DIFFERENT node than the live manifest, the manifest node is
+   not what this `/do` is executing, so skip rather than mis-attribute (never
+   guess).
+
+`$DO_PLAN_PATH` below is the plan path resolved in Step 1 (the `/do` argument, or
+the current-directory plan for a bare `/do waves`); leave it empty if none.
+Stamp once, here, before dispatching any wave/task:
 
 ```bash
 LIVE="$(fno target status --json 2>/dev/null | jq -r '."manifest-live" // ""' 2>/dev/null)"
 if [[ "$LIVE" == live* ]]; then
   # xargs trims whitespace and strips any surrounding quotes from the scalar.
   NODE_ID="$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | xargs)"
-  [[ -n "$NODE_ID" && "$NODE_ID" != null ]] && fno backlog session add "$NODE_ID" --phase do || true
+  PLAN_CLAIM=""
+  [[ -f "$DO_PLAN_PATH" ]] && PLAN_CLAIM="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^claims:/{sub(/^claims:[[:space:]]*/,""); print; exit}' "$DO_PLAN_PATH" | xargs)"
+  if [[ -n "$PLAN_CLAIM" && "$PLAN_CLAIM" != null && -n "$NODE_ID" && "$PLAN_CLAIM" != "$NODE_ID" ]]; then
+    echo "do provenance: plan claims '$PLAN_CLAIM' != live node '$NODE_ID' - conflict, skipping do stamp (never guess)." >&2
+  elif [[ -n "$NODE_ID" && "$NODE_ID" != null ]]; then
+    fno backlog session add "$NODE_ID" --phase do || true
+  fi
 fi
 ```
 
 Idempotent, append-only, best-effort: harness + session id default from the
 ambient identity; a missing-identity warning is non-fatal and never blocks
-execution. No live target (standalone `/do` on a raw plan, or a dead manifest)
--> skip silently; the node's `do` provenance is stamped by the pipeline run that
-owns the live manifest.
+execution. No live target (standalone `/do` on a raw plan, or a dead manifest),
+or a plan-vs-manifest node conflict -> skip silently; the node's `do` provenance
+is stamped by the pipeline run whose live manifest and plan agree.
 
 ## Step 2: flat mode (lightweight single-session, default)
 
