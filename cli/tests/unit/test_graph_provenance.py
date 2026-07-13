@@ -765,7 +765,7 @@ def test_cli_session_add_pr_mode_resolves_node(tmp_path, monkeypatch):
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
 
-    r = CliRunner().invoke(C.cli, ["session", "add", "--pr", "1200", "--phase", "ship", "--json"])
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1200", "--phase", "ship", "--json"])
     assert r.exit_code == 0, r.output
     out = json.loads(r.output)
     assert out["node_id"] == "ab-prcli001" and out["added"] is True
@@ -785,7 +785,7 @@ def test_cli_session_add_pr_ambiguous_exits_nonzero(tmp_path, monkeypatch):
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
 
-    r = CliRunner().invoke(C.cli, ["session", "add", "--pr", "1300", "--phase", "ship"])
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1300", "--phase", "ship"])
     assert r.exit_code != 0
     assert "1300" in r.output
 
@@ -803,7 +803,7 @@ def test_cli_session_add_requires_node_or_pr(tmp_path, monkeypatch):
 
     assert CliRunner().invoke(C.cli, ["session", "add", "--phase", "ship"]).exit_code != 0
     assert CliRunner().invoke(
-        C.cli, ["session", "add", "ab-prcli004", "--pr", "1400", "--phase", "ship"]
+        C.cli, ["session", "add", "ab-prcli004", "--pr-number", "1400", "--phase", "ship"]
     ).exit_code != 0
 
 

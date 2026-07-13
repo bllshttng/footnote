@@ -275,7 +275,7 @@ exactly one same-repo PR-linked node and warns+skips on zero or multiple
 (Locked Decision 9: never fan out):
 
 ```bash
-fno backlog session add --pr "$PR" --phase ship || true
+fno backlog session add --pr-number "$PR" --phase ship || true
 ```
 
 Harness + session id default from the ambient identity; idempotent (this exact

@@ -2637,12 +2637,12 @@ def _session_callback() -> None:
 @session_app.command("add")
 def cmd_session_add(
     node: Optional[str] = typer.Argument(
-        None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr)."
+        None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr-number)."
     ),
     phase: str = typer.Option(..., "--phase", help="Lifecycle phase: think|blueprint|do|ship."),
     pr: Optional[int] = typer.Option(
-        None, "--pr", help="Resolve the UNIQUE node carrying this PR number instead of "
-                           "passing NODE (rejects 0 or multiple matches; never fans out)."
+        None, "--pr-number", help="Resolve the UNIQUE node carrying this PR number instead "
+                                  "of passing NODE (rejects 0 or multiple matches; never fans out)."
     ),
     harness: Optional[str] = typer.Option(
         None, "--harness", help="Override harness (default: ambient session identity)."
@@ -2657,7 +2657,7 @@ def cmd_session_add(
 ) -> None:
     """Stamp a node with a lifecycle phase record (idempotent, append-only).
 
-    Identify the node by NODE (id/slug/hex) or by ``--pr <n>`` (the unique
+    Identify the node by NODE (id/slug/hex) or by ``--pr-number <n>`` (the unique
     PR-linked node) -- exactly one of the two. Harness + session id default to the
     ambient session identity; with neither an env marker nor an explicit flag the
     stamp is skipped and a warning names the node/PR and phase (provenance is
@@ -2668,7 +2668,7 @@ def cmd_session_add(
     from fno.graph.store import append_session_record, read_graph, stamp_session_for_pr
 
     if (node is None) == (pr is None):
-        typer.echo("session add: pass exactly one of NODE or --pr.", err=True)
+        typer.echo("session add: pass exactly one of NODE or --pr-number.", err=True)
         raise typer.Exit(code=2)
 
     who = node if node is not None else f"pr#{pr}"
