@@ -134,15 +134,24 @@ class TestSwitch:
         managed.switch(by_id["work-b"], by_id=by_id, root=tmp_path)
         assert fake_slot["claude"] == _blob("B0")  # re-materialized work-b's stored blob
 
-    def test_emits_account_switched(self, fake_slot, tmp_path):
+    def test_emits_account_switched(self, fake_slot, tmp_path, monkeypatch):
         by_id = _register_two(fake_slot, tmp_path)
         events: list[tuple] = []
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: pytest.fail("Claude switch must not probe Codex"),
+        )
         managed.switch(
             by_id["work-a"], by_id=by_id, root=tmp_path,
             emit_fn=lambda kind, **d: events.append((kind, d)),
         )
-        assert events and events[0][0] == "account_switched"
-        assert events[0][1]["provider"] == "work-a" and events[0][1]["outgoing"] == "work-b"
+        assert events == [
+            (
+                "account_switched",
+                {"provider": "work-a", "account_id": "work-a", "outgoing": "work-b"},
+            )
+        ]
 
 
 class TestSwitchGuards:
@@ -434,6 +443,35 @@ class TestCodexFileBackend:
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"
         assert events == []
 
+    def test_codex_login_rejection_without_rollback_blob_reports_slot_state(
+        self, tmp_path, monkeypatch
+    ):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
+        target = _rec("cx-a", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(target, root=tmp_path)
+        auth.unlink()
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=False),
+        )
+        events = []
+
+        with pytest.raises(managed.ManagedStoreError, match="nothing to roll back"):
+            managed.switch(
+                target,
+                by_id={"cx-a": target},
+                root=tmp_path,
+                emit_fn=lambda kind, **data: events.append((kind, data)),
+            )
+
+        assert managed._read_slot_blob("codex") == _blob("A0")
+        assert managed.active_slot_id("codex", tmp_path) is None
+        assert events == []
+
     def test_codex_hard_probe_error_rolls_back(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
 
@@ -453,8 +491,11 @@ class TestCodexFileBackend:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(managed, "_codex_login_ok", _interrupt)
-        with pytest.raises(KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt) as caught:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert caught.value.__notes__ == [
+            "codex login verification interrupted; slot rolled back to the previous account"
+        ]
         assert managed._read_slot_blob("codex") == _blob("B0")
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"
 
@@ -479,8 +520,12 @@ class TestCodexFileBackend:
             return original_write(cli, blob, config_dir)
 
         monkeypatch.setattr(managed, "_write_slot_blob", _write)
-        with pytest.raises(KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt) as caught:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert caught.value.__notes__ == [
+            "codex login verification interrupted; rollback ALSO failed (rollback denied); "
+            "slot is in an indeterminate state"
+        ]
 
     def test_codex_rejection_reports_rollback_failure(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
@@ -595,6 +640,11 @@ class TestCodexFileBackend:
             return [] if calls["n"] == 1 else [managed.PinningSession(777, "codex")]
 
         monkeypatch.setattr(managed, "codex_pinning_sessions", _scan)
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=True),
+        )
         with pytest.raises(managed.SwitchDeferred) as exc:
             managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert "777" in str(exc.value) and "during the switch" in str(exc.value)
@@ -798,6 +848,28 @@ class TestCliSurface:
         assert response.exit_code == 0
         assert "already materialized" in response.output
         assert "slot-already-active" in response.output
+
+    def test_use_codex_interrupt_surfaces_rollback_receipt(self, monkeypatch):
+        config = ProvidersConfig(records=[_rec("cx-a", cli="codex")], active="cx-a")
+        monkeypatch.setattr(
+            "fno.adapters.providers.cli.load_providers",
+            lambda repo_root=None: config,
+        )
+
+        def _interrupt(*args, **kwargs):
+            exc = KeyboardInterrupt()
+            exc.add_note(
+                "codex login verification interrupted; rollback ALSO failed "
+                "(rollback denied); slot is in an indeterminate state"
+            )
+            raise exc
+
+        monkeypatch.setattr(managed, "switch", _interrupt)
+        response = runner.invoke(providers_app, ["use", "cx-a"])
+
+        assert response.exit_code == 130
+        assert "switch interrupted: codex login verification interrupted" in response.output
+        assert "slot is in an indeterminate state" in response.output
 
     def test_use_managed_live_pin_defers(self, tmp_path, monkeypatch):
         slot = _cli_slot(monkeypatch)

@@ -640,11 +640,12 @@ def _switch_locked(
         except ManagedStoreError as exc:
             tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
             raise ManagedStoreError(f"codex login verification failed ({exc}); {tail}") from exc
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
             # Never convert a BaseException into a caught Exception: best-effort
             # rollback, then let the interrupt propagate so the top-level handler
             # exits cleanly instead of an outer `except Exception` swallowing it.
-            _rollback_materialized_slot(target.cli, rollback_blob)
+            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+            exc.add_note(f"codex login verification interrupted; {tail}")
             raise
         if login.ok is False:
             tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
