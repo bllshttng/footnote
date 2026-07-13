@@ -5313,8 +5313,10 @@ def cmd_maintain(
                 root = node.get("cwd")
                 if not isinstance(root, str) or not os.path.isdir(root):
                     return None  # repo unavailable -> path evidence recorded unavailable
-                root_p = os.path.normpath(os.path.expanduser(root))
-                return lambda rel: os.path.exists(os.path.join(root_p, rel))
+                root_p = os.path.abspath(os.path.expanduser(root))
+                # `rel` is extracted from untrusted node text; contained_path_exists
+                # rejects an absolute or `../` escape from the repo root (CWE-22).
+                return lambda rel: _maintain.contained_path_exists(root_p, rel)
 
             # Re-read fresh just before the sweep writes, so a node that raced to
             # claimed/done/deferred voids its recommendation (AC4-EDGE).

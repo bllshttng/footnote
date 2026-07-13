@@ -528,6 +528,23 @@ def select_validity_candidates(
     return [e for _, _, e in scored[:batch_size]]
 
 
+def contained_path_exists(root: str, rel: str) -> bool:
+    """``os.path.exists`` for ``rel`` resolved under ``root``, but ONLY when it
+    stays inside ``root`` (CWE-22 guard).
+
+    ``rel`` comes from untrusted node text, so an absolute path or a ``../``
+    escape must never probe a file outside the repo - it is reported missing
+    (``False``) instead of touching disk. ``root`` is assumed already absolute.
+    """
+    target = os.path.abspath(os.path.join(root, rel))
+    try:
+        if os.path.commonpath([root, target]) != root:
+            return False
+    except ValueError:  # different drives / mixed abs+rel -> not contained
+        return False
+    return os.path.exists(target)
+
+
 def _extract_paths(text: str, limit: int = 8) -> list[str]:
     """Deterministic, deduped path-like tokens from node text (bounded)."""
     out: list[str] = []

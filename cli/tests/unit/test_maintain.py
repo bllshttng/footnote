@@ -480,6 +480,16 @@ def test_collect_evidence_records_unavailable_sources():
     assert not any(i.startswith("path:") for i in pkt.items)
 
 
+def test_contained_path_exists_blocks_traversal(tmp_path):
+    (tmp_path / "in.py").write_text("x")
+    root = str(tmp_path)
+    assert m.contained_path_exists(root, "in.py") is True
+    assert m.contained_path_exists(root, "nope.py") is False
+    # CWE-22: an untrusted `../` or absolute path must not escape root -> missing.
+    assert m.contained_path_exists(root, "../../etc/passwd") is False
+    assert m.contained_path_exists(root, "/etc/passwd") is False
+
+
 def test_collect_evidence_missing_path_is_missing_not_dropped():
     now = datetime(2026, 7, 12, tzinfo=timezone.utc)
     node = _idea("ab-idea", 90, now, title="t", details="cli/gone/removed.py")
