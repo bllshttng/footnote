@@ -69,24 +69,27 @@ The default mode `flat` takes a **plan path**. The `waves` mode (and its one-rel
 ## Step 1.5: Stamp do provenance (execution entry, x-b6e4)
 
 `/do` is the point where execution actually begins - the truthful `do` boundary,
-unlike `target init` which fires before design/planning. Resolve exactly one
-authoritative node and stamp it: prefer the live target manifest's
-`graph_node_id` (`.fno/target-state.md`), else the resolved plan's scalar
-`claims:` frontmatter. Stamp once, here, before dispatching any wave/task:
+unlike `target init` which fires before design/planning. Stamp the node the live
+target is executing (Locked Decision 9). **Trust `graph_node_id` only from a LIVE
+manifest**: a dead/stale `.fno/target-state.md` left in a reused worktree still
+carries an old node id, and stamping it would attribute this do-entry to the
+wrong node. Gate on `manifest-live` first, then read the (now-trusted) manifest
+node. Stamp once, here, before dispatching any wave/task:
 
 ```bash
-# xargs trims whitespace and strips any surrounding quotes from the scalar.
-NODE_ID="$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | xargs)"
-if [[ -z "$NODE_ID" || "$NODE_ID" == null ]]; then
-  NODE_ID="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^claims:/{sub(/^claims:[[:space:]]*/,""); print; exit}' "$PLAN_ARG" 2>/dev/null | xargs)"
+LIVE="$(fno target status --json 2>/dev/null | jq -r '."manifest-live" // ""' 2>/dev/null)"
+if [[ "$LIVE" == live* ]]; then
+  # xargs trims whitespace and strips any surrounding quotes from the scalar.
+  NODE_ID="$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | xargs)"
+  [[ -n "$NODE_ID" && "$NODE_ID" != null ]] && fno backlog session add "$NODE_ID" --phase do || true
 fi
-[[ -n "$NODE_ID" && "$NODE_ID" != null ]] && fno backlog session add "$NODE_ID" --phase do || true
 ```
 
 Idempotent, append-only, best-effort: harness + session id default from the
-ambient identity; a missing-identity or conflicting-node warning is non-fatal and
-never blocks execution. No resolvable node (standalone `/do` on an unclaimed
-plan) -> skip silently.
+ambient identity; a missing-identity warning is non-fatal and never blocks
+execution. No live target (standalone `/do` on a raw plan, or a dead manifest)
+-> skip silently; the node's `do` provenance is stamped by the pipeline run that
+owns the live manifest.
 
 ## Step 2: flat mode (lightweight single-session, default)
 

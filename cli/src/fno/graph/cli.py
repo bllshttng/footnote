@@ -2573,7 +2573,8 @@ def cmd_provenance(
                 _edge("spawn", spawn_result),
             ],
             # Append-only lifecycle provenance in raw append order (x-b6e4).
-            "sessions": e.get("sessions", []),
+            # read_graph's defaults guarantee the key, so no fallback guard.
+            "sessions": e["sessions"],
         }
         typer.echo(json.dumps(output, indent=2))
         return
@@ -2602,8 +2603,9 @@ def cmd_provenance(
 
     # Lifecycle rows (x-b6e4): raw append order, phase-forward. Distinct from the
     # birth/spawn edges above -- those are single parent pointers; this is the
-    # per-phase who-did-what across sessions and harnesses.
-    sessions = e.get("sessions", [])
+    # per-phase who-did-what across sessions and harnesses. read_graph's defaults
+    # guarantee the key.
+    sessions = e["sessions"]
     if sessions:
         lines.append("  lifecycle:")
         for s in sessions:
