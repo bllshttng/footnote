@@ -5318,9 +5318,12 @@ def cmd_maintain(
                 # rejects an absolute or `../` escape from the repo root (CWE-22).
                 return lambda rel: _maintain.contained_path_exists(root_p, rel)
 
-            # Re-read fresh just before the sweep writes, so a node that raced to
-            # claimed/done/deferred voids its recommendation (AC4-EDGE).
-            fresh = recompute_statuses(read_graph(_graph_path()))
+            # Re-read seam: the sweep calls this AFTER the analyzer returns, so a
+            # node that raced to claimed/done/deferred DURING analysis voids its
+            # recommendation (AC4-EDGE).
+            def _reread():
+                return recompute_statuses(read_graph(_graph_path()))
+
             validity_result = _maintain.run_validity_sweep(
                 entries,
                 validity_days=v_days,
@@ -5330,7 +5333,7 @@ def cmd_maintain(
                 recheck=recheck,
                 exists_factory=_exists_factory,
                 search=_validity_rg_search,
-                fresh_entries=fresh,
+                reread=_reread,
             )
             if validity_result.error and not json_out:
                 typer.echo(f"validity: {validity_result.error}", err=True)

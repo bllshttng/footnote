@@ -712,6 +712,28 @@ def _cap_packet(packet: EvidencePacket) -> None:
         packet.items.pop(next(reversed(packet.items)))
 
 
+def _apply_aggregate_budget(
+    packets: list[EvidencePacket],
+) -> tuple[list[EvidencePacket], int]:
+    """Keep the oldest-first prefix of ``packets`` whose combined serialized size
+    stays within ``AGGREGATE_MAX_BYTES``; return ``(kept, dropped_count)``.
+
+    Order is preserved (candidates arrive oldest-first), so the dropped tail is
+    the freshest of the batch and re-enters the next sweep unwatermarked. At
+    least one packet is always kept so a single oversized packet still gets a
+    turn rather than starving forever.
+    """
+    kept: list[EvidencePacket] = []
+    total = 0
+    for p in packets:
+        psize = len(json.dumps(p.to_json(), ensure_ascii=False).encode("utf-8"))
+        if kept and total + psize > AGGREGATE_MAX_BYTES:
+            break
+        kept.append(p)
+        total += psize
+    return kept, len(packets) - len(kept)
+
+
 # --- validity: tool-less schema-constrained analysis -----------------------
 
 # Destructive recommendations need at least this confidence AND a valid citation;
@@ -1131,17 +1153,18 @@ def run_validity_sweep(
     exists_factory: Optional[Callable[[dict], Optional[Callable[[str], bool]]]] = None,
     search: Optional[Callable[[str], Optional[int]]] = None,
     analyze: Optional[Callable[[list["EvidencePacket"]], dict[str, dict]]] = None,
-    fresh_entries: Optional[list[dict]] = None,
+    reread: Optional[Callable[[], list[dict]]] = None,
     deck_id: Optional[str] = None,
 ) -> ValiditySweepResult:
     """Select -> evidence -> analyze -> revalidate-state -> write immutable deck.
 
     Proposal-only: never mutates graph state. Seams (``exists_factory``,
-    ``search``, ``analyze``, ``fresh_entries``) are injected so the whole leg is
+    ``search``, ``analyze``, ``reread``) are injected so the whole leg is
     hermetic under test. An analyzer failure yields an evidence-only degraded
-    deck rather than aborting (AC2-ERR). ``fresh_entries`` (a re-read taken just
-    before write) marks any row whose node left idea-state or changed content as
-    stale, voiding its command (AC4-EDGE).
+    deck rather than aborting (AC2-ERR). ``reread`` is called AFTER the analyzer
+    returns (analysis can take seconds) and marks any row whose node left
+    idea-state or changed content in the meantime as stale, voiding its command
+    (AC4-EDGE); reading before analysis would miss a mid-analysis change.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -1163,6 +1186,16 @@ def run_validity_sweep(
         )
         for c in candidates
     ]
+    # Enforce the aggregate prompt budget (Locked Decision #7): each packet is
+    # <=32 KiB, but 25 large ones would blow past AGGREGATE_MAX_BYTES. Drop the
+    # oldest-first tail that overflows; dropped packets are never analyzed, so
+    # they are not watermarked and the next sweep picks them up. Never silent.
+    packets, dropped = _apply_aggregate_budget(packets)
+    if dropped:
+        warnings.append(
+            f"{dropped} packet(s) dropped to fit the {AGGREGATE_MAX_BYTES // 1024} KiB "
+            f"aggregate budget; they re-enter the next sweep"
+        )
     packets_by_id = {p.node_id: p for p in packets}
 
     degraded = False
@@ -1173,16 +1206,23 @@ def run_validity_sweep(
         degraded = True
         rows = evidence_only_rows(packets)
 
-    # AC4-EDGE: re-check live state just before write. A node that left idea, or
-    # whose premise changed since selection, has its recommendation voided.
-    if fresh_entries is not None:
-        current = {
-            e.get("id"): e for e in fresh_entries if isinstance(e.get("id"), str)
-        }
-        for r in rows:
-            cur = current.get(r.node_id)
-            if cur is None or cur.get("_status") != "idea" or node_fingerprint(cur) != r.fingerprint:
-                r.mark_stale()
+    # AC4-EDGE: re-read AFTER analysis (which can take seconds) and void any row
+    # whose node left idea-state or changed premise while the analyzer ran - a
+    # pre-analysis snapshot would miss a mid-analysis change and still watermark
+    # the old state.
+    if reread is not None:
+        try:
+            fresh_entries = reread()
+        except Exception:  # noqa: BLE001 - a failed re-read must not lose the deck
+            fresh_entries = None
+        if fresh_entries is not None:
+            current = {
+                e.get("id"): e for e in fresh_entries if isinstance(e.get("id"), str)
+            }
+            for r in rows:
+                cur = current.get(r.node_id)
+                if cur is None or cur.get("_status") != "idea" or node_fingerprint(cur) != r.fingerprint:
+                    r.mark_stale()
 
     if deck_id is None:
         node_key = hashlib.sha256(

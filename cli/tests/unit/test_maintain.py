@@ -616,6 +616,44 @@ def test_read_watermarks_skips_malformed_sidecar(tmp_path):
     assert m.read_watermarked_fingerprints(tmp_path) == frozenset({"fp-1"})
 
 
+def test_apply_aggregate_budget_drops_overflow_tail():
+    # Each packet ~ >200 KiB of details; 3 of them exceed the 512 KiB aggregate,
+    # so the oldest-first prefix is kept and the tail dropped (never silent).
+    big = "y" * 200_000
+    pkts = [_packet(f"ab-{i}", details=big) for i in range(4)]
+    kept, dropped = m._apply_aggregate_budget(pkts)
+    total = sum(len(json.dumps(p.to_json()).encode()) for p in kept)
+    assert total <= m.AGGREGATE_MAX_BYTES
+    assert dropped == len(pkts) - len(kept) and dropped > 0
+    # At least one packet always survives (no permanent starvation).
+    assert len(kept) >= 1
+
+
+def test_run_validity_sweep_reread_marks_stale_after_analysis(tmp_path):
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    node = _idea("ab-race", 90, now, title="t", plan_path=None)
+    entries = [node]
+
+    def analyze(packets):
+        return {
+            p.node_id: {"classification": "keep", "confidence": 0.8,
+                        "rationale": "still good", "evidence_ids": []}
+            for p in packets
+        }
+
+    # reread (called AFTER analyze) returns the node now claimed -> no longer idea.
+    def reread():
+        return [dict(node, _status="claimed", locked_by="someone")]
+
+    res = m.run_validity_sweep(
+        entries, validity_days=60, batch_size=25, out_dir=tmp_path,
+        now=now, analyze=analyze, reread=reread,
+    )
+    assert res.eligible == 1 and res.stale == 1
+    side = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert side["rows"][0]["stale"] is True and side["rows"][0]["command"] is None
+
+
 def test_run_validity_analysis_refuses_real_call_under_pytest(monkeypatch):
     import pytest
     monkeypatch.delenv("FNO_VALIDITY_STUB", raising=False)
