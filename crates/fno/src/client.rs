@@ -4100,7 +4100,10 @@ async fn attach_place_keys(
                 .copied();
             match target.filter(|sid| view.layout.squads.iter().any(|s| s.id == *sid)) {
                 Some(target) => view.attach_place.as_mut().unwrap().target = target,
-                None => view.set_notice("workspace is no longer available".into()),
+                None => {
+                    view.set_notice("workspace is no longer available".into());
+                    return Ok(StdinFlow::Continue);
+                }
             }
             continue;
         }
@@ -7015,6 +7018,18 @@ mod tests {
             })
         );
         assert!(v.attach_place.is_none());
+    }
+
+    #[tokio::test]
+    async fn attach_placement_invalid_target_digit_drops_the_input_batch() {
+        let mut v = unified_rows_view();
+        v.selector = Some(5);
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"9h", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+        assert_eq!(v.attach_place.as_ref().unwrap().target, 1);
+        assert!(v.notice.is_some());
     }
 
     #[tokio::test]
