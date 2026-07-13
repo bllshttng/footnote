@@ -131,9 +131,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
 | `collision.severity_thresholds.medium_ratio` | float | `0.25` | never | Collision scoring: medium-severity shared-file ratio. |
 | `work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). |
-| `model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) to a secondary provider at spawn. |
+| `model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn. |
 | `model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in. |
-| `model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'). |
+| `model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'); manage via `fno route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg). |
 | `model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
 | `mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |
 | `mux.notify_on_blocked` | bool | `true` | advanced | Fire an OS notification when an agent badge enters 'blocked' (default on). |
