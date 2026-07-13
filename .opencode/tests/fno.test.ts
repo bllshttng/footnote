@@ -272,6 +272,20 @@ test("collectModels folds a provider.list response into the set", () => {
   ])
   expect(collectModels(undefined, new Set()).size).toBe(0) // missing shape is safe
   expect(collectModels({ data: [{ id: "p" }] }, new Set()).size).toBe(0) // no models key
+  // malformed entries (null provider / missing id) are skipped, not thrown on
+  const guarded = collectModels(
+    { data: [null as any, { models: { m: {} } } as any, { id: "ok", models: { m: {} } }] },
+    new Set(),
+  )
+  expect([...guarded]).toEqual(["ok/m"])
+})
+
+test("plugin init tolerates a malformed client (provider missing) — no sync crash (AC1-ERR)", async () => {
+  // `.provider.list()` throws a synchronous TypeError; init must not crash
+  // bootstrap (the former try/catch guarded this; the fire-and-forget refactor
+  // must keep it).
+  const hooks = await initPlugin({ client: {}, directory: "/nonexistent" }, true)
+  expect(hooks.tool.task).toBeDefined()
 })
 
 test("plugin init issues the populate fetch exactly once when activated", async () => {

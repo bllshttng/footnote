@@ -145,6 +145,7 @@ export function collectModels(
   into: Set<string>,
 ): Set<string> {
   for (const p of providers?.data ?? []) {
+    if (!p?.id) continue // skip malformed entries (no "undefined/model" pollution)
     for (const modelID of Object.keys(p.models ?? {})) into.add(`${p.id}/${modelID}`)
   }
   return into
@@ -415,12 +416,17 @@ const plugin: Plugin = async (input: PluginInput) => {
   // answer yet and deadlocks startup. The set fills in place once the response
   // lands; a task() firing before then degrades to the default model.
   const available = new Set<string>()
-  ;(input.client as unknown as {
-    provider: { list(): Promise<{ data?: Array<{ id: string; models?: Record<string, unknown> }> }> }
-  }).provider
-    .list()
-    .then((providers) => collectModels(providers, available))
-    .catch(() => {}) // swallow: an unhandled rejection in plugin scope can crash the host
+  try {
+    ;(input.client as unknown as {
+      provider: { list(): Promise<{ data?: Array<{ id: string; models?: Record<string, unknown> }> }> }
+    }).provider
+      .list()
+      .then((providers) => collectModels(providers, available))
+      .catch(() => {}) // async rejection: unhandled in plugin scope can crash the host
+  } catch {
+    // synchronous throw (malformed client at init) -> no registry read; the try
+    // wraps only the call issuance, NOT an await, so it never blocks bootstrap.
+  }
 
   // Registered-agent set: footnote's translated agents plus the native
   // `.opencode/agents/*.md` (explore/oracle/librarian) opencode auto-loads.
