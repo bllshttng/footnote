@@ -308,6 +308,48 @@ class TestLooksLikeClaude:
 
 
 class TestCodexFileBackend:
+    def test_codex_login_status_uses_slot_home_and_exit_code(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        calls = []
+
+        def _run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, stdout="Logged in", stderr="")
+
+        monkeypatch.setattr(managed.subprocess, "run", _run)
+        result = managed._codex_login_ok()
+
+        assert result.ok is True and result.reason is None
+        assert calls[0][0] == ["codex", "login", "status"]
+        assert calls[0][1]["env"]["CODEX_HOME"] == str(auth.parent)
+        assert calls[0][1]["timeout"] == 5
+
+        monkeypatch.setattr(
+            managed.subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1),
+        )
+        assert managed._codex_login_ok().ok is False
+
+    @pytest.mark.parametrize(
+        ("error", "reason"),
+        [
+            (FileNotFoundError("codex"), "codex-login-status-missing"),
+            (
+                subprocess.TimeoutExpired(cmd=["codex", "login", "status"], timeout=5),
+                "codex-login-status-timeout",
+            ),
+        ],
+    )
+    def test_codex_login_status_unavailable_degrades(self, monkeypatch, error, reason):
+        def _raise(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(managed.subprocess, "run", _raise)
+        result = managed._codex_login_ok()
+        assert result.ok is None and result.reason == reason
+
     def test_file_slot_round_trip(self, tmp_path, monkeypatch):
         """The codex file backend reads/writes auth.json (0600) via the real
         _read_slot_blob/_write_slot_blob path (not the fake-slot seam)."""
@@ -330,9 +372,62 @@ class TestCodexFileBackend:
         managed.snapshot_current(b, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
         # switch to A: captures B's current slot, materializes A0, verifies.
-        managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=True),
+        )
+        result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
         assert managed._read_slot_blob("codex") == _blob("A0")
         assert (tmp_path / "cx-b" / "blob").read_text() == _blob("B0")
+        assert result.slot_changed is True
+        assert result.verification == "codex-recognized"
+        assert result.reason is None
+
+    def test_codex_switch_discloses_structural_fallback(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
+        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(a, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+        managed._write_slot_blob("codex", _blob("B0"))
+        managed.snapshot_current(b, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(
+                ok=None,
+                reason="codex-login-status-missing",
+            ),
+        )
+
+        result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+        assert result.slot_changed is True
+        assert result.verification == "structural"
+        assert result.reason == "codex-login-status-missing"
+
+    def test_codex_already_active_is_probe_free(self, tmp_path, monkeypatch):
+        auth = tmp_path / ".codex" / "auth.json"
+        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        target = _rec("cx-a", cli="codex")
+        managed._write_slot_blob("codex", _blob("A0"))
+        managed.snapshot_current(target, root=tmp_path)
+        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: pytest.fail("already-active switch must not probe codex"),
+        )
+
+        result = managed.switch(target, by_id={"cx-a": target}, root=tmp_path)
+
+        assert result.slot_changed is False
+        assert result.verification == "structural"
+        assert result.reason == "slot-already-active"
 
     def test_codex_switch_pin_defers(self, tmp_path, monkeypatch):
         """US6 Invariant: a live codex session pinning the slot defers the switch,

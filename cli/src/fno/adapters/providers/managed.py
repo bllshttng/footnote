@@ -43,6 +43,7 @@ from fno.adapters.providers.model import ProviderRecord
 # macOS Keychain item claude reads (mirrors usage.py._CLAUDE_KEYCHAIN_SERVICE).
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _SECURITY_TIMEOUT_S = 5  # ponytail: same 5s ceiling usage.py uses for `security`
+_CODEX_LOGIN_TIMEOUT_S = 5
 
 
 class ManagedStoreError(RuntimeError):
@@ -260,6 +261,33 @@ def verify_slot(record: ProviderRecord, expected_blob: str) -> bool:
     if got is None or got.strip() != expected_blob.strip():
         return False
     return _token_present(got)
+
+
+@dataclass(frozen=True)
+class _CodexLoginResult:
+    ok: Optional[bool]
+    reason: Optional[str] = None
+
+
+def _codex_login_ok() -> _CodexLoginResult:
+    """Ask Codex to recognize the materialized auth schema in its exact home."""
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(_codex_slot_auth_path().parent)
+    try:
+        result = subprocess.run(
+            ["codex", "login", "status"],
+            capture_output=True,
+            text=True,
+            timeout=_CODEX_LOGIN_TIMEOUT_S,
+            env=env,
+        )
+    except FileNotFoundError:
+        return _CodexLoginResult(ok=None, reason="codex-login-status-missing")
+    except subprocess.TimeoutExpired:
+        return _CodexLoginResult(ok=None, reason="codex-login-status-timeout")
+    except OSError as exc:
+        raise ManagedStoreError(f"`codex login status` failed to run: {exc}") from exc
+    return _CodexLoginResult(ok=result.returncode == 0)
 
 
 def _token_present(blob: str) -> bool:
@@ -493,6 +521,19 @@ def stamp_active_slot(cli: str, record_id: str, root: Path | None = None) -> Non
 @dataclass(frozen=True)
 class SwitchResult:
     active: str  # a returned result is always verified; failure raises instead
+    slot_changed: bool = True
+    verification: str = "structural"
+    reason: Optional[str] = None
+
+
+def _rollback_materialized_slot(cli: str, rollback_blob: Optional[str]) -> tuple[str, bool]:
+    if not rollback_blob:
+        return "nothing to roll back to; slot may hold the unverified target", False
+    try:
+        _write_slot_blob(cli, rollback_blob)
+    except ManagedStoreError as exc:
+        return f"rollback ALSO failed ({exc}); slot is in an indeterminate state", False
+    return "slot rolled back to the previous account", True
 
 
 def switch(
@@ -546,7 +587,11 @@ def _switch_locked(
         # a true no-op. If the slot was changed out-of-band (manual /login,
         # stale stamp after a partial failure), verify_slot is False and we
         # fall through to re-materialize rather than falsely report success.
-        return SwitchResult(active=target.id)
+        return SwitchResult(
+            active=target.id,
+            slot_changed=False,
+            reason="slot-already-active" if target.cli == "codex" else None,
+        )
 
     # Live-pin gate INSIDE the critical section (a session starting between
     # check and write is caught: the mutex is held across both). Per-CLI: claude
@@ -581,18 +626,36 @@ def _switch_locked(
     if not verify_slot(target, target_blob):
         # Verification failed: roll the slot back to the captured outgoing blob.
         # Tell the truth about the resulting slot state - operators act on it.
-        if not rollback_blob:
-            tail = "nothing to roll back to; slot may hold the unverified target"
-        else:
-            try:
-                _write_slot_blob(target.cli, rollback_blob)
-                tail = "slot rolled back to the previous account"
-            except ManagedStoreError as rb:
-                tail = f"rollback ALSO failed ({rb}); slot is in an indeterminate state"
+        tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
         raise ManagedStoreError(
             f"switch to '{target.id}' failed verification (stored token may be "
             f"stale/revoked); {tail}"
         )
+
+    verification = "structural"
+    verification_reason: Optional[str] = None
+    if target.cli == "codex":
+        try:
+            login = _codex_login_ok()
+        except ManagedStoreError as exc:
+            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+            raise ManagedStoreError(f"codex login verification failed ({exc}); {tail}") from exc
+        except KeyboardInterrupt as exc:
+            tail, rolled_back = _rollback_materialized_slot(target.cli, rollback_blob)
+            if rolled_back:
+                raise
+            raise ManagedStoreError(
+                f"codex login verification was interrupted; {tail}"
+            ) from exc
+        if login.ok is False:
+            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+            raise ManagedStoreError(
+                f"switch to '{target.id}' was not recognized by `codex login status`; {tail}"
+            )
+        if login.ok is True:
+            verification = "codex-recognized"
+        else:
+            verification_reason = login.reason
 
     # Codex TOCTOU narrowing (cv-f578cbe7): the pin gate above runs BEFORE the
     # write, so a codex launched in the snapshot+write window - having read the
@@ -631,10 +694,20 @@ def _switch_locked(
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.cli, target.id, root)
     if emit_fn is not None:
-        emit_fn(
-            "account_switched",
-            provider=target.id,
-            account_id=target.account_id or target.id,
-            outgoing=outgoing_id or "",
-        )
-    return SwitchResult(active=target.id)
+        event = {
+            "provider": target.id,
+            "account_id": target.account_id or target.id,
+            "outgoing": outgoing_id or "",
+        }
+        if target.cli == "codex":
+            event.update(
+                slot_changed=True,
+                verification=verification,
+                verification_reason=verification_reason,
+            )
+        emit_fn("account_switched", **event)
+    return SwitchResult(
+        active=target.id,
+        verification=verification,
+        reason=verification_reason,
+    )
