@@ -1081,3 +1081,114 @@ def read_watermarked_fingerprints(out_dir) -> frozenset[str]:
             if isinstance(fp, str) and row.get("watermark") is True:
                 seen.add(fp)
     return frozenset(seen)
+
+
+# --- validity: orchestration (proposal-only, injected seams) ---------------
+
+
+@dataclass
+class ValiditySweepResult:
+    """Outcome of one validity sweep. ``eligible == 0`` is the clean no-work case
+    (no deck written, AC3-UI). ``error`` is set only when the deck could not be
+    written (the CLI surfaces it and exits nonzero)."""
+
+    eligible: int
+    counts: dict[str, int] = field(default_factory=dict)
+    deck_md: Optional[str] = None
+    deck_json: Optional[str] = None
+    degraded: bool = False
+    stale: int = 0
+    warnings: list[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+def run_validity_sweep(
+    entries: list[dict],
+    *,
+    validity_days: object,
+    batch_size: object,
+    out_dir,
+    claimed_ids: frozenset[str] = frozenset(),
+    recheck: bool = False,
+    now: Optional[datetime] = None,
+    exists_factory: Optional[Callable[[dict], Optional[Callable[[str], bool]]]] = None,
+    search: Optional[Callable[[str], Optional[int]]] = None,
+    analyze: Optional[Callable[[list["EvidencePacket"]], dict[str, dict]]] = None,
+    fresh_entries: Optional[list[dict]] = None,
+    deck_id: Optional[str] = None,
+) -> ValiditySweepResult:
+    """Select -> evidence -> analyze -> revalidate-state -> write immutable deck.
+
+    Proposal-only: never mutates graph state. Seams (``exists_factory``,
+    ``search``, ``analyze``, ``fresh_entries``) are injected so the whole leg is
+    hermetic under test. An analyzer failure yields an evidence-only degraded
+    deck rather than aborting (AC2-ERR). ``fresh_entries`` (a re-read taken just
+    before write) marks any row whose node left idea-state or changed content as
+    stale, voiding its command (AC4-EDGE).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if analyze is None:
+        analyze = _run_validity_analysis
+    days, size, warnings = clamp_validity_bounds(validity_days, batch_size)
+    seen = frozenset() if recheck else read_watermarked_fingerprints(out_dir)
+    candidates = select_validity_candidates(
+        entries, days, size, claimed_ids=claimed_ids, seen_fingerprints=seen, now=now
+    )
+    if not candidates:
+        return ValiditySweepResult(eligible=0, warnings=warnings)
+
+    packets = [
+        collect_evidence(
+            c, entries, now=now,
+            exists=(exists_factory(c) if exists_factory else None),
+            search=search,
+        )
+        for c in candidates
+    ]
+    packets_by_id = {p.node_id: p for p in packets}
+
+    degraded = False
+    try:
+        raw = analyze(packets)
+        rows = build_rows(packets, raw)
+    except Exception:  # noqa: BLE001 - any analyzer failure -> evidence-only deck
+        degraded = True
+        rows = evidence_only_rows(packets)
+
+    # AC4-EDGE: re-check live state just before write. A node that left idea, or
+    # whose premise changed since selection, has its recommendation voided.
+    if fresh_entries is not None:
+        current = {
+            e.get("id"): e for e in fresh_entries if isinstance(e.get("id"), str)
+        }
+        for r in rows:
+            cur = current.get(r.node_id)
+            if cur is None or cur.get("_status") != "idea" or node_fingerprint(cur) != r.fingerprint:
+                r.mark_stale()
+
+    if deck_id is None:
+        node_key = hashlib.sha256(
+            "|".join(sorted(p.node_id for p in packets)).encode("utf-8")
+        ).hexdigest()[:8]
+        deck_id = f"validity-{now.strftime('%Y%m%dT%H%M%SZ')}-{node_key}"
+
+    try:
+        md, js = write_validity_deck(
+            rows, packets_by_id, out_dir,
+            deck_id=deck_id, created_iso=now.isoformat(), degraded=degraded,
+        )
+    except OSError as exc:
+        return ValiditySweepResult(
+            eligible=len(candidates), warnings=warnings,
+            error=f"deck write failed: {exc}",
+        )
+    return ValiditySweepResult(
+        eligible=len(candidates),
+        counts=category_counts(rows),
+        deck_md=md,
+        deck_json=js,
+        degraded=degraded,
+        stale=sum(1 for r in rows if r.stale),
+        warnings=warnings,
+    )

@@ -34,6 +34,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `blueprint.max_prs_per_epic` | int | `4` | advanced | Cap on group PRs per decomposed epic. |
 | `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
 | `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
+| `backlog.maintain.validity_days` | int | `60` | advanced | Age (days) before a stale idea enters the validity sweep. |
+| `backlog.maintain.validity_batch_size` | int | `25` | advanced | Oldest-first validity-sweep batch size (clamped to 100). |
 | `backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
 | `backlog.id_hex_width` | int | `8` | advanced | Hex width of minted node IDs (4-8). |
 | `batch.enabled` | bool | `false` | advanced | Coalesce same-domain nodes into one batch PR (opt-in). |
