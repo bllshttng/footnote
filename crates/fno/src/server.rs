@@ -38,12 +38,12 @@ use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
-    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, PanePlacement, ServerMsg,
-    SquadMeta, TabMeta, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, PanePlacement, PaneTarget,
+    ServerMsg, SquadMeta, TabMeta, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session};
-use crate::tree::{self, Axis, Node, Rect, Tab, TabId};
+use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
@@ -1236,6 +1236,115 @@ impl Core {
     /// failure mutates no model. Each call is its own pane, so three runs into
     /// one cwd land three panes in one squad (no mux-layer dedup - that lives
     /// in the spawn front half).
+    /// Resolve a placement target to a concrete squad id, BEFORE any PTY spawn
+    /// (Locked 4 / AC4 fail-closed). `CurrentRoute` yields `current` (the
+    /// caller's cwd/owner default, `None` when no squad exists yet and one must
+    /// be born). An explicit name/id that is missing, ambiguous, or stale is
+    /// refused - it never spawns a PTY and never creates a named squad.
+    fn resolve_placement_target(
+        &self,
+        target: &PaneTarget,
+        current: Option<u64>,
+    ) -> Result<Option<u64>, String> {
+        match target {
+            PaneTarget::CurrentRoute => Ok(current),
+            PaneTarget::SquadName(name) => {
+                let n = name.trim();
+                let mut hits = self
+                    .session
+                    .squads
+                    .iter()
+                    .filter(|s| s.name.as_deref() == Some(n));
+                match (hits.next(), hits.next()) {
+                    (Some(s), None) => Ok(Some(s.id)),
+                    (Some(_), Some(_)) => Err(format!("ambiguous squad name: {n}")),
+                    (None, _) => Err(format!("no such squad: {n}")),
+                }
+            }
+            PaneTarget::SquadId(id) => self
+                .session
+                .squad(*id)
+                .map(|s| Some(s.id))
+                .ok_or_else(|| format!("no such squad id: {id}")),
+        }
+    }
+
+    /// Commit an already-spawned pane `pid` per `split`, the single atomic
+    /// placement helper shared by pane-run and fresh attach (Locked 1). `dest`
+    /// is `None` only for a CurrentRoute miss, where a squad is born from
+    /// `squad_key` with `pid` as its first tab (split collapses to first-tab -
+    /// AC6-EDGE, a lone pane has no sibling to split against). Otherwise a
+    /// `None` split mints a new tab; a `Some` split inserts beside the
+    /// destination's active-tab focus. On a split refusal the pane is reaped and
+    /// the prior tree is left byte-for-byte unchanged (AC7). Returns the
+    /// `(squad, tab)` the pane landed in and leaves it focused.
+    fn place_spawned_pane(
+        &mut self,
+        dest: Option<u64>,
+        squad_key: &str,
+        pid: u64,
+        split: Option<Dir>,
+    ) -> Result<(u64, TabId), String> {
+        let sid = match dest {
+            Some(sid) => sid,
+            None => {
+                let tid = self.session.mint_tab_id();
+                let tab = Tab {
+                    name: None,
+                    id: tid,
+                    root: Node::Leaf(pid),
+                    focus: pid,
+                };
+                let sid = self.next_squad_id;
+                self.next_squad_id += 1;
+                self.session
+                    .add_squad(sid, vec![squad_key.to_string()], None, tab);
+                return Ok((sid, tid));
+            }
+        };
+        let squad = self
+            .session
+            .squad(sid)
+            .ok_or_else(|| "target squad vanished".to_string())?;
+        // First-pane-of-an-empty-squad and split-omitted both mint a fresh tab.
+        // A squad always carries >=1 tab in practice; the empty guard keeps the
+        // active-tab index safe (AC6-EDGE first-tab collapse) rather than
+        // underflowing.
+        if split.is_none() || squad.tabs.is_empty() {
+            let tid = self.session.mint_tab_id();
+            let tab = Tab {
+                name: None,
+                id: tid,
+                root: Node::Leaf(pid),
+                focus: pid,
+            };
+            self.session
+                .squad_mut(sid)
+                .expect("squad present")
+                .tabs
+                .push(tab);
+            return Ok((sid, tid));
+        }
+        let dir = split.expect("split present");
+        let ti = squad.active_tab.min(squad.tabs.len() - 1);
+        let tid = squad.tabs[ti].id;
+        let vp = self.tab_rect(tid);
+        let tab = &mut self
+            .session
+            .squad_mut(sid)
+            .expect("squad present")
+            .tabs[ti];
+        match tree::split_directional(tab, vp, dir, pid) {
+            Ok(()) => Ok((sid, tid)),
+            Err(e) => {
+                // Refused split: reap the pre-spawned pane; the tree, claim
+                // eligibility, and mappings are all cleared/untouched (AC7).
+                self.reap_pane(pid);
+                Err(e.to_string())
+            }
+        }
+    }
+
     fn run_pane(
         &mut self,
         squad_key: String,
@@ -1244,34 +1353,21 @@ impl Core {
         rows: u16,
         cols: u16,
         claim: bool,
-        _placement: PanePlacement,
+        placement: PanePlacement,
     ) -> Result<u64, String> {
+        // Resolve an explicit target before spawning a PTY - a missing squad
+        // must fail closed with no process wasted (AC4).
+        let current = self.session.find_by_cwd(&squad_key);
+        let dest = self.resolve_placement_target(&placement.target, current)?;
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
-            // The claim itself is acquired per-burst via PaneClaim.
+            // The claim itself is acquired per-burst via PaneClaim. A later
+            // placement refusal reaps the pane, which clears this again.
             self.claim_eligible.insert(pid);
         }
-        let tid = self.session.mint_tab_id();
-        let tab = Tab {
-            name: None,
-            id: tid,
-            root: Node::Leaf(pid),
-            focus: pid,
-        };
-        match self.session.find_by_cwd(&squad_key) {
-            Some(sid) => self
-                .session
-                .squad_mut(sid)
-                .expect("find_by_cwd hit")
-                .tabs
-                .push(tab),
-            None => {
-                let sid = self.next_squad_id;
-                self.next_squad_id += 1;
-                self.session.add_squad(sid, vec![squad_key], None, tab);
-            }
-        }
+        // place_spawned_pane reaps `pid` (clearing claim eligibility) on refusal.
+        self.place_spawned_pane(dest, &squad_key, pid, placement.split)?;
         // Keep any attached client's view consistent; a script-only session
         // has no clients, so this is then a cheap no-op.
         self.push_layout(true);
@@ -5978,6 +6074,132 @@ mod tests {
         }
     }
 
+    // -- x-3e38 pane placement (target resolution + atomic commit) ------
+
+    #[test]
+    fn resolve_placement_target_current_route_passes_through() {
+        // CurrentRoute yields the caller's default (a cwd/owner squad, or None
+        // when a squad must still be born) with no lookup.
+        let core = empty_core();
+        assert_eq!(
+            core.resolve_placement_target(&PaneTarget::CurrentRoute, Some(7))
+                .unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            core.resolve_placement_target(&PaneTarget::CurrentRoute, None)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_placement_target_explicit_hit_miss_and_id() {
+        // AC2-HP + AC4: an exact name/id resolves; a missing one fails closed.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("review".into()), leaf_tab(5, 1));
+        assert_eq!(
+            core.resolve_placement_target(&PaneTarget::SquadName(" review ".into()), None)
+                .unwrap(),
+            Some(1),
+            "name is trimmed before match"
+        );
+        assert!(core
+            .resolve_placement_target(&PaneTarget::SquadName("ghost".into()), None)
+            .is_err());
+        assert_eq!(
+            core.resolve_placement_target(&PaneTarget::SquadId(1), None)
+                .unwrap(),
+            Some(1)
+        );
+        assert!(core
+            .resolve_placement_target(&PaneTarget::SquadId(99), None)
+            .is_err());
+    }
+
+    #[test]
+    fn place_spawned_pane_new_tab_then_directional_split() {
+        // AC1-HP + AC2-HP: omitted split mints a new tab; a direction inserts
+        // beside the destination's active-tab focus in that same tab.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+
+        let (sid, _tid) = core.place_spawned_pane(Some(1), "/a", 2, None).unwrap();
+        assert_eq!(sid, 1);
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs.len(),
+            2,
+            "omitted split pushes a new tab"
+        );
+
+        let tabs_before = core.session.squad(1).unwrap().tabs.len();
+        let (_sid, tid) = core
+            .place_spawned_pane(Some(1), "/a", 3, Some(Dir::Right))
+            .unwrap();
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs.len(),
+            tabs_before,
+            "a directional split adds no tab"
+        );
+        let tab = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == tid)
+            .unwrap();
+        assert_eq!(
+            tree::leaves(&tab.root),
+            vec![1, 3],
+            "right places the new pane after the focused leaf"
+        );
+        assert_eq!(tab.focus, 3, "the new pane takes focus");
+    }
+
+    #[test]
+    fn place_spawned_pane_current_route_miss_births_first_tab() {
+        // AC6-EDGE: no squad yet + a split request -> the squad is born from the
+        // route with the pane as its lone first tab (split collapses).
+        let mut core = empty_core();
+        let (sid, tid) = core
+            .place_spawned_pane(None, "/fresh", 9, Some(Dir::Left))
+            .unwrap();
+        let sq = core.session.squad(sid).unwrap();
+        assert_eq!(sq.tabs.len(), 1);
+        assert_eq!(sq.tabs[0].id, tid);
+        assert_eq!(tree::leaves(&sq.tabs[0].root), vec![9]);
+        assert_eq!(sq.origins, vec!["/fresh".to_string()]);
+    }
+
+    #[test]
+    fn place_spawned_pane_reaps_on_min_size_refusal() {
+        // AC7: a split that would violate minimum size reaps the pane and leaves
+        // the prior tree byte-for-byte unchanged.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        // 8 cols cannot hold two MIN_COLS(8)-wide halves -> horizontal refusal.
+        core.tab_areas.insert(5, (40, 8));
+        let before = core.session.squad(1).unwrap().tabs[0].root.clone();
+
+        let err = core
+            .place_spawned_pane(Some(1), "/a", 3, Some(Dir::Right))
+            .unwrap_err();
+        assert!(!err.is_empty(), "the refusal names a reason");
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs[0].root,
+            before,
+            "a refused split leaves the tree untouched"
+        );
+        assert!(
+            !core.panes.contains_key(&3),
+            "the pre-spawned pane is reaped"
+        );
+    }
+
     #[test]
     fn rename_squad_blank_clears_origin_squad_and_refuses_origin_less() {
         // AC1-EDGE + AC1-ERR (server half): a blank rename clears an origin-
@@ -7367,6 +7589,82 @@ mod tests {
             persist_degraded_notified: false,
             restored: false,
         }
+    }
+
+    fn placement_core() -> Core {
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo/default".into()],
+            Some("review".into()),
+            Tab {
+                name: None,
+                id: 11,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.next_squad_id = 8;
+        core
+    }
+
+    #[test]
+    fn pane_placement_resolves_named_and_stale_targets_before_spawn() {
+        let core = placement_core();
+        assert_eq!(
+            core.resolve_placement_target(&PaneTarget::SquadName("review".into()), None),
+            Ok(Some(7))
+        );
+        assert_eq!(
+            core.resolve_placement_target(&PaneTarget::SquadId(7), None),
+            Ok(Some(7))
+        );
+        assert!(core
+            .resolve_placement_target(&PaneTarget::SquadName("missing".into()), None)
+            .is_err());
+        assert!(core
+            .resolve_placement_target(&PaneTarget::SquadId(99), None)
+            .is_err());
+    }
+
+    #[test]
+    fn pane_placement_splits_on_requested_side_and_focuses_new_pane() {
+        let mut core = placement_core();
+        core.tab_areas.insert(11, (24, 80));
+        let landed = core
+            .place_spawned_pane(Some(7), "/repo/child", 2, Some(Dir::Left))
+            .unwrap();
+        assert_eq!(landed, (7, 11));
+        let tab = &core.session.squad(7).unwrap().tabs[0];
+        assert_eq!(tree::leaves(&tab.root), vec![2, 1]);
+        assert_eq!(tab.focus, 2);
+    }
+
+    #[test]
+    fn pane_placement_refusal_preserves_tree_and_cleans_spawn_state() {
+        let mut core = placement_core();
+        core.tab_areas.insert(11, (24, 16));
+        core.claim_eligible.insert(2);
+        let before = core.session.squad(7).unwrap().tabs[0].clone();
+        let error = core
+            .place_spawned_pane(Some(7), "/repo/child", 2, Some(Dir::Right))
+            .unwrap_err();
+        assert!(error.contains("smaller"), "{error}");
+        assert_eq!(core.session.squad(7).unwrap().tabs[0], before);
+        assert!(!core.claim_eligible.contains(&2));
+    }
+
+    #[test]
+    fn pane_placement_split_without_existing_route_creates_first_tab() {
+        let mut core = empty_core();
+        let landed = core
+            .place_spawned_pane(None, "/repo/new", 1, Some(Dir::Down))
+            .unwrap();
+        let squad = core.session.squad(landed.0).unwrap();
+        assert_eq!(squad.canonical_cwd(), "/repo/new");
+        assert_eq!(squad.tabs.len(), 1);
+        assert_eq!(squad.tabs[0].root, Node::Leaf(1));
+        assert_eq!(squad.tabs[0].focus, 1);
     }
 
     fn client(id: u64, view_tab: TabId, dims: (u16, u16), passive: bool) -> Client {
