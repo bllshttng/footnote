@@ -81,7 +81,9 @@ def _find_by_session(registry: list[AgentEntry], session_uuid: str) -> Optional[
     ``CLAUDE_CODE_SESSION_ID`` (a UUID), always a non-empty real string, so a
     ``None`` stored field never spuriously matches.
 
-    1. Exact match against the full claude session UUID or the cc session id.
+    1. Exact match against the canonical ``harness_session_id`` (x-ec59: a codex
+       or gemini worker resolves its own row here too, not just claude), the full
+       claude session UUID, or the cc session id.
     2. Prefix match against the 8-hex ``claude_short_id`` - the jobId is a
        32-bit prefix of the session UUID (``claude attach`` / the jobs-dir use
        it). An older / partially-captured claude row may carry ONLY the short
@@ -91,7 +93,11 @@ def _find_by_session(registry: list[AgentEntry], session_uuid: str) -> Optional[
        always wins over a shared-prefix coincidence.
     """
     for entry in registry:
-        if session_uuid in (entry.claude_session_uuid, entry.cc_session_id):
+        if session_uuid in (
+            getattr(entry, "harness_session_id", None),
+            entry.claude_session_uuid,
+            entry.cc_session_id,
+        ):
             return entry
     norm = session_uuid.replace("-", "").lower()
     for entry in registry:

@@ -1433,7 +1433,15 @@ def cmd_whoami(
     # closure must forward those warnings out-of-band to be surfaced — else a
     # failed shellout would yield live_status: null with no WARN (the design
     # requires both).
-    session_uuid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    # Resolve THIS process's session id from whichever harness marker is set
+    # (x-ec59): a codex/gemini worker resolves its own row via harness_session_id,
+    # not just CLAUDE_CODE_SESSION_ID. Falls back to the claude marker when the
+    # shared resolver finds nothing so today's claude behavior is unchanged.
+    from fno.harness_identity import resolve_harness_identity
+
+    session_uuid = (
+        resolve_harness_identity().session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    )
     live_warnings: list[str] = []
 
     def _live_status_fn(short_id: str) -> str | None:
