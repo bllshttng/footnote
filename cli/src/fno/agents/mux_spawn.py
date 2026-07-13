@@ -578,6 +578,8 @@ def dispatch_spawn_pane(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     session: Optional[str] = None,
+    target: Optional[str] = None,
+    split: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
 ) -> MuxSpawnResult:
@@ -664,6 +666,14 @@ def dispatch_spawn_pane(
         # what self-spawns the server when absent (client.rs), so the server
         # inherits the config-derived knob. Latched at server birth - an
         # already-running server keeps its value.
+        # Placement flags ride the OUTER pane-run transport, before the `--`
+        # that fences the provider argv (x-3e38). build_pane_argv stays
+        # placement-blind so provider-native commands are never contaminated.
+        placement_flags: list[str] = []
+        if target:
+            placement_flags += ["--target", target]
+        if split:
+            placement_flags += ["--split", split]
         proc = _run_mux(
             [
                 "mux",
@@ -674,6 +684,7 @@ def dispatch_spawn_pane(
                 session,
                 "--cwd",
                 str(cwd),
+                *placement_flags,
                 "--",
                 *wrapped,
             ],
