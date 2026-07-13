@@ -512,6 +512,17 @@ struct View {
     /// Pending escape bytes in navigator mode, carried ACROSS reads (same
     /// split-arrow safety as [`View::search_esc`]).
     nav_esc: Vec<u8>,
+    /// (x-c376) The read-only peek overlay (Space on a selector agent row),
+    /// `Some` while open. Sits ON TOP of the selector; stdin diverts to
+    /// [`peek_keys`] BEFORE selector routing. Client-local like `nav` - opening
+    /// sends one `PeekAgent` and reserves no row.
+    peek: Option<PeekView>,
+    /// Pending escape bytes in peek mode (j/k arrow folding), same split-arrow
+    /// safety as [`View::sel_esc`].
+    peek_esc: Vec<u8>,
+    /// (x-c376) Monotonic `PeekAgent` request counter, bumped per open/move so a
+    /// body landing after a newer request is dropped by seq (AC1-FR).
+    peek_seq: u64,
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -584,6 +595,23 @@ struct NavView {
     cursor: usize,
 }
 
+/// (x-c376) The read-only peek overlay over a sideline agent row: its full
+/// status sentence + recent transcript + (for a blocked row) the x-c929
+/// answerable prompt. Opens ON TOP of the selector (which stays open
+/// underneath); Esc drops back into it. The row is re-read from the live
+/// `display_rows()` per frame (navigator-style), so only the index, the request
+/// seq, and the fetched body live here - never a stale row snapshot.
+struct PeekView {
+    /// A `display_rows()` index, always kept on a `DisplayRow::Agent` row.
+    cursor: usize,
+    /// The seq of the last `PeekAgent` sent; a `PeekBody` with any other seq is
+    /// dropped (A->B->A cycling defeats a name-only guard, AC1-FR).
+    seq: u64,
+    /// The fetched transcript: `None` = still loading (renders " loading…");
+    /// `Some(lines)` = loaded (error/timeout text arrives in-band as lines).
+    body: Option<Vec<String>>,
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Seed with the active squad so the first frame already shows its tabs
@@ -630,6 +658,9 @@ impl View {
             sel_follow: None,
             nav: None,
             nav_esc: Vec::new(),
+            peek: None,
+            peek_esc: Vec::new(),
+            peek_seq: 0,
         }
     }
 
@@ -822,6 +853,7 @@ impl View {
         self.nav = None;
         self.recruit = None;
         self.recruit_esc.clear();
+        self.clear_peek();
         self.create = Some(String::new());
         self.create_esc.clear();
     }
@@ -839,6 +871,7 @@ impl View {
         self.attach_place = None;
         self.nav = None;
         self.confirm = None;
+        self.clear_peek();
         self.recruit = Some(String::new());
         self.recruit_esc.clear();
     }
@@ -869,6 +902,7 @@ impl View {
         self.nav = None;
         self.recruit = None;
         self.recruit_esc.clear();
+        self.clear_peek();
         self.confirm = Some(action);
     }
 
@@ -886,6 +920,7 @@ impl View {
         self.nav = None;
         self.recruit = None;
         self.recruit_esc.clear();
+        self.clear_peek();
         self.rename = Some((target, String::new()));
         self.rename_esc.clear();
     }
@@ -904,6 +939,7 @@ impl View {
         self.recruit = None;
         self.recruit_esc.clear();
         self.attach_place = None;
+        self.clear_peek();
         self.move_pick = Some((tab, squads));
     }
 
@@ -918,12 +954,52 @@ impl View {
         self.recruit = None;
         self.recruit_esc.clear();
         self.move_pick = None;
+        self.clear_peek();
         self.attach_place = Some(AttachPlace {
             id,
             target,
             squads,
             esc: Vec::new(),
         });
+    }
+
+    /// Clear the read-only peek overlay (x-c376) and its escape carry. Called by
+    /// every modal `open_*` helper so a mouse-driven overlay open (the mouse
+    /// pre-pass runs before overlay routing) never leaves peek rendering on top.
+    fn clear_peek(&mut self) {
+        self.peek = None;
+        self.peek_esc.clear();
+    }
+
+    /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
+    /// only when peek is open AND `seq` is the current request. Returns whether
+    /// it applied (the caller redraws on true). A stale body (any other seq) is
+    /// dropped, so a peek moved on to another row never shows the prior row's
+    /// transcript.
+    fn apply_peek_body(&mut self, seq: u64, lines: Vec<String>) -> bool {
+        match self.peek.as_mut().filter(|p| p.seq == seq) {
+            Some(peek) => {
+                peek.body = Some(lines);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Open the read-only peek overlay on `cursor` (x-c376), a `display_rows()`
+    /// index the caller verified is a `DisplayRow::Agent`. Bumps the request seq
+    /// and starts in the loading state; the caller sends the matching
+    /// `PeekAgent` with the returned seq. Deliberately unlike the modal `open_*`
+    /// helpers: the selector stays open UNDERNEATH so Esc drops back into it.
+    fn open_peek(&mut self, cursor: usize) -> u64 {
+        self.peek_seq = self.peek_seq.wrapping_add(1);
+        self.peek = Some(PeekView {
+            cursor,
+            seq: self.peek_seq,
+            body: None,
+        });
+        self.peek_esc.clear();
+        self.peek_seq
     }
 
     /// The `display_rows()` index of squad `id`'s own row (a `Sel` with no tab),
@@ -1478,6 +1554,54 @@ impl View {
             .unwrap_or(cur)
     }
 
+    /// The nearest `DisplayRow::Agent` index past `from` in `dir` (+1 down, -1
+    /// up), skipping every non-agent row (x-c376 j/k peek). `None` when there is
+    /// no agent row that way (the caller BELs and stays put). Re-reads the live
+    /// catalog per call, so a scrape tick between keys never chases a stale row.
+    fn peek_next_agent(&self, from: usize, dir: isize) -> Option<usize> {
+        let rows = self.display_rows();
+        let mut i = from as isize + dir;
+        while i >= 0 && (i as usize) < rows.len() {
+            if matches!(rows[i as usize], DisplayRow::Agent(_)) {
+                return Some(i as usize);
+            }
+            i += dir;
+        }
+        None
+    }
+
+    /// Re-anchor or close the peek overlay after a catalog change (x-c376): if
+    /// the peeked index no longer lands on an agent row, snap to the nearest
+    /// agent row (down first, then up); close peek when none remain. Returns the
+    /// name to re-fetch when it re-anchored, `None` when it held or closed.
+    fn peek_reanchor(&mut self) -> Option<(usize, String)> {
+        let Some(cursor) = self.peek.as_ref().map(|p| p.cursor) else {
+            return None;
+        };
+        let rows = self.display_rows();
+        if let Some(DisplayRow::Agent(a)) = rows.get(cursor) {
+            let _ = a; // still an agent row: hold position
+            return None;
+        }
+        drop(rows);
+        let next = self
+            .peek_next_agent(cursor, 1)
+            .or_else(|| self.peek_next_agent(cursor, -1));
+        match next {
+            Some(i) => {
+                let name = match self.display_rows().into_iter().nth(i) {
+                    Some(DisplayRow::Agent(a)) => a.name.clone(),
+                    _ => return None,
+                };
+                Some((i, name))
+            }
+            None => {
+                self.clear_peek();
+                None
+            }
+        }
+    }
+
     /// Sideline rows the cursor can occupy: below the tab bar and above the
     /// bottom chrome row. `draw_bottom_row` repaints the last row over the
     /// sideline when it is chrome, and [`sideline_row_at`] excludes it from
@@ -1647,6 +1771,20 @@ impl View {
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
             draw_lines_overlay(&mut cells, rows, cols, &lines);
+        } else if let Some(peek) = &self.peek {
+            // x-c376 peek overlay: the peeked agent row (re-read LIVE from the
+            // layout, navigator-style) header + transcript, on the shared
+            // inverse-video chrome. Drawn above nav (mutually exclusive modes).
+            let agent = self
+                .display_rows()
+                .into_iter()
+                .nth(peek.cursor)
+                .and_then(|r| match r {
+                    DisplayRow::Agent(a) => Some(a),
+                    _ => None,
+                });
+            let lines = peek_overlay_lines(agent, peek);
+            draw_lines_overlay(&mut cells, rows, cols, &lines);
         } else if let Some(nav) = &self.nav {
             // x-653d navigator: the filtered flat catalog + query/chip line, on
             // the same inverse-video overlay chrome. Rows recompute per frame
@@ -1665,6 +1803,7 @@ impl View {
             && self.move_pick.is_none()
             && self.attach_place.is_none()
             && self.nav.is_none()
+            && self.peek.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -2768,6 +2907,89 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
     lines
 }
 
+/// The peek overlay content width (x-c376): wider than the navigator/answer
+/// overlays because it renders transcript lines, clamped to the terminal by
+/// `draw_lines_overlay`.
+const PEEK_OVERLAY_W: usize = 72;
+
+/// Wrap `s` into lines no wider than `w` display chars, breaking on spaces. A
+/// single word longer than `w` becomes its own line (pad_to ellipsizes it) - a
+/// status sentence has no such words in practice, so the simple greedy pass is
+/// enough. Always returns at least one (possibly empty) line.
+fn wrap_words(s: &str, w: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in s.split_whitespace() {
+        match out.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= w => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => out.push(word.to_string()),
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Build the read-only peek overlay lines (x-c376): a header (badge glyph + name
+/// + full wrapped status sentence), the x-c929 answerable block when the row is
+/// blocked (prompt + numbered options, reused verbatim), a divider, then the
+/// transcript body (" loading…" until it arrives, "no activity yet" for an empty
+/// one, error/timeout text rendered verbatim as body lines) and a footer hint.
+/// `agent` is the LIVE row re-read per frame; `None` means it vanished between
+/// key and frame (a transient single frame - the key handler re-anchors/closes).
+fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> {
+    let Some(a) = agent else {
+        return vec![pad_to(" peek · row gone", PEEK_OVERLAY_W)];
+    };
+    let glyph = if a.exited {
+        '✗'
+    } else {
+        nav_glyph(pane_state(a.badge, a.seen))
+    };
+    let mut lines = vec![pad_to(&format!(" {glyph} {}", a.name), PEEK_OVERLAY_W)];
+    if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
+        for wl in wrap_words(reason, PEEK_OVERLAY_W - 3) {
+            lines.push(pad_to(&format!("   {wl}"), PEEK_OVERLAY_W));
+        }
+    }
+    // x-c929 answerable block: prompt + numbered options, mirroring the needs-me
+    // overlay's body so a blocked peek reads identically. Digit answers (US3)
+    // act on exactly these options.
+    if let Some(ans) = &a.answerable {
+        lines.push(pad_to("", PEEK_OVERLAY_W));
+        if !ans.prompt.is_empty() {
+            lines.push(pad_to(
+                &format!("   {}", ans.prompt.replace('\n', " ")),
+                PEEK_OVERLAY_W,
+            ));
+        }
+        for o in &ans.options {
+            lines.push(pad_to(
+                &format!("     {}. {}", o.idx, o.label),
+                PEEK_OVERLAY_W,
+            ));
+        }
+    }
+    lines.push(pad_to("", PEEK_OVERLAY_W)); // divider before the transcript
+    match &peek.body {
+        None => lines.push(pad_to("   loading…", PEEK_OVERLAY_W)),
+        Some(body) if body.is_empty() => lines.push(pad_to("   no activity yet", PEEK_OVERLAY_W)),
+        Some(body) => {
+            for l in body {
+                lines.push(pad_to(&format!(" {l}"), PEEK_OVERLAY_W));
+            }
+        }
+    }
+    lines.push(pad_to(
+        " j/k peek · digit answers · ⏎ attach · esc back",
+        PEEK_OVERLAY_W,
+    ));
+    lines
+}
+
 /// Truncate `s` to `w` display chars (ellipsizing) and pad with spaces to `w`,
 /// so an overlay line is a fixed-width inverse block that fully overwrites the
 /// content beneath it.
@@ -2915,7 +3137,10 @@ async fn attach_and_run(
                 // search - both can only follow attach: stray in the preamble,
                 // ignore rather than desync.
                 | ServerMsg::Copy { .. }
-                | ServerMsg::SearchResult { .. },
+                | ServerMsg::SearchResult { .. }
+                // PeekBody answers a post-attach PeekAgent (x-c376): impossible
+                // in the preamble, ignore rather than desync.
+                | ServerMsg::PeekBody { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -3060,6 +3285,14 @@ async fn attach_and_run(
                 }
                 Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog });
+                    // x-c376: a scrape tick may have removed the peeked row.
+                    // Re-anchor to an adjacent agent row (fetch its transcript)
+                    // or close - never a stale render / panic (AC1-EDGE).
+                    if let Some((cursor, name)) = view.peek_reanchor() {
+                        if let Err(e) = fetch_peek(&mut view, cursor, name, &mut sock_w).await {
+                            break Err(e);
+                        }
+                    }
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -3130,6 +3363,16 @@ async fn attach_and_run(
                     }
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
+                    }
+                }
+                Ok(ServerMsg::PeekBody { seq, lines, .. }) => {
+                    // x-c376: the seq guard (AC1-FR) drops a superseded body so
+                    // B's header never shows A's transcript. `name` is a wire
+                    // checksum; the header reads the live row.
+                    if view.apply_peek_body(seq, lines) {
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
                     }
                 }
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
@@ -3391,6 +3634,11 @@ async fn handle_stdin(
     }
     if view.attach_place.is_some() {
         return attach_place_keys(view, &passthrough, sock_w).await;
+    }
+    if view.peek.is_some() {
+        // x-c376: peek sits ON TOP of the selector; routed BEFORE it so its keys
+        // (j/k, Esc, later digit/attach) never leak to the selector underneath.
+        return peek_keys(view, &passthrough, sock_w).await;
     }
     if view.selector.is_some() {
         return selector_keys(view, &passthrough, sock_w).await;
@@ -3730,6 +3978,77 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
     keys
 }
 
+/// Open (or move) the peek overlay to `cursor` and fetch its transcript: bumps
+/// the seq, resets the body to loading, and sends the matching `PeekAgent`. The
+/// caller guarantees `cursor` is a `DisplayRow::Agent`. Shared by Space-open,
+/// j/k, and the layout re-anchor so the seq/loading discipline is identical on
+/// every path (x-c376).
+async fn fetch_peek(
+    view: &mut View,
+    cursor: usize,
+    name: String,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let seq = view.open_peek(cursor);
+    write_msg(
+        sock_w,
+        &ClientMsg::Command(Command::PeekAgent { name, seq }),
+    )
+    .await
+    .map_err(|e| format!("peek send failed: {e}"))
+}
+
+/// Peek-overlay keys (x-c376): j/k (and folded arrows) peek the adjacent agent
+/// row (fresh seq, stale bodies dropped by the seq guard); Esc/q closes back to
+/// the selector with its cursor synced to the peeked row (AC2-UI). Digit answers
+/// (US3) and attach (US4) are added by later stories; until then those keys are
+/// swallowed - no key in peek mode ever reaches a pane (the leader-layer
+/// invariant). The catalog is re-read per key so a scrape tick that removed the
+/// peeked row re-anchors or closes (never a panic on a dropped index).
+async fn peek_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.peek_esc);
+    let keys = fold_selector_keys(&mut esc, bytes);
+    view.peek_esc = esc;
+    for &k in &keys {
+        let Some(cursor) = view.peek.as_ref().map(|p| p.cursor) else {
+            break; // closed mid-chunk: swallow the rest, never forward
+        };
+        match k {
+            b'j' | b'k' => {
+                let dir = if k == b'j' { 1 } else { -1 };
+                match view.peek_next_agent(cursor, dir) {
+                    Some(next) => {
+                        let name = match view.display_rows().into_iter().nth(next) {
+                            Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
+                            _ => None,
+                        };
+                        if let Some(name) = name {
+                            fetch_peek(view, next, name, sock_w).await?;
+                        }
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07"); // at the edge: BEL, stay put
+                    }
+                }
+            }
+            0x1b | b'q' => {
+                // Close peek only; the selector stays open with its cursor synced
+                // to the last-peeked row (AC2-UI).
+                view.clear_peek();
+                view.selector = Some(cursor);
+            }
+            // Digit (US3) and l/Enter attach (US4) land here in later stories;
+            // everything else is swallowed - never a pane leak.
+            _ => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
 /// Selector-mode keys: j/k (and arrows) move over the unified display rows,
 /// skipping inert Headers; h/l (and left/right) collapse/expand squad rows;
 /// Enter acts on the row through [`View::row_action`] + [`apply_hit`] - the
@@ -3813,7 +4132,25 @@ async fn selector_keys(
                 }
             }
             b' ' => {
-                // Toggle a recruit mark on the focused row (x-8f11). Markable
+                // Open the read-only peek overlay on the focused agent row
+                // (x-c376): its status sentence + recent transcript, read from
+                // disk (peek/logs read disk; only attach spawns a pane). Any
+                // non-agent row BELs (selector convention). The selector stays
+                // open underneath; Esc drops back into it at the peeked row.
+                let name = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
+                    _ => None,
+                };
+                match name {
+                    Some(name) => fetch_peek(view, cur, name, sock_w).await?,
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
+            b'\t' => {
+                // Toggle a recruit mark on the focused row (x-8f11; moved from
+                // Space to Tab by x-c376, which took Space for peek). Markable
                 // only if it is an attachable watch-only agent (live, has an
                 // attach_id); anything else gives a notice, never zero feedback.
                 let id = match view.display_rows().get(cur) {
@@ -6684,27 +7021,175 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_space_marks_attachable_and_notices_unmarkable() {
-        // AC1-UI: space marks an attachable watch-only row (toggling), and gives
-        // a notice on a pane-hosted (unmarkable) row without marking.
+    async fn selector_tab_marks_attachable_and_notices_unmarkable() {
+        // AC1-UI: Tab marks an attachable watch-only row (toggling), and gives
+        // a notice on a pane-hosted (unmarkable) row without marking. (x-c376
+        // moved the mark toggle from Space to Tab; Space now opens peek.)
         let mut v = unified_rows_view();
         let mut buf: Vec<u8> = Vec::new();
         let idx = agent_row_at(&v, |a| a.attach_id.as_deref() == Some("c19cd2c3"));
         v.selector = Some(idx);
-        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
-        assert!(
-            v.marks.contains("c19cd2c3"),
-            "space marks the attachable row"
-        );
+        selector_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert!(v.marks.contains("c19cd2c3"), "Tab marks the attachable row");
         v.selector = Some(idx);
-        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
-        assert!(!v.marks.contains("c19cd2c3"), "space toggles the mark off");
+        selector_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert!(!v.marks.contains("c19cd2c3"), "Tab toggles the mark off");
         // A pane-hosted row (no attach_id) is unmarkable -> notice, no mark.
         let hosted = agent_row_at(&v, |a| a.pane_id == Some(10));
         v.selector = Some(hosted);
-        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        selector_keys(&mut v, b"\t", &mut buf).await.unwrap();
         assert!(v.marks.is_empty(), "an unmarkable row is not marked");
         assert!(v.notice.is_some(), "an unmarkable row gives a notice");
+    }
+
+    // x-c376 AC1-HP: Space on a selector agent row opens the peek overlay, sends
+    // a PeekAgent for that row's name, and leaves the selector open underneath.
+    #[tokio::test]
+    async fn peek_space_opens_overlay_and_sends_peekagent() {
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        v.selector = Some(idx);
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        let peek = v.peek.as_ref().expect("Space opens peek");
+        assert_eq!(peek.cursor, idx);
+        assert!(peek.body.is_none(), "starts loading");
+        assert_eq!(v.selector, Some(idx), "selector stays open underneath");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::PeekAgent { name, seq }) => {
+                assert_eq!(name, "bg-claude");
+                assert_eq!(seq, peek.seq);
+            }
+            other => panic!("expected PeekAgent, got {other:?}"),
+        }
+    }
+
+    // x-c376: Space on a non-agent row (a section header) BELs, never opens peek.
+    #[tokio::test]
+    async fn peek_space_on_header_does_not_open() {
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let header = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Header(_)))
+            .expect("a header row exists");
+        v.selector = Some(header);
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        assert!(v.peek.is_none(), "Space on a header never opens peek");
+    }
+
+    // x-c376 AC2-HP: j moves the peek to the next agent row and refetches with a
+    // fresh, higher seq (stale bodies then drop by seq).
+    #[tokio::test]
+    async fn peek_j_moves_to_adjacent_agent_and_refetches() {
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let first = agent_row_at(&v, |a| a.name == "worker");
+        v.selector = Some(first);
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        let seq0 = v.peek.as_ref().unwrap().seq;
+        buf.clear();
+        peek_keys(&mut v, b"j", &mut buf).await.unwrap();
+        let peek = v.peek.as_ref().expect("still open after j");
+        assert!(peek.cursor > first, "moved down to the next agent row");
+        assert!(peek.seq > seq0, "a fresh request seq");
+        assert!(peek.body.is_none(), "the new row starts loading again");
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(
+            matches!(
+                crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur),
+                Ok(ClientMsg::Command(Command::PeekAgent { .. }))
+            ),
+            "j fires a fresh PeekAgent"
+        );
+    }
+
+    // x-c376 AC2-UI: Esc closes peek back to the selector at the peeked row.
+    #[tokio::test]
+    async fn peek_esc_returns_to_selector_at_peeked_row() {
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        v.selector = Some(idx);
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        // A bare Esc resolves on the following byte (fold_selector_keys); "\x1bq"
+        // yields one bare-Esc key (the q is swallowed by the pending-esc branch).
+        peek_keys(&mut v, b"\x1bq", &mut buf).await.unwrap();
+        assert!(v.peek.is_none(), "Esc closes peek");
+        assert_eq!(v.selector, Some(idx), "selector cursor sits on the row");
+    }
+
+    // x-c376 AC1-FR: a PeekBody whose seq is not current is dropped; the matching
+    // seq applies.
+    #[test]
+    fn peek_body_seq_guard_drops_stale() {
+        let mut v = unified_rows_view();
+        v.peek = Some(PeekView {
+            cursor: 0,
+            seq: 5,
+            body: None,
+        });
+        assert!(
+            !v.apply_peek_body(4, vec!["stale".into()]),
+            "an older seq is dropped"
+        );
+        assert!(v.peek.as_ref().unwrap().body.is_none());
+        assert!(
+            v.apply_peek_body(5, vec!["fresh".into()]),
+            "the current seq applies"
+        );
+        assert_eq!(
+            v.peek.as_ref().unwrap().body.as_deref(),
+            Some(["fresh".to_string()].as_slice())
+        );
+    }
+
+    // x-c376: peek_overlay_lines renders loading, then the transcript, and folds
+    // in the x-c929 answerable block for a blocked row.
+    #[test]
+    fn peek_overlay_renders_loading_transcript_and_answerable() {
+        let row = AgentRow {
+            squad: None,
+            name: "w".into(),
+            pane_id: Some(3),
+            badge: Some(AgentBadge::Blocked),
+            reason: Some("waiting on a menu".into()),
+            exited: false,
+            answerable: Some(answerable(&[("1", "Yes"), ("2", "No")], 7)),
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        };
+        let loading = PeekView {
+            cursor: 0,
+            seq: 1,
+            body: None,
+        };
+        let out = peek_overlay_lines(Some(&row), &loading).join("\n");
+        assert!(
+            out.contains("waiting on a menu"),
+            "shows the status sentence"
+        );
+        assert!(
+            out.contains("1. Yes") && out.contains("2. No"),
+            "answerable"
+        );
+        assert!(out.contains("loading"), "loading placeholder before a body");
+        let loaded = PeekView {
+            cursor: 0,
+            seq: 1,
+            body: Some(vec!["line one".into(), "line two".into()]),
+        };
+        let out = peek_overlay_lines(Some(&row), &loaded).join("\n");
+        assert!(out.contains("line one") && out.contains("line two"));
+        assert!(!out.contains("loading"), "no placeholder once loaded");
+        // A vanished row renders a safe placeholder, never a panic.
+        assert!(peek_overlay_lines(None, &loaded)[0].contains("row gone"));
     }
 
     #[tokio::test]

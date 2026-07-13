@@ -516,6 +516,9 @@ impl FakeClient {
             | ServerMsg::Ok
             | ServerMsg::WaitDone { .. }
             | ServerMsg::Err { .. } => {}
+            // (x-c376) Peek transcript body: a client-interactive reply covered
+            // by client unit tests, not the e2e absorber - ignore here.
+            ServerMsg::PeekBody { .. } => {}
         }
     }
 
