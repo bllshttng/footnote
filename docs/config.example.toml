@@ -218,6 +218,14 @@ headless_yolo = false
 # Use full-yolo (drop sandbox) for headless gemini workers.
 headless_yolo = false
 
+[dispatch]
+# Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.
+harness = ""
+# Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).
+substrate = ""
+# Dispatch command template with a single {id}; empty = '/target no-merge {id}'.
+command = ""
+
 [auto_continue]
 # Auto-dispatch the next ready node after a PR merges.
 enabled = false
