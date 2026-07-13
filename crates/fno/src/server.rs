@@ -1296,11 +1296,11 @@ impl Core {
                 return Ok((sid, tid));
             }
         };
-        let Some(squad) = self.session.squad(sid) else {
+        let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
             return Err("target squad vanished".into());
         };
-        if split.is_none() || squad.tabs.is_empty() {
+        if split.is_none() || self.session.squads[si].tabs.is_empty() {
             let tid = self.session.mint_tab_id();
             let tab = Tab {
                 name: None,
@@ -1308,18 +1308,15 @@ impl Core {
                 root: Node::Leaf(pid),
                 focus: pid,
             };
-            self.session
-                .squad_mut(sid)
-                .expect("squad present")
-                .tabs
-                .push(tab);
+            self.session.squads[si].tabs.push(tab);
             return Ok((sid, tid));
         }
         let dir = split.expect("split present");
+        let squad = &self.session.squads[si];
         let ti = squad.active_tab.min(squad.tabs.len() - 1);
         let tid = squad.tabs[ti].id;
         let vp = self.tab_rect(tid);
-        let tab = &mut self.session.squad_mut(sid).expect("squad present").tabs[ti];
+        let tab = &mut self.session.squads[si].tabs[ti];
         match tree::split_directional(tab, vp, dir, pid) {
             Ok(()) => Ok((sid, tid)),
             Err(e) => {
