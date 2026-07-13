@@ -1084,6 +1084,66 @@ mod tests {
     }
 
     #[test]
+    fn harness_backfill_legacy_row_gains_canonical() {
+        // x-ec59 / AC1-EDGE: a pre-migration Python row (provider + the legacy
+        // per-provider uuid, no harness) gains the canonical pair on load.
+        let python_legacy = r#"{"name":"w","provider":"claude","cwd":"/p","log_path":null,
+            "claude_short_id":"7c5dcf5d","claude_session_uuid":"UUID-1","codex_session_id":null,
+            "gemini_session_id":null,"created_at":"2026-07-13T00:00:00Z","status":"live",
+            "last_message_at":null,"mcp_channel_id":null}"#;
+        let mut e: RegistryEntry = serde_json::from_str(python_legacy).unwrap();
+        e.backfill_harness_aliases();
+        assert_eq!(e.harness.as_deref(), Some("claude"));
+        assert_eq!(e.harness_session_id.as_deref(), Some("UUID-1"));
+    }
+
+    #[test]
+    fn harness_backfill_canonical_only_row_syncs_legacy() {
+        // A canonical-only row (post-migration mint): the legacy alias is synced
+        // so an old reader still resolves the session.
+        let mut e = sample_entry("w");
+        e.provider = "claude".into();
+        e.codex_session_id = None;
+        e.session_id = None;
+        e.claude_session_uuid = None;
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some("CANON".into());
+        e.backfill_harness_aliases();
+        assert_eq!(e.claude_session_uuid.as_deref(), Some("CANON"));
+    }
+
+    #[test]
+    fn harness_backfill_conflict_is_canonical_wins() {
+        // AC2-EDGE (Rust side): a conflicting legacy value is overwritten.
+        let mut e = sample_entry("w");
+        e.provider = "claude".into();
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some("CANON".into());
+        e.claude_session_uuid = Some("STALE".into());
+        e.backfill_harness_aliases();
+        assert_eq!(e.harness_session_id.as_deref(), Some("CANON"));
+        assert_eq!(e.claude_session_uuid.as_deref(), Some("CANON"));
+    }
+
+    #[test]
+    fn harness_backfill_reads_python_canonical_row_via_registry() {
+        // Cross-language: a Python-authored canonical codex row parses into
+        // Registry and, after the load-time backfill (mirrors
+        // read_registry_tolerant), resolves the legacy alias too.
+        let python_json = r#"{"schema_version":7,"agents":[{"name":"w","provider":"codex",
+            "cwd":"/p","log_path":null,"claude_short_id":null,"codex_session_id":null,
+            "gemini_session_id":null,"created_at":"2026-07-13T00:00:00Z","status":"live",
+            "last_message_at":null,"mcp_channel_id":null,"harness":"codex",
+            "harness_session_id":"THREAD"}]}"#;
+        let mut reg: Registry = serde_json::from_str(python_json).unwrap();
+        for e in &mut reg.entries {
+            e.backfill_harness_aliases();
+        }
+        assert_eq!(reg.entries[0].harness_session_id.as_deref(), Some("THREAD"));
+        assert_eq!(reg.entries[0].codex_session_id.as_deref(), Some("THREAD"));
+    }
+
+    #[test]
     fn state_mux_row_skips_key_when_absent() {
         // Slim rows: no "mux" key serialized for non-mux rows, so a
         // round-tripped worker row stays byte-familiar to older tooling.

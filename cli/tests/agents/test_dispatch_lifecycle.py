@@ -527,6 +527,81 @@ def test_reconcile_recovery(tmp_path: Path, monkeypatch) -> None:
     assert done[0]["orphaned"] == 0
 
 
+def test_reconcile_backfills_null_harness_session_id(tmp_path: Path, monkeypatch) -> None:
+    """AC1-FR / AC1-UI (x-ec59): a live claude row whose canonical id never landed
+    (the spawn-time uuid resolution raced) is healed from the harness store, and
+    reconcile names the backfilled row in its result + the reconcile_done event."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-claude",
+            provider="claude",
+            claude_short_id="7c5dcf5d",
+            status="live",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents.providers import claude as claude_mod
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(
+        claude_mod, "claude_logs_reachable", lambda short_id, *, timeout=10.0: True
+    )
+    monkeypatch.setattr(
+        claude_mod, "resolve_session_uuid", lambda short_id: "FULL-UUID-7c5dcf5d"
+    )
+
+    result = dispatch.reconcile_agents()
+
+    assert len(result.backfilled) == 1
+    assert result.backfilled[0]["name"] == "worker-claude"
+    assert result.backfilled[0]["harness_session_id"] == "FULL-UUID-7c5dcf5d"
+
+    # The row gains BOTH the canonical field and the synced legacy alias.
+    e = load_registry()[0]
+    assert e.harness_session_id == "FULL-UUID-7c5dcf5d"
+    assert e.claude_session_uuid == "FULL-UUID-7c5dcf5d"
+
+    events = _read_events(tmp_path)
+    done = [ev for ev in events if ev.get("kind") == "reconcile_done"]
+    assert done and done[0]["backfilled"] == 1
+
+
+def test_reconcile_backfill_empty_when_id_already_present(tmp_path: Path, monkeypatch) -> None:
+    """AC1-UI: a live row that already carries its canonical id yields an empty
+    backfill set (so "nothing to heal" is distinguishable from "healed"), and the
+    resolver is never even consulted."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-claude",
+            provider="claude",
+            claude_short_id="7c5dcf5d",
+            harness="claude",
+            harness_session_id="ALREADY",
+            status="live",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents.providers import claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "claude_logs_reachable", lambda short_id, *, timeout=10.0: True
+    )
+
+    def _must_not_resolve(short_id):
+        raise AssertionError("resolve_session_uuid called for an already-healed row")
+
+    monkeypatch.setattr(claude_mod, "resolve_session_uuid", _must_not_resolve)
+
+    result = dispatch.reconcile_agents()
+    assert result.backfilled == []
+
+
 def test_reconcile_json_shape_round_trips_gemini_error(
     tmp_path: Path, monkeypatch
 ) -> None:
