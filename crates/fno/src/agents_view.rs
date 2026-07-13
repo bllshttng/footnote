@@ -725,13 +725,14 @@ pub fn parse_claude_agents(
     raw: &str,
     tracked: &std::collections::HashSet<String>,
 ) -> Option<HashMap<String, ObservedExternal>> {
-    let arr = serde_json::from_str::<serde_json::Value>(raw.trim())
-        .ok()?
-        .as_array()?
-        .clone();
+    // Deserialize straight into a vec of objects: a non-array body or a
+    // non-object element fails the parse -> `None` (schema drift), the same
+    // fail-closed behavior as a manual `as_array`/`as_object` walk but without
+    // the intermediate `Value` tree or the array clone.
+    let arr: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(raw.trim()).ok()?;
     let mut out = HashMap::new();
-    for entry in arr {
-        let obj = entry.as_object()?; // a non-object element is schema drift
+    for obj in arr {
         let Some(id) = obj.get("id").and_then(|v| v.as_str()) else {
             continue;
         };
