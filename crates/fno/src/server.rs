@@ -1956,23 +1956,29 @@ impl Core {
     /// table, commits the result, and routes the refreshed set + notices back to
     /// every client. A no-tracked-id store spawns nothing.
     fn reconcile_external_lifecycle(&self) {
-        let tracked: std::collections::HashSet<String> = self
+        // Snapshot attach_id -> generation BEFORE the off-lock query, so the
+        // atomic locked apply can leave any record a concurrent operator action
+        // advanced past its baseline untouched (lost-update guard, code review).
+        let baseline: std::collections::HashMap<String, u64> = self
             .external_lifecycle
             .iter()
-            .map(|r| r.attach_id.clone())
+            .map(|r| (r.attach_id.clone(), r.generation))
             .collect();
-        if tracked.is_empty() {
+        if baseline.is_empty() {
             return;
         }
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
+            let tracked: std::collections::HashSet<String> = baseline.keys().cloned().collect();
             let observed = run_claude_agents_all(&tracked).await;
-            // Re-load under no lock contention; the startup window has no
-            // concurrent action (Locked 9: the flock still serializes the write).
-            let persisted = crate::squad_store::load().external_lifecycle;
-            let (records, notices) =
-                crate::agents_view::reconcile_external(persisted, observed.as_ref());
-            let _ = crate::squad_store::replace_lifecycle(records.clone());
+            // Read-compute-write is atomic under the store lock: reconcile only
+            // the baseline-generation-matching records; a concurrent stop/rm's
+            // record (advanced generation) is left for its own completion.
+            let notices = crate::squad_store::reconcile_lifecycle(&baseline, |reconcilable| {
+                crate::agents_view::reconcile_external(reconcilable, observed.as_ref())
+            })
+            .unwrap_or_default();
+            let records = crate::squad_store::load().external_lifecycle;
             let _ = core_tx
                 .send(CoreMsg::ExternalLifecycleSync {
                     to: None,

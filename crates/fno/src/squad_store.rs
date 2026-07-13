@@ -406,13 +406,34 @@ pub fn complete_external(
     })
 }
 
-/// Overwrite the whole lifecycle collection in one locked write (x-7561): the
-/// startup reconcile pass computes the new record set (pure, in `agents_view`)
-/// and commits it here, preserving squads. Reconcile runs at the first attach
-/// before any external action, so the load->compute->write window carries no
-/// concurrent CAS to lose (the flock still serializes the write itself).
-pub fn replace_lifecycle(records: Vec<ExternalLifecycle>) -> io::Result<()> {
-    mutate_lifecycle(|slot| *slot = records)
+/// Apply the startup reconcile ATOMICALLY under the store lock (x-7561): the
+/// `claude agents` liveness query runs off-lock (it must - a subprocess cannot
+/// be awaited while holding the flock), but the load -> compute -> write is
+/// serialized here so a concurrent operator action is never clobbered
+/// (lost-update). `baseline` is the `attach_id -> generation` snapshot taken
+/// BEFORE the query; under the lock, a record whose generation still matches its
+/// baseline is fed to `reconcile` (the pure `agents_view` table), while a record
+/// the baseline never saw or whose generation ADVANCED (a concurrent stop/rm
+/// owns it) is left untouched - reconciling it against a pre-action liveness
+/// snapshot would drop the action's completion. Returns the reconcile notices.
+pub fn reconcile_lifecycle<F>(
+    baseline: &std::collections::HashMap<String, u64>,
+    reconcile: F,
+) -> io::Result<Vec<String>>
+where
+    F: FnOnce(Vec<ExternalLifecycle>) -> (Vec<ExternalLifecycle>, Vec<String>),
+{
+    let mut notices = Vec::new();
+    mutate_lifecycle(|records| {
+        let (reconcilable, mut untouched): (Vec<_>, Vec<_>) = std::mem::take(records)
+            .into_iter()
+            .partition(|r| baseline.get(&r.attach_id) == Some(&r.generation));
+        let (reconciled, ns) = reconcile(reconcilable);
+        notices = ns;
+        untouched.extend(reconciled);
+        *records = untouched;
+    })?;
+    Ok(notices)
 }
 
 /// The locked read-modify-write core: acquire an exclusive, NON-BLOCKING lock
@@ -836,6 +857,63 @@ mod tests {
             lc("deadbeef").is_none(),
             "a successful rm deletes the tombstone"
         );
+    }
+
+    #[test]
+    fn reconcile_lifecycle_leaves_a_generation_advanced_record_untouched() {
+        // Lost-update guard (code review): a record a concurrent operator action
+        // advanced PAST the reconcile's baseline generation is excluded from the
+        // reconcile and left untouched - reconciling it against a pre-action
+        // liveness snapshot would drop the action's completion.
+        let _s = Scratch::new("reconcile-gen-guard");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen1 Stopping
+        complete_external("deadbeef", 1, ExternalState::Stopping, false, None).unwrap(); // gen1 Failed
+        let baseline: std::collections::HashMap<String, u64> =
+            [("deadbeef".to_string(), 1u64)].into_iter().collect();
+        // A concurrent retry advances the record to gen2 BEFORE reconcile applies.
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen2 Stopping
+        let notices = reconcile_lifecycle(&baseline, |recs| {
+            let n = recs.len();
+            let mapped = recs
+                .into_iter()
+                .map(|mut r| {
+                    r.state = ExternalState::Stopped;
+                    r
+                })
+                .collect();
+            (mapped, (0..n).map(|_| "reconciled".to_string()).collect())
+        })
+        .unwrap();
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopping);
+        assert_eq!(lc("deadbeef").unwrap().generation, 2);
+        assert!(
+            notices.is_empty(),
+            "the advanced record was excluded from reconcile"
+        );
+    }
+
+    #[test]
+    fn reconcile_lifecycle_applies_to_a_baseline_matching_record() {
+        // The other half: with no concurrent action, a baseline-matching record
+        // IS reconciled and its notices flow out.
+        let _s = Scratch::new("reconcile-applies");
+        begin_external_stop("deadbeef", "ext", "/tmp").unwrap(); // gen1 Stopping
+        complete_external("deadbeef", 1, ExternalState::Stopping, false, None).unwrap(); // gen1 Failed
+        let baseline: std::collections::HashMap<String, u64> =
+            [("deadbeef".to_string(), 1u64)].into_iter().collect();
+        let notices = reconcile_lifecycle(&baseline, |recs| {
+            let mapped = recs
+                .into_iter()
+                .map(|mut r| {
+                    r.state = ExternalState::Stopped;
+                    r
+                })
+                .collect();
+            (mapped, vec!["done".to_string()])
+        })
+        .unwrap();
+        assert_eq!(lc("deadbeef").unwrap().state, ExternalState::Stopped);
+        assert_eq!(notices, vec!["done".to_string()]);
     }
 
     #[test]
