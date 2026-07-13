@@ -458,6 +458,30 @@ class TestCodexFileBackend:
         assert managed._read_slot_blob("codex") == _blob("B0")
         assert managed.active_slot_id("codex", tmp_path) == "cx-b"
 
+    def test_codex_probe_interrupt_reraises_even_when_rollback_fails(
+        self, tmp_path, monkeypatch
+    ):
+        # A KeyboardInterrupt must propagate as itself even if best-effort
+        # rollback fails - never downgrade a BaseException to a caught Exception.
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+
+        def _interrupt():
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(managed, "_codex_login_ok", _interrupt)
+        original_write = managed._write_slot_blob
+        calls = {"count": 0}
+
+        def _write(cli, blob, config_dir=None):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise managed.ManagedStoreError("rollback denied")
+            return original_write(cli, blob, config_dir)
+
+        monkeypatch.setattr(managed, "_write_slot_blob", _write)
+        with pytest.raises(KeyboardInterrupt):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
     def test_codex_rejection_reports_rollback_failure(self, tmp_path, monkeypatch):
         a, b = _register_codex_pair(tmp_path, monkeypatch)
         monkeypatch.setattr(
