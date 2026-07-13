@@ -595,3 +595,49 @@ def test_extra_env_compact_window_wins_over_injection() -> None:
     )
     assert route is not None
     assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
+
+
+# ---------------------------------------------------------------------------
+# build lane (x-b0b4): opt-in by config presence, not in DEFAULT_ROUTED_ROLES
+# ---------------------------------------------------------------------------
+
+
+def test_build_lane_unconfigured_returns_none() -> None:
+    # AC2-EDGE precondition: build is NOT auto-routed. With no config line it
+    # resolves None (fail-safe -> primary Anthropic model), byte-identical to
+    # today for a --role build spawn.
+    assert "build" not in mr.DEFAULT_ROUTED_ROLES
+    assert mr.resolve_route("build", settings=_settings(), env={"ZAI_API_KEY": "k"}) is None
+
+
+def test_build_lane_routes_when_configured() -> None:
+    # AC2-HP: writing model_routing.roles.build is the opt-in; a --role build
+    # spawn then gets the full z.ai env block.
+    route = mr.resolve_route(
+        "build",
+        settings=_settings(roles={"build": "zai,glm-5.2"}),
+        env={"ZAI_API_KEY": "zk"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert route["ANTHROPIC_AUTH_TOKEN"] == "zk"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_build_lane_configured_missing_key_fails_safe() -> None:
+    # AC2-EDGE: configured build with no resolvable key falls back to the
+    # primary model (None), a notice names the missing key.
+    notes, sink = _collector()
+    route = mr.resolve_route(
+        "build",
+        settings=_settings(roles={"build": "zai,glm-5.2"}),
+        env={},
+        notice=sink,
+    )
+    assert route is None
+    assert any("ZAI_API_KEY" in n or "no API key" in n for n in notes)
+
+
+def test_build_is_in_known_lane_roles_not_protected() -> None:
+    assert "build" in mr.KNOWN_LANE_ROLES
+    assert "build" not in mr.PROTECTED_ROLES

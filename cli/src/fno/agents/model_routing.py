@@ -6,6 +6,12 @@ consolidation) is routed to a *secondary* model provider (z.ai GLM, DeepSeek,
 diff, the correctness verdict) stays on the primary Anthropic model,
 byte-for-byte as today.
 
+The ``build`` lane extends the same mechanism to *delivery* spawns (``/target
+bg`` + blueprint autolaunch). It is opt-in by config presence: unconfigured it
+routes nothing (fail-safe ``None``); writing ``model_routing.roles.build`` is
+the consent. ``build`` is not in :data:`DEFAULT_ROUTED_ROLES` but is named in
+:data:`KNOWN_LANE_ROLES` so ``fno route ls`` renders it even before it is set.
+
 Mechanism (Locked Decision 2): a spawn stamps ``ANTHROPIC_BASE_URL`` +
 ``ANTHROPIC_AUTH_TOKEN`` + the model env vars into the worker env. No proxy in
 the critical path; each worker is a fresh process, so switching base_url per
@@ -89,6 +95,15 @@ DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate", "post-mer
 # Roles the secondary provider must NEVER touch (writes a diff / renders a
 # correctness verdict). Hard guard, enforced before any config is read.
 PROTECTED_ROLES = frozenset({"implement", "review-verdict"})
+
+# Routable lanes that are part of the known vocabulary but are NOT auto-routed
+# by default: config presence is the opt-in (writing model_routing.roles.build
+# IS the consent). `_role_target` already resolves any config-present name, so
+# these need no resolution-path change; they exist so `fno route ls` can render
+# a lane that has no config line yet (an unconfigured `build` row) instead of
+# hiding it. `build` is the sanctioned delivery lane for /target bg + blueprint
+# autolaunch; unconfigured it fails safe to the primary Anthropic model.
+KNOWN_LANE_ROLES = ("build",)
 
 # Every tier Claude Code may request internally. Setting all of them to the
 # routed model keeps the entire worker (incl. background haiku) on the secondary
