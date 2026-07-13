@@ -1989,6 +1989,8 @@ done
                 name: sid.clone(),
                 short_id: sid.clone(),
                 provider: "claude".into(),
+                harness: None,
+                harness_session_id: None,
                 cwd: "/tmp".into(),
                 project_root: String::new(),
                 session_id: None,

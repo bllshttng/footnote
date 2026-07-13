@@ -92,7 +92,17 @@ PROVIDER_SESSION_ID_FIELDS = {
 }
 
 from fno import paths
-from fno.harness_identity import canonical_handle
+from fno.harness_identity import canonical_handle, sync_harness_aliases
+
+# The registry's legacy per-harness session-id keys (x-ec59). Distinct from the
+# manifest's map (which uses claude_session_id): the registry's claude identity
+# lives in claude_session_uuid. Passed to the shared sync_harness_aliases rule so
+# canonical harness_session_id and these legacy fields stay in lockstep on load.
+REGISTRY_LEGACY_SESSION_KEYS = {
+    "claude": "claude_session_uuid",
+    "codex": "codex_session_id",
+    "gemini": "gemini_session_id",
+}
 
 # v4 (ab-a171ceb2) is the host_mode forward-compat bump. v5 (inside-out E3.1) is
 # the same kind of bump for the additive `inside_leg` field: structurally
@@ -170,6 +180,18 @@ class AgentEntry:
     # as None, and the Rust RegistryEntry mirrors it with `#[serde(default)]`, so
     # a row round-trips between the two languages. [stream-json host lane node]
     claude_session_uuid: Optional[str] = None
+    # Canonical harness identity (x-ec59), the successor to the per-provider
+    # identity fields. ``harness`` is the harness name (identity only; ``provider``
+    # stays load-bearing for dispatch + the KNOWN_PROVIDERS gate), and
+    # ``harness_session_id`` is the worker's own session id in its harness's store
+    # (claude full UUID, codex thread id, gemini session id). Both additive-optional
+    # like ``claude_session_uuid`` (no schema bump): load_registry back-fills them
+    # from the legacy fields via the shared ``sync_harness_aliases`` rule, and the
+    # Rust RegistryEntry mirrors them with ``#[serde(default)]``, so a row
+    # round-trips between the two languages. Routing (dispatch.py) reads these
+    # first, legacy fields as fallback during the migration window.
+    harness: Optional[str] = None
+    harness_session_id: Optional[str] = None
     # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
     # SPAWNING session's environment; never required of a caller. All three
     # default to None so pre-existing rows and callers that pass none of them
@@ -453,6 +475,16 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                 f"{sorted(KNOWN_STATUSES)}. "
                 "Upgrade or downgrade fno to match."
             )
+        # Harness identity back-fill (x-ec59): harness adopts provider when
+        # absent (provider is always present, checked above; harness is
+        # identity-only and NOT validated against KNOWN_PROVIDERS, so an alien
+        # harness degrades to durable routing rather than bricking the read),
+        # then the shared rule syncs harness_session_id <-> the legacy per-harness
+        # key. A legacy-only row gains canonical fields here; a canonical-only row
+        # (the class the bg-routing bug lives in) keeps resolving once its id lands.
+        if not row.get("harness") and row.get("provider"):
+            row = {**row, "harness": row["provider"]}
+        row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
         # `session_id` is a computed @property on AgentEntry, not an init field.
         # A Rust PTY row may serialize it (Rust skips it when None, so this only
         # fires for a row that recorded one); passing it to AgentEntry(**row)

@@ -52,6 +52,8 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         name: adopted_name(&short),
         short_id: String::new(),
         provider: "claude".into(),
+        harness: None,
+        harness_session_id: None,
         cwd: w.cwd.clone(),
         project_root: w.worktree_path.clone().unwrap_or_else(|| w.cwd.clone()),
         session_id: None,

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from fno.harness_identity import sync_harness_aliases
 from fno.schemas.common import (
     SessionId,
     RoadmapId,
@@ -112,25 +113,19 @@ class TargetState(BaseModel):
         data = dict(data)
         # Canonical wins: when the harness field is set it is authoritative and
         # syncs its legacy alias (so a conflicting legacy value can't leak);
-        # otherwise adopt the legacy value.
+        # otherwise adopt the legacy value. The harness<->provider alias is
+        # manifest-specific (the registry keeps provider load-bearing), so it
+        # stays here; the session-id sync is the shared rule.
         for new, old in (("harness", "provider"), ("harness_mode", "provider_mode")):
             if data.get(new):
                 data[old] = data[new]
             elif data.get(old):
                 data[new] = data[old]
-        if data.get("harness_session_id"):
-            # canonical present: sync the matching per-provider legacy key so a
-            # reader of the old name still resolves it after alias removal.
-            h = str(data.get("harness") or "").lower()
-            legacy_key = {"claude": "claude_session_id", "codex": "codex_thread_id"}.get(h)
-            if legacy_key and not data.get(legacy_key):
-                data[legacy_key] = data["harness_session_id"]
-        else:
-            for legacy in ("claude_session_id", "codex_thread_id"):
-                v = data.get(legacy)
-                if v and str(v).strip() and str(v).strip().lower() != "null":
-                    data["harness_session_id"] = v
-                    break
+        # Manifest legacy session key for claude is claude_session_id (the
+        # registry's is claude_session_uuid) -- hence the parameterized map.
+        sync_harness_aliases(
+            data, {"claude": "claude_session_id", "codex": "codex_thread_id"}
+        )
         return data
 
     @field_validator("clean_passed", "goal_verification_passed", "browser_testing_passed", mode="before")

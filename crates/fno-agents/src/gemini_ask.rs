@@ -1026,6 +1026,8 @@ fn dispatch_create(
         name: name.to_string(),
         short_id: String::new(),
         provider: "gemini".to_string(),
+        harness: None,
+        harness_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

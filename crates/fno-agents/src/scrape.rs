@@ -505,6 +505,8 @@ mod tests {
             name: name.into(),
             short_id: String::new(),
             provider: provider.into(),
+            harness: None,
+            harness_session_id: None,
             cwd: "/tmp/x".into(),
             project_root: String::new(),
             session_id: None,

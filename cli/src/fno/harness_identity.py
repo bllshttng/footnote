@@ -30,6 +30,38 @@ def canonical_handle(harness: str, session_id: str) -> str:
     return f"{harness}-{session_id[:8]}"
 
 
+def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> dict:
+    """Two-way sync of ``harness_session_id`` with a store's legacy per-harness
+    session-id key. The ONE source of the sync rule (x-ec59): the target manifest
+    shim (``schemas/target.py``) and the agent-registry row coercion both call it,
+    so canonical<->legacy resolution can never drift between the two.
+
+    ``legacy_session_keys`` maps a harness name to that store's legacy session-id
+    field, because the stores disagree on the claude key: the manifest uses
+    ``claude_session_id``, the registry ``claude_session_uuid``.
+
+    Rule (canonical wins): when ``harness_session_id`` is set it is authoritative
+    and syncs the matching legacy key (a stale/conflicting legacy value is
+    overwritten, never leaked); otherwise the first present non-null legacy value
+    back-fills ``harness_session_id``. Mutates and returns ``data``. The harness
+    <-> provider alias is store-specific and stays with each caller.
+    """
+    if not isinstance(data, dict):
+        return data
+    if data.get("harness_session_id"):
+        harness = str(data.get("harness") or "").lower()
+        legacy_key = legacy_session_keys.get(harness)
+        if legacy_key:
+            data[legacy_key] = data["harness_session_id"]
+    else:
+        for legacy_key in legacy_session_keys.values():
+            value = data.get(legacy_key)
+            if value and str(value).strip() and str(value).strip().lower() != "null":
+                data["harness_session_id"] = value
+                break
+    return data
+
+
 @dataclass(frozen=True)
 class HarnessIdentity:
     """The resolved session id and its harness, or two ``None`` values."""
