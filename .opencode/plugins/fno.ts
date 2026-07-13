@@ -139,6 +139,17 @@ export function resolveModel(
   return { providerID, modelID }
 }
 
+/** Fold a provider.list() response into the available-model set (in place). */
+export function collectModels(
+  providers: { data?: Array<{ id: string; models?: Record<string, unknown> }> } | undefined,
+  into: Set<string>,
+): Set<string> {
+  for (const p of providers?.data ?? []) {
+    for (const modelID of Object.keys(p.models ?? {})) into.add(`${p.id}/${modelID}`)
+  }
+  return into
+}
+
 // ---------------------------------------------------------------------------
 // Agent loading
 // ---------------------------------------------------------------------------
@@ -397,18 +408,19 @@ const plugin: Plugin = async (input: PluginInput) => {
   const orchestratorPrompt = loadOrchestratorPrompt(projectDir)
   const footnoteAgents = loadFootnoteAgents(projectDir)
 
-  // Available models, fetched once for best-effort category routing (AC5-ERR).
+  // Available models, populated fire-and-forget for best-effort category
+  // routing (AC5-ERR). NEVER await a client.* SDK call in plugin init: plugins
+  // load inside opencode's bootstrap, which serves no request until every
+  // plugin returns, so an awaited provider.list() reenters a server that cannot
+  // answer yet and deadlocks startup. The set fills in place once the response
+  // lands; a task() firing before then degrades to the default model.
   const available = new Set<string>()
-  try {
-    const providers = await (input.client as unknown as {
-      provider: { list(): Promise<{ data?: Array<{ id: string; models?: Record<string, unknown> }> }> }
-    }).provider.list()
-    for (const p of providers?.data ?? []) {
-      for (const modelID of Object.keys(p.models ?? {})) available.add(`${p.id}/${modelID}`)
-    }
-  } catch {
-    // No registry read -> resolveModel returns undefined -> opencode default.
-  }
+  ;(input.client as unknown as {
+    provider: { list(): Promise<{ data?: Array<{ id: string; models?: Record<string, unknown> }> }> }
+  }).provider
+    .list()
+    .then((providers) => collectModels(providers, available))
+    .catch(() => {}) // swallow: an unhandled rejection in plugin scope can crash the host
 
   // Registered-agent set: footnote's translated agents plus the native
   // `.opencode/agents/*.md` (explore/oracle/librarian) opencode auto-loads.
