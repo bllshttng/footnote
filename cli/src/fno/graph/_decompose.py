@@ -142,24 +142,104 @@ def separate_plan_path(base: str, slug: str) -> str:
     return str(p.with_name(f"{stem}.group-{slug}.md"))
 
 
-def scaffold_separate_plan(group: NormalizedGroup, epic_id: str, source_doc: str) -> str:
+# Stub markers the validator refuses to link/ready (x-edf7 US1). An unfilled
+# scaffold carries these; inline-fill (or the fan-out design pass) must replace
+# every one before the child is linked. Kept next to the scaffold that emits
+# them so the writer and the checker share one list.
+STUB_MARKERS: tuple[str, ...] = (
+    "<!-- Seeded from epic waves",
+    "<!-- From the epic's File Ownership Map",
+    "<!-- The checks that prove",
+    "<!-- Why (from epic):",  # the empty-why sentinel (US4)
+)
+
+# The seed the scaffold leaves in `## Why (from epic)` when the epic doc yields
+# no usable intent to transcribe - itself a stub marker, so the validator refuses
+# a child whose why never got filled (US4 fallback).
+_WHY_STUB = (
+    "<!-- Why (from epic): transcribe the epic's intent line + the Locked "
+    "Decisions that bind this child (not a pointer). -->"
+)
+
+_OVERVIEW_RE = re.compile(r"^##[ \t]+Overview[ \t]*$", re.M)
+_LOCKED_RE = re.compile(r"^##[ \t]+Locked Decisions\b.*$", re.M)
+
+
+def _section_body(doc_text: str, heading_re: re.Pattern) -> str:
+    """The body under a `## Heading`, bounded by the next `## `/`# ` heading."""
+    m = heading_re.search(doc_text or "")
+    if not m:
+        return ""
+    body = doc_text[m.end():]
+    nxt = re.search(r"^##?[ \t]+", body, re.M)
+    return (body[: nxt.start()] if nxt else body).strip()
+
+
+def extract_why_digest(doc_text: str) -> tuple[str, Optional[str]]:
+    """Transcribe the epic's why for a child scaffold (US4, Layer 3).
+
+    Returns ``(digest, warning)``. The digest is the epic's intent (the first
+    paragraph of ``## Overview``, else the first prose paragraph) plus its
+    ``## Locked Decisions`` block verbatim - a transcription the builder narrows,
+    NOT a pointer. When the doc has no ``## Locked Decisions`` the digest degrades
+    to the intent line alone and ``warning`` names the gap (Boundaries: never
+    fail the decompose on a why-less epic). An unreadable/empty doc yields
+    ``("", None)`` so the caller seeds the ``_WHY_STUB`` sentinel instead.
+    """
+    text = doc_text or ""
+    intent = _section_body(text, _OVERVIEW_RE)
+    if intent:
+        intent = intent.split("\n\n", 1)[0].strip()
+    else:
+        # No Overview heading: first non-heading, non-frontmatter prose paragraph.
+        body = re.sub(r"(?s)^---\n.*?\n---\n", "", text, count=1)
+        for para in re.split(r"\n\s*\n", body):
+            para = para.strip()
+            if para and not para.startswith("#") and not para.startswith("---"):
+                intent = para
+                break
+    if not intent:
+        return ("", None)
+
+    locked = _section_body(text, _LOCKED_RE)
+    if locked:
+        return (f"{intent}\n\n**Locked Decisions (binding this child):**\n\n{locked}", None)
+    return (
+        intent,
+        "epic doc has no ## Locked Decisions section; why-digest degraded to the "
+        "intent line only - narrow it by hand during inline-fill",
+    )
+
+
+def scaffold_separate_plan(
+    group: NormalizedGroup,
+    epic_id: str,
+    source_doc: str,
+    why_digest: str = "",
+) -> str:
     """A self-contained quick-plan stub for one group child.
 
-    Seeded from the group's wave range + a pointer to the epic's File Ownership
-    Map; the builder fills the concrete change/file/verify detail. Deliberately a
-    STUB, not a full plan - the epic doc remains the source of truth for scope.
+    Seeded from the group's wave range, a transcribed ``## Why (from epic)``
+    (US4), and stub markers for the concrete change/file/verify detail the
+    builder fills inline. Born ``status: stub`` (NOT ``ready``, x-edf7 US1): the
+    validator refuses to link a child still carrying any :data:`STUB_MARKERS`, so
+    a fresh-context worker never dispatches against an unfilled plan. The epic doc
+    remains the design authority; this child carries its own execution plan.
     """
     # Escape so a title containing a double quote can't emit invalid YAML.
     yaml_title = group["title"].replace("\\", "\\\\").replace('"', '\\"')
+    why_block = why_digest.strip() or _WHY_STUB
     return (
         f'---\n'
         f'title: "{yaml_title}"\n'
-        f'status: ready\n'
+        f'status: stub\n'
         f'kind: quick-plan\n'
         f'parent_epic: {epic_id}\n'
         f'source_doc: {source_doc}\n'
         f'---\n\n'
         f'# {group["title"]}\n\n'
+        f'## Why (from epic)\n\n'
+        f'{why_block}\n\n'
         f'## Context\n\n'
         f'Group child of epic `{epic_id}` (see `{source_doc}`). Covers wave(s) '
         f'{group["waves"] or "(unset)"} of the epic\'s Execution Strategy. This is a '

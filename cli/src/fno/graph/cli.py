@@ -651,6 +651,7 @@ def cmd_decompose(
         child_plan_path,
         classify_group_dep,
         extract_contract_versions,
+        extract_why_digest,
         find_orphans,
         is_shipped,
         plan_base,
@@ -916,6 +917,20 @@ def cmd_decompose(
     scaffolded: list[str] = []
     if separate and base_box[0]:
         source_doc = verbatim_base_box[0] or base_box[0]
+        # US4: transcribe the epic's why (intent + Locked Decisions) once, so every
+        # child scaffold is born grounded instead of pointing back at the epic. A
+        # missing Locked-Decisions block degrades to intent-only + a warning; an
+        # unreadable doc yields an empty digest and the scaffold seeds the _WHY_STUB
+        # sentinel (which the validator rejects, so the gap is loud, never silent).
+        why_digest = ""
+        try:
+            why_digest, why_warn = extract_why_digest(
+                Path(base_box[0]).read_text(encoding="utf-8")
+            )
+            if why_warn:
+                typer.echo(f"warning: {why_warn}", err=True)
+        except (OSError, UnicodeDecodeError):
+            pass
         for grp in norm:
             disk_path = Path(separate_plan_path(base_box[0], grp["slug"]))
             if disk_path.exists():
@@ -923,7 +938,9 @@ def cmd_decompose(
             try:
                 disk_path.parent.mkdir(parents=True, exist_ok=True)
                 disk_path.write_text(
-                    scaffold_separate_plan(grp, epic_resolved_id, source_doc),
+                    scaffold_separate_plan(
+                        grp, epic_resolved_id, source_doc, why_digest=why_digest
+                    ),
                     encoding="utf-8",
                 )
                 scaffolded.append(str(disk_path))

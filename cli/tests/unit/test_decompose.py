@@ -730,9 +730,12 @@ def test_set_expected_count_spawn_failure_is_failed_not_skipped(tmp_path, monkey
 # -- G2: hard|contract dependency classification --
 
 from fno.graph._decompose import (  # noqa: E402
+    STUB_MARKERS,
     DecomposeError,
     classify_group_dep,
     extract_contract_versions,
+    extract_why_digest,
+    scaffold_separate_plan,
     validate_groups,
 )
 
@@ -781,6 +784,82 @@ def test_extract_contract_versions_ignores_stray_outside_section():
         "**contract_version: 3**\n"
     )
     assert extract_contract_versions(text) == {2}
+
+
+def _grp(slug="1", title="Group 1: foundation", waves="1-2"):
+    return validate_groups([{"slug": slug, "title": title, "waves": waves}], None)[0]
+
+
+# scaffold_separate_plan shape (US1 stub-proof + US4 why) ----------------------
+
+
+def test_scaffold_born_stub_not_ready():
+    # US1: the scaffold is born `status: stub`, never `ready` - the whole point.
+    text = scaffold_separate_plan(_grp(), "ab-epic0001", "big.md", why_digest="the why")
+    assert "status: stub\n" in text
+    assert "status: ready" not in text
+
+
+def test_scaffold_carries_stub_markers_for_unfilled_sections():
+    text = scaffold_separate_plan(_grp(), "ab-epic0001", "big.md", why_digest="the why")
+    assert any(m in text for m in STUB_MARKERS)
+    assert "## Changes" in text and "## Files to Modify" in text and "## Verification" in text
+
+
+def test_scaffold_seeds_why_section_from_digest():
+    # US4: a real digest is transcribed into ## Why (from epic), not a marker.
+    text = scaffold_separate_plan(_grp(), "ab-epic0001", "big.md", why_digest="ground the tasks")
+    assert "## Why (from epic)" in text
+    assert "ground the tasks" in text
+    assert "<!-- Why (from epic):" not in text  # non-empty why is not a stub
+
+
+def test_scaffold_empty_why_falls_back_to_stub_marker():
+    # US4 fallback: no digest -> the ## Why section carries the empty-why sentinel,
+    # itself a stub marker the validator rejects.
+    text = scaffold_separate_plan(_grp(), "ab-epic0001", "big.md", why_digest="")
+    assert "<!-- Why (from epic):" in text
+
+
+# extract_why_digest (US4) ----------------------------------------------------
+
+
+_EPIC_WITH_LOCKED = (
+    "---\ntitle: E\n---\n\n"
+    "# Epic\n\n"
+    "## Overview\n\n"
+    "The dispatcher stampedes thin stub plans; gate launch on a real plan.\n\n"
+    "More overview prose that should not leak into the intent line.\n\n"
+    "## Architecture\n\nstuff\n\n"
+    "## Locked Decisions (DO NOT revisit)\n\n"
+    "1. Inline-fill is mandatory.\n2. Fan-out is flag-scoped.\n"
+)
+
+
+def test_extract_why_digest_intent_plus_locked():
+    digest, warning = extract_why_digest(_EPIC_WITH_LOCKED)
+    assert warning is None
+    assert "The dispatcher stampedes thin stub plans" in digest
+    assert "More overview prose" not in digest  # only the first paragraph
+    assert "Inline-fill is mandatory" in digest
+    assert "Fan-out is flag-scoped" in digest
+
+
+def test_extract_why_digest_no_locked_degrades_with_warning():
+    doc = "## Overview\n\nJust the intent, no locked block.\n\n## Architecture\n\nx\n"
+    digest, warning = extract_why_digest(doc)
+    assert "Just the intent" in digest
+    assert warning is not None and "Locked Decisions" in warning
+
+
+def test_extract_why_digest_no_overview_uses_first_prose_paragraph():
+    doc = "---\ntitle: E\n---\n\n# Heading\n\nFirst real prose paragraph is the intent.\n"
+    digest, _ = extract_why_digest(doc)
+    assert "First real prose paragraph" in digest
+
+
+def test_extract_why_digest_empty_doc_is_empty():
+    assert extract_why_digest("") == ("", None)
 
 
 def test_extract_contract_versions_empty_doc():
