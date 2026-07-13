@@ -375,6 +375,25 @@ class TestCodexFileBackend:
                     },
                 }
             ),
+            json.dumps(
+                {
+                    "OPENAI_API_KEY": None,
+                    "tokens": json.loads(_codex_blob("legacy"))["tokens"],
+                }
+            ),
+            json.dumps(
+                {
+                    "personal_access_token": None,
+                    "bedrock_api_key": {"api_key": "key", "region": "us-east-1"},
+                }
+            ),
+            json.dumps(
+                {
+                    "personal_access_token": None,
+                    "bedrock_api_key": None,
+                    "OPENAI_API_KEY": "sk-fallback",
+                }
+            ),
         ],
     )
     def test_codex_auth_requires_supported_credential_material(self, blob):

@@ -358,11 +358,11 @@ def _codex_auth_present(blob: str) -> bool:
 
     mode = data.get("auth_mode")
     if mode is None:
-        if "personal_access_token" in data:
+        if data.get("personal_access_token") is not None:
             mode = "personalAccessToken"
-        elif "bedrock_api_key" in data:
+        elif data.get("bedrock_api_key") is not None:
             mode = "bedrockApiKey"
-        elif "OPENAI_API_KEY" in data:
+        elif data.get("OPENAI_API_KEY") is not None:
             mode = "apikey"
         else:
             mode = "chatgpt"
