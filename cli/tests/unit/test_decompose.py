@@ -993,6 +993,14 @@ def test_extract_why_digest_empty_doc_is_empty():
     assert extract_why_digest("") == ("", None)
 
 
+def test_extract_why_digest_overview_with_suffix_and_crlf():
+    # Robustness: `## Overview: <suffix>` matches, and CRLF is normalized.
+    doc = "## Overview: the goal\r\n\r\nThe intent line here.\r\n\r\n## Next\r\nx\r\n"
+    digest, _ = extract_why_digest(doc)
+    assert "The intent line here." in digest
+    assert "\r" not in digest
+
+
 def test_extract_contract_versions_empty_doc():
     assert extract_contract_versions("") == set()
 

@@ -72,8 +72,11 @@ if [[ -f "$PLAN_DIR" ]]; then
     # non-empty `## Why (from epic)` - the transcribed intent grounds its tasks
     # (US4). Only enforced for group children; a normal quick/full plan has no
     # Why section and is not required to grow one.
+    # grep redirected to /dev/null (not -q): under `set -o pipefail`, grep -q can
+    # exit early and SIGPIPE the upstream awk (exit 141), failing the pipeline and
+    # spuriously skipping the check for a real group child.
     if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-            | grep -qE '^[[:space:]]*parent_epic:'; then
+            | grep -E '^[[:space:]]*parent_epic:' >/dev/null; then
         _why_body="$(awk '
             /^##[ \t]+Why \(from epic\)[ \t]*$/{f=1; next}
             f && /^##?[ \t]/{exit}

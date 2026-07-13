@@ -169,7 +169,9 @@ _WHY_STUB = (
     "Decisions that bind this child (not a pointer). -->"
 )
 
-_OVERVIEW_RE = re.compile(r"^##[ \t]+Overview[ \t]*$", re.M)
+# `\b.*$` (not `[ \t]*$`) so `## Overview: Goal` / `## Overview - Intent` match,
+# while `## Overviews` (no word boundary) does not.
+_OVERVIEW_RE = re.compile(r"^##[ \t]+Overview\b.*$", re.M)
 _LOCKED_RE = re.compile(r"^##[ \t]+Locked Decisions\b.*$", re.M)
 
 
@@ -194,7 +196,9 @@ def extract_why_digest(doc_text: str) -> tuple[str, Optional[str]]:
     fail the decompose on a why-less epic). An unreadable/empty doc yields
     ``("", None)`` so the caller seeds the ``_WHY_STUB`` sentinel instead.
     """
-    text = doc_text or ""
+    # Normalize CRLF so paragraph splitting + regex anchors behave on in-memory
+    # strings that never went through universal-newline translation.
+    text = (doc_text or "").replace("\r\n", "\n")
     intent = _section_body(text, _OVERVIEW_RE)
     if intent:
         intent = intent.split("\n\n", 1)[0].strip()
@@ -291,14 +295,19 @@ def group_child_slug(node: dict, base: str) -> Optional[str]:
     if isinstance(gslug, str) and gslug:
         return gslug
     pp = node.get("plan_path") or ""
-    frag_prefix = f"{base}#group-"
     p = Path(base)
     stem = p.stem if p.name.endswith(".md") else p.name
-    sep_prefix = str(p.with_name(f"{stem}.group-"))  # path minus "<slug>.md"
-    if pp.startswith(frag_prefix):
-        return pp[len(frag_prefix):]
-    if pp.startswith(sep_prefix) and pp.endswith(".md"):
-        return pp[len(sep_prefix):-3]
+    # Match on FILENAMES, not full dir paths, so an abs/rel mismatch between base
+    # and a legacy plan_path never hides a group child (which would duplicate it
+    # on re-decompose). The `<stem>.group-<slug>.md` shape is guaranteed.
+    if "#group-" in pp:
+        base_part, slug = pp.split("#group-", 1)
+        if Path(base_part).name == p.name:
+            return slug
+    name = Path(pp).name
+    sep_pre = f"{stem}.group-"
+    if name.startswith(sep_pre) and name.endswith(".md"):
+        return name[len(sep_pre):-3]
     return None
 
 

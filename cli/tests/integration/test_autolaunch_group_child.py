@@ -14,6 +14,7 @@ config.sh when the function is already defined).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -50,7 +51,7 @@ def _run(plan: Path, graph: Path, extra_path: str = "", dry=False):
     if dry:
         inner += ' --dry-run'
     env = {"GRAPH_JSON": str(graph), "PATH": (extra_path + ":" if extra_path else "")
-           + subprocess.os.environ["PATH"]}
+           + os.environ["PATH"]}
     return subprocess.run(["bash", "-c", inner, "_", *args],
                           capture_output=True, text=True, cwd=str(REPO_ROOT), env=env)
 
