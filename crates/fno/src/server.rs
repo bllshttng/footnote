@@ -1243,11 +1243,20 @@ impl Core {
                 if n.is_empty() {
                     return Err("target squad name cannot be blank".into());
                 }
+                let cwds: Vec<String> = self
+                    .session
+                    .squads
+                    .iter()
+                    .map(|s| s.canonical_cwd().to_string())
+                    .collect();
+                let derived = squad::display_names(&cwds);
                 let mut hits = self
                     .session
                     .squads
                     .iter()
-                    .filter(|s| s.name.as_deref() == Some(n));
+                    .zip(derived)
+                    .filter(|(s, derived)| s.name.as_deref().unwrap_or(derived) == n)
+                    .map(|(s, _)| s);
                 match (hits.next(), hits.next()) {
                     (Some(s), None) => Ok(Some(s.id)),
                     (Some(_), Some(_)) => Err(format!("ambiguous squad name: {n}")),
@@ -6089,6 +6098,8 @@ mod tests {
         let mut core = empty_core();
         core.session
             .add_squad(1, vec!["/a".into()], Some("review".into()), leaf_tab(5, 1));
+        core.session
+            .add_squad(2, vec!["/repos/default".into()], None, leaf_tab(6, 2));
         assert_eq!(
             core.resolve_placement_target(&PaneTarget::SquadName(" review ".into()), None)
                 .unwrap(),
@@ -6098,6 +6109,12 @@ mod tests {
         assert!(core
             .resolve_placement_target(&PaneTarget::SquadName("ghost".into()), None)
             .is_err());
+        assert_eq!(
+            core.resolve_placement_target(&PaneTarget::SquadName("default".into()), None)
+                .unwrap(),
+            Some(2),
+            "derived display names are targetable"
+        );
         assert_eq!(
             core.resolve_placement_target(&PaneTarget::SquadId(1), None)
                 .unwrap(),
