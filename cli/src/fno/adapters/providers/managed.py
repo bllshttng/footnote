@@ -44,6 +44,7 @@ from fno.adapters.providers.model import ProviderRecord
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _SECURITY_TIMEOUT_S = 5  # ponytail: same 5s ceiling usage.py uses for `security`
 _CODEX_LOGIN_TIMEOUT_S = 5
+_CODEX_AUTH_ENV_VARS = ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY")
 
 
 class ManagedStoreError(RuntimeError):
@@ -274,6 +275,8 @@ class _CodexLoginResult:
 def _codex_login_ok() -> _CodexLoginResult:
     """Ask Codex to recognize the materialized auth schema in its exact home."""
     env = os.environ.copy()
+    for name in _CODEX_AUTH_ENV_VARS:
+        env.pop(name, None)
     env["CODEX_HOME"] = str(_codex_slot_auth_path().parent)
     try:
         result = subprocess.run(

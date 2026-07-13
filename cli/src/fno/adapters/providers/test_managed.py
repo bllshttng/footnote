@@ -429,6 +429,8 @@ class TestCodexFileBackend:
     def test_codex_login_status_uses_slot_home_and_exit_code(self, tmp_path, monkeypatch):
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+        for name in managed._CODEX_AUTH_ENV_VARS:
+            monkeypatch.setenv(name, "ambient-credential")
         calls = []
 
         def _run(argv, **kwargs):
@@ -441,6 +443,7 @@ class TestCodexFileBackend:
         assert result.ok is True and result.reason is None
         assert calls[0][0] == ["codex", "login", "status"]
         assert calls[0][1]["env"]["CODEX_HOME"] == str(auth.parent)
+        assert all(name not in calls[0][1]["env"] for name in managed._CODEX_AUTH_ENV_VARS)
         assert calls[0][1]["timeout"] == 5
 
         monkeypatch.setattr(
