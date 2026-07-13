@@ -333,6 +333,21 @@ fabricate a tier). Per-task tiers ride in task blocks as `model_tier:` lines
 (the do-phase reads them the same way it reads `executor:` task blocks). No tier
 and no pin present -> write nothing.
 
+## Blueprint Provenance Stamp (x-b6e4)
+
+After auto-intake mints `$NODE_ID` and the plan's Execution Strategy is
+finalized, stamp the lifecycle provenance so the graph records which
+session/harness planned the node (idempotent, append-only, best-effort):
+
+```bash
+[[ -n "$NODE_ID" ]] && fno backlog session add "$NODE_ID" --phase blueprint || true
+```
+
+Harness + session id default from the ambient identity. A missing-identity
+warning is non-fatal; the stamp never blocks intake. When `/blueprint`
+decomposes a scope:epic into child nodes, this stamps the parent node only (the
+session planned the epic; child do-entries stamp themselves at execution).
+
 ## PRODUCT.md Prereq Check (when executor: impeccable is locked)
 
 When `/blueprint` generates a plan that locks `executor: impeccable` at the plan

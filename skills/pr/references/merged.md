@@ -265,6 +265,23 @@ no node, that is fine (reconcile closes nothing, exit 0, `NODE_IDS` empty) -
 continue. A non-zero exit is a genuine failure (e.g. corrupt graph.json): keep
 going so the inbox prose still lands, but flag it in the report.
 
+### Step 2b: Stamp ship provenance (post-merge takeover, x-b6e4)
+
+A post-merge session that runs this ritual is a distinct ship-phase contributor
+from the one that opened the PR. Append a `ship` lifecycle entry for each node
+this PR maps to, so the takeover session is attributed alongside the original
+(append-only; both `ship` entries remain, AC4-EDGE):
+
+```bash
+for N in $NODE_IDS; do
+  fno backlog session add "$N" --phase ship || true
+done
+```
+
+Harness + session id default from the ambient identity; idempotent (this exact
+session's `ship` entry is added once) and best-effort - a missing-identity
+warning or empty `NODE_IDS` skips silently and never blocks the ritual.
+
 ## Step 3: Mechanical triage harvest
 
 ```bash

@@ -66,6 +66,28 @@ The default mode `flat` takes a **plan path**. The `waves` mode (and its one-rel
 
   and stop with a non-zero result (run nothing, dispatch nothing). This is the locked router contract: an unknown non-empty first token that is not a real plan path never silently falls through.
 
+## Step 1.5: Stamp do provenance (execution entry, x-b6e4)
+
+`/do` is the point where execution actually begins - the truthful `do` boundary,
+unlike `target init` which fires before design/planning. Resolve exactly one
+authoritative node and stamp it: prefer the live target manifest's
+`graph_node_id` (`.fno/target-state.md`), else the resolved plan's scalar
+`claims:` frontmatter. Stamp once, here, before dispatching any wave/task:
+
+```bash
+# xargs trims whitespace and strips any surrounding quotes from the scalar.
+NODE_ID="$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | xargs)"
+if [[ -z "$NODE_ID" || "$NODE_ID" == null ]]; then
+  NODE_ID="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^claims:/{sub(/^claims:[[:space:]]*/,""); print; exit}' "$PLAN_ARG" 2>/dev/null | xargs)"
+fi
+[[ -n "$NODE_ID" && "$NODE_ID" != null ]] && fno backlog session add "$NODE_ID" --phase do || true
+```
+
+Idempotent, append-only, best-effort: harness + session id default from the
+ambient identity; a missing-identity or conflicting-node warning is non-fatal and
+never blocks execution. No resolvable node (standalone `/do` on an unclaimed
+plan) -> skip silently.
+
 ## Step 2: flat mode (lightweight single-session, default)
 
 ### 2a. Wave-declaration notice (flat on a wave plan)
