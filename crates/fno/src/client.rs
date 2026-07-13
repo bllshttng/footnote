@@ -4083,14 +4083,38 @@ async fn peek_keys(
                     }
                 }
             }
+            b'l' | b'\r' | b'\n' => {
+                // Attach from peek (US4): resolve the peeked row through the same
+                // agent_hit -> apply_hit path a selector Enter / sideline click
+                // uses (FocusPane for a pane-hosted row, AttachAgent for a
+                // watch-only row with an attach_id). A Notice refusal (a paneless
+                // row with no attach target here) keeps BOTH overlays open
+                // (x-260a locked 3); a real hit closes peek AND the selector
+                // underneath. Right-arrow is already folded to `l`.
+                let hit = match view.display_rows().into_iter().nth(cursor) {
+                    Some(DisplayRow::Agent(a)) => Some(agent_hit(&a)),
+                    _ => None,
+                };
+                match hit {
+                    Some(ChromeHit::Notice(msg)) => view.set_notice(msg.to_string()),
+                    Some(hit) => {
+                        view.clear_peek();
+                        view.selector = None;
+                        apply_hit(view, hit, sock_w).await?;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
             0x1b | b'q' => {
                 // Close peek only; the selector stays open with its cursor synced
                 // to the last-peeked row (AC2-UI).
                 view.clear_peek();
                 view.selector = Some(cursor);
             }
-            // l/Enter attach (US4) lands here in a follow-up commit; everything
-            // else is swallowed - never a pane leak (leader-layer invariant).
+            // Everything else is swallowed - never a pane leak (leader-layer
+            // invariant). h (left-arrow) has no peek action.
             _ => {}
         }
     }
@@ -7276,6 +7300,52 @@ mod tests {
         let mut buf2: Vec<u8> = Vec::new();
         peek_keys(&mut v, b"1", &mut buf2).await.unwrap();
         assert!(buf2.is_empty(), "no PaneAnswer for a non-answerable row");
+    }
+
+    // x-c376 AC4-HP: Enter on a pane-hosted peeked row focuses its pane and
+    // closes BOTH overlays; right-arrow (folds to l) on a watch-only row attaches
+    // it; AC2-EDGE: a row with no pane and no attach target refuses with a notice
+    // and keeps both overlays open.
+    #[tokio::test]
+    async fn peek_attaches_and_refuses_a_paneless_row() {
+        // Pane-hosted "worker" (pane_id 10): Enter -> FocusPane, both close.
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let worker = agent_row_at(&v, |a| a.pane_id == Some(10));
+        v.selector = Some(worker);
+        v.open_peek(worker);
+        peek_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(v.peek.is_none(), "attach closes peek");
+        assert_eq!(v.selector, None, "attach closes the selector too");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::FocusPane(p)) => assert_eq!(p, 10),
+            other => panic!("expected FocusPane, got {other:?}"),
+        }
+        // Watch-only "bg-claude" (attach_id): right-arrow folds to l -> AttachAgent.
+        let mut v = unified_rows_view();
+        let mut buf2: Vec<u8> = Vec::new();
+        let bg = agent_row_at(&v, |a| a.name == "bg-claude");
+        v.selector = Some(bg);
+        v.open_peek(bg);
+        peek_keys(&mut v, b"\x1b[C", &mut buf2).await.unwrap();
+        assert!(v.peek.is_none() && v.selector.is_none());
+        let mut cur = std::io::Cursor::new(buf2);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { id, .. }) => assert_eq!(id, "c19cd2c3"),
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+        // Orphan "bg-other" (no pane, no attach_id): Enter refuses, overlays stay.
+        let mut v = unified_rows_view();
+        let mut buf3: Vec<u8> = Vec::new();
+        let orphan = agent_row_at(&v, |a| a.name == "bg-other");
+        v.selector = Some(orphan);
+        v.open_peek(orphan);
+        peek_keys(&mut v, b"\r", &mut buf3).await.unwrap();
+        assert!(v.peek.is_some(), "a refusal keeps peek open");
+        assert_eq!(v.selector, Some(orphan), "and the selector open");
+        assert!(v.notice.is_some(), "with a notice");
+        assert!(buf3.is_empty(), "no command sent on a refusal");
     }
 
     #[tokio::test]
