@@ -703,8 +703,9 @@ def _switch_locked(
             event.update(
                 slot_changed=True,
                 verification=verification,
-                verification_reason=verification_reason,
             )
+            if verification_reason:
+                event["reason"] = verification_reason
         emit_fn("account_switched", **event)
     return SwitchResult(
         active=target.id,

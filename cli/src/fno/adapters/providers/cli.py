@@ -624,7 +624,24 @@ def use_provider(
         except managed.ManagedStoreError as exc:
             typer.echo(f"switch failed: {exc}", err=True)
             raise typer.Exit(1)
-        typer.echo(f"Materialized managed account '{result.active}' into the slot (verified).")
+        if record.cli == "codex":
+            if not result.slot_changed:
+                typer.echo(
+                    f"Managed Codex account '{result.active}' is already materialized "
+                    f"(structural; {result.reason})."
+                )
+            elif result.verification == "codex-recognized":
+                typer.echo(
+                    f"Materialized managed Codex account '{result.active}' into the slot; "
+                    "Codex recognized the local auth."
+                )
+            else:
+                typer.echo(
+                    f"Materialized managed Codex account '{result.active}' into the slot "
+                    f"(structural fallback: {result.reason})."
+                )
+        else:
+            typer.echo(f"Materialized managed account '{result.active}' into the slot (verified).")
 
     from fno.adapters.providers.model import ProvidersConfig
     new_config = ProvidersConfig(records=config.records, active=provider_id)

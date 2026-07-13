@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 
 from fno.adapters.providers import managed
 from fno.adapters.providers.cli import cli as providers_app
-from fno.adapters.providers.model import ProviderRecord
+from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
 
 runner = CliRunner()
 
@@ -307,6 +307,20 @@ class TestLooksLikeClaude:
 # ---------------------------------------------------------------------------
 
 
+def _register_codex_pair(tmp_path, monkeypatch):
+    auth = tmp_path / ".codex" / "auth.json"
+    monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
+    monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
+    a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+    managed._write_slot_blob("codex", _blob("A0"))
+    managed.snapshot_current(a, root=tmp_path)
+    managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
+    managed._write_slot_blob("codex", _blob("B0"))
+    managed.snapshot_current(b, root=tmp_path)
+    managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+    return a, b
+
+
 class TestCodexFileBackend:
     def test_codex_login_status_uses_slot_home_and_exit_code(self, tmp_path, monkeypatch):
         auth = tmp_path / ".codex" / "auth.json"
@@ -361,16 +375,7 @@ class TestCodexFileBackend:
         assert stat.S_IMODE(auth.stat().st_mode) == 0o600
 
     def test_codex_switch_captures_and_materializes(self, tmp_path, monkeypatch):
-        auth = tmp_path / ".codex" / "auth.json"
-        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
-        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
-        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
-        managed._write_slot_blob("codex", _blob("A0"))
-        managed.snapshot_current(a, root=tmp_path)
-        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
-        managed._write_slot_blob("codex", _blob("B0"))
-        managed.snapshot_current(b, root=tmp_path)
-        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
         # switch to A: captures B's current slot, materializes A0, verifies.
         monkeypatch.setattr(
             managed,
@@ -385,16 +390,7 @@ class TestCodexFileBackend:
         assert result.reason is None
 
     def test_codex_switch_discloses_structural_fallback(self, tmp_path, monkeypatch):
-        auth = tmp_path / ".codex" / "auth.json"
-        monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
-        monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
-        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
-        managed._write_slot_blob("codex", _blob("A0"))
-        managed.snapshot_current(a, root=tmp_path)
-        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
-        managed._write_slot_blob("codex", _blob("B0"))
-        managed.snapshot_current(b, root=tmp_path)
-        managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-b")
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
         monkeypatch.setattr(
             managed,
             "_codex_login_ok",
@@ -404,11 +400,112 @@ class TestCodexFileBackend:
             ),
         )
 
-        result = managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        events = []
+        result = managed.switch(
+            a,
+            by_id={"cx-a": a, "cx-b": b},
+            root=tmp_path,
+            emit_fn=lambda kind, **data: events.append((kind, data)),
+        )
 
         assert result.slot_changed is True
         assert result.verification == "structural"
         assert result.reason == "codex-login-status-missing"
+        assert events[0][1]["reason"] == "codex-login-status-missing"
+
+    def test_codex_login_rejection_rolls_back_without_event(self, tmp_path, monkeypatch):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=False),
+        )
+        events = []
+
+        with pytest.raises(managed.ManagedStoreError, match="not recognized"):
+            managed.switch(
+                a,
+                by_id={"cx-a": a, "cx-b": b},
+                root=tmp_path,
+                emit_fn=lambda kind, **data: events.append((kind, data)),
+            )
+
+        assert managed._read_slot_blob("codex") == _blob("B0")
+        assert managed.active_slot_id("codex", tmp_path) == "cx-b"
+        assert events == []
+
+    def test_codex_hard_probe_error_rolls_back(self, tmp_path, monkeypatch):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+
+        def _raise():
+            raise managed.ManagedStoreError("permission denied")
+
+        monkeypatch.setattr(managed, "_codex_login_ok", _raise)
+        with pytest.raises(managed.ManagedStoreError, match="permission denied"):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert managed._read_slot_blob("codex") == _blob("B0")
+        assert managed.active_slot_id("codex", tmp_path) == "cx-b"
+
+    def test_codex_probe_interrupt_rolls_back_then_reraises(self, tmp_path, monkeypatch):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+
+        def _interrupt():
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(managed, "_codex_login_ok", _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+        assert managed._read_slot_blob("codex") == _blob("B0")
+        assert managed.active_slot_id("codex", tmp_path) == "cx-b"
+
+    def test_codex_rejection_reports_rollback_failure(self, tmp_path, monkeypatch):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=False),
+        )
+        original_write = managed._write_slot_blob
+        calls = {"count": 0}
+
+        def _write(cli, blob, config_dir=None):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise managed.ManagedStoreError("rollback denied")
+            return original_write(cli, blob, config_dir)
+
+        monkeypatch.setattr(managed, "_write_slot_blob", _write)
+        with pytest.raises(managed.ManagedStoreError, match="indeterminate"):
+            managed.switch(a, by_id={"cx-a": a, "cx-b": b}, root=tmp_path)
+
+    def test_codex_switch_event_records_verification_strength(self, tmp_path, monkeypatch):
+        a, b = _register_codex_pair(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            managed,
+            "_codex_login_ok",
+            lambda: managed._CodexLoginResult(ok=True),
+        )
+        events = []
+
+        managed.switch(
+            a,
+            by_id={"cx-a": a, "cx-b": b},
+            root=tmp_path,
+            emit_fn=lambda kind, **data: events.append((kind, data)),
+        )
+
+        assert events == [
+            (
+                "account_switched",
+                {
+                    "provider": "cx-a",
+                    "account_id": "cx-a",
+                    "outgoing": "cx-b",
+                    "slot_changed": True,
+                    "verification": "codex-recognized",
+                },
+            )
+        ]
 
     def test_codex_already_active_is_probe_free(self, tmp_path, monkeypatch):
         auth = tmp_path / ".codex" / "auth.json"
@@ -597,6 +694,19 @@ def _cli_slot(monkeypatch):
 
 
 class TestCliSurface:
+    def _invoke_codex_use(self, monkeypatch, result):
+        config = ProvidersConfig(records=[_rec("cx-a", cli="codex")], active="cx-a")
+        monkeypatch.setattr(
+            "fno.adapters.providers.cli.load_providers",
+            lambda repo_root=None: config,
+        )
+        monkeypatch.setattr(
+            "fno.adapters.providers.cli.save_providers",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(managed, "switch", lambda *args, **kwargs: result)
+        return runner.invoke(providers_app, ["use", "cx-a"], catch_exceptions=False)
+
     def test_register_then_list_marks_active(self, tmp_path, monkeypatch):
         slot = _cli_slot(monkeypatch)
         env = {"HOME": str(tmp_path), "PWD": str(tmp_path)}
@@ -629,7 +739,41 @@ class TestCliSurface:
         r = runner.invoke(providers_app, ["use", "work-a"], env=env, catch_exceptions=False)
         assert r.exit_code == 0, r.output
         assert slot["claude"] == _blob("A0")
-        assert "Materialized managed account 'work-a'" in r.output
+        assert "Materialized managed account 'work-a' into the slot (verified)." in r.output
+
+    def test_use_codex_reports_native_verification(self, monkeypatch):
+        result = managed.SwitchResult(
+            active="cx-a",
+            slot_changed=True,
+            verification="codex-recognized",
+        )
+        response = self._invoke_codex_use(monkeypatch, result)
+        assert response.exit_code == 0
+        assert "Codex recognized" in response.output
+
+    def test_use_codex_reports_structural_fallback(self, monkeypatch):
+        result = managed.SwitchResult(
+            active="cx-a",
+            slot_changed=True,
+            verification="structural",
+            reason="codex-login-status-timeout",
+        )
+        response = self._invoke_codex_use(monkeypatch, result)
+        assert response.exit_code == 0
+        assert "structural fallback" in response.output
+        assert "codex-login-status-timeout" in response.output
+
+    def test_use_codex_reports_already_active_noop(self, monkeypatch):
+        result = managed.SwitchResult(
+            active="cx-a",
+            slot_changed=False,
+            verification="structural",
+            reason="slot-already-active",
+        )
+        response = self._invoke_codex_use(monkeypatch, result)
+        assert response.exit_code == 0
+        assert "already materialized" in response.output
+        assert "slot-already-active" in response.output
 
     def test_use_managed_live_pin_defers(self, tmp_path, monkeypatch):
         slot = _cli_slot(monkeypatch)
