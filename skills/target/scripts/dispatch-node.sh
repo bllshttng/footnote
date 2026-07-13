@@ -143,20 +143,21 @@ fi
 n_launched=0; n_parked=0; n_already=0; n_skipped=0; n_done=0; n_failed=0; n_capped=0
 
 # x-b0b4: resolve the build-lane outcome ONCE for the receipt route= token
-# (config + key are per-run, not per-node). `fno route ls -J` is the single
-# source of the effective table; the build row's target + key status decide
-# whether a --role build spawn actually routes or fails safe to primary. A stale
-# `fno` without the `route` verb (or any read/parse failure) leaves the default
-# `primary` - the honest conservative claim (routing not confirmed). An explicit
-# --route always wins over this per-node below.
+# (config + key are per-run, not per-node). The AUTHORITATIVE predicate is
+# `fno route env build`: it runs the same resolve_route('build') the worker's
+# bg_create uses, so it accounts for EVERY reason the lane fails safe to primary
+# - not just target+key, but model_routing.enabled=false AND a keyed but
+# non-anthropic provider (a build lane `route set` permits with a warning). A
+# table-only heuristic (target present + key found) would print
+# route=<provider,model> for one of those primary-model launches, hiding the
+# exact fallback this token exists to expose (codex P2). env exits 0 only when a
+# real route resolves; `route ls -J` then supplies the provider,model string. A
+# stale `fno` without the verb (or any failure) leaves `primary` - the honest
+# conservative claim (routing not confirmed). Explicit --route wins per-node.
 BUILD_ROUTE_VAL="primary"
-_route_json="$(fno route ls -J 2>/dev/null || true)"
-if [[ -n "$_route_json" ]]; then
-  _brow="$(printf '%s' "$_route_json" | jq -r '.[] | select(.role=="build") | [.target, .key] | @tsv' 2>/dev/null || true)"
-  IFS=$'\t' read -r _btarget _bkey <<< "$_brow"
-  if [[ -n "$_btarget" && "$_btarget" != "unconfigured" && "$_bkey" == found* ]]; then
-    BUILD_ROUTE_VAL="$_btarget"
-  fi
+if fno route env build >/dev/null 2>&1; then
+  _btarget="$(fno route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .target' 2>/dev/null || true)"
+  [[ -n "$_btarget" && "$_btarget" != "unconfigured" ]] && BUILD_ROUTE_VAL="$_btarget"
 fi
 
 for id in "${NODES[@]}"; do
