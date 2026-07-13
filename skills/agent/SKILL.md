@@ -57,7 +57,7 @@ focused core:
 Advanced lifecycle intents (`drive`/`grid`/`attach`/`resume`/`reconcile`/`rm`/
 `ack`/`promote`) map to their corresponding raw `fno agents` verbs; the skill
 resolves their arguments and runs them rather than reimplementing them. The
-capability matrix at `docs/provider-command-matrix.md` remains the per-provider
+capability matrix at `docs/harness-command-matrix.md` remains the per-provider
 truth. For the full surface map - which verbs are human-facing vs
 machine-internal vs exploratory channel infra - see
 [references/fno-agents-surface.md](references/fno-agents-surface.md).
@@ -124,7 +124,7 @@ see below):
   Default resolves from config -> `claude`. "on codex" / "with gemini" map here.
   The set is not hardcoded here: normalize matches any bareword in its
   `VALID_PROVIDERS` (which mirrors the Rust `KNOWN_PROVIDERS` source of truth),
-  so a new harness needs no grammar edit. `docs/provider-command-matrix.md` is
+  so a new harness needs no grammar edit. `docs/harness-command-matrix.md` is
   the per-provider capability truth. Quotes protect a trailing word that is
   ambiguously a provider. (megawalk drivers like `hermes`/`openclaw` are a
   different axis, not `spawn` providers.)

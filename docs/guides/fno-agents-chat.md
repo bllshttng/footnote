@@ -74,4 +74,4 @@ Reach for `chat` only when you genuinely want a live exchange - the free address
 - `config.agents.a2a.turn_ceiling` (default 6) - the hard bound on relay turns. A reached ceiling ends the relay with a visible "loop ceiling reached" note.
 - `config.agents.a2a.auto` (default off-on-malformed) - when false, `chat` is a single mirrored hop; when true, the bounded autonomous relay runs. The first autonomous use confirms once (see [live-session-comms.md](../architecture/live-session-comms.md)).
 
-See [docs/provider-command-matrix.md](../provider-command-matrix.md) for the per-provider support row and [the agent skill](../../skills/agent/SKILL.md) for the full verb router.
+See [docs/harness-command-matrix.md](../harness-command-matrix.md) for the per-provider support row and [the agent skill](../../skills/agent/SKILL.md) for the full verb router.
