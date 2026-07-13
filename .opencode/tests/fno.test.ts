@@ -1,14 +1,28 @@
 import { test, expect } from "bun:test"
-import {
+import fnoPlugin, {
   inferCategory,
   parseFrontmatter,
   toOpencodeAgent,
   extractAssistantText,
   resolveModel,
+  collectModels,
   loadFootnoteAgents,
   createTaskTool,
   isActivated,
 } from "../plugins/fno.ts"
+
+// Run plugin init with FNO_OPENCODE forced, restoring the prior value.
+async function initPlugin(input: any, activated: boolean) {
+  const prev = process.env.FNO_OPENCODE
+  if (activated) process.env.FNO_OPENCODE = "1"
+  else delete process.env.FNO_OPENCODE
+  try {
+    return await (fnoPlugin as any).server(input)
+  } finally {
+    if (prev === undefined) delete process.env.FNO_OPENCODE
+    else process.env.FNO_OPENCODE = prev
+  }
+}
 
 test("isActivated is opt-in (off by default)", () => {
   expect(isActivated({})).toBe(false)
@@ -189,4 +203,110 @@ test("task times out and aborts (AC6-FR)", async () => {
   const out = await t.execute({ prompt: "x", category: "do" } as any, ctx)
   expect(out).toContain("timed out")
   expect(aborted).toBe(true)
+})
+
+// ---- plugin init (deadlock regression, x-c36b) ---------------------------
+
+// The bug: init awaited provider.list(), which reenters the still-bootstrapping
+// server and never settles -> permanent hang. These call plugin init directly;
+// the module import cannot catch the loader-path hang, so US1 also has a LIVE
+// opencode-run check (see the plan). Here we pin the mechanism.
+
+test("plugin init does not await provider.list — never-settling stub resolves promptly (AC1-FR)", async () => {
+  const input = { client: { provider: { list: () => new Promise(() => {}) } }, directory: "/nonexistent" }
+  // If init awaited the never-settling promise this line would hang to the
+  // test-runner timeout; resolving at all is the regression assertion.
+  const hooks = await initPlugin(input, true)
+  expect(hooks.tool.task).toBeDefined()
+  expect(hooks.tool.task_result).toBeDefined()
+})
+
+test("plugin init contains a rejecting provider.list — no unhandled rejection (AC1-ERR)", async () => {
+  let unhandled = false
+  const onUnhandled = () => {
+    unhandled = true
+  }
+  process.on("unhandledRejection", onUnhandled)
+  try {
+    const input = {
+      client: { provider: { list: () => Promise.reject(new Error("boom")) } },
+      directory: "/nonexistent",
+    }
+    const hooks = await initPlugin(input, true)
+    expect(hooks.tool.task).toBeDefined()
+    await new Promise((r) => setTimeout(r, 10)) // let the rejected populate settle
+    expect(unhandled).toBe(false)
+    // empty set -> default-model routing
+    expect(resolveModel("do", new Set())).toBeUndefined()
+  } finally {
+    process.off("unhandledRejection", onUnhandled)
+  }
+})
+
+test("plugin is inert when FNO_OPENCODE unset — returns {} and never fetches (AC1-EDGE)", async () => {
+  let called = false
+  const input = {
+    client: { provider: { list: () => { called = true; return Promise.resolve({ data: [] }) } } },
+    directory: "/nonexistent",
+  }
+  const hooks = await initPlugin(input, false)
+  expect(hooks).toEqual({})
+  expect(called).toBe(false)
+})
+
+test("collectModels folds a provider.list response (data.all shape) into the set", () => {
+  // The SDK 200 body nests providers under data.all (with default/connected
+  // siblings) — NOT directly under data. Iterating data itself throws.
+  const into = new Set<string>()
+  collectModels(
+    {
+      data: {
+        all: [
+          { id: "anthropic", models: { "claude-haiku-4-5": {}, "claude-opus-4-6": {} } },
+          { id: "zai", models: { "glm-5": {} } },
+        ],
+      },
+    },
+    into,
+  )
+  expect([...into].sort()).toEqual([
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-opus-4-6",
+    "zai/glm-5",
+  ])
+  expect(collectModels(undefined, new Set()).size).toBe(0) // missing shape is safe
+  expect(collectModels({ data: { all: [{ id: "p" }] } }, new Set()).size).toBe(0) // no models key
+  expect(collectModels({ data: {} }, new Set()).size).toBe(0) // no all key
+  // malformed entries (null provider / missing id) are skipped, not thrown on
+  const guarded = collectModels(
+    { data: { all: [null as any, { models: { m: {} } } as any, { id: "ok", models: { m: {} } }] } },
+    new Set(),
+  )
+  expect([...guarded]).toEqual(["ok/m"])
+})
+
+test("plugin init tolerates a malformed client (provider missing) — no sync crash (AC1-ERR)", async () => {
+  // `.provider.list()` throws a synchronous TypeError; init must not crash
+  // bootstrap (the former try/catch guarded this; the fire-and-forget refactor
+  // must keep it).
+  const hooks = await initPlugin({ client: {}, directory: "/nonexistent" }, true)
+  expect(hooks.tool.task).toBeDefined()
+})
+
+test("plugin init issues the populate fetch exactly once when activated", async () => {
+  let calls = 0
+  const input = {
+    client: {
+      provider: {
+        list: async () => {
+          calls++
+          return { data: { all: [{ id: "anthropic", models: { "claude-haiku-4-5": {} } }] } }
+        },
+      },
+    },
+    directory: "/nonexistent",
+  }
+  await initPlugin(input, true)
+  await new Promise((r) => setTimeout(r, 10)) // let the populate settle
+  expect(calls).toBe(1) // single populate per init, no re-fetch
 })
