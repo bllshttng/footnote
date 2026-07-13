@@ -191,7 +191,7 @@ def resolve_dispatch(
     # Autonomous triggers never resolve pane (it stalls waiting for a human) -
     # Invariant, fail CLOSED: only an explicit 'attended' trigger opts out, so a
     # malformed/unknown trigger is treated as autonomous and the guard still fires.
-    if chosen_substrate == "pane" and trigger.strip().lower() != "attended":
+    if chosen_substrate == "pane" and (trigger or "").strip().lower() != "attended":
         raise DispatchResolveError(
             "autonomous triggers never resolve substrate 'pane' "
             "(a pane stalls waiting for a human); use 'bg' or 'headless'"
