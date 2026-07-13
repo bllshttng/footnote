@@ -1618,6 +1618,9 @@ def cmd_reconcile(
             "recovered": result.recovered,
             "skipped": result.skipped,
             "errors": result.errors,
+            # Always present (empty when nothing healed) so "ran, nothing to heal"
+            # is distinguishable from "healed w1" in the JSON (x-ec59).
+            "backfilled": result.backfilled,
         }
         sys.stdout.write(json.dumps(payload, sort_keys=False) + "\n")
         sys.stdout.flush()
@@ -1650,6 +1653,9 @@ def render_reconcile_human(result, *, out) -> None:
         out.write(
             f"{entry['name']} ({entry['provider']}): error ({entry.get('reason', 'unspecified')})\n"
         )
+    for entry in getattr(result, "backfilled", []):
+        sid = entry.get("harness_session_id") or "?"
+        out.write(f"{entry['name']} ({entry['provider']}): harness_session_id backfilled ({sid})\n")
 
     out.write(
         f"{result.scanned} entries scanned: "
@@ -1659,6 +1665,8 @@ def render_reconcile_human(result, *, out) -> None:
     )
     if result.errors:
         out.write(f", {len(result.errors)} errors")
+    if getattr(result, "backfilled", []):
+        out.write(f", {len(result.backfilled)} backfilled")
     out.write("\n")
 
 
