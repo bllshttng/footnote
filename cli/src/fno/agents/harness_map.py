@@ -164,34 +164,34 @@ def resolve_dispatch(
         decision.append("harness=builtin(claude)")
     caps = capabilities(chosen_harness)  # loud error on unknown (AC1-ERR)
 
-    # 2. substrate
+    # 2. substrate. Validate the RESOLVED value once, whatever rung supplied it
+    # (explicit flag, config, or per-harness default) - the config rung is a
+    # trust boundary too, so a `config.dispatch.substrate` typo must fail loud
+    # here, not resolve silently to a launcher.
     if substrate:
         chosen_substrate = substrate.strip()
         decision.append(f"substrate=explicit({chosen_substrate})")
-        if chosen_substrate not in _VALID_SUBSTRATES:
-            raise DispatchResolveError(
-                f"unknown substrate {chosen_substrate!r}; "
-                f"valid: {', '.join(_VALID_SUBSTRATES)}"
-            )
-        if chosen_substrate == "bg" and not caps["bg"]:
-            raise DispatchResolveError(
-                f"substrate 'bg' is unsupported on harness {chosen_harness!r} "
-                f"(bg is claude-only); use 'headless'"
-            )
     elif cfg.get("substrate"):
         chosen_substrate = str(cfg["substrate"]).strip()
         decision.append(f"substrate=config({chosen_substrate})")
-        if chosen_substrate == "bg" and not caps["bg"]:
-            raise DispatchResolveError(
-                f"config.dispatch.substrate 'bg' is unsupported on harness "
-                f"{chosen_harness!r} (bg is claude-only); use 'headless'"
-            )
     else:
         chosen_substrate = substrate_default(chosen_harness)
         decision.append(f"substrate=default({chosen_substrate})")
 
-    # Autonomous triggers never resolve pane (it stalls) - Invariant.
-    if chosen_substrate == "pane" and trigger.strip().lower() == "autonomous":
+    if chosen_substrate not in _VALID_SUBSTRATES:
+        raise DispatchResolveError(
+            f"unknown substrate {chosen_substrate!r}; "
+            f"valid: {', '.join(_VALID_SUBSTRATES)}"
+        )
+    if chosen_substrate == "bg" and not caps["bg"]:
+        raise DispatchResolveError(
+            f"substrate 'bg' is unsupported on harness {chosen_harness!r} "
+            f"(bg is claude-only); use 'headless'"
+        )
+    # Autonomous triggers never resolve pane (it stalls waiting for a human) -
+    # Invariant, fail CLOSED: only an explicit 'attended' trigger opts out, so a
+    # malformed/unknown trigger is treated as autonomous and the guard still fires.
+    if chosen_substrate == "pane" and trigger.strip().lower() != "attended":
         raise DispatchResolveError(
             "autonomous triggers never resolve substrate 'pane' "
             "(a pane stalls waiting for a human); use 'bg' or 'headless'"

@@ -78,6 +78,20 @@ def test_bad_template_rejected_when_substituting():
         _resolve(node_id="x-1", command="/target no-merge")
 
 
+def test_config_substrate_typo_fails_loud():
+    """A config.dispatch.substrate typo is a trust boundary too - it must raise,
+    not resolve silently to a launcher."""
+    with pytest.raises(DispatchResolveError, match="unknown substrate"):
+        resolve_dispatch(harness="claude", dispatch_cfg={"substrate": "panel"})
+
+
+def test_pane_guard_fails_closed_on_unknown_trigger():
+    """The autonomous-pane guard fails CLOSED: any non-'attended' trigger
+    (typo, 'auto') still blocks a stalling pane."""
+    with pytest.raises(DispatchResolveError, match="pane"):
+        _resolve(harness="claude", substrate="pane", trigger="autonamous")
+
+
 def test_config_overlay_precedence():
     """config.dispatch overlays the built-in but loses to an explicit flag."""
     cfg = {"harness": "codex", "substrate": "", "command": "/think {id}"}
