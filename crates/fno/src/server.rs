@@ -38,8 +38,8 @@ use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
-    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, ServerMsg, SquadMeta, TabMeta,
-    WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, PanePlacement, ServerMsg,
+    SquadMeta, TabMeta, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session};
@@ -345,6 +345,7 @@ enum CoreMsg {
         cols: Option<u16>,
         rows: Option<u16>,
         claim: bool,
+        placement: PanePlacement,
         reply: ControlReply,
     },
     PaneSend {
@@ -1243,6 +1244,7 @@ impl Core {
         rows: u16,
         cols: u16,
         claim: bool,
+        _placement: PanePlacement,
     ) -> Result<u64, String> {
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
         if claim {
@@ -2172,7 +2174,7 @@ impl Core {
         }
         self.node_registry_row(&card.id)
             .and_then(|(attach, _)| attach)
-            .map(Command::AttachAgent)
+            .map(Command::attach_agent)
     }
 
     /// The situated notice for an in-flight card `inflight_route` could not
@@ -3222,7 +3224,7 @@ impl Core {
                 }
                 Flow::Continue
             }
-            Command::AttachAgent(id) => {
+            Command::AttachAgent { id, placement: _ } => {
                 // Validate the jobId shape (8 hex digits) BEFORE it reaches the
                 // argv - defense in depth even though spawn_pane_cmd never
                 // builds a shell string (the id can only ever be `claude
@@ -4094,11 +4096,12 @@ impl Core {
                 cols,
                 rows,
                 claim,
+                placement,
                 reply,
             } => {
                 let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
-                let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim) {
+                let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim, placement) {
                     Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
                     Err(e) => ServerMsg::Err {
                         code: err_code::SPAWN_FAILED,
@@ -4859,6 +4862,7 @@ async fn handle_control(
             cols,
             rows,
             claim,
+            placement,
         } => {
             // Resolve the squad key off the core loop, exactly like Attach.
             let squad_key = resolve_squad_key(&resolver, &cwd).await;
@@ -4870,6 +4874,7 @@ async fn handle_control(
                     cols,
                     rows,
                     claim,
+                    placement,
                     reply: reply_tx,
                 })
                 .await
@@ -6308,7 +6313,7 @@ mod tests {
             "deadbeef",
         ] {
             let mut core = empty_core();
-            let flow = core.command(1, Command::AttachAgent(bad.into()));
+            let flow = core.command(1, Command::attach_agent(bad));
             assert!(matches!(flow, Flow::Continue));
             assert!(
                 core.panes.is_empty(),
@@ -6456,7 +6461,7 @@ mod tests {
         core.attached.insert("deadbee1".into(), p2);
         let panes_before = core.panes.len();
 
-        core.command(client_id, Command::AttachAgent("deadbee1".into()));
+        core.command(client_id, Command::attach_agent("deadbee1"));
         assert_eq!(
             core.panes.len(),
             panes_before,
@@ -6465,7 +6470,7 @@ mod tests {
         // The view jumped to the mapped pane's tab (p2 is tab id 2).
         assert_eq!(core.client_view(client_id), Some((1, 2)), "view follows p2");
 
-        core.command(client_id, Command::AttachAgent("deadbee1".into()));
+        core.command(client_id, Command::attach_agent("deadbee1"));
         assert_eq!(
             core.panes.len(),
             panes_before,
@@ -6735,11 +6740,11 @@ mod tests {
         core.agents = vec![bg_row("tgt-x-aaa", "/w", Some("deadbee1"))];
         assert_eq!(
             core.inflight_route("x-aaa"),
-            Some(Command::AttachAgent("deadbee1".into()))
+            Some(Command::attach_agent("deadbee1"))
         );
         assert_eq!(
             core.inflight_route("aaa-slug"),
-            Some(Command::AttachAgent("deadbee1".into())),
+            Some(Command::attach_agent("deadbee1")),
             "slug names the same card"
         );
         assert_eq!(core.inflight_route("x-rdy"), None, "ready is not routed");

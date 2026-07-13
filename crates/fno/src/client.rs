@@ -1075,7 +1075,7 @@ impl View {
             CardState::Blocked => ChromeHit::Notice("card blocked - unmet deps".into()),
             CardState::InFlight => match (c.pane_id, &c.attach_id) {
                 (Some(pid), _) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
-                (None, Some(id)) => ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())]),
+                (None, Some(id)) => ChromeHit::Cmds(vec![Command::attach_agent(id)]),
                 (None, None) => ChromeHit::Notice(
                     c.where_hint
                         .clone()
@@ -2330,7 +2330,7 @@ fn agent_hit(a: &AgentRow) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
         None => match &a.attach_id {
-            Some(id) => ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())]),
+            Some(id) => ChromeHit::Cmds(vec![Command::attach_agent(id)]),
             None => ChromeHit::Notice("agent has no pane here".into()),
         },
     }
@@ -4652,12 +4652,9 @@ async fn answer_keys(
                         .await
                         .map_err(|e| format!("command send failed: {e}"))?;
                 } else if let Some(id) = &row.attach_id {
-                    write_msg(
-                        sock_w,
-                        &ClientMsg::Command(Command::AttachAgent(id.clone())),
-                    )
-                    .await
-                    .map_err(|e| format!("command send failed: {e}"))?;
+                    write_msg(sock_w, &ClientMsg::Command(Command::attach_agent(id)))
+                        .await
+                        .map_err(|e| format!("command send failed: {e}"))?;
                 } else {
                     view.set_notice("no pane here - focus it manually".into());
                 }
@@ -4911,7 +4908,7 @@ mod tests {
             ..hosted.clone()
         };
         assert!(
-            matches!(agent_hit(&bg), ChromeHit::Cmds(c) if c == vec![Command::AttachAgent("job1".into())])
+            matches!(agent_hit(&bg), ChromeHit::Cmds(c) if c == vec![Command::attach_agent("job1")])
         );
         let orphan = AgentRow {
             pane_id: None,
@@ -5383,7 +5380,7 @@ mod tests {
         assert_eq!(cmds(view.chrome_hit(4, 5)), vec![Command::FocusPane(11)]);
         assert_eq!(
             cmds(view.chrome_hit(5, 5)),
-            vec![Command::AttachAgent("deadbee2".into())]
+            vec![Command::attach_agent("deadbee2")]
         );
         match view.chrome_hit(6, 5) {
             Some(ChromeHit::Notice(msg)) => assert_eq!(msg, "in flight - worked by t:abc"),
@@ -5673,7 +5670,7 @@ mod tests {
         assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::FocusPane(10)]);
         assert_eq!(
             cmds(view.chrome_hit(6, 4)),
-            vec![Command::AttachAgent("c19cd2c3".into())]
+            vec![Command::attach_agent("c19cd2c3")]
         );
         assert!(matches!(view.chrome_hit(7, 4), Some(ChromeHit::Notice(_))));
         // The "~ elsewhere" header row is inert.
@@ -6812,7 +6809,10 @@ mod tests {
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
         match crate::proto::read_msg_sync(&mut cur).unwrap() {
-            ClientMsg::Command(Command::AttachAgent(id)) => assert_eq!(id, "c19cd2c3"),
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert_eq!(placement, crate::proto::PanePlacement::default());
+            }
             other => panic!("expected AttachAgent, got {other:?}"),
         }
         assert_eq!(v.selector, None);
