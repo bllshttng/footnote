@@ -578,23 +578,23 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# x-3e38 pane placement: --target/--split on the outer pane-run transport
+# x-3e38 pane placement: squad/split on the outer pane-run transport
 # ---------------------------------------------------------------------------
 
 
-def test_placement_flags_ride_outer_pane_run_before_separator(
+def test_placement_directives_ride_outer_pane_run_before_separator(
     tmp_path: Path, monkeypatch
 ) -> None:
     # AC1-HP/AC2-HP: placement rides the OUTER pane-run argv, before the `--`
     # fencing the provider argv; build_pane_argv stays placement-blind.
-    _result, runner = _spawn(monkeypatch, tmp_path, target="review", split="left")
+    _result, runner = _spawn(monkeypatch, tmp_path, squad="review", split="left")
     run_call = runner.calls[0]
     sep = run_call.index("--")
     outer = run_call[:sep]
-    assert outer[outer.index("--target") + 1] == "review"
-    assert outer[outer.index("--split") + 1] == "left"
+    assert outer[outer.index("squad") + 1] == "review"
+    assert outer[outer.index("split") + 1] == "left"
     tail = run_call[sep + 1 :]
-    assert "--target" not in tail and "--split" not in tail
+    assert "squad" not in tail and "split" not in tail
     assert "claude" in tail  # provider argv unchanged
 
 
@@ -604,7 +604,8 @@ def test_placement_omitted_leaves_pane_run_argv_unchanged(
     # AC4-EDGE: no placement -> exactly the current one-new-tab argv.
     _result, runner = _spawn(monkeypatch, tmp_path)
     run_call = runner.calls[0]
-    assert "--target" not in run_call and "--split" not in run_call
+    sep = run_call.index("--")
+    assert "squad" not in run_call[:sep] and "split" not in run_call[:sep]
 
 
 def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
@@ -617,10 +618,10 @@ def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatc
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", "--substrate", "bg", "--split", "left"],
+        ["spawn", "peer", "--provider", "claude", "--substrate", "bg", "-x", "left"],
     )
     assert res.exit_code == 2, res.output
-    assert "--target/--split apply only to --substrate pane" in res.output
+    assert "--squad/-s and --split/-x apply only to --substrate pane" in res.output
 
 
 def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
@@ -632,13 +633,13 @@ def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", "--split", "diagonal"],
+        ["spawn", "peer", "--provider", "claude", "-x", "diagonal"],
     )
     assert res.exit_code == 2, res.output
     assert "left, right, up, or down" in res.output
 
 
-def test_cmd_spawn_rejects_blank_target_before_dispatch(tmp_path: Path, monkeypatch) -> None:
+def test_cmd_spawn_rejects_blank_squad_before_dispatch(tmp_path: Path, monkeypatch) -> None:
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
@@ -646,14 +647,23 @@ def test_cmd_spawn_rejects_blank_target_before_dispatch(tmp_path: Path, monkeypa
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", "--target", ""],
+        ["spawn", "peer", "--provider", "claude", "-s", ""],
     )
     assert res.exit_code == 2, res.output
-    assert "--target needs a nonblank squad name" in res.output
+    assert "--squad/-s needs a nonblank squad name" in res.output
 
 
-def test_cmd_spawn_pane_threads_placement_to_dispatch(tmp_path: Path, monkeypatch) -> None:
-    # AC1-HP/AC2-HP: a pane spawn hands --target/--split to dispatch_spawn_pane.
+@pytest.mark.parametrize(
+    "placement_args",
+    [
+        ["--squad", "review", "--split", "right"],
+        ["-s", "review", "-x", "right"],
+    ],
+)
+def test_cmd_spawn_pane_threads_placement_to_dispatch(
+    tmp_path: Path, monkeypatch, placement_args: list[str]
+) -> None:
+    # AC1-HP/AC2-HP: long and mobile aliases reach dispatch_spawn_pane.
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
@@ -677,10 +687,10 @@ def test_cmd_spawn_pane_threads_placement_to_dispatch(tmp_path: Path, monkeypatc
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", "--target", "review", "--split", "right"],
+        ["spawn", "peer", "--provider", "claude", *placement_args],
     )
     assert res.exit_code == 0, res.output
-    assert captured["target"] == "review"
+    assert captured["squad"] == "review"
     assert captured["split"] == "right"
 
 

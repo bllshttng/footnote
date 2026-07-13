@@ -1255,14 +1255,14 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         .and_then(|a| a.to_str())
         .ok_or_else(|| "pane needs a verb: ls|read|run|send|wait|kill|claim|release".to_string())?;
 
-    // `run` is special: leading flags, then the command argv verbatim (its own
-    // flags are NOT ours to parse), optionally after a `--` separator.
+    // `run` is special: leading options/directives, then the command argv
+    // verbatim (its own flags are NOT ours to parse), optionally after `--`.
     if verb == "run" {
         let mut session = None;
         let mut json = false;
         let mut cwd = None;
         let mut claim = false;
-        let mut target = None;
+        let mut squad = None;
         let mut split = None;
         let mut i = 1;
         while i < args.len() {
@@ -1278,15 +1278,15 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 "--claim" => claim = true,
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
-                "--target" => {
-                    let name = flag_value(args, &mut i, "--target")?;
+                "--squad" | "-s" | "squad" => {
+                    let name = flag_value(args, &mut i, tok)?;
                     if name.trim().is_empty() {
-                        return Err("--target needs a nonblank squad name".into());
+                        return Err("squad/-s needs a nonblank squad name".into());
                     }
-                    target = Some(name);
+                    squad = Some(name);
                 }
-                "--split" => {
-                    let value = flag_value(args, &mut i, "--split")?;
+                "--split" | "-x" | "split" => {
+                    let value = flag_value(args, &mut i, tok)?;
                     split = Some(match value.as_str() {
                         "left" => Dir::Left,
                         "right" => Dir::Right,
@@ -1294,7 +1294,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                         "down" => Dir::Down,
                         _ => {
                             return Err(format!(
-                                "--split must be left, right, up, or down (got {value:?})"
+                                "split/-x must be left, right, up, or down (got {value:?})"
                             ))
                         }
                     });
@@ -1323,7 +1323,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 argv,
                 claim,
                 placement: PanePlacement {
-                    target: target
+                    target: squad
                         .map(PaneTarget::SquadName)
                         .unwrap_or(PaneTarget::CurrentRoute),
                     split,
@@ -2507,7 +2507,7 @@ mod tests {
     #[test]
     fn mux_pane_parse_run_accepts_typed_placement_before_argv() {
         let p = parse_pane_args(&os(&[
-            "run", "--target", "review", "--split", "left", "--", "claude", "--print",
+            "run", "squad", "review", "split", "left", "claude", "--print",
         ]))
         .unwrap();
         assert!(matches!(
@@ -2521,8 +2521,35 @@ mod tests {
                 ..
             } if name == "review" && argv == &["claude", "--print"]
         ));
-        assert!(parse_pane_args(&os(&["run", "--target", " ", "echo"])).is_err());
-        assert!(parse_pane_args(&os(&["run", "--split", "diagonal", "echo"])).is_err());
+        let aliases =
+            parse_pane_args(&os(&["run", "-s", "review", "-x", "right", "--", "echo"])).unwrap();
+        assert!(matches!(
+            aliases.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement {
+                    target: PaneTarget::SquadName(ref name),
+                    split: Some(crate::tree::Dir::Right),
+                },
+                ..
+            } if name == "review"
+        ));
+        let long = parse_pane_args(&os(&[
+            "run", "--squad", "review", "--split", "up", "--", "echo",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            long.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement {
+                    target: PaneTarget::SquadName(ref name),
+                    split: Some(crate::tree::Dir::Up),
+                },
+                ..
+            } if name == "review"
+        ));
+        assert!(parse_pane_args(&os(&["run", "squad", " ", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&os(&["run", "split", "diagonal", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&os(&["run", "--target", "review", "--", "echo"])).is_err());
     }
 
     #[test]

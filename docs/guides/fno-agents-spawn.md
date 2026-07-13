@@ -31,17 +31,16 @@ Plain `spawn` for codex/gemini creates a PTY-backed hosted worker under the `fno
 
 ## Place a pane in a mux workspace
 
-Pane-hosted agents can target an existing mux workspace and tile beside its focused pane:
+Pane-hosted agents can join an existing mux workspace and tile beside its focused pane:
 
 ```bash
 fno agents spawn reviewer "review the current diff" \
-  --provider codex --substrate pane \
-  --target reviews --split right
+  -p codex -s reviews -x right
 ```
 
-`--target` is an exact workspace name. `--split` accepts `left`, `right`, `up`, or `down`; omit it to create a new tab in the target workspace. Omitting both flags preserves the cwd-routed new-tab behavior. Placement does not change the worker's cwd, and the flags are rejected for `bg` and `headless`, which have no mux geometry.
+`-s` / `--squad` selects a workspace by the same visible name shown in the mux sideline. `-x` / `--split` accepts `left`, `right`, `up`, or `down`; omit it to create a new tab in that squad. Omitting both options preserves the cwd-routed new-tab behavior. Placement does not change the worker's cwd, and the options are rejected for `bg` and `headless`, which have no mux geometry.
 
-The lower-level equivalent is `fno mux pane run --target reviews --split right -- <command>`. A missing target or a split that would make a pane too small fails without leaving a child process or layout mutation behind.
+The lower-level equivalent avoids option punctuation entirely: `fno mux pane run squad reviews split right echo ready`. It also accepts `-s` / `--squad` and `-x` / `--split`. A missing squad or a split that would make a pane too small fails without leaving a child process or layout mutation behind.
 
 ## Reasoning effort (`--effort`)
 

@@ -1241,7 +1241,7 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err("target squad name cannot be blank".into());
+                    return Err("squad name cannot be blank".into());
                 }
                 let cwds: Vec<String> = self
                     .session
@@ -1298,7 +1298,7 @@ impl Core {
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err("target squad vanished".into());
+            return Err("selected squad vanished".into());
         };
         if split.is_none() || self.session.squads[si].tabs.is_empty() {
             let tid = self.session.mint_tab_id();
@@ -3401,7 +3401,8 @@ impl Core {
                     }
                 };
                 // Place through the shared helper (Locked 1): a new tab, or a
-                // directional split beside the target's active-tab focus. A
+                // directional split beside the selected squad's active-tab
+                // focus. A
                 // refusal reaps the pane and leaves the row watch-only (AC7);
                 // the mapping is recorded ONLY after placement succeeds.
                 let (sid, tid) =
