@@ -42,6 +42,66 @@ else
 fi
 
 # -------------------------------------------------------------------
+# Check 1b: Group-child stub markers + why-digest (x-edf7 US1/US4)
+# -------------------------------------------------------------------
+# A `blueprint decompose` child is scaffolded with placeholder stub markers and
+# an empty-why sentinel; it is born `status: stub` and MUST be inline-filled (or
+# designed by a fan-out /think pass) before its plan_path is linked - a linked
+# child derives `ready` and dispatchers launch fresh-context workers against it.
+# This check refuses to pass a plan still carrying any stub marker, so the link
+# step (skill body) and this validator agree on "filled". Keep STUB_MARKERS in
+# sync with cli/src/fno/graph/_decompose.py.
+echo ""
+echo "--- Stub Markers (decompose child) ---"
+if [[ -f "$PLAN_DIR" ]]; then
+    STUB_MARKERS=(
+        "<!-- Seeded from epic waves"
+        "<!-- From the epic's File Ownership Map"
+        "<!-- The checks that prove"
+        "<!-- Why (from epic):"
+    )
+    _found_stub=0
+    for _m in "${STUB_MARKERS[@]}"; do
+        if grep -Fq "$_m" "$PLAN_DIR"; then
+            error "unfilled stub marker '${_m} ...' in $(basename "$PLAN_DIR"); inline-fill the scaffold before linking plan_path"
+            _found_stub=1
+        fi
+    done
+
+    # A born scaffold carries `status: stub`, which is OUTSIDE the canonical
+    # PlanStatus vocabulary - `fno plan reconcile-status` would later archive a
+    # linked-but-still-stub plan off the board. So refuse to pass a plan still
+    # frontmatter-stamped `status: stub`: the fill step must flip it to `ready`.
+    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+            | grep -E '^[[:space:]]*status:[[:space:]]*["'"'"']?stub' >/dev/null; then
+        error "$(basename "$PLAN_DIR") is still 'status: stub'; set 'status: ready' after filling (a non-canonical status is archived by reconcile-status)"
+        _found_stub=1
+    fi
+
+    # A group-child plan (frontmatter carries `parent_epic:`) must also carry a
+    # non-empty `## Why (from epic)` - the transcribed intent grounds its tasks
+    # (US4). Only enforced for group children; a normal quick/full plan has no
+    # Why section and is not required to grow one.
+    # grep redirected to /dev/null (not -q): under `set -o pipefail`, grep -q can
+    # exit early and SIGPIPE the upstream awk (exit 141), failing the pipeline and
+    # spuriously skipping the check for a real group child.
+    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+            | grep -E '^[[:space:]]*parent_epic:' >/dev/null; then
+        _why_body="$(awk '
+            /^##[ \t]+Why \(from epic\)[ \t]*$/{f=1; next}
+            f && /^##?[ \t]/{exit}
+            f{print}
+        ' "$PLAN_DIR" | grep -vE '^[[:space:]]*(<!--|$)' || true)"
+        if [[ -z "$_why_body" ]]; then
+            error "group-child plan $(basename "$PLAN_DIR") has an empty '## Why (from epic)'; transcribe the epic's intent + binding Locked Decisions"
+        else
+            ok "## Why (from epic) is non-empty"
+        fi
+    fi
+    [[ "$_found_stub" -eq 0 ]] && ok "no unfilled stub markers"
+fi
+
+# -------------------------------------------------------------------
 # Check 2: Execution strategy
 # -------------------------------------------------------------------
 echo ""

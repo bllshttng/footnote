@@ -1045,7 +1045,8 @@ is known):
    cat > /tmp/groups-$$.json <<'JSON'
    [
      {"slug": "1", "title": "Group 1: backend API", "waves": "1-3", "blocked_by_groups": []},
-     {"slug": "2", "title": "Group 2: frontend", "waves": "4-6", "blocked_by_groups": ["1"], "dep": "contract"}
+     {"slug": "2", "title": "Group 2: frontend", "waves": "4-6", "blocked_by_groups": ["1"], "dep": "contract"},
+     {"slug": "3", "title": "Group 3: novel index engine", "waves": "7", "blocked_by_groups": ["1"], "needs_think": true}
    ]
    JSON
    fno backlog decompose "$EPIC_ID" --max-prs "$N" --groups "@/tmp/groups-$$.json"
@@ -1062,23 +1063,56 @@ is known):
    shipped a PR, the verb refuses (exit 2) unless you pass `--force`; unshipped
    dropped groups are left in place and reported as a warning.
 
+   **Set `needs_think: true` on a group that owns genuine unknowns** - a
+   feasibility spike, unresolved epic Open Questions, or a novel subsystem. That
+   child gets a dispatched `/think` + `/blueprint` design pass instead of the
+   inline-fill below (the decompose invocation is the consent for that spawn).
+   Leave it off (the default) for a group whose scope is already clear from the
+   epic; that child takes the inline-fill path.
+
+7. **Inline-fill every unflagged child BEFORE linking (MANDATORY).** Decompose
+   births each child UNLINKED (`status: stub`, no `plan_path` -> derives `idea`),
+   so nothing dispatches against an empty scaffold. You hold the epic in context
+   right now - the warmest window there will ever be - so rewrite each unflagged
+   child's `<stem>.group-<slug>.md` scaffold into a real quick-plan, then link it:
+
+   - Fill `## Why (from epic)` (the seeded intent + Locked Decisions, narrowed to
+     what binds THIS child - transcribed, never a pointer back at the epic).
+   - Replace every stub marker: concrete `## Changes`, `## Files to Modify` (from
+     the epic's File Ownership Map), `## Verification` (the checks that prove this
+     slice), and a `kill_criteria`.
+   - Flip the frontmatter `status: stub` -> `status: ready` (`stub` is outside the
+     canonical PlanStatus vocabulary, so a linked-but-still-stub plan is later
+     archived by `fno plan reconcile-status`; the validator refuses to link one).
+   - Validate, THEN link (link LAST, after the content is real):
+     ```bash
+     bash "${SKILL_DIR}/scripts/validate-plan.sh" <child-plan> \
+       && fno backlog update <child-id> --plan-path <child-plan>
+     ```
+   The validator REFUSES a plan still carrying any stub marker or an empty
+   `## Why (from epic)`, so a half-filled child can never be linked. Linking flips
+   the child `ready` - that is the design-completion signal (there is no
+   `status: ready` to hand-write). A flagged (`needs_think`) child skips this: its
+   fan-out design pass produces the real doc and links it.
+
 **Slug stability.** Use stable slugs across re-decomposition so idempotency
 holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
 (`auth-flow`) are fine as long as they do not change between runs.
 
 **Packaging: `separate` only.** Every child gets its own self-contained
 quick-plan file - `plan == PR == node` for children too. Decompose scaffolds a
-stub per child (Context / Changes / Files to Modify / Verification, seeded from
-the group's waves + a pointer to the epic's File Ownership Map) and points each
-child's `plan_path` at its own `<stem>.group-<slug>.md`. This is what a
-fresh-context bg `/target` builder reads best, and there is no shared-doc
-fragment to clobber. It is the default (and only) packaging - `--plans` need not
-be passed; `--plans fragment` is a removed value that errors.
+stub per child (`## Why (from epic)` + Context / Changes / Files to Modify /
+Verification, born `status: stub`) at `<stem>.group-<slug>.md`, and births the
+child WITHOUT a `plan_path` - identity is the durable `group_slug` field, so the
+unlinked child is still found on re-decompose. Linking the filled plan (inline
+step 2, or the fan-out pass) is what makes it `ready`. It is the default (and
+only) packaging - `--plans` need not be passed; `--plans fragment` errors.
 
 Scaffolding is idempotent on the slug: re-running upserts the same children, an
 existing scaffolded file is never clobbered (a builder's edits survive a
-re-decompose), and a child still on the legacy `<doc>#group-<slug>` fragment
-form (from a pre-removal decompose) is repointed to its separate file in place.
+re-decompose), a designed child's `plan_path` is preserved (never unset), and a
+child still on the legacy `<doc>#group-<slug>` fragment form (from a pre-removal
+decompose) is repointed to its separate file in place.
 
 ## Ready-gated auto-launch (opt-in, default OFF) — Phase 2 / US6
 

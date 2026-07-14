@@ -65,6 +65,45 @@ def _node(**over) -> dict:
     return base
 
 
+def test_assemble_seed_chain_blueprint_appends_chain(monkeypatch):
+    # x-edf7 US3: a fan-out seed must instruct the worker to continue into
+    # /blueprint + link, else the flagged child stays designless/idea.
+    _resolved(monkeypatch, ok=True)
+    seed = st.assemble_seed(_node(), chain_blueprint=True)
+    assert "/blueprint" in seed.prompt
+    assert "FAILED pass" in seed.prompt
+    assert "--plan-path" in seed.prompt
+
+
+def test_assemble_seed_default_has_no_blueprint_chain(monkeypatch):
+    _resolved(monkeypatch, ok=True)
+    seed = st.assemble_seed(_node())  # default: born-with-why /think only
+    assert "/blueprint" not in seed.prompt
+
+
+def test_assemble_seed_why_digest_present_even_when_transcript_unresolved(monkeypatch):
+    # P2: with the origin transcript pruned, the seed must still carry the epic
+    # digest so the fan-out worker isn't designing from the title alone.
+    _resolved(monkeypatch, ok=False)
+    seed = st.assemble_seed(_node(), why_digest="Gate launch on a real plan.\n\nLD1: inline-fill.")
+    assert "GROUNDING" in seed.prompt
+    assert "Gate launch on a real plan." in seed.prompt
+    assert "LD1: inline-fill." in seed.prompt
+
+
+def test_assemble_seed_project_root_scopes_output_path(monkeypatch, tmp_path):
+    # P1: the /think output path resolves from the passed project_root, so a
+    # cross-repo child writes into its own repo (a settings.local plansDirectory
+    # pin makes the resolution deterministic).
+    _resolved(monkeypatch, ok=True)
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.local.json").write_text(
+        '{"plansDirectory": "child-plans"}'
+    )
+    seed = st.assemble_seed(_node(), project_root=tmp_path)
+    assert str(tmp_path / "child-plans") in seed.output_path
+
+
 @pytest.fixture
 def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     """Patch the spawn seam + forward stamp; return (spawn_calls, stamp_calls)."""

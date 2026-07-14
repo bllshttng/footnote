@@ -414,7 +414,13 @@ def classify_presence(
 # ---------------------------------------------------------------------------
 
 
-def assemble_seed(node: dict) -> ThinkSeed:
+def assemble_seed(
+    node: dict,
+    *,
+    chain_blueprint: bool = False,
+    why_digest: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> ThinkSeed:
     """Build a /think seed carrying the *resolved* origin pointer.
 
     Resolves the node's x-30f6 provenance pointers to a real transcript path
@@ -423,6 +429,19 @@ def assemble_seed(node: dict) -> ThinkSeed:
     it degrades to the stored ``(harness, session_id, cwd)`` triple with
     ``resolved=False`` (AC1-EDGE) - it NEVER paraphrases the why (the exact bug
     being fixed).
+
+    ``chain_blueprint`` (x-edf7 US3): a decompose fan-out worker must not stop at
+    /think - it chains into /blueprint on the produced doc, which claims the child
+    and links its plan_path (the event that flips it `ready`). A bare /think seed
+    would leave the child designless/`idea`, so the prompt spells the chain out.
+
+    ``why_digest`` (x-edf7 US4): the transcribed epic intent + Locked Decisions,
+    embedded verbatim so a fan-out worker stays grounded even when the origin
+    transcript is pruned/unresolved (the pointer alone would leave it designing
+    from the title). ``project_root`` (x-edf7 P1): resolve the /think OUTPUT path
+    from the child's OWN repo, not the ambient decompose process - a cross-repo
+    (`project`/`cwd`-routed) child must write its doc in its own project, where
+    the worker runs and /blueprint mutates it. Both default to the prior behavior.
     """
     node_id = node.get("id") or "?"
     slug = node.get("slug") or ""
@@ -456,7 +475,8 @@ def assemble_seed(node: dict) -> ThinkSeed:
     # Give the headless worker a durable, known home for its output so the
     # /think doc is written where /blueprint mutates it in place (plans-dir,
     # date-slug named); best-effort - an unresolvable path just omits the line.
-    output_path = _think_output_path(node_id, slug)
+    # project_root scopes it to the CHILD's repo for a cross-repo fan-out.
+    output_path = _think_output_path(node_id, slug, project_root)
 
     prompt = (
         f"/think {node_id}\n\n"
@@ -465,6 +485,12 @@ def assemble_seed(node: dict) -> ThinkSeed:
         f"the transcript holds the discovery / failure-mode / tradeoff that made "
         f"this worth filing.\n"
         + "\n".join(why_lines)
+        + (
+            f"\n\nGROUNDING (transcribed from the epic - use it even if the "
+            f"transcript above is unresolved):\n{why_digest.strip()}\n"
+            if why_digest and why_digest.strip()
+            else ""
+        )
         + f"\n\nNode: {node_id} {('(' + slug + ')') if slug else ''}\n"
         f"Title: {title}\n"
         + (f"\nDetails:\n{details}\n" if details else "")
@@ -472,6 +498,18 @@ def assemble_seed(node: dict) -> ThinkSeed:
             f"\nWRITE YOUR /think OUTPUT to this exact path so node {node_id} can "
             f"point at it:\n  {output_path}\n"
             if output_path
+            else ""
+        )
+        + (
+            f"\nTHEN, in this SAME session, CONTINUE into /blueprint - do not stop "
+            f"at /think. Run:\n"
+            f"  /blueprint {output_path or '<your /think doc>'}\n"
+            f"which turns the design into an execution plan and links it to node "
+            f"{node_id} (that link is what flips this child `ready` for dispatch). "
+            f"A design pass that ends without a linked plan_path is a FAILED pass; "
+            f"if /blueprint did not link it, run "
+            f"`fno backlog update {node_id} --plan-path <doc>` yourself.\n"
+            if chain_blueprint
             else ""
         )
     )
@@ -489,16 +527,17 @@ def assemble_seed(node: dict) -> ThinkSeed:
     )
 
 
-def _plans_output_dir() -> Path:
+def _plans_output_dir(project_root: Optional[Path] = None) -> Path:
     """The plans dir the /think doc lands in (x-ff83 W1); shared with W2's sweep.
 
     Delegates to :func:`fno.paths.plans_content_dir` (settings.local
-    ``plansDirectory`` -> ``config.plans_dir``). Raises on an unresolvable
-    root so the caller can fall back to briefs.
+    ``plansDirectory`` -> ``config.plans_dir``). ``project_root`` scopes the
+    lookup to a specific repo (a cross-repo fan-out child), else the ambient
+    repo. Raises on an unresolvable root so the caller can fall back to briefs.
     """
     from fno.paths import plans_content_dir
 
-    return plans_content_dir()
+    return plans_content_dir(project_root)
 
 
 def _frontmatter_claims_node(path: Path, node_id: str) -> bool:
@@ -550,7 +589,9 @@ def _find_node_doc(pdir: Path, node_id: str) -> Optional[Path]:
     return by_name
 
 
-def _think_output_path(node_id: str, slug: str = "") -> str:
+def _think_output_path(
+    node_id: str, slug: str = "", project_root: Optional[Path] = None
+) -> str:
     """Resolve where the headless /think worker writes its design doc (x-8af8).
 
     A newly minted filename ends ``-<node_id>.md`` so a roadmap base keyed on
@@ -566,7 +607,7 @@ def _think_output_path(node_id: str, slug: str = "") -> str:
     from datetime import datetime, timezone
 
     try:
-        pdir = _plans_output_dir()
+        pdir = _plans_output_dir(project_root)
         # 1-2: reuse this node's existing doc (frontmatter claim, else a prior
         #      node-id-suffixed mint) rather than minting a duplicate.
         existing = _find_node_doc(pdir, node_id)
@@ -1079,6 +1120,8 @@ def maybe_spawn_think(
     run_state: Optional[RunState] = None,
     invocation_suffix: Optional[str] = None,
     quiet: bool = False,
+    chain_blueprint: bool = False,
+    why_digest: Optional[str] = None,
 ) -> ThinkSpawnResult:
     """Evaluate + execute the context /think spawn for a node at a trigger moment.
 
@@ -1151,7 +1194,10 @@ def maybe_spawn_think(
 
     # 5. Presence + seed.
     presence = classify_presence(project_root=project_root, env=environ)
-    seed = assemble_seed(node)
+    seed = assemble_seed(
+        node, chain_blueprint=chain_blueprint, why_digest=why_digest,
+        project_root=project_root,
+    )
 
     # 5b. Relevance filter (A2, Locked Decision 3): a LIFECYCLE trigger fires only
     #     when the origin pointer resolves - a high-volume work-start/retro moment

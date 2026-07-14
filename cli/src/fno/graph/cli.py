@@ -651,6 +651,7 @@ def cmd_decompose(
         child_plan_path,
         classify_group_dep,
         extract_contract_versions,
+        extract_why_digest,
         find_orphans,
         is_shipped,
         plan_base,
@@ -796,17 +797,19 @@ def cmd_decompose(
         for grp in norm:
             frag_path = child_plan_path(base, grp["slug"])
             sep_path = separate_plan_path(base, grp["slug"])
-            cpath = sep_path
-            # Tolerant lookup: a child is the same group whether its plan_path is
-            # currently the legacy fragment or the separate-file form, so
-            # re-decomposing a pre-removal epic upserts in place (and repoints the
-            # child to its separate file) instead of duplicating (idempotent on slug).
+            # Tolerant lookup: identity is the durable group_slug (x-edf7 US2), so
+            # a child born unlinked (no plan_path yet) is still found; the legacy
+            # plan_path match (fragment or separate form) upserts a pre-field child
+            # in place instead of duplicating (idempotent on slug across migration).
             existing = next(
                 (
                     e
                     for e in graph_entries
                     if e.get("parent") == epic_resolved_id
-                    and e.get("plan_path") in (frag_path, sep_path)
+                    and (
+                        e.get("group_slug") == grp["slug"]
+                        or e.get("plan_path") in (frag_path, sep_path)
+                    )
                 ),
                 None,
             )
@@ -814,9 +817,14 @@ def cmd_decompose(
             if existing is not None:
                 action = "updated"
                 node = existing
-                # Repoint to the requested packaging (no-op when already in that
-                # mode) so the child stays addressable under its current form.
-                node["plan_path"] = cpath
+                node["group_slug"] = grp["slug"]  # backfill identity on legacy children
+                # Preserve a designed child's plan_path; NEVER link an unlinked
+                # child here (linking is the inline-fill / fan-out step's job, US2).
+                # The one exception is the documented legacy-fragment repoint:
+                # a child still on `<doc>#group-<slug>` moves to its separate file
+                # (staying linked/ready), never unset.
+                if node.get("plan_path") == frag_path:
+                    node["plan_path"] = sep_path
                 # Re-running with an explicit route reprojects an existing child
                 # (e.g. a first pass inherited the epic's repo, a later pass adds
                 # per-group routing). No route leaves the child's repo untouched.
@@ -826,6 +834,10 @@ def cmd_decompose(
                     node["cwd"] = route_cwd
             else:
                 action = "created"
+                # Born UNLINKED (plan_path=None -> derives `idea`): linking the
+                # filled plan is the design-completion signal that flips the child
+                # `ready` (x-edf7 US2, Locked Decision 4). group_slug is the durable
+                # identity that survives the unlinked window.
                 node = _build_backlog_node(
                     title=grp["title"],
                     parent=epic_resolved_id,
@@ -833,8 +845,9 @@ def cmd_decompose(
                     cwd=route_cwd if route_cwd is not None else live_epic.get("cwd"),
                     priority=live_epic.get("priority", "p2"),
                     domain=live_epic.get("domain", "code"),
-                    plan_path=cpath,
+                    plan_path=None,
                 )
+                node["group_slug"] = grp["slug"]
                 node["id"] = mint_node_id({e.get("id") for e in graph_entries})
                 # Reuse the parent-setter's cycle detection on this path too
                 # (plan Invariants, line 88). A freshly minted id cannot be an
@@ -913,6 +926,22 @@ def cmd_decompose(
     #     graph mutation already repointed each child's plan_path to its separate
     #     file; here we materialize the stub on disk. Skip a file that already
     #     exists so a builder's edits and idempotent re-runs are never clobbered.
+    # US4: transcribe the epic's why (intent + Locked Decisions) once - every child
+    # scaffold is born grounded, AND a fan-out seed carries it so the /think worker
+    # stays grounded even when its origin transcript is unresolved. A missing
+    # Locked-Decisions block degrades to intent-only + a warning; an unreadable doc
+    # yields an empty digest (the scaffold then seeds the validator-rejected stub).
+    why_digest = ""
+    if separate and base_box[0]:
+        try:
+            why_digest, why_warn = extract_why_digest(
+                Path(base_box[0]).read_text(encoding="utf-8")
+            )
+            if why_warn:
+                typer.echo(f"warning: {why_warn}", err=True)
+        except (OSError, UnicodeDecodeError):
+            pass
+
     scaffolded: list[str] = []
     if separate and base_box[0]:
         source_doc = verbatim_base_box[0] or base_box[0]
@@ -923,7 +952,9 @@ def cmd_decompose(
             try:
                 disk_path.parent.mkdir(parents=True, exist_ok=True)
                 disk_path.write_text(
-                    scaffold_separate_plan(grp, epic_resolved_id, source_doc),
+                    scaffold_separate_plan(
+                        grp, epic_resolved_id, source_doc, why_digest=why_digest
+                    ),
                     encoding="utf-8",
                 )
                 scaffolded.append(str(disk_path))
@@ -935,7 +966,80 @@ def cmd_decompose(
                     err=True,
                 )
 
-    # 4. Report what happened (AC1-UI).
+    # 4a. Per-child design pass (x-edf7 US3) + born-with-why (v2 A1). Runs BEFORE
+    #     the report so a flagged fan-out's outcome rides in the --json payload
+    #     (a machine caller must see when a child was left an unlinked idea, not a
+    #     silent success). Two lanes, one shared RunState bounding the batch's blast
+    #     radius (AC1-EDGE):
+    #       - `needs_think` group -> FORCE a fan-out /think+/blueprint design pass.
+    #         The decompose invocation IS the operator consent (Locked Decision 3),
+    #         so the gate + attended-offer are overridden (mirrors the
+    #         dispatch_conversational env-forcing); the caps still bound it. A spawn
+    #         that does not fire leaves the child `idea` with its stub on disk.
+    #       - unflagged group -> today's opt-in born-with-why OFFER (gate-OFF
+    #         default => complete no-op).
+    #     Only UNLINKED children are candidates (a re-decompose never re-designs a
+    #     child that already has a plan). Strictly non-fatal: never wedge decompose.
+    fanout: list[dict] = []
+    flagged_slugs = {g["slug"] for g in norm if g["needs_think"]}
+    slug_by_id = {r["id"]: r["slug"] for r in results}
+    created_ids = {r["id"] for r in results if r["action"] == "created"}
+    spec_ids = [r["id"] for r in results]
+    if spec_ids:
+        try:
+            from fno.graph.store import read_graph
+            from fno.provenance.spawn_think import (
+                RunState,
+                maybe_spawn_think,
+                on_node_born,
+            )
+
+            by_id = {e.get("id"): e for e in read_graph(_graph_path())}
+            born_rs = RunState()
+            # Force the gate + spawn (over the default-OFF / attended-offer) for the
+            # flagged fan-out only; reuses the exact env seams dispatch_conversational
+            # uses, so no new maybe_spawn branch.
+            forced_env = {
+                **os.environ,
+                "FNO_THINK_SPAWN": "1",
+                "FNO_THINK_SPAWN_ATTENDED": "spawn",
+            }
+            for cid in spec_ids:
+                child = by_id.get(cid)
+                if child is None or child.get("plan_path"):
+                    continue  # already-linked children are done; nothing to design
+                if slug_by_id.get(cid) in flagged_slugs:
+                    # chain_blueprint: the worker must continue /think -> /blueprint
+                    # -> link, else the flagged child stays designless/idea forever
+                    # (a bare /think never links plan_path). why_digest keeps it
+                    # grounded when the transcript is unresolved; project_root scopes
+                    # the /think doc to the CHILD's repo (cross-repo routing).
+                    child_root = child.get("_resolved_cwd") or child.get("cwd")
+                    res = maybe_spawn_think(
+                        child, run_state=born_rs, env=forced_env,
+                        quiet=json_mode(ctx), chain_blueprint=True,
+                        why_digest=why_digest,
+                        project_root=Path(child_root) if child_root else None,
+                    )
+                    fanout.append({"id": cid, "decision": res.decision,
+                                   "reason": res.reason})
+                    if res.decision != "spawned" and not json_mode(ctx):
+                        typer.echo(
+                            f"fan-out /think for {cid} did not spawn "
+                            f"({res.reason}); run `/think {cid}` then `/blueprint` "
+                            f"to design it (child left idea with its stub)",
+                            err=True,
+                        )
+                elif cid in created_ids:
+                    # Already the persisted, slugged node -> skip the re-read.
+                    # quiet in --json mode: the offer stderr print would pollute a
+                    # captured JSON stream (test_json_output_shape).
+                    on_node_born(child, run_state=born_rs, persisted=True,
+                                 quiet=json_mode(ctx))
+        except Exception:  # noqa: BLE001 - additive; never wedge the decompose
+            pass
+
+    # 4b. Report what happened (AC1-UI).
     if json_mode(ctx):
         typer.echo(json.dumps(
             {
@@ -945,6 +1049,7 @@ def cmd_decompose(
                 "downgrades": downgrades,
                 "packaging": plans,
                 "scaffolded": scaffolded,
+                "fanout": fanout,
             },
             default=str,
         ))
@@ -962,6 +1067,9 @@ def cmd_decompose(
             typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
         for f in scaffolded:
             typer.echo(f"  scaffolded plan: {f}")
+        for fo in fanout:
+            if fo["decision"] == "spawned":
+                typer.echo(f"  fan-out design pass dispatched: {fo['id']}")
         if orphan_ids:
             typer.echo(
                 f"warning: {len(orphan_ids)} group child node(s) no longer in the spec, "
@@ -970,32 +1078,6 @@ def cmd_decompose(
             )
         for msg in downgrades:
             typer.echo(f"warning: {msg}", err=True)
-
-    # 4b. Born-with-why (v2 A1): decompose mints child nodes; route each NEWLY
-    #     created child through the shared birth hook so the epic's why can carry
-    #     a context /think into the group (US2). One shared RunState bounds the
-    #     whole batch's blast radius (AC1-EDGE), not each child. Re-read once so
-    #     each child carries its durable cwd/slug/provenance. Strictly non-fatal +
-    #     opt-in (gate-OFF default => complete no-op); never wedges the decompose.
-    created_ids = [r["id"] for r in results if r["action"] == "created"]
-    if created_ids:
-        try:
-            from fno.graph.store import read_graph
-            from fno.provenance.spawn_think import RunState, on_node_born
-
-            by_id = {e.get("id"): e for e in read_graph(_graph_path())}
-            born_rs = RunState()
-            for cid in created_ids:
-                child = by_id.get(cid)
-                if child is not None:
-                    # Already the persisted, slugged node -> skip the re-read.
-                    # quiet in --json mode: the born-with-why offer is a human
-                    # prompt with no consumer in a machine pipe, and its stderr
-                    # print pollutes a captured JSON stream (test_json_output_shape).
-                    on_node_born(child, run_state=born_rs, persisted=True,
-                                 quiet=json_mode(ctx))
-        except Exception:  # noqa: BLE001 - additive; never wedge the decompose
-            pass
 
     # 5. Record the group count N on the shared epic doc so it graduates only
     #    after all N group PRs ship (not after the first). The graph mutation

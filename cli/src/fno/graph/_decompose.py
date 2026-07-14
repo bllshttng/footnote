@@ -38,6 +38,13 @@ class NormalizedGroup(TypedDict):
     deferring until its blocker lands; the pin check (and possible fall-back to
     `hard`) happens in the CLI, which can read the epic doc. `stub_against` is an
     optional explicit contract-ref override; absent, the CLI derives it.
+
+    `needs_think` (x-edf7 US3, default False) flags a group whose child gets a
+    dispatched `/think` + `/blueprint` design pass rather than inline-fill - set
+    it for a group that owns a feasibility spike, carries unresolved epic Open
+    Questions, or introduces a novel subsystem. The decompose invocation is the
+    operator consent for that spawn (Locked Decision 3); the RunState cap + daily
+    ceiling still bound it.
     """
 
     slug: str
@@ -48,6 +55,7 @@ class NormalizedGroup(TypedDict):
     cwd: Optional[str]
     dep: str
     stub_against: Optional[str]
+    needs_think: bool
 
 
 def extract_contract_versions(doc_text: str) -> set[int]:
@@ -142,24 +150,108 @@ def separate_plan_path(base: str, slug: str) -> str:
     return str(p.with_name(f"{stem}.group-{slug}.md"))
 
 
-def scaffold_separate_plan(group: NormalizedGroup, epic_id: str, source_doc: str) -> str:
+# Stub markers the validator refuses to link/ready (x-edf7 US1). An unfilled
+# scaffold carries these; inline-fill (or the fan-out design pass) must replace
+# every one before the child is linked. Kept next to the scaffold that emits
+# them so the writer and the checker share one list.
+STUB_MARKERS: tuple[str, ...] = (
+    "<!-- Seeded from epic waves",
+    "<!-- From the epic's File Ownership Map",
+    "<!-- The checks that prove",
+    "<!-- Why (from epic):",  # the empty-why sentinel (US4)
+)
+
+# The seed the scaffold leaves in `## Why (from epic)` when the epic doc yields
+# no usable intent to transcribe - itself a stub marker, so the validator refuses
+# a child whose why never got filled (US4 fallback).
+_WHY_STUB = (
+    "<!-- Why (from epic): transcribe the epic's intent line + the Locked "
+    "Decisions that bind this child (not a pointer). -->"
+)
+
+# `\b.*$` (not `[ \t]*$`) so `## Overview: Goal` / `## Overview - Intent` match,
+# while `## Overviews` (no word boundary) does not.
+_OVERVIEW_RE = re.compile(r"^##[ \t]+Overview\b.*$", re.M)
+_LOCKED_RE = re.compile(r"^##[ \t]+Locked Decisions\b.*$", re.M)
+
+
+def _section_body(doc_text: str, heading_re: re.Pattern) -> str:
+    """The body under a `## Heading`, bounded by the next `## `/`# ` heading."""
+    m = heading_re.search(doc_text or "")
+    if not m:
+        return ""
+    body = doc_text[m.end():]
+    nxt = re.search(r"^##?[ \t]+", body, re.M)
+    return (body[: nxt.start()] if nxt else body).strip()
+
+
+def extract_why_digest(doc_text: str) -> tuple[str, Optional[str]]:
+    """Transcribe the epic's why for a child scaffold (US4, Layer 3).
+
+    Returns ``(digest, warning)``. The digest is the epic's intent (the first
+    paragraph of ``## Overview``, else the first prose paragraph) plus its
+    ``## Locked Decisions`` block verbatim - a transcription the builder narrows,
+    NOT a pointer. When the doc has no ``## Locked Decisions`` the digest degrades
+    to the intent line alone and ``warning`` names the gap (Boundaries: never
+    fail the decompose on a why-less epic). An unreadable/empty doc yields
+    ``("", None)`` so the caller seeds the ``_WHY_STUB`` sentinel instead.
+    """
+    # Normalize CRLF so paragraph splitting + regex anchors behave on in-memory
+    # strings that never went through universal-newline translation.
+    text = (doc_text or "").replace("\r\n", "\n")
+    intent = _section_body(text, _OVERVIEW_RE)
+    if intent:
+        intent = intent.split("\n\n", 1)[0].strip()
+    else:
+        # No Overview heading: first non-heading, non-frontmatter prose paragraph.
+        body = re.sub(r"(?s)^---\n.*?\n---\n", "", text, count=1)
+        for para in re.split(r"\n\s*\n", body):
+            para = para.strip()
+            if para and not para.startswith("#") and not para.startswith("---"):
+                intent = para
+                break
+    if not intent:
+        return ("", None)
+
+    locked = _section_body(text, _LOCKED_RE)
+    if locked:
+        return (f"{intent}\n\n**Locked Decisions (binding this child):**\n\n{locked}", None)
+    return (
+        intent,
+        "epic doc has no ## Locked Decisions section; why-digest degraded to the "
+        "intent line only - narrow it by hand during inline-fill",
+    )
+
+
+def scaffold_separate_plan(
+    group: NormalizedGroup,
+    epic_id: str,
+    source_doc: str,
+    why_digest: str = "",
+) -> str:
     """A self-contained quick-plan stub for one group child.
 
-    Seeded from the group's wave range + a pointer to the epic's File Ownership
-    Map; the builder fills the concrete change/file/verify detail. Deliberately a
-    STUB, not a full plan - the epic doc remains the source of truth for scope.
+    Seeded from the group's wave range, a transcribed ``## Why (from epic)``
+    (US4), and stub markers for the concrete change/file/verify detail the
+    builder fills inline. Born ``status: stub`` (NOT ``ready``, x-edf7 US1): the
+    validator refuses to link a child still carrying any :data:`STUB_MARKERS`, so
+    a fresh-context worker never dispatches against an unfilled plan. The epic doc
+    remains the design authority; this child carries its own execution plan.
     """
     # Escape so a title containing a double quote can't emit invalid YAML.
     yaml_title = group["title"].replace("\\", "\\\\").replace('"', '\\"')
+    why_block = why_digest.strip() or _WHY_STUB
     return (
         f'---\n'
         f'title: "{yaml_title}"\n'
-        f'status: ready\n'
+        f'status: stub\n'
         f'kind: quick-plan\n'
         f'parent_epic: {epic_id}\n'
         f'source_doc: {source_doc}\n'
         f'---\n\n'
         f'# {group["title"]}\n\n'
+        f'## Why (from epic)\n\n'
+        f'{why_block}\n\n'
         f'## Context\n\n'
         f'Group child of epic `{epic_id}` (see `{source_doc}`). Covers wave(s) '
         f'{group["waves"] or "(unset)"} of the epic\'s Execution Strategy. This is a '
@@ -189,31 +281,52 @@ def is_shipped(node: dict) -> bool:
     )
 
 
+def group_child_slug(node: dict, base: str) -> Optional[str]:
+    """The group slug of a child node, or None if it is not a group child.
+
+    Identity is the durable ``group_slug`` field (x-edf7 US2) - present on every
+    child born unlinked, so a child with no ``plan_path`` yet is still
+    identifiable. Falls back to deriving the slug from a legacy ``plan_path`` (the
+    ``fragment`` form ``<base>#group-<slug>`` or the ``separate`` form
+    ``<dir>/<stem>.group-<slug>.md``) for children created before the field
+    existed, so re-decompose stays idempotent across the migration.
+    """
+    gslug = node.get("group_slug")
+    if isinstance(gslug, str) and gslug:
+        return gslug
+    pp = node.get("plan_path") or ""
+    p = Path(base)
+    stem = p.stem if p.name.endswith(".md") else p.name
+    # Match on FILENAMES, not full dir paths, so an abs/rel mismatch between base
+    # and a legacy plan_path never hides a group child (which would duplicate it
+    # on re-decompose). The `<stem>.group-<slug>.md` shape is guaranteed.
+    if "#group-" in pp:
+        base_part, slug = pp.split("#group-", 1)
+        if Path(base_part).name == p.name:
+            return slug
+    name = Path(pp).name
+    sep_pre = f"{stem}.group-"
+    if name.startswith(sep_pre) and name.endswith(".md"):
+        return name[len(sep_pre):-3]
+    return None
+
+
 def find_orphans(
     entries: list[dict], epic_id: str, base: str, keep_slugs: set[str]
 ) -> list[dict]:
     """Existing group children of the epic whose slug is absent from the new spec.
 
-    A child is a group node when it is parented to the epic and its plan_path is
-    either the `fragment` form `<base>#group-<slug>` or the `separate` form
-    `<dir>/<stem>.group-<slug>.md`. Returns those whose slug is not in keep_slugs,
+    A child is a group node when it is parented to the epic and carries a
+    resolvable group slug (the ``group_slug`` field, else a legacy plan_path -
+    see :func:`group_child_slug`). Returns those whose slug is not in keep_slugs,
     in graph order, so a re-decomposition can surface or refuse the orphans
-    regardless of which packaging mode created them.
+    regardless of packaging mode or whether the child was ever linked.
     """
-    frag_prefix = f"{base}#group-"
-    p = Path(base)
-    stem = p.stem if p.name.endswith(".md") else p.name
-    sep_prefix = str(p.with_name(f"{stem}.group-"))  # path minus "<slug>.md"
     orphans: list[dict] = []
     for e in entries:
         if e.get("parent") != epic_id:
             continue
-        pp = e.get("plan_path") or ""
-        slug: Optional[str] = None
-        if pp.startswith(frag_prefix):
-            slug = pp[len(frag_prefix):]
-        elif pp.startswith(sep_prefix) and pp.endswith(".md"):
-            slug = pp[len(sep_prefix):-3]
+        slug = group_child_slug(e, base)
         if slug and slug not in keep_slugs:
             orphans.append(e)
     return orphans
@@ -309,6 +422,13 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                 f"group {slug!r} stub_against must be a non-empty string when set",
                 exit_code=1,
             )
+        # Optional design-pass flag (x-edf7 US3). Default False (inline-fill).
+        needs_think = grp.get("needs_think", False)
+        if not isinstance(needs_think, bool):
+            raise DecomposeError(
+                f"group {slug!r} needs_think must be a boolean (got {needs_think!r})",
+                exit_code=1,
+            )
         normalized.append(
             {
                 "slug": slug,
@@ -321,6 +441,7 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                 "stub_against": (
                     stub_against.strip() if isinstance(stub_against, str) else None
                 ),
+                "needs_think": needs_think,
             }
         )
 
