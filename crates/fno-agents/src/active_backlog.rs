@@ -567,10 +567,14 @@ fn reconcile_pending(
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) {
-    let root = Some(cfg.cwd.as_path());
     pending.retain_mut(|p| {
         p.ticks += 1;
-        let (state, rec) = claims::status(&format!("node:{}", p.node_id), root);
+        // `node:<id>` is a GLOBAL-id claim: it routes to $FNO_CLAIMS_ROOT (else
+        // $HOME) by prefix, NOT under the project cwd, so the worker (which
+        // acquires it via `fno claim` with no explicit root) and this read must
+        // resolve the SAME dir. Passing Some(cfg.cwd) would look in the wrong
+        // place and never find the worker's claim (claim_status root mismatch).
+        let (state, rec) = claims::status(&format!("node:{}", p.node_id), None);
         if let Some(sid) = rec
             .as_ref()
             .and_then(|r| r.holder.strip_prefix("target-session:"))
@@ -1182,6 +1186,176 @@ mod tests {
         assert!(!is_done_reason(&TerminationReason::DoneBatched));
         assert!(!is_done_reason(&TerminationReason::DoneAwaitingMerge));
         assert!(!is_done_reason(&TerminationReason::NoProgress));
+    }
+
+    // ── reconcile policy (x-0ad6) ────────────────────────────────────────────
+    //
+    // These drive the private reconcile helpers directly with a stub `fno` (for
+    // the defer/done side effects) + a temp Journal, so the failure-streak policy
+    // is covered without env-mutating claim setup. The crash-floor boot-grace
+    // path uses a unique fake node id that is naturally `Free` at the real global
+    // claims root, so it reads real state for a key that never exists (and never
+    // writes there).
+
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A stub `fno` that appends its argv to `record` and exits 0, so a test can
+    /// assert which `backlog done`/`defer` side effects the reconcile fired.
+    fn stub_fno(dir: &std::path::Path, record: &std::path::Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!("#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\nexit 0\n", record.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    fn test_cfg(tmp: &std::path::Path, abi_bin: String, failure_limit: u32) -> DrainConfig {
+        DrainConfig {
+            cwd: tmp.to_path_buf(),
+            project: Some("footnote".to_string()),
+            mission: None,
+            lib_path: tmp.join("lib/driver-claude-code.sh"),
+            abi_bin,
+            allow_merge: false,
+            max_turns: 5,
+            budget_usd: 25.0,
+            model: None,
+            max_iterations: 10,
+            per_unit_max_dispatches: 1,
+            failure_limit,
+            batch: false,
+            max_lanes: 1,
+        }
+    }
+
+    fn test_journal(tmp: &std::path::Path) -> (Journal, PathBuf) {
+        let project = tmp.join(".fno").join("events.jsonl");
+        let global = tmp.join("global-events.jsonl");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        (Journal::new_raw(project.clone(), global), project)
+    }
+
+    fn journal_lines(p: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn resolve_dispatch_done_records_success_and_marks_done() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let abi = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), abi, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        breaker.record_failure("x-suc0001"); // pre-existing streak to prove reset
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-suc0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "done".to_string(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-suc0001"), 0, "success resets the streak");
+        // is_done_reason -> the reconcile marks the node done (mirrors queue.close).
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-suc0001"), "calls: {calls}");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_dispatched") && l.contains("x-suc0001")));
+    }
+
+    #[test]
+    fn resolve_dispatch_awaiting_merge_is_success_without_done() {
+        // DoneAwaitingMerge is a successful dispatch (closes at merge via
+        // reconcile) - the keep-set records success but must NOT `backlog done`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let abi = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), abi, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        breaker.record_failure("x-awm0001");
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-awm0001",
+            Evidence {
+                reason: TerminationReason::DoneAwaitingMerge,
+                message: String::new(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-awm0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(!calls.contains("backlog done"), "awaiting-merge must not mark done: {calls}");
+    }
+
+    #[test]
+    fn resolve_crash_at_limit_defers_and_parks() {
+        // AC1-FR: a worker death (no termination event) counts as a failure; the
+        // Nth consecutive death trips the breaker -> defer + parked event.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let abi = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), abi, 2);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(2);
+
+        resolve_crash(&cfg, &mut breaker, &journal, "x-cra0001"); // failure 1/2
+        assert_eq!(breaker.consecutive_failures("x-cra0001"), 1);
+        resolve_crash(&cfg, &mut breaker, &journal, "x-cra0001"); // failure 2/2 -> trip
+
+        // Trip defers the node (graph exclusion) and resets the streak.
+        assert_eq!(breaker.consecutive_failures("x-cra0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog defer x-cra0001"), "calls: {calls}");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_parked") && l.contains("x-cra0001")));
+    }
+
+    #[test]
+    fn reconcile_boot_grace_then_crash_floor() {
+        // A dispatched worker that never takes its `node:<id>` claim (never
+        // booted) is kept for BOOT_GRACE_TICKS reconcile passes, then counted as
+        // a crash. Uses a unique fake node id (naturally Free at the global root).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let abi = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), abi, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = vec![PendingDispatch {
+            node_id: "x-bootgrace-never-real".to_string(),
+            session_id: None,
+            ticks: 0,
+        }];
+
+        // Passes before the grace expires keep the dispatch and record nothing.
+        for _ in 1..BOOT_GRACE_TICKS {
+            reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+            assert_eq!(pending.len(), 1, "must keep the dispatch during the boot window");
+            assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 0);
+        }
+        // The pass that reaches the grace counts a crash-floor failure and drops it.
+        reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+        assert!(pending.is_empty(), "the never-booted dispatch is retired as a crash");
+        assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 1);
     }
 
     #[test]
