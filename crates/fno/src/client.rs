@@ -1321,6 +1321,17 @@ impl View {
         }
     }
 
+    /// Rebuild the settings modal after a toggle so its glyph reflects the new
+    /// state, preserving the current selection (a keyboard toggle must re-toggle
+    /// the SAME row on the next Enter, not reset to row 0).
+    fn reopen_settings_keeping_sel(&mut self) {
+        let sel = self.aux.as_ref().map(|m| m.popup.sel).unwrap_or(0);
+        let mut modal = self.build_settings_modal();
+        let n = modal.popup.targets().len();
+        modal.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
+        self.aux = Some(modal);
+    }
+
     /// The flat popup target under a screen cell while an aux popup is open.
     fn aux_hit(&self, row: u16, col: u16) -> Option<usize> {
         let m = self.aux.as_ref()?;
@@ -4892,7 +4903,7 @@ async fn execute_aux_action(
         }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
-            view.aux = Some(view.build_settings_modal());
+            view.reopen_settings_keeping_sel();
         }
         AuxAction::ToggleStatus => {
             view.status_on = !view.status_on;
@@ -4902,7 +4913,7 @@ async fn execute_aux_action(
             write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
-            view.aux = Some(view.build_settings_modal());
+            view.reopen_settings_keeping_sel();
         }
     }
     Ok(DispatchFlow::Continue)
@@ -5190,10 +5201,16 @@ async fn peek_keys(
                 }
             }
             0x1b | b'q' => {
-                // Close peek only; the selector stays open with its cursor synced
-                // to the last-peeked row (AC2-UI).
+                // Close peek. When peek was opened FROM the selector it stays
+                // open underneath, so re-point its cursor to the peeked row
+                // (AC2-UI). When peek was opened standalone (x-8ccf US2:
+                // right-click a row -> Peek, selector closed), Esc must return to
+                // normal pane input, NOT drop into panel-selector mode.
+                let restore = view.selector.is_some();
                 view.clear_peek();
-                view.selector = Some(cursor);
+                if restore {
+                    view.selector = Some(cursor);
+                }
             }
             // Everything else is swallowed - never a pane leak (leader-layer
             // invariant). h (left-arrow) has no peek action.
@@ -7810,6 +7827,44 @@ mod tests {
         aux_execute_selected(&mut v, &mut buf).await.unwrap();
         assert_eq!(v.hover_focus, !before, "toggle flips session state");
         assert!(v.aux.is_some(), "settings stays open for another toggle");
+    }
+
+    #[tokio::test]
+    async fn peek_from_right_click_esc_returns_to_pane_not_selector() {
+        // US2 review fix: peek opened standalone (right-click a row, selector
+        // closed) must close back to the pane on Esc, not drop into the panel
+        // selector (which assumed peek was opened from it).
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(v.selector.is_none());
+        fetch_peek(&mut v, idx, "bg-claude".to_string(), &mut buf)
+            .await
+            .unwrap();
+        assert!(v.peek.is_some());
+        peek_keys(&mut v, b"q", &mut buf).await.unwrap();
+        assert!(v.peek.is_none(), "peek closed");
+        assert!(
+            v.selector.is_none(),
+            "did NOT drop into panel-selector mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_toggle_preserves_keyboard_selection() {
+        // US5 review fix: toggling rebuilds the modal but keeps the selection, so
+        // a keyboard Enter re-toggles the SAME row instead of alternating.
+        let mut v = two_pane_view();
+        v.aux = Some(v.build_settings_modal());
+        assert!(v.aux.as_ref().unwrap().popup.targets().len() >= 2);
+        v.aux.as_mut().unwrap().popup.sel = 1; // the second toggle
+        let mut buf: Vec<u8> = Vec::new();
+        aux_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert_eq!(
+            v.aux.as_ref().unwrap().popup.sel,
+            1,
+            "selection stays on the toggled row after the rebuild"
+        );
     }
 
     #[tokio::test]
