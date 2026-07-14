@@ -143,9 +143,63 @@ def test_sweep_idempotent_and_non_regressing(tmp_path: Path):
 
 def test_sweep_tier2_uses_signal(tmp_path: Path):
     (tmp_path / "closed.md").write_text(_plan("status: implemented"))
-    res = sweep(tmp_path, apply=True, signal_for=lambda fm: True)
+    res = sweep(tmp_path, apply=True, signal_for=lambda fm: True, status_map={})
     assert res.normalized == 1 and res.archived == 0
     assert 'status: "done"' in (tmp_path / "closed.md").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: canonical-but-stale -> node projection (x-f34f, US4)
+# ---------------------------------------------------------------------------
+
+
+def _linked_plan(status: str, node: str = "x-1") -> str:
+    return f"---\nnode: {node}\nstatus: {status}\n---\n# T\n\nbody\n"
+
+
+def test_tier3_fixes_stale_canonical(tmp_path: Path):
+    """x-76ea class: plan `design`, node `done` -> plan rewritten to `done`."""
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("design"))
+    res = sweep(tmp_path, apply=True, status_map={"x-1": "done"})
+    assert res.normalized == 1
+    assert 'status: "done"' in p.read_text()
+
+
+def test_tier3_disabled_when_graph_absent(tmp_path: Path):
+    """AC2-ERR: an empty status_map (unreadable graph) leaves canonical untouched."""
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("design"))
+    res = sweep(tmp_path, apply=True, status_map={})
+    assert res.skipped == 1 and res.normalized == 0
+    assert "status: design" in p.read_text()  # untouched (not even re-quoted)
+
+
+def test_tier3_forward_only(tmp_path: Path):
+    """A node that regressed never rewrites a plan backward."""
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("shipped"))
+    res = sweep(tmp_path, apply=True, status_map={"x-1": "claimed"})
+    assert res.skipped == 1
+    assert "status: shipped" in p.read_text()
+
+
+def test_tier3_unlinked_plan_skipped(tmp_path: Path):
+    """AC2-EDGE: a canonical plan with no node link is left alone by Tier 3."""
+    p = tmp_path / "a.md"
+    p.write_text("---\nstatus: design\n---\n# T\n\nbody\n")
+    res = sweep(tmp_path, apply=True, status_map={"x-1": "done"})
+    assert res.skipped == 1
+    assert "status: design" in p.read_text()
+
+
+def test_tier3_link_missing_from_graph_warns(tmp_path: Path):
+    """A link resolving to no node in a readable graph is treated as unlinked."""
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("design", node="x-ghost"))
+    res = sweep(tmp_path, apply=True, status_map={"x-1": "done"})
+    assert res.skipped == 1
+    assert any("x-ghost" in w for w in res.warnings)
 
 
 # ---------------------------------------------------------------------------
