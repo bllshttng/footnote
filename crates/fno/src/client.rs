@@ -3706,217 +3706,243 @@ async fn handle_stdin(
         return nav_keys(view, &passthrough, sock_w).await;
     }
     for event in scanner.scan(&passthrough) {
-        match event {
-            Event::Forward(chunk) => {
-                // Reliable channel: awaited send, input is NEVER dropped.
-                write_msg(sock_w, &ClientMsg::Input(chunk))
-                    .await
-                    .map_err(|e| format!("input send failed: {e}"))?;
-            }
-            Event::Cmd(cmd) => {
-                write_msg(sock_w, &ClientMsg::Command(cmd))
-                    .await
-                    .map_err(|e| format!("command send failed: {e}"))?;
-            }
-            Event::SelectTabIdx(idx) => {
-                // Resolve the digit's index to a stable TabId against the
-                // last Layout; an out-of-range digit is a local BEL, never a
-                // wire message the server would refuse anyway.
-                let id = view
-                    .layout
-                    .squads
-                    .iter()
-                    .find(|s| s.id == view.layout.active_squad)
-                    .and_then(|s| s.tabs.get(idx))
-                    .map(|t| t.id);
-                match id {
-                    Some(id) => {
-                        write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(id)))
-                            .await
-                            .map_err(|e| format!("command send failed: {e}"))?;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            Event::Detach => return Ok(StdinFlow::Detach),
-            Event::OpenSelector => {
-                // The unified rows are never empty - the `+ new workspace`
-                // footer is always present - so an empty session opens on it
-                // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
-                if view.term.1 < PANEL_W + MIN_CONTENT_COLS {
-                    let _ = raw_out(b"\x07");
-                } else {
-                    view.panel_on = true;
-                    // Row 0 is a squad row (or the footer, never a Header).
-                    view.selector = Some(0);
-                    view.sel_esc.clear();
-                    // Open at the top: a stale offset from a prior session must
-                    // not hide row 0 (x-a621).
-                    view.sideline_offset = 0;
-                }
-            }
-            Event::OpenAnswers => {
-                // x-feec: open the needs-me queue. Always opens (even with an
-                // empty live leg) so the async event-fold leg can populate it;
-                // an ultimately-empty union renders "nothing needs you". The
-                // fold merges in when it lands - the overlay never blocks on it.
-                view.answers = Some(0);
-                view.ans_esc.clear();
-                view.needs_gen = view.needs_gen.wrapping_add(1);
-                let fresh = view
-                    .needs_fold_at
-                    .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
-                if fresh {
-                    // Re-open within the cache TTL: reuse the last fold instantly
-                    // (Perspective B - mashing leader+a never re-shells).
-                    view.needs_degraded = false;
-                } else {
-                    // Stale/first open: live-only until the refresh lands.
-                    view.needs_fold = None;
-                    view.needs_degraded = false;
-                    view.needs_want = true;
-                }
-            }
-            Event::TogglePanel => {
-                view.panel_on = !view.panel_on;
-                // Chrome changed size: report the new content area so rects
-                // fill it (the reply Layout redraws everything).
-                let (r, c) = view.content_dims();
-                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                    .await
-                    .map_err(|e| format!("resize send failed: {e}"))?;
-            }
-            Event::ToggleStatus => {
-                view.status_on = !view.status_on;
-                // Same accounting as the sideline: the content area grew or
-                // shrank by one row.
-                let (r, c) = view.content_dims();
-                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                    .await
-                    .map_err(|e| format!("resize send failed: {e}"))?;
-            }
-            Event::ShowKeys => {
-                view.overlay = true;
-            }
-            Event::BlockJump(dir) => {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::BlockJump {
-                        pane: view.layout.focus,
-                        dir,
-                    },
-                )
-                .await
-                .map_err(|e| format!("block-jump send failed: {e}"))?;
-            }
-            Event::BlockSelect(dir) => {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::BlockSelect {
-                        pane: view.layout.focus,
-                        dir,
-                    },
-                )
-                .await
-                .map_err(|e| format!("block-select send failed: {e}"))?;
-            }
-            Event::BlockRerun => {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::BlockRerun {
-                        pane: view.layout.focus,
-                    },
-                )
-                .await
-                .map_err(|e| format!("block-rerun send failed: {e}"))?;
-            }
-            Event::DispatchNext => {
-                write_msg(sock_w, &ClientMsg::DispatchNext)
-                    .await
-                    .map_err(|e| format!("dispatch-next send failed: {e}"))?;
-            }
-            Event::SearchOpen => {
-                // Enter client-local typing mode over the focused pane; keystrokes
-                // divert to search_keys on the next read (no message sent yet, no
-                // Resize - the input line overlays the bottom chrome). Break so no
-                // same-chunk bytes after the chord leak to the pane.
-                view.search = Some(SearchView {
-                    pane: view.layout.focus,
-                    query: String::new(),
-                    submitted: false,
-                    result: None,
-                });
-                view.search_esc.clear();
-                break;
-            }
-            Event::OpenNav => {
-                // Client-local overlay (x-653d): opening sends nothing and
-                // reserves no row (it draws over the content top-left like the
-                // answer overlay, not the bottom chrome). Break so same-chunk
-                // bytes after the chord can't leak to the pane (like SearchOpen).
-                // No width gate: draw_lines_overlay clips a tiny terminal, and a
-                // zero-squad session shows an explicit `no matches` (AC1-EDGE).
-                view.nav = Some(NavView {
-                    query: String::new(),
-                    state_filter: None,
-                    cursor: 0,
-                });
-                view.nav_esc.clear();
-                break;
-            }
-            Event::OpenRename => {
-                // Rename targets the ACTIVE tab, resolved to its stable id at
-                // open time so a tab switch mid-edit cannot retarget the send
-                // (the server refuses a stale id fail-closed - AC1-FR).
-                let tab = view
-                    .layout
-                    .squads
-                    .iter()
-                    .find(|s| s.id == view.layout.active_squad)
-                    .and_then(|s| s.tabs.get(s.active_tab))
-                    .map(|t| t.id);
-                match tab {
-                    Some(id) => {
-                        view.open_rename(RenameTarget::Tab(id));
-                        // Swallow same-chunk bytes after the chord, like
-                        // SearchOpen: nothing may leak into the pane.
-                        break;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            Event::ReorderTab(delta) => {
-                let target = view
-                    .layout
-                    .squads
-                    .iter()
-                    .find(|s| s.id == view.layout.active_squad)
-                    .and_then(|s| s.tabs.get(s.active_tab).map(|tab| (s.id, tab.id)));
-                match target {
-                    Some((squad, tab)) => {
-                        write_msg(
-                            sock_w,
-                            &ClientMsg::Command(Command::ReorderTab { squad, tab, delta }),
-                        )
-                        .await
-                        .map_err(|e| format!("command send failed: {e}"))?;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-                break;
-            }
-            Event::Bell => {
-                let _ = raw_out(b"\x07");
-            }
+        match dispatch_event(view, event, sock_w).await? {
+            DispatchFlow::Continue => {}
+            DispatchFlow::Break => break,
+            DispatchFlow::Detach => return Ok(StdinFlow::Detach),
         }
     }
     Ok(StdinFlow::Continue)
+}
+
+/// One of three control-flow outcomes of dispatching a leader event: fall
+/// through to the next event, stop consuming this chunk (a chord that opens a
+/// typing mode must not leak the chunk's trailing bytes into a pane), or detach.
+enum DispatchFlow {
+    Continue,
+    Break,
+    Detach,
+}
+
+/// Dispatch one resolved leader [`Event`] to the wire / view state - the single
+/// executor the key-scan loop and the which-key modal both call (x-8ccf Locked
+/// 3), so a modal-executed chord runs the IDENTICAL path as a directly-typed one
+/// (no parallel keymap to drift).
+async fn dispatch_event(
+    view: &mut View,
+    event: Event,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    match event {
+        Event::Forward(chunk) => {
+            // Reliable channel: awaited send, input is NEVER dropped.
+            write_msg(sock_w, &ClientMsg::Input(chunk))
+                .await
+                .map_err(|e| format!("input send failed: {e}"))?;
+        }
+        Event::Cmd(cmd) => {
+            write_msg(sock_w, &ClientMsg::Command(cmd))
+                .await
+                .map_err(|e| format!("command send failed: {e}"))?;
+        }
+        Event::SelectTabIdx(idx) => {
+            // Resolve the digit's index to a stable TabId against the
+            // last Layout; an out-of-range digit is a local BEL, never a
+            // wire message the server would refuse anyway.
+            let id = view
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == view.layout.active_squad)
+                .and_then(|s| s.tabs.get(idx))
+                .map(|t| t.id);
+            match id {
+                Some(id) => {
+                    write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(id)))
+                        .await
+                        .map_err(|e| format!("command send failed: {e}"))?;
+                }
+                None => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+        }
+        Event::Detach => return Ok(DispatchFlow::Detach),
+        Event::OpenSelector => {
+            // The unified rows are never empty - the `+ new workspace`
+            // footer is always present - so an empty session opens on it
+            // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
+            if view.term.1 < PANEL_W + MIN_CONTENT_COLS {
+                let _ = raw_out(b"\x07");
+            } else {
+                view.panel_on = true;
+                // Row 0 is a squad row (or the footer, never a Header).
+                view.selector = Some(0);
+                view.sel_esc.clear();
+                // Open at the top: a stale offset from a prior session must
+                // not hide row 0 (x-a621).
+                view.sideline_offset = 0;
+            }
+        }
+        Event::OpenAnswers => {
+            // x-feec: open the needs-me queue. Always opens (even with an
+            // empty live leg) so the async event-fold leg can populate it;
+            // an ultimately-empty union renders "nothing needs you". The
+            // fold merges in when it lands - the overlay never blocks on it.
+            view.answers = Some(0);
+            view.ans_esc.clear();
+            view.needs_gen = view.needs_gen.wrapping_add(1);
+            let fresh = view
+                .needs_fold_at
+                .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
+            if fresh {
+                // Re-open within the cache TTL: reuse the last fold instantly
+                // (Perspective B - mashing leader+a never re-shells).
+                view.needs_degraded = false;
+            } else {
+                // Stale/first open: live-only until the refresh lands.
+                view.needs_fold = None;
+                view.needs_degraded = false;
+                view.needs_want = true;
+            }
+        }
+        Event::TogglePanel => {
+            view.panel_on = !view.panel_on;
+            // Chrome changed size: report the new content area so rects
+            // fill it (the reply Layout redraws everything).
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+        }
+        Event::ToggleStatus => {
+            view.status_on = !view.status_on;
+            // Same accounting as the sideline: the content area grew or
+            // shrank by one row.
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+        }
+        Event::ShowKeys => {
+            view.overlay = true;
+        }
+        Event::BlockJump(dir) => {
+            write_msg(
+                sock_w,
+                &ClientMsg::BlockJump {
+                    pane: view.layout.focus,
+                    dir,
+                },
+            )
+            .await
+            .map_err(|e| format!("block-jump send failed: {e}"))?;
+        }
+        Event::BlockSelect(dir) => {
+            write_msg(
+                sock_w,
+                &ClientMsg::BlockSelect {
+                    pane: view.layout.focus,
+                    dir,
+                },
+            )
+            .await
+            .map_err(|e| format!("block-select send failed: {e}"))?;
+        }
+        Event::BlockRerun => {
+            write_msg(
+                sock_w,
+                &ClientMsg::BlockRerun {
+                    pane: view.layout.focus,
+                },
+            )
+            .await
+            .map_err(|e| format!("block-rerun send failed: {e}"))?;
+        }
+        Event::DispatchNext => {
+            write_msg(sock_w, &ClientMsg::DispatchNext)
+                .await
+                .map_err(|e| format!("dispatch-next send failed: {e}"))?;
+        }
+        Event::SearchOpen => {
+            // Enter client-local typing mode over the focused pane; keystrokes
+            // divert to search_keys on the next read (no message sent yet, no
+            // Resize - the input line overlays the bottom chrome). Break so no
+            // same-chunk bytes after the chord leak to the pane.
+            view.search = Some(SearchView {
+                pane: view.layout.focus,
+                query: String::new(),
+                submitted: false,
+                result: None,
+            });
+            view.search_esc.clear();
+            return Ok(DispatchFlow::Break);
+        }
+        Event::OpenNav => {
+            // Client-local overlay (x-653d): opening sends nothing and
+            // reserves no row (it draws over the content top-left like the
+            // answer overlay, not the bottom chrome). Break so same-chunk
+            // bytes after the chord can't leak to the pane (like SearchOpen).
+            // No width gate: draw_lines_overlay clips a tiny terminal, and a
+            // zero-squad session shows an explicit `no matches` (AC1-EDGE).
+            view.nav = Some(NavView {
+                query: String::new(),
+                state_filter: None,
+                cursor: 0,
+            });
+            view.nav_esc.clear();
+            return Ok(DispatchFlow::Break);
+        }
+        Event::OpenRename => {
+            // Rename targets the ACTIVE tab, resolved to its stable id at
+            // open time so a tab switch mid-edit cannot retarget the send
+            // (the server refuses a stale id fail-closed - AC1-FR).
+            let tab = view
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == view.layout.active_squad)
+                .and_then(|s| s.tabs.get(s.active_tab))
+                .map(|t| t.id);
+            match tab {
+                Some(id) => {
+                    view.open_rename(RenameTarget::Tab(id));
+                    // Swallow same-chunk bytes after the chord, like
+                    // SearchOpen: nothing may leak into the pane.
+                    return Ok(DispatchFlow::Break);
+                }
+                None => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+        }
+        Event::ReorderTab(delta) => {
+            let target = view
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == view.layout.active_squad)
+                .and_then(|s| s.tabs.get(s.active_tab).map(|tab| (s.id, tab.id)));
+            match target {
+                Some((squad, tab)) => {
+                    write_msg(
+                        sock_w,
+                        &ClientMsg::Command(Command::ReorderTab { squad, tab, delta }),
+                    )
+                    .await
+                    .map_err(|e| format!("command send failed: {e}"))?;
+                }
+                None => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+            return Ok(DispatchFlow::Break);
+        }
+        Event::Bell => {
+            let _ = raw_out(b"\x07");
+        }
+    }
+    Ok(DispatchFlow::Continue)
 }
 
 /// Apply one resolved [`ChromeHit`] - the single consumer both input paths
