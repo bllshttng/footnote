@@ -23,6 +23,16 @@
         ]
       },
       {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/worktree-harness-guard.sh",
+            "statusMessage": "checking worktree harness ownership"
+          }
+        ]
+      },
+      {
         "matcher": "^Bash$",
         "hooks": [
           {
