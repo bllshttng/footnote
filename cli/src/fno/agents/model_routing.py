@@ -127,19 +127,37 @@ def _normalize(role: Optional[str]) -> str:
 
 
 def _parse_target(raw: str) -> Optional[tuple[str, str]]:
-    """Parse a ``"provider,model"`` role value into (provider, model).
+    """Parse a ``"provider/model"`` (or legacy ``"provider,model"``) target into
+    (provider, model).
+
+    Slash is the canonical, ecosystem-standard form (``zai/glm-5.2[1m]``); comma
+    is still accepted for the existing peer-lane / built-in values and any config
+    written before the switch, so nothing already configured breaks. A comma, if
+    present, wins as the separator (it never appears inside a model id, so it is
+    unambiguous); otherwise the FIRST slash splits, which keeps a namespaced model
+    id intact (``zai/z-ai/glm-5.2`` -> provider ``zai``, model ``z-ai/glm-5.2``).
 
     Returns None for a malformed value (fail-safe; caller degrades to primary)."""
-    parts = [p.strip() for p in raw.split(",")]
-    if len(parts) != 2 or not parts[0] or not parts[1]:
+    raw = raw.strip()
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) != 2:
+            return None
+        provider, model = parts
+    else:
+        provider, found, model = raw.partition("/")
+        if not found:
+            return None
+        provider, model = provider.strip(), model.strip()
+    if not provider or not model:
         return None
     # Reject INTERNAL whitespace (a space or newline inside a token): the
     # contract is one non-whitespace model token, an embedded space yields an
     # invalid model id and a newline would corrupt the line-oriented dispatch
     # receipt. Outer whitespace was already stripped above.
-    if any(c.isspace() for c in parts[0]) or any(c.isspace() for c in parts[1]):
+    if any(c.isspace() for c in provider) or any(c.isspace() for c in model):
         return None
-    return parts[0].lower(), parts[1]
+    return provider.lower(), model
 
 
 def _key_from_env_file(path_str: str, key_name: str) -> Optional[str]:
@@ -678,7 +696,7 @@ def build_route_table(
             rows.append(
                 {
                     "role": role,
-                    "target": f"{pname},{model}",
+                    "target": f"{pname}/{model}",
                     "protocol": "unknown provider",
                     "key": "-",
                     "assigned_by": _provenance(role, source),
@@ -695,7 +713,7 @@ def build_route_table(
         rows.append(
             {
                 "role": role,
-                "target": f"{pname},{model}",
+                "target": f"{pname}/{model}",
                 "protocol": protocol,
                 "key": key_status,
                 "assigned_by": _provenance(role, source),

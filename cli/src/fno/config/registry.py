@@ -302,7 +302,7 @@ FIELD_META: dict[str, Meta] = {
         "never", "Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in."
     ),
     "model_routing.roles": Meta(
-        "never", "Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'); manage via `fno route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg)."
+        "never", "Per-role target map (role -> 'provider/model', e.g. tidy: 'zai/glm-4.7'; legacy 'provider,model' comma form also accepted); manage via `fno route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg)."
     ),
     "model_routing.extra_env": Meta(
         "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides)."

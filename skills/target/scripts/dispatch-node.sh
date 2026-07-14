@@ -11,11 +11,11 @@
 # Usage:
 #   dispatch-node.sh <node-id...> [--flags "<extra /target flags>"]
 #                                 [--allow-merge] [--max N] [--dry-run] [--here]
-#                                 [--permission-mode <mode>] [--route provider,model]
+#                                 [--permission-mode <mode>] [--route provider/model]
 #   dispatch-node.sh --all-ready  [--flags "..."] [--allow-merge] [--max N] [--dry-run] [--here]
-#                                 [--permission-mode <mode>] [--route provider,model]
+#                                 [--permission-mode <mode>] [--route provider/model]
 #
-# --route provider,model: per-dispatch explicit model route (x-b0b4), forwarded
+# --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
 #   to every worker spawn. Fails CLOSED in the spawn (unknown/non-anthropic/
 #   keyless refuses -> the node stays dispatchable). Wins over the build lane.
 #   Every worker also carries --role build unconditionally: the build lane is a
@@ -27,7 +27,7 @@
 #   main so a dispatch from a linked worktree does not inherit that worktree.
 #
 # Per-node outcome lines (stdout; one per node; NEVER silent):
-#   launched         <node> name=<agent> session=<sid> cwd=<path> hint="fno agents logs <agent>" route=<provider,model|primary>
+#   launched         <node> name=<agent> session=<sid> cwd=<path> hint="fno agents logs <agent>" route=<provider/model|primary>
 #   already-running  <node> reason="live target worker holds node:<id> (<holder>)"
 #   skipped-contested <node> reason="suspect claim (respawned worker); advancing" (x-ba4b)
 #   parked           <node> reason="blocked|deferred|<status> (not up-next)"
@@ -93,7 +93,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)    DRY_RUN=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
-    --route)      [[ $# -ge 2 ]] || { echo "failed: --route reason=\"requires a provider,model value\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; ROUTE="$2"; shift 2 ;;
+    --route)      [[ $# -ge 2 ]] || { echo "failed: --route reason=\"requires a provider/model value\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; ROUTE="$2"; shift 2 ;;
     --) shift; while [[ $# -gt 0 ]]; do NODES+=("$1"); shift; done ;;
     -*) echo "failed: $1 reason=\"unknown flag\"" >&2; exit 2 ;;
     *)  NODES+=("$1"); shift ;;

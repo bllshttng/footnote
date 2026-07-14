@@ -52,7 +52,7 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 |-----|---------|---------|
 | `enabled` | `true` | Master on/off. |
 | `providers` | _(built-in `zai`)_ | Name → `{protocol, base_url, api_key_env, api_key_file}`. Add `deepseek` etc.; override `zai` per field. |
-| `roles` | _(built-in 4 → `zai,glm-5.2`)_ | Role → `"provider,model"` (e.g. `tidy: "zai,glm-4.7"`). |
+| `roles` | _(built-in → `zai/glm-5.2`)_ | Role → `"provider/model"` (e.g. `tidy: "zai/glm-4.7"`; legacy comma `zai,glm-4.7` also accepted). |
 | `extra_env` | `{}` | Extra env merged into routed spawns (e.g. `API_TIMEOUT_MS`, a cheaper per-tier model). |
 
 A worked example:
@@ -68,10 +68,10 @@ config:
         base_url: https://api.deepseek.com/anthropic
         api_key_env: DEEPSEEK_API_KEY
     roles:
-      coordinate: "zai,glm-4.7"
-      tidy: "zai,glm-4.7"
-      orient: "zai,glm-4.7"
-      consolidate: "zai,glm-5.2"
+      coordinate: "zai/glm-4.7"
+      tidy: "zai/glm-4.7"
+      orient: "zai/glm-4.7"
+      consolidate: "zai/glm-5.2"
     extra_env:
       API_TIMEOUT_MS: "3000000"
 ```
@@ -85,12 +85,12 @@ The auxiliary roles above are coordination work. `build` extends the same mechan
 `build` is **opt-in by config presence**: it ships unconfigured and routes nothing (fail-safe `None`, byte-identical to today). Writing the roles line IS the consent:
 
 ```bash
-fno route set build zai,glm-5.2[1m]        # atomic config write; effect: next spawn
+fno route set build zai/glm-5.2[1m]        # atomic config write; effect: next spawn
 ```
 
-`dispatch-node.sh` passes `--role build` on every worker spawn unconditionally; the fail-safe makes that a no-op until the lane is configured, so there is no conditional plumbing. Each dispatch receipt carries a `route=` token (`route=zai,glm-5.2` when the lane resolved, `route=primary` when it fell back), so a build that silently reverted to Anthropic - a keyless lane - is visible at the call site, not just in a buried stderr notice.
+`dispatch-node.sh` passes `--role build` on every worker spawn unconditionally; the fail-safe makes that a no-op until the lane is configured, so there is no conditional plumbing. Each dispatch receipt carries a `route=` token (`route=zai/glm-5.2` when the lane resolved, `route=primary` when it fell back), so a build that silently reverted to Anthropic - a keyless lane - is visible at the call site, not just in a buried stderr notice.
 
-For a one-off "just this node on GLM" without flipping the lane default, `dispatch-node.sh <node> --route provider,model` (or `fno agents spawn --route ...`) forwards an explicit route. Unlike the role lane, an explicit `--route` **fails closed**: an unknown provider, non-anthropic protocol, or missing key refuses the spawn (you asked for GLM by name; billing Anthropic instead would violate intent). `--route` wins over a configured `build` lane on the same spawn.
+For a one-off "just this node on GLM" without flipping the lane default, `dispatch-node.sh <node> --route provider/model` (or `fno agents spawn --route ...`) forwards an explicit route. Unlike the role lane, an explicit `--route` **fails closed**: an unknown provider, non-anthropic protocol, or missing key refuses the spawn (you asked for GLM by name; billing Anthropic instead would violate intent). `--route` wins over a configured `build` lane on the same spawn.
 
 ## `fno route` - legibility + on-the-fly switching
 
@@ -98,10 +98,10 @@ Four verbs over the same machinery (`model_routing.py` stays the single source o
 
 | Verb | Purpose |
 |------|---------|
-| `fno route ls [-J]` | The effective merged table: role → `provider,model` → protocol → key status (which env var / file satisfied it, or MISSING) → auto-assigned-by. `-J` for scripts. |
-| `fno route set <role> <provider,model>` | Route a lane (atomic config write via `fno config set`). Refuses protected names + unknown providers pre-write. |
+| `fno route ls [-J]` | The effective merged table: role → `provider/model` → protocol → key status (which env var / file satisfied it, or MISSING) → auto-assigned-by. `-J` for scripts. |
+| `fno route set <role> <provider/model>` | Route a lane (atomic config write via `fno config set`). Refuses protected names + unknown providers pre-write. |
 | `fno route unset <role>` | Revert a lane to its built-in default (or unrouted); idempotent no-op if unconfigured. |
-| `fno route env <role \| provider,model>` | Print an eval-able export block for an interactive session: `eval "$(fno route env build)" && claude`. Fails closed on a missing key (no partial block). |
+| `fno route env <role \| provider/model>` | Print an eval-able export block for an interactive session: `eval "$(fno route env build)" && claude`. Fails closed on a missing key (no partial block). |
 
 `route env` is the sanctioned interactive switch - never editing `~/.claude/settings.json` (global, restart-bound, races parallel sessions). The `ccz`-style alias becomes a one-liner over it.
 
@@ -113,7 +113,7 @@ A routed GLM worker wants a couple of env tweaks, carried by `extra_env` (config
 config:
   model_routing:
     roles:
-      build: "zai,glm-5.2[1m]"          # [1m] = 1M-context; auto-injects CLAUDE_CODE_AUTO_COMPACT_WINDOW
+      build: "zai/glm-5.2[1m]"          # [1m] = 1M-context; auto-injects CLAUDE_CODE_AUTO_COMPACT_WINDOW
     extra_env:
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000"
       API_TIMEOUT_MS: "3000000"

@@ -47,8 +47,8 @@ def test_route_table_shows_builtins_config_build_and_protected() -> None:
     by_role = {r["role"]: r for r in rows}
 
     for r in ("coordinate", "tidy", "orient", "consolidate", "post-merge"):
-        assert by_role[r]["target"] == "zai,glm-5.2"
-    assert by_role["codex-verify"]["target"] == "zai-openai,glm-4.6"
+        assert by_role[r]["target"] == "zai/glm-5.2"
+    assert by_role["codex-verify"]["target"] == "zai-openai/glm-4.6"
     assert by_role["codex-verify"]["protocol"] == "openai"
     assert by_role["build"]["target"] == "unconfigured"
     for p in ("implement", "review-verdict"):
@@ -94,24 +94,25 @@ def _roles_on_disk(repo_root: Path) -> dict:
 
 
 def test_set_build_writes_roles(project_scope: Path) -> None:
-    res = runner.invoke(route_app, ["set", "build", "zai,glm-5.2", "--local"])
+    res = runner.invoke(route_app, ["set", "build", "zai/glm-5.2", "--local"])
     assert res.exit_code == 0, res.stdout
-    assert _roles_on_disk(project_scope) == {"build": "zai,glm-5.2"}
+    assert _roles_on_disk(project_scope) == {"build": "zai/glm-5.2"}
 
 
 def test_set_preserves_existing_roles(project_scope: Path) -> None:
     runner.invoke(route_app, ["set", "tidy", "zai,glm-4.7", "--local"])
-    runner.invoke(route_app, ["set", "build", "zai,glm-5.2", "--local"])
+    runner.invoke(route_app, ["set", "build", "zai/glm-5.2", "--local"])
+    # Comma input is normalized to the canonical slash form on write.
     assert _roles_on_disk(project_scope) == {
-        "tidy": "zai,glm-4.7",
-        "build": "zai,glm-5.2",
+        "tidy": "zai/glm-4.7",
+        "build": "zai/glm-5.2",
     }
 
 
 def test_set_one_m_suffix_passes(project_scope: Path) -> None:
-    res = runner.invoke(route_app, ["set", "build", "zai,glm-5.2[1m]", "--local"])
+    res = runner.invoke(route_app, ["set", "build", "zai/glm-5.2[1m]", "--local"])
     assert res.exit_code == 0, res.stdout
-    assert _roles_on_disk(project_scope)["build"] == "zai,glm-5.2[1m]"
+    assert _roles_on_disk(project_scope)["build"] == "zai/glm-5.2[1m]"
 
 
 def test_set_protected_role_refused_no_write(project_scope: Path) -> None:
@@ -140,11 +141,11 @@ def test_set_malformed_target_refused(project_scope: Path) -> None:
 
 
 def test_unset_removes_role(project_scope: Path) -> None:
-    runner.invoke(route_app, ["set", "build", "zai,glm-5.2", "--local"])
-    runner.invoke(route_app, ["set", "tidy", "zai,glm-4.7", "--local"])
+    runner.invoke(route_app, ["set", "build", "zai/glm-5.2", "--local"])
+    runner.invoke(route_app, ["set", "tidy", "zai/glm-4.7", "--local"])
     res = runner.invoke(route_app, ["unset", "build", "--local"])
     assert res.exit_code == 0, res.stdout
-    assert _roles_on_disk(project_scope) == {"tidy": "zai,glm-4.7"}
+    assert _roles_on_disk(project_scope) == {"tidy": "zai/glm-4.7"}
 
 
 def test_unset_unconfigured_is_noop(project_scope: Path) -> None:
@@ -172,6 +173,15 @@ def test_env_explicit_emits_export_block(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "export ANTHROPIC_BASE_URL=" in out
     assert "export ANTHROPIC_AUTH_TOKEN=" in out
     assert "glm-5.2" in out
+
+
+def test_env_explicit_slash_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The slash form must be recognized as an explicit target, not a role name.
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    res = runner.invoke(route_app, ["env", "zai/glm-5.2"])
+    assert res.exit_code == 0
+    assert "export ANTHROPIC_AUTH_TOKEN=" in res.stdout
+    assert "glm-5.2" in res.stdout
 
 
 def test_env_unsets_parent_anthropic_creds_before_exports(

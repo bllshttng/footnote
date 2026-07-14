@@ -5,7 +5,7 @@ Four verbs over the existing per-spawn model-routing machinery
 env-var contract:
 
 - ``ls``    - the effective merged table (built-ins + config), one row per role.
-- ``set``   - route a lane to ``provider,model`` (atomic config write).
+- ``set``   - route a lane to ``provider/model`` (atomic config write).
 - ``unset`` - revert a lane (to its built-in default, or unrouted).
 - ``env``   - eval-able ``export`` block for an interactive session.
 
@@ -44,7 +44,7 @@ def ls_cmd(
 ) -> None:
     """Render the effective routing table.
 
-    One row per role: role -> target (provider,model) -> protocol -> key status
+    One row per role: role -> target (provider/model) -> protocol -> key status
     (which env var / file satisfied it, or MISSING) -> auto-assigned-by. Built-in
     roles, config overrides, the known ``build`` lane, and the protected roles all
     appear. Degrades an unreadable key source to MISSING rather than erroring.
@@ -81,7 +81,9 @@ def ls_cmd(
 def set_cmd(
     role: str = typer.Argument(..., help="Lane/role name, e.g. build."),
     target: str = typer.Argument(
-        ..., help="provider,model - e.g. zai,glm-5.2 or zai,glm-5.2[1m]."
+        ...,
+        help="provider/model - e.g. zai/glm-5.2 or zai/glm-5.2[1m] "
+        "(legacy comma form zai,glm-5.2 is also accepted).",
     ),
     local: bool = typer.Option(
         False,
@@ -91,7 +93,7 @@ def set_cmd(
         "global one (default global; routing is operator-level).",
     ),
 ) -> None:
-    """Route a lane to ``provider,model`` (atomic, schema-validated).
+    """Route a lane to ``provider/model`` (atomic, schema-validated).
 
     Refuses a protected role name and a provider absent from the effective
     providers map BEFORE any write. A protocol mismatch (anthropic lane pointing
@@ -118,7 +120,7 @@ def set_cmd(
     parsed = _parse_target(target)
     if parsed is None:
         typer.echo(
-            f"error: target must be 'provider,model' with a non-empty model "
+            f"error: target must be 'provider/model' with a non-empty model "
             f"token; got {target!r}. Config unchanged.",
             err=True,
         )
@@ -147,7 +149,7 @@ def set_cmd(
         existing = read_scope_value("model_routing.roles", scope=scope)
         if not isinstance(existing, dict):
             existing = {}
-        merged = {**existing, name: f"{pname},{model}"}
+        merged = {**existing, name: f"{pname}/{model}"}
         set_config_values(
             [("model_routing.roles", json.dumps(merged))], scope=scope
         )
@@ -155,7 +157,7 @@ def set_cmd(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(exc.exit_code) from exc
 
-    typer.echo(f"route set {name} = {pname},{model} ({scope})")
+    typer.echo(f"route set {name} = {pname}/{model} ({scope})")
 
 
 @route_app.command("unset")
@@ -232,7 +234,7 @@ def unset_cmd(
 def env_cmd(
     spec: str = typer.Argument(
         ...,
-        help="A role (build) or an explicit provider,model (zai,glm-5.2).",
+        help="A role (build) or an explicit provider/model (zai/glm-5.2).",
     ),
 ) -> None:
     """Print an eval-able env block for interactive use.
@@ -256,11 +258,13 @@ def env_cmd(
     notes: list[str] = []
     target_pname: str | None = None
 
-    if "," in spec:
+    # A separator (slash or legacy comma) marks an explicit provider/model; a
+    # bare token is a role name (roles never contain a separator).
+    if "/" in spec or "," in spec:
         parsed = _parse_target(spec)
         if parsed is None:
             typer.echo(
-                f"route env: malformed target {spec!r}; expected provider,model",
+                f"route env: malformed target {spec!r}; expected provider/model",
                 err=True,
             )
             raise typer.Exit(2)

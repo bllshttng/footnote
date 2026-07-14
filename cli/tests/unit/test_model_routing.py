@@ -658,3 +658,35 @@ def test_parse_target_rejects_internal_whitespace(raw: str) -> None:
 
 def test_parse_target_accepts_one_m_suffix() -> None:
     assert mr._parse_target("zai,glm-5.2[1m]") == ("zai", "glm-5.2[1m]")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("zai/glm-5.2", ("zai", "glm-5.2")),
+        ("zai/glm-5.2[1m]", ("zai", "glm-5.2[1m]")),
+        ("zai-openai/glm-4.6", ("zai-openai", "glm-4.6")),
+        # First slash splits, so a namespaced model id keeps its slashes.
+        ("zai/z-ai/glm-5.2", ("zai", "z-ai/glm-5.2")),
+        # Legacy comma still parses.
+        ("zai,glm-5.2", ("zai", "glm-5.2")),
+    ],
+)
+def test_parse_target_accepts_slash_and_comma(raw: str, expected: tuple) -> None:
+    assert mr._parse_target(raw) == expected
+
+
+def test_build_lane_routes_when_configured_with_slash() -> None:
+    route = mr.resolve_route(
+        "build",
+        settings=_settings(roles={"build": "zai/glm-5.2"}),
+        env={"ZAI_API_KEY": "zk"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_route_table_target_uses_slash() -> None:
+    rows = mr.build_route_table(settings=_settings(), env={"ZAI_API_KEY": "k"})
+    by_role = {r["role"]: r for r in rows}
+    assert by_role["coordinate"]["target"] == "zai/glm-5.2"

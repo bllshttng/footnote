@@ -382,8 +382,9 @@ def cmd_spawn(
         None,
         "--route",
         help=(
-            "Explicit per-dispatch model route as provider,model (e.g. "
-            "zai,glm-5.2). Bypasses the --role table and guard (explicit intent "
+            "Explicit per-dispatch model route as provider/model (e.g. "
+            "zai/glm-5.2; legacy comma zai,glm-5.2 also accepted). Bypasses the "
+            "--role table and guard (explicit intent "
             "is not auto-routing) and wins over any configured lane. FAILS CLOSED: "
             "an unknown provider, non-anthropic protocol, or missing key refuses "
             "the spawn - never a silent primary-model launch. claude only."
