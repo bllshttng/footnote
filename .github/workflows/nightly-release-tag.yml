@@ -36,13 +36,24 @@ jobs:
           # Full history + tags: git describe and rev-list both need them.
           fetch-depth: 0
 
-      - name: Compute next version, tag, dispatch release-wheels
+      - name: Compute next version, tag, dispatch release workflows
         env:
           GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 0. Release only from the default branch. A workflow_dispatch on a
+          #    feature branch would otherwise push a bump + a public tag from
+          #    unmerged code (an immutable release cut from a non-main commit).
+          branch="${GITHUB_REF_NAME}"
+          default_branch="${DEFAULT_BRANCH:-main}"
+          if [ "$branch" != "$default_branch" ]; then
+            echo "::error::refusing to release from non-default branch '${branch}'; run this on '${default_branch}'"
+            exit 1
+          fi
 
           # 1. Latest v* tag. No tag at all -> a human must cut the first release;
           #    the nightly never mints the first one (unfetched tags or a
@@ -64,14 +75,21 @@ jobs:
           fi
           echo "${count} commit(s) since ${latest}"
 
-          # 3. Compute next patch. No zero-padding assumptions (0.3.999 -> 0.3.1000).
-          ver="${latest#v}"
-          major="${ver%%.*}"
-          rest="${ver#*.}"
+          # 3. Compute the release version = max(source version, tag's patch bump).
+          #    The source files are the version source of truth. When a minor bump
+          #    landed in-PR (source 0.3.0 while the last tag is still v0.2.1,
+          #    before the operator cuts v0.3.0) a pure tag-patch bump would derive
+          #    v0.2.2 and REWRITE the source DOWN to 0.2.2. Taking the max cuts the
+          #    already-declared 0.3.0 instead. No zero-padding assumptions.
+          tag_ver="${latest#v}"
+          major="${tag_ver%%.*}"
+          rest="${tag_ver#*.}"
           minor="${rest%%.*}"
           patch="${rest#*.}"
-          next="v${major}.${minor}.$((patch + 1))"
-          new_ver="${next#v}"
+          tag_bump="${major}.${minor}.$((patch + 1))"
+          src_ver="$(sed -nE 's/^__version__ = "(.*)"$/\1/p' cli/src/fno/__init__.py)"
+          new_ver="$(printf '%s\n%s\n' "$src_ver" "$tag_bump" | sort -V | tail -1)"
+          next="v${new_ver}"
 
           # Idempotent re-run: a prior night tagged then died downstream.
           # Skip cleanly - recovery is re-dispatch, never re-tag.
@@ -90,7 +108,6 @@ jobs:
           #    behind fails crates-publish or ships a mislabeled binary).
           PY_FILE="cli/src/fno/__init__.py"
           CRATE_FILES="crates/fno/Cargo.toml crates/fno-agents/Cargo.toml"
-          branch="${GITHUB_REF_NAME}"
 
           apply_bump() {
             sed -i -E "s/^__version__ = \".*\"/__version__ = \"${new_ver}\"/" "$PY_FILE"
@@ -146,9 +163,25 @@ jobs:
           git push origin "${next}"
           echo "tagged ${bump_sha} as ${next}"
 
-          # 6. Explicitly dispatch release-wheels at the tag ref. GITHUB_TOKEN
-          #    pushes fire no workflows (anti-loop rule), so the tag-push event
-          #    alone builds nothing - this dispatch is load-bearing. Assert its
-          #    exit code so a "green" nightly can never silently skip releasing.
+          # 6. Explicitly dispatch the tag-gated release workflows. A tag pushed
+          #    with GITHUB_TOKEN fires no `on: push` workflows (anti-loop rule),
+          #    so these dispatches are load-bearing - the tag-push event alone
+          #    builds nothing. Both publish jobs stay approval-gated by the
+          #    `release` environment (autonomy still ends at the click). set -e
+          #    fails the nightly red if a dispatch call fails, so a "green"
+          #    nightly can never silently skip a channel.
           gh workflow run release-wheels.yml --ref "${next}" -f publish=true
           echo "dispatched release-wheels at ${next} with publish=true"
+          gh workflow run crates-publish.yml --ref "${next}" -f confirm=true
+          echo "dispatched crates-publish at ${next} with confirm=true"
+
+          # release-binaries only ATTACHES on a real tag PUSH (its release job is
+          # gated `github.event_name == 'push'` - a dispatch, even at a v* tag,
+          # deliberately stops at build artifacts for inspection). A GITHUB_TOKEN
+          # tag push cannot fire that, so the nightly cannot auto-attach the
+          # standalone fno-agents binaries. The PyPI wheel (the bootstrap channel)
+          # and crates.io are covered above; standalone-binary attachment for a
+          # nightly tag needs a maintainer to re-run release-binaries from the tag
+          # (or a PAT push that fires on: push). Called out here, not silently
+          # skipped.
+          echo "::notice::nightly does not auto-attach standalone binaries for ${next}; re-run release-binaries from the tag if needed"
