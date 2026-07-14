@@ -865,18 +865,27 @@ impl Queue for MegawalkQueue {
     ///
     /// DonePRGreen | DoneAdvisory -> shell `fno backlog done <id>`.
     ///   Exit 0 -> CloseOutcome::Closed.
-    ///   Nonzero -> CloseOutcome::Parked(stderr tail).
+    ///   Exit 5 -> CloseOutcome::AwaitingMerge (PR OPEN, not merged; x-aba7).
+    ///   Other nonzero -> CloseOutcome::Parked(stderr tail).
+    ///
+    /// DoneAwaitingMerge -> CloseOutcome::AwaitingMerge directly, WITHOUT
+    ///   shelling `backlog done` (x-f4d2: the reason already carries the fact).
     ///
     /// Any other reason -> CloseOutcome::Parked(reason description).
     ///   Does NOT call `fno backlog done` (task 2.2 handles refusal paths).
     ///
     /// Updates walk policy state (consecutive-failure streak / p0 flag) so
     /// the NEXT next() call can return a pause when policy warrants it.
+    /// AwaitingMerge records SUCCESS (not a failure) even though its reason
+    /// (DoneAwaitingMerge) is not a `is_done_reason`.
     ///
     /// ## Park-exclusion (AC2-EDGE): hold claim on Parked/Refused
     ///
-    /// ONLY releases the node claim when the outcome is CloseOutcome::Closed.
-    /// For Parked and Refused outcomes, the claim is HELD so the live-claims
+    /// Releases the node claim on Closed AND AwaitingMerge (both success-shaped:
+    /// an exit-5 node carries a PR, so its durable `_status: in_review` already
+    /// excludes it from next/ready/named dispatch - holding the claim would only
+    /// starve the walker of a slot). For Parked and Refused outcomes, the claim
+    /// is HELD so the live-claims
     /// selection filter in `_live_claimed_node_ids` (cli/src/fno/graph/cli.py:43-65)
     /// continues to exclude this node and `fno backlog next` moves on to other
     /// ready work instead of re-picking the same busted node.
@@ -899,7 +908,13 @@ impl Queue for MegawalkQueue {
     fn close(&mut self, unit: &Unit, evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
         let should_done = is_done_reason(&evidence.reason);
 
-        let outcome = if should_done {
+        let outcome = if matches!(evidence.reason, TerminationReason::DoneAwaitingMerge) {
+            // x-aba7 / x-f4d2: the session built successfully but its PR could not
+            // merge yet. Success-shaped - release the claim, record success, let
+            // reconcile close the node at the actual merge. Do NOT shell `backlog
+            // done` (it would exit 5 anyway; this reason already carries the fact).
+            CloseOutcome::AwaitingMerge
+        } else if should_done {
             let done_out = retry_etxtbsy(|| {
                 abi_cmd(&self.abi_bin)
                     .args(["backlog", "done", &unit.id])
@@ -909,6 +924,10 @@ impl Queue for MegawalkQueue {
 
             if done_out.status.success() {
                 CloseOutcome::Closed
+            } else if done_out.status.code() == Some(5) {
+                // Exit 5: PR OPEN, not merged (x-aba7). Awaiting merge, not a
+                // failure - the node stays in_review and closes on merge.
+                CloseOutcome::AwaitingMerge
             } else {
                 let stderr = String::from_utf8_lossy(&done_out.stderr).trim().to_string();
                 CloseOutcome::Parked(if stderr.is_empty() {
@@ -944,11 +963,15 @@ impl Queue for MegawalkQueue {
             .get(&unit.id)
             .map(|e| e.is_p0)
             .unwrap_or(false);
-        self.policy_record_close(&unit.id, should_done, is_p0);
+        // AwaitingMerge is a success (x-aba7): a DoneAwaitingMerge-reason close
+        // has should_done=false, so record it explicitly here or its streak
+        // would count a healthy ship-green as a failure.
+        let close_success = should_done || matches!(outcome, CloseOutcome::AwaitingMerge);
+        self.policy_record_close(&unit.id, close_success, is_p0);
 
         // ── claim release vs. hold (park-exclusion) ───────────────────────────
         match &outcome {
-            CloseOutcome::Closed => {
+            CloseOutcome::Closed | CloseOutcome::AwaitingMerge => {
                 // Success: release the claim so the node is no longer live-claimed.
                 let session_key = self
                     .active_claims

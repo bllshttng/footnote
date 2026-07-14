@@ -2784,3 +2784,190 @@ exit 0"#,
         "walker claim must be released after walk completes; calls: {calls:?}"
     );
 }
+
+// ── AC6-FR (x-aba7): done exit 5 -> AwaitingMerge, claim RELEASED ─────────────
+//
+// When `fno backlog done` exits 5 (PR OPEN, not merged), the close outcome is
+// AwaitingMerge (success-shaped): the claim is released like a Closed node and
+// the node is closed later by reconcile at the actual merge.
+
+#[test]
+fn awaiting_merge_exit5_releases_claim() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let call_log = tmp.path().join("calls.log");
+    let call_log_str = call_log.display().to_string();
+
+    let node_json = real_node_json("ab-await001", "Awaiting merge", None);
+
+    write_stub(
+        &bin_dir,
+        "fno",
+        &format!(
+            r#"echo "$@" >> "{call_log_str}"
+if [[ "$1" == "backlog" && "$2" == "next" ]]; then
+  echo '{node_json}'
+  exit 0
+fi
+if [[ "$1" == "claim" ]]; then
+  exit 0
+fi
+if [[ "$1" == "backlog" && "$2" == "done" ]]; then
+  echo "awaiting merge: PR #7 is OPEN, not merged" >&2
+  exit 5
+fi
+exit 0"#,
+            call_log_str = call_log_str,
+            node_json = node_json,
+        ),
+    );
+
+    let abi_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let unit = q.next().unwrap().unwrap();
+
+    let evidence = Evidence {
+        reason: TerminationReason::DonePRGreen,
+        message: "PR up, reviewed".to_string(),
+    };
+    let outcome = q.close(&unit, &evidence).unwrap();
+
+    assert_eq!(outcome, CloseOutcome::AwaitingMerge);
+
+    let calls = read_file_lines(&call_log);
+    // done was shelled (exit 5 drove the outcome).
+    assert!(
+        calls
+            .iter()
+            .any(|l| l.contains("backlog done") && l.contains("ab-await001")),
+        "backlog done must be called; calls: {calls:?}"
+    );
+    // Claim RELEASED (success-shaped), not held.
+    assert!(
+        calls
+            .iter()
+            .any(|l| l.contains("claim release") && l.contains("node:ab-await001")),
+        "claim must be released on AwaitingMerge; calls: {calls:?}"
+    );
+}
+
+// ── AC7-FR (x-aba7 / x-f4d2): DoneAwaitingMerge reason -> AwaitingMerge ───────
+//
+// A unit that terminates DoneAwaitingMerge maps directly to AwaitingMerge
+// WITHOUT shelling `fno backlog done` (the reason already carries the fact),
+// releases the claim, and does NOT park (the pre-x-aba7 bug).
+
+#[test]
+fn done_awaiting_merge_reason_maps_without_calling_done() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let call_log = tmp.path().join("calls.log");
+    let call_log_str = call_log.display().to_string();
+
+    let node_json = real_node_json("ab-await002", "Awaiting reason", None);
+
+    write_stub(
+        &bin_dir,
+        "fno",
+        &format!(
+            r#"echo "$@" >> "{call_log_str}"
+if [[ "$1" == "backlog" && "$2" == "next" ]]; then
+  echo '{node_json}'
+  exit 0
+fi
+if [[ "$1" == "claim" ]]; then
+  exit 0
+fi
+if [[ "$1" == "backlog" && "$2" == "done" ]]; then
+  # If this fires, the mapping is wrong (should skip done entirely).
+  echo "done SHOULD NOT be called for DoneAwaitingMerge" >&2
+  exit 1
+fi
+exit 0"#,
+            call_log_str = call_log_str,
+            node_json = node_json,
+        ),
+    );
+
+    let abi_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let unit = q.next().unwrap().unwrap();
+
+    let evidence = Evidence {
+        reason: TerminationReason::DoneAwaitingMerge,
+        message: "past proven main-red".to_string(),
+    };
+    let outcome = q.close(&unit, &evidence).unwrap();
+
+    assert_eq!(outcome, CloseOutcome::AwaitingMerge);
+
+    let calls = read_file_lines(&call_log);
+    // `backlog done` must NOT be called for this reason.
+    assert!(
+        !calls.iter().any(|l| l.contains("backlog done")),
+        "backlog done must NOT be called for DoneAwaitingMerge; calls: {calls:?}"
+    );
+    // Claim released (success-shaped), not held.
+    assert!(
+        calls
+            .iter()
+            .any(|l| l.contains("claim release") && l.contains("node:ab-await002")),
+        "claim must be released on AwaitingMerge; calls: {calls:?}"
+    );
+}
+
+// ── AC6-FR: AwaitingMerge does NOT increment the consecutive-failure streak ───
+//
+// Three AwaitingMerge closes in a row must not trip the consecutive_failures
+// pause (three Parked closes would). Proves close records SUCCESS.
+
+#[test]
+fn awaiting_merge_does_not_trip_failure_streak() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let node_json = real_node_json("ab-streak01", "Streak", None);
+
+    // backlog next always returns a node; claim ok; done always exits 5.
+    write_stub(
+        &bin_dir,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then echo '{node_json}'; exit 0; fi
+if [[ "$1" == "claim" ]]; then exit 0; fi
+if [[ "$1" == "backlog" && "$2" == "done" ]]; then exit 5; fi
+exit 0"#,
+            node_json = node_json,
+        ),
+    );
+
+    let abi_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(abi_stub, None, false);
+
+    // Close 3 AwaitingMerge units directly (DonePRGreen reason + done exit 5).
+    for i in 0..3 {
+        let unit = Unit {
+            id: format!("ab-streak0{i}"),
+            title: "streak".to_string(),
+            session_key: format!("sk-{i}"),
+            plan_path: None,
+            extra_env: vec![],
+        };
+        let outcome = q
+            .close(
+                &unit,
+                &Evidence {
+                    reason: TerminationReason::DonePRGreen,
+                    message: "await".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, CloseOutcome::AwaitingMerge, "close {i}");
+    }
+
+    // After 3 successes the streak is 0: next() must NOT pause.
+    let next = q.next().unwrap();
+    assert!(
+        next.is_some(),
+        "AwaitingMerge must not trip consecutive_failures; next() should dequeue, not pause"
+    );
+}
