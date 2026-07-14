@@ -718,8 +718,8 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
 /// - `pane` (default): owned interactive daemon pane -> None (fall through).
 /// - claude + `bg`: dispatch_claude_spawn (the detached `claude --bg` thread).
 /// - claude + `headless`: dispatch_claude_headless (the `claude -p` one-shot).
-/// - codex/gemini/agy + `headless`: dispatch_*_once (one-shot, client-side).
-/// - codex/gemini/agy + `bg`: hard error (bg is claude-only -> use headless).
+/// - codex/gemini/agy/opencode + `headless`: dispatch_*_once (one-shot, client-side).
+/// - codex/gemini/agy/opencode + `bg`: hard error (bg is claude-only -> use headless).
 /// - no resolvable / unknown provider: stderr usage error + exit 2.
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
@@ -730,6 +730,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     };
     use fno_agents::codex_ask::dispatch_codex_once;
     use fno_agents::gemini_ask::dispatch_gemini_once;
+    use fno_agents::opencode_ask::dispatch_opencode_once;
     use fno_agents::state::load_registry;
 
     let provider_param = params.get("provider").and_then(|v| v.as_str());
@@ -1061,16 +1062,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, message, from_name, &cwd, yolo, timeout, model,
         )),
-        // opencode v1 hosts the PTY-TUI only (x-51f6 Locked Decision 3): no
-        // client-side `opencode run` one-shot lane is wired. Refuse loudly
-        // rather than fall through to the daemon RPC (which would silently
-        // attempt a retired PTY host).
-        ("opencode", "headless") => {
-            eprintln!(
-                "substrate 'headless' is not wired for opencode yet; spawn an interactive pane with --substrate pane"
-            );
-            Some(2)
-        }
+        // opencode headless: the client-side one-shot `opencode run --auto`
+        // (x-567d wires the documented lane; the bare `opencode` TUI stays the
+        // `pane` form). Stateless plain-text, like agy.
+        ("opencode", "headless") => emit!(dispatch_opencode_once(
+            home, name, message, from_name, &cwd, yolo, timeout, model,
+        )),
 
         ("agy", "headless") => {
             // agy is stateless (plain text, no session id): a one-shot `agy -p`.
