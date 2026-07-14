@@ -28,10 +28,12 @@ WT = Path("/work/repo/.claude/worktrees/x-abcd")
 
 
 def _guard(root, harness, session, wt=WT, **kw):
+    # Production uses a harness-level holder (see cli.worktree_guard_cmd) so all
+    # same-harness sessions share it; `session` is kept only for readability.
     return guard_worktree(
         wt,
         my_harness=harness,
-        my_holder=f"{harness}-worktree:{session}",
+        my_holder=f"worktree-owner:{harness}",
         root=root,
         **kw,
     )
@@ -44,7 +46,7 @@ class TestAcquire:
         st = claim_status(worktree_claim_key(WT), root=tmp_path)
         assert st["state"] == "live"
         assert st["harness"] == "claude"
-        assert st["holder"] == "claude-worktree:s1"
+        assert st["holder"] == "worktree-owner:claude"
 
     def test_no_worktree_enforces_nothing(self, tmp_path):
         r = guard_worktree(None, my_harness="claude", my_holder="h", root=tmp_path)
@@ -56,6 +58,27 @@ class TestAcquire:
         assert not claim_status(worktree_claim_key(WT), root=tmp_path).get("holder")
 
 
+class TestBoundedKey:
+    def test_short_path_keeps_raw_key(self):
+        assert worktree_claim_key(WT) == f"worktree:{WT}"
+
+    def test_long_path_falls_back_to_digest_and_fits(self, tmp_path):
+        from urllib.parse import quote
+        from fno.claims.types import MAX_ENCODED_FILENAME_BYTES
+
+        deep = Path("/" + "/".join(f"very-long-segment-{i:03d}" for i in range(30)))
+        key = worktree_claim_key(deep)
+        assert key.startswith("worktree:") and key != f"worktree:{deep}"
+        # The encoded key now fits the claim filename cap (the whole point:
+        # a raw over-cap key would make acquire_claim raise and fail open).
+        assert len(quote(key, safe="").encode("utf-8")) <= MAX_ENCODED_FILENAME_BYTES
+        # And the guard still enforces on the deep path (acquires, no crash).
+        r = guard_worktree(
+            deep, my_harness="claude", my_holder="worktree-owner:claude", root=tmp_path
+        )
+        assert r.verdict == VERDICT_ACQUIRED
+
+
 class TestForeignRefusal:
     def test_codex_refused_from_claude_owned_worktree(self, tmp_path):
         """Verification #1."""
@@ -64,7 +87,7 @@ class TestForeignRefusal:
         assert r.blocked
         assert r.verdict == VERDICT_FOREIGN
         assert r.owner_harness == "claude"
-        assert r.owner_holder == "claude-worktree:s1"  # message can name the owner
+        assert r.owner_holder == "worktree-owner:claude"  # owner is harness-level
 
     def test_override_downgrades_foreign(self, tmp_path):
         _guard(tmp_path, "claude", "s1")
@@ -82,15 +105,26 @@ class TestSameHarnessReentry:
         assert r.verdict == VERDICT_OK
         assert not r.blocked
 
-    def test_sibling_same_harness_session_ok(self, tmp_path):
-        """Two claude sessions in one worktree: same harness, no refusal."""
+    def test_sibling_same_harness_session_refreshes_shared_claim(self, tmp_path, monkeypatch):
+        """Two claude sessions in one worktree: same harness, no refusal, and the
+        sibling REFRESHES the shared harness-level claim so liveness tracks the
+        active session (finding B) rather than expiring with the first holder."""
+        import fno.claims.core as core
+
+        # A realistic epoch-ms so hybrid liveness (create_time < acquired_at,
+        # TTL unexpired) keeps the claim LIVE across the sibling's re-read.
+        clock = [1_800_000_000_000]
+        monkeypatch.setattr(core, "now_ms", lambda: clock[0])
         _guard(tmp_path, "claude", "s1")
+        key = worktree_claim_key(WT)
+        first = claim_status(key, root=tmp_path)["acquired_at"]
+
+        clock[0] += 90_000  # 90s later a sibling session writes
         r = _guard(tmp_path, "claude", "s2")
         assert r.verdict == VERDICT_OK
-        assert not r.blocked
-        # The original owner's claim is left intact (not stolen by the sibling).
-        st = claim_status(worktree_claim_key(WT), root=tmp_path)
-        assert st["holder"] == "claude-worktree:s1"
+        after = claim_status(key, root=tmp_path)
+        assert after["holder"] == "worktree-owner:claude"  # shared, not stolen
+        assert after["acquired_at"] > first  # refreshed -> liveness follows activity
 
 
 class TestReadOnly:

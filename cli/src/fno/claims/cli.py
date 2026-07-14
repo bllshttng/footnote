@@ -361,16 +361,17 @@ def worktree_guard_cmd(
     from .session_pid import resolve_session_pid
     from .worktree_guard import (
         VERDICT_NO_WORKTREE,
+        WorktreeGuardResult,
         guard_worktree,
         resolve_worktree_root,
     )
 
     ident = resolve_harness_identity()
-    holder = (
-        f"{ident.harness}-worktree:{ident.session_id}"
-        if ident.harness and ident.session_id
-        else f"{ident.harness or 'unknown'}-worktree:{os.getpid()}"
-    )
+    # Harness-level holder: every same-harness session shares it, so any
+    # sibling's write idempotent-re-acquires and refreshes liveness (pid + TTL).
+    # A session-scoped holder would let a TTL-only owner (codex) expire while a
+    # sibling is still active, then a foreign harness could take the worktree.
+    holder = f"worktree-owner:{ident.harness or 'unknown'}"
     override = os.environ.get("FNO_WORKTREE_OK", "").strip() not in ("", "0", "false", "False")
 
     try:
@@ -378,14 +379,20 @@ def worktree_guard_cmd(
     except Exception:
         session_pid = None
 
-    result = guard_worktree(
-        resolve_worktree_root(),
-        my_harness=ident.harness,
-        my_holder=holder,
-        session_pid=session_pid,
-        override=override,
-        acquire=acquire_if_free,
-    )
+    try:
+        result = guard_worktree(
+            resolve_worktree_root(),
+            my_harness=ident.harness,
+            my_holder=holder,
+            session_pid=session_pid,
+            override=override,
+            acquire=acquire_if_free,
+        )
+    except Exception:
+        # Defensive: never traceback out of the guard. An unexpected error emits
+        # no-worktree (enforce nothing) so a hook fails open rather than on a
+        # crash exit; the guard must never be the thing that bricks a session.
+        result = WorktreeGuardResult(verdict=VERDICT_NO_WORKTREE, my_harness=ident.harness)
 
     payload = {
         "verdict": result.verdict,

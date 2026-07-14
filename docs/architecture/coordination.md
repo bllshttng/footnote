@@ -38,7 +38,7 @@ so the prefix's colon is filename-safe.
 | `walker:` | `megawalk-loop:<pid>` | megawalk singleton |
 | `fleet:` | `megatron-commander:<pid>` | megatron `run()` |
 | `project:` | `megatron-project:<mission>:<project>` | (reserved) per-project worker |
-| `worktree:` | `<harness>-worktree:<sid>` | worktree harness guard (see below) |
+| `worktree:` | `worktree-owner:<harness>` | worktree harness guard (see below) |
 | `user:` | (reserved) | (future) human-imposed locks |
 
 Holder shape is convention, not enforced. The verb-level invariants are:
@@ -215,13 +215,20 @@ and nothing objects, producing duplicate work and conflicting commits. The
 - **Key + collision unit.** `worktree:<physical-toplevel>` (a worktree checks
   out exactly one branch, so path and branch are 1:1; the physical toplevel is
   the cheapest thing to resolve, and `pwd -P` symlink resolution makes two
-  entry paths key on one lock). The key is repo-local, so `claims_root_for`
-  routes it to the canonical `.fno/claims`: every worktree of a repo shares one
-  claims dir and each worktree gets its own lock file.
-- **Ownership keys on HARNESS, not holder.** Two claude sessions (or a subagent)
-  in one worktree are the same harness and never refuse each other; a codex
-  session entering a claude-owned worktree is refused, naming the owner.
-  Atomicity and the harness tag come straight from `acquire_claim`, so the
+  entry paths key on one lock). A path whose URL-encoded key would exceed the
+  claim filename cap falls back to `worktree:<sha256-digest>` - a raw over-cap
+  key would make `acquire_claim` raise and the guard silently fail open for
+  exactly the deep checkouts it must cover. The key is repo-local, so
+  `claims_root_for` routes it to the canonical `.fno/claims`: every worktree of
+  a repo shares one claims dir and each worktree gets its own lock file.
+- **Ownership keys on HARNESS, not holder.** The holder is harness-level
+  (`worktree-owner:<harness>`), so every same-harness session shares it: two
+  claude sessions (or a subagent) in one worktree never refuse each other, and
+  any sibling's write idempotent-re-acquires and **refreshes liveness** (a
+  session-scoped holder would let a TTL-only owner expire while a sibling is
+  still active, then a foreign harness could take the worktree). A codex session
+  entering a claude-owned worktree is refused, naming the owner. Atomicity and
+  the harness tag come straight from `acquire_claim`, so the
   concurrent-double-entry race has exactly one winner with no new machinery.
 - **Enforcement surfaces** (`fno claim worktree-guard` is the shared core):
   - *first write* - a PreToolUse hook (`hooks/worktree-harness-guard.sh`, both

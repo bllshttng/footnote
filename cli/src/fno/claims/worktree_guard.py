@@ -23,12 +23,15 @@ without --ttl" footgun cannot apply.
 """
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote as _url_quote
 
 from .core import ClaimHeldByOther, acquire_claim, claim_status
+from .types import MAX_ENCODED_FILENAME_BYTES
 
 # 2h TTL matches the node claim default (TARGET_CLAIM_TTL). A live session keeps
 # it fresh by re-acquiring on each write; the pid arm keeps a claude owner alive
@@ -61,7 +64,20 @@ class WorktreeGuardResult:
 
 
 def worktree_claim_key(worktree_root: Path) -> str:
-    return f"worktree:{worktree_root}"
+    """`worktree:<path>` when its URL-encoded filename fits the claim cap, else
+    `worktree:<sha256-digest>`.
+
+    A raw over-cap key would make `acquire_claim` raise before the verb emits a
+    verdict; the hook then fail-opens and enforcement silently drops for exactly
+    the deep/long checkouts it must still cover. The digest is deterministic per
+    path (same worktree -> same lock), and the human-readable path still reaches
+    the block message via the verdict's `worktree` field, not the key.
+    """
+    raw = f"worktree:{worktree_root}"
+    if len(_url_quote(raw, safe="").encode("utf-8")) <= MAX_ENCODED_FILENAME_BYTES:
+        return raw
+    digest = hashlib.sha256(str(worktree_root).encode("utf-8")).hexdigest()[:32]
+    return f"worktree:{digest}"
 
 
 def resolve_worktree_root(cwd: Optional[Path] = None) -> Optional[Path]:
