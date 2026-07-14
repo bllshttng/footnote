@@ -415,15 +415,50 @@ for id in "${NODES[@]}"; do
   esac
 
   # ---- Build the worker command + resolve the launch cwd ----
-  # claude runs the native `/target` slash command; --flags + the default
-  # no-merge (Locked Decision 4; --allow-merge opts out) apply to it.
-  # Non-claude workers get the harness-native command the resolver chose
-  # (x-567d): codex `$fno:target ...`, agy `/target ...`, or a prose brief for
-  # opencode/gemini. That template bakes in no-merge for the autonomous lane, so
-  # --flags / --allow-merge (claude `/target` concepts) do not re-thread here; a
-  # missing template (stale fno) fails this node loudly rather than sending an
-  # empty prompt.
-  if [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
+  # Command precedence, single source = `fno dispatch resolve`:
+  #   node dispatch_verb / dispatch_brief (US3, x-f78d)  >  per-harness builtin (x-567d)
+  # A node verb/brief goes through the resolver (validates the verb allowlist,
+  # caps the brief at 8 KB, emits TARGET_BRIEF); no override -> claude builds its
+  # native /target locally (--flags / --allow-merge, byte-identical) and every
+  # OTHER harness uses the per-harness command the initial resolve chose (codex
+  # `$fno:target`, agy `/target`, opencode/gemini prose brief). no-merge is a
+  # launcher flag for a /target-family command; a prose brief carries it in prose.
+  # select(. != "") before // empty: jq's // treats "" as truthy (repo idiom).
+  dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != "") // empty' 2>/dev/null)"
+  dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
+  TARGET_BRIEF_ENV=""
+  if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
+    # --harness so the resolver's per-harness builtin applies where no explicit
+    # verb string is given; the verb string itself stays claude-syntax (a
+    # per-harness verb translation is a follow-up).
+    resolve_args=(dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" -J)
+    [[ -n "$dispatch_verb" ]] && resolve_args+=(--verb "$dispatch_verb")
+    [[ -n "$dispatch_brief" ]] && resolve_args+=(--brief "$dispatch_brief")
+    resolved_json="$(fno "${resolve_args[@]}" 2>/dev/null)"; resolve_rc=$?
+    if [[ "$resolve_rc" -ne 0 ]] || ! printf '%s' "$resolved_json" | jq -e '.command' >/dev/null 2>&1; then
+      # Refused verb / oversized brief (or a stale fno without the flags): fail
+      # closed and leave the node re-dispatchable, never launch a wrong command.
+      fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      echo "failed $id reason=\"dispatch resolve refused verb/brief (rc=$resolve_rc); node not dispatched\""
+      n_failed=$((n_failed + 1))
+      continue
+    fi
+    tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
+    TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
+    # /target-family command: thread --flags + the no-merge default (a non-target
+    # command like $fno:target or a prose brief takes neither).
+    if [[ "$tgt_cmd" == "/target "* ]]; then
+      rest="${tgt_cmd#/target }"
+      inject=""
+      [[ -n "$FLAGS" ]] && inject="$FLAGS "
+      if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* && " $rest " != *" no-merge "* ]]; then
+        inject="${inject}no-merge "
+      fi
+      tgt_cmd="/target ${inject}${rest}"
+    fi
+  elif [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
+    # claude native /target, built locally: /target [FLAGS] [no-merge] <id>
+    # (Locked Decision 4; --allow-merge opts out). Byte-identical to before.
     tgt_cmd="/target"
     [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
     if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
@@ -431,6 +466,8 @@ for id in "${NODES[@]}"; do
     fi
     tgt_cmd="$tgt_cmd $id"
   elif [[ -n "$DISPATCH_COMMAND" ]]; then
+    # non-claude per-harness builtin (x-567d), {id} substituted (codex
+    # `$fno:target`, agy `/target`, opencode/gemini prose brief).
     tgt_cmd="${DISPATCH_COMMAND//\{id\}/$id}"
   else
     fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
@@ -466,7 +503,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\" route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -511,6 +548,10 @@ for id in "${NODES[@]}"; do
   # the optional --cwd off an empty-array path (bash 3.2 set -u safe). stderr goes
   # to a temp file, NOT 2>&1: a stderr warning must never pollute the JSON receipt
   # parse below (house rule; gemini review PR #457).
+  # Carry the US3 brief to the worker via env (inherited by claude --bg), never
+  # on the command line. Exported unconditionally (empty when the node has no
+  # brief) so a prior loop iteration's brief can never leak into a later node.
+  export TARGET_BRIEF="$TARGET_BRIEF_ENV"
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
   # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->

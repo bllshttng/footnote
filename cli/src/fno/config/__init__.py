@@ -1095,9 +1095,10 @@ class DispatchBlock(BaseModel):
     validates the harness against the map and the substrate against the harness's
     capabilities at resolve time, fail-loud.
 
-    `command` is a template with a single `{id}` placeholder. The dispatch VERB +
-    per-node brief precedence (US3) layers on top of this; US1 ships the resolver
-    + map only.
+    `command` is a template with a single `{id}` placeholder. A node's
+    `dispatch_verb`/`dispatch_brief` (US3) layer on top: the resolver validates
+    the verb against `allowed_verbs` and carries the brief via env only, so a
+    graph field crossing into a worker prompt is a guarded trust boundary.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1105,6 +1106,9 @@ class DispatchBlock(BaseModel):
     harness: str = ""
     substrate: str = ""
     command: str = ""
+    # US3 verb allowlist: a node-supplied dispatch verb must match one of these
+    # or the resolver refuses (no worker). Empty = the built-in default set.
+    allowed_verbs: list[str] = Field(default_factory=lambda: ["/target", "/think"])
 
 
 class AgentsBlock(BaseModel):

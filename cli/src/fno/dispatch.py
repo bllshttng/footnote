@@ -92,6 +92,12 @@ def cmd_resolve(
     command: Optional[str] = typer.Option(
         None, "--command", help="Command template. Default: config.dispatch.command > '/target no-merge {id}'."
     ),
+    verb: Optional[str] = typer.Option(
+        None, "--verb", help="Node dispatch verb (validated against config.dispatch.allowed_verbs); assembled as '<verb> {id}'. Wins over --command's config/builtin default."
+    ),
+    brief: Optional[str] = typer.Option(
+        None, "--brief", help="Node dispatch brief; returned in env.TARGET_BRIEF (never the command line). Capped at 8 KB."
+    ),
     trigger: str = typer.Option(
         "autonomous", "--trigger", help="autonomous (fire-and-forget) | attended. Autonomous never resolves pane."
     ),
@@ -114,6 +120,8 @@ def cmd_resolve(
             substrate=substrate,
             node_id=node,
             command=command,
+            verb=verb,
+            brief=brief,
             trigger=trigger,
         )
     except DispatchResolveError as exc:
@@ -128,6 +136,10 @@ def cmd_resolve(
         typer.echo(f"permission_bypass={' '.join(out['permission_bypass'])}")
         typer.echo(f"bg={out['bg']}")
         typer.echo(f"resume={out['resume']}")
+        # env carries TARGET_BRIEF (US3); consumers read it via -J JSON. A brief
+        # can be multi-line, so key=value lines only report presence/size here.
+        if out["env"].get("TARGET_BRIEF") is not None:
+            typer.echo(f"brief_bytes={len(out['env']['TARGET_BRIEF'].encode('utf-8'))}")
     raise typer.Exit(code=0)
 
 

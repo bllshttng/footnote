@@ -122,3 +122,77 @@ def test_substrate_default_table():
 def test_known_harnesses_covers_readable_set():
     """The map covers the readable-provider set so US4 can wire opencode."""
     assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
+
+
+# --- US3: configurable dispatch verb + brief ------------------------------
+
+
+def test_node_verb_assembles_command():
+    """AC2-HP: a node verb resolves to `<verb> <id>` (not the /target default)."""
+    out = _resolve(node_id="x-1", verb="/think")
+    assert out["command"] == "/think x-1"
+    assert out["env"] == {}
+
+
+def test_node_brief_rides_env_never_command():
+    """AC2-HP: the brief reaches the worker via TARGET_BRIEF env, and no brief
+    text is shell-interpolated into the command line."""
+    out = _resolve(node_id="x-1", verb="/think", brief="brainstorm the retry design")
+    assert out["command"] == "/think x-1"
+    assert out["env"]["TARGET_BRIEF"] == "brainstorm the retry design"
+    assert "brainstorm" not in out["command"]
+
+
+def test_out_of_allowlist_verb_rejected():
+    """AC3-EDGE: an injection-shaped verb is refused, naming the verb + allowlist."""
+    with pytest.raises(DispatchResolveError) as exc:
+        _resolve(node_id="x-1", verb="rm -rf; /target")
+    msg = str(exc.value)
+    assert "rm -rf" in msg
+    assert "/target" in msg  # the allowlist is named
+
+
+def test_empty_verb_rejected():
+    """An explicit empty verb fails loud rather than silently defaulting."""
+    with pytest.raises(DispatchResolveError):
+        _resolve(node_id="x-1", verb="   ")
+
+
+def test_brief_over_8kb_rejected():
+    """Verify 4: a brief larger than the 8 KB env budget is an explicit error,
+    never silent truncation."""
+    with pytest.raises(DispatchResolveError, match="8"):
+        _resolve(node_id="x-1", verb="/think", brief="x" * 8193)
+
+
+def test_brief_at_8kb_ok():
+    out = _resolve(node_id="x-1", verb="/think", brief="x" * 8192)
+    assert out["env"]["TARGET_BRIEF"] == "x" * 8192
+
+
+def test_no_verb_leaves_default_and_empty_env():
+    """Verify 3 (regression): no dispatch fields -> /target no-merge <id>, env empty."""
+    out = _resolve(node_id="x-1")
+    assert out["command"] == "/target no-merge x-1"
+    assert out["env"] == {}
+
+
+def test_config_extends_allowlist():
+    """A per-project allowlist admits a domain workflow verb."""
+    cfg = {"allowed_verbs": ["/target", "/think", "/marketing"]}
+    out = _resolve(node_id="x-1", verb="/marketing", dispatch_cfg=cfg)
+    assert out["command"] == "/marketing x-1"
+
+
+def test_node_verb_wins_over_config_command():
+    """Precedence: node verb > config.dispatch.command > builtin."""
+    cfg = {"command": "/foo {id}"}
+    out = _resolve(node_id="x-1", verb="/think", dispatch_cfg=cfg)
+    assert out["command"] == "/think x-1"
+
+
+def test_brief_without_verb_still_rides_env():
+    """A brief on a default (/target) dispatch still travels via env."""
+    out = _resolve(node_id="x-1", brief="ship carefully")
+    assert out["command"] == "/target no-merge x-1"
+    assert out["env"]["TARGET_BRIEF"] == "ship carefully"
