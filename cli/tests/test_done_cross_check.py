@@ -1,7 +1,11 @@
-"""Tests for `fno backlog done` gh cross-check (Task 2.2).
+"""Tests for `fno backlog done` gh cross-check (x-aba7: graph done = merged).
 
-The cross-check runs BEFORE the graph mutation. It refuses to close a node
-unless at least one referenced PR is MERGED or OPEN with green CI.
+The cross-check runs BEFORE the graph mutation. MERGED is the ONLY closing
+evidence. An OPEN PR (regardless of CI state) yields exit 5 (awaiting merge,
+success-shaped): the node stays in_review and closes on the actual merge via
+reconcile / merge-triggered advance. CI state is irrelevant to the close
+decision - whether CI is green is the session's finish-line concern (loop-check),
+not close evidence.
 
 Test filter: `python -m pytest tests/ -k done_cross_check`
 
@@ -10,8 +14,9 @@ module level via monkeypatch, same as the reconcile test pattern) so no real
 gh subprocess is ever invoked.
 
 Exit codes chosen (documented in cmd_done docstring):
-    3  - gh cross-check refused: no merged/green evidence
+    3  - gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge/open evidence
     4  - gh outage / subprocess failure: retryable, node stays open
+    5  - awaiting merge: PR OPEN, not merged; node stays in_review (success-shaped)
     2  - usage error (--force without --reason)
 """
 from __future__ import annotations
@@ -103,13 +108,6 @@ def _patch_query(monkeypatch, query_fn):
     monkeypatch.setattr(gcli, "_done_gh_query", query_fn)
 
 
-def _patch_ci_query(monkeypatch, ci_fn):
-    """Inject a stub CI-checks function into graph.cli.cmd_done."""
-    import fno.graph.cli as gcli
-
-    monkeypatch.setattr(gcli, "_done_ci_query", ci_fn)
-
-
 # ---------------------------------------------------------------------------
 # AC-EDGE: already-done node short-circuits with NO gh call
 # ---------------------------------------------------------------------------
@@ -126,7 +124,6 @@ def test_already_done_short_circuits_no_gh_call(tmp_graph, monkeypatch):
         raise AssertionError("gh should not be called for an already-done node")
 
     _patch_query(monkeypatch, boom_query)
-    _patch_ci_query(monkeypatch, boom_query)
 
     result = _invoke_done("ab-12345678")
 
@@ -153,7 +150,6 @@ def test_advisory_node_no_refs_closes_without_gh(tmp_graph, monkeypatch):
         raise AssertionError("gh should not be called for advisory (no-ref) node")
 
     _patch_query(monkeypatch, boom_query)
-    _patch_ci_query(monkeypatch, boom_query)
 
     result = _invoke_done("ab-aaaaaa01")
 
@@ -195,12 +191,17 @@ def test_merged_pr_closes_successfully(tmp_graph, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# AC-HP: OPEN PR with green CI - close proceeds
+# AC2-HP: OPEN no longer closes, even with green CI (regression against the
+# removed behavior). Exit 5, node stays in_review, and no CI query is issued.
 # ---------------------------------------------------------------------------
 
 
-def test_open_green_pr_closes_successfully(tmp_graph, monkeypatch):
-    """AC-HP: OPEN PR with all-pass CI buckets is accepted as evidence."""
+def test_open_green_pr_awaits_merge_exit5_no_ci_query(tmp_graph, monkeypatch):
+    """AC2-HP: OPEN PR with all-pass CI is no longer closing evidence.
+
+    Exits 5 (awaiting merge), node stays open, and `_done_ci_query` is NEVER
+    called - CI state is irrelevant to the close decision.
+    """
     from fno.graph._reconcile import PrMergeState
 
     _seed(
@@ -214,31 +215,29 @@ def test_open_green_pr_closes_successfully(tmp_graph, monkeypatch):
             merged_at=None,
         )
 
-    def green_ci(pr_number, **kwargs):
-        # Simulate `gh pr checks --json name,state,bucket` returning all-pass
-        return [
-            {"name": "ci", "state": "SUCCESS", "bucket": "pass"},
-            {"name": "lint", "state": "SKIPPED", "bucket": "skipping"},
-        ]
-
     _patch_query(monkeypatch, open_query)
-    _patch_ci_query(monkeypatch, green_ci)
+
+    # The CI-query helper is gone entirely - CI is never consulted in the close
+    # decision (x-aba7). Its absence is the structural guarantee.
+    import fno.graph.cli as _gcli
+    assert not hasattr(_gcli, "_done_ci_query")
+    assert not hasattr(_gcli, "_ci_is_green")
 
     result = _invoke_done("ab-cc000001")
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 5, f"expected 5 (awaiting merge), got {result.exit_code}. output: {result.output}"
     node = _read(tmp_graph)[0]
-    assert node.get("_status") == "done"
-    assert node["completed_at"] is not None
+    assert not node.get("completed_at")
+    assert node.get("_status") != "done"
 
 
 # ---------------------------------------------------------------------------
-# AC3-ERR: OPEN PR with red CI - refuse with specific fact
+# AC2-HP: OPEN PR with red/pending CI also awaits merge (CI never consulted)
 # ---------------------------------------------------------------------------
 
 
-def test_open_red_pr_refuses_with_specific_fact(tmp_graph, monkeypatch):
-    """AC3-ERR: OPEN PR with fail bucket -> refuses, prints specific fact, exit 3, node stays open."""
+def test_open_red_pr_awaits_merge_exit5(tmp_graph, monkeypatch):
+    """OPEN PR awaits merge (exit 5) regardless of CI - CI is not queried."""
     from fno.graph._reconcile import PrMergeState
 
     _seed(
@@ -249,27 +248,88 @@ def test_open_red_pr_refuses_with_specific_fact(tmp_graph, monkeypatch):
     def open_query(pr_number, **kwargs):
         return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
 
-    def red_ci(pr_number, **kwargs):
-        return [
-            {"name": "unit-tests", "state": "FAILURE", "bucket": "fail"},
-            {"name": "lint", "state": "IN_PROGRESS", "bucket": "pending"},
-        ]
-
     _patch_query(monkeypatch, open_query)
-    _patch_ci_query(monkeypatch, red_ci)
 
     result = _invoke_done("ab-dd000001")
 
-    assert result.exit_code == 3, f"expected 3 (refusal), got {result.exit_code}. output: {result.output}"
-    # Must print specific fact
-    combined = result.output + (result.stderr or "")
-    assert "PR #300" in combined or "300" in combined
-    # Must name the failing check or state
-    assert "fail" in combined.lower() or "FAILURE" in combined or "red" in combined.lower()
-    # Node must stay open
+    assert result.exit_code == 5, f"expected 5 (awaiting merge), got {result.exit_code}. output: {result.output}"
     node = _read(tmp_graph)[0]
-    assert node.get("_status") != "done"
     assert not node.get("completed_at")
+
+
+# ---------------------------------------------------------------------------
+# AC4-UI: exit-5 stderr names the PR, the in_review hold, and who closes it
+# ---------------------------------------------------------------------------
+
+
+def test_awaiting_merge_stderr_is_explicit(tmp_graph, monkeypatch):
+    """AC4-UI: exit 5 stderr names the PR number, the in_review hold, and that
+    reconcile/advance close it at merge - never a silent non-close."""
+    from fno.graph._reconcile import PrMergeState
+
+    _seed(
+        tmp_graph,
+        [_node("ab-nn000001", pr_number=1300, pr_url="https://github.com/org/repo/pull/1300")],
+    )
+
+    _patch_query(
+        monkeypatch,
+        lambda n, **k: PrMergeState(number=n, state="OPEN", url=None, merged_at=None),
+    )
+
+    result = _invoke_done("ab-nn000001")
+
+    assert result.exit_code == 5, result.output
+    combined = result.output + (result.stderr or "")
+    assert "1300" in combined
+    assert "in_review" in combined.lower()
+    assert "merge" in combined.lower()
+    assert "reconcile" in combined.lower() or "advance" in combined.lower()
+
+
+# ---------------------------------------------------------------------------
+# AC1-HP: a MERGED ref wins over an OPEN ref on a multi-PR node
+# ---------------------------------------------------------------------------
+
+
+def test_merged_ref_wins_over_open_ref(tmp_graph, monkeypatch):
+    """A node with one OPEN and one MERGED ref closes on the MERGED evidence."""
+    from fno.graph._reconcile import PrMergeState
+
+    _seed(
+        tmp_graph,
+        [
+            {
+                "id": "ab-oo000001",
+                "title": "multi",
+                "_status": "ready",
+                "domain": "code",
+                "pr_number": 10,
+                "pr_url": "https://github.com/org/repo/pull/10",
+                "additional_prs": [
+                    {"number": 11, "url": "https://github.com/org/repo/pull/11"}
+                ],
+                "completed_at": None,
+            }
+        ],
+    )
+
+    def query(pr_number, **kwargs):
+        # #10 OPEN, #11 MERGED
+        if pr_number == 11:
+            return PrMergeState(
+                number=11, state="MERGED",
+                url="https://github.com/org/repo/pull/11", merged_at="2026-06-01T10:00:00Z",
+            )
+        return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
+
+    _patch_query(monkeypatch, query)
+
+    result = _invoke_done("ab-oo000001")
+
+    assert result.exit_code == 0, f"expected 0 (merged wins), got {result.exit_code}. output: {result.output}"
+    node = _read(tmp_graph)[0]
+    assert node.get("_status") == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -389,11 +449,9 @@ def test_gh_outage_fails_closed_retryable(tmp_graph, monkeypatch):
 
 
 def test_exit_codes_are_distinct(tmp_graph, monkeypatch):
-    """Verify exit codes: 3=refusal, 4=gh-outage, 2=usage-error are all distinct."""
+    """Verify exit codes: 2=usage, 3=refusal, 4=gh-outage, 5=awaiting-merge are distinct."""
     # Just a sanity check on the constants in use
-    assert 3 != 4
-    assert 3 != 2
-    assert 4 != 2
+    assert len({2, 3, 4, 5}) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -474,224 +532,87 @@ def test_forced_close_emits_event_with_reason(tmp_graph, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Additional: OPEN + pending CI (not all-pass) -> refuses
+# Partial outage: OPEN ref wins over an outaged ref -> exit 5 (definitive open
+# PR means the node is awaiting merge; success-shaped, retryable-on-merge)
 # ---------------------------------------------------------------------------
 
 
-def test_open_pending_ci_refuses(tmp_graph, monkeypatch):
-    """OPEN PR with a pending check is not green -> refuses."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-kk000001", pr_number=1000, pr_url="https://github.com/org/repo/pull/1000")],
-    )
-
-    def open_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
-
-    def pending_ci(pr_number, **kwargs):
-        return [
-            {"name": "ci", "state": "SUCCESS", "bucket": "pass"},
-            {"name": "smoke", "state": "IN_PROGRESS", "bucket": "pending"},
-        ]
-
-    _patch_query(monkeypatch, open_query)
-    _patch_ci_query(monkeypatch, pending_ci)
-
-    result = _invoke_done("ab-kk000001")
-
-    assert result.exit_code == 3
-    node = _read(tmp_graph)[0]
-    assert not node.get("completed_at")
-
-
-# ---------------------------------------------------------------------------
-# Additional: OPEN + no CI checks at all (no checks configured) -> refuses
-# ---------------------------------------------------------------------------
-
-
-def test_open_no_ci_checks_refuses(tmp_graph, monkeypatch):
-    """OPEN PR with empty CI check list is not evidence -> refuses."""
-    from fno.graph._reconcile import PrMergeState
-
-    _seed(
-        tmp_graph,
-        [_node("ab-ll000001", pr_number=1100, pr_url="https://github.com/org/repo/pull/1100")],
-    )
-
-    def open_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
-
-    def empty_ci(pr_number, **kwargs):
-        return []  # no checks configured
-
-    _patch_query(monkeypatch, open_query)
-    _patch_ci_query(monkeypatch, empty_ci)
-
-    result = _invoke_done("ab-ll000001")
-
-    assert result.exit_code == 3
-    node = _read(tmp_graph)[0]
-    assert not node.get("completed_at")
-
-
-# ---------------------------------------------------------------------------
-# Additional: CI outage for OPEN PR -> exit 4 (gh outage, not refusal)
-# ---------------------------------------------------------------------------
-
-
-def test_open_ci_outage_fails_closed(tmp_graph, monkeypatch):
-    """OPEN PR where gh pr checks fails -> retryable exit 4, node stays open."""
+def test_open_ref_wins_over_outaged_ref(tmp_graph, monkeypatch):
+    """A definitive OPEN ref yields exit 5 even when another ref outages."""
     from fno.graph._reconcile import PrMergeState, ReconcileError
 
     _seed(
         tmp_graph,
-        [_node("ab-mm000001", pr_number=1200, pr_url="https://github.com/org/repo/pull/1200")],
+        [
+            {
+                "id": "ab-pp000001",
+                "title": "multi",
+                "_status": "ready",
+                "domain": "code",
+                "pr_number": 20,
+                "pr_url": "https://github.com/org/repo/pull/20",
+                "additional_prs": [
+                    {"number": 21, "url": "https://github.com/org/repo/pull/21"}
+                ],
+                "completed_at": None,
+            }
+        ],
     )
 
-    def open_query(pr_number, **kwargs):
-        return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
+    def query(pr_number, **kwargs):
+        if pr_number == 21:
+            raise ReconcileError("gh: timeout on #21")
+        return PrMergeState(number=20, state="OPEN", url=None, merged_at=None)
 
-    def ci_outage(pr_number, **kwargs):
-        raise ReconcileError("gh pr checks timed out")
+    _patch_query(monkeypatch, query)
 
-    _patch_query(monkeypatch, open_query)
-    _patch_ci_query(monkeypatch, ci_outage)
+    result = _invoke_done("ab-pp000001")
 
-    result = _invoke_done("ab-mm000001")
-
-    assert result.exit_code == 4
+    assert result.exit_code == 5, f"expected 5 (awaiting merge), got {result.exit_code}. output: {result.output}"
     node = _read(tmp_graph)[0]
     assert not node.get("completed_at")
 
 
 # ---------------------------------------------------------------------------
-# GAP-6: _ci_is_green direct unit tests with real captured bucket shapes
+# Partial outage conservatism: CLOSED ref + outaged ref (no OPEN, no MERGED)
+# -> exit 4 (retryable), never a wrong refusal
 # ---------------------------------------------------------------------------
-# Bucket fixtures mirror real `gh pr checks --json name,state,bucket` output
-# (shapes verified in commit fb9a48e8 that flipped shell-harness mocks to the
-# real bucket schema; `conclusion` is NOT a field in this endpoint).
 
 
-import pytest  # noqa: E402 (already imported above but explicit for clarity)
+def test_closed_ref_plus_outage_is_retryable(tmp_graph, monkeypatch):
+    """CLOSED + outage (no OPEN/MERGED) stays a retryable outage (exit 4)."""
+    from fno.graph._reconcile import PrMergeState, ReconcileError
 
-
-@pytest.mark.parametrize(
-    "checks, expected_green, reason_fragment",
-    [
-        # All pass -> green
-        pytest.param(
-            [
-                {"name": "ci", "state": "SUCCESS", "bucket": "pass"},
-                {"name": "lint", "state": "SUCCESS", "bucket": "pass"},
-            ],
-            True,
-            "",
-            id="all_pass_green",
-        ),
-        # Mix of pass and skipping -> green
-        pytest.param(
-            [
-                {"name": "ci", "state": "SUCCESS", "bucket": "pass"},
-                {"name": "optional", "state": "SKIPPED", "bucket": "skipping"},
-            ],
-            True,
-            "",
-            id="pass_and_skipping_green",
-        ),
-        # Single fail bucket -> not green, names the failing check
-        pytest.param(
-            [
-                {"name": "unit-tests", "state": "FAILURE", "bucket": "fail"},
-                {"name": "lint", "state": "SUCCESS", "bucket": "pass"},
-            ],
-            False,
-            "unit-tests",
-            id="one_fail_not_green",
-        ),
-        # Cancel bucket -> not green
-        pytest.param(
-            [
-                {"name": "smoke", "state": "CANCELLED", "bucket": "cancel"},
-            ],
-            False,
-            "smoke",
-            id="cancel_not_green",
-        ),
-        # Pending check -> not green
-        pytest.param(
-            [
-                {"name": "ci", "state": "SUCCESS", "bucket": "pass"},
-                {"name": "deploy", "state": "IN_PROGRESS", "bucket": "pending"},
-            ],
-            False,
-            "deploy",
-            id="pending_not_green",
-        ),
-        # Empty list -> not green ("no CI checks configured")
-        pytest.param(
-            [],
-            False,
-            "no CI checks",
-            id="empty_not_green",
-        ),
-        # All skipping (no pass, no fail) -> green (skipping-only is acceptable)
-        pytest.param(
-            [
-                {"name": "optional-a", "state": "SKIPPED", "bucket": "skipping"},
-                {"name": "optional-b", "state": "SKIPPED", "bucket": "skipping"},
-            ],
-            True,
-            "",
-            id="all_skipping_green",
-        ),
-    ],
-)
-def test_ci_is_green_parametrized(checks, expected_green, reason_fragment):
-    """GAP-6: _ci_is_green with real captured `gh pr checks --json name,state,bucket` shapes."""
-    from fno.graph.cli import _ci_is_green
-
-    green, reason = _ci_is_green(checks)
-    assert green == expected_green, (
-        f"expected green={expected_green} for checks={checks!r}, got green={green}, reason={reason!r}"
+    _seed(
+        tmp_graph,
+        [
+            {
+                "id": "ab-qq000001",
+                "title": "multi",
+                "_status": "ready",
+                "domain": "code",
+                "pr_number": 30,
+                "pr_url": "https://github.com/org/repo/pull/30",
+                "additional_prs": [
+                    {"number": 31, "url": "https://github.com/org/repo/pull/31"}
+                ],
+                "completed_at": None,
+            }
+        ],
     )
-    if reason_fragment:
-        assert reason_fragment.lower() in reason.lower(), (
-            f"expected {reason_fragment!r} in reason {reason!r}"
-        )
 
+    def query(pr_number, **kwargs):
+        if pr_number == 31:
+            raise ReconcileError("gh: timeout on #31")
+        return PrMergeState(number=30, state="CLOSED", url=None, merged_at=None)
 
-def test_ci_is_green_tolerates_non_dict_elements():
-    """Gemini MEDIUM: _ci_is_green must not AttributeError on non-dict check items.
+    _patch_query(monkeypatch, query)
 
-    gh pr checks output can include non-dict elements in unexpected edge cases.
-    The function must filter those out and process only dict items.
-    """
-    from fno.graph.cli import _ci_is_green
+    result = _invoke_done("ab-qq000001")
 
-    # Mix of a passing dict check and a string element (non-dict).
-    # Must not crash; the string is ignored; the dict check is pass -> green.
-    checks_with_string = [
-        {"name": "ci", "state": "SUCCESS", "bucket": "pass"},
-        "some-unexpected-string-element",
-    ]
-    green, reason = _ci_is_green(checks_with_string)
-    assert green is True, f"non-dict elements must be filtered out; got green={green}, reason={reason!r}"
-
-    # Non-dict element alongside a fail check -> not green (fail wins).
-    checks_with_fail = [
-        "unexpected-string",
-        {"name": "lint", "state": "FAILURE", "bucket": "fail"},
-    ]
-    green2, reason2 = _ci_is_green(checks_with_fail)
-    assert green2 is False, f"fail bucket must still trigger not-green; got green={green2}"
-    assert "lint" in reason2.lower(), f"reason must name the failing check; got: {reason2!r}"
-
-    # All non-dict -> treated as empty after filter -> not green.
-    checks_all_strings = ["foo", 42, None]
-    green3, reason3 = _ci_is_green(checks_all_strings)
-    assert green3 is False, f"all non-dict after filter must be not-green; got green={green3}"
+    assert result.exit_code == 4, f"expected 4 (retryable outage), got {result.exit_code}. output: {result.output}"
+    node = _read(tmp_graph)[0]
+    assert not node.get("completed_at")
 
 
 # ---------------------------------------------------------------------------
