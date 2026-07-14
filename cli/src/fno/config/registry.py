@@ -183,6 +183,10 @@ FIELD_META: dict[str, Meta] = {
     "agents.spawn_permission_mode": Meta("advanced", "Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); an explicit flag wins, empty = unset. Provider-native, fail-closed at the spawn seam.", default_source="default"),
     "agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
     "agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
+    # --- config.dispatch.* (harness-capability map overlay; `fno dispatch resolve`) ---
+    "dispatch.harness": Meta("advanced", "Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.", default_source="default"),
+    "dispatch.substrate": Meta("advanced", "Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).", default_source="default"),
+    "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}; empty = '/target no-merge {id}'.", default_source="default"),
     # --- config.auto_continue.* ---
     "auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
     # --- config.keep_going.* ---

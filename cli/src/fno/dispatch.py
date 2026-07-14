@@ -78,6 +78,59 @@ def cmd_one(
     raise typer.Exit(code=0 if verdict["outcome"] != "failed" else 1)
 
 
+@dispatch_app.command("resolve")
+def cmd_resolve(
+    harness: Optional[str] = typer.Option(
+        None, "--harness", help="Target harness (claude|codex|gemini|agy|opencode). Default: config.dispatch.harness > claude."
+    ),
+    substrate: Optional[str] = typer.Option(
+        None, "--substrate", help="bg|headless|pane. Default: per-harness (claude=bg, else headless)."
+    ),
+    node: Optional[str] = typer.Option(
+        None, "--node", "--id", help="Node id substituted into the command's {id}. Absent = template returned literally."
+    ),
+    command: Optional[str] = typer.Option(
+        None, "--command", help="Command template. Default: config.dispatch.command > '/target no-merge {id}'."
+    ),
+    trigger: str = typer.Option(
+        "autonomous", "--trigger", help="autonomous (fire-and-forget) | attended. Autonomous never resolves pane."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the resolved tuple as JSON (default: key=value lines)."
+    ),
+) -> None:
+    """Resolve (config + context) -> (harness, substrate, command, permission_bypass, env).
+
+    Pure: reads the harness-capability map + config.dispatch, resolves nothing at
+    runtime, never spawns or claims. Exit 0 on a resolved tuple; exit 2 naming the
+    harness and the map when it cannot resolve (unknown harness, bad substrate,
+    empty/unsubstituted command).
+    """
+    from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
+
+    try:
+        out = resolve_dispatch(
+            harness=harness,
+            substrate=substrate,
+            node_id=node,
+            command=command,
+            trigger=trigger,
+        )
+    except DispatchResolveError as exc:
+        typer.echo(f"dispatch resolve: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    if json_output:
+        typer.echo(json.dumps(out))
+    else:
+        for key in ("harness", "substrate", "command"):
+            typer.echo(f"{key}={out[key]}")
+        typer.echo(f"permission_bypass={' '.join(out['permission_bypass'])}")
+        typer.echo(f"bg={out['bg']}")
+        typer.echo(f"resume={out['resume']}")
+    raise typer.Exit(code=0)
+
+
 def _lookup_node(node_ref: str) -> Optional[dict]:
     """Best-effort graph record for an explicit ``--node`` (id or slug). A
     missing/corrupt graph degrades to None; the dispatch still proceeds with the

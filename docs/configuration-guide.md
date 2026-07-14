@@ -84,6 +84,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `agents.min_free_gb` | float | `4.0` | advanced | Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). |
 | `agents.worker_qos` | str | `utility` | advanced | Worker CPU/IO priority: utility (background QoS, default) or off. |
 | `agents.spawn_permission_mode` | str | `` | advanced | Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); an explicit flag wins, empty = unset. Provider-native, fail-closed at the spawn seam. |
+| `dispatch.harness` | str | `` | advanced | Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map. |
+| `dispatch.substrate` | str | `` | advanced | Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless). |
+| `dispatch.command` | str | `` | advanced | Dispatch command template with a single {id}; empty = '/target no-merge {id}'. |
 | `auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
 | `keep_going.enabled` | bool | `false` | advanced | Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap). |
 | `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |

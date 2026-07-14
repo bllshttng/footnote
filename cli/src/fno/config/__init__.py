@@ -1082,6 +1082,31 @@ class SpawnDefaultsBlock(BaseModel):
     effort: str = ""
 
 
+class DispatchBlock(BaseModel):
+    """Autonomous-dispatch profile (nested under 'config.dispatch').
+
+    Per-environment overlay of the in-tree harness-capability map
+    (`fno.agents.harness_map`): the shared `fno dispatch resolve` resolver reads
+    these as the config rung between an explicit flag and the built-in default.
+    All three are empty ("") = unset, so a fresh install resolves exactly as the
+    built-ins (harness=claude, per-harness substrate, `/target no-merge {id}`).
+
+    No value validation here (config stays a leaf module, x-7fdd): the resolver
+    validates the harness against the map and the substrate against the harness's
+    capabilities at resolve time, fail-loud.
+
+    `command` is a template with a single `{id}` placeholder. The dispatch VERB +
+    per-node brief precedence (US3) layers on top of this; US1 ships the resolver
+    + map only.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    harness: str = ""
+    substrate: str = ""
+    command: str = ""
+
+
 class AgentsBlock(BaseModel):
     """Agent-runtime settings (nested under 'config.agents').
 
@@ -2456,6 +2481,7 @@ class ConfigBlock(BaseModel):
     review: ReviewBlock = Field(default_factory=ReviewBlock)
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
+    dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)
     think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)
