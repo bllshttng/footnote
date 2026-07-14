@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from fno.plan._stamp import _atomic_write
+
 # Leading ---\n ... \n--- . Non-greedy so the FIRST block wins even if the body
 # carries a --- rule. Mirrors reconcile_status._FRONT_RE.
 _FRONT_RE = re.compile(r"\A(---\n)(?P<fm>.*?)(\n---)(?P<rest>.*)\Z", re.DOTALL)
@@ -132,6 +134,7 @@ class MigrateResult:
     skipped: int = 0
     review: int = 0  # files with a kept legacy key needing a human decision
     changes: list[tuple[str, list[str]]] = field(default_factory=list)  # (path, notes)
+    review_files: list[tuple[str, list[str]]] = field(default_factory=list)  # (path, review notes)
     warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -154,8 +157,12 @@ def migrate(plans_dir: Path, *, apply: bool = False) -> MigrateResult:
             continue
 
         new_text, notes = migrate_text(text)
-        if any("review" in n for n in notes):
+        review_notes = [n for n in notes if "review" in n]
+        if review_notes:
+            # Record the path so the receipt can name which files a human must
+            # reconcile - a bare count is useless without the list.
             res.review += 1
+            res.review_files.append((str(path), review_notes))
         if new_text is None:
             res.skipped += 1
             continue
@@ -163,6 +170,8 @@ def migrate(plans_dir: Path, *, apply: bool = False) -> MigrateResult:
         res.migrated += 1
         res.changes.append((str(path), notes))
         if apply:
-            path.write_text(new_text, encoding="utf-8")
+            # Atomic (tmp + os.replace): an interrupted migration never leaves a
+            # plan half-written, so a re-run stays idempotent and recoverable.
+            _atomic_write(path, new_text)
 
     return res

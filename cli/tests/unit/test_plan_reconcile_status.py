@@ -163,7 +163,11 @@ def test_tier3_fixes_stale_canonical(tmp_path: Path):
     p.write_text(_linked_plan("design"))
     res = sweep(tmp_path, apply=True, status_map={"x-1": "done"})
     assert res.normalized == 1
-    assert 'status: "done"' in p.read_text()
+    text = p.read_text()
+    assert 'status: "done"' in text
+    # A done promotion MUST carry a first-write done_at (else later sweeps see
+    # done==done and never backfill it) - codex P1.
+    assert "done_at:" in text
 
 
 def test_tier3_disabled_when_graph_absent(tmp_path: Path):

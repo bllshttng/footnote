@@ -83,6 +83,17 @@ def test_no_frontmatter_is_noop():
     assert out is None and notes == []
 
 
+def test_review_only_file_named_in_receipt(tmp_path: Path):
+    """A file that only needs review (no safe rename) is listed by path in the
+    receipt, not just counted - codex P2 (the 61-flagged follow-up needs names)."""
+    p = tmp_path / "conflict.md"
+    p.write_text(_plan("node: x-1\nclaims: x-2"))  # claims != node -> review, no write
+    res = migrate(tmp_path, apply=True)
+    assert res.review == 1 and res.migrated == 0
+    assert len(res.review_files) == 1
+    assert res.review_files[0][0].endswith("conflict.md")
+
+
 def test_sweep_apply_writes_and_summarizes(tmp_path: Path):
     (tmp_path / "a.md").write_text(_plan("graph_node_id: x-1\nkind: feature"))
     (tmp_path / "b.md").write_text(_plan("node: x-2\nclaims: x-2"))

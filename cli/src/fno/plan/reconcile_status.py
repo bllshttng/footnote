@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
 
 from fno.plan._doc import load_plan
+from fno.plan._stamp import _atomic_write
 from fno.plan._status import KNOWN_STATUSES, project_plan_status
 
 # Tier 1: pure synonym rewrite. Roughly half the drift is node-lifecycle
@@ -54,6 +56,22 @@ _TIER1: dict[str, str] = {
 # wins even if the body contains a --- rule.
 _FRONT_RE = re.compile(r"\A(---\n)(?P<fm>.*?)(\n---)(?P<rest>.*)\Z", re.DOTALL)
 _STATUS_LINE_RE = re.compile(r"(?m)^(?P<indent>[ \t]*)status[ \t]*:.*$")
+_DONE_AT_LINE_RE = re.compile(r"(?m)^[ \t]*done_at[ \t]*:.*$")
+
+
+def ensure_done_at(text: str, ts: str) -> str:
+    """Append a `done_at: "<ts>"` line to the frontmatter if absent (first-write
+    only). A sweep that promotes a plan to `done` must stamp the completion
+    timestamp, else `done == done` no-ops leave `done_at` permanently missing.
+    Byte-preserving: the body and existing keys are untouched.
+    """
+    m = _FRONT_RE.match(text)
+    if not m or _DONE_AT_LINE_RE.search(m.group("fm")):
+        return text
+    fm = m.group("fm")
+    line = f'done_at: "{ts}"'
+    new_fm = f"{fm}\n{line}" if fm else line
+    return m.group(1) + new_fm + m.group(3) + m.group("rest")
 
 
 def _norm(raw: object) -> str:
@@ -233,12 +251,20 @@ def sweep(
             res.warnings.append(f"skip (no frontmatter): {path.name}")
             continue
 
+        # A promotion to `done` must carry a first-write done_at, else later
+        # sweeps/projections see done == done and never backfill it.
+        if new == "done":
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rewritten = ensure_done_at(rewritten, ts)
+
         res.changes.append((str(path), _norm(raw) or "(none)", new))
         if new == "archived":
             res.archived += 1
         else:
             res.normalized += 1
         if apply:
-            path.write_text(rewritten, encoding="utf-8")
+            # Atomic (tmp + os.replace): an interrupted sweep never leaves a
+            # half-written plan, so a re-run stays idempotent and recoverable.
+            _atomic_write(path, rewritten)
 
     return res

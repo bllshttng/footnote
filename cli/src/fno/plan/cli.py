@@ -409,6 +409,10 @@ def migrate_keys(
 
     for path, notes in res.changes:
         typer.echo(f"  {Path(path).name}: {', '.join(notes)}")
+    if res.review_files:
+        typer.echo("  needs manual review (kept legacy key untouched):")
+        for path, notes in res.review_files:
+            typer.echo(f"    {Path(path).name}: {', '.join(notes)}")
     for warn in res.warnings:
         typer.echo(f"  ! {warn}", err=True)
     prefix = "" if apply else "[dry-run] "

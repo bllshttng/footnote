@@ -271,7 +271,7 @@ if command -v fno >/dev/null 2>&1; then
     rs_watermark=".fno/.reconcile-status-watermark"
     rs_today="$(date +%Y-%m-%d 2>/dev/null || echo "")"
     if [[ -n "$rs_today" && "$(cat "$rs_watermark" 2>/dev/null || echo "")" != "$rs_today" ]]; then
-        printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
+        mkdir -p .fno 2>/dev/null; printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
         ( fno plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
     fi
 fi
