@@ -285,7 +285,10 @@ def cmd_watch(
 
 @agents_app.command("spawn")
 def cmd_spawn(
-    name: str = typer.Argument(..., help="Agent name."),
+    name: str = typer.Argument(
+        "",
+        help="Agent name (optional; an adjective-noun slug is minted when omitted).",
+    ),
     message: str = typer.Argument("", help="Initial message (optional; empty string if omitted)."),
     provider: str | None = typer.Option(
         None,
@@ -367,7 +370,6 @@ def cmd_spawn(
     role: str | None = typer.Option(
         None,
         "--role",
-        "-r",
         help=(
             "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
             "roles (coordinate|tidy|orient|consolidate|post-merge) and the "
@@ -427,10 +429,12 @@ def cmd_spawn(
     resume: str | None = typer.Option(
         None,
         "--resume",
+        "-r",
         help=(
-            "Resume an existing claude session UUID instead of starting fresh: "
-            "the new --bg supervisor continues that transcript (US4 bg-thread "
-            "revival). claude + --substrate bg only; forwarded as --resume <uuid>."
+            "Resume an existing claude session instead of starting fresh: the new "
+            "--bg supervisor continues that transcript (US4 bg-thread revival). "
+            "Accepts a full session uuid OR the 8-hex short-id shown in receipts "
+            "(x-f76e); with no --substrate it implies bg. claude + bg only."
         ),
     ),
     add_dir: str | None = typer.Option(

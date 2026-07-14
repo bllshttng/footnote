@@ -421,6 +421,18 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     return substrate == "pane"
 
 
+def _args_before_argv(args: Sequence[str]) -> Sequence[str]:
+    """The fno-arg head, stopping at the ``--argv`` provider-payload boundary.
+
+    A payload token (e.g. the child command's own ``--resume``/``--role``) must
+    never be read as one of our routing flags, so every spawn-flag scan operates
+    on this slice. Mirrors the ``--argv`` break in :func:`_is_pane_substrate_spawn`.
+    """
+    if "--argv" in args:
+        return args[: list(args).index("--argv")]
+    return args
+
+
 def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--role`` (x-d2fe).
 
@@ -430,11 +442,33 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     auto-routed to the binary would exit with ``unknown flag: --role``.
     Detecting it here lets the call fall through to the Python runtime, which
     owns the single source of truth for the routing policy.
+
+    ``-r`` is NOT a role alias anymore (x-f76e reassigned it to ``--resume``);
+    role is long-form only here.
     """
     if verb != "spawn":
         return False
     return any(
-        a in ("--role", "-r") or a.startswith("--role=") for a in args
+        a == "--role" or a.startswith("--role=") for a in _args_before_argv(args)
+    )
+
+
+def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--resume`` / ``-r`` (x-f76e / x-9844).
+
+    The front-door normalizer rewrites ``-r <id>`` into ``--resume <full-uuid>``,
+    and the Rust spawn parser does not (yet) know ``--resume``, so a resume-bearing
+    spawn that auto-routed to the binary would exit ``unknown flag: --resume``.
+    Keeping it Python routes it to ``cmd_spawn``, which owns the bg-thread revival
+    lane. (``-r`` is matched too for a pre-normalization raw argv.)
+    """
+    if verb != "spawn":
+        return False
+    return any(
+        a in ("--resume", "-r")
+        or a.startswith("--resume=")
+        or a.startswith("-r=")
+        for a in _args_before_argv(args)
     )
 
 
@@ -448,7 +482,9 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     flag: --route`` - identical registration to ``--role``."""
     if verb != "spawn":
         return False
-    return any(a == "--route" or a.startswith("--route=") for a in args)
+    return any(
+        a == "--route" or a.startswith("--route=") for a in _args_before_argv(args)
+    )
 
 
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -464,22 +500,10 @@ def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     if verb != "spawn":
         return False
     prov = ("--node", "--slug", "--plan")
-    return any(a in prov or a.startswith(tuple(f"{p}=" for p in prov)) for a in args)
-
-
-def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
-    """True for a ``spawn`` carrying ``--resume`` (x-9844 Fix 3).
-
-    ``--resume <uuid>`` is parsed only by the Python spawn verb (``cmd_spawn``
-    -> ``dispatch_spawn(resume_session_id=...)``), which owns the revive-in-place
-    collision exemption. The Rust client's spawn parser has no ``--resume`` flag,
-    so a ``spawn ... --resume <uuid>`` auto-routed to the binary would fail on an
-    unknown flag before the exemption is ever reached. Keeping it Python (the
-    ``_is_role_bearing_spawn`` precedent) covers every caller in one place -
-    including the mux respawn key, which shells this porcelain server-side."""
-    if verb != "spawn":
-        return False
-    return any(a == "--resume" or a.startswith("--resume=") for a in args)
+    return any(
+        a in prov or a.startswith(tuple(f"{p}=" for p in prov))
+        for a in _args_before_argv(args)
+    )
 
 
 def route_to_rust(

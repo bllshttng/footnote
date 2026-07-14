@@ -12,8 +12,10 @@ routing and reaches the seam as explicit flags, never displaced by these.
 """
 from __future__ import annotations
 
+import random
+import re
 import sys
-from typing import IO, List, Mapping, Optional, Sequence, Tuple
+from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 
 # Flags that consume the FOLLOWING token. Scanning for our three flags skips a
 # value flag's value so a value that looks like `--model` / `--effort` can never
@@ -62,6 +64,255 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
     return provider_present, provider_value, model_present, effort_present
 
 
+# --------------------------------------------------------------------------- #
+# Spawn argv normalization (x-f76e): three ergonomic cuts, one argv->argv pass.
+#
+# Runs at the front door (inside inject_spawn_defaults, BEFORE config injection
+# and BEFORE the runtime route/fork), so by the time either runtime parser sees
+# the argv it is canonical: an explicit NAME, long-form `--resume <full-uuid>`,
+# long-form `--substrate <s>`. Neither parser learns a new vocabulary.
+# --------------------------------------------------------------------------- #
+
+_SUBSTRATES = ("pane", "bg", "headless")
+
+# Flags on `spawn` that consume the following token. Needed to tell a flag's
+# VALUE apart from a positional when scanning for the NAME / substrate token. A
+# missing entry would misread that flag's value as a positional (e.g. a Rust-path
+# `--message bg` mis-parsed as a substrate token), so this unions the shared
+# `_VALUE_FLAGS` (--message, --session-id, --from, --status, ...) with the
+# spawn-only value options.
+_SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
+    {
+        "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
+        "--deny-tools", "--squad", "-s", "--split", "-x", "--node", "--slug",
+        "--plan",
+    }
+)
+
+# Tokens that pin the substrate explicitly (a positional substrate word conflicts
+# with any of these -> exit 2). `-H/--headless` and `-o/--once` both mean headless.
+_EXPLICIT_SUBSTRATE_BOOLS = ("-H", "--headless", "-o", "--once")
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+
+# Two-word slug lists for a nameless spawn (docker/heroku pattern). Curated
+# lowercase-ascii, unambiguous read aloud; no external dependency, no config.
+_SLUG_ADJ = (
+    "amber", "brave", "calm", "clever", "coral", "cosmic", "crisp", "dapper",
+    "eager", "fabled", "gentle", "glossy", "golden", "hardy", "jolly", "keen",
+    "lively", "lucid", "mellow", "merry", "nimble", "noble", "plucky", "quiet",
+    "rapid", "ruddy", "sage", "sleek", "snug", "spry", "stout", "sunny",
+    "swift", "tidy", "vivid", "warm", "witty", "zesty", "bold", "bright",
+)
+_SLUG_NOUN = (
+    "otter", "falcon", "willow", "cedar", "comet", "ember", "harbor", "meadow",
+    "pebble", "quartz", "river", "summit", "thicket", "vale", "walrus", "yak",
+    "badger", "bison", "cobra", "crane", "dingo", "eagle", "ferret", "gecko",
+    "heron", "ibis", "jaguar", "koala", "lemur", "marten", "newt", "osprey",
+    "puffin", "raven", "shrew", "tapir", "urchin", "viper", "wombat", "finch",
+)
+
+
+def _has_explicit_substrate(toks: Sequence[str]) -> Optional[str]:
+    """Return the substrate value if pinned by an explicit flag, else None.
+
+    Stops at the ``--argv`` payload boundary like the other spawn scans.
+    """
+    it = iter(toks)
+    for t in it:
+        if t == "--argv":
+            break
+        if t in _EXPLICIT_SUBSTRATE_BOOLS:
+            return "headless"
+        if t == "--substrate":
+            return next(it, "")
+        if t.startswith("--substrate="):
+            return t.split("=", 1)[1]
+    return None
+
+
+def _positional_indices(toks: Sequence[str]) -> List[int]:
+    """Indices of positional tokens (NAME, MESSAGE), skipping flags + their values."""
+    idxs: List[int] = []
+    i = 0
+    n = len(toks)
+    while i < n:
+        t = toks[i]
+        if t == "--argv":
+            break
+        if t.startswith("-"):
+            if "=" not in t and t in _SPAWN_VALUE_FLAGS:
+                i += 2  # skip the flag and its value
+                continue
+            i += 1
+            continue
+        idxs.append(i)
+        i += 1
+    return idxs
+
+
+def _mint_slug(existing: Set[str], rng: random.Random, err: IO[str]) -> str:
+    """Best-effort collision-avoided ``adjective-noun`` slug.
+
+    Regenerates up to 5 times on a registry hit; the flocked downstream check
+    remains authoritative. Raises SystemExit(2) only if all 5 attempts collide.
+    """
+    for _ in range(5):
+        slug = f"{rng.choice(_SLUG_ADJ)}-{rng.choice(_SLUG_NOUN)}"
+        if slug not in existing:
+            return slug
+    print(
+        "fno agents spawn: could not find a free auto-name after 5 tries; "
+        "pass one explicitly",
+        file=err,
+    )
+    raise SystemExit(2)
+
+
+def _read_registry_names() -> Set[str]:
+    """Live worker names for the autogen pre-check. Best-effort: {} on any error."""
+    try:
+        from fno.agents.registry import load_registry
+
+        return {e.name for e in load_registry()}
+    except Exception:
+        return set()
+
+
+def normalize_spawn_args(
+    args: Sequence[str],
+    *,
+    resolver: Optional[Callable[[str], Optional[str]]] = None,
+    existing_names: Optional[Set[str]] = None,
+    rng: Optional[random.Random] = None,
+    stderr: Optional[IO[str]] = None,
+) -> List[str]:
+    """Canonicalize a ``spawn`` argv (verb at index 0); pure argv -> argv.
+
+    Three passes (each sees the previous pass's output):
+
+    1. A trailing positional that exact-matches ``pane|bg|headless`` becomes
+       ``--substrate <token>`` (unless an explicit substrate is present -> exit 2).
+    2. ``-r`` is the short flag for ``--resume``; its value may be a full uuid or
+       an 8-hex short-id (resolved to the uuid; unresolvable/malformed -> exit 2).
+       ``--resume`` with no substrate defaults the substrate to ``bg``.
+    3. A spawn with no NAME positional gets an autogen ``adjective-noun`` slug.
+
+    Non-``spawn`` verbs and ``spawn --help`` pass through unchanged. Read-only
+    (registry names, session resolver); writes no state.
+    """
+    out = list(args)
+    if not out or out[0] != "spawn":
+        return out
+    for a in out[1:]:
+        if a == "--argv":
+            break
+        if a in ("-h", "--help"):
+            return out
+
+    err = stderr if stderr is not None else sys.stderr
+    # Split off the `--argv` provider payload: every pass operates on the fno-arg
+    # HEAD only, and derived flags are appended before the payload, so a payload
+    # token (e.g. the child command's own `--resume`) is never scanned or rewritten.
+    body = out[1:]
+    if "--argv" in body:
+        cut = body.index("--argv")
+        toks, payload = body[:cut], body[cut:]
+    else:
+        toks, payload = body, []
+
+    # Pass 1: trailing substrate token.
+    positions = _positional_indices(toks)
+    if positions:
+        last = positions[-1]
+        tok = toks[last]
+        if tok in _SUBSTRATES:
+            explicit = _has_explicit_substrate(toks)
+            if explicit is not None:
+                print(
+                    f"fno agents spawn: substrate given twice: positional {tok!r} "
+                    f"and --substrate {explicit!r}",
+                    file=err,
+                )
+                raise SystemExit(2)
+            del toks[last]
+            toks += ["--substrate", tok]
+
+    # Pass 2: -r / --resume id widening + implied bg.
+    resume_idxs = [
+        i for i, t in enumerate(toks)
+        if t in ("-r", "--resume") or t.startswith("--resume=") or t.startswith("-r=")
+    ]
+    if len(resume_idxs) > 1:
+        print("fno agents spawn: resume given twice (-r / --resume)", file=err)
+        raise SystemExit(2)
+    if resume_idxs:
+        i = resume_idxs[0]
+        flag = toks[i]
+        if "=" in flag:
+            raw_value: Optional[str] = flag.split("=", 1)[1]
+            value_at = None
+        else:
+            value_at = i + 1
+            raw_value = toks[value_at] if value_at < len(toks) else None
+        if not raw_value or raw_value.startswith("-"):
+            print("fno agents spawn: -r/--resume needs a session uuid or 8-hex short-id", file=err)
+            raise SystemExit(2)
+        low = raw_value.lower()
+        if _UUID_RE.match(low):
+            resolved = low
+        elif _SHORT_ID_RE.match(low):
+            resolve = resolver if resolver is not None else _default_resolver
+            resolved = resolve(low)
+            if not resolved:
+                print(f"fno agents spawn: cannot resolve short-id {raw_value!r} to a session uuid", file=err)
+                raise SystemExit(2)
+        else:
+            print(
+                f"fno agents spawn: -r/--resume value {raw_value!r} is neither a "
+                "full session uuid (8-4-4-4-12) nor an 8-hex short-id",
+                file=err,
+            )
+            raise SystemExit(2)
+        # Rewrite in place to the canonical `--resume <uuid>` form. Leave an
+        # already-canonical `--resume <lowercase-uuid>` untouched so a fully
+        # explicit argv passes through byte-identically (AC1-EDGE).
+        if value_at is None:
+            toks[i] = f"--resume={resolved}"
+        elif not (flag == "--resume" and raw_value == resolved):
+            toks[i] = "--resume"
+            toks[value_at] = resolved
+        # `--resume` is bg-only: default the substrate when none was pinned.
+        # Print the implied choice so the routing decision is never silent
+        # (blueprint Silent-Failure-Hunter / Locked Decision 4).
+        if _has_explicit_substrate(toks) is None:
+            toks += ["--substrate", "bg"]
+            print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
+
+    # Pass 3: autogen name when no NAME positional remains.
+    if not _positional_indices(toks):
+        names = existing_names if existing_names is not None else _read_registry_names()
+        slug = _mint_slug(names, rng if rng is not None else random.Random(), err)
+        toks.insert(0, slug)
+
+    return ["spawn", *toks, *payload]
+
+
+def _default_resolver(short_id: str) -> Optional[str]:
+    """Resolve an 8-hex claude short-id to its full session uuid (bg sessions).
+
+    Uses the bounded-retry lane so a short-id issued while claude is still writing
+    the session entry is not rejected on a transient miss (blueprint Concurrency).
+    """
+    try:
+        from fno.agents.providers.claude import resolve_session_uuid_at_spawn
+
+        return resolve_session_uuid_at_spawn(short_id)
+    except Exception:
+        return None
+
+
 def inject_spawn_defaults(
     args: Sequence[str],
     *,
@@ -89,6 +340,11 @@ def inject_spawn_defaults(
             break
         if a in ("-h", "--help"):
             return out
+
+    # Ergonomic normalization runs FIRST (x-f76e): the substrate-token / -r /
+    # autogen-name rewrites consider only operator-supplied argv, so config
+    # defaults injected below never fight the token form.
+    out = normalize_spawn_args(out, stderr=stderr)
 
     if settings is None:
         try:
