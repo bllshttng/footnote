@@ -3664,7 +3664,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, wait silently and do not reply or narrate until the state changes.",
         &cwd,
         &session_id,
     );
@@ -3731,7 +3731,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
         // into debugging a nonexistent failure on every quiet fire.
         if pr.ci_conclusion == CiConclusion::Pending {
             return format!(
-                "CI still running on PR #{}; wait for it to finish",
+                "CI still running on PR #{}; wait for it to finish. Nothing to do here: wait silently and do not reply or narrate until this state changes.",
                 pr.number
             );
         }
