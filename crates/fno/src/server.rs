@@ -140,6 +140,16 @@ fn route_mouse(modes: Modes, kind: MouseKind) -> MouseAction {
     }
 }
 
+/// Bound a folded wheel burst's net offset move to `cap` lines (one viewport)
+/// so a high-event-rate trackpad flick lands a screen at a time instead of
+/// teleporting hundreds of lines. `before`/`after` are the offsets around an
+/// in-order fold, so the per-tick history clamp already happened - this only
+/// caps the aggregate. A single mouse-wheel notch is one tick far under the
+/// cap and passes through unchanged; the cap self-selects the trackpad burst.
+fn bounded_scroll_target(before: i32, after: i32, cap: i32) -> i32 {
+    before + (after - before).clamp(-cap, cap)
+}
+
 /// SGR-encode one mouse event for an app that negotiated mouse reporting
 /// (`ESC [ < b ; x ; y {M|m}`, brief Locked 12 / Domain: SGR 1006 only). `b` is
 /// the button code plus the drag-motion bit; coordinates are 1-based. Press and
@@ -2914,6 +2924,46 @@ impl Core {
         }
     }
 
+    /// The line delta an interpreted wheel-scroll applies, or `None` when the
+    /// event isn't a mux-interpreted scroll (a mouse-app passthrough, a select, or
+    /// an ignore). The core drain folds a contiguous run of wheel ticks on one
+    /// pane - including a direction reversal queued behind in-flight opposite
+    /// ticks - into a single broadcast, so a fast trackpad flick settles in one
+    /// frame instead of rubber-banding through every intermediate offset.
+    fn scroll_delta(&self, pane: u64, event: &MouseEvent) -> Option<i32> {
+        let modes = self.panes.get(&pane)?.vt.modes();
+        match route_mouse(modes, event.kind) {
+            MouseAction::Scroll(delta) => Some(delta),
+            _ => None,
+        }
+    }
+
+    /// Apply one wheel tick to a pane WITHOUT broadcasting, returning the
+    /// resulting scroll offset. The drain applies a queued run tick-by-tick so
+    /// `vt.scroll`'s per-tick clamp at the history top / live bottom is preserved
+    /// - the algebraic net would wrongly cancel a tick that clamped, losing a
+    /// reversal at a boundary - then broadcasts once. `0` if the pane is gone.
+    fn scroll_tick(&mut self, pane: u64, delta: i32) -> usize {
+        self.panes.get_mut(&pane).map_or(0, |e| e.vt.scroll(delta))
+    }
+
+    /// The pane's current scroll offset (0 = live bottom), or 0 if it's gone.
+    fn scroll_offset(&self, pane: u64) -> usize {
+        self.panes.get(&pane).map_or(0, |e| e.vt.display_offset())
+    }
+
+    /// The pane's viewport height in rows (0 if gone), the per-fold scroll cap.
+    fn pane_rows(&self, pane: u64) -> u16 {
+        self.panes.get(&pane).map_or(0, |e| e.vt.size().0)
+    }
+
+    /// Apply a single interpreted wheel tick and push one frame (the
+    /// per-message path; the drain coalesces a run through `scroll_tick`).
+    fn apply_scroll(&mut self, pane: u64, delta: i32) {
+        self.scroll_tick(pane, delta);
+        self.broadcast_pane(pane);
+    }
+
     /// Route a client's pane-rect mouse event (brief Locked 2, US1/US2/US3).
     /// An app that negotiated SGR mouse reporting owns its mouse: the event is
     /// SGR-encoded onto its PTY and the mux consumes nothing (AC3-HP). Otherwise
@@ -2932,12 +2982,7 @@ impl Core {
                     let _ = entry.pty.write_input(&bytes);
                 }
             }
-            MouseAction::Scroll(delta) => {
-                if let Some(e) = self.panes.get_mut(&pane) {
-                    e.vt.scroll(delta);
-                }
-                self.broadcast_pane(pane);
-            }
+            MouseAction::Scroll(delta) => self.apply_scroll(pane, delta),
             MouseAction::SelectStart => {
                 if let Some(e) = self.panes.get_mut(&pane) {
                     e.vt.selection_start(event.row, event.col);
@@ -5305,6 +5350,60 @@ async fn serve(
                         flow = core.handle(m);
                     }
                     if flow == Flow::Shutdown { break Flow::Shutdown; }
+                } else if let CoreMsg::Mouse { id, pane, event } = msg {
+                    // Wheel-scroll coalescing (mirrors the resize-storm coalescer
+                    // above): fold a contiguous run of interpreted wheel ticks on
+                    // one pane into ONE broadcast. Each tick is applied IN ORDER so
+                    // vt.scroll's per-tick clamp is preserved (algebraic netting
+                    // would cancel a clamped tick and lose a reversal at a
+                    // boundary); only the intermediate frames are skipped, so a
+                    // reversal queued behind in-flight opposite ticks lands in one
+                    // frame instead of rubber-banding through every offset. A
+                    // non-scroll event (passthrough/select) or passive sender stops
+                    // the fold, so ordering and read-only gating stay unchanged.
+                    if core.is_passive(id) {
+                        if core.handle(CoreMsg::Mouse { id, pane, event }) == Flow::Shutdown {
+                            break Flow::Shutdown;
+                        }
+                    } else if let Some(d0) = core.scroll_delta(pane, &event) {
+                        let before = core.scroll_offset(pane) as i32;
+                        core.scroll_tick(pane, d0);
+                        let mut trailer = None;
+                        while let Ok(m) = core_rx.try_recv() {
+                            if let CoreMsg::Mouse { id: mid, pane: mpane, event: mev } = &m {
+                                if *mpane == pane && !core.is_passive(*mid) {
+                                    if let Some(d) = core.scroll_delta(pane, mev) {
+                                        core.scroll_tick(pane, d);
+                                        continue;
+                                    }
+                                }
+                            }
+                            trailer = Some(m);
+                            break;
+                        }
+                        // Cap the fold's net move to one viewport: a fast trackpad
+                        // flick drops many ticks in a single drain and would
+                        // otherwise jump hundreds of lines at once ("too fast").
+                        // The in-order clamp above is intact; this only bounds the
+                        // aggregate, so a lone wheel notch (well under a screen)
+                        // passes through untouched.
+                        let after = core.scroll_offset(pane) as i32;
+                        let cap = (core.pane_rows(pane) as i32).max(MOUSE_WHEEL_LINES);
+                        let bounded = bounded_scroll_target(before, after, cap);
+                        if bounded != after {
+                            core.scroll_tick(pane, bounded - after);
+                        }
+                        if bounded != before {
+                            core.broadcast_pane(pane);
+                        }
+                        if let Some(m) = trailer {
+                            if core.handle(m) == Flow::Shutdown {
+                                break Flow::Shutdown;
+                            }
+                        }
+                    } else if core.handle(CoreMsg::Mouse { id, pane, event }) == Flow::Shutdown {
+                        break Flow::Shutdown;
+                    }
                 } else if core.handle(msg) == Flow::Shutdown {
                     break Flow::Shutdown;
                 }
@@ -8636,6 +8735,89 @@ mod tests {
             Arc::new(Notify::new()),
         );
         (core, client_id, p1, p2, rx)
+    }
+
+    #[test]
+    fn scroll_delta_classifies_only_interpreted_wheel_ticks() {
+        // The fold is only correct if it folds real scrolls and STOPS at anything
+        // else. A plain pane's wheel is an interpreted scroll (foldable, +/-
+        // MOUSE_WHEEL_LINES); a left press is a selection (not foldable) so it must
+        // break the run and preserve order.
+        let (core, _cid, p1, _p2, _rx) = seen_test_core();
+        let ev = |kind| MouseEvent {
+            row: 1,
+            col: 1,
+            kind,
+        };
+        assert_eq!(
+            core.scroll_delta(p1, &ev(MouseKind::WheelUp)),
+            Some(MOUSE_WHEEL_LINES)
+        );
+        assert_eq!(
+            core.scroll_delta(p1, &ev(MouseKind::WheelDown)),
+            Some(-MOUSE_WHEEL_LINES)
+        );
+        assert_eq!(
+            core.scroll_delta(p1, &ev(MouseKind::Press(MouseButton::Left))),
+            None,
+            "a select must stop the fold, not coalesce into it"
+        );
+        assert_eq!(
+            core.scroll_delta(999, &ev(MouseKind::WheelUp)),
+            None,
+            "an unknown pane never folds"
+        );
+    }
+
+    #[test]
+    fn folded_scroll_ticks_preserve_per_tick_clamp_at_a_boundary() {
+        // The fold applies ticks IN ORDER via scroll_tick, never by algebraic net:
+        // at the live bottom a WheelDown clamps to 0, so a following WheelUp must
+        // still move the view up. Netting (-3 + 3 = 0) would wrongly lose the
+        // reversal - the exact boundary bug this guards against.
+        let (mut core, _cid, p1, _p2, _rx) = seen_test_core();
+        // Push content past the 24-row grid so there is scrollback to reveal.
+        core.panes
+            .get_mut(&p1)
+            .unwrap()
+            .vt
+            .feed("row\r\n".repeat(60).as_bytes());
+        assert_eq!(core.scroll_offset(p1), 0, "starts at the live bottom");
+
+        // WheelDown at the bottom clamps (no-op); the reversal WheelUp reveals
+        // history. Ordered application lands above the bottom, not back at it.
+        core.scroll_tick(p1, -MOUSE_WHEEL_LINES);
+        assert_eq!(core.scroll_offset(p1), 0, "down at the bottom clamps");
+        core.scroll_tick(p1, MOUSE_WHEEL_LINES);
+        assert_eq!(
+            core.scroll_offset(p1),
+            MOUSE_WHEEL_LINES as usize,
+            "the reversal still scrolls up (netting to 0 would strand it)"
+        );
+
+        // A mid-history reversal that truly cancels returns to where it started,
+        // so the drain's before==after guard skips the redundant broadcast.
+        let mid = core.scroll_offset(p1);
+        core.scroll_tick(p1, MOUSE_WHEEL_LINES);
+        core.scroll_tick(p1, -MOUSE_WHEEL_LINES);
+        assert_eq!(core.scroll_offset(p1), mid, "a real cancel nets to no move");
+    }
+
+    #[test]
+    fn bounded_scroll_target_caps_a_burst_but_spares_a_single_notch() {
+        // A big same-direction fold is capped to one viewport (24) either way...
+        assert_eq!(bounded_scroll_target(0, 300, 24), 24, "up burst capped");
+        assert_eq!(bounded_scroll_target(300, 0, 24), 276, "down burst capped");
+        // ...a move already within a screen (a lone wheel notch) is untouched...
+        assert_eq!(
+            bounded_scroll_target(0, MOUSE_WHEEL_LINES, 24),
+            MOUSE_WHEEL_LINES
+        );
+        // ...a boundary reversal the in-order fold landed at +3 survives the cap
+        // (it never re-introduces the netting bug)...
+        assert_eq!(bounded_scroll_target(0, 3, 24), 3);
+        // ...and a true no-op fold stays put.
+        assert_eq!(bounded_scroll_target(10, 10, 24), 10);
     }
 
     #[test]
