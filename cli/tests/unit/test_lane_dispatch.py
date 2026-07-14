@@ -144,13 +144,20 @@ def test_spawn_failure_releases_slot_and_spares_other_lanes(tmp_path, monkeypatc
     assert active_lane_count(root=tmp_path / "claims") == 1
 
 
-def test_below_two_lanes_dispatches_nothing(tmp_path, monkeypatch):
+def test_max_lanes_one_dispatches_a_single_node(tmp_path, monkeypatch):
+    # x-0ad6: the daemon's sequential fire-and-forget dispatch selects and spawns
+    # exactly one node; below one lane still dispatches nothing.
     ready = _nodes(("n-a", "code"), ("n-c", "docs"))
     _wire(monkeypatch, tmp_path, ready)
 
-    assert advance.dispatch_lanes(1, claims_root=tmp_path / "claims") == []
     assert advance.dispatch_lanes(0, claims_root=tmp_path / "claims") == []
-    assert active_lane_count(root=tmp_path / "claims") == 0
+
+    receipts = advance.dispatch_lanes(
+        1, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+    assert [r["node_id"] for r in receipts] == ["n-a"]
+    assert receipts[0]["status"] == "dispatched"
+    assert active_lane_count(root=tmp_path / "claims") == 1
 
 
 def test_empty_ready_dispatches_nothing(tmp_path, monkeypatch):

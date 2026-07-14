@@ -39,14 +39,18 @@ def test_cap_limits_selection(tmp_path, monkeypatch):
     assert active_lane_count(root=tmp_path) == 2
 
 
-def test_max_lanes_below_two_is_sequential_noop(tmp_path, monkeypatch):
-    """AC1-EDGE: <2 lanes selects nothing and holds no slot (caller uses `next`)."""
+def test_max_lanes_one_selects_a_single_node(tmp_path, monkeypatch):
+    """x-0ad6: max_lanes==1 selects a single ready node (the daemon's sequential
+    fire-and-forget dispatch); max_lanes<1 still selects nothing."""
     ready = _nodes(("n-a", "code"), ("n-c", "docs"))
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
-    assert advance.select_lane_fill(1, claims_root=tmp_path) == []
     assert advance.select_lane_fill(0, claims_root=tmp_path) == []
     assert active_lane_count(root=tmp_path) == 0
+
+    sel = advance.select_lane_fill(1, claims_root=tmp_path)
+    assert [s["id"] for s in sel] == ["n-a"]
+    assert active_lane_count(root=tmp_path) == 1
 
 
 def test_recomputes_distinctness_after_each_claim(tmp_path, monkeypatch):

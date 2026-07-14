@@ -67,7 +67,7 @@ use serde_json::json;
 
 use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
-use crate::loop_megawalk::abi_cmd;
+use crate::loop_megawalk::{abi_cmd, retry_etxtbsy};
 use crate::loop_runtime::{
     CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };
@@ -157,9 +157,9 @@ pub struct DrainConfig {
     /// path is byte-for-byte today's one-PR-per-node behavior.
     pub batch: bool,
     /// Parallel-mode lane cap (config.parallel.max_lanes, x-42d5 G4). `>= 2`
-    /// switches the tick to fire-and-forget lane-fill (`fno backlog
-    /// dispatch-lanes`); anything below is today's sequential in-tick drain
-    /// with no special-case code (AC1-EDGE).
+    /// fans the tick out into lane-fill; `< 2` runs the sequential fire-and-forget
+    /// drain, which dispatches ONE node via `dispatch-lanes --max 1` and
+    /// reconciles it from events on a later tick (x-0ad6).
     pub max_lanes: u64,
 }
 
@@ -620,16 +620,31 @@ fn resolve_dispatch(
     node_id: &str,
     ev: Evidence,
 ) {
-    // Mirror MegawalkQueue::close: a DonePRGreen/DoneAdvisory close marks the
-    // node done (idempotent, best-effort). DoneBatched/DoneAwaitingMerge close
-    // at merge via reconcile and are NOT marked here - map_outcome's keep-set
-    // records them as a successful dispatch without a `done` write.
+    // Mirror MegawalkQueue::close EXACTLY: a DonePRGreen/DoneAdvisory close runs
+    // `fno backlog done` (retry_etxtbsy for a transient busy binary) and Closes
+    // only on success - a failed `done` Parks with the error, so the breaker
+    // counts it as a failure just as the supervised path did (never a false
+    // success). DoneBatched/DoneAwaitingMerge close at merge via reconcile and
+    // are NOT marked here - map_outcome's keep-set records them as a successful
+    // dispatch without a `done` write.
     let close = if is_done_reason(&ev.reason) {
-        let _ = abi_cmd(&cfg.abi_bin)
-            .args(["backlog", "done", node_id])
-            .current_dir(&cfg.cwd)
-            .output();
-        CloseOutcome::Closed
+        match retry_etxtbsy(|| {
+            abi_cmd(&cfg.abi_bin)
+                .args(["backlog", "done", node_id])
+                .current_dir(&cfg.cwd)
+                .output()
+        }) {
+            Ok(o) if o.status.success() => CloseOutcome::Closed,
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                CloseOutcome::Parked(if stderr.is_empty() {
+                    format!("fno backlog done {node_id} failed (exit {})", o.status)
+                } else {
+                    stderr
+                })
+            }
+            Err(e) => CloseOutcome::Parked(format!("fno backlog done {node_id} spawn failed: {e}")),
+        }
     } else {
         CloseOutcome::Parked(format!("session terminated: {:?}", ev.reason))
     };
@@ -1269,8 +1284,8 @@ mod tests {
     fn resolve_dispatch_done_records_success_and_marks_done() {
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("fno-calls.txt");
-        let abi = stub_fno(&tmp.path().join("bin"), &record);
-        let cfg = test_cfg(tmp.path(), abi, 3);
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
         breaker.record_failure("x-suc0001"); // pre-existing streak to prove reset
@@ -1305,8 +1320,8 @@ mod tests {
         // reconcile) - the keep-set records success but must NOT `backlog done`.
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("fno-calls.txt");
-        let abi = stub_fno(&tmp.path().join("bin"), &record);
-        let cfg = test_cfg(tmp.path(), abi, 3);
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
         breaker.record_failure("x-awm0001");
@@ -1331,13 +1346,50 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dispatch_failed_done_records_failure_not_false_success() {
+        // Parity with MegawalkQueue::close: if `fno backlog done` FAILS, the node
+        // was not actually closed, so the dispatch must Park (a failure toward the
+        // streak), never a false success. Regression guard for the review finding.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fno = bin.join("fno");
+        std::fs::write(
+            &fno,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'node has open blockers' >&2; exit 1; fi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-donefail",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "done".to_string(),
+            },
+        );
+
+        assert_eq!(
+            breaker.consecutive_failures("x-donefail"),
+            1,
+            "a failed `backlog done` must count as a failure, not a false success"
+        );
+    }
+
+    #[test]
     fn resolve_crash_at_limit_defers_and_parks() {
         // AC1-FR: a worker death (no termination event) counts as a failure; the
         // Nth consecutive death trips the breaker -> defer + parked event.
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("fno-calls.txt");
-        let abi = stub_fno(&tmp.path().join("bin"), &record);
-        let cfg = test_cfg(tmp.path(), abi, 2);
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 2);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(2);
 
@@ -1361,8 +1413,8 @@ mod tests {
         // a crash. Uses a unique fake node id (naturally Free at the global root).
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("fno-calls.txt");
-        let abi = stub_fno(&tmp.path().join("bin"), &record);
-        let cfg = test_cfg(tmp.path(), abi, 3);
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
         let mut pending = vec![PendingDispatch {
