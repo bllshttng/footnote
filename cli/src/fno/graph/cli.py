@@ -4721,8 +4721,10 @@ def cmd_done(
 
     # Project the closed node + any cascade-closed epic parents onto their plans
     # (forward-only, stamps done_at). Covers epic parents that the primary-only
-    # _stamp_and_graduate_plan below never touches.
-    _project_closed_plans([task_id, *cascade_closed_out])
+    # _stamp_and_graduate_plan below never touches. --skip-stamp suppresses ALL
+    # plan writes, projection included.
+    if not skip_stamp:
+        _project_closed_plans([task_id, *cascade_closed_out])
 
     # Operator-authority matrix (LD3/LD29): `fno backlog done` is an allowed
     # action during a drive window, but audit-tag it so the trail attributes
