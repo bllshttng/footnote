@@ -174,6 +174,52 @@ def test_env_explicit_emits_export_block(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "glm-5.2" in out
 
 
+def test_env_unsets_parent_anthropic_creds_before_exports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A parent ANTHROPIC_API_KEY / OAuth token in the invoking shell would
+    # otherwise win over the routed AUTH_TOKEN and silently bill Anthropic. env
+    # must clear them (parity with bg_create), BEFORE the exports.
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    res = runner.invoke(route_app, ["env", "zai,glm-5.2"])
+    assert res.exit_code == 0
+    out = res.stdout
+    assert "unset ANTHROPIC_API_KEY" in out
+    assert "unset CLAUDE_CODE_OAUTH_TOKEN" in out
+    assert out.index("unset ANTHROPIC_API_KEY") < out.index("export ANTHROPIC_AUTH_TOKEN")
+
+
+def test_env_missing_key_emits_no_unset_or_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fail-closed: nothing on stdout at all, not even the unset lines.
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    res = runner.invoke(route_app, ["env", "zai,glm-5.2"])
+    assert res.exit_code == 1
+    assert "unset " not in res.stdout
+    assert "export " not in res.stdout
+
+
+@pytest.mark.parametrize("target", ["zai,glm 5.2", "zai,glm\n5.2", "z ai,glm-5.2"])
+def test_set_rejects_whitespace_in_tokens(
+    target: str, project_scope: Path
+) -> None:
+    res = runner.invoke(route_app, ["set", "build", target, "--local"])
+    assert res.exit_code == 2
+    assert not (project_scope / ".fno" / "config.toml").exists()
+
+
+def test_unset_surfaces_malformed_config(project_scope: Path) -> None:
+    # A malformed scope file must NOT be reported as a clean "not configured"
+    # no-op; the read now raises and route unset exits non-zero.
+    cfg = project_scope / ".fno" / "config.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("this is = = not valid toml [[[\n", encoding="utf-8")
+    res = runner.invoke(route_app, ["unset", "build", "--local"])
+    assert res.exit_code != 0
+    assert "malformed" in res.output.lower() or "error" in res.output.lower()
+
+
 def test_env_missing_key_fails_closed_no_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     res = runner.invoke(route_app, ["env", "zai,glm-5.2"])

@@ -143,11 +143,11 @@ def set_cmd(
             err=True,
         )
 
-    existing = read_scope_value("model_routing.roles", scope=scope)
-    if not isinstance(existing, dict):
-        existing = {}
-    merged = {**existing, name: f"{pname},{model}"}
     try:
+        existing = read_scope_value("model_routing.roles", scope=scope)
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, name: f"{pname},{model}"}
         set_config_values(
             [("model_routing.roles", json.dumps(merged))], scope=scope
         )
@@ -187,7 +187,13 @@ def unset_cmd(
     name = role.strip().lower()
     builtin = f"zai,{DEFAULT_SECONDARY_MODEL}"
 
-    existing = read_scope_value("model_routing.roles", scope=scope)
+    try:
+        existing = read_scope_value("model_routing.roles", scope=scope)
+    except ConfigSetError as exc:
+        # A malformed/unreadable scope file must surface here, not masquerade as a
+        # clean "not configured" no-op (the read now raises rather than -> {}).
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(exc.exit_code) from exc
     if not isinstance(existing, dict):
         existing = {}
 
@@ -281,5 +287,14 @@ def env_cmd(
         )
         raise typer.Exit(1)
 
+    # Clear any parent Anthropic credential BEFORE the routed exports, exactly as
+    # bg_create pops them (claude.py): a lingering ANTHROPIC_API_KEY or
+    # CLAUDE_CODE_OAUTH_TOKEN in the invoking shell would otherwise authenticate
+    # the eval'd session against Anthropic instead of the routed token - the
+    # silent-Anthropic path this switch exists to prevent. `unset` on an already
+    # unset var is a harmless no-op. Emitted only past the fail-closed guard, so a
+    # refused resolve still writes nothing (AC2-FR).
+    sys.stdout.write("unset ANTHROPIC_API_KEY\n")
+    sys.stdout.write("unset CLAUDE_CODE_OAUTH_TOKEN\n")
     for k in sorted(route):
         sys.stdout.write(f"export {k}={shlex.quote(route[k])}\n")

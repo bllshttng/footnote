@@ -454,15 +454,19 @@ def test_codex_route_never_routes_protected_role(role: str) -> None:
 
 def test_codex_route_bails_on_unsafe_provider_name() -> None:
     notes, sink = _collector()
+    # A dot is a valid single non-whitespace token (so _parse_target accepts it)
+    # but is not a safe codex bareword provider id, so resolve_codex_route's own
+    # regex guard is what bails + notices here. (A space in the provider is caught
+    # earlier by _parse_target; see test_parse_target_rejects_internal_whitespace.)
     s = _settings(
         providers={
-            "b ad": {
+            "b.ad": {
                 "protocol": "openai",
                 "base_url": "https://x/v4",
                 "api_key_env": "OPENAI_API_KEY",
             }
         },
-        roles={"tidy": "b ad,glm-5.2"},
+        roles={"tidy": "b.ad,glm-5.2"},
     )
     route = mr.resolve_codex_route(
         "tidy", settings=s, env={"OPENAI_API_KEY": "k"}, notice=sink
@@ -641,3 +645,16 @@ def test_build_lane_configured_missing_key_fails_safe() -> None:
 def test_build_is_in_known_lane_roles_not_protected() -> None:
     assert "build" in mr.KNOWN_LANE_ROLES
     assert "build" not in mr.PROTECTED_ROLES
+
+
+@pytest.mark.parametrize(
+    "raw", ["zai,glm 5.2", "zai,glm\n5.2", "z ai,glm-5.2", "zai,gl\tm"]
+)
+def test_parse_target_rejects_internal_whitespace(raw: str) -> None:
+    # One non-whitespace model token per the route contract; an embedded space
+    # is an invalid id and a newline would corrupt the dispatch receipt line.
+    assert mr._parse_target(raw) is None
+
+
+def test_parse_target_accepts_one_m_suffix() -> None:
+    assert mr._parse_target("zai,glm-5.2[1m]") == ("zai", "glm-5.2[1m]")

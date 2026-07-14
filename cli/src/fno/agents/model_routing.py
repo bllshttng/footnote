@@ -133,6 +133,12 @@ def _parse_target(raw: str) -> Optional[tuple[str, str]]:
     parts = [p.strip() for p in raw.split(",")]
     if len(parts) != 2 or not parts[0] or not parts[1]:
         return None
+    # Reject INTERNAL whitespace (a space or newline inside a token): the
+    # contract is one non-whitespace model token, an embedded space yields an
+    # invalid model id and a newline would corrupt the line-oriented dispatch
+    # receipt. Outer whitespace was already stripped above.
+    if any(c.isspace() for c in parts[0]) or any(c.isspace() for c in parts[1]):
+        return None
     return parts[0].lower(), parts[1]
 
 

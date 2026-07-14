@@ -93,7 +93,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)    DRY_RUN=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
-    --route)      ROUTE="${2:-}"; shift 2 ;;
+    --route)      [[ $# -ge 2 ]] || { echo "failed: --route reason=\"requires a provider,model value\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; ROUTE="$2"; shift 2 ;;
     --) shift; while [[ $# -gt 0 ]]; do NODES+=("$1"); shift; done ;;
     -*) echo "failed: $1 reason=\"unknown flag\"" >&2; exit 2 ;;
     *)  NODES+=("$1"); shift ;;
@@ -141,24 +141,6 @@ fi
 
 # ---- per-node dispatch ------------------------------------------------------
 n_launched=0; n_parked=0; n_already=0; n_skipped=0; n_done=0; n_failed=0; n_capped=0
-
-# x-b0b4: resolve the build-lane outcome ONCE for the receipt route= token
-# (config + key are per-run, not per-node). The AUTHORITATIVE predicate is
-# `fno route env build`: it runs the same resolve_route('build') the worker's
-# bg_create uses, so it accounts for EVERY reason the lane fails safe to primary
-# - not just target+key, but model_routing.enabled=false AND a keyed but
-# non-anthropic provider (a build lane `route set` permits with a warning). A
-# table-only heuristic (target present + key found) would print
-# route=<provider,model> for one of those primary-model launches, hiding the
-# exact fallback this token exists to expose (codex P2). env exits 0 only when a
-# real route resolves; `route ls -J` then supplies the provider,model string. A
-# stale `fno` without the verb (or any failure) leaves `primary` - the honest
-# conservative claim (routing not confirmed). Explicit --route wins per-node.
-BUILD_ROUTE_VAL="primary"
-if fno route env build >/dev/null 2>&1; then
-  _btarget="$(fno route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .target' 2>/dev/null || true)"
-  [[ -n "$_btarget" && "$_btarget" != "unconfigured" ]] && BUILD_ROUTE_VAL="$_btarget"
-fi
 
 for id in "${NODES[@]}"; do
   # --max soft cap: once reached, report the remainder rather than dropping silently.
@@ -274,12 +256,30 @@ for id in "${NODES[@]}"; do
   # discipline). resolve_route returns None for an unconfigured `build`, so this
   # is byte-identical to today until `fno route set build ...` opts in - no
   # config read in bash, no conditional. An explicit --route (fail-closed in the
-  # spawn) is forwarded per-dispatch and wins over the lane. route_val is the
-  # receipt token: the explicit target when given, else the build-lane outcome.
+  # spawn) is forwarded per-dispatch and wins over the lane.
   role_args=("--role" "build")
   route_args=()
   [[ -n "$ROUTE" ]] && route_args=("--route" "$ROUTE")
-  route_val="${ROUTE:-$BUILD_ROUTE_VAL}"
+  # Receipt route= token, resolved PER NODE (not once before the loop) so a
+  # `route set`/`unset` racing a bulk dispatch is stamped per worker, never
+  # inferred from a stale run-start snapshot (codex P2; plan's per-worker
+  # provenance invariant). Explicit --route wins. Otherwise the AUTHORITATIVE
+  # build-lane predicate is `fno route env build`: it runs the same
+  # resolve_route('build') the worker's bg_create uses, so it catches every
+  # fall-safe-to-primary reason (model_routing.enabled=false, a keyed but
+  # non-anthropic provider) that a target+key table heuristic would miss. env
+  # exits 0 only when a real route resolves; `route ls -J` then supplies the
+  # provider,model string. A stale `fno` without the verb (or any failure) leaves
+  # `primary` - the honest conservative claim (routing not confirmed).
+  if [[ -n "$ROUTE" ]]; then
+    route_val="$ROUTE"
+  else
+    route_val="primary"
+    if fno route env build >/dev/null 2>&1; then
+      _btarget="$(fno route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .target' 2>/dev/null || true)"
+      [[ -n "$_btarget" && "$_btarget" != "unconfigured" ]] && route_val="$_btarget"
+    fi
+  fi
 
   # ---- Guards 1+2 via the shared spawn-guard verb (x-73cc) ----
   # The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
