@@ -127,6 +127,42 @@ impl Popup {
         self.scroll = (self.scroll as isize + delta).max(0) as usize;
     }
 
+    /// The visible body height for a `term_rows`-tall terminal (the block is one
+    /// line per row).
+    fn viewport_h(&self, term_rows: usize) -> usize {
+        self.rows.len().min(term_rows.max(1))
+    }
+
+    /// After an arrow move, scroll so the selected row stays visible (a tall
+    /// menu/modal must never leave the selection off-screen, where Enter would
+    /// run an invisible entry).
+    pub fn follow_sel(&mut self, term_rows: usize) {
+        let vis_h = self.viewport_h(term_rows);
+        if let Some((ri, _)) = self.selected() {
+            if ri < self.scroll {
+                self.scroll = ri;
+            } else if ri >= self.scroll + vis_h {
+                self.scroll = ri + 1 - vis_h;
+            }
+        }
+        self.scroll = self.scroll.min(self.rows.len().saturating_sub(vis_h));
+    }
+
+    /// After a page/wheel scroll, pull the selection onto a visible row, so a
+    /// subsequent Enter can never execute an off-screen target.
+    pub fn clamp_sel_to_view(&mut self, term_rows: usize) {
+        let vis_h = self.viewport_h(term_rows);
+        let scroll = self.scroll.min(self.rows.len().saturating_sub(vis_h));
+        let (lo, hi) = (scroll, scroll + vis_h);
+        if let Some((ri, _)) = self.selected() {
+            if ri < lo || ri >= hi {
+                if let Some(idx) = self.targets().iter().position(|(r, _)| *r >= lo && *r < hi) {
+                    self.sel = idx;
+                }
+            }
+        }
+    }
+
     /// Every selectable target as `(row_index, cell_index_within_row)`, in
     /// render order.
     pub fn targets(&self) -> Vec<(usize, usize)> {
@@ -541,6 +577,41 @@ mod tests {
             "clamped to last screenful"
         );
         assert!(r.lines[5].text.contains("row19"));
+    }
+
+    #[test]
+    fn follow_sel_scrolls_to_keep_the_selection_visible() {
+        // codex P2: a tall menu/modal must scroll so the selected row stays on
+        // screen (else Enter runs an invisible entry).
+        let rows: Vec<PopupRow> = (0..12).map(|i| entry("x", &format!("r{i}"), "")).collect();
+        let mut p = Popup::new(rows, Anchor::Center);
+        // Terminal 5 rows tall. Walk selection down past the fold; scroll follows.
+        for _ in 0..8 {
+            p.nav(NavDir::Down);
+            p.follow_sel(5);
+        }
+        let (ri, _) = p.selected().unwrap();
+        assert_eq!(ri, 8);
+        let r = p.render((5, 80));
+        // The selected row is inside the 5-row window.
+        assert!(r.origin.0 == 0);
+        assert!(
+            (p.scroll..p.scroll + 5).contains(&ri),
+            "selection is in the viewport"
+        );
+    }
+
+    #[test]
+    fn clamp_sel_to_view_pulls_selection_onto_a_visible_row_after_paging() {
+        // codex P2: PageDown moves scroll only; clamp then pulls the selection
+        // onto a visible row so a following Enter can't run an off-screen target.
+        let rows: Vec<PopupRow> = (0..12).map(|i| entry("x", &format!("r{i}"), "")).collect();
+        let mut p = Popup::new(rows, Anchor::Center);
+        assert_eq!(p.selected(), Some((0, 0)));
+        p.scroll_by(6); // page down
+        p.clamp_sel_to_view(5);
+        let (ri, _) = p.selected().unwrap();
+        assert!(ri >= p.scroll, "selection moved into the scrolled viewport");
     }
 
     #[test]

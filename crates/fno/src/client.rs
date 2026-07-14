@@ -722,8 +722,33 @@ fn build_keys_modal() -> KeysModal {
 /// the popup's flat targets (`popup.sel` indexes it directly).
 struct RowMenu {
     popup: Popup,
-    target: String,
+    /// The target agent's identity, pinned at open. Names ALONE are ambiguous
+    /// (the daemon roster can surface two rows with the same name), so the
+    /// pane_id / attach_id disambiguate; execution fails closed if this identity
+    /// does not resolve to exactly one live row (never acts on the wrong agent).
+    target: AgentIdent,
     actions: Vec<MenuAction>,
+}
+
+/// The disambiguating identity of an agent row, captured when a row menu opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentIdent {
+    name: String,
+    pane_id: Option<u64>,
+    attach_id: Option<String>,
+}
+
+impl AgentIdent {
+    fn of(a: &AgentRow) -> Self {
+        AgentIdent {
+            name: a.name.clone(),
+            pane_id: a.pane_id,
+            attach_id: a.attach_id.clone(),
+        }
+    }
+    fn matches(&self, a: &AgentRow) -> bool {
+        a.name == self.name && a.pane_id == self.pane_id && a.attach_id == self.attach_id
+    }
 }
 
 /// What a context-menu entry does, resolved against the LIVE agent row (found by
@@ -804,7 +829,7 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     }
     RowMenu {
         popup: Popup::new(rows, anchor),
-        target: agent.name.clone(),
+        target: AgentIdent::of(agent),
         actions,
     }
 }
@@ -4520,22 +4545,17 @@ fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
     out
 }
 
-/// Which-key modal keys (x-8ccf US3). A lone `0x1b` chunk closes instantly
-/// (bare Esc); arrows/pgup scroll+select; Enter/`click` run the selected row;
-/// a bound printable key runs immediately through the shared chord dispatch
-/// (which-key), an unbound one dismisses. No key ever reaches a pane.
+/// Which-key modal keys (x-8ccf US3). Esc closes; arrows/pgup scroll+select;
+/// Enter/`click` run the selected row; a bound printable key runs immediately
+/// through the shared chord dispatch (which-key), an unbound one dismisses. Esc
+/// is folded like every other overlay (carried across reads) so a split arrow
+/// sequence can never leak its tail into a pane (codex P2). No key ever reaches
+/// a pane.
 async fn keys_modal_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    // A lone Esc chunk is unambiguously the Escape key (a real escape sequence
-    // arrives as one multi-byte read): close now rather than waiting for a
-    // following key, so dismiss is instant.
-    if bytes == [0x1b] && view.keys_modal_esc.is_empty() {
-        view.keys_modal = None;
-        return Ok(StdinFlow::Continue);
-    }
     let mut esc = std::mem::take(&mut view.keys_modal_esc);
     let toks = fold_modal_keys(&mut esc, bytes);
     view.keys_modal_esc = esc;
@@ -4568,15 +4588,17 @@ async fn keys_modal_keys(
                 }
             }
             ModalKey::PageUp => {
-                let page = (view.term.0 as isize - 2).max(1);
+                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
                 if let Some(m) = view.keys_modal.as_mut() {
                     m.popup.scroll_by(-page);
+                    m.popup.clamp_sel_to_view(trows); // Enter never runs an off-screen row
                 }
             }
             ModalKey::PageDown => {
-                let page = (view.term.0 as isize - 2).max(1);
+                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
                 if let Some(m) = view.keys_modal.as_mut() {
                     m.popup.scroll_by(page);
+                    m.popup.clamp_sel_to_view(trows);
                 }
             }
             ModalKey::Enter => {
@@ -4677,24 +4699,25 @@ async fn keys_modal_mouse(
     Ok(StdinFlow::Continue)
 }
 
-/// Run a row-menu entry (x-8ccf US2) against the LIVE agent row (found by the
-/// pinned name). A stale target is a Notice (AC1-ERR), never a misrouted action;
-/// every action maps to an existing Command / overlay / confirm (zero proto).
+/// Run a row-menu entry (x-8ccf US2) against the LIVE agent row (resolved by the
+/// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
+/// P1), never a misrouted action; every action maps to an existing Command /
+/// overlay / confirm (zero proto).
 async fn execute_row_menu_action(
     view: &mut View,
     action: MenuAction,
-    target: String,
+    target: AgentIdent,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
-    let Some(a) = view
-        .layout
-        .agents
-        .iter()
-        .find(|a| a.name == target)
-        .cloned()
-    else {
-        view.set_notice(format!("agent {target} is no longer here"));
-        return Ok(());
+    // Fail closed unless the identity resolves to EXACTLY one live row: two rows
+    // sharing a name must never let a menu act on the wrong one (codex P1).
+    let mut hits = view.layout.agents.iter().filter(|a| target.matches(a));
+    let a = match (hits.next(), hits.next()) {
+        (Some(a), None) => a.clone(),
+        _ => {
+            view.set_notice(format!("agent {} is no longer uniquely here", target.name));
+            return Ok(());
+        }
     };
     match action {
         MenuAction::NewTab | MenuAction::Split(_) => {
@@ -4729,9 +4752,9 @@ async fn execute_row_menu_action(
             let idx = view
                 .display_rows()
                 .iter()
-                .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == target));
+                .position(|r| matches!(r, DisplayRow::Agent(x) if target.matches(x)));
             match idx {
-                Some(idx) => fetch_peek(view, idx, target, sock_w).await?,
+                Some(idx) => fetch_peek(view, idx, a.name.clone(), sock_w).await?,
                 None => view.set_notice("agent is no longer here".into()),
             }
         }
@@ -4786,18 +4809,17 @@ async fn row_menu_execute_selected(
     Ok(())
 }
 
-/// Row-menu keys (x-8ccf US2): arrows walk the entries + 2x2 grid, Enter runs
-/// the selection, Esc/`q` close. A lone Esc closes instantly; no key reaches a
-/// pane.
+/// Row-menu keys (x-8ccf US2): arrows walk the entries + 2x2 grid (scrolling to
+/// keep the selection on-screen), pgup/pgdn scroll, Enter runs the selection,
+/// Esc/`q`/any unbound key dismiss (the shared popup contract, codex P2). Esc is
+/// carried across reads like every overlay, so a split arrow never leaks; no key
+/// reaches a pane.
 async fn row_menu_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    if bytes == [0x1b] && view.row_menu_esc.is_empty() {
-        view.row_menu = None;
-        return Ok(StdinFlow::Continue);
-    }
+    let trows = view.term.0 as usize;
     let mut esc = std::mem::take(&mut view.row_menu_esc);
     let toks = fold_modal_keys(&mut esc, bytes);
     view.row_menu_esc = esc;
@@ -4807,15 +4829,16 @@ async fn row_menu_keys(
         }
         match tok {
             ModalKey::Esc => view.row_menu = None,
-            ModalKey::Byte(b'q') => view.row_menu = None,
             ModalKey::Up => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.nav(NavDir::Up);
+                    m.popup.follow_sel(trows);
                 }
             }
             ModalKey::Down => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.nav(NavDir::Down);
+                    m.popup.follow_sel(trows);
                 }
             }
             ModalKey::Left => {
@@ -4828,10 +4851,21 @@ async fn row_menu_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
-            ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
-            _ => {
-                let _ = raw_out(b"\x07");
+            ModalKey::PageUp => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.scroll_by(-(trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
             }
+            ModalKey::PageDown => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.scroll_by((trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
+            // Any other (unbound) key dismisses, per the shared popup contract.
+            ModalKey::Byte(_) => view.row_menu = None,
         }
     }
     Ok(StdinFlow::Continue)
@@ -4937,17 +4971,16 @@ async fn aux_execute_selected(
     }
 }
 
-/// Aux-popup keys (US4/US5): arrows select, Enter runs, Esc/`q` close. A lone Esc
-/// closes instantly; a detach entry propagates StdinFlow::Detach.
+/// Aux-popup keys (US4/US5): arrows select (scrolling to keep the selection
+/// visible), pgup/pgdn scroll, Enter runs, Esc/`q`/any unbound key dismiss (the
+/// shared popup contract, codex P2); a detach entry propagates StdinFlow::Detach.
+/// Esc is carried across reads so a split arrow never leaks into a pane.
 async fn aux_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    if bytes == [0x1b] && view.aux_esc.is_empty() {
-        view.aux = None;
-        return Ok(StdinFlow::Continue);
-    }
+    let trows = view.term.0 as usize;
     let mut esc = std::mem::take(&mut view.aux_esc);
     let toks = fold_modal_keys(&mut esc, bytes);
     view.aux_esc = esc;
@@ -4957,15 +4990,16 @@ async fn aux_keys(
         }
         match tok {
             ModalKey::Esc => view.aux = None,
-            ModalKey::Byte(b'q') => view.aux = None,
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Up);
+                    m.popup.follow_sel(trows);
                 }
             }
             ModalKey::Down => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Down);
+                    m.popup.follow_sel(trows);
                 }
             }
             ModalKey::Left => {
@@ -4978,6 +5012,18 @@ async fn aux_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
+            ModalKey::PageUp => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.scroll_by(-(trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::PageDown => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.scroll_by((trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
             ModalKey::Enter => {
                 if matches!(
                     aux_execute_selected(view, sock_w).await?,
@@ -4986,9 +5032,8 @@ async fn aux_keys(
                     return Ok(StdinFlow::Detach);
                 }
             }
-            _ => {
-                let _ = raw_out(b"\x07");
-            }
+            // Any other (unbound) key dismisses, per the shared popup contract.
+            ModalKey::Byte(_) => view.aux = None,
         }
     }
     Ok(StdinFlow::Continue)
@@ -7616,9 +7661,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keys_modal_unbound_key_and_bare_esc_dismiss_without_acting() {
-        // AC2-EDGE: an unbound key dismisses and NO action fires; a bare Esc
-        // closes instantly.
+    async fn keys_modal_unbound_key_and_esc_dismiss_without_acting() {
+        // AC2-EDGE: an unbound key dismisses and NO action fires. Esc is FOLDED
+        // (carried across reads like every overlay, codex P2) so it resolves once
+        // a following byte disambiguates it from a split arrow.
         let mut v = two_pane_view();
         v.term = (40, 80);
         let mut buf: Vec<u8> = Vec::new();
@@ -7626,10 +7672,19 @@ mod tests {
         keys_modal_keys(&mut v, b"Z", &mut buf).await.unwrap();
         assert!(v.keys_modal.is_none(), "unbound key dismisses");
         assert!(buf.is_empty(), "unbound key sends nothing");
+        // A lone Esc is carried (no leak); the next byte flushes it as a dismiss.
         v.open_keys_modal();
         keys_modal_keys(&mut v, b"\x1b", &mut buf).await.unwrap();
-        assert!(v.keys_modal.is_none(), "bare Esc closes");
-        assert!(buf.is_empty(), "Esc sends nothing");
+        assert!(
+            v.keys_modal.is_some(),
+            "a lone Esc is carried, not acted on"
+        );
+        keys_modal_keys(&mut v, b"z", &mut buf).await.unwrap();
+        assert!(
+            v.keys_modal.is_none(),
+            "the carried Esc dismisses on the next key"
+        );
+        assert!(buf.is_empty(), "Esc sends nothing to a pane");
     }
 
     #[tokio::test]
@@ -7765,6 +7820,65 @@ mod tests {
         let mut v = unified_rows_view();
         assert!(!v.open_row_menu(0, Anchor::Center));
         assert!(v.row_menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn row_menu_unbound_key_dismisses() {
+        // codex P2: the shared popup contract says an unbound key dismisses; the
+        // row menu must not just ring BEL and stay open.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        v.open_row_menu(idx, Anchor::Center);
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, b"z", &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "an unbound key dismisses the menu");
+    }
+
+    #[tokio::test]
+    async fn row_menu_disambiguates_same_named_agents() {
+        // codex P1: two rows share a name; the menu is pinned by the full
+        // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
+        // never the other same-named row.
+        let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+            squad: Some(1),
+            name: name.into(),
+            pane_id,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        };
+        let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
+        // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
+        let second = mk("dup", Some(9));
+        v.row_menu = Some(build_row_menu(&second, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Focus)
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::FocusPane(pid)) => {
+                assert_eq!(
+                    pid, 9,
+                    "focused the row the menu was opened on, not its twin"
+                );
+            }
+            other => panic!("expected FocusPane(9), got {other:?}"),
+        }
     }
 
     #[test]
