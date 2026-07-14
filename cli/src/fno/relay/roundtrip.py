@@ -175,10 +175,10 @@ def _agents_home() -> Path:
 # path-traverse via _worker_sock. Mirrors the daemon's short_id shape.
 _SHORT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
-# An adopted session's claude_short_id is the control.sock wire `short`: always
-# exactly the 8-hex prefix of the session uuid. Validate it precisely (stricter
-# than the worker _SHORT_ID_RE, which also covers non-hex fno worker ids) so a
-# malformed/non-hex registry value is never handed to the wire boundary.
+# An adopted session's wire `short` (v9: `short_id`) is always exactly the 8-hex
+# prefix of the session uuid. Validate it precisely (stricter than the worker
+# _SHORT_ID_RE, which also covers non-hex fno worker ids) so a malformed/non-hex
+# registry value is never handed to the wire boundary.
 _ATTACHED_SHORT_RE = re.compile(r"^[0-9a-fA-F]{8}$")
 
 
@@ -245,18 +245,21 @@ def resolve_worker_short_id(session_id: str) -> Optional[str]:
 
 def resolve_attached_short_id(session_id: str) -> Optional[str]:
     """Resolve a claude session uuid to its ADOPTED (``host_mode == "attached"``)
-    row's 8-hex ``claude_short_id`` -- the G3 adopt lane (epic x-07c1, node x-e027).
+    row's 8-hex wire short (v9: ``short_id``) -- the G3 adopt lane (epic x-07c1,
+    node x-e027).
 
-    An adopted ``claude --bg`` session is not a footnote PTY worker: its
-    ``short_id`` is empty and there is NO ``worker.sock``. Its only drive handle is
-    the daemon ``control.sock`` (driven via the ``mail-inject`` op:'reply' verb),
-    and the single-writer claim the adopt path writes is keyed
-    ``pty:<claude_short_id>`` (mirrors ``crate::claude_adopt::pty_claim_holder``).
-    Returns the path-safe ``claude_short_id``, or None when absent/not-live."""
+    An adopted ``claude --bg`` session is not a footnote PTY worker, but since v9
+    its wire short lives in ``short_id`` (the unified transport key), and its only
+    drive handle is the daemon ``control.sock`` (driven via the ``mail-inject``
+    op:'reply' verb); the single-writer claim the adopt path writes is keyed
+    ``pty:<short>`` (mirrors ``crate::claude_adopt::pty_claim_holder``). This reads
+    the raw registry (no load-time backfill), so a legacy ``claude_short_id`` row
+    is tolerated as a fallback. Returns the path-safe short, or None when
+    absent/not-live."""
     for e in _live_claude_rows(session_id):
         if e.get("host_mode") != "attached":
             continue
-        short = e.get("claude_short_id")
+        short = e.get("short_id") or e.get("claude_short_id")
         if isinstance(short, str) and _ATTACHED_SHORT_RE.match(short):
             return short
     return None

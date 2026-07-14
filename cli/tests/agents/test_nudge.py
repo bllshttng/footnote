@@ -105,7 +105,7 @@ def _register_self(name: str, cwd: str) -> None:
     write_registry([
         AgentEntry(
             name=name, provider="claude", cwd=cwd,
-            log_path=f"/tmp/{name}.log", claude_short_id=f"id-{name}", status="live",
+            log_path=f"/tmp/{name}.log", short_id=f"id-{name}", status="live",
         )
     ])
 

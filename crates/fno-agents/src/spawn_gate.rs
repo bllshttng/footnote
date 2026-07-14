@@ -195,12 +195,10 @@ pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
                     Some(p) => pid_is_ours(p, e.pid_start_time),
                     // No local pid: a fno bg/adopted row whose process is the
                     // claude daemon's — resolve liveness via the roster by its
-                    // claude_short_id. (A row without either signal is a
-                    // disk-only ghost and stays uncounted.)
+                    // jobId (in short_id since v9). (A row without either signal
+                    // is a disk-only ghost and stays uncounted.)
                     None => e
-                        .claude_short_id
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
+                        .transport_short()
                         .map(|sid| live_roster_short_ids.contains(sid))
                         .unwrap_or(false),
                 };
@@ -845,9 +843,9 @@ MemAvailable:    8000000 kB\n";
                 let pidf = resolve(&row["pid"])
                     .map(|p| format!(r#","pid":{p}"#))
                     .unwrap_or_default();
-                let csidf = row["claude_short_id"]
+                let csidf = row["short_id"]
                     .as_str()
-                    .map(|s| format!(r#","claude_short_id":"{s}""#))
+                    .map(|s| format!(r#","short_id":"{s}""#))
                     .unwrap_or_default();
                 entries.push(format!(
                     r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z"{pidf}{csidf}}}"#

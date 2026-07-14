@@ -1302,7 +1302,7 @@ def cmd_discovered_json(
 
         try:
             entries = load_registry()
-            exclude = {e.claude_short_id for e in entries if e.claude_short_id}
+            exclude = {e.short_id for e in entries if e.short_id}
             # Projects-store rows key on full session_id (x-a1d5: no double-list).
             exclude_sids = {e.cc_session_id for e in entries if e.cc_session_id}
         except Exception:  # noqa: BLE001 — discovery never depends on a clean registry

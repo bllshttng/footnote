@@ -236,17 +236,21 @@ def census() -> LiveCensus:
         if row.status not in LIVE_STATUSES:
             continue
         pid_alive = _pid_alive(row.pid, row.pid_start_time)
-        # A fno `claude --bg` row is minted with a claude_short_id but no local
+        # A fno `claude --bg` row is minted with a jobId in short_id but no local
         # pid (liveness lives in the claude daemon roster). Resolve it via the
         # roster so real fno bg workers hold slots — a pid-only filter would drop
         # them and let the cap admit unbounded bg workers (Codex P1, PR #235).
         # Still no non-fno session counted: a claude-mem observer has no
-        # registry row and never reaches here.
+        # registry row and never reaches here. v9 unified the jobId into short_id;
+        # a bg row is discriminated from a daemon PTY worker by pid==None +
+        # provider claude + roster membership (a worker's name-derived short is
+        # never in the claude roster, so the guard is self-limiting).
         bg_alive = (
             not pid_alive
             and row.pid is None
-            and bool(row.claude_short_id)
-            and row.claude_short_id in roster_live_short_ids
+            and row.provider == "claude"
+            and bool(row.short_id)
+            and row.short_id in roster_live_short_ids
         )
         if not (pid_alive or bg_alive):
             continue
@@ -254,13 +258,13 @@ def census() -> LiveCensus:
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
-        dedup_key = row.claude_short_id or row.short_id or None
+        dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             continue  # already shown as its roster row in the display union
         if dedup_key:
             counted_short_ids.add(dedup_key)
         substrate = "pane" if getattr(row, "mux", None) else (
-            "bg" if row.claude_short_id else "worker"
+            "bg" if bg_alive else "worker"
         )
         out.workers.append(
             LiveWorker(
@@ -551,10 +555,11 @@ def qos_demote_pid(pid: int) -> None:
         _warn(f"spawn-gate: QoS demotion of pid {pid} failed (non-fatal)")
 
 
-def qos_demote_bg_worker(claude_short_id: str, *, poll_s: float = 10.0) -> None:
+def qos_demote_bg_worker(job_id: str, *, poll_s: float = 10.0) -> None:
     """After a ``--substrate bg`` dispatch, poll the roster briefly for the
-    new worker's pid and demote it post-hoc. Bounded; one warning on miss."""
-    if not claude_short_id or not _qos_enabled():
+    new worker's pid and demote it post-hoc. ``job_id`` is the claude bg jobId
+    (the registry ``short_id``). Bounded; one warning on miss."""
+    if not job_id or not _qos_enabled():
         return
     deadline = time.monotonic() + poll_s
     while True:
@@ -565,7 +570,7 @@ def qos_demote_bg_worker(claude_short_id: str, *, poll_s: float = 10.0) -> None:
                 if not isinstance(w, dict):
                     continue
                 sid = str(w.get("sessionId") or "")
-                if sid.split("-")[0] == claude_short_id and isinstance(
+                if sid.split("-")[0] == job_id and isinstance(
                     w.get("pid"), int
                 ):
                     qos_demote_pid(w["pid"])
@@ -574,7 +579,7 @@ def qos_demote_bg_worker(claude_short_id: str, *, poll_s: float = 10.0) -> None:
             pass
         if time.monotonic() >= deadline:
             _warn(
-                f"spawn-gate: bg worker {claude_short_id} pid not in roster "
+                f"spawn-gate: bg worker {job_id} pid not in roster "
                 f"within {int(poll_s)}s; QoS demotion skipped (non-fatal)"
             )
             return

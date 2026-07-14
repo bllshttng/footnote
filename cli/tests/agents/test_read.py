@@ -25,7 +25,7 @@ def _claude(**kw) -> AgentEntry:
         provider="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/worker-frontend/output.jsonl",
-        claude_short_id="abc12345",
+        short_id="abc12345",
         created_at="2026-05-20T17:00:00Z",
         status="live",
         last_message_at="2026-05-20T17:30:12Z",
@@ -176,7 +176,7 @@ def test_list_agents_filter_by_status(
             _claude(
                 name="dead",
                 status="orphaned",
-                claude_short_id="def67890",
+                short_id="def67890",
             ),
         ]
     )
@@ -236,7 +236,7 @@ def test_list_agents_claude_shellout_failure_falls_back(
     write_registry(
         [
             _claude(name="a"),
-            _claude(name="b", claude_short_id="def67890"),
+            _claude(name="b", short_id="def67890"),
         ]
     )
     # Empty result + warning simulates the fallback path.
@@ -279,7 +279,7 @@ def test_list_agents_claude_shellout_only_called_once_per_invocation(
     write_registry(
         [
             _claude(name="a"),
-            _claude(name="b", claude_short_id="def67890"),
+            _claude(name="b", short_id="def67890"),
         ]
     )
 

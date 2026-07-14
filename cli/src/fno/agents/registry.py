@@ -28,6 +28,7 @@ import contextlib
 import fcntl
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +87,7 @@ KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 # provider -> field mapping lives in exactly one place and cannot drift
 # between the two. Adding a provider here updates both call sites at once.
 PROVIDER_SESSION_ID_FIELDS = {
-    "claude": "claude_short_id",
+    "claude": "short_id",
     "codex": "codex_session_id",
     "gemini": "gemini_session_id",
 }
@@ -117,7 +118,11 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # store (clean "upgrade fno") rather than accept the version and then TypeError on
 # the unknown AgentEntry kwargs (the PR #364 brick) or silently drop the fields on
 # a Rust read-modify-write. Same forward-compat rationale as the v4-v7 bumps.
-SCHEMA_VERSION = 8
+# v9 removes `claude_short_id`: the claude jobId (a pure prefix of the session
+# UUID) now lives in `short_id`, unifying the transport-key field across
+# providers. Legacy rows backfill on load (see load_registry); a pre-v9 reader
+# must reject a v9 store rather than drop the jobId on write-back.
+SCHEMA_VERSION = 9
 
 
 class RegistryVersionError(RuntimeError):
@@ -160,7 +165,6 @@ class AgentEntry:
     provider: str
     cwd: str
     log_path: str
-    claude_short_id: Optional[str] = None
     codex_session_id: Optional[str] = None
     gemini_session_id: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
@@ -177,7 +181,7 @@ class AgentEntry:
     # Python's coercion maps the absence back to "exec". [interactive-drive node]
     host_mode: Optional[str] = None
     # The FULL claude session UUID, the stream-json `--resume` target. Distinct
-    # from `claude_short_id` (the 8-hex jobId, a 32-bit prefix used by `claude
+    # from the 8-hex jobId in `short_id` (a 32-bit prefix used by `claude
     # attach` + the jobs-dir, not collision-proof as a resume key). None until a
     # claude session is adopted into the daemon stream-json host lane, which
     # resolves it via `_claude_session_registry.resolve_session_uuid` and
@@ -227,6 +231,12 @@ class AgentEntry:
     # short_id/project_root are Rust `String` (NOT Option), so they default to
     # "" -- emitting "short_id": null would fail Rust's deserialize (null is not
     # a String). The Option fields below emit null, which Rust reads as None.
+    #
+    # short_id is the provider's transport key (v9, x-1b1e): claude rows carry
+    # the 8-hex jobId (`claude attach/logs <jobId>`, by construction the first 8
+    # hex of the session UUID); daemon PTY rows carry the name-derived worker
+    # socket key. The legacy `claude_short_id` field was removed at v9 --
+    # load_registry backfills it into short_id on read and never writes it back.
     short_id: str = ""
     project_root: str = ""
     messaging_socket_path: Optional[str] = None
@@ -275,7 +285,7 @@ class AgentEntry:
         """The provider-specific resume-target id.
 
         Resolves to whichever stored field the resume path consumes:
-        ``claude_short_id`` (``claude attach``), ``codex_session_id``
+        ``short_id`` (``claude attach``), ``codex_session_id``
         (``codex resume <uuid>``), or ``gemini_session_id``. ``None`` for
         unknown providers or when the id was never captured.
 
@@ -286,7 +296,9 @@ class AgentEntry:
         on-disk storage field.
         """
         field_name = PROVIDER_SESSION_ID_FIELDS.get(self.provider)
-        return getattr(self, field_name) if field_name else None
+        # `short_id` is a str defaulting to "" (never None); normalize the
+        # empty transport key to None so callers keep their `is None` checks.
+        return (getattr(self, field_name) or None) if field_name else None
 
 
 def _registry_path(path: Optional[Path]) -> Path:
@@ -331,19 +343,18 @@ def _hold_registry_lock(registry_path: Path) -> Iterator[None]:
 def _validate_single_live_ref(entry: AgentEntry) -> None:
     """One-live-ref invariant (4a-G2, mirrors Rust ``validate_single_live_ref``).
 
-    A row carrying the ``mux`` ref must not ALSO carry a worker-socket
-    identity (non-empty ``short_id``) or a ``claude --bg`` thread id
-    (``claude_short_id``) - a double-ref row would make consumers dispatch one
+    A row carrying the ``mux`` ref must not ALSO carry a transport identity
+    (non-empty ``short_id``: a worker-socket key or, since v9, a ``claude
+    --bg`` jobId) - a double-ref row would make consumers dispatch one
     agent down two substrates. Scoped to mux rows only; pre-existing
     worker/bg field combinations are untouched.
     """
     if entry.mux is None:
         return
-    if entry.short_id or entry.claude_short_id is not None:
-        other = "worker" if entry.short_id else "bg-thread"
+    if entry.short_id:
         raise ValueError(
             f"registry row {entry.name!r} carries a mux ref alongside a "
-            f"{other} ref; a row holds exactly one live ref (mux XOR worker XOR bg)"
+            f"worker/bg ref; a row holds exactly one live ref (mux XOR worker XOR bg)"
         )
 
 
@@ -490,6 +501,22 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         if not row.get("harness") and row.get("provider"):
             row = {**row, "harness": row["provider"]}
         row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
+        # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
+        # READ only -- a legacy row's jobId moves into `short_id` (the unified
+        # transport key) and the key dies here, so asdict never re-emits it.
+        # A conflicting pair keeps `short_id` (the drift this removal kills)
+        # and warns once, never silently prefers the legacy value.
+        legacy_short = row.pop("claude_short_id", None)
+        if legacy_short:
+            if not row.get("short_id"):
+                row["short_id"] = legacy_short
+            elif row["short_id"] != legacy_short:
+                print(
+                    f"fno agents: warning: registry row {row.get('name')!r} "
+                    f"carries short_id={row['short_id']!r} and legacy "
+                    f"claude_short_id={legacy_short!r}; keeping short_id",
+                    file=sys.stderr,
+                )
         # `session_id` is a computed @property on AgentEntry, not an init field.
         # A Rust PTY row may serialize it (Rust skips it when None, so this only
         # fires for a row that recorded one); passing it to AgentEntry(**row)

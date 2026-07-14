@@ -34,7 +34,7 @@ def _write_roster(tmp_path, workers: dict) -> None:
     (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))
 
 
-def _row(name: str, *, status="live", pid=None, claude_short_id=None, short_id=""):
+def _row(name: str, *, status="live", pid=None, short_id=""):
     return AgentEntry(
         name=name,
         provider="claude",
@@ -42,7 +42,6 @@ def _row(name: str, *, status="live", pid=None, claude_short_id=None, short_id="
         log_path="/tmp/log",
         status=status,
         pid=pid,
-        claude_short_id=claude_short_id,
         short_id=short_id,
     )
 
@@ -63,7 +62,7 @@ class TestCensus:
         )
         rows = [
             _row("pane-worker", pid=ALIVE),  # fno-only
-            _row("adopted", pid=ALIVE, claude_short_id="bbbbbbbb"),  # dup of roster
+            _row("adopted", pid=ALIVE, short_id="bbbbbbbb"),  # dup of roster
         ]
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
         c = spawn_gate.census()

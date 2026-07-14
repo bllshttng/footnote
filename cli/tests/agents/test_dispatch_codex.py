@@ -561,7 +561,7 @@ def test_yolo_on_claude_followup_emits_stderr_note(workdir, capsys, monkeypatch)
             provider="claude",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="live",
         )
     ])

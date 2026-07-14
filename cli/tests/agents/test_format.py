@@ -24,7 +24,7 @@ def _claude_entry(**overrides) -> AgentEntry:
         provider="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/worker-frontend/output.jsonl",
-        claude_short_id="abc12345",
+        short_id="abc12345",
         created_at="2026-05-20T17:00:00Z",
         status="live",
         last_message_at="2026-05-20T17:30:12Z",

@@ -189,7 +189,7 @@ def test_reconcile_gemini_flips_orphaned_when_session_file_missing(
     gemini_session_id so the human renderer and JSON consumers can
     identify which session was orphaned. Pre-fix gemini flips rendered
     "?" for the id field because the dispatch.py change-builder only
-    looked at claude_short_id and codex_session_id.
+    looked at short_id and codex_session_id.
     """
     work = isolated_state / "work"
     work.mkdir()
@@ -357,7 +357,7 @@ def test_reconcile_cross_provider_batched_write(
         AgentEntry(
             name="claude-a", provider="claude", cwd=str(work),
             log_path=str(work / "claude-a.log"),
-            claude_short_id="aaaaaaaa",
+            short_id="aaaaaaaa",
             status="live",
         ),
         AgentEntry(

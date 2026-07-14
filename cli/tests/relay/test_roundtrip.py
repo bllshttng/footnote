@@ -202,8 +202,8 @@ def test_resolve_attached_matches_live_adopted_session(tmp_path, monkeypatch):
     # 8-hex in claude_short_id; resolve to that, not the interactive short_id.
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
     _write_registry(tmp_path, [
-        {"name": "cc-aa11bb22", "short_id": "", "provider": "claude",
-         "claude_session_uuid": "the-uuid", "claude_short_id": "aa11bb22",
+        {"name": "cc-aa11bb22", "short_id": "aa11bb22", "provider": "claude",
+         "claude_session_uuid": "the-uuid",
          "host_mode": "attached", "status": "live"},
     ])
     assert rt_mod.resolve_attached_short_id("the-uuid") == "aa11bb22"
@@ -217,11 +217,11 @@ def test_resolve_attached_skips_interactive_and_exec(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
     _write_registry(tmp_path, [
         {"name": "i", "short_id": "wkI", "provider": "claude", "claude_session_uuid": "u",
-         "claude_short_id": "wkI", "host_mode": "interactive"},
+         "host_mode": "interactive"},
         {"name": "e", "short_id": "wkE", "provider": "claude", "claude_session_uuid": "u",
-         "claude_short_id": "wkE", "host_mode": "exec"},
-        {"name": "a", "short_id": "", "provider": "claude", "claude_session_uuid": "u",
-         "claude_short_id": "cc77dd88", "host_mode": "attached"},
+         "host_mode": "exec"},
+        {"name": "a", "short_id": "cc77dd88", "provider": "claude", "claude_session_uuid": "u",
+         "host_mode": "attached"},
     ])
     assert rt_mod.resolve_attached_short_id("u") == "cc77dd88"
 
@@ -229,9 +229,9 @@ def test_resolve_attached_skips_interactive_and_exec(tmp_path, monkeypatch):
 def test_resolve_attached_skips_dead_and_rejects_unsafe(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
     _write_registry(tmp_path, [
-        {"name": "dead", "claude_session_uuid": "d", "claude_short_id": "aa11bb22",
+        {"name": "dead", "claude_session_uuid": "d", "short_id": "aa11bb22",
          "host_mode": "attached", "status": "exited"},
-        {"name": "evil", "claude_session_uuid": "x", "claude_short_id": "../../etc",
+        {"name": "evil", "claude_session_uuid": "x", "short_id": "../../etc",
          "provider": "claude", "host_mode": "attached", "status": "live"},
     ])
     assert rt_mod.resolve_attached_short_id("d") is None  # dead
@@ -249,11 +249,11 @@ def test_resolve_attached_rejects_non_hex_short(tmp_path, monkeypatch):
     # control.sock boundary (stricter than the worker _SHORT_ID_RE).
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
     _write_registry(tmp_path, [
-        {"name": "n8", "claude_session_uuid": "nonhex", "claude_short_id": "zzzzzzzz",
+        {"name": "n8", "claude_session_uuid": "nonhex", "short_id": "zzzzzzzz",
          "provider": "claude", "host_mode": "attached", "status": "live"},
-        {"name": "short", "claude_session_uuid": "tooshort", "claude_short_id": "aa11bb",
+        {"name": "short", "claude_session_uuid": "tooshort", "short_id": "aa11bb",
          "provider": "claude", "host_mode": "attached", "status": "live"},
-        {"name": "ok", "claude_session_uuid": "good", "claude_short_id": "aa11bb22",
+        {"name": "ok", "claude_session_uuid": "good", "short_id": "aa11bb22",
          "provider": "claude", "host_mode": "attached", "status": "live"},
     ])
     assert rt_mod.resolve_attached_short_id("nonhex") is None    # alnum but not hex

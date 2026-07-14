@@ -379,7 +379,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// reads of v1..=v4 are retained. Anything else is a hard error - which is the
 /// point of each bump: a pre-inside-leg reader pinned to {1,2,3,4} rejects a v5
 /// store instead of silently dropping the inside-leg report.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -460,7 +460,39 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
             }
         }
     }
-    Ok(rows.clone())
+    // v9 transport-key backfill (x-1b1e), the raw-Value mirror of Python
+    // `load_registry` popping `claude_short_id` into `short_id`: a legacy row's
+    // jobId moves into an empty `short_id` and the old key is dropped so no verb
+    // body reads it. A conflicting pair keeps `short_id` and warns once.
+    let mut out = rows.clone();
+    for row in &mut out {
+        if let Some(obj) = row.as_object_mut() {
+            let legacy = obj
+                .remove("claude_short_id")
+                .and_then(|v| v.as_str().map(str::to_string))
+                .filter(|s| !s.is_empty());
+            if let Some(legacy) = legacy {
+                let existing = obj
+                    .get("short_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                match existing {
+                    None => {
+                        obj.insert("short_id".into(), Value::String(legacy));
+                    }
+                    Some(short) if short != legacy => {
+                        let name = obj.get("name").and_then(Value::as_str).unwrap_or("?");
+                        eprintln!(
+                            "fno agents: warning: registry row {name:?} carries short_id={short:?} and legacy claude_short_id={legacy:?}; keeping short_id"
+                        );
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// String field accessor with a default (Python `ev.get(key, "")`).
@@ -773,10 +805,11 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Provider -> session-id registry field, mirroring Python
-/// `registry.PROVIDER_SESSION_ID_FIELDS`.
+/// `registry.PROVIDER_SESSION_ID_FIELDS`. v9 (x-1b1e): claude resolves to the
+/// unified `short_id` transport key (was `claude_short_id`).
 fn session_id_field(provider: &str) -> Option<&'static str> {
     match provider {
-        "claude" => Some("claude_short_id"),
+        "claude" => Some("short_id"),
         "codex" => Some("codex_session_id"),
         "gemini" => Some("gemini_session_id"),
         _ => None,
@@ -826,7 +859,7 @@ fn claude_resume_argv(
     name: &str,
 ) -> Result<(Vec<String>, Option<String>), i32> {
     let short_id = entry
-        .get("claude_short_id")
+        .get("short_id")
         .and_then(Value::as_str)
         .unwrap_or("");
     let uuid = entry
@@ -902,7 +935,7 @@ fn acquire_resume_session_claim(uuid: &str, root: Option<&Path>) -> Result<(), (
 /// socket), never the registry `status` field, matching the resume smart verb.
 fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
     let short_id = entry
-        .get("claude_short_id")
+        .get("short_id")
         .and_then(Value::as_str)
         .unwrap_or("");
     let uuid = entry
@@ -1341,12 +1374,12 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     }
 
     let short_id = entry
-        .get("claude_short_id")
+        .get("short_id")
         .and_then(Value::as_str)
         .unwrap_or("");
     if short_id.is_empty() {
         eprintln!(
-            "registry entry {} has no claude_short_id; cannot attach.",
+            "registry entry {} has no short id on file; cannot attach.",
             py_repr_str(&name)
         );
         return 12;
@@ -1638,7 +1671,7 @@ fn run_logs_claude(entry: &Value, args: &LogsArgs) -> i32 {
         );
     }
     let short_id = entry
-        .get("claude_short_id")
+        .get("short_id")
         .and_then(Value::as_str)
         .unwrap_or("");
     if short_id.is_empty() {
@@ -1647,7 +1680,7 @@ fn run_logs_claude(entry: &Value, args: &LogsArgs) -> i32 {
             .and_then(Value::as_str)
             .unwrap_or("");
         eprintln!(
-            "claude agent {} (created {created}) has no claude_short_id on file; cannot read logs. This entry may predate US1's short-id capture; try re-dispatching with `fno agents ask`.",
+            "claude agent {} (created {created}) has no short id on file; cannot read logs. This entry may predate US1's short-id capture; try re-dispatching with `fno agents ask`.",
             args.name
         );
         return 1;
@@ -2278,7 +2311,7 @@ mod tests {
 
     #[test]
     fn session_id_field_and_resume_argv_match_python() {
-        assert_eq!(session_id_field("claude"), Some("claude_short_id"));
+        assert_eq!(session_id_field("claude"), Some("short_id"));
         assert_eq!(session_id_field("codex"), Some("codex_session_id"));
         assert_eq!(session_id_field("gemini"), Some("gemini_session_id"));
         assert_eq!(session_id_field("unknown"), None);

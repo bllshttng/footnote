@@ -878,7 +878,7 @@ def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
                 provider="claude",
                 cwd="/Users/x/code/proj",
                 log_path="/tmp/x-foo.log",
-                claude_short_id="9a063cd3",
+                short_id="9a063cd3",
                 claude_session_uuid="9a063cd3-69d4-415a-ada5-649b0164189c",
             )
         ],
@@ -914,7 +914,7 @@ def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
                 provider="claude",
                 cwd="/x",
                 log_path="/tmp/x.log",
-                claude_short_id="9a063cd3",
+                short_id="9a063cd3",
                 claude_session_uuid=sid,
             )
         ],
@@ -934,7 +934,7 @@ def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
         [
             AgentEntry(
                 name="x-dead", provider="claude", cwd="/x", log_path="/tmp/d.log",
-                claude_short_id="deadd00d", claude_session_uuid="deadd00d-1111-2222-3333-444444444444",
+                short_id="deadd00d", claude_session_uuid="deadd00d-1111-2222-3333-444444444444",
                 status="orphaned",
             )
         ],
@@ -948,7 +948,7 @@ def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
 
 
 def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
-    """codex review: short_id must be the authoritative claude_short_id (jobId),
+    """codex review: short_id must be the authoritative jobId,
     not the uuid's first 8 hex, when the two differ."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, write_registry
@@ -958,7 +958,7 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
         [
             AgentEntry(
                 name="x-foo", provider="claude", cwd="/x", log_path="/tmp/f.log",
-                claude_short_id="j0b1d001",  # jobId
+                short_id="j0b1d001",  # jobId
                 claude_session_uuid="aaaabbbb-1111-2222-3333-444444444444",  # uuid[:8]=aaaabbbb
             )
         ],

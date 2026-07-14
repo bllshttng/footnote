@@ -92,7 +92,7 @@ def test_stop_claude_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:
     """AC1-HP: claude stop succeeds, emits agent_stopped, prints summary."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -133,7 +133,7 @@ def test_stop_claude_nonzero_exit_propagates(
     """AC1-ERR: claude stop non-zero passes stderr through and exit_code=1."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -235,7 +235,7 @@ def test_stop_claude_timeout_maps_to_exit_15(
     """AC1-FR: shellout timeout raises DispatchAskError(exit_code=15)."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -272,7 +272,7 @@ def test_rm_claude_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:
     """AC2-HP: claude rm exits 0, registry row removed."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -308,7 +308,7 @@ def test_rm_claude_refusal_leaves_registry_unchanged(
     """AC2-ERR: non-forceful claude refusal -> stderr passthrough, registry unchanged."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -353,7 +353,7 @@ def test_rm_force_overrides_claude_refusal(
     """AC2-UI: --force removes the registry row even when claude rm fails."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -427,7 +427,7 @@ def test_rm_claude_not_on_path(tmp_path: Path, monkeypatch) -> None:
     """AC2-FR: claude not on PATH exits 14, registry unchanged."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     monkeypatch.setenv("PATH", "/nonexistent")
 
@@ -454,7 +454,7 @@ def test_reconcile_orphan_detection(tmp_path: Path, monkeypatch) -> None:
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="live",
             last_message_at="2026-05-01T00:00:00Z",
         ),
@@ -499,7 +499,7 @@ def test_reconcile_recovery(tmp_path: Path, monkeypatch) -> None:
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="orphaned",
         ),
     )
@@ -536,7 +536,7 @@ def test_reconcile_backfills_null_harness_session_id(tmp_path: Path, monkeypatch
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="live",
         ),
     )
@@ -578,7 +578,7 @@ def test_reconcile_backfill_empty_when_id_already_present(tmp_path: Path, monkey
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             harness="claude",
             harness_session_id="ALREADY",
             status="live",
@@ -716,7 +716,7 @@ def test_attach_claude_inherits_stdio_and_propagates_exit(
     """AC7-HP: claude attach returns claude's exit code."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -787,7 +787,7 @@ def test_attach_claude_propagates_nonzero_exit(
     """AC7-EDGE: claude attach exit 4 surfaces as result.exit_code=4."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -819,7 +819,7 @@ def test_rm_claude_timeout_preserves_registry(
     """
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -861,7 +861,7 @@ def test_rm_print_lands_after_registry_write(
     """
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id="7c5dcf5d"),
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -903,13 +903,13 @@ def test_reconcile_skips_claude_when_cli_missing(
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="live",
         ),
         dict(
             name="worker-claude-2",
             provider="claude",
-            claude_short_id="abcd1234",
+            short_id="abcd1234",
             status="live",
         ),
     )
@@ -957,7 +957,7 @@ def test_rm_force_removes_orphan_row_without_short_id(
     """
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id=None),
+        dict(name="worker-claude", provider="claude"),
     )
 
     from fno.agents import dispatch
@@ -982,7 +982,7 @@ def test_rm_force_removes_orphan_row_without_short_id(
     # No subprocess fired - we can't shell out without a short_id.
     assert spawn_called is False
     err = capsys.readouterr().err
-    assert "registry entry has no claude_short_id" in err
+    assert "registry entry has no short id" in err
 
 
 def test_rm_without_force_on_orphan_row_still_refuses(
@@ -992,7 +992,7 @@ def test_rm_without_force_on_orphan_row_still_refuses(
     operators see the diagnostic and choose to add --force explicitly."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
-        dict(name="worker-claude", provider="claude", claude_short_id=None),
+        dict(name="worker-claude", provider="claude"),
     )
 
     from fno.agents import dispatch
@@ -1002,7 +1002,7 @@ def test_rm_without_force_on_orphan_row_still_refuses(
         dispatch.rm_agent("worker-claude")  # default force=False
 
     assert exc_info.value.exit_code == 12
-    assert "no claude_short_id" in str(exc_info.value)
+    assert "no short id" in str(exc_info.value)
     # Registry untouched.
     assert len(load_registry()) == 1
 
@@ -1025,7 +1025,7 @@ def test_rm_uses_locked_short_id_after_concurrent_recreate(
     # Seed with the LATER (post-recreate) short_id so the locked re-resolve
     # picks it up via the real load_registry path.
     _seed_registry(
-        dict(name="racy", provider="claude", claude_short_id="bbbbbbbb"),
+        dict(name="racy", provider="claude", short_id="bbbbbbbb"),
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
@@ -1048,7 +1048,7 @@ def test_rm_uses_locked_short_id_after_concurrent_recreate(
             # Stale entry — pretends short_id was aaaaaaaa pre-flock.
             return AgentEntry(
                 name=name, provider="claude", cwd="/tmp", log_path="/tmp/x",
-                claude_short_id="aaaaaaaa",
+                short_id="aaaaaaaa",
             )
         return real_resolve(name, **kwargs)
 
@@ -1091,7 +1091,7 @@ def test_reconcile_preserves_claude_status_on_probe_error(
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="live",
         ),
     )

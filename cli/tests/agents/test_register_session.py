@@ -43,7 +43,7 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     )
 
     assert entry.provider == "claude"
-    assert entry.claude_short_id == "ef9982cc-2543-4cea-9a20-081cca7119f6"
+    assert entry.short_id == "ef9982cc-2543-4cea-9a20-081cca7119f6"
     # Registered NON-live: a hand-started session has no live transport, so it
     # must not be a resolve_to_project anycast target (else default sends
     # dead-letter to inbox/<agent-name>/, which its wake hook never reads).
@@ -89,7 +89,7 @@ def test_ac7_edge_two_sessions_one_cwd_distinct_names(tmp_path: Path, monkeypatc
     assert a.name != b.name
     rows = load_registry()
     assert len(rows) == 2
-    ids = {r.claude_short_id for r in rows}
+    ids = {r.short_id for r in rows}
     assert ids == {"11111111-aaaa", "22222222-bbbb"}
 
 

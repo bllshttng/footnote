@@ -37,7 +37,7 @@ def _write_existing_entry(name: str, provider: str, short_id: str) -> None:
             provider=provider,
             cwd="/tmp",
             log_path="/tmp/a.log",
-            claude_short_id=short_id if provider == "claude" else None,
+            short_id=short_id if provider == "claude" else "",
             codex_session_id=short_id if provider == "codex" else None,
             gemini_session_id=short_id if provider == "gemini" else None,
         )

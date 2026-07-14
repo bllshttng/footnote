@@ -1379,7 +1379,7 @@ fn build_claude_stream_entry(
         cwd: cwd_s.clone(),
         project_root: cwd_s,
         session_id: None,
-        claude_short_id: None,
+        legacy_claude_short_id: None,
         claude_session_uuid: Some(uuid.into()),
         messaging_socket_path: None,
         codex_session_id: None,
@@ -2631,25 +2631,27 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
             // claude; ClaudeProvider.as_pty() is None). The field is kept (null)
             // to preserve the serialize_entry parity shape for JSON consumers.
             //
-            // session_id: Python uses the provider-specific resume id (claude_short_id
-            // for claude, codex_session_id for codex, gemini_session_id for gemini).
-            // The Rust registry stores these in separate optional fields; we replicate
-            // the Python resolution logic here.
+            // session_id: Python uses the provider-specific resume id (short_id
+            // for claude since v9, codex_session_id for codex, gemini_session_id
+            // for gemini). The Rust registry stores these in separate optional
+            // fields; we replicate the Python resolution logic here.
             // Provider-specific resume id, falling back to the generic
             // `session_id` when the provider field is None (matches Python's
             // resolution + the resolve_session_id helper below; gemini-code-assist
             // medium on PR #361 — without the fallback a row with only the generic
             // session_id set would report null here).
             let resume_id: Option<String> = match e.provider.as_str() {
-                "claude" => e.claude_short_id.clone().or_else(|| e.session_id.clone()),
+                "claude" => e
+                    .transport_short()
+                    .map(str::to_string)
+                    .or_else(|| e.session_id.clone()),
                 "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
                 "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
                 _ => e.session_id.clone(),
             };
             let session_id: Value = resume_id.map(Value::String).unwrap_or(Value::Null);
             let short_id: Value = e
-                .claude_short_id
-                .as_deref()
+                .transport_short()
                 .map(|s| Value::String(s.to_string()))
                 .unwrap_or(Value::Null);
             let log_path: Value = e
@@ -2954,8 +2956,7 @@ async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
 /// `stop` on the agent's short id and marks the registry row exited on success.
 async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry) -> Response {
     let short = match entry
-        .claude_short_id
-        .as_deref()
+        .transport_short()
         .or(entry.session_id.as_deref())
         .filter(|s| !s.is_empty())
     {
@@ -2995,9 +2996,9 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 .emitter
                 .emit("agent_stopped", &json!({"name": name, "backend": "claude"}));
             // Report the id we actually stopped with (`short`), not
-            // `entry.short_id`: a Python-authored claude row has an empty
-            // short_id but a populated claude_short_id, so echoing entry.short_id
-            // would print `stopped: <name> ()` and break the stop output
+            // `entry.short_id`: a row with only a generic session_id and an empty
+            // short_id would otherwise print `stopped: <name> ()` and break the
+            // stop output
             // contract for exactly the rows ab-e5a57efa makes readable (Codex P2).
             Response::ok(
                 req.id,
@@ -3294,7 +3295,10 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
     let session_id = match e.provider.as_str() {
         "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
         "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
-        "claude" => e.claude_short_id.clone().or_else(|| e.session_id.clone()),
+        "claude" => e
+            .transport_short()
+            .map(str::to_string)
+            .or_else(|| e.session_id.clone()),
         _ => e.session_id.clone(),
     };
     crate::provider::AgentEntry {
@@ -3670,7 +3674,7 @@ enum UuidBackfill {
 }
 
 /// Find the `claude --bg` row awaiting its full session uuid. A bg spawn writes
-/// the row with `claude_short_id` (the 8-hex jobId) but `claude_session_uuid:
+/// the row with the 8-hex jobId in `short_id` (v9) but `claude_session_uuid:
 /// null` -- the full uuid only arrives on the first inside-leg report, so until
 /// it is backfilled `entry_holds_session` never matches and every report is
 /// buffered-then-lost (x-c393). Match a null-uuid claude row whose short-id is
@@ -3680,12 +3684,12 @@ enum UuidBackfill {
 fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
     let mut found = None;
     for (i, e) in entries.iter().enumerate() {
-        // Only a claude bg row owns a claude_short_id + uuid identity; skip any
-        // other provider so a malformed foreign row can't adopt a claude uuid.
+        // Only a claude bg row owns a jobId + uuid identity; skip any other
+        // provider so a malformed foreign row can't adopt a claude uuid.
         if e.provider != "claude" || e.claude_session_uuid.is_some() {
             continue;
         }
-        let Some(short) = e.claude_short_id.as_deref() else {
+        let Some(short) = e.transport_short() else {
             continue;
         };
         // Require the group boundary (`<short>-`) so a short cannot match a
@@ -4151,7 +4155,7 @@ mod tests {
             cwd: "/tmp".into(),
             project_root: String::new(),
             session_id: None,
-            claude_short_id: None,
+            legacy_claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: None,
@@ -4259,7 +4263,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4326,7 +4330,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4376,7 +4380,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4492,7 +4496,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4580,7 +4584,7 @@ mod tests {
             cwd: "/".into(),
             project_root: "/".into(),
             session_id: None,
-            claude_short_id: None,
+            legacy_claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: None,
@@ -4615,7 +4619,7 @@ mod tests {
             cwd: "/tmp".into(),
             project_root: "/tmp".into(),
             session_id: Some("sid".into()),
-            claude_short_id: None,
+            legacy_claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: None,
@@ -4643,11 +4647,11 @@ mod tests {
 
     // --- find_uuid_backfill_row (x-c393): backfill a null-uuid bg row ---------
 
-    /// A `claude --bg` row: `claude_short_id` set, `claude_session_uuid` null.
+    /// A `claude --bg` row: jobId in `short_id`, `claude_session_uuid` null.
     fn bg_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = rentry(name, AgentStatus::Live, None);
         e.provider = "claude".into();
-        e.claude_short_id = Some(short_id.into());
+        e.short_id = short_id.into();
         e.claude_session_uuid = None;
         e
     }
@@ -4689,7 +4693,7 @@ mod tests {
 
     #[test]
     fn find_uuid_backfill_row_skips_non_claude_rows() {
-        // codex P2: a foreign-provider row carrying a claude_short_id must not
+        // codex P2: a foreign-provider row carrying a short must not
         // adopt a claude uuid.
         let mut row = bg_claude_row("w", "3228ccad");
         row.provider = "codex".into();
@@ -5365,7 +5369,7 @@ done
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: Some(format!("uuid-{short_id}")),
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -5566,8 +5570,9 @@ done
         assert_eq!(e.claude_session_uuid.as_deref(), Some("FULL-UUID-3"));
         assert_eq!(e.status, AgentStatus::Live);
         assert_eq!(e.pid, Some(4242));
-        // The resume key lives in claude_session_uuid, NOT the jobId field.
-        assert_eq!(e.claude_short_id, None);
+        // The resume key lives in claude_session_uuid; a stream thread carries
+        // its worker short in short_id ("sw3"), not the removed jobId field.
+        assert_eq!(e.short_id, "sw3");
     }
 
     /// AC1-ERR / front-door routing: a fresh `host --provider claude` with no

@@ -96,7 +96,7 @@ def _find_by_session(
     Two passes, most-specific first:
     1. Exact match against the harness's own id fields (canonical
        ``harness_session_id`` plus that harness's legacy field).
-    2. Prefix match against the 8-hex ``claude_short_id`` - CLAUDE ONLY, because the
+    2. Prefix match against the 8-hex jobId in ``short_id`` - CLAUDE ONLY, because the
        jobId is a 32-bit prefix of a claude session UUID; a partially-captured
        claude row may carry only the short id.
 
@@ -122,7 +122,7 @@ def _find_by_session(
             for entry in registry:
                 if _row_harness(entry) != "claude":
                     continue
-                short_id = entry.claude_short_id
+                short_id = entry.short_id
                 if short_id and norm.startswith(short_id.lower()):
                     return entry
         return None
@@ -137,7 +137,11 @@ def _find_by_session(
             return entry
     norm = session_uuid.replace("-", "").lower()
     for entry in registry:
-        short_id = entry.claude_short_id
+        # The prefix rule holds only for claude jobIds (a uuid prefix); a
+        # daemon worker's name-derived short must never prefix-match a uuid.
+        if entry.provider != "claude":
+            continue
+        short_id = entry.short_id
         if short_id and norm.startswith(short_id.lower()):
             return entry
     return None
@@ -202,7 +206,7 @@ def resolve_self(
 
     provider = env_provider or (row.provider if row else None)
     session = env_session or (row.session_id if row else None)
-    short_id = (row.claude_short_id or row.short_id or None) if row else None
+    short_id = (row.short_id or None) if row else None
     status = row.status if row else None
 
     live_status: Optional[str] = None

@@ -122,8 +122,8 @@ def list_agents(
     rows: list[dict] = []
     for entry in filtered:
         live_status: Optional[str] = None
-        if entry.provider == "claude" and entry.claude_short_id:
-            live_status = (live_map.get(entry.claude_short_id) or {}).get(
+        if entry.provider == "claude" and entry.short_id:
+            live_status = (live_map.get(entry.short_id) or {}).get(
                 "live_status"
             )
         if live_status in (None, "Idle"):
@@ -151,7 +151,7 @@ def list_agents(
             from fno.agents import discover as discover_mod
 
             registered_short_ids = {
-                e.claude_short_id for e in entries if e.claude_short_id
+                e.short_id for e in entries if e.short_id
             }
             # Projects-store rows key on full session_id (their short_id is the
             # uuid prefix, not the registry's hex handle), so exclude adopted
@@ -269,10 +269,10 @@ def read_logs(
                 "JSON output for Claude logs not implemented in US3; "
                 "falling back to raw passthrough"
             )
-        if not entry.claude_short_id:
+        if not entry.short_id:
             err.write(
                 f"claude agent {name} (created {entry.created_at}) has no "
-                "claude_short_id on file; cannot read logs. This entry may "
+                "short id on file; cannot read logs. This entry may "
                 "predate US1's short-id capture; try re-dispatching with "
                 "`fno agents ask`.\n"
             )
@@ -282,7 +282,7 @@ def read_logs(
         from fno.agents.providers import claude as claude_mod
 
         exit_code = claude_mod.logs(
-            short_id=entry.claude_short_id,
+            short_id=entry.short_id,
             tail=tail,
             follow=follow,
             stdout=out,

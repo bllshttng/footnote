@@ -510,7 +510,7 @@ mod tests {
             cwd: "/tmp/x".into(),
             project_root: String::new(),
             session_id: None,
-            claude_short_id: None,
+            legacy_claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: None,

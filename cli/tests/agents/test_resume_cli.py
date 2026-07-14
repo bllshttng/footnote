@@ -25,7 +25,7 @@ class _FakeAgentEntry:
     provider: str
     cwd: str
     log_path: str = "/tmp/log.jsonl"
-    claude_short_id: Optional[str] = None
+    short_id: Optional[str] = None
     codex_session_id: Optional[str] = None
     gemini_session_id: Optional[str] = None
 
@@ -156,7 +156,7 @@ def test_claude_path_uses_attach_substrate() -> None:
     entry = _FakeAgentEntry(
         name="alpha", provider="claude",
         cwd="/cwd",
-        claude_short_id="deadbeef",
+        short_id="deadbeef",
     )
     res = resume_logic(
         name="alpha",

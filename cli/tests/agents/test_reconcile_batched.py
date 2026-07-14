@@ -61,7 +61,7 @@ def _seed_claude(name: str, *, status: str, short_id: str) -> AgentEntry:
         provider="claude",
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / f"{name}.log"),
-        claude_short_id=short_id,
+        short_id=short_id,
         status=status,
         last_message_at="2026-05-21T00:00:00Z",
     )

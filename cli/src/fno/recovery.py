@@ -16,7 +16,7 @@ and re-injects a resume nudge over Claude Code's messaging socket.
 Design notes (the load-bearing parts):
 
 - **Scope = registry ∩ live bg sessions.** Provenance comes from footnote's own
-  agents registry (``provider == "claude"`` rows carry ``claude_short_id``);
+  agents registry (``provider == "claude"`` rows carry the jobId in ``short_id``);
   liveness + the messaging socket come from ``locate_session`` reading
   ``~/.claude/sessions``. The join is exactly "footnote-launched AND reachable",
   which satisfies the invariant *only ever touch sessions footnote launched*.
@@ -181,7 +181,7 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
     ``locate_fn(short_id)`` is ``_claude_session_registry.locate_session``: it
     returns a locator with a live ``messaging_socket_path`` + ``jobs_dir`` only
     for a ``kind == "bg"`` session whose socket is non-null, and ``None``
-    otherwise. A registry row that is not claude, has no ``claude_short_id``, or
+    otherwise. A registry row that is not claude, has no ``short_id``, or
     has no matching live session is dropped — so the result is exactly the set
     of footnote-launched, currently-reachable bg sessions.
     """
@@ -189,7 +189,7 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
     for entry in registry_entries:
         if getattr(entry, "provider", None) != "claude":
             continue
-        short_id = getattr(entry, "claude_short_id", None)
+        short_id = getattr(entry, "short_id", "") or None
         if not short_id:
             continue
         loc = locate_fn(short_id)

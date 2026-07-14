@@ -24,7 +24,7 @@ def _claude(name, short_id="abc12345", **kw) -> AgentEntry:
         provider="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/x/output.jsonl",
-        claude_short_id=short_id,
+        short_id=short_id,
         created_at="2026-05-20T17:00:00Z",
         status="live",
     )

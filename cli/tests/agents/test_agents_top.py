@@ -43,7 +43,7 @@ def _seed(tmp_path, monkeypatch):
             log_path="/tmp/l",
             status="busy",
             pid=ALIVE,
-            claude_short_id="aaaa0000",
+            short_id="aaaa0000",
         )
     ]
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)

@@ -30,7 +30,7 @@ def _seed_mcp_agent(name: str = "mcp-worker", *, mcp_channel_id: str = "abc12345
                 provider="claude",
                 cwd="/tmp",
                 log_path=f"/tmp/{name}.log",
-                claude_short_id="abc12345",
+                short_id="abc12345",
                 status="live",
                 mcp_channel_id=mcp_channel_id,
             )
@@ -49,7 +49,7 @@ def _seed_socket_only_agent(name: str = "socket-worker") -> None:
                 provider="claude",
                 cwd="/tmp",
                 log_path=f"/tmp/{name}.log",
-                claude_short_id="abc12345",
+                short_id="abc12345",
                 status="live",
             )
         ]

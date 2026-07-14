@@ -2136,12 +2136,12 @@ fn followup(
     from_name: &str,
     timeout: Option<Duration>,
 ) -> AskOutcome {
-    let short_id = match entry.claude_short_id.as_deref() {
-        Some(s) if !s.is_empty() => s.to_string(),
+    let short_id = match entry.transport_short() {
+        Some(s) => s.to_string(),
         _ => {
             return AskOutcome::err(
                 format!(
-                    "registry entry {} has no claude_short_id; cannot follow up. Remove with 'fno agents rm {}' and recreate.",
+                    "registry entry {} has no short id on file; cannot follow up. Remove with 'fno agents rm {}' and recreate.",
                     py_repr(name), name
                 ),
                 12,
@@ -2463,7 +2463,9 @@ fn create(
     let log_path = derive_log_path(home, name);
     let new_entry = RegistryEntry {
         name: name.to_string(),
-        short_id: String::new(),
+        // v9: the claude jobId is the unified transport key (was claude_short_id);
+        // follow-up/logs read it via `transport_short()`.
+        short_id: short_id.clone(),
         provider: "claude".to_string(),
         // Canonical identity at birth (x-ec59); harness_session_id mirrors the
         // (possibly None-on-race) resolved uuid, healed later like the legacy field.
@@ -2472,7 +2474,6 @@ fn create(
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
-        claude_short_id: Some(short_id.clone()),
         claude_session_uuid: session_uuid,
         messaging_socket_path: None,
         codex_session_id: None,
@@ -2491,6 +2492,7 @@ fn create(
         exited_at: None,
         mux: None,
         screen_state: None,
+        legacy_claude_short_id: None,
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent

@@ -176,7 +176,7 @@ def test_claude_create_path_happy_path(tmp_path: Path, monkeypatch) -> None:
     entry = entries[0]
     assert entry.name == "frontend-worker"
     assert entry.provider == "claude"
-    assert entry.claude_short_id == "7c5dcf5d"
+    assert entry.short_id == "7c5dcf5d"
     assert entry.codex_session_id is None
     assert entry.gemini_session_id is None
     assert entry.cwd == str(cwd)
@@ -333,7 +333,7 @@ def test_dispatch_ask_existing_name_routes_to_followup(tmp_path: Path, monkeypat
                 provider="claude",
                 cwd="/tmp",
                 log_path="/tmp/a.log",
-                claude_short_id="abc12345",
+                short_id="abc12345",
             )
         ]
     )
@@ -696,7 +696,7 @@ def test_dispatch_ask_select_provider_inside_flock(
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/a.log",
-            claude_short_id="abc12345",
+            short_id="abc12345",
         )
     ])
 
@@ -907,7 +907,7 @@ def _seed_followup_target(tmp_path: Path, name: str = "frontend-worker") -> None
             provider="claude",
             cwd="/tmp",
             log_path=f"/tmp/{name}.log",
-            claude_short_id="abc12345",
+            short_id="abc12345",
             status="live",
         )
     ])

@@ -41,7 +41,7 @@ def _register_claude_peer(name: str, *, short_id: str, uuid: str | None) -> None
             provider="claude",
             cwd="/tmp",
             log_path=f"/tmp/{name}.log",
-            claude_short_id=short_id,
+            short_id=short_id,
             claude_session_uuid=uuid,
             status="live",
         )

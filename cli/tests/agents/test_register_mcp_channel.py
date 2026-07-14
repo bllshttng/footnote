@@ -20,7 +20,7 @@ def _seed_claude_agent(name: str = "claude-bot", *, short_id: str = "abc12345") 
                 provider="claude",
                 cwd="/tmp",
                 log_path=f"/tmp/{name}.log",
-                claude_short_id=short_id,
+                short_id=short_id,
                 status="live",
             )
         ]
@@ -55,7 +55,7 @@ class TestRegisterMCPChannel:
         from fno.agents.registry import load_registry
 
         result = register_mcp_channel("claude-bot")
-        assert result == "abc12345"  # equals claude_short_id (1:1 today)
+        assert result == "abc12345"  # equals short_id (1:1 today)
 
         loaded = load_registry()
         target = next(e for e in loaded if e.name == "claude-bot")
@@ -148,7 +148,7 @@ class TestReconcileMCPProbeSlot:
                     provider="claude",
                     cwd="/tmp",
                     log_path="/tmp/mcp-bot.log",
-                    claude_short_id="ch-xyz12345",
+                    short_id="ch-xyz12345",
                     status="orphaned",  # start orphaned to detect flip
                     mcp_channel_id="ch-xyz12345",
                 )

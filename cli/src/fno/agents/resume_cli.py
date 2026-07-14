@@ -12,7 +12,7 @@ Provider resume substrates (Locked Decision #6):
 
 - ``codex`` → ``codex resume <codex_session_id>`` (bypasses the
   exec-source picker filter via direct UUID argument).
-- ``claude`` → ``claude attach <claude_short_id>`` (reuses the existing
+- ``claude`` → ``claude attach <short_id>`` (reuses the existing
   attach surface).
 - ``gemini`` → ``gemini --session <gemini_session_id>``  (TBD at
   implementation time; if gemini lacks a native resume verb, exit 14
