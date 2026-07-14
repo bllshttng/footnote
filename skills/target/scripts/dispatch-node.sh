@@ -387,11 +387,19 @@ for id in "${NODES[@]}"; do
     fi
     tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
     TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
-    # Merge posture stays a launcher flag (not part of the verb string): inject
-    # no-merge for a /target-family command unless --allow-merge, mirroring the
-    # default path below.
-    if [[ "$ALLOW_MERGE" -eq 0 && "$tgt_cmd" == "/target "* && " $tgt_cmd " != *" no-merge "* ]]; then
-      tgt_cmd="/target no-merge ${tgt_cmd#/target }"
+    # Launcher flag policy for a /target-family command: apply --flags AND the
+    # no-merge default, same as the fallback branch below, so a brief/verb-bearing
+    # target node still honors `--flags "L"` etc. instead of silently dropping it.
+    # A non-target verb (/think) takes neither - target size/profile flags do not
+    # apply to it. Ordering matches the fallback: /target [FLAGS] [no-merge] <id>.
+    if [[ "$tgt_cmd" == "/target "* ]]; then
+      rest="${tgt_cmd#/target }"
+      inject=""
+      [[ -n "$FLAGS" ]] && inject="$FLAGS "
+      if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* && " $rest " != *" no-merge "* ]]; then
+        inject="${inject}no-merge "
+      fi
+      tgt_cmd="/target ${inject}${rest}"
     fi
   else
     # no-merge is the default for a fire-and-forget worker (Locked Decision 4);
