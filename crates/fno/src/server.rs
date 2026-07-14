@@ -2914,12 +2914,12 @@ impl Core {
         }
     }
 
-    /// The net line delta an interpreted wheel-scroll applies, or `None` when the
+    /// The line delta an interpreted wheel-scroll applies, or `None` when the
     /// event isn't a mux-interpreted scroll (a mouse-app passthrough, a select, or
     /// an ignore). The core drain folds a contiguous run of wheel ticks on one
     /// pane - including a direction reversal queued behind in-flight opposite
-    /// ticks - into a single apply+broadcast, so a fast trackpad flick settles in
-    /// one frame instead of rubber-banding through every intermediate offset.
+    /// ticks - into a single broadcast, so a fast trackpad flick settles in one
+    /// frame instead of rubber-banding through every intermediate offset.
     fn scroll_delta(&self, pane: u64, event: &MouseEvent) -> Option<i32> {
         let modes = self.panes.get(&pane)?.vt.modes();
         match route_mouse(modes, event.kind) {
@@ -2928,15 +2928,24 @@ impl Core {
         }
     }
 
-    /// Scroll a pane by a net line delta and push one frame. A zero net (a
-    /// fully-cancelled reversal) moves nothing, so it skips the redundant frame.
+    /// Apply one wheel tick to a pane WITHOUT broadcasting, returning the
+    /// resulting scroll offset. The drain applies a queued run tick-by-tick so
+    /// `vt.scroll`'s per-tick clamp at the history top / live bottom is preserved
+    /// - the algebraic net would wrongly cancel a tick that clamped, losing a
+    /// reversal at a boundary - then broadcasts once. `0` if the pane is gone.
+    fn scroll_tick(&mut self, pane: u64, delta: i32) -> usize {
+        self.panes.get_mut(&pane).map_or(0, |e| e.vt.scroll(delta))
+    }
+
+    /// The pane's current scroll offset (0 = live bottom), or 0 if it's gone.
+    fn scroll_offset(&self, pane: u64) -> usize {
+        self.panes.get(&pane).map_or(0, |e| e.vt.display_offset())
+    }
+
+    /// Apply a single interpreted wheel tick and push one frame (the
+    /// per-message path; the drain coalesces a run through `scroll_tick`).
     fn apply_scroll(&mut self, pane: u64, delta: i32) {
-        if delta == 0 {
-            return;
-        }
-        if let Some(e) = self.panes.get_mut(&pane) {
-            e.vt.scroll(delta);
-        }
+        self.scroll_tick(pane, delta);
         self.broadcast_pane(pane);
     }
 
@@ -5329,24 +5338,27 @@ async fn serve(
                 } else if let CoreMsg::Mouse { id, pane, event } = msg {
                     // Wheel-scroll coalescing (mirrors the resize-storm coalescer
                     // above): fold a contiguous run of interpreted wheel ticks on
-                    // one pane into a single net scroll+broadcast. A reversal
-                    // queued behind in-flight opposite ticks nets down to its true
-                    // delta here instead of rubber-banding, and a fast flick lands
-                    // in one frame instead of a jagged catch-up. Any non-scroll
-                    // event (passthrough/select) or passive sender stops the fold,
-                    // so ordering and read-only gating stay unchanged.
+                    // one pane into ONE broadcast. Each tick is applied IN ORDER so
+                    // vt.scroll's per-tick clamp is preserved (algebraic netting
+                    // would cancel a clamped tick and lose a reversal at a
+                    // boundary); only the intermediate frames are skipped, so a
+                    // reversal queued behind in-flight opposite ticks lands in one
+                    // frame instead of rubber-banding through every offset. A
+                    // non-scroll event (passthrough/select) or passive sender stops
+                    // the fold, so ordering and read-only gating stay unchanged.
                     if core.is_passive(id) {
                         if core.handle(CoreMsg::Mouse { id, pane, event }) == Flow::Shutdown {
                             break Flow::Shutdown;
                         }
                     } else if let Some(d0) = core.scroll_delta(pane, &event) {
-                        let mut net = d0;
+                        let before = core.scroll_offset(pane);
+                        core.scroll_tick(pane, d0);
                         let mut trailer = None;
                         while let Ok(m) = core_rx.try_recv() {
                             if let CoreMsg::Mouse { id: mid, pane: mpane, event: mev } = &m {
                                 if *mpane == pane && !core.is_passive(*mid) {
                                     if let Some(d) = core.scroll_delta(pane, mev) {
-                                        net += d;
+                                        core.scroll_tick(pane, d);
                                         continue;
                                     }
                                 }
@@ -5354,7 +5366,9 @@ async fn serve(
                             trailer = Some(m);
                             break;
                         }
-                        core.apply_scroll(pane, net);
+                        if core.scroll_offset(pane) != before {
+                            core.broadcast_pane(pane);
+                        }
                         if let Some(m) = trailer {
                             if core.handle(m) == Flow::Shutdown {
                                 break Flow::Shutdown;
@@ -8698,10 +8712,10 @@ mod tests {
 
     #[test]
     fn scroll_delta_classifies_only_interpreted_wheel_ticks() {
-        // The wheel-coalescing fold (x-316d) is only correct if it folds real
-        // scrolls and STOPS at anything else. A plain pane's wheel is an
-        // interpreted scroll (foldable, +/- MOUSE_WHEEL_LINES); a left press is a
-        // selection (not foldable) so it must break the run and preserve order.
+        // The fold is only correct if it folds real scrolls and STOPS at anything
+        // else. A plain pane's wheel is an interpreted scroll (foldable, +/-
+        // MOUSE_WHEEL_LINES); a left press is a selection (not foldable) so it must
+        // break the run and preserve order.
         let (core, _cid, p1, _p2, _rx) = seen_test_core();
         let ev = |kind| MouseEvent {
             row: 1,
@@ -8726,19 +8740,40 @@ mod tests {
             None,
             "an unknown pane never folds"
         );
-        // A direction reversal nets down to its true delta (the bug: it used to
-        // rubber-band through every intermediate offset before settling).
-        let run = [
-            MouseKind::WheelDown,
-            MouseKind::WheelDown,
-            MouseKind::WheelDown,
-            MouseKind::WheelUp,
-        ];
-        let net: i32 = run
-            .iter()
-            .map(|&k| core.scroll_delta(p1, &ev(k)).unwrap())
-            .sum();
-        assert_eq!(net, -2 * MOUSE_WHEEL_LINES, "3 down + 1 up nets to 2 down");
+    }
+
+    #[test]
+    fn folded_scroll_ticks_preserve_per_tick_clamp_at_a_boundary() {
+        // The fold applies ticks IN ORDER via scroll_tick, never by algebraic net:
+        // at the live bottom a WheelDown clamps to 0, so a following WheelUp must
+        // still move the view up. Netting (-3 + 3 = 0) would wrongly lose the
+        // reversal - the exact boundary bug this guards against.
+        let (mut core, _cid, p1, _p2, _rx) = seen_test_core();
+        // Push content past the 24-row grid so there is scrollback to reveal.
+        core.panes
+            .get_mut(&p1)
+            .unwrap()
+            .vt
+            .feed("row\r\n".repeat(60).as_bytes());
+        assert_eq!(core.scroll_offset(p1), 0, "starts at the live bottom");
+
+        // WheelDown at the bottom clamps (no-op); the reversal WheelUp reveals
+        // history. Ordered application lands above the bottom, not back at it.
+        core.scroll_tick(p1, -MOUSE_WHEEL_LINES);
+        assert_eq!(core.scroll_offset(p1), 0, "down at the bottom clamps");
+        core.scroll_tick(p1, MOUSE_WHEEL_LINES);
+        assert_eq!(
+            core.scroll_offset(p1),
+            MOUSE_WHEEL_LINES as usize,
+            "the reversal still scrolls up (netting to 0 would strand it)"
+        );
+
+        // A mid-history reversal that truly cancels returns to where it started,
+        // so the drain's before==after guard skips the redundant broadcast.
+        let mid = core.scroll_offset(p1);
+        core.scroll_tick(p1, MOUSE_WHEEL_LINES);
+        core.scroll_tick(p1, -MOUSE_WHEEL_LINES);
+        assert_eq!(core.scroll_offset(p1), mid, "a real cancel nets to no move");
     }
 
     #[test]
