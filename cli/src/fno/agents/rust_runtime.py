@@ -482,7 +482,9 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     flag: --route`` - identical registration to ``--role``."""
     if verb != "spawn":
         return False
-    return any(a == "--route" or a.startswith("--route=") for a in args)
+    return any(
+        a == "--route" or a.startswith("--route=") for a in _args_before_argv(args)
+    )
 
 
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:

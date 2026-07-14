@@ -919,6 +919,9 @@ def test_routing_predicates_stop_at_argv_boundary() -> None:
     assert not rr._is_provenance_bearing_spawn(
         "spawn", ["spawn", "w", "--argv", "--", "tool", "--node", "x"]
     )
+    assert not rr._is_route_bearing_spawn(
+        "spawn", ["spawn", "w", "--argv", "--", "tool", "--route", "x"]
+    )
     # a real fno flag BEFORE --argv still counts.
     assert rr._is_resume_bearing_spawn(
         "spawn", ["spawn", "w", "--resume", "u", "--argv", "--", "tool"]
