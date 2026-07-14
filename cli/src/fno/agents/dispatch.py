@@ -832,6 +832,8 @@ def _codex_create_path(
         cwd=str(cwd),
         log_path=str(output_path),
         codex_session_id=session_id,
+        harness="codex",
+        harness_session_id=session_id,
     )
 
     try:
@@ -1100,6 +1102,8 @@ def _gemini_create_path(
         cwd=str(cwd),
         log_path=str(output_path),
         gemini_session_id=session_id,
+        harness="gemini",
+        harness_session_id=session_id,
     )
 
     try:
@@ -1404,6 +1408,11 @@ def _claude_create_path(
         log_path=str(log_path),
         claude_short_id=short_id,
         claude_session_uuid=session_uuid,
+        # Canonical identity at birth (x-ec59): a bg claude row is born routable
+        # by name. A raced uuid-resolution miss leaves harness_session_id None
+        # (same as claude_session_uuid); reconcile / send-time heal backfills it.
+        harness="claude",
+        harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
@@ -2078,6 +2087,10 @@ class ReconcileResult:
     recovered: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
+    # Live rows whose null canonical harness_session_id reconcile healed from the
+    # harness store (x-ec59). Empty list (not absent) distinguishes "ran, nothing
+    # to heal" from "healed": each entry is {name, provider, harness_session_id}.
+    backfilled: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -2644,6 +2657,15 @@ def reconcile_agents(
     recovered: list[dict] = []
     skipped: list[dict] = []
     errors: list[dict] = []
+    backfilled: list[dict] = []
+    # name -> (probed_claude_short_id, resolved harness_session_id) for a live row
+    # whose canonical id never landed (x-ec59). Folded into the SAME batched
+    # update_registry write as the status flips, so no new write cycle or lock
+    # scope appears. The probed short_id is retained so the write only stamps a row
+    # that STILL matches what we probed: a slow reconcile can race a rm + same-name
+    # re-register, and stamping by name alone would put the old row's claude uuid
+    # onto a replacement (possibly codex/gemini) row and misroute its mail.
+    pending_backfill: dict[str, tuple[Optional[str], str]] = {}
 
     # ``pending_updates`` accumulates per-name status flips across the
     # probe loop; at the end we apply ALL of them via a SINGLE
@@ -2914,6 +2936,26 @@ def reconcile_agents(
                 continue
             new_status = "live" if reachable else "orphaned"
 
+            # US4 heal (x-ec59): a live claude row whose canonical id never landed
+            # (the uuid resolution raced at spawn) is unroutable-but-live. Resolve
+            # it from claude's own store -- the same jsonl the liveness probe just
+            # read -- and fold the write into reconcile's single batched cycle. A
+            # miss leaves it null (the durable queue stays the floor); never fatal.
+            if reachable and not entry.harness_session_id and entry.claude_short_id:
+                try:
+                    healed = claude_mod.resolve_session_uuid(entry.claude_short_id)
+                except Exception:  # noqa: BLE001 — a resolver error is a tolerated miss
+                    healed = None
+                if healed:
+                    pending_backfill[entry.name] = (entry.claude_short_id, healed)
+                    backfilled.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "harness_session_id": healed,
+                        }
+                    )
+
         else:
             errors.append(
                 {
@@ -2958,7 +3000,7 @@ def reconcile_agents(
     # a partial split. The all-or-nothing atomicity is enforced by
     # update_registry's own atomic-rename semantics — the closure is
     # pure, so an OSError mid-write leaves the registry untouched.
-    if pending_updates:
+    if pending_updates or pending_backfill:
 
         def _apply(current_entries: list[AgentEntry]) -> list[AgentEntry]:
             # Build the new entries from the CURRENT (under-lock) entries,
@@ -2968,12 +3010,24 @@ def reconcile_agents(
             # time — silently losing any ``last_message_at`` bump that
             # dispatch_ask wrote during the probe loop (US4-gemini handoff:
             # concurrent reconcile + ask data loss).
-            return [
-                replace(e, status=pending_updates[e.name].status)
-                if e.name in pending_updates
-                else e
-                for e in current_entries
-            ]
+            out: list[AgentEntry] = []
+            for e in current_entries:
+                updates: dict = {}
+                if e.name in pending_updates:
+                    updates["status"] = pending_updates[e.name].status
+                if e.name in pending_backfill:
+                    probed_short, hsid = pending_backfill[e.name]
+                    # Only stamp a row that STILL matches the row we probed: a
+                    # same-name rm+re-register during the probe loop would put this
+                    # claude uuid onto a replacement row (misrouting its mail).
+                    if e.provider == "claude" and e.claude_short_id == probed_short:
+                        # Canonical wins: set harness_session_id and sync the legacy
+                        # claude uuid so both readers resolve.
+                        updates["harness_session_id"] = hsid
+                        updates["harness"] = e.harness or e.provider
+                        updates["claude_session_uuid"] = hsid
+                out.append(replace(e, **updates) if updates else e)
+            return out
 
         try:
             update_registry(_apply)
@@ -2981,6 +3035,7 @@ def reconcile_agents(
             # Re-classify every queued change as a write failure. Move
             # them out of orphaned/recovered into errors so callers don't
             # see a recovered/orphaned record that never actually committed.
+            # A backfill that never committed must not claim it healed either.
             write_error = f"registry-write-failed: {exc}"
             failed_names = set(pending_updates.keys())
             for change in list(orphaned):
@@ -2991,6 +3046,9 @@ def reconcile_agents(
                 if change["name"] in failed_names:
                     recovered.remove(change)
                     errors.append({**change, "reason": write_error})
+            for change in list(backfilled):
+                backfilled.remove(change)
+                errors.append({**change, "id": None, "reason": write_error})
 
     events.emit(
         "reconcile_done",
@@ -2999,6 +3057,7 @@ def reconcile_agents(
         recovered=len(recovered),
         skipped=len(skipped),
         errors=len(errors),
+        backfilled=len(backfilled),
     )
     return ReconcileResult(
         scanned=len(entries),
@@ -3006,6 +3065,7 @@ def reconcile_agents(
         recovered=recovered,
         skipped=skipped,
         errors=errors,
+        backfilled=backfilled,
     )
 
 
@@ -4255,7 +4315,11 @@ def _deliver_live(
     if entry.mux:
         return _mux_pane_send(entry, wrapped)
 
-    if entry.provider != "claude":
+    # Route key is the canonical harness, legacy provider as fallback (x-ec59):
+    # an unknown harness with no inject lane (e.g. opencode) falls through to the
+    # daemon deliver RPC by name and demotes to durable cleanly (never a KeyError).
+    route_harness = entry.harness or entry.provider
+    if route_harness != "claude":
         # Route codex/gemini through the daemon deliver RPC (now <fno_mail>-wrapped).
         result = _daemon_rpc(
             "agent.deliver",
@@ -4352,7 +4416,9 @@ def _deliver_live(
     # recipient, leaving control.sock the sole live path (x-3dac). The mail-inject
     # verb resolves the handle itself via ClaudeRoster (accepts the full session
     # uuid or 8-hex short id) and returns False (-> durable) when not reachable.
-    recipient = entry.claude_session_uuid or entry.claude_short_id
+    recipient = (
+        entry.harness_session_id or entry.claude_session_uuid or entry.claude_short_id
+    )
     if not recipient:
         return False
     return _mail_inject_claude(recipient, wrapped)
@@ -4487,7 +4553,8 @@ def dispatch_send(
                 # lacks one of these fields degrades to None rather than crashing
                 # the send (the fallback chain also stays intact).
                 from_session = (
-                    getattr(sender_entry, "claude_session_uuid", None)
+                    getattr(sender_entry, "harness_session_id", None)
+                    or getattr(sender_entry, "claude_session_uuid", None)
                     or getattr(sender_entry, "short_id", None)
                     or getattr(sender_entry, "claude_short_id", None)
                 )

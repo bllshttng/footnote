@@ -1433,7 +1433,18 @@ def cmd_whoami(
     # closure must forward those warnings out-of-band to be surfaced — else a
     # failed shellout would yield live_status: null with no WARN (the design
     # requires both).
-    session_uuid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    # Resolve THIS process's session id from whichever harness marker is set
+    # (x-ec59): a codex/gemini worker resolves its own row via harness_session_id,
+    # not just CLAUDE_CODE_SESSION_ID. Falls back to the claude marker when the
+    # shared resolver finds nothing so today's claude behavior is unchanged.
+    from fno.harness_identity import resolve_harness_identity
+
+    _ident = resolve_harness_identity()
+    session_uuid = _ident.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    # Scope registry matching to this process's harness so a provider-local session
+    # id can't match a same-id row of another harness (x-ec59). The env fallback is
+    # CLAUDE_CODE_SESSION_ID, so an unresolved marker means claude.
+    session_harness = _ident.harness or ("claude" if session_uuid else None)
     live_warnings: list[str] = []
 
     def _live_status_fn(short_id: str) -> str | None:
@@ -1450,6 +1461,7 @@ def cmd_whoami(
         session_uuid=session_uuid,
         live_status_fn=_live_status_fn,
         node_fn=lambda: whoami_mod.find_held_node(session_uuid=session_uuid),
+        harness=session_harness,
     )
 
     for warn in (*result.warnings, *live_warnings):
@@ -1618,6 +1630,9 @@ def cmd_reconcile(
             "recovered": result.recovered,
             "skipped": result.skipped,
             "errors": result.errors,
+            # Always present (empty when nothing healed) so "ran, nothing to heal"
+            # is distinguishable from "healed w1" in the JSON (x-ec59).
+            "backfilled": result.backfilled,
         }
         sys.stdout.write(json.dumps(payload, sort_keys=False) + "\n")
         sys.stdout.flush()
@@ -1650,6 +1665,9 @@ def render_reconcile_human(result, *, out) -> None:
         out.write(
             f"{entry['name']} ({entry['provider']}): error ({entry.get('reason', 'unspecified')})\n"
         )
+    for entry in getattr(result, "backfilled", []):
+        sid = entry.get("harness_session_id") or "?"
+        out.write(f"{entry['name']} ({entry['provider']}): harness_session_id backfilled ({sid})\n")
 
     out.write(
         f"{result.scanned} entries scanned: "
@@ -1659,6 +1677,8 @@ def render_reconcile_human(result, *, out) -> None:
     )
     if result.errors:
         out.write(f", {len(result.errors)} errors")
+    if getattr(result, "backfilled", []):
+        out.write(f", {len(result.backfilled)} backfilled")
     out.write("\n")
 
 

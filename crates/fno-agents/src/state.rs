@@ -52,7 +52,10 @@ use std::path::{Path, PathBuf};
 /// `screen_state` verdict: absent reads as `None`, but a pre-v7 writer would
 /// silently drop a stored verdict on write-back and blind the manifest rung
 /// of the badge lattice. Accepted set widens to 1..=7.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 7;
+// v8 (x-ec59) is the canonical-identity bump for `harness` / `harness_session_id`
+// (mirrors Python's SCHEMA_VERSION): a pre-v8 reader rejects the store rather than
+// silently dropping the canonical fields on a read-modify-write.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 8;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -349,6 +352,19 @@ pub struct RegistryEntry {
     /// stream-json host lane. [stream-json host lane node]
     #[serde(default)]
     pub claude_session_uuid: Option<String>,
+    /// Canonical harness identity (x-ec59), mirroring Python's `AgentEntry`:
+    /// `harness` is the harness name (identity only -- `provider` stays
+    /// load-bearing for dispatch) and `harness_session_id` is the worker's own
+    /// session id in its harness's store. Both additive-optional, back-filled
+    /// from the legacy per-provider fields at load via
+    /// [`RegistryEntry::backfill_harness_aliases`] so a Rust reader of a legacy
+    /// row and a Python reader of a Rust-minted canonical row both resolve.
+    /// Skip-when-`None` keeps a Rust-authored row slim; Python's `asdict` always
+    /// emits the key, so a Python row round-trips fine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_id: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,6 +506,52 @@ pub const CLAUDE_MODE_STREAM_JSON: &str = "stream_json";
 pub const CLAUDE_MODE_INTERACTIVE: &str = "interactive";
 
 impl RegistryEntry {
+    /// Two-way sync of `harness`/`harness_session_id` with the legacy
+    /// per-provider identity fields (x-ec59), the Rust mirror of Python's
+    /// `harness_identity.sync_harness_aliases` + the registry harness back-fill.
+    /// Applied at load so a Rust reader of a legacy row and a Python reader of a
+    /// Rust-minted canonical row both resolve. `harness` adopts `provider` when
+    /// absent (provider is always set; harness is identity-only, never gates the
+    /// read). Then canonical wins: a set `harness_session_id` syncs the matching
+    /// legacy key (a conflicting legacy value is overwritten, never leaked);
+    /// otherwise the first present legacy value back-fills `harness_session_id`.
+    /// The claude legacy key is `claude_session_uuid` (the registry's identity),
+    /// NOT the manifest's `claude_session_id`.
+    pub fn backfill_harness_aliases(&mut self) {
+        if self.harness.is_none() && !self.provider.is_empty() {
+            self.harness = Some(self.provider.clone());
+        }
+        match self.harness_session_id.clone() {
+            Some(hsid) if !hsid.is_empty() => match self.harness.as_deref() {
+                Some("claude") => self.claude_session_uuid = Some(hsid),
+                Some("codex") => self.codex_session_id = Some(hsid),
+                Some("gemini") => self.gemini_session_id = Some(hsid),
+                _ => {}
+            },
+            _ => {
+                // Adopt from THIS harness's own legacy key when known, so a stale
+                // legacy id of a DIFFERENT harness can't cross-contaminate; only a
+                // genuinely unknown harness scans all keys (a pre-migration row
+                // whose harness has not been resolved).
+                let legacy = match self.harness.as_deref() {
+                    Some("claude") => self.claude_session_uuid.clone(),
+                    Some("codex") => self.codex_session_id.clone(),
+                    Some("gemini") => self.gemini_session_id.clone(),
+                    _ => self
+                        .claude_session_uuid
+                        .clone()
+                        .or_else(|| self.codex_session_id.clone())
+                        .or_else(|| self.gemini_session_id.clone()),
+                };
+                if let Some(value) = legacy {
+                    if !value.is_empty() && value != "null" {
+                        self.harness_session_id = Some(value);
+                    }
+                }
+            }
+        }
+    }
+
     /// The hosting mode with the absent==exec rule applied in one place.
     /// `None` on disk (and the legacy rows that predate the field) read as
     /// [`HOST_MODE_EXEC`]; an explicit value passes through. Reconcile/liveness
@@ -721,7 +783,14 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
     if buf.trim().is_empty() {
         return Ok(Registry::default());
     }
-    let reg: Registry = serde_json::from_str(&buf)?;
+    let mut reg: Registry = serde_json::from_str(&buf)?;
+    // Harness identity back-fill (x-ec59): canonical fields resolve from the
+    // legacy per-provider fields on every load, so a legacy row read by Rust and
+    // a canonical row written by Rust both round-trip. Applied here (the single
+    // read choke point) covers both load_registry and update_registry's RMW read.
+    for entry in &mut reg.entries {
+        entry.backfill_harness_aliases();
+    }
     // Forward-compat guard on the TYPED daemon path (Codex P2, ab-a171ceb2):
     // the raw client path (client_verbs::load_registry_entries) already rejects
     // unsupported versions, but the daemon reads through here and previously
@@ -972,6 +1041,8 @@ mod tests {
             name: name.into(),
             short_id: format!("{name}-id"),
             provider: "codex".into(),
+            harness: None,
+            harness_session_id: None,
             cwd: "/tmp/x".into(),
             project_root: "/tmp/x".into(),
             session_id: Some("uuid-1".into()),
@@ -1022,6 +1093,81 @@ mod tests {
         assert_eq!(row.mux.as_ref().unwrap().pane_id, 3);
         // A pre-mux row (absent key) reads as None.
         assert_eq!(sample_entry("plain").mux, None);
+    }
+
+    #[test]
+    fn harness_backfill_legacy_row_gains_canonical() {
+        // x-ec59 / AC1-EDGE: a pre-migration Python row (provider + the legacy
+        // per-provider uuid, no harness) gains the canonical pair on load.
+        let python_legacy = r#"{"name":"w","provider":"claude","cwd":"/p","log_path":null,
+            "claude_short_id":"7c5dcf5d","claude_session_uuid":"UUID-1","codex_session_id":null,
+            "gemini_session_id":null,"created_at":"2026-07-13T00:00:00Z","status":"live",
+            "last_message_at":null,"mcp_channel_id":null}"#;
+        let mut e: RegistryEntry = serde_json::from_str(python_legacy).unwrap();
+        e.backfill_harness_aliases();
+        assert_eq!(e.harness.as_deref(), Some("claude"));
+        assert_eq!(e.harness_session_id.as_deref(), Some("UUID-1"));
+    }
+
+    #[test]
+    fn harness_backfill_canonical_only_row_syncs_legacy() {
+        // A canonical-only row (post-migration mint): the legacy alias is synced
+        // so an old reader still resolves the session.
+        let mut e = sample_entry("w");
+        e.provider = "claude".into();
+        e.codex_session_id = None;
+        e.session_id = None;
+        e.claude_session_uuid = None;
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some("CANON".into());
+        e.backfill_harness_aliases();
+        assert_eq!(e.claude_session_uuid.as_deref(), Some("CANON"));
+    }
+
+    #[test]
+    fn harness_backfill_conflict_is_canonical_wins() {
+        // AC2-EDGE (Rust side): a conflicting legacy value is overwritten.
+        let mut e = sample_entry("w");
+        e.provider = "claude".into();
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some("CANON".into());
+        e.claude_session_uuid = Some("STALE".into());
+        e.backfill_harness_aliases();
+        assert_eq!(e.harness_session_id.as_deref(), Some("CANON"));
+        assert_eq!(e.claude_session_uuid.as_deref(), Some("CANON"));
+    }
+
+    #[test]
+    fn harness_backfill_does_not_cross_contaminate() {
+        // A claude row carrying a stale codex id must NOT adopt it: only the
+        // row's own harness key is consulted when harness is known.
+        let mut e = sample_entry("w");
+        e.provider = "claude".into();
+        e.harness = Some("claude".into());
+        e.harness_session_id = None;
+        e.claude_session_uuid = None;
+        e.codex_session_id = Some("STALE-CODEX".into());
+        e.session_id = None;
+        e.backfill_harness_aliases();
+        assert_eq!(e.harness_session_id, None);
+    }
+
+    #[test]
+    fn harness_backfill_reads_python_canonical_row_via_registry() {
+        // Cross-language: a Python-authored canonical codex row parses into
+        // Registry and, after the load-time backfill (mirrors
+        // read_registry_tolerant), resolves the legacy alias too.
+        let python_json = r#"{"schema_version":7,"agents":[{"name":"w","provider":"codex",
+            "cwd":"/p","log_path":null,"claude_short_id":null,"codex_session_id":null,
+            "gemini_session_id":null,"created_at":"2026-07-13T00:00:00Z","status":"live",
+            "last_message_at":null,"mcp_channel_id":null,"harness":"codex",
+            "harness_session_id":"THREAD"}]}"#;
+        let mut reg: Registry = serde_json::from_str(python_json).unwrap();
+        for e in &mut reg.entries {
+            e.backfill_harness_aliases();
+        }
+        assert_eq!(reg.entries[0].harness_session_id.as_deref(), Some("THREAD"));
+        assert_eq!(reg.entries[0].codex_session_id.as_deref(), Some("THREAD"));
     }
 
     #[test]
@@ -1563,15 +1709,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v8, or - for an old daemon -
-        // a v7 it cannot interpret), while v1..=v7 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v9, or - for an old daemon -
+        // a v8 it cannot interpret), while v1..=v8 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":8,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":9,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 8);
+                assert_eq!(found, 9);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

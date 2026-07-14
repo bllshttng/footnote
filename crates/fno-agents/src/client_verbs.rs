@@ -378,7 +378,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// reads of v1..=v4 are retained. Anything else is a hard error - which is the
 /// point of each bump: a pre-inside-leg reader pinned to {1,2,3,4} rejects a v5
 /// store instead of silently dropping the inside-leg report.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -2294,9 +2294,15 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // Current v5 (inside_leg forward-compat bump, inside-out E3.1) and the
+        // Current v8 (canonical-identity bump, x-ec59), v5 (inside_leg), and the
         // prior v4 (host_mode bump) are accepted, and v1 back-compat reads are
         // retained (the widened accepted set).
+        fs::write(
+            &reg,
+            format!(r#"{{"schema_version":8,"agents":[{valid}]}}"#),
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
         fs::write(
             &reg,
             format!(r#"{{"schema_version":5,"agents":[{valid}]}}"#),
@@ -2317,10 +2323,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v6 is the future-drift case a pre-bump reader would have on v5.
+        // v9 is the future-drift case a pre-bump reader would have on v8.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":8,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":9,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown provider -> Err (aider: a real CLI we deliberately do not

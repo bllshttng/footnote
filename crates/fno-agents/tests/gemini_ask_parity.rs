@@ -554,6 +554,8 @@ fn gemini_registry_entry(name: &str, cwd: &str, sid: &str, log_path: &str) -> Re
         name: name.to_string(),
         short_id: String::new(),
         provider: "gemini".to_string(),
+        harness: None,
+        harness_session_id: None,
         cwd: cwd.to_string(),
         project_root: String::new(),
         session_id: None,
