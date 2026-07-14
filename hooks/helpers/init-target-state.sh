@@ -1136,6 +1136,24 @@ PYEOF
 
   echo "target: session manifest written: $STATE_FILE"
 
+  # Worktree harness claim (x-193d Wave 5): own this worktree from boot so the
+  # boot-window (before the first write's PreToolUse guard) cannot be entered by
+  # a foreign harness. Fully fail-open and non-fatal: no git worktree, no
+  # harness, or an old fno without the verb is a silent no-op. Never blocks init
+  # (init has its own location refusal); a foreign owner here only warns.
+  if command -v fno >/dev/null 2>&1; then
+    _WT_GUARD="$(fno claim worktree-guard --json 2>/dev/null || true)"
+    if [[ -n "$_WT_GUARD" ]] && command -v jq >/dev/null 2>&1; then
+      _WT_VERDICT="$(printf '%s' "$_WT_GUARD" | jq -er '.verdict | select(. != "") // empty' 2>/dev/null || true)"
+      case "$_WT_VERDICT" in
+        acquired) echo "target: worktree claimed for this harness" >&2 ;;
+        foreign)
+          _WT_OWNER="$(printf '%s' "$_WT_GUARD" | jq -er '.owner_harness | select(. != "") // "another"' 2>/dev/null || echo another)"
+          echo "target: WARNING: worktree already owned by a $_WT_OWNER session (non-fatal; PreToolUse guard enforces)" >&2 ;;
+      esac
+    fi
+  fi
+
 else
   # State file already exists. Leave it alone - the immutable manifest must
   # not be overwritten on resume. Terminal states (COMPLETE/BLOCKED) stay

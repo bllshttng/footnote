@@ -318,3 +318,44 @@ def test_non_node_key_uses_cwd_not_global(tmp_path, monkeypatch):
     r = runner.invoke(cli, ["status", "walker:/some/root", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["state"] == "free"
+
+
+# ---------------------------------------------------------------------------
+# worktree-guard (x-193d Wave 5)
+# ---------------------------------------------------------------------------
+
+
+def _wt_env(monkeypatch, tmp_path, harness_marker, session, worktree="/w/repo/wt-a"):
+    """Isolate the claim in tmp and stamp the ambient harness identity."""
+    import fno.claims.worktree_guard as wg
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    for m in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv(harness_marker, session)
+    monkeypatch.setattr(wg, "resolve_worktree_root", lambda cwd=None: Path(worktree))
+
+
+def test_worktree_guard_acquire_then_foreign_refused(tmp_path, monkeypatch):
+    _wt_env(monkeypatch, tmp_path, "CLAUDE_CODE_SESSION_ID", "s1")
+    r1 = runner.invoke(cli, ["worktree-guard", "--json"])
+    assert r1.exit_code == 0
+    assert json.loads(r1.stdout)["verdict"] == "acquired"
+
+    # A codex session entering the same worktree is refused (exit 1).
+    _wt_env(monkeypatch, tmp_path, "CODEX_THREAD_ID", "s2")
+    r2 = runner.invoke(cli, ["worktree-guard", "--json"])
+    assert r2.exit_code == 1
+    out = json.loads(r2.stdout)
+    assert out["verdict"] == "foreign"
+    assert out["owner_harness"] == "claude"
+
+
+def test_worktree_guard_override_env(tmp_path, monkeypatch):
+    _wt_env(monkeypatch, tmp_path, "CLAUDE_CODE_SESSION_ID", "s1")
+    runner.invoke(cli, ["worktree-guard", "--json"])
+    _wt_env(monkeypatch, tmp_path, "CODEX_THREAD_ID", "s2")
+    monkeypatch.setenv("FNO_WORKTREE_OK", "1")
+    r = runner.invoke(cli, ["worktree-guard", "--json"])
+    assert r.exit_code == 0
+    assert json.loads(r.stdout)["verdict"] == "override"

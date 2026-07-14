@@ -193,6 +193,27 @@ if [[ -f "$hygiene_helper" ]]; then
     fi
 fi
 
+# 4b. worktree HARNESS-ownership heads-up (x-193d Wave 5) — read-only consult of
+#     the worktree claim. Warns when a DIFFERENT harness already owns this
+#     worktree, before the PreToolUse guard would block the first write. Never
+#     acquires here (--no-acquire) so a read-only session establishes nothing;
+#     silent unless `fno` supports the verb AND a foreign owner exists.
+if command -v fno >/dev/null 2>&1; then
+    wt_guard_json="$(fno claim worktree-guard --no-acquire --json 2>/dev/null || true)"
+    if [[ -n "$wt_guard_json" ]] && command -v jq >/dev/null 2>&1; then
+        wt_verdict="$(printf '%s' "$wt_guard_json" | jq -er '.verdict | select(. != "") // empty' 2>/dev/null || true)"
+        if [[ "$wt_verdict" == "foreign" ]]; then
+            wt_owner="$(printf '%s' "$wt_guard_json" | jq -er '.owner_harness | select(. != "") // "another"' 2>/dev/null || echo another)"
+            wt_note="- This worktree is owned by a \`${wt_owner}\` session; a second harness working it concurrently is refused at first write (x-193d). Use that session, a different worktree, or \`FNO_WORKTREE_OK=1\` to override."
+            if [[ -n "$hygiene_content" ]]; then
+                hygiene_content="${hygiene_content}"$'\n'"${wt_note}"
+            else
+                hygiene_content="## Worktree hygiene"$'\n'"${wt_note}"
+            fi
+        fi
+    fi
+fi
+
 # 5. first-run setup nudge — points a brand-new user (no fno config yet) at the
 #    setup wizard. Silent once any settings file exists. On Claude Code this
 #    fires as its own hooks.json entry; here it rides the wrapper so Codex and
