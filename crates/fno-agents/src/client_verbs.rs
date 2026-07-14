@@ -2255,19 +2255,12 @@ mod tests {
         assert!(!is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f")); // 11-char tail
     }
 
-    // Fixture: write a `<pid>.json` bg session under a ClaudeHome so
-    // locate_session finds it (mirrors claude_ask.rs::write_session).
-    fn cv_tmpdir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "abi-cv-resume-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&d).unwrap();
-        d
+    // Fixture: an auto-cleaned temp dir used as a fake $HOME under which the
+    // tests write bg session files. Returns a tempfile::TempDir (the pattern the
+    // rest of this module's tests use) so a panicking test never leaks a /tmp
+    // tree.
+    fn cv_tmpdir() -> tempfile::TempDir {
+        tempfile::TempDir::new().unwrap()
     }
 
     #[test]
@@ -2277,7 +2270,7 @@ mod tests {
 
         // Dead row (no session file) with a recorded uuid -> `claude --resume`.
         let home = cv_tmpdir();
-        let ch = ClaudeHome::at(&home);
+        let ch = ClaudeHome::at(home.path());
         let entry = serde_json::json!({
             "name": "w", "provider": "claude",
             "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
@@ -2296,9 +2289,9 @@ mod tests {
         // Live supervisor (socket answers) beats a stale "exited" registry ->
         // `claude attach <short_id>`, no --resume (AC1-EDGE).
         let home2 = cv_tmpdir();
-        let sessions = home2.join(".claude").join("sessions");
+        let sessions = home2.path().join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
-        let sock = home2.join("live.sock");
+        let sock = home2.path().join("live.sock");
         let _listener = UnixListener::bind(&sock).unwrap();
         fs::write(
             sessions.join("222.json"),
@@ -2308,14 +2301,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let ch2 = ClaudeHome::at(&home2);
+        let ch2 = ClaudeHome::at(home2.path());
         assert_eq!(
             claude_resume_argv(&ch2, &entry, "w").unwrap(),
             vec!["claude".to_string(), "attach".into(), "7c5dcf5d".into()]
         );
-
-        fs::remove_dir_all(&home).ok();
-        fs::remove_dir_all(&home2).ok();
     }
 
     #[test]
@@ -2323,7 +2313,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
         let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
         let dead = cv_tmpdir();
-        let ch_dead = ClaudeHome::at(&dead);
+        let ch_dead = ClaudeHome::at(dead.path());
 
         // Dead row + uuid -> pointer naming both revival commands.
         let entry = serde_json::json!({
@@ -2342,9 +2332,9 @@ mod tests {
 
         // Live supervisor -> no pointer (fall through to a real attach).
         let live_home = cv_tmpdir();
-        let sessions = live_home.join(".claude").join("sessions");
+        let sessions = live_home.path().join(".claude").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
-        let sock = live_home.join("live.sock");
+        let sock = live_home.path().join("live.sock");
         let _l = UnixListener::bind(&sock).unwrap();
         fs::write(
             sessions.join("222.json"),
@@ -2355,12 +2345,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            claude_attach_pointer(&ClaudeHome::at(&live_home), &entry, "w"),
+            claude_attach_pointer(&ClaudeHome::at(live_home.path()), &entry, "w"),
             None
         );
-
-        fs::remove_dir_all(&dead).ok();
-        fs::remove_dir_all(&live_home).ok();
     }
 
     #[test]

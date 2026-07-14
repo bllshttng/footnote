@@ -1799,8 +1799,16 @@ def _is_revival(
     from fno.agents.providers import claude as claude_mod
 
     short_id = getattr(existing, "claude_short_id", None)
-    if short_id and claude_mod.session_is_live(short_id):
-        return False
+    if short_id:
+        # A liveness-probe error fails SAFE toward "possibly live": never revive
+        # (--resume) into what could be a second writer on one transcript. A
+        # spurious collision refusal is retryable; a double writer is not. So a
+        # probe crash refuses the revival, it does not wave it through.
+        try:
+            if claude_mod.session_is_live(short_id):
+                return False
+        except Exception:
+            return False
     return True
 
 
