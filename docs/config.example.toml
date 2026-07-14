@@ -225,6 +225,8 @@ harness = ""
 substrate = ""
 # Dispatch command template with a single {id}; empty = '/target no-merge {id}'.
 command = ""
+# Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).
+allowed_verbs = ["/target", "/think"]
 
 [auto_continue]
 # Auto-dispatch the next ready node after a PR merges.
