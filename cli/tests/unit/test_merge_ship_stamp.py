@@ -35,17 +35,34 @@ def _sessions(g: Path, node_id: str) -> list[dict]:
 
 
 def test_merged_stamps_ship(tmp_path, monkeypatch):
-    g = _make_graph(tmp_path, [{"id": "ab-mrg00001", "title": "t", "pr_number": 4242}])
+    g = _make_graph(tmp_path, [{"id": "ab-mrg00001", "title": "t", "pr_number": 4242,
+                                "pr_url": "https://github.com/bllshttng/footnote/pull/4242"}])
     _patch(monkeypatch, g)
     _clear_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "merger-sid")
 
-    from fno.pr._merge import _sync_graph_merge_status
-    _sync_graph_merge_status("merged", 4242)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_repo_slug", lambda cwd: "bllshttng/footnote")
+    M._sync_graph_merge_status("merged", 4242)
 
     rows = _sessions(g, "ab-mrg00001")
     assert len(rows) == 1
     assert (rows[0]["phase"], rows[0]["session_id"]) == ("ship", "merger-sid")
+
+
+def test_merged_skips_ship_when_repo_unresolved(tmp_path, monkeypatch):
+    """codex P2: an unresolved repo slug must SKIP, not fall back to a bare
+    pr_number match that could stamp a same-numbered PR in another repo."""
+    g = _make_graph(tmp_path, [{"id": "ab-mrg00009", "title": "t", "pr_number": 4242}])
+    _patch(monkeypatch, g)
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "merger-sid")
+
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_repo_slug", lambda cwd: None)  # gh flake / misconfig
+    M._sync_graph_merge_status("merged", 4242)
+
+    assert _sessions(g, "ab-mrg00009") == []  # skipped, not stamped on a bare match
 
 
 def test_queued_does_not_stamp_ship(tmp_path, monkeypatch):

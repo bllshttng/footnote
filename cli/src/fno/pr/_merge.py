@@ -165,7 +165,13 @@ def _stamp_ship_provenance(pr_number: int, cwd: str = "") -> None:
     (x-b6e4). Ambient identity of whoever ran `fno pr merge`; resolves the unique
     PR-linked node in THIS repo (x-d5f9: scoped by the repo slug so a same-numbered
     PR in another repo is never stamped). Best-effort: any failure or a missing
-    identity is a silent no-op and never blocks the merge outcome."""
+    identity is a silent no-op and never blocks the merge outcome.
+
+    When the repo slug cannot be resolved, SKIP rather than fall back to a bare
+    pr_number match: in a cross-project graph a lone same-numbered PR in another
+    repo would then be stamped on the wrong node (codex P2 on #403). A merge
+    cannot have succeeded without `gh`, so an unresolved slug here is a rare
+    flake; the node-id ship stamp from pr-creator already covers provenance."""
     try:
         from fno.harness_identity import resolve_harness_identity
         from fno.paths import graph_json
@@ -174,13 +180,20 @@ def _stamp_ship_provenance(pr_number: int, cwd: str = "") -> None:
         ident = resolve_harness_identity()
         if not ident.session_id or not ident.harness:
             return
+        repo = _repo_slug(cwd)
+        if not repo:
+            sys.stderr.write(
+                f"pr-merge: repo slug unresolved; skipping ship stamp for PR {pr_number} "
+                "(a bare match could stamp a same-numbered PR in another repo)\n"
+            )
+            return
         path = graph_json()
         if not path.exists():
             return
         stamp_session_for_pr(
             path, pr_number, phase="ship",
             harness=ident.harness, session_id=ident.session_id,
-            repo=_repo_slug(cwd),
+            repo=repo,
         )
     except (Exception, SystemExit):
         pass
