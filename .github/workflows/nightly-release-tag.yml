@@ -1,0 +1,135 @@
+name: nightly-release-tag
+
+# Cadence for PyPI publishing. Per-merge auto-bump is ruled out (30-50 PRs/day);
+# this caps releases at one/day and keeps the published wheel <= ~1 day stale so
+# the Rust shim's first-run recovery (`uv tool install --force fno`) resolves a
+# wheel that ships `fno-py`. It only ever mints the NEXT patch off an existing
+# v* tag - the first release is a deliberate operator step (see the runbook).
+#
+# It never publishes on its own: it pushes a bump commit + tag, then explicitly
+# dispatches release-wheels. That workflow still waits at the one-click `release`
+# environment approval before the PyPI upload. Autonomy ends at the click.
+
+on:
+  schedule:
+    # ~09:00 UTC / 2am PT
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+# Serialize runs so two nights (or a manual + scheduled overlap) never race on
+# the tag. Queue rather than cancel: a queued run re-evaluates the guards and
+# no-ops if the first already tagged.
+concurrency:
+  group: nightly-release-tag
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the bump commit + tag
+  actions: write # gh workflow run (dispatch release-wheels)
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags: git describe and rev-list both need them.
+          fetch-depth: 0
+
+      - name: Compute next version, tag, dispatch release-wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 1. Latest v* tag. No tag at all -> a human must cut the first release;
+          #    the nightly never mints the first one (unfetched tags or a
+          #    never-released fork both land here and both need a human).
+          latest="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+          if [ -z "$latest" ]; then
+            echo "::error::no v* release tag found - cut the first release manually (see runbook)"
+            exit 1
+          fi
+          echo "latest release tag: $latest"
+
+          # 2. No new commits since the tag -> logged no-op, no artifacts.
+          #    Self-stabilizing: each release tags the bump commit itself, so
+          #    the bump never re-triggers the next night.
+          count="$(git rev-list "${latest}..HEAD" --count)"
+          if [ "$count" -eq 0 ]; then
+            echo "no new commits since ${latest} - nothing to release"
+            exit 0
+          fi
+          echo "${count} commit(s) since ${latest}"
+
+          # 3. Compute next patch. No zero-padding assumptions (0.3.999 -> 0.3.1000).
+          ver="${latest#v}"
+          major="${ver%%.*}"
+          rest="${ver#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+          next="v${major}.${minor}.$((patch + 1))"
+          new_ver="${next#v}"
+
+          # Idempotent re-run: a prior night tagged then died downstream.
+          # Skip cleanly - recovery is re-dispatch, never re-tag.
+          if git rev-parse -q --verify "refs/tags/${next}" >/dev/null; then
+            echo "tag ${next} already exists - skipping (idempotent re-run)"
+            exit 0
+          fi
+          echo "next version: ${next}"
+
+          # 4. Bump __version__, commit [skip ci], push with rebase-retry
+          #    (merges land constantly). Fetch+reset at the top of each attempt
+          #    so we always build on the freshest origin.
+          file="cli/src/fno/__init__.py"
+          branch="${GITHUB_REF_NAME}"
+          bump_sha=""
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$branch"
+            git reset --hard "origin/${branch}"
+            sed -i -E "s/^__version__ = \".*\"/__version__ = \"${new_ver}\"/" "$file"
+            grep -q "^__version__ = \"${new_ver}\"$" "$file" \
+              || { echo "::error::failed to set __version__ to ${new_ver} in ${file}"; exit 1; }
+            # A prior half-run may have pushed the bump commit but failed to push
+            # the tag: origin already carries ${new_ver}, so there is nothing to
+            # commit. Adopt the current HEAD (file == ${new_ver} holds through
+            # later merges) and proceed straight to tagging - never abort on an
+            # empty commit.
+            if git diff --quiet -- "$file"; then
+              bump_sha="$(git rev-parse HEAD)"
+              echo "bump to ${new_ver} already on ${branch} (${bump_sha}) - proceeding to tag"
+              break
+            fi
+            git add "$file"
+            git commit -m "chore(release): ${new_ver} [skip ci]"
+            cand="$(git rev-parse HEAD)"
+            if git push origin "HEAD:${branch}"; then
+              bump_sha="$cand"
+              echo "pushed bump commit ${bump_sha} (attempt ${attempt})"
+              break
+            fi
+            echo "push attempt ${attempt} lost the race - retrying"
+          done
+
+          # Retries exhausted -> fail RED with no tag. A tag must never point at
+          # an unpushed or non-main commit.
+          if [ -z "$bump_sha" ]; then
+            echo "::error::exhausted bump-commit push retries; no tag pushed, no release dispatched"
+            exit 1
+          fi
+
+          # 5. Tag the CAPTURED bump SHA (not a re-resolved HEAD - a merge may
+          #    have landed mid-run), push the tag.
+          git tag "${next}" "${bump_sha}"
+          git push origin "${next}"
+          echo "tagged ${bump_sha} as ${next}"
+
+          # 6. Explicitly dispatch release-wheels at the tag ref. GITHUB_TOKEN
+          #    pushes fire no workflows (anti-loop rule), so the tag-push event
+          #    alone builds nothing - this dispatch is load-bearing. Assert its
+          #    exit code so a "green" nightly can never silently skip releasing.
+          gh workflow run release-wheels.yml --ref "${next}" -f publish=true
+          echo "dispatched release-wheels at ${next} with publish=true"
