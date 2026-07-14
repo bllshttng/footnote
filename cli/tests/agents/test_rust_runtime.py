@@ -906,3 +906,20 @@ def test_is_resume_bearing_spawn_predicate() -> None:
     assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])
     # A --resume flag on a non-spawn verb never matches (resume is its own verb).
     assert not rr._is_resume_bearing_spawn("ask", ["ask", "w", "--resume", uuid])
+
+
+def test_routing_predicates_stop_at_argv_boundary() -> None:
+    # codex P1: a provider payload's own flags after --argv must not force Python.
+    assert not rr._is_resume_bearing_spawn(
+        "spawn", ["spawn", "w", "--argv", "--", "tool", "--resume", "x"]
+    )
+    assert not rr._is_role_bearing_spawn(
+        "spawn", ["spawn", "w", "--argv", "--", "tool", "--role", "x"]
+    )
+    assert not rr._is_provenance_bearing_spawn(
+        "spawn", ["spawn", "w", "--argv", "--", "tool", "--node", "x"]
+    )
+    # a real fno flag BEFORE --argv still counts.
+    assert rr._is_resume_bearing_spawn(
+        "spawn", ["spawn", "w", "--resume", "u", "--argv", "--", "tool"]
+    )

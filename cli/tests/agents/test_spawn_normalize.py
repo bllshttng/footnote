@@ -87,6 +87,12 @@ def test_ac3_hp_resume_implies_bg():
     assert out == ["spawn", "foo", "--resume", UUID, "--substrate", "bg"]
 
 
+def test_implied_bg_is_announced_on_stderr():
+    err = io.StringIO()
+    _norm(["spawn", "foo", "-r", UUID], stderr=err)
+    assert "implied by --resume" in err.getvalue()
+
+
 def test_resume_does_not_override_explicit_substrate():
     out = _norm(["spawn", "foo", "-r", UUID, "--substrate", "headless"])
     # implied-bg must not fire when a substrate is already pinned
@@ -143,6 +149,19 @@ def test_headless_flag_plus_trailing_substrate_token_exits_2():
 def test_ordinary_message_positional_is_not_a_substrate():
     out = _norm(["spawn", "foo", "hello"])
     assert out == ["spawn", "foo", "hello"]  # untouched; hello is the message
+
+
+def test_message_option_value_is_not_a_substrate_token():
+    # `--message` is a Rust-path value flag; its value must not be misread as a
+    # trailing substrate token (codex P2).
+    argv = ["spawn", "foo", "--message", "bg"]
+    assert _norm(argv) == argv
+
+
+def test_message_option_value_does_not_block_autogen_name():
+    out = _norm(["spawn", "--message", "hello", "--substrate", "bg"])
+    assert out[1] not in ("--message", "--substrate", "hello", "bg")  # slug minted
+    assert "--message" in out and "hello" in out
 
 
 # --- --argv payload boundary (codex finding) ---------------------------------

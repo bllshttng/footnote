@@ -76,13 +76,16 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
 _SUBSTRATES = ("pane", "bg", "headless")
 
 # Flags on `spawn` that consume the following token. Needed to tell a flag's
-# VALUE apart from a positional when scanning for the NAME / substrate token.
-_SPAWN_VALUE_FLAGS = frozenset(
+# VALUE apart from a positional when scanning for the NAME / substrate token. A
+# missing entry would misread that flag's value as a positional (e.g. a Rust-path
+# `--message bg` mis-parsed as a substrate token), so this unions the shared
+# `_VALUE_FLAGS` (--message, --session-id, --from, --status, ...) with the
+# spawn-only value options.
+_SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
-        "--provider", "-p", "--substrate", "--cwd", "-c", "--timeout", "-t",
-        "--from-name", "--role", "--model", "-m", "--permission-mode", "--effort",
-        "--resume", "-r", "--add-dir", "--agent", "--tools", "--deny-tools",
-        "--squad", "-s", "--split", "-x", "--node", "--slug", "--plan",
+        "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
+        "--deny-tools", "--squad", "-s", "--split", "-x", "--node", "--slug",
+        "--plan",
     }
 )
 
@@ -281,8 +284,11 @@ def normalize_spawn_args(
             toks[i] = "--resume"
             toks[value_at] = resolved
         # `--resume` is bg-only: default the substrate when none was pinned.
+        # Print the implied choice so the routing decision is never silent
+        # (blueprint Silent-Failure-Hunter / Locked Decision 4).
         if _has_explicit_substrate(toks) is None:
             toks += ["--substrate", "bg"]
+            print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
 
     # Pass 3: autogen name when no NAME positional remains.
     if not _positional_indices(toks):
@@ -294,11 +300,15 @@ def normalize_spawn_args(
 
 
 def _default_resolver(short_id: str) -> Optional[str]:
-    """Resolve an 8-hex claude short-id to its full session uuid (bg sessions)."""
-    try:
-        from fno.agents.providers._claude_session_registry import resolve_session_uuid
+    """Resolve an 8-hex claude short-id to its full session uuid (bg sessions).
 
-        return resolve_session_uuid(short_id)
+    Uses the bounded-retry lane so a short-id issued while claude is still writing
+    the session entry is not rejected on a transient miss (blueprint Concurrency).
+    """
+    try:
+        from fno.agents.providers.claude import resolve_session_uuid_at_spawn
+
+        return resolve_session_uuid_at_spawn(short_id)
     except Exception:
         return None
 
