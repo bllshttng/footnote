@@ -847,23 +847,8 @@ fn write_ledger_record(
     }
 }
 
-// ── stamp + graduate (ship only) ─────────────────────────────────────────────
+// ── stamp (ship only) ────────────────────────────────────────────────────────
 
-/// Run `python3 -m fno.plan._stamp` stamp then (optionally) graduate. Both are
-/// idempotent/conditional (no-op on empty plan_path or already-done). Returns
-/// Err("stamp"|"graduate") naming the first failing step.
-///
-/// `expected_url_count` is passed to `stamp` ONLY when known (cross-project
-/// plans, derived from the `projects:` map). For single-project plans it is
-/// None: the stamp module keeps any count the plan already declares (first-
-/// writer-wins; e.g. a decomposed epic's `set-expected`) and otherwise graduate
-/// defaults to 1. We never hard-code 1, which would prematurely graduate a
-/// multi-repo plan after its first PR (codex P1).
-///
-/// `do_graduate` is false only when a cross-project plan's count could not be
-/// derived: stamp the URL but skip graduate, so the plan can never graduate
-/// before all project PRs land (conservative; graduation then happens on a
-/// later fire or via reconcile).
 /// After a stamp writes, validate the plan's frontmatter via `fno plan validate`
 /// (the same read-only verb). Non-fatal-but-loud: a non-zero exit (e.g. a stamp
 /// that left `status` unset) is reported on stderr for the next session to fix;
