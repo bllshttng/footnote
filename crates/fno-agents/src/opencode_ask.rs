@@ -105,9 +105,16 @@ fn build_opencode_argv(prompt: &str, model: Option<&str>) -> Vec<String> {
 }
 
 /// Last `n` characters of `s` (UTF-8 safe; forensic tail for a failed run).
-fn tail_chars(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    chars[chars.len().saturating_sub(n)..].iter().collect()
+/// Walks from the end for the start byte offset instead of collecting every
+/// char into a Vec, so a large stderr blob costs O(n), not O(len).
+fn tail_chars(s: &str, n: usize) -> &str {
+    if n == 0 {
+        return "";
+    }
+    match s.char_indices().rev().nth(n - 1) {
+        Some((idx, _)) => &s[idx..],
+        None => s, // fewer than n chars
+    }
 }
 
 /// Stable per-agent log path (mirror of the sibling one-shots).

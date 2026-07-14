@@ -155,8 +155,10 @@ fi
 # `fno dispatch resolve` / `fno event emit` are top-level Python verbs (not in the
 # `agents` group), so they are immune to FNO_AGENTS_RUNTIME=rust - no pin needed.
 resolve_json="$(fno dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
-DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness // empty' 2>/dev/null)"
-DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate // empty' 2>/dev/null)"
+# jq `//` treats "" as truthy, so filter empties with select() before the
+# fallback (repo rule) - a resolver that ever returned "" must read as absent.
+DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
+DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
 if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
   reason="no autonomous substrate resolved (rc=$resolve_rc); set config.dispatch.harness to a harness with one (claude=bg, codex/gemini/agy/opencode=headless)"
   fno event emit -t dispatch_no_autonomous_substrate -s backlog \
@@ -268,13 +270,14 @@ for id in "${NODES[@]}"; do
   model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
   # x-d7a7: no exact `.model` pin? resolve the node's `model_tier` via the single
   # Python projection (`fno target resolve-model` -> route_resolve) so a tiered
-  # node's worker spawns on the tier model too - bash never resolves. `--provider
-  # claude` scopes the pick to THIS lane (bg is claude-only): a tier that resolves
-  # to a codex/gemini model is dropped to the provider default rather than passed
-  # as an invalid `claude --model <foreign>`. Empty output (no pin/tier, cross-
-  # harness pick, or any resolve error) -> zero args = byte-identical to today.
+  # node's worker spawns on the tier model too - bash never resolves. Scope the
+  # pick to the RESOLVED dispatch provider (x-567d), not a hardcoded `claude`: a
+  # tier that resolves to a model of a DIFFERENT harness is dropped to the
+  # provider default rather than passed as an invalid `<provider> --model
+  # <foreign>` (the cross-harness mismatch obs 100675 named). Empty output (no
+  # pin/tier, cross-harness pick, or any resolve error) -> zero args.
   if [[ -z "$model_pin" ]]; then
-    model_pin="$(fno target resolve-model "$id" --provider claude 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    model_pin="$(fno target resolve-model "$id" --provider "$DISPATCH_PROVIDER" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
   fi
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
@@ -529,7 +532,7 @@ for id in "${NODES[@]}"; do
   if [[ "$DISPATCH_SUBSTRATE" == "bg" ]]; then
     # grep the receipt line first as defense in depth. No parseable short id on
     # exit 0 => no launch we can prove; report honestly + release the reservation.
-    sid="$(printf '%s\n' "$spawn_out" | grep -F '"short_id"' | head -1 | jq -r '.short_id // empty' 2>/dev/null)"
+    sid="$(printf '%s\n' "$spawn_out" | grep -F '"short_id"' | head -1 | jq -r '.short_id | select(. != null and . != "")' 2>/dev/null)"
     if [[ -z "$sid" ]]; then
       fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
       reason="$(printf '%s' "${spawn_out:-$spawn_err}" | tr '\n' ' ' | sed 's/"/'"'"'/g' | cut -c1-200)"
