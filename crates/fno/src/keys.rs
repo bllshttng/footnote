@@ -226,54 +226,182 @@ fn flush(plain: &mut Vec<u8>, out: &mut Vec<Event>) {
     }
 }
 
-/// The single-byte chord table.
+/// Which help-modal section a leader chord belongs to (x-8ccf). Declaration
+/// order is the render order the which-key modal groups by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySection {
+    Global,
+    Navigation,
+    WorkspacesTabs,
+    Panes,
+}
+
+impl KeySection {
+    /// The section header the modal renders (herdr anatomy: accent-colored).
+    pub fn title(self) -> &'static str {
+        match self {
+            KeySection::Global => "global",
+            KeySection::Navigation => "navigation",
+            KeySection::WorkspacesTabs => "workspaces & tabs",
+            KeySection::Panes => "panes",
+        }
+    }
+}
+
+/// One leader-chord binding: the single source of truth shared by the chord
+/// dispatcher ([`chord`]) and the which-key modal renderer (x-8ccf, Locked 3).
+/// Help that reads THIS cannot drift from what the dispatcher runs; the parity
+/// test (`bindings_are_the_chord_table`) fails loudly if the two disagree.
+pub struct KeyBinding {
+    /// The post-leader byte. `disp` is how it prints (`%`, `hjkl`, `[`).
+    pub key: u8,
+    pub disp: &'static str,
+    pub event: Event,
+    pub section: KeySection,
+    /// The action phrase the modal's right column shows.
+    pub label: &'static str,
+}
+
+/// The authoritative leader-chord table. `chord()` looks a byte up here; the
+/// modal renders these rows. The two `1-9` (select tab) and `C-b C-b` (literal)
+/// chords are structural specials handled directly in `chord()` and shown by
+/// [`meta_rows`], so they are deliberately absent here.
+pub fn key_bindings() -> Vec<KeyBinding> {
+    use Command as C;
+    use Event::*;
+    use KeySection::*;
+    let b = |key, disp, event, section, label| KeyBinding {
+        key,
+        disp,
+        event,
+        section,
+        label,
+    };
+    vec![
+        // panes
+        b(b'%', "%", Cmd(C::SplitH), Panes, "split horizontal"),
+        b(b'"', "\"", Cmd(C::SplitV), Panes, "split vertical"),
+        b(b'h', "h", Cmd(C::FocusDir(Dir::Left)), Panes, "focus left"),
+        b(b'j', "j", Cmd(C::FocusDir(Dir::Down)), Panes, "focus down"),
+        b(b'k', "k", Cmd(C::FocusDir(Dir::Up)), Panes, "focus up"),
+        b(
+            b'l',
+            "l",
+            Cmd(C::FocusDir(Dir::Right)),
+            Panes,
+            "focus right",
+        ),
+        b(
+            b'H',
+            "H",
+            Cmd(C::ResizeDir(Dir::Left)),
+            Panes,
+            "resize left",
+        ),
+        b(
+            b'J',
+            "J",
+            Cmd(C::ResizeDir(Dir::Down)),
+            Panes,
+            "resize down",
+        ),
+        b(b'K', "K", Cmd(C::ResizeDir(Dir::Up)), Panes, "resize up"),
+        b(
+            b'L',
+            "L",
+            Cmd(C::ResizeDir(Dir::Right)),
+            Panes,
+            "resize right",
+        ),
+        b(b'x', "x", Cmd(C::ClosePane), Panes, "close pane"),
+        // workspaces & tabs
+        b(b'c', "c", Cmd(C::NewTab), WorkspacesTabs, "new tab"),
+        b(b'n', "n", Cmd(C::NextTab), WorkspacesTabs, "next tab"),
+        b(b'p', "p", Cmd(C::PrevTab), WorkspacesTabs, "prev tab"),
+        b(b'&', "&", Cmd(C::CloseTab), WorkspacesTabs, "close tab"),
+        b(b',', ",", OpenRename, WorkspacesTabs, "rename tab"),
+        b(b'<', "<", ReorderTab(-1), WorkspacesTabs, "move tab left"),
+        b(b'>', ">", ReorderTab(1), WorkspacesTabs, "move tab right"),
+        // navigation (scrollback blocks + goto/search)
+        b(
+            b'[',
+            "[",
+            BlockJump(BlockDir::Prev),
+            Navigation,
+            "jump prev block",
+        ),
+        b(
+            b']',
+            "]",
+            BlockJump(BlockDir::Next),
+            Navigation,
+            "jump next block",
+        ),
+        b(
+            b'v',
+            "v",
+            BlockSelect(BlockDir::Prev),
+            Navigation,
+            "select block",
+        ),
+        b(
+            b'y',
+            "y",
+            Cmd(C::CopySelection),
+            Navigation,
+            "copy selection",
+        ),
+        b(b'r', "r", BlockRerun, Navigation, "rerun block"),
+        b(b'/', "/", SearchOpen, Navigation, "search scrollback"),
+        b(b'f', "f", OpenNav, Navigation, "find: goto pane/agent"),
+        // global
+        b(b'w', "w", OpenSelector, Global, "panel selector"),
+        b(b'a', "a", OpenAnswers, Global, "answer queue"),
+        b(b'b', "b", TogglePanel, Global, "toggle sideline"),
+        b(b's', "s", ToggleStatus, Global, "toggle status"),
+        b(b'?', "?", ShowKeys, Global, "this key table"),
+        b(
+            b'g',
+            "g",
+            DispatchNext,
+            Global,
+            "grab work (dispatch next ready)",
+        ),
+        b(b'd', "d", Detach, Global, "detach"),
+    ]
+}
+
+/// Display-only pseudo-bindings the modal shows but `chord()` handles as
+/// structural specials (not simple byte lookups): the digit tab-select range
+/// and the leader-leader literal. Kept beside [`key_bindings`] so the modal's
+/// row set stays complete without polluting the executable table.
+pub fn meta_rows() -> &'static [(&'static str, &'static str, KeySection)] {
+    &[
+        ("1-9", "select tab", KeySection::WorkspacesTabs),
+        ("C-b C-b", "literal Ctrl-b", KeySection::Global),
+    ]
+}
+
+/// The single-byte chord table. LEADER (literal) and the digit range are
+/// structural specials; every other byte is resolved from [`key_bindings`], the
+/// same table the which-key modal renders, so dispatch and help cannot diverge.
+/// Resolve a post-leader byte to its [`Event`] as if the leader were held - the
+/// which-key modal's execution path (x-8ccf US3): a keypress in the modal runs
+/// EXACTLY what `prefix+<key>` runs, because both go through this one table.
+/// `Event::Bell` means the byte is unbound (the modal dismisses on it).
+pub fn resolve_chord(byte: u8) -> Event {
+    chord(byte)
+}
+
 fn chord(b: u8) -> Event {
     match b {
         LEADER => Event::Forward(vec![LEADER]), // leader-leader = literal
-        b'%' => Event::Cmd(Command::SplitH),
-        b'"' => Event::Cmd(Command::SplitV),
-        b'h' => Event::Cmd(Command::FocusDir(Dir::Left)),
-        b'j' => Event::Cmd(Command::FocusDir(Dir::Down)),
-        b'k' => Event::Cmd(Command::FocusDir(Dir::Up)),
-        b'l' => Event::Cmd(Command::FocusDir(Dir::Right)),
-        b'H' => Event::Cmd(Command::ResizeDir(Dir::Left)),
-        b'J' => Event::Cmd(Command::ResizeDir(Dir::Down)),
-        b'K' => Event::Cmd(Command::ResizeDir(Dir::Up)),
-        b'L' => Event::Cmd(Command::ResizeDir(Dir::Right)),
-        b'x' => Event::Cmd(Command::ClosePane),
-        b'c' => Event::Cmd(Command::NewTab),
-        b'n' => Event::Cmd(Command::NextTab),
-        b'p' => Event::Cmd(Command::PrevTab),
-        b'&' => Event::Cmd(Command::CloseTab),
         b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
-        b'w' => Event::OpenSelector,
-        b'a' => Event::OpenAnswers,
-        b'b' => Event::TogglePanel,
-        b's' => Event::ToggleStatus,
-        b'?' => Event::ShowKeys,
-        b'd' => Event::Detach,
-        // Block navigation (x-38c4). `[`/`]` follow tmux copy-mode muscle memory;
-        // `x` stays ClosePane (block-select is `v`, vim-visual), `y` yanks the
-        // selection, `r` reruns.
-        b'[' => Event::BlockJump(BlockDir::Prev),
-        b']' => Event::BlockJump(BlockDir::Next),
-        b'v' => Event::BlockSelect(BlockDir::Prev),
-        b'y' => Event::Cmd(Command::CopySelection),
-        b'r' => Event::BlockRerun,
-        // leader+n is NextTab (tmux muscle memory); "grab work" is leader+g.
-        b'g' => Event::DispatchNext,
-        // In-scrollback search (leader+/, x-e780): tmux copy-mode `/` muscle
-        // memory. The client owns the typing mode; the chord only opens it.
-        b'/' => Event::SearchOpen,
-        // Session navigator (leader+f = "find", x-653d): a free key (leader+g
-        // stays "grab work"). The client owns the typing mode; the chord opens.
-        b'f' => Event::OpenNav,
-        // Rename the active tab (leader+,, tmux rename-window convention,
-        // x-c150). Same client-owned typing mode shape as search.
-        b',' => Event::OpenRename,
-        b'<' => Event::ReorderTab(-1),
-        b'>' => Event::ReorderTab(1),
-        _ => Event::Bell,
+        _ => key_bindings()
+            .into_iter()
+            .find(|kb| kb.key == b)
+            .map(|kb| kb.event)
+            .unwrap_or(Event::Bell),
     }
 }
 
@@ -490,6 +618,34 @@ mod tests {
     fn client_keys_leader_unmapped_swallows_with_bell() {
         // The 'q' must NOT be forwarded - swallow + BEL.
         assert_eq!(scan_all(&[b"\x02q"]), vec![Event::Bell]);
+    }
+
+    #[test]
+    fn bindings_are_the_chord_table() {
+        // x-8ccf Locked 3 / parity: the which-key modal renders `key_bindings()`;
+        // `chord()` dispatches through the same table. Assert they cannot diverge:
+        // every table row's key resolves (via the real chord path) to exactly the
+        // event the row advertises, and every key is listed once.
+        let mut seen = std::collections::HashSet::new();
+        for kb in key_bindings() {
+            assert!(
+                seen.insert(kb.key),
+                "duplicate key {:?} in key_bindings()",
+                kb.key as char
+            );
+            assert_eq!(
+                chord(kb.key),
+                kb.event,
+                "chord({:?}) diverged from its key_bindings() row",
+                kb.key as char
+            );
+            // The digit range and LEADER are structural specials, never table rows.
+            assert!(
+                !(b'1'..=b'9').contains(&kb.key) && kb.key != LEADER,
+                "structural special {:?} must not appear in key_bindings()",
+                kb.key as char
+            );
+        }
     }
 
     #[test]

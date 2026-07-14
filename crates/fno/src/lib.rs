@@ -12,6 +12,7 @@ pub mod keys;
 pub mod mouse;
 pub mod mux_cli;
 pub mod needs_overlay;
+pub mod popup;
 pub mod proto;
 pub mod pty;
 pub mod server;

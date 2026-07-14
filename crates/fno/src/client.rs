@@ -25,7 +25,8 @@ use crossterm::style::Color as CtColor;
 use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
-use crate::keys::{Event, Scanner};
+use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
+use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, AnswerablePrompt, BacklogCard,
     BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
@@ -54,6 +55,11 @@ const STATUS_ROWS: u16 = 1;
 /// Below this many terminal rows the bottom chrome (status row + which-key
 /// hint) auto-hides and the content area recovers the line (AC4-ERR).
 const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
+/// The sideline footer's `+ new` and `☰ menu` labels (x-8ccf US4). The menu
+/// button rides the existing new-workspace footer row's right edge when the
+/// panel is wide enough (see [`View::footer_menu_range`]).
+const FOOTER_NEW_LABEL: &str = "+ new workspace";
+const FOOTER_MENU: &str = "☰ menu";
 /// How long a pending leader chord waits before the which-key hint paints
 /// (US4, AC4-HP). `leader+?` shows the full table instantly instead.
 const HINT_DELAY: Duration = Duration::from_millis(400);
@@ -394,9 +400,27 @@ struct View {
     /// The which-key hint line is painted over the bottom row (leader held
     /// past [`HINT_DELAY`]); any chord resolution clears it (AC4-HP).
     hint: bool,
-    /// The full key-table overlay (leader+?); the next keypress dismisses it
-    /// (AC4-EDGE).
-    overlay: bool,
+    /// The which-key keybinds modal (leader+?, x-8ccf US3): a centered popup
+    /// built from the leader-chord table. While open, a bound key executes
+    /// through the SAME dispatch as a direct chord (which-key); arrows/pgup
+    /// scroll+select, Enter runs the selected row, Esc/unbound closes. `None`
+    /// when closed. Replaces the old static top-left key-table poster.
+    keys_modal: Option<KeysModal>,
+    /// Pending escape bytes in modal mode (arrow/pgup folding), same split-arrow
+    /// safety as [`View::sel_esc`].
+    keys_modal_esc: Vec<u8>,
+    /// (x-8ccf US2) The right-click / `m` row context menu over a sideline agent
+    /// row: an anchored popup whose entries route to existing commands. `None`
+    /// when closed. The target is pinned by name so a layout reshuffle can only
+    /// stale-refuse an action, never redirect it.
+    row_menu: Option<RowMenu>,
+    /// Pending escape bytes in row-menu mode (arrow folding).
+    row_menu_esc: Vec<u8>,
+    /// (x-8ccf US4/US5) The sideline MENU popup or the settings modal (they share
+    /// one slot; MENU chains into settings). `None` when closed.
+    aux: Option<AuxPopup>,
+    /// Pending escape bytes in aux-popup mode (arrow folding).
+    aux_esc: Vec<u8>,
     /// Caret expansion per squad id - client-local, instant (AC6-UI).
     expanded: HashSet<u64>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
@@ -626,6 +650,238 @@ struct PeekView {
     name: String,
 }
 
+/// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
+/// the single-source leader-chord table, plus the [`Event`] each selectable row
+/// runs (`None` for headers, rules, and display-only meta rows). Keeping the
+/// events beside the popup lets Enter/click on the SELECTED row dispatch through
+/// the exact path a typed chord would, so help can never advertise an action it
+/// cannot run (Locked 3).
+struct KeysModal {
+    popup: Popup,
+    row_events: Vec<Option<Event>>,
+}
+
+/// Build the modal's rows from [`key_bindings`] (the dispatcher's own table):
+/// title, then each section's header + its bindings (key leading, action right),
+/// its display-only meta rows, then a footer hint. `row_events` runs parallel to
+/// `popup.rows` so a selected row's chord is one lookup away.
+fn build_keys_modal() -> KeysModal {
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut events: Vec<Option<Event>> = Vec::new();
+    let mut add = |row: PopupRow, ev: Option<Event>| {
+        rows.push(row);
+        events.push(ev);
+    };
+    add(PopupRow::Header("keybinds  ·  esc close".into()), None);
+    let bindings = key_bindings();
+    for section in [
+        KeySection::Global,
+        KeySection::Navigation,
+        KeySection::WorkspacesTabs,
+        KeySection::Panes,
+    ] {
+        add(PopupRow::Header(section.title().into()), None);
+        for kb in bindings.iter().filter(|kb| kb.section == section) {
+            add(
+                PopupRow::Entry {
+                    glyph: kb.disp.to_string(),
+                    label: kb.label.to_string(),
+                    hint: String::new(),
+                },
+                Some(kb.event.clone()),
+            );
+        }
+        // Display-only rows (1-9 select tab, C-b C-b literal): selectable so the
+        // reference shows them, but not single-event chords, so Enter BELs.
+        for (disp, label, _) in meta_rows().iter().filter(|(_, _, s)| *s == section) {
+            add(
+                PopupRow::Entry {
+                    glyph: (*disp).to_string(),
+                    label: (*label).to_string(),
+                    hint: String::new(),
+                },
+                None,
+            );
+        }
+    }
+    add(PopupRow::Rule, None);
+    add(
+        PopupRow::Header("scroll wheel · pgup/pgdn · ⏎/click/tap runs".into()),
+        None,
+    );
+    KeysModal {
+        popup: Popup::new(rows, Anchor::Center),
+        row_events: events,
+    }
+}
+
+/// (x-8ccf US2) The right-click / `m` row context menu over a sideline agent
+/// row. The target is pinned by NAME (not index) so a layout reshuffle between
+/// open and click can only turn an action into a stale-name refusal, never
+/// redirect it to a different agent (Concurrency). `actions` runs parallel to
+/// the popup's flat targets (`popup.sel` indexes it directly).
+struct RowMenu {
+    popup: Popup,
+    /// The target agent's identity, pinned at open. Names ALONE are ambiguous
+    /// (the daemon roster can surface two rows with the same name), so the
+    /// pane_id / attach_id disambiguate; execution fails closed if this identity
+    /// does not resolve to exactly one live row (never acts on the wrong agent).
+    target: AgentIdent,
+    actions: Vec<MenuAction>,
+}
+
+/// The disambiguating identity of an agent row, captured when a row menu opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentIdent {
+    name: String,
+    pane_id: Option<u64>,
+    attach_id: Option<String>,
+}
+
+impl AgentIdent {
+    fn of(a: &AgentRow) -> Self {
+        AgentIdent {
+            name: a.name.clone(),
+            pane_id: a.pane_id,
+            attach_id: a.attach_id.clone(),
+        }
+    }
+    fn matches(&self, a: &AgentRow) -> bool {
+        a.name == self.name && a.pane_id == self.pane_id && a.attach_id == self.attach_id
+    }
+}
+
+/// What a context-menu entry does, resolved against the LIVE agent row (found by
+/// name) at execution time - a stale target becomes a Notice, not a wrong action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    /// Attach a bg (paneless) agent as a new tab.
+    NewTab,
+    /// Attach a bg agent as a directional split of the current tab.
+    Split(Dir),
+    /// Focus an existing pane-hosted row.
+    Focus,
+    /// Open the read-only peek overlay.
+    Peek,
+    /// Stop a live row (StopAgent, or StopExternal for a daemon-roster row).
+    Stop,
+    /// Remove an exited row (RemoveAgent, or RemoveExternal for a roster row).
+    Remove,
+}
+
+/// Build the per-state row menu for the agent at `display_rows()` index `i`,
+/// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
+/// Entry sets mirror the row's state so no dead item ever renders: a paneless
+/// bg row gets the new-tab + 2x2 split grid (its whole point); a pane row gets
+/// focus; an exited row gets remove; peek/stop apply where they make sense.
+fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut actions: Vec<MenuAction> = Vec::new();
+    let mut add = |row: PopupRow, acts: &[MenuAction]| {
+        rows.push(row);
+        actions.extend_from_slice(acts);
+    };
+    let entry = |glyph: &str, label: &str| PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: String::new(),
+    };
+    let cell = |glyph: &str, label: &str| GridCell {
+        glyph: glyph.into(),
+        label: label.into(),
+    };
+    add(PopupRow::Header(agent.name.clone()), &[]);
+    add(PopupRow::Rule, &[]);
+    if agent.exited {
+        add(entry("✕", "Remove"), &[MenuAction::Remove]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+    } else if agent.pane_id.is_some() {
+        // Live pane row: already placed, so focus/peek/stop (no splits).
+        add(entry("→", "Focus"), &[MenuAction::Focus]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(PopupRow::Rule, &[]);
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+    } else if agent.attach_id.is_some() {
+        // Paneless bg row: the motivating case - open as a tab or a split pane.
+        add(
+            PopupRow::FullWidth("▭ New Tab".into()),
+            &[MenuAction::NewTab],
+        );
+        add(PopupRow::Rule, &[]);
+        // 2x2 spatial grid: Left/Right on top, Up/Down below (the cell you pick
+        // IS the direction). Glyphs are half-block squares; a non-nerd-font
+        // terminal still shows the label beside them.
+        add(
+            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
+            &[MenuAction::Split(Dir::Left), MenuAction::Split(Dir::Right)],
+        );
+        add(
+            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
+            &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
+        );
+        add(PopupRow::Rule, &[]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+    } else {
+        // A live row that is neither pane-hosted nor attachable here.
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+    }
+    RowMenu {
+        popup: Popup::new(rows, anchor),
+        target: AgentIdent::of(agent),
+        actions,
+    }
+}
+
+/// (x-8ccf US4/US5) The sideline MENU popup and the minimal settings modal share
+/// this one aux-popup type: a [`Popup`] plus the [`AuxAction`] each selectable
+/// row runs. The two chain (MENU -> settings) by swapping the `aux` slot.
+struct AuxPopup {
+    popup: Popup,
+    actions: Vec<AuxAction>,
+}
+
+/// What a MENU / settings-modal row does. Menu entries open a surface or detach;
+/// settings entries flip a session-local view toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuxAction {
+    OpenKeybinds,
+    OpenSettings,
+    Detach,
+    ToggleHoverFocus,
+    ToggleStatus,
+}
+
+/// Build the sideline MENU popup (US4), anchored at the footer's menu cell:
+/// keybinds / settings / detach. `reload config` is intentionally absent - there
+/// is no config-reload machinery to route it to (a net-new capability, not a
+/// re-route), so the menu advertises only what actually works.
+fn build_sideline_menu(anchor: Anchor) -> AuxPopup {
+    let entry = |glyph: &str, label: &str| PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: String::new(),
+    };
+    AuxPopup {
+        popup: Popup::new(
+            vec![
+                PopupRow::Header("menu".into()),
+                PopupRow::Rule,
+                entry("⌨", "keybinds"),
+                entry("⚙", "settings"),
+                entry("⏏", "detach"),
+            ],
+            anchor,
+        ),
+        actions: vec![
+            AuxAction::OpenKeybinds,
+            AuxAction::OpenSettings,
+            AuxAction::Detach,
+        ],
+    }
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Seed with the active squad so the first frame already shows its tabs
@@ -639,7 +895,12 @@ impl View {
             panel_on: true,
             status_on: true,
             hint: false,
-            overlay: false,
+            keys_modal: None,
+            keys_modal_esc: Vec::new(),
+            row_menu: None,
+            row_menu_esc: Vec::new(),
+            aux: None,
+            aux_esc: Vec::new(),
             expanded,
             selector: None,
             sel_esc: Vec::new(),
@@ -985,6 +1246,131 @@ impl View {
         self.peek_esc.clear();
     }
 
+    /// Open the which-key keybinds modal (leader+?, x-8ccf US3). Clears peek like
+    /// every other overlay open so a mouse-driven open never leaves peek on top.
+    fn open_keys_modal(&mut self) {
+        self.clear_peek();
+        self.keys_modal = Some(build_keys_modal());
+        self.keys_modal_esc.clear();
+    }
+
+    /// The flat popup target under a screen cell while the modal is open, for
+    /// mouse hover/click. Renders the modal (windowed by the live scroll) and
+    /// walks the visible line's hit spans; `None` off the popup.
+    fn keys_modal_hit(&self, row: u16, col: u16) -> Option<usize> {
+        let m = self.keys_modal.as_ref()?;
+        let r = m.popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let li = (row as usize).checked_sub(r0)?;
+        let line = r.lines.get(li)?;
+        let cc = (col as usize).checked_sub(c0)?;
+        line.hits
+            .iter()
+            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .map(|(t, _, _)| *t)
+    }
+
+    /// Keep the selected modal row inside the scrolled viewport after an arrow
+    /// move (the block is one line per row, so the row index IS the line index).
+    fn follow_modal_selection(&mut self) {
+        let trows = self.term.0.max(1) as usize;
+        if let Some(m) = self.keys_modal.as_mut() {
+            let vis_h = m.popup.rows.len().min(trows);
+            if let Some((ri, _)) = m.popup.selected() {
+                if ri < m.popup.scroll {
+                    m.popup.scroll = ri;
+                } else if ri >= m.popup.scroll + vis_h {
+                    m.popup.scroll = ri + 1 - vis_h;
+                }
+            }
+        }
+    }
+
+    /// Open the row context menu on `display_rows()` index `i`, anchored at
+    /// `anchor` (x-8ccf US2). Returns whether it opened - `false` for a non-agent
+    /// row (the caller then leaves the press alone / forwards it).
+    fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
+        let agent = match self.display_rows().get(i) {
+            Some(DisplayRow::Agent(a)) => (*a).clone(),
+            _ => return false,
+        };
+        self.clear_peek();
+        self.row_menu = Some(build_row_menu(&agent, anchor));
+        self.row_menu_esc.clear();
+        true
+    }
+
+    /// The flat popup target under a screen cell while the row menu is open, for
+    /// mouse hover/click; `None` off the popup.
+    fn row_menu_hit(&self, row: u16, col: u16) -> Option<usize> {
+        let m = self.row_menu.as_ref()?;
+        let r = m.popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let li = (row as usize).checked_sub(r0)?;
+        let line = r.lines.get(li)?;
+        let cc = (col as usize).checked_sub(c0)?;
+        line.hits
+            .iter()
+            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .map(|(t, _, _)| *t)
+    }
+
+    /// Open the sideline MENU popup anchored at `anchor` (x-8ccf US4).
+    fn open_sideline_menu(&mut self, anchor: Anchor) {
+        self.clear_peek();
+        self.aux = Some(build_sideline_menu(anchor));
+        self.aux_esc.clear();
+    }
+
+    /// Build the minimal settings modal (x-8ccf US5): 2 session-only toggles that
+    /// live-apply to this session. Persistence to config.toml is out of scope for
+    /// v1, so each row is honestly labeled "session only" rather than pretending
+    /// it persisted (the modal must never claim persistence it did not achieve).
+    fn build_settings_modal(&self) -> AuxPopup {
+        let toggle = |on: bool, label: &str| PopupRow::Entry {
+            glyph: if on { "☑".into() } else { "☐".into() },
+            label: label.into(),
+            hint: "session only".into(),
+        };
+        AuxPopup {
+            popup: Popup::new(
+                vec![
+                    PopupRow::Header("settings".into()),
+                    PopupRow::Rule,
+                    toggle(self.hover_focus, "focus follows mouse"),
+                    toggle(self.status_on, "status row"),
+                ],
+                Anchor::Center,
+            ),
+            actions: vec![AuxAction::ToggleHoverFocus, AuxAction::ToggleStatus],
+        }
+    }
+
+    /// Rebuild the settings modal after a toggle so its glyph reflects the new
+    /// state, preserving the current selection (a keyboard toggle must re-toggle
+    /// the SAME row on the next Enter, not reset to row 0).
+    fn reopen_settings_keeping_sel(&mut self) {
+        let sel = self.aux.as_ref().map(|m| m.popup.sel).unwrap_or(0);
+        let mut modal = self.build_settings_modal();
+        let n = modal.popup.targets().len();
+        modal.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
+        self.aux = Some(modal);
+    }
+
+    /// The flat popup target under a screen cell while an aux popup is open.
+    fn aux_hit(&self, row: u16, col: u16) -> Option<usize> {
+        let m = self.aux.as_ref()?;
+        let r = m.popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let li = (row as usize).checked_sub(r0)?;
+        let line = r.lines.get(li)?;
+        let cc = (col as usize).checked_sub(c0)?;
+        line.hits
+            .iter()
+            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .map(|(t, _, _)| *t)
+    }
+
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
     /// only when peek is open AND `seq` is the current request. Returns whether
     /// it applied (the caller redraws on true). A stale body (any other seq) is
@@ -1084,6 +1470,16 @@ impl View {
         None
     }
 
+    /// The column range of the footer's `☰ menu` button (x-8ccf US4), shared by
+    /// the renderer and the hit-test so a click lands where it draws. `None` when
+    /// the panel is too narrow to add the button beside the `+ new workspace`
+    /// affordance, or a recruit-mark tally is competing for the row.
+    fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
+        let tw = panel_w.saturating_sub(1); // last column is the divider
+        let mw = FOOTER_MENU.chars().count();
+        (self.marks.is_empty() && tw >= FOOTER_NEW_LABEL.len() + 2 + mw).then(|| (tw - mw)..tw)
+    }
+
     /// Map a left-click on chrome (the tab bar or the sideline) to what it does:
     /// switch tab/squad, focus an agent's pane, open a new tab, or a local hint
     /// for a row that isn't directly actionable (a work-only agent, a card).
@@ -1126,7 +1522,17 @@ impl View {
         // Display row i is painted at TAB_BAR_ROWS + (i - sideline_offset)
         // (draw_sideline), so invert with the offset - else a click on a scrolled
         // row activates the wrong unscrolled row (codex P2). Mirrors sideline_row_at.
-        self.row_action((row - TAB_BAR_ROWS) as usize + self.sideline_offset)
+        let i = (row - TAB_BAR_ROWS) as usize + self.sideline_offset;
+        // x-8ccf US4: a click on the footer's `☰ menu` region opens the sideline
+        // MENU popup; the rest of the footer row keeps its `+ new` create action.
+        if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
+            if let Some(range) = self.footer_menu_range(panel_w as usize) {
+                if range.contains(&(col as usize)) {
+                    return Some(ChromeHit::OpenSidelineMenu { row, col });
+                }
+            }
+        }
+        self.row_action(i)
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -1776,8 +2182,16 @@ impl View {
             // x-4e2d catch-up overlay: reuse the inverse-video chrome; any key
             // dismisses (handled in handle_stdin, like the key-table overlay).
             draw_lines_overlay(&mut cells, rows, cols, lines);
-        } else if self.overlay {
-            draw_overlay(&mut cells, rows, cols);
+        } else if let Some(m) = &self.keys_modal {
+            // x-8ccf US3: the centered which-key modal replaces the old top-left
+            // key-table poster (opaque, sectioned, scrollable).
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+        } else if let Some(m) = &self.row_menu {
+            // x-8ccf US2: the anchored row context menu, drawn at the pointer.
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+        } else if let Some(m) = &self.aux {
+            // x-8ccf US4/US5: the sideline MENU popup or settings modal.
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
         } else if let Some(sel) = self.answers {
             // x-feec needs-me queue (grown from the x-c929 answer overlay): the
             // severity-ranked union + the selected row's answer options, on the
@@ -1826,6 +2240,9 @@ impl View {
             && self.attach_place.is_none()
             && self.nav.is_none()
             && self.peek.is_none()
+            && self.keys_modal.is_none()
+            && self.row_menu.is_none()
+            && self.aux.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -2456,10 +2873,17 @@ impl View {
                 DisplayRow::NewSquad => {
                     // The recruit-mark footer count rides the create affordance
                     // (x-8f11): `space` marks, `R` recruits the marked set.
-                    let label = if self.marks.is_empty() {
-                        "+ new workspace".to_string()
+                    let base = if self.marks.is_empty() {
+                        FOOTER_NEW_LABEL.to_string()
                     } else {
-                        format!("+ new workspace   {} marked ·R", self.marks.len())
+                        format!("{FOOTER_NEW_LABEL}   {} marked ·R", self.marks.len())
+                    };
+                    // x-8ccf US4: the `☰ menu` button rides the footer's right edge
+                    // when the panel is wide enough (footer_menu_range gates it);
+                    // the same range routes a click there to the MENU popup.
+                    let label = match self.footer_menu_range(panel_w) {
+                        Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
+                        None => base,
                     };
                     (label, cell_flags::DIM)
                 }
@@ -2543,6 +2967,12 @@ enum ChromeHit {
     OpenCreate,
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
     ToggleExpand(u64),
+    /// Open the sideline MENU popup anchored at the footer's menu cell (x-8ccf
+    /// US4). Carries the click cell so the popup anchors under the pointer.
+    OpenSidelineMenu {
+        row: u16,
+        col: u16,
+    },
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else attach a paneless
@@ -2755,34 +3185,6 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
     p.to_string()
 }
 
-/// The full key table (leader+?), inverse-video over the content area's
-/// top-left. Any key dismisses it (AC4-EDGE). Cell-bounds-checked, so a tiny
-/// terminal shows a clipped table rather than nothing.
-const KEY_TABLE: &[&str] = &[
-    " fno keys · leader = Ctrl-b              ",
-    "  %  split horizontal   \"  split vertical ",
-    "  hjkl / arrows  focus  HJKL / C-arrows  resize ",
-    "  x  close pane         c  new tab        ",
-    "  n/p  cycle tabs       1-9  select tab   ",
-    "  &  close tab          w  panel selector ",
-    "     selector ⏎ acts on the row: squad/tab ",
-    "     · agent focus/attach · card dispatch · + create ",
-    "     · selector p places attach into a workspace split ",
-    "     organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder",
-    "     · space mark agent · R recruit marked → workspace ",
-    "  a  answer queue       b  toggle sideline ",
-    "  s  toggle status      ?  this key table  ",
-    "  [ ]  jump block       v  select block   ",
-    "  y  copy selection     r  rerun block    ",
-    "  g  grab work (dispatch next ready)     ",
-    "  ,  rename tab (empty resets to auto)   ",
-    "  /  search scrollback  n/N older/newer  ",
-    "  f  find: goto pane/agent · type filter  ",
-    "     · Tab state · C-n/C-p move · ⏎ goto  ",
-    "  d  detach             C-b C-b  literal  ",
-    " any key dismisses                        ",
-];
-
 /// Draw inverse-video overlay lines at the content area's top-left, one line
 /// per row, cell-bounds-checked (a tiny terminal clips rather than panics).
 /// Shared by the key-table overlay and the x-c929 answer overlay.
@@ -2806,10 +3208,6 @@ fn draw_lines_overlay<S: AsRef<str>>(cells: &mut [Cell], rows: usize, cols: usiz
             };
         }
     }
-}
-
-fn draw_overlay(cells: &mut [Cell], rows: usize, cols: usize) {
-    draw_lines_overlay(cells, rows, cols, KEY_TABLE);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -3607,6 +4005,28 @@ async fn handle_stdin(
         if rep.shift {
             continue;
         }
+        // x-8ccf US3: while the which-key modal is open, the mouse drives it
+        // (hover selects, wheel scrolls, click executes or dismisses) and is
+        // SWALLOWED - it never reaches a pane or the chrome underneath.
+        if view.keys_modal.is_some() {
+            if let StdinFlow::Detach = keys_modal_mouse(view, rep, sock_w).await? {
+                return Ok(StdinFlow::Detach);
+            }
+            continue;
+        }
+        // x-8ccf US2: the row context menu owns the mouse while open (hover
+        // selects, click runs, right-press re-anchors) and is swallowed.
+        if view.row_menu.is_some() {
+            row_menu_mouse(view, rep, sock_w).await?;
+            continue;
+        }
+        // x-8ccf US4/US5: the MENU popup / settings modal owns the mouse.
+        if view.aux.is_some() {
+            if let StdinFlow::Detach = aux_mouse(view, rep, sock_w).await? {
+                return Ok(StdinFlow::Detach);
+            }
+            continue;
+        }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
         // click / scroll cancels it and is SWALLOWED - it must never leak to a
         // pane underneath (the confirm prompt spans the full-width bottom row) nor
@@ -3630,6 +4050,22 @@ async fn handle_stdin(
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                 apply_hit(view, hit, sock_w).await?;
+                continue;
+            }
+        }
+        // x-8ccf US2: right-click a sideline row opens its context menu (agent
+        // rows) or is swallowed (non-agent chrome). A right-click on a PANE cell
+        // (sideline_row_at -> None) falls through and forwards to the inner app,
+        // so pane right-click behavior is untouched (AC3-EDGE).
+        if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) {
+            if let Some(i) = view.sideline_row_at(rep.row, rep.col) {
+                view.open_row_menu(
+                    i,
+                    Anchor::At {
+                        row: rep.row,
+                        col: rep.col,
+                    },
+                );
                 continue;
             }
         }
@@ -3658,13 +4094,21 @@ async fn handle_stdin(
         view.digest = None;
         return Ok(StdinFlow::Continue);
     }
-    if view.overlay {
-        // AC4-EDGE: one keypress dismisses the key table and does nothing
-        // else. The WHOLE chunk is swallowed - splitting it could leak the
-        // tail of an escape sequence into the pane, a worse bug than two
-        // coalesced keypresses both dying with the overlay.
-        view.overlay = false;
-        return Ok(StdinFlow::Continue);
+    if view.keys_modal.is_some() {
+        // x-8ccf US3 which-key: a bound key executes through the shared dispatch,
+        // arrows/pgup scroll+select, Enter runs the selected row, Esc/unbound
+        // dismiss. Routed here (same precedence as the old poster) so its keys
+        // never leak to a pane.
+        return keys_modal_keys(view, &passthrough, sock_w).await;
+    }
+    if view.row_menu.is_some() {
+        // x-8ccf US2: the row context menu consumes keys while open (arrows walk
+        // the entries + grid, Enter runs, Esc/q close) - never leaks to a pane.
+        return row_menu_keys(view, &passthrough, sock_w).await;
+    }
+    if view.aux.is_some() {
+        // x-8ccf US4/US5: the MENU popup / settings modal consumes keys.
+        return aux_keys(view, &passthrough, sock_w).await;
     }
     if view.confirm.is_some() {
         return confirm_keys(view, &passthrough, sock_w).await;
@@ -3706,217 +4150,243 @@ async fn handle_stdin(
         return nav_keys(view, &passthrough, sock_w).await;
     }
     for event in scanner.scan(&passthrough) {
-        match event {
-            Event::Forward(chunk) => {
-                // Reliable channel: awaited send, input is NEVER dropped.
-                write_msg(sock_w, &ClientMsg::Input(chunk))
-                    .await
-                    .map_err(|e| format!("input send failed: {e}"))?;
-            }
-            Event::Cmd(cmd) => {
-                write_msg(sock_w, &ClientMsg::Command(cmd))
-                    .await
-                    .map_err(|e| format!("command send failed: {e}"))?;
-            }
-            Event::SelectTabIdx(idx) => {
-                // Resolve the digit's index to a stable TabId against the
-                // last Layout; an out-of-range digit is a local BEL, never a
-                // wire message the server would refuse anyway.
-                let id = view
-                    .layout
-                    .squads
-                    .iter()
-                    .find(|s| s.id == view.layout.active_squad)
-                    .and_then(|s| s.tabs.get(idx))
-                    .map(|t| t.id);
-                match id {
-                    Some(id) => {
-                        write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(id)))
-                            .await
-                            .map_err(|e| format!("command send failed: {e}"))?;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            Event::Detach => return Ok(StdinFlow::Detach),
-            Event::OpenSelector => {
-                // The unified rows are never empty - the `+ new workspace`
-                // footer is always present - so an empty session opens on it
-                // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
-                if view.term.1 < PANEL_W + MIN_CONTENT_COLS {
-                    let _ = raw_out(b"\x07");
-                } else {
-                    view.panel_on = true;
-                    // Row 0 is a squad row (or the footer, never a Header).
-                    view.selector = Some(0);
-                    view.sel_esc.clear();
-                    // Open at the top: a stale offset from a prior session must
-                    // not hide row 0 (x-a621).
-                    view.sideline_offset = 0;
-                }
-            }
-            Event::OpenAnswers => {
-                // x-feec: open the needs-me queue. Always opens (even with an
-                // empty live leg) so the async event-fold leg can populate it;
-                // an ultimately-empty union renders "nothing needs you". The
-                // fold merges in when it lands - the overlay never blocks on it.
-                view.answers = Some(0);
-                view.ans_esc.clear();
-                view.needs_gen = view.needs_gen.wrapping_add(1);
-                let fresh = view
-                    .needs_fold_at
-                    .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
-                if fresh {
-                    // Re-open within the cache TTL: reuse the last fold instantly
-                    // (Perspective B - mashing leader+a never re-shells).
-                    view.needs_degraded = false;
-                } else {
-                    // Stale/first open: live-only until the refresh lands.
-                    view.needs_fold = None;
-                    view.needs_degraded = false;
-                    view.needs_want = true;
-                }
-            }
-            Event::TogglePanel => {
-                view.panel_on = !view.panel_on;
-                // Chrome changed size: report the new content area so rects
-                // fill it (the reply Layout redraws everything).
-                let (r, c) = view.content_dims();
-                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                    .await
-                    .map_err(|e| format!("resize send failed: {e}"))?;
-            }
-            Event::ToggleStatus => {
-                view.status_on = !view.status_on;
-                // Same accounting as the sideline: the content area grew or
-                // shrank by one row.
-                let (r, c) = view.content_dims();
-                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                    .await
-                    .map_err(|e| format!("resize send failed: {e}"))?;
-            }
-            Event::ShowKeys => {
-                view.overlay = true;
-            }
-            Event::BlockJump(dir) => {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::BlockJump {
-                        pane: view.layout.focus,
-                        dir,
-                    },
-                )
-                .await
-                .map_err(|e| format!("block-jump send failed: {e}"))?;
-            }
-            Event::BlockSelect(dir) => {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::BlockSelect {
-                        pane: view.layout.focus,
-                        dir,
-                    },
-                )
-                .await
-                .map_err(|e| format!("block-select send failed: {e}"))?;
-            }
-            Event::BlockRerun => {
-                write_msg(
-                    sock_w,
-                    &ClientMsg::BlockRerun {
-                        pane: view.layout.focus,
-                    },
-                )
-                .await
-                .map_err(|e| format!("block-rerun send failed: {e}"))?;
-            }
-            Event::DispatchNext => {
-                write_msg(sock_w, &ClientMsg::DispatchNext)
-                    .await
-                    .map_err(|e| format!("dispatch-next send failed: {e}"))?;
-            }
-            Event::SearchOpen => {
-                // Enter client-local typing mode over the focused pane; keystrokes
-                // divert to search_keys on the next read (no message sent yet, no
-                // Resize - the input line overlays the bottom chrome). Break so no
-                // same-chunk bytes after the chord leak to the pane.
-                view.search = Some(SearchView {
-                    pane: view.layout.focus,
-                    query: String::new(),
-                    submitted: false,
-                    result: None,
-                });
-                view.search_esc.clear();
-                break;
-            }
-            Event::OpenNav => {
-                // Client-local overlay (x-653d): opening sends nothing and
-                // reserves no row (it draws over the content top-left like the
-                // answer overlay, not the bottom chrome). Break so same-chunk
-                // bytes after the chord can't leak to the pane (like SearchOpen).
-                // No width gate: draw_lines_overlay clips a tiny terminal, and a
-                // zero-squad session shows an explicit `no matches` (AC1-EDGE).
-                view.nav = Some(NavView {
-                    query: String::new(),
-                    state_filter: None,
-                    cursor: 0,
-                });
-                view.nav_esc.clear();
-                break;
-            }
-            Event::OpenRename => {
-                // Rename targets the ACTIVE tab, resolved to its stable id at
-                // open time so a tab switch mid-edit cannot retarget the send
-                // (the server refuses a stale id fail-closed - AC1-FR).
-                let tab = view
-                    .layout
-                    .squads
-                    .iter()
-                    .find(|s| s.id == view.layout.active_squad)
-                    .and_then(|s| s.tabs.get(s.active_tab))
-                    .map(|t| t.id);
-                match tab {
-                    Some(id) => {
-                        view.open_rename(RenameTarget::Tab(id));
-                        // Swallow same-chunk bytes after the chord, like
-                        // SearchOpen: nothing may leak into the pane.
-                        break;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            Event::ReorderTab(delta) => {
-                let target = view
-                    .layout
-                    .squads
-                    .iter()
-                    .find(|s| s.id == view.layout.active_squad)
-                    .and_then(|s| s.tabs.get(s.active_tab).map(|tab| (s.id, tab.id)));
-                match target {
-                    Some((squad, tab)) => {
-                        write_msg(
-                            sock_w,
-                            &ClientMsg::Command(Command::ReorderTab { squad, tab, delta }),
-                        )
-                        .await
-                        .map_err(|e| format!("command send failed: {e}"))?;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-                break;
-            }
-            Event::Bell => {
-                let _ = raw_out(b"\x07");
-            }
+        match dispatch_event(view, event, sock_w).await? {
+            DispatchFlow::Continue => {}
+            DispatchFlow::Break => break,
+            DispatchFlow::Detach => return Ok(StdinFlow::Detach),
         }
     }
     Ok(StdinFlow::Continue)
+}
+
+/// One of three control-flow outcomes of dispatching a leader event: fall
+/// through to the next event, stop consuming this chunk (a chord that opens a
+/// typing mode must not leak the chunk's trailing bytes into a pane), or detach.
+enum DispatchFlow {
+    Continue,
+    Break,
+    Detach,
+}
+
+/// Dispatch one resolved leader [`Event`] to the wire / view state - the single
+/// executor the key-scan loop and the which-key modal both call (x-8ccf Locked
+/// 3), so a modal-executed chord runs the IDENTICAL path as a directly-typed one
+/// (no parallel keymap to drift).
+async fn dispatch_event(
+    view: &mut View,
+    event: Event,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    match event {
+        Event::Forward(chunk) => {
+            // Reliable channel: awaited send, input is NEVER dropped.
+            write_msg(sock_w, &ClientMsg::Input(chunk))
+                .await
+                .map_err(|e| format!("input send failed: {e}"))?;
+        }
+        Event::Cmd(cmd) => {
+            write_msg(sock_w, &ClientMsg::Command(cmd))
+                .await
+                .map_err(|e| format!("command send failed: {e}"))?;
+        }
+        Event::SelectTabIdx(idx) => {
+            // Resolve the digit's index to a stable TabId against the
+            // last Layout; an out-of-range digit is a local BEL, never a
+            // wire message the server would refuse anyway.
+            let id = view
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == view.layout.active_squad)
+                .and_then(|s| s.tabs.get(idx))
+                .map(|t| t.id);
+            match id {
+                Some(id) => {
+                    write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(id)))
+                        .await
+                        .map_err(|e| format!("command send failed: {e}"))?;
+                }
+                None => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+        }
+        Event::Detach => return Ok(DispatchFlow::Detach),
+        Event::OpenSelector => {
+            // The unified rows are never empty - the `+ new workspace`
+            // footer is always present - so an empty session opens on it
+            // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
+            if view.term.1 < PANEL_W + MIN_CONTENT_COLS {
+                let _ = raw_out(b"\x07");
+            } else {
+                view.panel_on = true;
+                // Row 0 is a squad row (or the footer, never a Header).
+                view.selector = Some(0);
+                view.sel_esc.clear();
+                // Open at the top: a stale offset from a prior session must
+                // not hide row 0 (x-a621).
+                view.sideline_offset = 0;
+            }
+        }
+        Event::OpenAnswers => {
+            // x-feec: open the needs-me queue. Always opens (even with an
+            // empty live leg) so the async event-fold leg can populate it;
+            // an ultimately-empty union renders "nothing needs you". The
+            // fold merges in when it lands - the overlay never blocks on it.
+            view.answers = Some(0);
+            view.ans_esc.clear();
+            view.needs_gen = view.needs_gen.wrapping_add(1);
+            let fresh = view
+                .needs_fold_at
+                .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
+            if fresh {
+                // Re-open within the cache TTL: reuse the last fold instantly
+                // (Perspective B - mashing leader+a never re-shells).
+                view.needs_degraded = false;
+            } else {
+                // Stale/first open: live-only until the refresh lands.
+                view.needs_fold = None;
+                view.needs_degraded = false;
+                view.needs_want = true;
+            }
+        }
+        Event::TogglePanel => {
+            view.panel_on = !view.panel_on;
+            // Chrome changed size: report the new content area so rects
+            // fill it (the reply Layout redraws everything).
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+        }
+        Event::ToggleStatus => {
+            view.status_on = !view.status_on;
+            // Same accounting as the sideline: the content area grew or
+            // shrank by one row.
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+        }
+        Event::ShowKeys => {
+            view.open_keys_modal();
+        }
+        Event::BlockJump(dir) => {
+            write_msg(
+                sock_w,
+                &ClientMsg::BlockJump {
+                    pane: view.layout.focus,
+                    dir,
+                },
+            )
+            .await
+            .map_err(|e| format!("block-jump send failed: {e}"))?;
+        }
+        Event::BlockSelect(dir) => {
+            write_msg(
+                sock_w,
+                &ClientMsg::BlockSelect {
+                    pane: view.layout.focus,
+                    dir,
+                },
+            )
+            .await
+            .map_err(|e| format!("block-select send failed: {e}"))?;
+        }
+        Event::BlockRerun => {
+            write_msg(
+                sock_w,
+                &ClientMsg::BlockRerun {
+                    pane: view.layout.focus,
+                },
+            )
+            .await
+            .map_err(|e| format!("block-rerun send failed: {e}"))?;
+        }
+        Event::DispatchNext => {
+            write_msg(sock_w, &ClientMsg::DispatchNext)
+                .await
+                .map_err(|e| format!("dispatch-next send failed: {e}"))?;
+        }
+        Event::SearchOpen => {
+            // Enter client-local typing mode over the focused pane; keystrokes
+            // divert to search_keys on the next read (no message sent yet, no
+            // Resize - the input line overlays the bottom chrome). Break so no
+            // same-chunk bytes after the chord leak to the pane.
+            view.search = Some(SearchView {
+                pane: view.layout.focus,
+                query: String::new(),
+                submitted: false,
+                result: None,
+            });
+            view.search_esc.clear();
+            return Ok(DispatchFlow::Break);
+        }
+        Event::OpenNav => {
+            // Client-local overlay (x-653d): opening sends nothing and
+            // reserves no row (it draws over the content top-left like the
+            // answer overlay, not the bottom chrome). Break so same-chunk
+            // bytes after the chord can't leak to the pane (like SearchOpen).
+            // No width gate: draw_lines_overlay clips a tiny terminal, and a
+            // zero-squad session shows an explicit `no matches` (AC1-EDGE).
+            view.nav = Some(NavView {
+                query: String::new(),
+                state_filter: None,
+                cursor: 0,
+            });
+            view.nav_esc.clear();
+            return Ok(DispatchFlow::Break);
+        }
+        Event::OpenRename => {
+            // Rename targets the ACTIVE tab, resolved to its stable id at
+            // open time so a tab switch mid-edit cannot retarget the send
+            // (the server refuses a stale id fail-closed - AC1-FR).
+            let tab = view
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == view.layout.active_squad)
+                .and_then(|s| s.tabs.get(s.active_tab))
+                .map(|t| t.id);
+            match tab {
+                Some(id) => {
+                    view.open_rename(RenameTarget::Tab(id));
+                    // Swallow same-chunk bytes after the chord, like
+                    // SearchOpen: nothing may leak into the pane.
+                    return Ok(DispatchFlow::Break);
+                }
+                None => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+        }
+        Event::ReorderTab(delta) => {
+            let target = view
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == view.layout.active_squad)
+                .and_then(|s| s.tabs.get(s.active_tab).map(|tab| (s.id, tab.id)));
+            match target {
+                Some((squad, tab)) => {
+                    write_msg(
+                        sock_w,
+                        &ClientMsg::Command(Command::ReorderTab { squad, tab, delta }),
+                    )
+                    .await
+                    .map_err(|e| format!("command send failed: {e}"))?;
+                }
+                None => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+            return Ok(DispatchFlow::Break);
+        }
+        Event::Bell => {
+            let _ = raw_out(b"\x07");
+        }
+    }
+    Ok(DispatchFlow::Continue)
 }
 
 /// Apply one resolved [`ChromeHit`] - the single consumer both input paths
@@ -3946,6 +4416,10 @@ async fn apply_hit(
         // Pure state flip, no I/O - usable even when the socket write path
         // is failing (x-2f99, AC1-FR).
         ChromeHit::ToggleExpand(id) => view.toggle_expand(id),
+        // x-8ccf US4: open the sideline MENU popup anchored at the clicked cell.
+        ChromeHit::OpenSidelineMenu { row, col } => {
+            view.open_sideline_menu(Anchor::At { row, col })
+        }
     }
     Ok(())
 }
@@ -3980,6 +4454,621 @@ async fn confirm_keys(
         write_msg(sock_w, &ClientMsg::Command(cmd))
             .await
             .map_err(|e| format!("confirm-action send failed: {e}"))?;
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// A folded which-key modal key (x-8ccf US3). Arrows/pgup navigate the
+/// reference; `Byte`/`Enter` execute; `Esc` dismisses. Distinct from
+/// [`fold_selector_keys`] because the modal needs arrows kept as navigation
+/// (not folded to hjkl, which are executable bindings) and pgup/pgdn as scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModalKey {
+    Byte(u8),
+    Enter,
+    Esc,
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+}
+
+/// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
+/// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
+/// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
+/// special-cased by the caller for instant close) becomes `Esc`; every other
+/// printable byte is `Byte`, resolved by the caller through the chord table.
+fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
+    let mut out = Vec::new();
+    for &b in bytes {
+        if !esc.is_empty() {
+            match (esc.as_slice(), b) {
+                ([0x1b], b'[') => {
+                    esc.push(b);
+                    continue;
+                }
+                ([0x1b], _) => {
+                    // The pending ESC was a bare Esc press; emit it, then let the
+                    // fresh byte fall through to be processed below.
+                    out.push(ModalKey::Esc);
+                    esc.clear();
+                }
+                ([0x1b, b'['], b'A') => {
+                    out.push(ModalKey::Up);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'B') => {
+                    out.push(ModalKey::Down);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'C') => {
+                    out.push(ModalKey::Right);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'D') => {
+                    out.push(ModalKey::Left);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'5') | ([0x1b, b'['], b'6') => {
+                    esc.push(b); // PageUp `ESC[5~` / PageDown `ESC[6~` pending
+                    continue;
+                }
+                ([0x1b, b'[', b'5'], b'~') => {
+                    out.push(ModalKey::PageUp);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'[', b'6'], b'~') => {
+                    out.push(ModalKey::PageDown);
+                    esc.clear();
+                    continue;
+                }
+                _ => {
+                    // Unknown escape tail: swallow it whole (never leak).
+                    esc.clear();
+                    continue;
+                }
+            }
+        }
+        match b {
+            0x1b => esc.push(0x1b),
+            b'\r' | b'\n' => out.push(ModalKey::Enter),
+            _ => out.push(ModalKey::Byte(b)),
+        }
+    }
+    out
+}
+
+/// Which-key modal keys (x-8ccf US3). Esc closes; arrows/pgup scroll+select;
+/// Enter/`click` run the selected row; a bound printable key runs immediately
+/// through the shared chord dispatch (which-key), an unbound one dismisses. Esc
+/// is folded like every other overlay (carried across reads) so a split arrow
+/// sequence can never leak its tail into a pane (codex P2). No key ever reaches
+/// a pane.
+async fn keys_modal_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.keys_modal_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.keys_modal_esc = esc;
+    for tok in toks {
+        if view.keys_modal.is_none() {
+            break; // closed mid-chunk: swallow the rest, never forward
+        }
+        match tok {
+            ModalKey::Esc => view.keys_modal = None,
+            ModalKey::Up => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Up);
+                }
+                view.follow_modal_selection();
+            }
+            ModalKey::Down => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Down);
+                }
+                view.follow_modal_selection();
+            }
+            ModalKey::Left => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Left);
+                }
+            }
+            ModalKey::Right => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Right);
+                }
+            }
+            ModalKey::PageUp => {
+                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.scroll_by(-page);
+                    m.popup.clamp_sel_to_view(trows); // Enter never runs an off-screen row
+                }
+            }
+            ModalKey::PageDown => {
+                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.scroll_by(page);
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::Enter => {
+                if matches!(
+                    keys_modal_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            ModalKey::Byte(b) => match resolve_chord(b) {
+                // Unbound key dismisses (AC2-EDGE): no action fires.
+                Event::Bell => view.keys_modal = None,
+                // Bound key runs immediately through the SAME dispatch a typed
+                // chord uses (Locked 3), then the modal closes.
+                ev => {
+                    view.keys_modal = None;
+                    if matches!(
+                        dispatch_event(view, ev, sock_w).await?,
+                        DispatchFlow::Detach
+                    ) {
+                        return Ok(StdinFlow::Detach);
+                    }
+                }
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Run the modal's selected row (Enter/click) through the shared dispatch, then
+/// close - a header/meta row with no chord BELs and stays open (nothing ran, so
+/// the "execute always closes" invariant is not tripped). Returns the dispatch
+/// flow so a detach chord (leader+d) run from the modal actually detaches.
+async fn keys_modal_execute_selected(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    let ev = view.keys_modal.as_ref().and_then(|m| {
+        m.popup
+            .selected()
+            .and_then(|(ri, _)| m.row_events.get(ri).cloned().flatten())
+    });
+    match ev {
+        Some(ev) => {
+            view.keys_modal = None;
+            dispatch_event(view, ev, sock_w).await
+        }
+        None => {
+            let _ = raw_out(b"\x07");
+            Ok(DispatchFlow::Continue)
+        }
+    }
+}
+
+/// One mouse report while the which-key modal is open (x-8ccf US3): hover moves
+/// the selection, the wheel scrolls, a left click on a row runs it, a click off
+/// the popup dismisses (herdr click-elsewhere).
+async fn keys_modal_mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::WheelUp => {
+            if let Some(m) = view.keys_modal.as_mut() {
+                m.popup.scroll_by(-3);
+            }
+        }
+        MouseKind::WheelDown => {
+            if let Some(m) = view.keys_modal.as_mut() {
+                m.popup.scroll_by(3);
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => match view.keys_modal_hit(rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.select(t);
+                }
+                if matches!(
+                    keys_modal_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            None => view.keys_modal = None, // click off the popup dismisses
+        },
+        _ => {}
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Run a row-menu entry (x-8ccf US2) against the LIVE agent row (resolved by the
+/// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
+/// P1), never a misrouted action; every action maps to an existing Command /
+/// overlay / confirm (zero proto).
+async fn execute_row_menu_action(
+    view: &mut View,
+    action: MenuAction,
+    target: AgentIdent,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    // Fail closed unless the identity resolves to EXACTLY one live row: two rows
+    // sharing a name must never let a menu act on the wrong one (codex P1).
+    let mut hits = view.layout.agents.iter().filter(|a| target.matches(a));
+    let a = match (hits.next(), hits.next()) {
+        (Some(a), None) => a.clone(),
+        _ => {
+            view.set_notice(format!("agent {} is no longer uniquely here", target.name));
+            return Ok(());
+        }
+    };
+    match action {
+        MenuAction::NewTab | MenuAction::Split(_) => {
+            let Some(id) = a.attach_id.clone() else {
+                view.set_notice("agent is no longer attachable".into());
+                return Ok(());
+            };
+            let split = match action {
+                MenuAction::Split(d) => Some(d),
+                _ => None,
+            };
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::AttachAgent {
+                    id,
+                    placement: PanePlacement {
+                        target: PaneTarget::CurrentRoute,
+                        split,
+                    },
+                }),
+            )
+            .await
+            .map_err(|e| format!("attach send failed: {e}"))?;
+        }
+        MenuAction::Focus => match a.pane_id {
+            Some(pid) => write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
+                .await
+                .map_err(|e| format!("focus send failed: {e}"))?,
+            None => view.set_notice("agent has no pane here".into()),
+        },
+        MenuAction::Peek => {
+            let idx = view
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(x) if target.matches(x)));
+            match idx {
+                Some(idx) => fetch_peek(view, idx, a.name.clone(), sock_w).await?,
+                None => view.set_notice("agent is no longer here".into()),
+            }
+        }
+        MenuAction::Stop | MenuAction::Remove => {
+            // A confirm owns the bottom row; a too-short terminal refuses rather
+            // than arm an invisible prompt (matching the selector's stop/reap).
+            if view.term.0 < MIN_ROWS_FOR_STATUS {
+                view.set_notice("terminal too short for the confirm prompt".into());
+                return Ok(());
+            }
+            let kind = match (action, a.external, a.attach_id.clone()) {
+                (MenuAction::Stop, true, Some(id)) => ConfirmKind::StopExternal {
+                    attach_id: id,
+                    name: a.name.clone(),
+                },
+                (MenuAction::Stop, _, _) => ConfirmKind::StopAgent {
+                    name: a.name.clone(),
+                },
+                (MenuAction::Remove, true, Some(id)) => ConfirmKind::RemoveExternal {
+                    attach_id: id,
+                    name: a.name.clone(),
+                },
+                (_, _, _) => ConfirmKind::RemoveAgent {
+                    name: a.name.clone(),
+                },
+            };
+            view.open_confirm(ConfirmAction {
+                action: kind,
+                label: a.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Run the row menu's selected entry (Enter/click), then close - the popup never
+/// lingers after execute (AC1-FR).
+async fn row_menu_execute_selected(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let picked = view.row_menu.as_ref().and_then(|m| {
+        m.actions
+            .get(m.popup.sel)
+            .copied()
+            .map(|a| (a, m.target.clone()))
+    });
+    view.row_menu = None;
+    if let Some((action, target)) = picked {
+        execute_row_menu_action(view, action, target, sock_w).await?;
+    }
+    Ok(())
+}
+
+/// Row-menu keys (x-8ccf US2): arrows walk the entries + 2x2 grid (scrolling to
+/// keep the selection on-screen), pgup/pgdn scroll, Enter runs the selection,
+/// Esc/`q`/any unbound key dismiss (the shared popup contract, codex P2). Esc is
+/// carried across reads like every overlay, so a split arrow never leaks; no key
+/// reaches a pane.
+async fn row_menu_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let trows = view.term.0 as usize;
+    let mut esc = std::mem::take(&mut view.row_menu_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.row_menu_esc = esc;
+    for tok in toks {
+        if view.row_menu.is_none() {
+            break;
+        }
+        match tok {
+            ModalKey::Esc => view.row_menu = None,
+            ModalKey::Up => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Up);
+                    m.popup.follow_sel(trows);
+                }
+            }
+            ModalKey::Down => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Down);
+                    m.popup.follow_sel(trows);
+                }
+            }
+            ModalKey::Left => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Left);
+                }
+            }
+            ModalKey::Right => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Right);
+                }
+            }
+            ModalKey::PageUp => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.scroll_by(-(trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::PageDown => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.scroll_by((trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
+            // Any other (unbound) key dismisses, per the shared popup contract.
+            ModalKey::Byte(_) => view.row_menu = None,
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// One mouse report while the row menu is open (x-8ccf US2): hover selects, a
+/// left click runs the entry, a right press re-anchors on the row under the
+/// pointer (or dismisses off the sideline), a click off the popup dismisses.
+async fn row_menu_mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = view.row_menu_hit(rep.row, rep.col) {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => match view.row_menu_hit(rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.select(t);
+                }
+                row_menu_execute_selected(view, sock_w).await?;
+            }
+            None => view.row_menu = None,
+        },
+        MouseKind::Press(MouseButton::Right) => match view.sideline_row_at(rep.row, rep.col) {
+            // Re-anchor on the row under the second right-press (never stack two
+            // menus); a non-agent row leaves nothing open.
+            Some(i) => {
+                if !view.open_row_menu(
+                    i,
+                    Anchor::At {
+                        row: rep.row,
+                        col: rep.col,
+                    },
+                ) {
+                    view.row_menu = None;
+                }
+            }
+            None => view.row_menu = None,
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Run one aux-popup action (x-8ccf US4/US5). Menu entries open a surface or
+/// detach; settings toggles flip a session-local view flag and rebuild the modal
+/// so its glyph reflects the new state (the popup stays open for another toggle).
+async fn execute_aux_action(
+    view: &mut View,
+    action: AuxAction,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    match action {
+        AuxAction::OpenKeybinds => {
+            view.aux = None;
+            view.open_keys_modal();
+        }
+        AuxAction::OpenSettings => view.aux = Some(view.build_settings_modal()),
+        AuxAction::Detach => {
+            view.aux = None;
+            return Ok(DispatchFlow::Detach);
+        }
+        AuxAction::ToggleHoverFocus => {
+            view.hover_focus = !view.hover_focus;
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::ToggleStatus => {
+            view.status_on = !view.status_on;
+            // The status row changed the content area; report the new size so the
+            // panes reflow (same accounting as Event::ToggleStatus).
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+            view.reopen_settings_keeping_sel();
+        }
+    }
+    Ok(DispatchFlow::Continue)
+}
+
+/// Run the aux popup's selected row (Enter/click), propagating a detach.
+async fn aux_execute_selected(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    let picked = view
+        .aux
+        .as_ref()
+        .and_then(|m| m.actions.get(m.popup.sel).copied());
+    match picked {
+        Some(a) => execute_aux_action(view, a, sock_w).await,
+        None => {
+            let _ = raw_out(b"\x07");
+            Ok(DispatchFlow::Continue)
+        }
+    }
+}
+
+/// Aux-popup keys (US4/US5): arrows select (scrolling to keep the selection
+/// visible), pgup/pgdn scroll, Enter runs, Esc/`q`/any unbound key dismiss (the
+/// shared popup contract, codex P2); a detach entry propagates StdinFlow::Detach.
+/// Esc is carried across reads so a split arrow never leaks into a pane.
+async fn aux_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let trows = view.term.0 as usize;
+    let mut esc = std::mem::take(&mut view.aux_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.aux_esc = esc;
+    for tok in toks {
+        if view.aux.is_none() {
+            break;
+        }
+        match tok {
+            ModalKey::Esc => view.aux = None,
+            ModalKey::Up => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Up);
+                    m.popup.follow_sel(trows);
+                }
+            }
+            ModalKey::Down => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Down);
+                    m.popup.follow_sel(trows);
+                }
+            }
+            ModalKey::Left => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Left);
+                }
+            }
+            ModalKey::Right => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Right);
+                }
+            }
+            ModalKey::PageUp => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.scroll_by(-(trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::PageDown => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.scroll_by((trows as isize - 2).max(1));
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::Enter => {
+                if matches!(
+                    aux_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            // Any other (unbound) key dismisses, per the shared popup contract.
+            ModalKey::Byte(_) => view.aux = None,
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// One mouse report while an aux popup is open (US4/US5): hover selects, a left
+/// click runs the entry (propagating detach), a click off the popup dismisses.
+async fn aux_mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = view.aux_hit(rep.row, rep.col) {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => match view.aux_hit(rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.select(t);
+                }
+                if matches!(
+                    aux_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            None => view.aux = None,
+        },
+        _ => {}
     }
     Ok(StdinFlow::Continue)
 }
@@ -4157,10 +5246,16 @@ async fn peek_keys(
                 }
             }
             0x1b | b'q' => {
-                // Close peek only; the selector stays open with its cursor synced
-                // to the last-peeked row (AC2-UI).
+                // Close peek. When peek was opened FROM the selector it stays
+                // open underneath, so re-point its cursor to the peeked row
+                // (AC2-UI). When peek was opened standalone (x-8ccf US2:
+                // right-click a row -> Peek, selector closed), Esc must return to
+                // normal pane input, NOT drop into panel-selector mode.
+                let restore = view.selector.is_some();
                 view.clear_peek();
-                view.selector = Some(cursor);
+                if restore {
+                    view.selector = Some(cursor);
+                }
             }
             // Everything else is swallowed - never a pane leak (leader-layer
             // invariant). h (left-arrow) has no peek action.
@@ -4488,6 +5583,15 @@ async fn selector_keys(
                 }
             }
             b'm' => {
+                // x-8ccf US2: `m` on an AGENT row opens its context menu
+                // (mouse-off parity), anchored at the row and sitting over the
+                // selector like peek; Esc drops back into the selector.
+                if matches!(view.display_rows().get(cur), Some(DisplayRow::Agent(_))) {
+                    let arow =
+                        (TAB_BAR_ROWS as usize + cur.saturating_sub(view.sideline_offset)) as u16;
+                    view.open_row_menu(cur, Anchor::At { row: arow, col: 1 });
+                    continue;
+                }
                 // Move a tab into another squad (x-96e8): open the numbered
                 // picker over the OTHER squads (a squad is moved with J/K, not
                 // m). Tab rows left the sideline (x-0090), so `m` on a squad row
@@ -6067,6 +7171,7 @@ mod tests {
             Some(ChromeHit::Confirm(_)) => "Confirm",
             Some(ChromeHit::OpenCreate) => "OpenCreate",
             Some(ChromeHit::ToggleExpand(_)) => "ToggleExpand",
+            Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
         }
     }
 
@@ -6508,23 +7613,393 @@ mod tests {
     }
 
     #[test]
-    fn client_compose_overlay_renders_key_table() {
-        // AC4-EDGE: leader+? renders the full table over the content area.
+    fn client_compose_keys_modal_renders_the_which_key_reference() {
+        // x-8ccf US3: leader+? opens the centered which-key modal (replacing the
+        // top-left poster) built from the single-source binding table.
         let mut view = two_pane_view();
-        view.term = (30, 80);
-        view.overlay = true;
+        view.term = (40, 80);
+        view.open_keys_modal();
         let text = frame_text(&view.compose());
-        assert!(text.contains("fno keys"), "table header present");
-        assert!(text.contains("any key dismisses"));
-        // x-653d AC5-HP: the table documents leader+f and its filters.
-        assert!(text.contains("f  find"), "key table documents leader+f");
-        assert!(text.contains("Tab state"), "and its type/Tab/goto filters");
+        assert!(text.contains("keybinds"), "modal title present");
+        assert!(text.contains("esc close"), "dismiss affordance present");
+        // Section headers + a sampling of bindings the table advertises.
+        assert!(text.contains("panes"), "section header");
+        assert!(text.contains("detach"), "the d binding's action");
         assert!(
-            text.contains(
-                "organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder"
-            ),
-            "80-column key table documents every organize gesture"
+            text.contains("find: goto pane/agent"),
+            "the f binding's action"
         );
+    }
+
+    #[test]
+    fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
+        // The default selection is the first binding; row_events[selected] must
+        // be exactly the Event a direct chord of that key would produce (Locked
+        // 3 parity, at the modal boundary).
+        let m = super::build_keys_modal();
+        let (ri, _) = m.popup.selected().expect("a selectable row");
+        let ev = m.row_events[ri].clone().expect("first row is executable");
+        // The first section is Global; its first binding is `w` -> OpenSelector.
+        assert_eq!(ev, crate::keys::resolve_chord(b'w'));
+    }
+
+    #[tokio::test]
+    async fn keys_modal_which_key_executes_a_bound_key_to_the_wire() {
+        // AC2-HP: tapping a bound key in the modal runs it immediately through
+        // the SAME dispatch a direct chord uses, and the modal closes.
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        v.open_keys_modal();
+        let mut buf: Vec<u8> = Vec::new();
+        keys_modal_keys(&mut v, b"%", &mut buf).await.unwrap();
+        assert!(v.keys_modal.is_none(), "executing a chord closes the modal");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::SplitH) => {}
+            other => panic!("expected SplitH from `%`, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn keys_modal_unbound_key_and_esc_dismiss_without_acting() {
+        // AC2-EDGE: an unbound key dismisses and NO action fires. Esc is FOLDED
+        // (carried across reads like every overlay, codex P2) so it resolves once
+        // a following byte disambiguates it from a split arrow.
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        let mut buf: Vec<u8> = Vec::new();
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, b"Z", &mut buf).await.unwrap();
+        assert!(v.keys_modal.is_none(), "unbound key dismisses");
+        assert!(buf.is_empty(), "unbound key sends nothing");
+        // A lone Esc is carried (no leak); the next byte flushes it as a dismiss.
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, b"\x1b", &mut buf).await.unwrap();
+        assert!(
+            v.keys_modal.is_some(),
+            "a lone Esc is carried, not acted on"
+        );
+        keys_modal_keys(&mut v, b"z", &mut buf).await.unwrap();
+        assert!(
+            v.keys_modal.is_none(),
+            "the carried Esc dismisses on the next key"
+        );
+        assert!(buf.is_empty(), "Esc sends nothing to a pane");
+    }
+
+    #[tokio::test]
+    async fn keys_modal_wheel_scrolls_and_click_off_dismisses() {
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (8, 80); // short: the binding list overflows and scrolls
+        v.open_keys_modal();
+        let mut buf: Vec<u8> = Vec::new();
+        let wheel = MouseReport {
+            row: 4,
+            col: 40,
+            kind: MouseKind::WheelDown,
+            shift: false,
+        };
+        keys_modal_mouse(&mut v, wheel, &mut buf).await.unwrap();
+        assert_eq!(
+            v.keys_modal.as_ref().unwrap().popup.scroll,
+            3,
+            "wheel scrolls"
+        );
+        // A left click off the popup (top-left corner) dismisses.
+        let click = MouseReport {
+            row: 0,
+            col: 0,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        keys_modal_mouse(&mut v, click, &mut buf).await.unwrap();
+        assert!(v.keys_modal.is_none(), "click off the popup dismisses");
+    }
+
+    #[test]
+    fn row_menu_entries_gate_by_agent_state() {
+        // US2: no dead item - a bg row gets new-tab + the 2x2 split grid; a pane
+        // row gets focus and NO splits (already placed); an exited row gets
+        // remove and no stop.
+        let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+            squad: None,
+            name: name.into(),
+            pane_id,
+            badge: None,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: attach.map(Into::into),
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        };
+        let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
+        assert!(bg.actions.contains(&super::MenuAction::NewTab));
+        assert!(bg.actions.contains(&super::MenuAction::Split(Dir::Right)));
+        assert!(bg.actions.contains(&super::MenuAction::Split(Dir::Up)));
+        assert!(bg.actions.contains(&super::MenuAction::Stop));
+        assert!(!bg.actions.contains(&super::MenuAction::Focus));
+        let pane = super::build_row_menu(&mk("p", Some(9), None, false), Anchor::Center);
+        assert!(pane.actions.contains(&super::MenuAction::Focus));
+        assert!(
+            !pane
+                .actions
+                .iter()
+                .any(|a| matches!(a, super::MenuAction::Split(_))),
+            "a placed pane row offers no splits"
+        );
+        let dead = super::build_row_menu(&mk("d", None, None, true), Anchor::Center);
+        assert!(dead.actions.contains(&super::MenuAction::Remove));
+        assert!(!dead.actions.contains(&super::MenuAction::Stop));
+    }
+
+    #[tokio::test]
+    async fn row_menu_bg_split_right_attaches_to_current_route() {
+        // AC1-HP: "Split Right" on a bg row sends AttachAgent placing it as a
+        // right split of the current tab - an existing command, zero proto bump.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Split(Dir::Right))
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "executing closes the menu");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert_eq!(placement.split, Some(Dir::Right));
+                assert!(matches!(
+                    placement.target,
+                    crate::proto::PaneTarget::CurrentRoute
+                ));
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_stale_target_notices_without_acting() {
+        // AC1-ERR: the target racing out between open and execute becomes a
+        // Notice, and nothing goes on the wire.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        v.open_row_menu(idx, Anchor::Center);
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Split(Dir::Right))
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        v.layout.agents.retain(|a| a.name != "bg-claude"); // it vanishes
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "a stale target sends nothing");
+        assert!(v.notice.is_some(), "and surfaces a notice");
+    }
+
+    #[test]
+    fn row_menu_opens_only_on_agent_rows() {
+        // Row 0 is a squad row, not an agent - the menu refuses (right-click
+        // there is swallowed as chrome).
+        let mut v = unified_rows_view();
+        assert!(!v.open_row_menu(0, Anchor::Center));
+        assert!(v.row_menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn row_menu_unbound_key_dismisses() {
+        // codex P2: the shared popup contract says an unbound key dismisses; the
+        // row menu must not just ring BEL and stay open.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        v.open_row_menu(idx, Anchor::Center);
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, b"z", &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "an unbound key dismisses the menu");
+    }
+
+    #[tokio::test]
+    async fn row_menu_disambiguates_same_named_agents() {
+        // codex P1: two rows share a name; the menu is pinned by the full
+        // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
+        // never the other same-named row.
+        let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+            squad: Some(1),
+            name: name.into(),
+            pane_id,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        };
+        let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
+        // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
+        let second = mk("dup", Some(9));
+        v.row_menu = Some(build_row_menu(&second, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Focus)
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::FocusPane(pid)) => {
+                assert_eq!(
+                    pid, 9,
+                    "focused the row the menu was opened on, not its twin"
+                );
+            }
+            other => panic!("expected FocusPane(9), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn footer_menu_region_routes_a_click_to_the_sideline_menu() {
+        // US4: a click on the footer's `☰ menu` region opens the MENU popup; the
+        // rest of the `+ new workspace` row still opens create.
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        let footer = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::NewSquad))
+            .unwrap();
+        let panel_w = v.panel_w() as usize;
+        let range = v
+            .footer_menu_range(panel_w)
+            .expect("a wide panel shows the menu button");
+        let trow = (TAB_BAR_ROWS as usize + footer - v.sideline_offset) as u16;
+        assert!(matches!(
+            v.chrome_hit(trow, range.start as u16),
+            Some(ChromeHit::OpenSidelineMenu { .. })
+        ));
+        assert!(matches!(v.chrome_hit(trow, 2), Some(ChromeHit::OpenCreate)));
+    }
+
+    #[tokio::test]
+    async fn sideline_menu_settings_toggle_flips_session_state_and_stays_open() {
+        // US4->US5: MENU -> settings chains, and a toggle flips session state and
+        // keeps the modal open (labeled session-only, no config write).
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.open_sideline_menu(Anchor::Center);
+        let settings = v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == AuxAction::OpenSettings)
+            .unwrap();
+        v.aux.as_mut().unwrap().popup.sel = settings;
+        let mut buf: Vec<u8> = Vec::new();
+        aux_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .contains(&AuxAction::ToggleHoverFocus));
+        let before = v.hover_focus;
+        let hf = v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == AuxAction::ToggleHoverFocus)
+            .unwrap();
+        v.aux.as_mut().unwrap().popup.sel = hf;
+        aux_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert_eq!(v.hover_focus, !before, "toggle flips session state");
+        assert!(v.aux.is_some(), "settings stays open for another toggle");
+    }
+
+    #[tokio::test]
+    async fn peek_from_right_click_esc_returns_to_pane_not_selector() {
+        // US2 review fix: peek opened standalone (right-click a row, selector
+        // closed) must close back to the pane on Esc, not drop into the panel
+        // selector (which assumed peek was opened from it).
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(v.selector.is_none());
+        fetch_peek(&mut v, idx, "bg-claude".to_string(), &mut buf)
+            .await
+            .unwrap();
+        assert!(v.peek.is_some());
+        peek_keys(&mut v, b"q", &mut buf).await.unwrap();
+        assert!(v.peek.is_none(), "peek closed");
+        assert!(
+            v.selector.is_none(),
+            "did NOT drop into panel-selector mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_toggle_preserves_keyboard_selection() {
+        // US5 review fix: toggling rebuilds the modal but keeps the selection, so
+        // a keyboard Enter re-toggles the SAME row instead of alternating.
+        let mut v = two_pane_view();
+        v.aux = Some(v.build_settings_modal());
+        assert!(v.aux.as_ref().unwrap().popup.targets().len() >= 2);
+        v.aux.as_mut().unwrap().popup.sel = 1; // the second toggle
+        let mut buf: Vec<u8> = Vec::new();
+        aux_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert_eq!(
+            v.aux.as_ref().unwrap().popup.sel,
+            1,
+            "selection stays on the toggled row after the rebuild"
+        );
+    }
+
+    #[tokio::test]
+    async fn sideline_menu_detach_entry_detaches() {
+        let mut v = two_pane_view();
+        v.open_sideline_menu(Anchor::Center);
+        let idx = v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == AuxAction::Detach)
+            .unwrap();
+        v.aux.as_mut().unwrap().popup.sel = idx;
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(matches!(
+            aux_execute_selected(&mut v, &mut buf).await.unwrap(),
+            DispatchFlow::Detach
+        ));
+        assert!(v.aux.is_none());
     }
 
     #[test]
