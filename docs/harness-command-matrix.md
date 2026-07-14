@@ -1,6 +1,6 @@
 # `fno agents`: every verb, per provider
 
-`fno agents` is one surface over five provider CLIs - `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode` - but the providers are not symmetric: substrates, session ids, and re-entry paths differ per CLI. This page is the source of truth for what each verb does and which providers it works against.
+`fno agents` is one surface over five provider CLIs - `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode` - but the providers are not symmetric: substrates, session IDs, and re-entry paths differ per CLI. This page is the source of truth for what each verb does and which providers it works against.
 
 Two runtimes serve the surface. The **Rust client** (`fno-agents`, the shipped default) intercepts most verbs; **Python** owns a handful (`whoami`, `top`, `peek`, `watch`, `chat`, plus internal helpers) and is the fallback when no binary is installed (`FNO_AGENTS_RUNTIME=python`). Routing is automatic - you type `fno agents <verb>` either way. Notably, **pane spawns are Python-owned by design**: the mux-hosted back half lives in the Python `cmd_spawn` path, and the router keeps every pane spawn there even when Rust mode is requested - so the default substrate works identically under both runtimes.
 
@@ -15,7 +15,7 @@ What each provider fundamentally is, from fno's point of view:
 | Substrates | pane, **bg**, headless | pane, headless | pane, headless | pane, headless | pane only |
 | Detached-thread lane (`--substrate bg`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | no |
 | Headless one-shot (`--substrate headless` / `-H`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | **no** (refuses, pointing to pane) |
-| Session id recorded | `claude_short_id` (jobId) + `claude_session_uuid` (full transcript uuid) | `codex_session_id` | `gemini_session_id` | **none** (stateless: plain-text output, no parseable id) | minted by opencode but not probed or resumed by fno |
+| Session id recorded | `claude_short_id` (jobId) + `claude_session_uuid` (full transcript UUID) | `codex_session_id` | `gemini_session_id` | **none** (stateless: plain-text output, no parseable ID) | minted by opencode but not probed or resumed by fno |
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | no |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
@@ -29,7 +29,7 @@ The pane substrate (the default) is the great equalizer: all five providers can 
 | `spawn <name> [msg]` | yes | yes | yes | yes | yes | Create + register a worker. Default substrate `pane` (mux-hosted PTY). |
 | `spawn --substrate bg` | yes | no | no | no | no | Persistent detached `claude --bg` thread. Hard error on any other provider, pointing to `headless`. |
 | `spawn --substrate headless` / `-H` / `--once` | yes | yes | yes | yes | no | One-shot: create + exchange + teardown. stdout is the provider reply. |
-| `spawn --resume <uuid>` | yes (bg only) | no | no | no | no | **Revive a dead session**: mints a fresh detached bg thread seeded from the persisted transcript uuid, re-registers the row. Requires `--substrate bg` and provider claude. |
+| `spawn --resume <uuid>` | yes (bg only) | no | no | no | no | **Revive a dead session**: mints a fresh detached bg thread seeded from the persisted transcript UUID, re-registers the row. Requires `--substrate bg` and provider claude. **Runtime caveat:** the `--resume` flag is wired only on the Python `cmd_spawn` path, so on an installed binary (default `auto`/`rust` runtime) the spawn auto-routes to the Rust client, which does not parse it; run it under `FNO_AGENTS_RUNTIME=python` until the flag joins the Python-only auto-route set. |
 | `spawn --model <m>` | pane+bg+headless | pane+headless | pane+headless | pane+headless | pane | Exact passthrough to the provider CLI. Every provider honors it on pane; the one-shot lanes forward it too (`codex exec --model`, `gemini --model`, `agy`, `claude -p --model`). |
 | `spawn --permission-mode <m>` | pane+bg+headless | pane | pane | pane | pane | Mapped approval mode (`claude -p`/`--bg` take it directly). Non-claude bg/headless lanes hardcode their own bypass form, so the flag is refused there (fail-closed, never silently dropped). Mutually exclusive with `--yolo`. |
 
@@ -50,11 +50,11 @@ Retired creation verbs (each prints a pointer and exits non-zero, never a silent
 
 The three re-entry verbs are easy to conflate; the axes that separate them:
 
-| | Session must be live? | Where you end up | Id it keys on |
+| | Session must be live? | Where you end up | ID it keys on |
 |---|---|---|---|
 | `attach` / `resume` (claude) | yes | your terminal, inside the session's TUI | `claude_short_id` (8-hex jobId) |
-| `resume` (codex/gemini) | recorded session | your terminal, provider resume CLI | provider session id |
-| `spawn --resume <uuid>` | **no - it revives the dead** | a new detached bg worker + registry row (same conversation: `--resume` keeps the session uuid; only the supervisor and its jobId are new) | `claude_session_uuid` (full transcript uuid) |
+| `resume` (codex/gemini) | recorded session | your terminal, provider resume CLI | provider session ID |
+| `spawn --resume <uuid>` | **no - it revives the dead** | a new detached bg worker + registry row (same conversation: `--resume` keeps the session UUID; only the supervisor and its jobId are new) | `claude_session_uuid` (full transcript UUID) |
 
 ## Verbs: registry and admin (provider-agnostic)
 
@@ -64,7 +64,7 @@ These operate on the registry / daemon, not on a provider CLI, so they work for 
 |------|---|
 | `list` | List registered agents with filters (includes discovered live claude sessions). |
 | `status` | Daemon liveness + per-agent state (`status-v1.json`; warns on binary drift). |
-| `whoami` | Print THIS worker's own registered mesh name + session id. Run it when confused after compaction. |
+| `whoami` | Print THIS worker's own registered mesh name + session ID. Run it when confused after compaction. |
 | `top` | Every live worker process - fno-spawned and not - with RSS. |
 | `trace <name>` | Trace an agent's dispatch lifecycle from `events.jsonl`. |
 | `stop <name>` | Stop the underlying session (idempotent; already-exited is a clean no-op). |
@@ -124,10 +124,10 @@ Retired verbs print these pointers and exit non-zero, so scripts fail loud rathe
 
 ## Why the asymmetries exist
 
-- **claude** is the only provider with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, `chat`, and dead-session revival (`spawn --resume` off the persisted transcript uuid) possible. When the supervisor dies, the short jobId dies with it - only the full session uuid survives on disk, which is why revival and attach key on different ids.
+- **claude** is the only provider with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, `chat`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
 - **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
-- **agy** emits plain text with no parseable session id, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
-- **opencode** is pane-hostable with a readiness detector and badge manifest, but fno does not probe or resume its session ids this release, and its headless lane is not wired - live-only, via the pane.
+- **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
+- **opencode** is pane-hostable with a readiness detector and badge manifest, but fno does not probe or resume its session IDs this release, and its headless lane is not wired - live-only, via the pane.
 
 ## See also
 
