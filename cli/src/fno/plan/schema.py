@@ -46,6 +46,13 @@ class PlanFrontmatter(BaseModel):
     distinct historical keys, and this model deliberately does not police them.
     """
 
+    # Canonical keys (x-f34f US7): `node`, `created`, `blocked_by`, `type` are
+    # the single authority per axis. Their legacy synonyms (`graph_node_id`,
+    # `created_at`, `depends_on`, `kind`) are collapsed by `fno plan
+    # migrate-keys`; readers keep a one-release fallback (e.g. reconcile's
+    # _plan_link_id reads node -> claims -> graph_node_id). `deliverable_type`
+    # stays distinct from `type` (different axes, both read). `claims` is an
+    # observed duplicate of `node`, dropped by the migration where identical.
     node: str
     status: PlanStatus
     # datetime BEFORE date so a full timestamp keeps its time (specific-first;
