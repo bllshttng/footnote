@@ -33,13 +33,26 @@ from typing import Mapping, Optional
 
 # Bump when a capability KEY is added/removed or a value's meaning changes, so a
 # consumer can assert the shape it was written against.
-MAP_VERSION = 2  # +dispatch_command (x-567d)
+MAP_VERSION = 3  # dispatch_command -> command_surface + normalize_command (x-a5e4)
 
-# Prose-brief dispatch template for harnesses with NO native footnote skill
-# surface (gemini extension / opencode plugin). A general coding agent reads the
-# node via the fno CLI and delivers; `{id}` is substituted by resolve_dispatch.
-# This is the builtin default only - config.dispatch.command and a node's own
-# brief (x-f78d) override it.
+# Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
+# One axis, three values, the single source both dispatch surfaces normalize
+# through (autonomous `/target bg` + `/agent spawn`):
+#   "slash"       claude, agy       -> "/verb ..."     native slash command
+#   "codex-skill" codex             -> "$fno:verb ..." plugin skill expansion (verified)
+#   "prose"       gemini, opencode  -> a prose brief   (no slash/skill surface)
+_SLASH, _CODEX_SKILL, _PROSE = "slash", "codex-skill", "prose"
+
+# The canonical (claude-syntax) autonomous dispatch command. normalize_command
+# maps it per-harness for the builtin `dispatch_command`, so the per-harness
+# spelling lives in ONE place (command_surface), not five literal strings.
+_AUTONOMOUS_COMMAND = "/target no-merge {id}"
+
+# Prose-brief dispatch template for prose-surface harnesses (gemini extension /
+# opencode plugin) with NO native footnote skill. A general coding agent reads
+# the node via the fno CLI and delivers; `{id}` is substituted by
+# resolve_dispatch. Builtin default only - config.dispatch.command and a node's
+# own brief (x-f78d) override it.
 _PROSE_BRIEF = (
     "Implement footnote backlog node {id} end-to-end. Read its spec with "
     "`fno backlog get {id}` (title, details, plan_path), then implement it: write "
@@ -47,10 +60,9 @@ _PROSE_BRIEF = (
     "pull request. Do NOT merge the PR."
 )
 
-# capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Every
-# harness now carries a `dispatch_command` (x-567d): a native skill invocation
-# where one exists and is verified (claude `/target`, codex `$fno:target`, agy
-# `/target`), else the prose-brief lane (gemini/opencode). `bg` stays claude-only.
+# capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Each
+# harness carries a `command_surface` (x-a5e4): the invocation form its native
+# footnote skill takes, or `prose` where none exists. `bg` stays claude-only.
 _HARNESS_CAPS: dict[str, dict] = {
     "claude": {
         "permission_bypass": ["--dangerously-skip-permissions"],
@@ -58,7 +70,7 @@ _HARNESS_CAPS: dict[str, dict] = {
         "bg": True,  # claude --bg
         "stop_hook": "native",
         # Native slash-command invocation of the target skill (verified).
-        "dispatch_command": "/target no-merge {id}",
+        "command_surface": _SLASH,
     },
     "codex": {
         "permission_bypass": ["--dangerously-bypass-approvals-and-sandbox"],
@@ -66,9 +78,9 @@ _HARNESS_CAPS: dict[str, dict] = {
         "bg": False,  # -> headless
         "stop_hook": "native",
         # `$fno:target` invokes the footnote plugin skill. VERIFIED: `codex exec`
-        # injects the fno skill definitions and expands `$fno:target` (not a
+        # injects the fno skill definitions and expands `$fno:verb` (not a
         # literal prompt). Supersedes the old "prose brief only" guidance.
-        "dispatch_command": "$fno:target no-merge {id}",
+        "command_surface": _CODEX_SKILL,
     },
     "gemini": {
         "permission_bypass": ["--yolo"],
@@ -77,9 +89,8 @@ _HARNESS_CAPS: dict[str, dict] = {
         "stop_hook": "native",
         # gemini CLI is effectively deprecated (agy is its successor) and footnote
         # is a gemini *extension* (context injection), not a gemini *skill* - so
-        # there is no verified `/target` surface. Prose-brief lane: a general
-        # coding agent implements node {id} from the repo + `fno backlog get`.
-        "dispatch_command": _PROSE_BRIEF,
+        # there is no verified `/target` surface. Prose-brief lane.
+        "command_surface": _PROSE,
     },
     "agy": {
         # Antigravity CLI (gemini's successor). Its migration guide converts
@@ -91,7 +102,7 @@ _HARNESS_CAPS: dict[str, dict] = {
         "resume": "native-continue",
         "bg": False,
         "stop_hook": "native",
-        "dispatch_command": "/target no-merge {id}",
+        "command_surface": _SLASH,
     },
     "opencode": {
         # Headless one-shot `opencode run` (wired x-567d); bypass confirmed
@@ -102,9 +113,40 @@ _HARNESS_CAPS: dict[str, dict] = {
         "resume": "native-continue",  # opencode run --continue
         "bg": False,
         "stop_hook": "native",
-        "dispatch_command": _PROSE_BRIEF,
+        "command_surface": _PROSE,
     },
 }
+
+
+def normalize_command(command: str, harness: str) -> str:
+    """Translate a claude-syntax footnote slash command to ``harness``'s native
+    invocation - the single normalizer both dispatch surfaces route through.
+
+    ``/target no-merge {id}`` becomes, per the harness ``command_surface``:
+      - ``slash`` (claude, agy)      -> verbatim ``/target no-merge {id}``
+      - ``codex-skill`` (codex)      -> ``$fno:target no-merge {id}`` (swap the
+        leading ``/verb`` for ``$fno:verb``; codex exec expands the plugin skill)
+      - ``prose`` (gemini, opencode) -> the prose brief; a slash/skill command
+        has no surface there and would run verbatim as a no-op, so the worker
+        gets a brief that names the node and reads it via the CLI instead.
+
+    ``command`` is expected to lead with ``/`` (a footnote slash command); a
+    non-slash string is returned unchanged for the slash/codex surfaces (nothing
+    to rewrite). Pure string transform; no config or IO."""
+    surface = capabilities(harness)["command_surface"]
+    if surface == _PROSE:
+        return _PROSE_BRIEF
+    cmd = command.strip()
+    if surface == _CODEX_SKILL and cmd.startswith("/"):
+        return "$fno:" + cmd[1:]
+    return cmd
+
+
+def dispatch_command(harness: str) -> str:
+    """Builtin autonomous dispatch command for ``harness``: the per-harness
+    normalization of ``/target no-merge {id}``. ``config.dispatch.command`` and a
+    node ``dispatch_verb`` override this in :func:`resolve_dispatch`."""
+    return normalize_command(_AUTONOMOUS_COMMAND, harness)
 
 
 class DispatchResolveError(ValueError):
@@ -270,12 +312,17 @@ def resolve_dispatch(
                 f"dispatch verb {chosen_verb!r} is not in the allowlist "
                 f"({', '.join(allowed)}); set config.dispatch.allowed_verbs to extend it"
             )
-        template = f"{chosen_verb} {{id}}"
+        # NORMALIZE per-harness (x-a5e4): a node's `/target` verb becomes
+        # `$fno:target {id}` on codex, `/target {id}` on claude/agy, a prose brief
+        # on gemini/opencode - NOT the old claude-syntax `/target {id}` for every
+        # harness (which handed a codex worker a Claude slash command it can't run).
+        template = normalize_command(f"{chosen_verb} {{id}}", chosen_harness)
         decision.append(f"command=verb({chosen_verb})")
     else:
-        # Per-harness builtin (x-567d): codex `$fno:target`, agy `/target`, claude
-        # `/target`, opencode/gemini prose brief. config.dispatch.command overrides.
-        template = (cfg.get("command") or caps["dispatch_command"]).strip()
+        # Per-harness builtin (x-a5e4): the normalize of `/target no-merge {id}` -
+        # codex `$fno:target`, agy/claude `/target`, opencode/gemini prose brief.
+        # config.dispatch.command overrides.
+        template = (cfg.get("command") or dispatch_command(chosen_harness)).strip()
         decision.append("command=config" if cfg.get("command") else "command=builtin")
 
     if not template:
@@ -312,6 +359,7 @@ def resolve_dispatch(
         "harness": chosen_harness,
         "substrate": chosen_substrate,
         "command": resolved_command,
+        "command_surface": caps["command_surface"],
         "permission_bypass": list(caps["permission_bypass"]),
         "resume": caps["resume"],
         "bg": caps["bg"],

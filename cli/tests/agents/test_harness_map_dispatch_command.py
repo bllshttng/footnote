@@ -11,6 +11,8 @@ import pytest
 from fno.agents.harness_map import (
     MAP_VERSION,
     DispatchResolveError,
+    dispatch_command,
+    normalize_command,
     resolve_dispatch,
 )
 
@@ -72,5 +74,64 @@ def test_template_without_id_is_rejected():
 
 def test_map_version_bumped_for_dispatch_command():
     # A consumer asserting the shape it was written against must see the bump.
-    assert MAP_VERSION >= 2
+    assert MAP_VERSION >= 3
     assert resolve_dispatch(harness="claude")["map_version"] == MAP_VERSION
+
+
+# --- the normalizer (x-a5e4) ------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    "harness,expected",
+    [
+        ("claude", "/target no-merge {id}"),
+        ("agy", "/target no-merge {id}"),
+        ("codex", "$fno:target no-merge {id}"),
+    ],
+)
+def test_normalize_command_slash_and_codex(harness, expected):
+    assert normalize_command("/target no-merge {id}", harness) == expected
+
+
+@pytest.mark.parametrize("harness", ["opencode", "gemini"])
+def test_normalize_command_prose_returns_the_brief(harness):
+    out = normalize_command("/target no-merge {id}", harness)
+    assert not out.startswith("/")
+    assert not out.startswith("$fno")
+    assert "{id}" in out  # the brief still names the node for substitution
+
+
+def test_dispatch_command_builtin_matches_normalize():
+    # The builtin is exactly the normalize of the canonical autonomous command.
+    for h in ("claude", "codex", "agy", "opencode", "gemini"):
+        assert dispatch_command(h) == normalize_command("/target no-merge {id}", h)
+
+
+def test_command_surface_is_reported():
+    assert resolve_dispatch(harness="codex")["command_surface"] == "codex-skill"
+    assert resolve_dispatch(harness="claude")["command_surface"] == "slash"
+    assert resolve_dispatch(harness="opencode")["command_surface"] == "prose"
+
+
+# --- the verb-path fix (the codex P1 the handoff names) --------------------- #
+# A node's `dispatch_verb=/target` must be NORMALIZED per-harness, not left as
+# claude-syntax `/target` for every harness (which handed codex a slash command
+# it cannot run).
+
+
+def test_verb_path_normalizes_to_codex_skill():
+    out = resolve_dispatch(harness="codex", node_id="x-abcd", verb="/target")
+    assert out["command"] == "$fno:target x-abcd"
+
+
+@pytest.mark.parametrize("harness", ["claude", "agy"])
+def test_verb_path_keeps_slash_for_slash_harnesses(harness):
+    out = resolve_dispatch(harness=harness, node_id="x-abcd", verb="/target")
+    assert out["command"] == "/target x-abcd"
+
+
+def test_verb_path_falls_to_prose_for_prose_harness():
+    out = resolve_dispatch(harness="opencode", node_id="x-abcd", verb="/target")
+    assert not out["command"].startswith("/")
+    assert not out["command"].startswith("$fno")
+    assert "x-abcd" in out["command"]
