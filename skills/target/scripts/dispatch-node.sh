@@ -38,14 +38,16 @@
 #   summary: launched=<n> parked=<n> already=<n> skipped=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
 # Invariants (Failure Modes section of the plan):
-#   - The bg worker is ALWAYS dispatched via
-#     `fno agents spawn --provider claude --substrate bg`, which lands a DETACHED
-#     `claude --bg` thread (x-2c27): it auto-worktrees and runs to completion
-#     unattended, and shows in `claude agents` (attach/peek/reply later). The
-#     `--substrate bg` key is required - the x-3ab8 default `pane` (owned-PTY)
-#     would stall a fire-and-forget dispatch at a placement prompt. NEVER
-#     `--bare`/`-p` (those force the API-credit pool and strip skills/hooks);
-#     `bg` is the subscription `claude --bg` lane, not `-p`. Subscription only.
+#   - Provider + substrate come from `fno dispatch resolve` (the x-4d85
+#     harness-capability map), NOT a hardcode (x-567d). claude resolves to `bg`
+#     (the DETACHED `claude --bg` thread, x-2c27: auto-worktrees, runs unattended,
+#     shows in `claude agents`); every other harness resolves to `headless` (a
+#     one-shot that runs to completion) with a loud fallback event. The default
+#     is never `pane` (x-3ab8's owned-PTY default would stall a fire-and-forget
+#     dispatch at a placement prompt). NEVER `--bare`/`-p` for the bg lane (those
+#     force the API-credit pool and strip skills/hooks); `bg` is the subscription
+#     `claude --bg` lane. An unresolvable harness hard-fails loudly (AC2-ERR),
+#     never a silent claude default.
 #   - A failed dispatch is surfaced and leaves the node `ready`/re-dispatchable;
 #     never reports a launch that did not happen; never silently swallows.
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
@@ -137,6 +139,37 @@ fi
 
 if [[ "$ALL_READY" -eq 1 ]]; then
   echo "dispatching up to ${#NODES[@]} worker(s) (~${#NODES[@]}x subscription quota while active; quota is the throttle)" >&2
+fi
+
+# ---- resolve provider + substrate from the harness-capability map (x-567d) ---
+# Provider + substrate are NO LONGER hardcoded claude/bg. `fno dispatch resolve`
+# reads config.dispatch.harness and returns the autonomous substrate: claude->bg
+# (today's path, byte-identical) or codex/gemini/agy/opencode->headless. Three
+# outcomes, all LOUD, never a silent claude default:
+#   - substrate=bg      : the detached `claude --bg` thread (unchanged).
+#   - substrate=headless: a one-shot that runs to completion; a fallback event is
+#     emitted so an operator sees the downgrade (epic AC1-EDGE).
+#   - resolve fails      : an unknown/misconfigured harness has NO autonomous
+#     substrate -> hard fail naming config.dispatch.harness; every node stays
+#     ready, nothing launches, a failure event is recorded (epic AC2-ERR).
+# `fno dispatch resolve` / `fno event emit` are top-level Python verbs (not in the
+# `agents` group), so they are immune to FNO_AGENTS_RUNTIME=rust - no pin needed.
+resolve_json="$(fno dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
+DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness // empty' 2>/dev/null)"
+DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate // empty' 2>/dev/null)"
+if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
+  reason="no autonomous substrate resolved (rc=$resolve_rc); set config.dispatch.harness to a harness with one (claude=bg, codex/gemini/agy/opencode=headless)"
+  fno event emit -t dispatch_no_autonomous_substrate -s backlog \
+    -d "{\"reason\":\"dispatch resolve rc=$resolve_rc\",\"config_key\":\"config.dispatch.harness\"}" >/dev/null 2>&1 || true
+  for id in "${NODES[@]}"; do echo "failed $id reason=\"$reason\""; done
+  echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=${#NODES[@]} capped=0"
+  exit 1
+fi
+# Loud, once: a non-bg harness dispatches via headless (a one-shot, not detached).
+if [[ "$DISPATCH_SUBSTRATE" != "bg" ]]; then
+  echo "note: harness '$DISPATCH_PROVIDER' has no bg substrate; dispatching via headless (one-shot runs to completion, not a detached thread)" >&2
+  fno event emit -t dispatch_substrate_fallback -s backlog \
+    -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"bg\",\"to\":\"$DISPATCH_SUBSTRATE\"}" >/dev/null 2>&1 || true
 fi
 
 # ---- per-node dispatch ------------------------------------------------------
@@ -396,7 +429,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}--role build ${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\" route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}--role build ${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\" route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -429,17 +462,18 @@ for id in "${NODES[@]}"; do
   fi
 
   # ---- Dispatch, fire-and-forget ----
-  # `fno agents spawn --provider claude --substrate bg` lands a DETACHED
-  # `claude --bg` thread (x-2c27): it auto-worktrees, runs the node to
-  # completion unattended, and shows in `claude agents` (attach/peek/reply) -
-  # NOT an owned-PTY pane that would stall at a placement prompt. `--substrate
-  # bg` is the explicit routing key (the x-3ab8 default `pane` is the
-  # regression this fixes). Still the subscription lane (NEVER --bare/-p) and
-  # still fire-and-forget. The receipt parsed below is the claude-spawn JSON
-  # (byte-identical to the pre-x-3ab8 --bg lane's). name is a positional. Three
-  # branches keep the optional --cwd off an empty-array path (bash 3.2 set -u
-  # safe). stderr goes to a temp file, NOT 2>&1: a stderr warning must never
-  # pollute the JSON receipt parse below (house rule; gemini review PR #457).
+  # `fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE"`.
+  # For claude/bg this lands a DETACHED `claude --bg` thread (x-2c27): it
+  # auto-worktrees, runs the node to completion unattended, and shows in `claude
+  # agents` (attach/peek/reply) - NOT an owned-PTY pane that would stall at a
+  # placement prompt (the x-3ab8 default `pane` is the regression `bg` fixes). For
+  # a headless fallback it is a one-shot that runs to completion here. Still the
+  # subscription lane (NEVER --bare/-p) and still fire-and-forget. The bg receipt
+  # parsed below is the claude-spawn JSON; a headless one-shot has no short_id
+  # (see the substrate branch there). name is a positional. Three branches keep
+  # the optional --cwd off an empty-array path (bash 3.2 set -u safe). stderr goes
+  # to a temp file, NOT 2>&1: a stderr warning must never pollute the JSON receipt
+  # parse below (house rule; gemini review PR #457).
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
   # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->
@@ -448,7 +482,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
@@ -458,16 +492,16 @@ for id in "${NODES[@]}"; do
       # may not shell out to a repo-root script (shellout-drift gate).
       _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
       [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --provider claude --substrate bg "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then
@@ -486,17 +520,25 @@ for id in "${NODES[@]}"; do
     continue
   fi
 
-  # The claude spawn receipt is one compact JSON line on CLEAN stdout:
+  # Receipt shape is substrate-dependent (x-567d). bg lands a DETACHED thread and
+  # returns a compact JSON receipt with a short_id we require as launch proof:
   #   {"name": "...", "short_id": "<8hex>", "provider": "claude", "status": "live"}
-  # grep the receipt line first as defense in depth. No parseable short id on
-  # exit 0 => no launch we can prove; report honestly + release the reservation.
-  sid="$(printf '%s\n' "$spawn_out" | grep -F '"short_id"' | head -1 | jq -r '.short_id // empty' 2>/dev/null)"
-  if [[ -z "$sid" ]]; then
-    fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-    reason="$(printf '%s' "${spawn_out:-$spawn_err}" | tr '\n' ' ' | sed 's/"/'"'"'/g' | cut -c1-200)"
-    echo "failed $id reason=\"spawn exit 0 but no short_id receipt: $reason\""
-    n_failed=$((n_failed + 1))
-    continue
+  # headless is a ONE-SHOT that already ran to completion on exit 0 (no detached
+  # thread, no short_id) - the clean exit IS the proof, so we skip the short_id
+  # requirement and label the session `headless`.
+  if [[ "$DISPATCH_SUBSTRATE" == "bg" ]]; then
+    # grep the receipt line first as defense in depth. No parseable short id on
+    # exit 0 => no launch we can prove; report honestly + release the reservation.
+    sid="$(printf '%s\n' "$spawn_out" | grep -F '"short_id"' | head -1 | jq -r '.short_id // empty' 2>/dev/null)"
+    if [[ -z "$sid" ]]; then
+      fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      reason="$(printf '%s' "${spawn_out:-$spawn_err}" | tr '\n' ' ' | sed 's/"/'"'"'/g' | cut -c1-200)"
+      echo "failed $id reason=\"spawn exit 0 but no short_id receipt: $reason\""
+      n_failed=$((n_failed + 1))
+      continue
+    fi
+  else
+    sid="headless"
   fi
   # Launched. Leave the reservation to expire by TTL (the worker now owns
   # node:<id>, which guards later dispatches).
