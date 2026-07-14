@@ -135,6 +135,7 @@ def _make_claim(
     metadata: Optional[dict[str, Any]],
     pid: Optional[int],
     host: Optional[str],
+    harness: Optional[str] = None,
 ) -> Claim:
     acquired = now_ms()
     return Claim(
@@ -149,7 +150,9 @@ def _make_claim(
         # can read a foreign owner off the claim. This is the PRODUCTION writer
         # (`fno claim` forwards to this Python CLI), kept in lockstep with the
         # Rust make_claim resolver via the shared harness_identity markers.
-        harness=resolve_harness_identity().harness,
+        # An explicit `harness` (worktree guard) wins over the ambient env
+        # resolution so the caller can pin the owning harness deterministically.
+        harness=harness if harness is not None else resolve_harness_identity().harness,
         metadata=metadata or {},
     )
 
@@ -163,6 +166,7 @@ def acquire_claim(
     metadata: Optional[dict[str, Any]] = None,
     pid: Optional[int] = None,
     host: Optional[str] = None,
+    harness: Optional[str] = None,
     root: Optional[Path] = None,
 ) -> Claim:
     """Try to acquire a claim on ``key`` for ``holder``.
@@ -185,7 +189,7 @@ def acquire_claim(
     _validate_inputs(key, holder, ttl_ms)
     path = claim_path(key, root=root)
 
-    new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host)
+    new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
     payload = serialize_claim(new_claim)
 
     try:
@@ -209,12 +213,13 @@ def acquire_claim(
             metadata=metadata,
             pid=pid,
             host=host,
+            harness=harness,
             root=root,
         )
 
     if existing.holder == holder:
         # Idempotent re-acquire: refresh pid/host/acquired_at.
-        refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host)
+        refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
         _atomic_replace(path, serialize_claim(refreshed))
         emit_claim_idempotent_reacquired(refreshed, previous=existing)
         return refreshed
@@ -244,6 +249,7 @@ def acquire_claim(
                     metadata=metadata,
                     pid=pid,
                     host=host,
+                    harness=harness,
                     root=root,
                 )
 
@@ -268,6 +274,7 @@ def acquire_claim(
                         metadata=metadata,
                         pid=pid,
                         host=host,
+                        harness=harness,
                         root=root,
                     )
                 emit_claim_acquired(new_claim)
@@ -275,7 +282,7 @@ def acquire_claim(
 
             if existing.holder == holder:
                 # Raced into the idempotent path while we were grabbing the lock.
-                refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host)
+                refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
                 _atomic_replace(path, serialize_claim(refreshed))
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
                 return refreshed
