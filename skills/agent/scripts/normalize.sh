@@ -664,12 +664,33 @@ else
   esac
 fi
 
+# Command surface (slash|codex-skill|prose) from the harness-map normalizer
+# (fno.agents.harness_map), the single source both dispatch surfaces route
+# through - so /agent spawn never re-encodes the per-harness spelling and can't
+# drift from `/target bg`. `fno dispatch resolve` is authoritative; a static
+# fallback keeps a spawn working if fno is unreachable (mirrors resolve_project).
+resolve_command_surface() {
+  local _prov="$1" _line
+  _line="$(fno dispatch resolve --harness "$_prov" 2>/dev/null | sed -n 's/^command_surface=//p' | head -1)"
+  if [[ -n "$_line" ]]; then printf '%s' "$_line"; return 0; fi
+  case "$_prov" in
+    claude|agy) printf 'slash' ;;
+    codex)      printf 'codex-skill' ;;
+    *)          printf 'prose' ;;
+  esac
+}
+
 case "$payload_mode" in
   passthrough)
-    if [[ "$provider" != "claude" ]]; then
-      emit_error "$provider has no slash commands; '$msg' cannot be dispatched as a passthrough (use 'ask <prompt>' for a one-shot question, or a bare feature description for a build)"
-    fi
-    message="$msg"
+    # A leading-`/` footnote command. claude/agy run it verbatim; codex swaps
+    # `/verb` -> `$fno:verb` (plugin skill); a prose-surface provider has no
+    # slash/skill surface, so refuse (a literal `/target` would run as a no-op).
+    surface="$(resolve_command_surface "$provider")"
+    case "$surface" in
+      slash)       message="$msg" ;;
+      codex-skill) message="\$fno:${msg#/}" ;;
+      *)           emit_error "$provider has no slash/skill surface; '$msg' cannot be dispatched as a passthrough (use 'ask <prompt>' for a one-shot question, or a bare feature description for a build)" ;;
+    esac
     ;;
   ask)
     message="$msg"
@@ -691,23 +712,30 @@ If the work includes code changes, land them as a pull request for review; do no
     message="$msg"
     ;;
   build)
-    if [[ "$provider" == "claude" ]]; then
-      message="/target $msg"
-    else
-      # codex/gemini build BRIEF - prose, NEVER a literal `/target`. The PR-review
-      # (no-merge) intent becomes an instruction; --allow-merge drops it. The brief
-      # is the codex/gemini analogue of claude's `/target ... no-merge`.
-      if [[ "$ALLOW_MERGE" -eq 0 ]]; then
-        pr_clause="open a pull request for review; do not merge it"
-      else
-        pr_clause="open a pull request"
-      fi
-      if [[ -n "$NODE" ]]; then
-        message="Implement backlog node $NODE following the conventions in AGENTS.md (run \`fno backlog get $NODE\` for the spec). Commit your work and $pr_clause."
-      else
-        message="Implement the following, per the conventions in AGENTS.md, then commit and $pr_clause: $msg"
-      fi
-    fi
+    # PROVIDER-AWARE via the normalizer surface. claude/agy invoke the native
+    # `/target` skill; codex invokes `$fno:target` (both run the REAL pipeline);
+    # a prose-surface provider (gemini/opencode) has no skill, so it gets a build
+    # BRIEF instead - never a literal `/target` it would run as a no-op.
+    surface="$(resolve_command_surface "$provider")"
+    case "$surface" in
+      slash)       message="/target $msg" ;;
+      codex-skill) message="\$fno:target $msg" ;;
+      *)
+        # prose build BRIEF. The PR-review (no-merge) intent becomes an
+        # instruction; --allow-merge drops it. This is the analogue of claude's
+        # `/target ... no-merge` for a provider with no footnote skill surface.
+        if [[ "$ALLOW_MERGE" -eq 0 ]]; then
+          pr_clause="open a pull request for review; do not merge it"
+        else
+          pr_clause="open a pull request"
+        fi
+        if [[ -n "$NODE" ]]; then
+          message="Implement backlog node $NODE following the conventions in AGENTS.md (run \`fno backlog get $NODE\` for the spec). Commit your work and $pr_clause."
+        else
+          message="Implement the following, per the conventions in AGENTS.md, then commit and $pr_clause: $msg"
+        fi
+        ;;
+    esac
     ;;
 esac
 
@@ -721,8 +749,11 @@ esac
 # (sigma-review finding 4), so it must never be no-merge'd.
 case "$payload_mode" in
   build|passthrough)
+    # A native /target-family invocation (claude/agy `/target`, codex
+    # `$fno:target`) is no-merge'd; a prose brief carries "do not merge" prose
+    # already. Single-quote the `$fno:` literal so it is not read as a variable.
     case "$message" in
-      /target\ *|/target)
+      /target\ *|/target|'$fno:target '*|'$fno:target')
         if [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" no-merge "* ]]; then
           message="$message no-merge"
         fi

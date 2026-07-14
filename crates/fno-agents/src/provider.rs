@@ -894,13 +894,15 @@ impl Provider for OpencodeProvider {
     }
 
     fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
-        // `opencode run [prompt]` is the headless one-shot; `--auto`
-        // (auto-approve permissions) is the never-prompt lane so an
-        // unattended run cannot wedge on its first approval.
+        // `opencode run [prompt]` is the headless one-shot;
+        // `--dangerously-skip-permissions` (auto-approve permissions) is the
+        // never-prompt lane so an unattended run cannot wedge on its first
+        // approval. Confirmed vs opencode v1.14.50 `run --help` (x-567d); the
+        // docs' `--auto` is stale.
         vec![
             "opencode".into(),
             "run".into(),
-            "--auto".into(),
+            "--dangerously-skip-permissions".into(),
             ctx.message.clone(),
         ]
     }
@@ -910,7 +912,7 @@ impl Provider for OpencodeProvider {
         vec![
             "opencode".into(),
             "run".into(),
-            "--auto".into(),
+            "--dangerously-skip-permissions".into(),
             "--session".into(),
             ctx.session_id.clone(),
             ctx.message.clone(),
@@ -1272,10 +1274,18 @@ mod tests {
     #[test]
     fn opencode_create_argv_is_headless_run_never_bare_tui() {
         // The trait's create path is the headless `opencode run` one-shot
-        // (never-prompt via --auto); the bare-`opencode` TUI is the PANE form
-        // and lives in mux_spawn.build_pane_argv, not here.
+        // (never-prompt via --dangerously-skip-permissions); the bare-`opencode`
+        // TUI is the PANE form and lives in mux_spawn.build_pane_argv, not here.
         let argv = OpencodeProvider.create_argv(&create_ctx());
-        assert_eq!(argv, vec!["opencode", "run", "--auto", "build feature X"]);
+        assert_eq!(
+            argv,
+            vec![
+                "opencode",
+                "run",
+                "--dangerously-skip-permissions",
+                "build feature X"
+            ]
+        );
     }
 
     #[test]
@@ -1289,7 +1299,14 @@ mod tests {
         };
         assert_eq!(
             OpencodeProvider.resume_argv(&ctx),
-            vec!["opencode", "run", "--auto", "--session", "ses_abc", "m"]
+            vec![
+                "opencode",
+                "run",
+                "--dangerously-skip-permissions",
+                "--session",
+                "ses_abc",
+                "m"
+            ]
         );
     }
 

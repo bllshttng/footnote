@@ -948,18 +948,19 @@ fn client_spawn_permission_mode_and_yolo_mutually_exclusive() {
     );
 }
 
-/// x-51f6: opencode v1 hosts the pane form only. `--substrate headless
-/// --provider opencode` must hard-error (exit 2) pointing to `pane`, never
-/// silently fall through to the daemon RPC (which would attempt a retired
-/// PTY host).
+/// x-567d: opencode headless is now WIRED (was exit-2 "not wired", x-51f6).
+/// `--substrate headless --provider opencode` invokes the `opencode run`
+/// one-shot. With no `opencode` on PATH the dispatch surfaces "binary not
+/// found" (exit 13) — the proof it reached run_opencode instead of the retired
+/// refusal — never exit 2. PATH is isolated so the assertion is deterministic
+/// on a dev machine that happens to have opencode installed (no real run).
 #[test]
-fn client_spawn_substrate_headless_opencode_hard_errors() {
+fn client_spawn_substrate_headless_opencode_is_wired() {
     let home_dir = tmpdir("cli-spawn-headless-opencode-home");
+    let empty_path = tmpdir("cli-spawn-headless-opencode-emptypath");
     let bin = find_client_bin();
     if !bin.exists() {
-        eprintln!(
-            "skipping client_spawn_substrate_headless_opencode_hard_errors: binary not found"
-        );
+        eprintln!("skipping client_spawn_substrate_headless_opencode_is_wired: binary not found");
         return;
     }
 
@@ -976,32 +977,34 @@ fn client_spawn_substrate_headless_opencode_hard_errors() {
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
+        .env("PATH", &empty_path) // isolate: `opencode` is deterministically absent
         .output()
         .expect("failed to run fno-agents");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
+    assert_ne!(
         out.status.code(),
         Some(2),
-        "opencode --substrate headless must exit 2; stderr: {stderr}"
+        "opencode --substrate headless must no longer exit 2 'not wired'; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("pane"),
-        "opencode --substrate headless error must point to --substrate pane: {stderr}"
+        stderr.contains("not found"),
+        "opencode --substrate headless with no opencode on PATH must surface 'binary not found' \
+         (proof it reached run_opencode, i.e. wired): {stderr}"
     );
 }
 
-/// x-51f6 peer-review fix: `--substrate bg --provider opencode` must point at
-/// `--substrate pane` (the only substrate that actually works for opencode),
-/// never at `--substrate headless` (opencode refuses that too - the generic
-/// bg error's default advice would be a dead end).
+/// x-567d: `--substrate bg --provider opencode` still hard-errors (bg is
+/// claude-only) but now points at `--substrate headless` (the generic bg arm)
+/// - opencode's headless one-shot is wired, so that advice is no longer the
+/// dead end the x-51f6 special-case pane arm guarded against.
 #[test]
-fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane() {
+fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless() {
     let home_dir = tmpdir("cli-spawn-bg-opencode-home");
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane: binary not found"
+            "skipping client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless: binary not found"
         );
         return;
     }
@@ -1026,16 +1029,12 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane() {
     assert_eq!(
         out.status.code(),
         Some(2),
-        "opencode --substrate bg must exit 2; stderr: {stderr}"
+        "opencode --substrate bg must exit 2 (bg is claude-only); stderr: {stderr}"
     );
     assert!(
-        stderr.contains("pane"),
-        "opencode --substrate bg error must point to --substrate pane: {stderr}"
-    );
-    assert!(
-        !stderr.contains("use --substrate headless"),
-        "opencode --substrate bg error must NOT direct the caller to --substrate headless \
-         (a dead end - opencode refuses that too): {stderr}"
+        stderr.contains("headless"),
+        "opencode --substrate bg error must now point to --substrate headless \
+         (the wired one-shot, no longer a dead end): {stderr}"
     );
 }
 

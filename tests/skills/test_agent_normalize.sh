@@ -218,12 +218,22 @@ else
   fail "finding-4 ask-with-slash: $OUT"
 fi
 
-# AC4-ERR: an explicit slash command to codex is refused (no inert string).
+# codex passthrough: a footnote slash command is NORMALIZED to the `$fno:` skill
+# surface (codex exec expands it), not refused - `/goal` -> `$fno:goal` (x-a5e4).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "/goal ship it")"
-if [[ "$(field "$OUT" status)" == "error" ]] && printf '%s' "$OUT" | grep -qi "no slash commands"; then
-  pass "AC4-ERR passthrough slash command to codex -> refused"
+if [[ "$(field "$OUT" status)" == "ok" ]] && [[ "$(field "$OUT" message)" == '$fno:goal ship it' ]]; then
+  pass "passthrough: codex /goal -> \$fno:goal (skill surface, not refused)"
 else
-  fail "AC4-ERR codex passthrough refuse: $OUT"
+  fail "codex passthrough normalize: $OUT"
+fi
+
+# A prose-surface provider (opencode) has NO slash/skill surface, so a slash
+# passthrough is still refused (a literal /goal would run verbatim as a no-op).
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider opencode --input "/goal ship it")"
+if [[ "$(field "$OUT" status)" == "error" ]] && printf '%s' "$OUT" | grep -qi "no slash/skill surface"; then
+  pass "passthrough: opencode /goal -> refused (no surface)"
+else
+  fail "opencode passthrough refuse: $OUT"
 fi
 
 # AC4-EDGE: normalize does NOT strip a trailing provider word from the prompt;
@@ -236,18 +246,27 @@ else
   fail "AC4-EDGE ask whole prompt: $OUT"
 fi
 
-# Provider-aware build BRIEF (codex/gemini): prose, NEVER a literal /target.
+# codex build: the native `$fno:target` skill invocation (runs the REAL
+# pipeline), no-merge appended - NOT a prose brief (x-a5e4).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "ab-deadbeef")"
 MSG="$(field "$OUT" message)"
 if [[ "$(field "$OUT" payload_mode)" == "build" ]] \
-   && [[ "$MSG" == *"Implement backlog node ab-deadbeef"* ]] \
-   && [[ "$MSG" == *"AGENTS.md"* ]] && [[ "$MSG" == *"do not merge"* ]] \
-   && [[ "$MSG" != *"/target"* ]]; then
-  pass "build: codex node -> prose brief (AGENTS.md, do-not-merge), never /target"
+   && [[ "$MSG" == '$fno:target ab-deadbeef no-merge' ]]; then
+  pass "build: codex node -> \$fno:target + no-merge (native skill)"
 else
-  fail "codex node brief: $OUT"
+  fail "codex node build: $OUT"
 fi
 
+# agy is also a slash surface (like claude): native /target, not a prose brief.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider agy --input "ab-deadbeef")"
+if [[ "$(field "$OUT" message)" == "/target ab-deadbeef no-merge" ]]; then
+  pass "build: agy -> /target + no-merge (slash surface)"
+else
+  fail "agy build: $OUT"
+fi
+
+# A prose-surface provider (gemini/opencode) keeps the prose BRIEF, never a
+# literal /target it would run as a no-op.
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider gemini --input "add CSV export to the dashboard")"
 MSG="$(field "$OUT" message)"
 if [[ "$MSG" == *"Implement the following"* ]] && [[ "$MSG" == *"add CSV export to the dashboard"* ]] \
@@ -257,13 +276,13 @@ else
   fail "gemini feature brief: $OUT"
 fi
 
-# --allow-merge drops the do-not-merge instruction from a codex/gemini brief.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "ab-deadbeef" --allow-merge)"
+# --allow-merge drops the do-not-merge from a prose brief (gemini/opencode).
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider gemini --input "add CSV export" --allow-merge)"
 MSG="$(field "$OUT" message)"
 if [[ "$MSG" == *"open a pull request"* ]] && [[ "$MSG" != *"do not merge"* ]]; then
-  pass "build: codex brief + --allow-merge -> no do-not-merge instruction"
+  pass "build: gemini brief + --allow-merge -> no do-not-merge instruction"
 else
-  fail "codex brief allow-merge: $OUT"
+  fail "gemini brief allow-merge: $OUT"
 fi
 
 # claude build is unchanged: /target wrap + no-merge (payload_mode=build).

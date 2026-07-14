@@ -243,8 +243,10 @@ the real node.
 
 **Payload modes** (chosen deterministically by normalize):
 
-- **build** (default): run the work. claude gets `/target <text>` (+ `no-merge`);
-  codex/gemini get a prose build BRIEF - never a literal `/target` string.
+- **build** (default): run the work, normalized per harness (x-a5e4). claude/agy
+  get `/target <text>` (+ `no-merge`); codex gets `$fno:target <text>` (the plugin
+  skill, runs the real pipeline); gemini/opencode (no skill surface) get a prose
+  build BRIEF - never a literal slash command they'd run as a no-op.
 - **ask** (`ask`/`bare` verb): a one-shot question. The prompt is sent verbatim.
 - **handoff** (`--handoff`): a doc path becomes a continuation seed (read the doc,
   continue from where it left off, do NOT re-derive a plan) + a standing
@@ -253,8 +255,11 @@ the real node.
 - **discuss** (`--discuss`): a verbatim conversational seed -> a running,
   provider-native interactive pane. Claude/Codex/Gemini, NO `/target`. See the
   `discuss` section.
-- **passthrough** (leading `/`): the explicit command, verbatim. claude-only;
-  normalize refuses it for codex/gemini.
+- **passthrough** (leading `/`): the explicit command, normalized per harness for
+  ANY footnote verb (x-a5e4) - `/verb` verbatim on claude/agy, `$fno:verb` on codex
+  (so `/agent spawn /blueprint -p codex` runs the real skill). gemini/opencode have
+  no slash/skill surface, so a slash passthrough there is refused (use a build
+  description or `ask`).
 
 **`shape_hint`** (`path|question|continue|feature`): a deterministic read of what
 KIND of payload this is. Use it ONLY on the bare-input path (no explicit verb) -

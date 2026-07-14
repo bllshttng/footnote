@@ -1957,6 +1957,37 @@ event_types:
           description: "Unix epoch seconds of the binding window's reset; the tick after this dispatches the node."
     consumers: [operator]
 
+  - name: dispatch_substrate_fallback
+    description: "Emitted by an autonomous dispatcher (dispatch-node.sh / /target bg) when the resolved harness has no bg substrate, so dispatch falls BACK to headless (a one-shot that runs to completion, not a detached thread). Provider-aware dispatch (x-567d, epic AC1-EDGE): the downgrade is loud, never silent. bg is claude-only; every other harness resolves to headless via the harness-capability map."
+    sources: [backlog]
+    data:
+      required: [harness, from, to]
+      properties:
+        harness:
+          type: string
+          description: "The resolved harness (codex/gemini/agy/opencode) whose lack of a bg substrate triggered the fallback."
+        from:
+          type: string
+          description: "The substrate the dispatcher wanted (always 'bg')."
+        to:
+          type: string
+          description: "The substrate it fell back to (always 'headless')."
+    consumers: [operator]
+
+  - name: dispatch_no_autonomous_substrate
+    description: "Emitted by an autonomous dispatcher (dispatch-node.sh / /target bg) when the configured harness resolves to NO autonomous substrate (an unknown/misconfigured config.dispatch.harness). The dispatch hard-fails loudly naming the config key; every requested node stays ready/re-dispatchable and nothing is launched. Provider-aware dispatch (x-567d, epic AC2-ERR): never a silent fall-through to a claude default."
+    sources: [backlog]
+    data:
+      required: [reason, config_key]
+      properties:
+        reason:
+          type: string
+          description: "Why no autonomous substrate resolved (e.g. 'resolve rc=2: unknown harness')."
+        config_key:
+          type: string
+          description: "The config key to fix (config.dispatch.harness)."
+    consumers: [operator]
+
   - name: quota_required_bot_exhausted
     description: "Emitted at the pre-promise checkpoint (x-5d3e US5) when a config.review required-bot's provider snapshot is EXHAUSTED with a known reset. Surfaces the coming review-gate wedge immediately (with the reset time) instead of the gate hanging silently for hours. Advisory + read-only; in attended mode the skill also raises a <help> tag with the same facts."
     sources: [backlog, target]

@@ -67,9 +67,10 @@ def test_attended_pane_is_allowed():
 
 
 def test_template_without_node_is_literal():
-    """No node id -> the template is returned verbatim ({id} unsubstituted)."""
+    """No node id -> the template is returned verbatim ({id} unsubstituted).
+    codex normalizes to its `$fno:` skill surface (x-a5e4)."""
     out = _resolve(harness="codex")
-    assert out["command"] == "/target no-merge {id}"
+    assert out["command"] == "$fno:target no-merge {id}"
 
 
 def test_bad_template_rejected_when_substituting():

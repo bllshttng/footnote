@@ -33,47 +33,131 @@ from typing import Mapping, Optional
 
 # Bump when a capability KEY is added/removed or a value's meaning changes, so a
 # consumer can assert the shape it was written against.
-MAP_VERSION = 1
+MAP_VERSION = 3  # dispatch_command -> command_surface + normalize_command (x-a5e4)
 
-# capability -> per-harness value. Keys are the READABLE_PROVIDERS set; only
-# claude/codex/gemini are dispatchable today (agy/opencode are headless-only
-# readable rows whose bypass is owned by their own adapter - US4 fills them in).
+# Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
+# One axis, three values, the single source both dispatch surfaces normalize
+# through (autonomous `/target bg` + `/agent spawn`):
+#   "slash"       claude, agy       -> "/verb ..."     native slash command
+#   "codex-skill" codex             -> "$fno:verb ..." plugin skill expansion (verified)
+#   "prose"       gemini, opencode  -> a prose brief   (no slash/skill surface)
+_SLASH, _CODEX_SKILL, _PROSE = "slash", "codex-skill", "prose"
+
+# The canonical (claude-syntax) autonomous dispatch command. normalize_command
+# maps it per-harness for the builtin `dispatch_command`, so the per-harness
+# spelling lives in ONE place (command_surface), not five literal strings.
+_AUTONOMOUS_COMMAND = "/target no-merge {id}"
+
+# Prose-brief dispatch template for prose-surface harnesses (gemini extension /
+# opencode plugin) with NO native footnote skill. A general coding agent reads
+# the node via the fno CLI and delivers; `{id}` is substituted by
+# resolve_dispatch. Builtin default only - config.dispatch.command and a node's
+# own brief (x-f78d) override it.
+_PROSE_BRIEF = (
+    "Implement footnote backlog node {id} end-to-end. Read its spec with "
+    "`fno backlog get {id}` (title, details, plan_path), then implement it: write "
+    "the code and its tests, run the suite, commit atomically, push, and open a "
+    "pull request. Do NOT merge the PR."
+)
+
+# capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Each
+# harness carries a `command_surface` (x-a5e4): the invocation form its native
+# footnote skill takes, or `prose` where none exists. `bg` stays claude-only.
 _HARNESS_CAPS: dict[str, dict] = {
     "claude": {
         "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-session",  # session store + --resume <uuid>
         "bg": True,  # claude --bg
         "stop_hook": "native",
+        # Native slash-command invocation of the target skill (verified).
+        "command_surface": _SLASH,
     },
     "codex": {
         "permission_bypass": ["--dangerously-bypass-approvals-and-sandbox"],
         "resume": "native-thread",  # CODEX_THREAD_ID + exec resume
         "bg": False,  # -> headless
         "stop_hook": "native",
+        # `$fno:target` invokes the footnote plugin skill. VERIFIED: `codex exec`
+        # injects the fno skill definitions and expands `$fno:verb` (not a
+        # literal prompt). Supersedes the old "prose brief only" guidance.
+        "command_surface": _CODEX_SKILL,
     },
     "gemini": {
         "permission_bypass": ["--yolo"],
         "resume": "native-continue",
         "bg": False,
         "stop_hook": "native",
+        # gemini CLI is effectively deprecated (agy is its successor) and footnote
+        # is a gemini *extension* (context injection), not a gemini *skill* - so
+        # there is no verified `/target` surface. Prose-brief lane.
+        "command_surface": _PROSE,
     },
     "agy": {
-        # Antigravity: headless-only readable row. Bypass owned by the agy
-        # adapter/Rust spawn path; left empty here until a dispatch path needs it.
-        "permission_bypass": [],
+        # Antigravity CLI (gemini's successor). Its migration guide converts
+        # legacy commands to skills and recognizes `.agents/skills/` entries as
+        # active slash commands, so the target skill invokes as `/target`
+        # (grounded in antigravity.google/docs/cli/gcli-migration; live-verify
+        # before relying on it for production dispatch).
+        "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-continue",
         "bg": False,
         "stop_hook": "native",
+        "command_surface": _SLASH,
     },
     "opencode": {
-        # Headless-only (serve). US4 wires the opencode headless one-shot; its
-        # bypass flag is confirmed there, not guessed here.
-        "permission_bypass": [],
+        # Headless one-shot `opencode run` (wired x-567d); bypass confirmed
+        # against opencode v1.14.50. footnote is an opencode plugin (session
+        # orchestration), not a slash-command surface, so a literal `/target`
+        # would run verbatim -> no-op. Prose-brief lane, same as gemini.
+        "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-continue",  # opencode run --continue
         "bg": False,
         "stop_hook": "native",
+        "command_surface": _PROSE,
     },
 }
+
+
+def normalize_command(command: str, harness: str) -> str:
+    """Translate a claude-syntax footnote slash command to ``harness``'s native
+    invocation - the single normalizer both dispatch surfaces route through.
+
+    ``/target no-merge {id}`` becomes, per the harness ``command_surface``:
+      - ``slash`` (claude, agy)      -> verbatim ``/target no-merge {id}``
+      - ``codex-skill`` (codex)      -> ``$fno:target no-merge {id}`` (swap the
+        leading ``/verb`` for ``$fno:verb``; codex exec expands the plugin skill)
+      - ``prose`` (gemini, opencode) -> the prose brief; a slash/skill command
+        has no surface there and would run verbatim as a no-op, so the worker
+        gets a brief that names the node and reads it via the CLI instead.
+
+    ``command`` is expected to lead with ``/`` (a footnote slash command); a
+    non-slash string is returned unchanged for the slash/codex surfaces (nothing
+    to rewrite). Pure string transform; no config or IO."""
+    surface = capabilities(harness)["command_surface"]
+    cmd = command.strip()
+    if surface == _PROSE:
+        # Only `/target` has a verified prose translation (the implementation
+        # brief). A different verb (e.g. `/think`) would silently become
+        # "implement the node" - the wrong intent - so reject it loudly instead:
+        # a prose harness has no skill surface to run it (codex review P1).
+        verb = cmd.split(maxsplit=1)[0].lstrip("/") if cmd else ""
+        if verb and verb != "target":
+            raise DispatchResolveError(
+                f"harness {harness!r} has no footnote skill surface, so only "
+                f"'/target' has a verified prose translation; '/{verb}' cannot be "
+                f"dispatched there (route /{verb} to a claude/codex/agy harness)"
+            )
+        return _PROSE_BRIEF
+    if surface == _CODEX_SKILL and cmd.startswith("/"):
+        return "$fno:" + cmd[1:]
+    return cmd
+
+
+def dispatch_command(harness: str) -> str:
+    """Builtin autonomous dispatch command for ``harness``: the per-harness
+    normalization of ``/target no-merge {id}``. ``config.dispatch.command`` and a
+    node ``dispatch_verb`` override this in :func:`resolve_dispatch`."""
+    return normalize_command(_AUTONOMOUS_COMMAND, harness)
 
 
 class DispatchResolveError(ValueError):
@@ -118,12 +202,13 @@ def effort_values(harness: str) -> list[str]:
 
 
 _VALID_SUBSTRATES = ("bg", "headless", "pane")
-_DEFAULT_COMMAND = "/target no-merge {id}"
 # US3: the built-in verb allowlist (config.dispatch.allowed_verbs overrides).
 _DEFAULT_ALLOWED_VERBS = ("/target", "/think")
 # The env budget a brief must fit; 8 KB, measured in UTF-8 bytes (Locked
 # Decision 9 / epic Boundaries). Oversized -> explicit error, never truncation.
 _BRIEF_MAX_BYTES = 8192
+# The default command is per-harness now (each harness's `dispatch_command` in
+# _HARNESS_CAPS), not a single template - see the resolve builtin branch.
 
 
 def resolve_dispatch(
@@ -221,9 +306,10 @@ def resolve_dispatch(
         )
 
     # 3. command template. Precedence: explicit --command > node verb > config
-    # template > builtin. A node verb is validated against the allowlist (a graph
-    # field is a trust boundary) and assembled as `<verb> {id}`; the merge posture
-    # (no-merge) is NOT part of the verb string - it stays a launcher flag.
+    # template > per-harness builtin (dispatch_command). A node verb is validated
+    # against the allowlist (a graph field is a trust boundary) and assembled as
+    # `<verb> {id}`; the merge posture (no-merge) is NOT part of the verb string -
+    # it stays a launcher flag.
     if command is not None and command.strip():
         template = command.strip()
         decision.append("command=explicit")
@@ -237,19 +323,28 @@ def resolve_dispatch(
                 f"dispatch verb {chosen_verb!r} is not in the allowlist "
                 f"({', '.join(allowed)}); set config.dispatch.allowed_verbs to extend it"
             )
-        template = f"{chosen_verb} {{id}}"
+        # NORMALIZE per-harness (x-a5e4): a node's `/target` verb becomes
+        # `$fno:target {id}` on codex, `/target {id}` on claude/agy, a prose brief
+        # on gemini/opencode - NOT the old claude-syntax `/target {id}` for every
+        # harness (which handed a codex worker a Claude slash command it can't run).
+        template = normalize_command(f"{chosen_verb} {{id}}", chosen_harness)
         decision.append(f"command=verb({chosen_verb})")
     else:
-        template = (cfg.get("command") or _DEFAULT_COMMAND).strip()
+        # Per-harness builtin (x-a5e4): the normalize of `/target no-merge {id}` -
+        # codex `$fno:target`, agy/claude `/target`, opencode/gemini prose brief.
+        # config.dispatch.command overrides.
+        template = (cfg.get("command") or dispatch_command(chosen_harness)).strip()
         decision.append("command=config" if cfg.get("command") else "command=builtin")
 
     if not template:
         raise DispatchResolveError("resolved command is empty")
     if node_id:
-        if template.count("{id}") != 1:
+        # `{id}` must appear at least once; a prose brief may reference it more
+        # than once (str.replace substitutes every occurrence).
+        if "{id}" not in template:
             raise DispatchResolveError(
-                f"command template {template!r} must contain '{{id}}' exactly "
-                f"once for substitution; found {template.count('{id}')}"
+                f"command template {template!r} must contain '{{id}}' at least "
+                f"once for substitution"
             )
         resolved_command = template.replace("{id}", node_id.strip())
         decision.append(f"command=substituted({resolved_command})")
@@ -275,6 +370,7 @@ def resolve_dispatch(
         "harness": chosen_harness,
         "substrate": chosen_substrate,
         "command": resolved_command,
+        "command_surface": caps["command_surface"],
         "permission_bypass": list(caps["permission_bypass"]),
         "resume": caps["resume"],
         "bg": caps["bg"],
