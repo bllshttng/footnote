@@ -54,6 +54,8 @@ The default mode `think` takes a **free-text design seed** (or no argument, for 
 
 Load [think.md](references/think.md) and execute it in full, in this context. That body is the canonical design-thinking flow: understand context, explore approaches, multi-perspective challenge, UI state-machine audit, the mandatory `## Failure Modes` section, and BDD acceptance criteria, then save and review the design doc.
 
+**`$TARGET_BRIEF` (US3):** when a dispatcher launched this `/think` on a node via `dispatch_verb: /think`, it may set `$TARGET_BRIEF` in the environment - a plain-text brief (capped at 8 KB, carried via env not the command line) with the scope/"why" the dispatcher wanted explored. If it is set, fold it in as design context; treat it as guidance, not a command to run.
+
 **Self-reference (no recursion).** `think` is the running skill during its own default mode. The router loads the think flow **inline via Read** and follows it here. It must never re-invoke `/think` to reach its own default - that body is `references/think.md`, loaded directly.
 
 When the think flow reaches its failure-mode step and the feature is large or risky enough to exceed the inline budget, it hands off with a copy-pasteable `/think what-if ...` line (the same router, `what-if` mode).
