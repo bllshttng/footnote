@@ -5713,6 +5713,9 @@ mod tests {
         // Inside pane 10 (content origin at outer (1, 28)).
         assert_eq!(view.hit_test(5, 30), Some((10, 4, 2)));
         // Inside pane 11 (content col 36 -> outer col 64), its top-left cell.
+        // Pins press-cell == anchor-cell for a pane with a NONZERO x origin: the
+        // first visible column of an offset pane maps to pane-col 0, so a drag
+        // anchored there selects from that glyph, not N chars late.
         assert_eq!(view.hit_test(3, 64), Some((11, 2, 0)));
         // Tab bar row is chrome.
         assert_eq!(view.hit_test(0, 40), None);

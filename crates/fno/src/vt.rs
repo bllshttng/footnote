@@ -2063,6 +2063,27 @@ mod tests {
     // -- US2 selection ---------------------------------------------------------
 
     #[test]
+    fn selection_and_highlight_pin_to_the_press_cell() {
+        // Regression: a drag anchored on the FIRST glyph must select and
+        // highlight from that glyph, never N chars late. Repro that motivated
+        // this: dragging '[' -> ']' over "[Image #4]" rendered "age #4]" (leading
+        // '[Im' skipped). Copy and highlight both derive from the one selection
+        // range, so this pins them TOGETHER - the severity fork (copy clipped vs
+        // render-only) is moot here because they cannot diverge at the leading edge.
+        let mut pane = Pane::new(2, 40);
+        pane.feed(b"[Image #4]");
+        pane.selection_start(0, 0); // press on '['
+        pane.selection_update(0, 9); // drag to ']'
+        assert_eq!(pane.selection_text().as_deref(), Some("[Image #4]"));
+        let frame = pane.frame();
+        assert_eq!(
+            frame.cells[0].flags & cell_flags::SELECTED,
+            cell_flags::SELECTED,
+            "leading '[' highlighted, not skipped",
+        );
+    }
+
+    #[test]
     fn selection_extracts_text_and_marks_cells() {
         // AC2-HP: a drag selects cells; the text and the SELECTED flags agree.
         let mut pane = Pane::new(2, 20);
