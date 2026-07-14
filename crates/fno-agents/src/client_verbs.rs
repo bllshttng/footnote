@@ -816,11 +816,15 @@ fn is_uuid_shaped(s: &str) -> bool {
 /// attach, not `--resume` into a second writer on one transcript. The chosen lane
 /// is printed to stderr before returning so the operator always knows which
 /// fired. `Err(code)` carries the exit code for the uuid-absent refusal.
+/// Returns `(argv, claim_uuid)`. `claim_uuid` is `Some(uuid)` only for the
+/// dead-arm (`claude --resume`), which the caller must guard with the
+/// `session:<uuid>` single-writer claim before exec; the live attach arm returns
+/// `None` (claude's own supervisor owns attach safety).
 fn claude_resume_argv(
     claude_home: &ClaudeHome,
     entry: &Value,
     name: &str,
-) -> Result<Vec<String>, i32> {
+) -> Result<(Vec<String>, Option<String>), i32> {
     let short_id = entry
         .get("claude_short_id")
         .and_then(Value::as_str)
@@ -838,16 +842,54 @@ fn claude_resume_argv(
 
     if live {
         eprintln!("fno agents resume: {name} is live - attaching");
-        Ok(vec!["claude".into(), "attach".into(), short_id.into()])
+        Ok((
+            vec!["claude".into(), "attach".into(), short_id.into()],
+            None,
+        ))
     } else if is_uuid_shaped(uuid) {
         eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
-        Ok(vec!["claude".into(), "--resume".into(), uuid.into()])
+        Ok((
+            vec!["claude".into(), "--resume".into(), uuid.into()],
+            Some(uuid.to_string()),
+        ))
     } else {
         eprintln!(
             "fno agents resume: {} has no claude session recorded; nothing to resume.",
             py_repr_str(name)
         );
         Err(13)
+    }
+}
+
+/// Acquire the `session:<uuid>` single-writer claim for an interactive dead-row
+/// resume, anchored to THIS process. `exec` keeps the pid, so the claim is held
+/// by the resumed claude and self-releases when the operator quits (no explicit
+/// release). Two racing resumers both probe dead, but only one wins this atomic
+/// claim; the loser gets `Err` and refuses instead of opening a second writer on
+/// one transcript - the residual double-writer window the liveness probe alone
+/// cannot close. `root` is `None` in prod (session: keys route to
+/// `$FNO_CLAIMS_ROOT`/`$HOME`); tests inject a temp root.
+fn acquire_resume_session_claim(uuid: &str, root: Option<&Path>) -> Result<(), (i32, String)> {
+    use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
+    let holder = format!("resume:{}", std::process::id());
+    let opts = AcquireOpts {
+        root: root.map(Path::to_path_buf),
+        reason: Some("interactive resume single-writer".to_string()),
+        ..Default::default()
+    };
+    match acquire(&format!("session:{uuid}"), &holder, opts) {
+        AcquireOutcome::Acquired(_) => Ok(()),
+        AcquireOutcome::HeldByOther { holder, pid, host } => Err((
+            11,
+            format!(
+                "fno agents resume: session {uuid} is held live by another writer \
+                 ({holder}, pid={pid}, host={host}); not opening a second writer on one transcript."
+            ),
+        )),
+        AcquireOutcome::Error(e) => Err((
+            12,
+            format!("fno agents resume: could not claim session {uuid}: {e}"),
+        )),
     }
 }
 
@@ -1098,9 +1140,9 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // <uuid>`. Other providers keep their settled-session resume CLI, checked
     // BEFORE session_id so an unknown provider surfaces "not supported" rather
     // than a misleading "no session_id".
-    let argv = if provider == "claude" {
+    let (argv, claim_uuid) = if provider == "claude" {
         match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
-            Ok(v) => v,
+            Ok(plan) => plan,
             Err(code) => return code,
         }
     } else {
@@ -1122,7 +1164,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             );
             return 13;
         }
-        v
+        (v, None)
     };
 
     if !which_on_path(&argv[0]) {
@@ -1138,6 +1180,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             .join(" ");
         println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
         return 0;
+    }
+
+    // Guard a dead-row `claude --resume` with the session single-writer claim
+    // before exec (--print-command already returned above, so it never claims).
+    // exec keeps this pid, so the claim is held by the resumed claude and
+    // self-releases when the operator quits.
+    if let Some(uuid) = &claim_uuid {
+        if let Err((code, msg)) = acquire_resume_session_claim(uuid, None) {
+            eprintln!("{msg}");
+            return code;
+        }
     }
 
     // chdir BEFORE the emit so a stale cwd surfaces as exit 13 rather than a
@@ -2277,7 +2330,10 @@ mod tests {
         });
         assert_eq!(
             claude_resume_argv(&ch, &entry, "w").unwrap(),
-            vec!["claude".to_string(), "--resume".into(), uuid.into()]
+            (
+                vec!["claude".to_string(), "--resume".into(), uuid.into()],
+                Some(uuid.to_string()), // dead-arm carries the uuid to claim
+            )
         );
 
         // uuid absent -> refuse (Err 13), never `claude --resume ""`.
@@ -2304,8 +2360,38 @@ mod tests {
         let ch2 = ClaudeHome::at(home2.path());
         assert_eq!(
             claude_resume_argv(&ch2, &entry, "w").unwrap(),
-            vec!["claude".to_string(), "attach".into(), "7c5dcf5d".into()]
+            (
+                vec!["claude".to_string(), "attach".into(), "7c5dcf5d".into()],
+                None, // live attach arm claims nothing
+            )
         );
+    }
+
+    #[test]
+    fn acquire_resume_session_claim_refuses_when_held_by_other() {
+        use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let root = cv_tmpdir();
+
+        // A different live writer already holds the session claim.
+        let pre = acquire(
+            &format!("session:{uuid}"),
+            "other-writer",
+            AcquireOpts {
+                root: Some(root.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pre, AcquireOutcome::Acquired(_)));
+
+        // The racing resumer loses: refuses (exit 11) instead of a 2nd writer.
+        let err = acquire_resume_session_claim(uuid, Some(root.path())).unwrap_err();
+        assert_eq!(err.0, 11);
+        assert!(err.1.contains("held live by another writer"));
+
+        // A session with no holder: the resumer wins.
+        let uuid2 = "1111abcd-2222-3333-4444-555566667777";
+        assert!(acquire_resume_session_claim(uuid2, Some(root.path())).is_ok());
     }
 
     #[test]

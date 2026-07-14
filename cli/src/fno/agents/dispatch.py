@@ -1345,6 +1345,28 @@ def _claude_create_path(
 
     from fno.agents.providers import claude as claude_mod
 
+    # x-9844 Lane 2: guard the detached revival's critical section with the
+    # session single-writer claim so a concurrent revival of the same uuid (the
+    # residual window the per-agent flock's name-scoped serialization leaves
+    # open, plus the cross-name case) can't spawn a second supervisor onto one
+    # transcript. Released right after the registry write below - the new
+    # supervisor's own liveness is the ongoing guard, and holding it longer would
+    # hoard the writer (the documented regression where footnote blocks native
+    # attach).
+    revive_claim_holder: Optional[str] = None
+    if revive and resume_session_id:
+        revive_claim_holder = f"revive:{os.getpid()}"
+        try:
+            claude_mod.acquire_session_writer_claim(
+                session_uuid=resume_session_id, holder=revive_claim_holder
+            )
+        except claude_mod.SessionWriterClaimError as exc:
+            raise DispatchAskError(
+                f"session {resume_session_id} is held by another writer; refusing "
+                f"to open a second writer on one transcript ({exc})",
+                exit_code=11,
+            ) from exc
+
     try:
         result: ProviderResult = claude_mod.bg_create(
             name=name,
@@ -1447,6 +1469,15 @@ def _claude_create_path(
             f"(registry not updated)",
             exit_code=12,
         ) from exc
+
+    # Revival succeeded and the row is live: release the critical-section claim
+    # so the new supervisor's own liveness (not a lingering lockfile) is the
+    # ongoing single-writer guard. Idempotent, so a never-recorded claim is a
+    # no-op.
+    if revive_claim_holder is not None and resume_session_id:
+        claude_mod.release_session_writer_claim(
+            session_uuid=resume_session_id, holder=revive_claim_holder
+        )
 
     # Spawn event (Task 2.2, x-30f6): exactly one per successful create.
     # Open schema — flattens onto the JSONL record alongside ts/kind.

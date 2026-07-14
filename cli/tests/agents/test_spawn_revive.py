@@ -151,3 +151,35 @@ def test_spawn_same_name_no_resume_is_collision(workdir_claude, monkeypatch) -> 
         catch_exceptions=False,
     )
     assert result.exit_code == 2, result.output
+
+
+def test_spawn_resume_refused_when_session_claim_held(
+    workdir_claude, monkeypatch, tmp_path
+) -> None:
+    """x-9844 Lane 2: a detached revival refuses (exit 11) when another live
+    writer already holds the session:<uuid> claim, instead of spawning a second
+    supervisor onto one transcript. The row is left untouched."""
+    import os as _os
+
+    from fno.agents.cli import agents_app
+    from fno.agents.providers import claude as claude_mod
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
+    _seed_row("rev-agent", "deadbeef", DEAD_UUID)
+
+    # A different live writer already holds the session single-writer claim.
+    claude_mod.acquire_session_writer_claim(
+        session_uuid=DEAD_UUID, holder="other-writer", pid=_os.getpid()
+    )
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "rev-agent", "-p", "claude", "--resume", DEAD_UUID,
+         "--substrate", "bg", "hi"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 11, result.output
+    rows = [e for e in load_registry() if e.name == "rev-agent"]
+    assert len(rows) == 1
+    assert rows[0].claude_short_id == "deadbeef"  # not revived - no 2nd supervisor
