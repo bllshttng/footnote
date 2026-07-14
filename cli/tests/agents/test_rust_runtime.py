@@ -891,3 +891,12 @@ def test_is_role_bearing_spawn_predicate() -> None:
     assert rr._is_role_bearing_spawn("spawn", ["spawn", "w", "-r", "tidy"])
     assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--provider", "claude"])
     assert not rr._is_role_bearing_spawn("ask", ["ask", "--role", "tidy"])
+
+
+def test_is_resume_bearing_spawn_predicate() -> None:
+    uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"
+    assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--resume", uuid])
+    assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", f"--resume={uuid}"])
+    assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--substrate", "bg"])
+    # A --resume flag on a non-spawn verb never matches (resume is its own verb).
+    assert not rr._is_resume_bearing_spawn("ask", ["ask", "w", "--resume", uuid])
