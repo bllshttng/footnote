@@ -354,7 +354,7 @@ fn lane_fill_tick(cfg: &DrainConfig, journal: &Journal) -> DrainOutcome {
         cmd.args(["--mission", m]);
     }
     cmd.current_dir(&cfg.cwd);
-    let out = match cmd.output() {
+    let out = match retry_etxtbsy(|| cmd.output()) {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
@@ -721,7 +721,7 @@ fn dispatch_one(
         cmd.args(["--mission", m]);
     }
     cmd.current_dir(&cfg.cwd);
-    let out = match cmd.output() {
+    let out = match retry_etxtbsy(|| cmd.output()) {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
