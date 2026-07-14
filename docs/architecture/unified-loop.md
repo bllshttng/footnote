@@ -64,7 +64,7 @@ pub trait Queue {
 
 `&mut self` is deliberate (locked decision F8): the group-2 megawalk Queue carries cursor state and consecutive-failure counters that are inherently sequential. Using `&self` would require pointless `Mutex`-wrapping for single-threaded walk state. `run_loop` is always called from one thread.
 
-`close` returns `CloseOutcome`: `Closed`, `Refused(String)`, or `Parked(String)`. The runtime journals none of these directly - it records `loop_terminated` at walk end; the Queue impl is responsible for any additional side-effects on close (e.g. `fno backlog done` in group 2).
+`close` returns `CloseOutcome`: `Closed`, `Refused(String)`, `Parked(String)`, or `AwaitingMerge`. The runtime journals none of these directly - it records `loop_terminated` at walk end; the Queue impl is responsible for any additional side-effects on close (e.g. `fno backlog done` in group 2). `AwaitingMerge` (x-aba7) is success-shaped - the PR is up and reviewed but not yet merged, so the graph node stays `in_review` and `reconcile` closes it at the actual merge; the claim is released and no failure is recorded.
 
 **Target Queue (group 1):** degenerate - one unit read from `.fno/target-state.md`. `close()` is inert: the session's own stop hook already emitted the `termination` event; the manifest is immutable. As of step 6 the session's terminal side-effects (ledger session-record, and on a ship the plan stamp/graduate + handoff artifact) are written by `fno-agents finalize`, which the shim invokes at the terminal-allow boundary BEFORE the worker process exits. The outer loop only observes the `termination` event afterward, so `TargetQueue::close` stays inert exactly as designed - placing the writes in `close` would miss attended interactive `/target` runs, which have no outer loop at all.
 
@@ -267,7 +267,7 @@ Model-fallback is a deliberate drop, not an oversight. The loop contract is type
 
 - **`next()`**: shells `fno backlog next [--project P | --all]` and parses the JSON response. A literal `null` output means the backlog is drained; `next()` returns `Ok(None)` and the walk terminates with `NoWork`. Malformed JSON or a non-zero exit is a `LoopError::Queue`.
 
-- **`close()`**: shells `fno backlog done <id>` for `DonePRGreen | DoneAdvisory` evidence. Exit 0 yields `CloseOutcome::Closed`; nonzero yields `CloseOutcome::Parked(stderr)`. Non-done evidence (any other `TerminationReason`) returns `CloseOutcome::Parked` without calling `fno backlog done`.
+- **`close()`**: shells `fno backlog done <id>` for `DonePRGreen | DoneAdvisory` evidence. Exit 0 yields `CloseOutcome::Closed`; exit 5 (PR OPEN, not merged; x-aba7) yields `CloseOutcome::AwaitingMerge`; other nonzero yields `CloseOutcome::Parked(stderr)`. `DoneAwaitingMerge` evidence maps directly to `CloseOutcome::AwaitingMerge` WITHOUT shelling `fno backlog done` (the reason already carries the fact - this fixes its pre-x-aba7 mis-handling as a held-claim Park). Other non-done evidence returns `CloseOutcome::Parked` without calling `fno backlog done`.
 
 **Claims.** Before returning a unit from `next()`, the queue calls `fno claim acquire node:<id> --holder target-session:<session_key> --ttl 2h`. Exit 0 records the claim and returns the unit. Exit 1 (`ClaimHeldByOther`) lets the live-claims filter inside `fno backlog next` exclude the node on the next retry; the walker never needs a skip-set - claims and selection compose without walker-side coordination. Exit 2 or other non-zero codes surface immediately as a `LoopError::Queue` (sigma-review finding 1: the previous collapse of all non-zero exits to "retry" hid validation and corruption errors). The retry bound is `MAX_CLAIM_RETRIES = 5`; exhaustion is a `LoopError::Queue`.
 
@@ -292,7 +292,7 @@ Three consequences flow from this:
 
 ### Walk policy
 
-**Consecutive-failure pause (3).** A "failure" is any `close()` with `evidence.reason` not in `{DonePRGreen, DoneAdvisory}`. Three consecutive failures trigger a `LoopError::Queue("pause:consecutive_failures:...")` on the next `next()` call. A successful close resets the streak - and also clears any pending p0 failure flag (sigma-review finding 3: without this reset a recovery success after a p0 failure caused a spurious immediate pause on the next unit).
+**Consecutive-failure pause (3).** A "failure" is any `close()` that is not success-shaped: neither `Closed` nor `AwaitingMerge`. An `AwaitingMerge` close (done exit 5, or `DoneAwaitingMerge` evidence) records SUCCESS even though its reason is not a done-reason, so a run of healthy ship-green-awaiting-merge closes never trips the pause. Three consecutive failures trigger a `LoopError::Queue("pause:consecutive_failures:...")` on the next `next()` call. A successful close resets the streak - and also clears any pending p0 failure flag (sigma-review finding 3: without this reset a recovery success after a p0 failure caused a spurious immediate pause on the next unit).
 
 **p0 immediate pause.** When a unit with `priority == "p0"` (from the `fno backlog next` JSON) fails, the next `next()` call returns `pause:p0_failed:<unit-id>` immediately, bypassing the 3-failure streak.
 
@@ -304,7 +304,7 @@ Three consequences flow from this:
 
 ### Hardened close (`fno backlog done` gh cross-check)
 
-`fno backlog done` performs a gh cross-check before marking a node complete. For nodes associated with a PR: MERGED state allows the close; OPEN with green CI also allows. Exit 3 is a refusal (`CloseOutcome::Refused`); exit 4 is a gh outage (`CloseOutcome::Parked`). `--force` requires `--reason` and journals `backlog_done_forced`. Advisory nodes (no PR refs) are unaffected by the cross-check.
+`fno backlog done` performs a gh cross-check before marking a node complete. For nodes associated with a PR, MERGED is the ONLY closing evidence (x-aba7: graph done = merged). An OPEN PR - even with green CI - is no longer closing evidence: it exits 5 (awaiting merge, `CloseOutcome::AwaitingMerge`), the node stays `in_review`, and `reconcile` / merge-triggered `advance` close it at the actual merge. CI state is not consulted in the close decision. Exit 3 is a refusal for CLOSED-unmerged / UNKNOWN (`CloseOutcome::Parked`); exit 4 is a gh outage (`CloseOutcome::Parked`). `--force` requires `--reason` and journals `backlog_done_forced`. Advisory nodes (no PR refs) are unaffected by the cross-check.
 
 ### New loop-stream event kinds (group 2)
 
@@ -313,7 +313,7 @@ Two new event kinds join the loop stream. Schema in `events-schema.yaml` only; N
 | Event | When | Key data fields |
 |---|---|---|
 | `walk_paused` | Walk policy triggered a pause | `policy` ("consecutive_failures" or "p0_failed"), `detail` (unit ids involved) |
-| `node_closed` | Unit close recorded | `unit_id`, `session_id`, `reason`, `close` ("closed" or "parked"), `detail` |
+| `node_closed` | Unit close recorded | `unit_id`, `session_id`, `reason`, `close` ("closed", "parked", "refused", or "awaiting-merge"), `detail` |
 
 **Legacy event migration.** The Python walker emitted ~29 kinds into `megawalk-events.jsonl` (deleted in task 2.4). Representative mappings: `node_complete` -> `node_closed{close:closed}`, `walker_paused` -> `walk_paused`, `consecutive_failures_paused` -> `walk_paused{policy:consecutive_failures}`, `backlog_empty` -> `loop_terminated{reason:NoWork}`. The full prune ledger is the comment block in `loop_megawalk.rs`. `megawalk-events.jsonl` as a write target is dead; the prune ledger records each legacy kind's fate for auditors.
 
