@@ -1,6 +1,6 @@
 # `fno agents` surface map
 
-The classification companion to [`docs/provider-command-matrix.md`](../../../docs/provider-command-matrix.md). That page answers *which provider supports a verb*; this page answers *which verbs a human drives, which are machine-internal, and which `/agent` routes vs leaves raw*. It is a map, not an encyclopedia: it exists so `/agent` documents its routing boundary and a reader can tell "not a `/agent` verb" apart from "missing feature".
+The classification companion to [`docs/harness-command-matrix.md`](../../../docs/harness-command-matrix.md). That page answers *which provider supports a verb*; this page answers *which verbs a human drives, which are machine-internal, and which `/agent` routes vs leaves raw*. It is a map, not an encyclopedia: it exists so `/agent` documents its routing boundary and a reader can tell "not a `/agent` verb" apart from "missing feature".
 
 ## Two layers, two `--help`
 
