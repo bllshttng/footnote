@@ -646,7 +646,12 @@ fn resolve_dispatch(
 /// NoProgress evidence and feed the SAME `map_outcome` path, so the failure
 /// counts toward the auto-defer streak exactly as the supervised `node_failed`
 /// watchdog did.
-fn resolve_crash(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Journal, node_id: &str) {
+fn resolve_crash(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    journal: &Journal,
+    node_id: &str,
+) {
     let message = "worker exited with no termination event (fire-and-forget crash floor)";
     let ur = UnitResult {
         unit_id: node_id.to_string(),
@@ -656,7 +661,13 @@ fn resolve_crash(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Jour
         },
         close: CloseOutcome::Parked(message.to_string()),
     };
-    map_outcome(cfg, breaker, journal, &TerminationReason::NoProgress, Some(&ur));
+    map_outcome(
+        cfg,
+        breaker,
+        journal,
+        &TerminationReason::NoProgress,
+        Some(&ur),
+    );
 }
 
 /// Node ids the daemon dispatched fire-and-forget, parsed from a `fno backlog
@@ -681,7 +692,11 @@ fn dispatched_node_ids(stdout: &[u8]) -> Vec<String> {
 /// the dispatched node recorded in `pending` for later event reconcile. Used by
 /// the retargeted sequential tick (`max_lanes < 2`) in place of the supervised
 /// `run_one_node`.
-fn dispatch_one(cfg: &DrainConfig, pending: &mut Vec<PendingDispatch>, journal: &Journal) -> DrainOutcome {
+fn dispatch_one(
+    cfg: &DrainConfig,
+    pending: &mut Vec<PendingDispatch>,
+    journal: &Journal,
+) -> DrainOutcome {
     let mut cmd = abi_cmd(&cfg.abi_bin);
     cmd.args(["backlog", "dispatch-lanes", "--max", "1"]);
     if let Some(ref p) = cfg.project {
@@ -1206,7 +1221,10 @@ mod tests {
         let p = dir.join("fno");
         std::fs::write(
             &p,
-            format!("#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\nexit 0\n", record.display()),
+            format!(
+                "#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\nexit 0\n",
+                record.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1268,7 +1286,11 @@ mod tests {
             },
         );
 
-        assert_eq!(breaker.consecutive_failures("x-suc0001"), 0, "success resets the streak");
+        assert_eq!(
+            breaker.consecutive_failures("x-suc0001"),
+            0,
+            "success resets the streak"
+        );
         // is_done_reason -> the reconcile marks the node done (mirrors queue.close).
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(calls.contains("backlog done x-suc0001"), "calls: {calls}");
@@ -1302,7 +1324,10 @@ mod tests {
 
         assert_eq!(breaker.consecutive_failures("x-awm0001"), 0);
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
-        assert!(!calls.contains("backlog done"), "awaiting-merge must not mark done: {calls}");
+        assert!(
+            !calls.contains("backlog done"),
+            "awaiting-merge must not mark done: {calls}"
+        );
     }
 
     #[test]
@@ -1349,12 +1374,19 @@ mod tests {
         // Passes before the grace expires keep the dispatch and record nothing.
         for _ in 1..BOOT_GRACE_TICKS {
             reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
-            assert_eq!(pending.len(), 1, "must keep the dispatch during the boot window");
+            assert_eq!(
+                pending.len(),
+                1,
+                "must keep the dispatch during the boot window"
+            );
             assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 0);
         }
         // The pass that reaches the grace counts a crash-floor failure and drops it.
         reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
-        assert!(pending.is_empty(), "the never-booted dispatch is retired as a crash");
+        assert!(
+            pending.is_empty(),
+            "the never-booted dispatch is retired as a crash"
+        );
         assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 1);
     }
 

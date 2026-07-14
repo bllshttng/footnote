@@ -192,7 +192,10 @@ exit 0"#,
     assert_eq!(pending.len(), 1, "one in-flight dispatch must be tracked");
     // Sequential cap crosses the seam.
     let args = fs::read_to_string(&args_file).expect("dispatch-lanes argv recorded");
-    assert!(args.contains("--max 1"), "sequential cap not forwarded: {args}");
+    assert!(
+        args.contains("--max 1"),
+        "sequential cap not forwarded: {args}"
+    );
     assert!(
         args.contains("--project footnote"),
         "project scope not forwarded: {args}"
