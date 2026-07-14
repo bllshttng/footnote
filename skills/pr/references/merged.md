@@ -275,7 +275,11 @@ exactly one same-repo PR-linked node and warns+skips on zero or multiple
 (Locked Decision 9: never fan out):
 
 ```bash
-fno backlog session add --pr-number "$PR" --phase ship || true
+# --repo scopes resolution to THIS repo: pr_number is not unique across repos in
+# the cross-project graph, so a bare number fans out to `ambiguous` and skips
+# (x-d5f9). A gh miss degrades to a bare number - a safe skip, never a wrong stamp.
+REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+fno backlog session add --pr-number "$PR" ${REPO_SLUG:+--repo "$REPO_SLUG"} --phase ship || true
 ```
 
 Harness + session id default from the ambient identity; idempotent (this exact

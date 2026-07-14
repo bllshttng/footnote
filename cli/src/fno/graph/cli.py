@@ -2742,6 +2742,10 @@ def cmd_session_add(
         None, "--pr-number", help="Resolve the UNIQUE node carrying this PR number instead "
                                   "of passing NODE (rejects 0 or multiple matches; never fans out)."
     ),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="Scope --pr-number resolution to an <owner>/<repo> slug "
+                             "(pr_number is not unique across repos in a cross-project graph)."
+    ),
     harness: Optional[str] = typer.Option(
         None, "--harness", help="Override harness (default: ambient session identity)."
     ),
@@ -2785,7 +2789,7 @@ def cmd_session_add(
         if pr is not None:
             node_id, status = stamp_session_for_pr(
                 _graph_path(), pr, phase=phase,
-                harness=eff_harness, session_id=eff_session, at=at,
+                harness=eff_harness, session_id=eff_session, at=at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
                 typer.echo(

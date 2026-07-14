@@ -750,6 +750,152 @@ def test_stamp_session_for_pr_duplicate(tmp_path, monkeypatch):
     assert len(_node_sessions(g, "ab-pr000007")) == 1
 
 
+# -- x-d5f9: repo-scoped resolution (pr_number collides across repos) --
+
+
+def _colliding_repo_graph(tmp_path):
+    """Two nodes carry pr_number 388 with pr_url in DIFFERENT repos (the live bug)."""
+    return _make_graph(tmp_path, [
+        {"id": "x-foot0001", "title": "footnote node", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
+        {"id": "ab-abil0001", "title": "abilities node", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/388"},
+    ])
+
+
+def test_stamp_repo_scoped_picks_right_node(tmp_path, monkeypatch):
+    """AC1-HP: repo-scoped resolution stamps exactly the same-repo node."""
+    g = _colliding_repo_graph(tmp_path)
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S",
+        repo="bllshttng/footnote",
+    )
+    assert (node_id, status) == ("x-foot0001", "added")
+    assert _node_sessions(g, "x-foot0001")[0]["phase"] == "ship"
+    assert _node_sessions(g, "ab-abil0001") == []  # untouched
+
+
+def test_stamp_repo_scoped_no_match_skips(tmp_path, monkeypatch):
+    """AC1-ERR: no node's pr_url matches the repo -> no-node, nothing mutated."""
+    g = _colliding_repo_graph(tmp_path)
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S",
+        repo="bllshttng/some-other-repo",
+    )
+    assert (node_id, status) == (None, "no-node")
+    assert _node_sessions(g, "x-foot0001") == []
+    assert _node_sessions(g, "ab-abil0001") == []
+
+
+def test_stamp_repo_none_falls_back_to_bare_number(tmp_path, monkeypatch):
+    """AC1-FR: repo=None on a lone node keeps today's bare-pr_number match."""
+    g = _make_graph(tmp_path, [
+        {"id": "x-lone0001", "title": "t", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(g, 388, phase="ship",
+                                           harness="claude", session_id="S")
+    assert (node_id, status) == ("x-lone0001", "added")
+
+
+def test_stamp_repo_scoped_same_repo_multi_stays_ambiguous(tmp_path, monkeypatch):
+    """AC1-EDGE: two nodes in the SAME repo for the same PR -> ambiguous, no stamp."""
+    g = _make_graph(tmp_path, [
+        {"id": "x-same0001", "title": "t", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
+        {"id": "x-same0002", "title": "u", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S",
+        repo="bllshttng/footnote",
+    )
+    assert (node_id, status) == (None, "ambiguous")
+    assert _node_sessions(g, "x-same0001") == []
+    assert _node_sessions(g, "x-same0002") == []
+
+
+def test_stamp_repo_scoped_excludes_urlless_legacy_node(tmp_path, monkeypatch):
+    """Failure Modes/Boundaries: a node with pr_number but no pr_url is unattributable."""
+    g = _make_graph(tmp_path, [
+        {"id": "x-nourl0001", "title": "t", "pr_number": 388, "pr_url": None},
+        {"id": "x-foot0001", "title": "u", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S",
+        repo="bllshttng/footnote",
+    )
+    assert (node_id, status) == ("x-foot0001", "added")  # urlless node never matches
+
+
+def test_stamp_repo_scoped_matches_additional_prs_url(tmp_path, monkeypatch):
+    """Boundaries: a repo match on an additional_prs url, not only the primary."""
+    g = _make_graph(tmp_path, [
+        {"id": "x-addl0001", "title": "t", "pr_number": 12,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/12",
+         "additional_prs": [
+             {"number": 388, "url": "https://github.com/bllshttng/abilities/pull/388", "note": None}
+         ]},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S",
+        repo="bllshttng/abilities",
+    )
+    assert (node_id, status) == ("x-addl0001", "added")
+
+
+def test_stamp_repo_scoped_pull_number_boundary(tmp_path, monkeypatch):
+    """A /pull/388 request must not match a node whose url is /pull/3880."""
+    g = _make_graph(tmp_path, [
+        {"id": "x-bound001", "title": "t", "pr_number": 3880,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/3880"},
+    ])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    assert stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S",
+        repo="bllshttng/footnote",
+    ) == (None, "no-node")
+
+
+@pytest.mark.parametrize("url,repo", [
+    ("https://github.com/bllshttng/footnote/pull/388/", "bllshttng/footnote"),      # trailing slash
+    ("https://github.com/bllshttng/footnote/pull/388?w=1", "bllshttng/footnote"),   # query
+    ("https://github.com/bllshttng/footnote/pull/388#issue-1", "bllshttng/footnote"),  # fragment
+    ("https://github.com/Bllshttng/Footnote/pull/388", "bllshttng/footnote"),       # casing mismatch
+])
+def test_stamp_repo_scoped_matches_url_variants(tmp_path, monkeypatch, url, repo):
+    """gemini review: trailing slash / query / fragment / casing must not false-negative."""
+    g = _make_graph(tmp_path, [{"id": "x-var00001", "title": "t", "pr_number": 388, "pr_url": url}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S", repo=repo,
+    )
+    assert (node_id, status) == ("x-var00001", "added")
+
+
 # -- `fno backlog session add` CLI (reuses _clear_session_env above) --
 
 
@@ -770,6 +916,33 @@ def test_cli_session_add_pr_mode_resolves_node(tmp_path, monkeypatch):
     out = json.loads(r.output)
     assert out["node_id"] == "ab-prcli001" and out["added"] is True
     assert read_graph(g)[0]["sessions"][0]["phase"] == "ship"
+
+
+def test_cli_session_add_pr_repo_scopes_resolution(tmp_path, monkeypatch):
+    """AC1-HP (CLI): --repo disambiguates a pr_number that collides across repos."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [
+        {"id": "x-clifoot1", "title": "t", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
+        {"id": "ab-cliabil1", "title": "u", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/388"},
+    ])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "--pr-number", "388",
+        "--repo", "bllshttng/footnote", "--phase", "ship", "--json",
+    ])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["node_id"] == "x-clifoot1"
+    by_id = {e["id"]: e for e in read_graph(g)}
+    assert by_id["ab-cliabil1"].get("sessions", []) == []  # other repo untouched
 
 
 def test_cli_session_add_pr_ambiguous_exits_nonzero(tmp_path, monkeypatch):

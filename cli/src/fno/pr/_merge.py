@@ -111,7 +111,7 @@ def _read_state_field(state_file: str, field: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _sync_graph_merge_status(merge_status: str, pr_number: int) -> None:
+def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -> None:
     """Set merge_status on the graph node carrying this pr_number (best-effort)."""
     try:
         from fno.paths import graph_json
@@ -142,14 +142,36 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int) -> None:
     # failed) -- the merge primitive is one of the plan's ship boundaries. Gated
     # here so all three merged code paths are covered in one place.
     if merge_status == "merged":
-        _stamp_ship_provenance(pr_number)
+        _stamp_ship_provenance(pr_number, cwd)
 
 
-def _stamp_ship_provenance(pr_number: int) -> None:
+def _repo_slug(cwd: str) -> "Optional[str]":
+    """The merge's ``<owner>/<repo>`` slug, or None if gh can't say (x-d5f9).
+
+    Best-effort: a probe miss degrades to None, which reverts ship-stamping to
+    the bare-``pr_number`` match - a safe skip in a multi-repo graph, never a
+    wrong stamp (Failure Modes: Errors)."""
+    try:
+        res = _gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+                  cwd or os.getcwd())
+        slug = res.stdout.strip() if res.ok else ""
+        return slug or None
+    except Exception:
+        return None
+
+
+def _stamp_ship_provenance(pr_number: int, cwd: str = "") -> None:
     """Append a `ship` lifecycle record to the PR's node for the merging session
     (x-b6e4). Ambient identity of whoever ran `fno pr merge`; resolves the unique
-    PR-linked node (never fans out). Best-effort: any failure or a missing
-    identity is a silent no-op and never blocks the merge outcome."""
+    PR-linked node in THIS repo (x-d5f9: scoped by the repo slug so a same-numbered
+    PR in another repo is never stamped). Best-effort: any failure or a missing
+    identity is a silent no-op and never blocks the merge outcome.
+
+    When the repo slug cannot be resolved, SKIP rather than fall back to a bare
+    pr_number match: in a cross-project graph a lone same-numbered PR in another
+    repo would then be stamped on the wrong node (codex P2 on #403). A merge
+    cannot have succeeded without `gh`, so an unresolved slug here is a rare
+    flake; the node-id ship stamp from pr-creator already covers provenance."""
     try:
         from fno.harness_identity import resolve_harness_identity
         from fno.paths import graph_json
@@ -158,12 +180,20 @@ def _stamp_ship_provenance(pr_number: int) -> None:
         ident = resolve_harness_identity()
         if not ident.session_id or not ident.harness:
             return
+        repo = _repo_slug(cwd)
+        if not repo:
+            sys.stderr.write(
+                f"pr-merge: repo slug unresolved; skipping ship stamp for PR {pr_number} "
+                "(a bare match could stamp a same-numbered PR in another repo)\n"
+            )
+            return
         path = graph_json()
         if not path.exists():
             return
         stamp_session_for_pr(
             path, pr_number, phase="ship",
             harness=ident.harness, session_id=ident.session_id,
+            repo=repo,
         )
     except (Exception, SystemExit):
         pass
@@ -586,7 +616,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             _sync_graph_merge_status("queued", pr_number)
         else:
             _emit(pr_number, "merged", "merged immediately", strategy, err=False)
-            _sync_graph_merge_status("merged", pr_number)
+            _sync_graph_merge_status("merged", pr_number, repo)
         _run_post_merge_followups(pr_number, strategy, repo)
         return 0
 
@@ -608,7 +638,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 strategy,
                 err=False,
             )
-            _sync_graph_merge_status("merged", pr_number)
+            _sync_graph_merge_status("merged", pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
         # (b) Not merged yet -> merge SERVER-SIDE via the API (no local checkout).
@@ -632,7 +662,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 strategy,
                 err=False,
             )
-            _sync_graph_merge_status("merged", pr_number)
+            _sync_graph_merge_status("merged", pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
 

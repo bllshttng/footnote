@@ -646,6 +646,40 @@ def _node_carries_pr(node: dict, pr_number: int) -> bool:
     )
 
 
+def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
+    """True if any of the node's PR urls resolves to exactly ``(repo, pr_number)``.
+
+    Repo-scoped narrowing (x-d5f9): ``pr_number`` is not unique across repos, so
+    a bare-number match fans out on footnote's cross-project graph; the url is
+    the only per-node field carrying the repo slug. ``repo`` is an
+    ``<owner>/<repo>`` slug. A node with a ``pr_number`` but no url (legacy,
+    pre pr_url stamp) is unattributable and never matches - refusing to guess is
+    correct, not a regression.
+    """
+    want = repo.lower()
+    urls = [node.get("pr_url")]
+    urls += [
+        extra.get("url")
+        for extra in (node.get("additional_prs") or [])
+        if isinstance(extra, dict)
+    ]
+    for url in urls:
+        if not isinstance(url, str):
+            continue
+        # Footnote's own stamps are canonical, but a hand-passed url may carry a
+        # query, fragment, or trailing slash; the repo slug is case-insensitive.
+        clean = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        head, sep, tail = clean.rpartition("/pull/")
+        if not sep:
+            continue
+        try:
+            if int(tail) == pr_number and head.lower().endswith("/" + want):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def stamp_session_for_pr(
     path: Path,
     pr_number: int,
@@ -654,6 +688,7 @@ def stamp_session_for_pr(
     harness: str,
     session_id: str,
     at: "str | None" = None,
+    repo: "str | None" = None,
 ) -> "tuple[str | None, str]":
     """Resolve the UNIQUE node carrying ``pr_number`` and append a lifecycle
     record, returning ``(node_id, status)`` (x-b6e4).
@@ -663,10 +698,22 @@ def stamp_session_for_pr(
     exactly one same-repo PR-linked node, never fan out") lives in one place.
     ``status`` is ``added`` | ``duplicate`` | ``no-node`` | ``ambiguous``; the
     last two leave the graph untouched (0 or >1 matches never fans out).
+
+    ``repo`` (an ``<owner>/<repo>`` slug, x-d5f9) scopes resolution to one repo:
+    ``pr_number`` alone collides across repos in a cross-project graph, so a
+    caller that knows its repo passes it to match only nodes whose ``pr_url``
+    (primary or an ``additional_prs`` entry) is that exact PR. ``repo=None``
+    preserves the bare-``pr_number`` match (single-repo / manual / tests); the
+    repo-scoped set is strictly narrower, so it never introduces a false match.
     """
     matches = [
         e["id"] for e in read_graph(path)
-        if isinstance(e.get("id"), str) and _node_carries_pr(e, pr_number)
+        if isinstance(e.get("id"), str)
+        and (
+            _node_matches_repo_pr(e, pr_number, repo)
+            if repo
+            else _node_carries_pr(e, pr_number)
+        )
     ]
     if not matches:
         return None, "no-node"
