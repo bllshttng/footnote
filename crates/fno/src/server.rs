@@ -140,6 +140,16 @@ fn route_mouse(modes: Modes, kind: MouseKind) -> MouseAction {
     }
 }
 
+/// Bound a folded wheel burst's net offset move to `cap` lines (one viewport)
+/// so a high-event-rate trackpad flick lands a screen at a time instead of
+/// teleporting hundreds of lines. `before`/`after` are the offsets around an
+/// in-order fold, so the per-tick history clamp already happened - this only
+/// caps the aggregate. A single mouse-wheel notch is one tick far under the
+/// cap and passes through unchanged; the cap self-selects the trackpad burst.
+fn bounded_scroll_target(before: i32, after: i32, cap: i32) -> i32 {
+    before + (after - before).clamp(-cap, cap)
+}
+
 /// SGR-encode one mouse event for an app that negotiated mouse reporting
 /// (`ESC [ < b ; x ; y {M|m}`, brief Locked 12 / Domain: SGR 1006 only). `b` is
 /// the button code plus the drag-motion bit; coordinates are 1-based. Press and
@@ -2942,6 +2952,11 @@ impl Core {
         self.panes.get(&pane).map_or(0, |e| e.vt.display_offset())
     }
 
+    /// The pane's viewport height in rows (0 if gone), the per-fold scroll cap.
+    fn pane_rows(&self, pane: u64) -> u16 {
+        self.panes.get(&pane).map_or(0, |e| e.vt.size().0)
+    }
+
     /// Apply a single interpreted wheel tick and push one frame (the
     /// per-message path; the drain coalesces a run through `scroll_tick`).
     fn apply_scroll(&mut self, pane: u64, delta: i32) {
@@ -5351,7 +5366,7 @@ async fn serve(
                             break Flow::Shutdown;
                         }
                     } else if let Some(d0) = core.scroll_delta(pane, &event) {
-                        let before = core.scroll_offset(pane);
+                        let before = core.scroll_offset(pane) as i32;
                         core.scroll_tick(pane, d0);
                         let mut trailer = None;
                         while let Ok(m) = core_rx.try_recv() {
@@ -5366,7 +5381,19 @@ async fn serve(
                             trailer = Some(m);
                             break;
                         }
-                        if core.scroll_offset(pane) != before {
+                        // Cap the fold's net move to one viewport: a fast trackpad
+                        // flick drops many ticks in a single drain and would
+                        // otherwise jump hundreds of lines at once ("too fast").
+                        // The in-order clamp above is intact; this only bounds the
+                        // aggregate, so a lone wheel notch (well under a screen)
+                        // passes through untouched.
+                        let after = core.scroll_offset(pane) as i32;
+                        let cap = (core.pane_rows(pane) as i32).max(MOUSE_WHEEL_LINES);
+                        let bounded = bounded_scroll_target(before, after, cap);
+                        if bounded != after {
+                            core.scroll_tick(pane, bounded - after);
+                        }
+                        if bounded != before {
                             core.broadcast_pane(pane);
                         }
                         if let Some(m) = trailer {
@@ -8774,6 +8801,23 @@ mod tests {
         core.scroll_tick(p1, MOUSE_WHEEL_LINES);
         core.scroll_tick(p1, -MOUSE_WHEEL_LINES);
         assert_eq!(core.scroll_offset(p1), mid, "a real cancel nets to no move");
+    }
+
+    #[test]
+    fn bounded_scroll_target_caps_a_burst_but_spares_a_single_notch() {
+        // A big same-direction fold is capped to one viewport (24) either way...
+        assert_eq!(bounded_scroll_target(0, 300, 24), 24, "up burst capped");
+        assert_eq!(bounded_scroll_target(300, 0, 24), 276, "down burst capped");
+        // ...a move already within a screen (a lone wheel notch) is untouched...
+        assert_eq!(
+            bounded_scroll_target(0, MOUSE_WHEEL_LINES, 24),
+            MOUSE_WHEEL_LINES
+        );
+        // ...a boundary reversal the in-order fold landed at +3 survives the cap
+        // (it never re-introduces the netting bug)...
+        assert_eq!(bounded_scroll_target(0, 3, 24), 3);
+        // ...and a true no-op fold stays put.
+        assert_eq!(bounded_scroll_target(10, 10, 24), 10);
     }
 
     #[test]
