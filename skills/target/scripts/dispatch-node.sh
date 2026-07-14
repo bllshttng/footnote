@@ -276,8 +276,8 @@ for id in "${NODES[@]}"; do
   else
     route_val="primary"
     if fno route env build >/dev/null 2>&1; then
-      _btarget="$(fno route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .provider_model' 2>/dev/null || true)"
-      [[ -n "$_btarget" && "$_btarget" != "unconfigured" ]] && route_val="$_btarget"
+      _bpm="$(fno route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .provider_model' 2>/dev/null || true)"
+      [[ -n "$_bpm" && "$_bpm" != "unconfigured" ]] && route_val="$_bpm"
     fi
   fi
 
