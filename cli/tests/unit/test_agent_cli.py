@@ -26,6 +26,21 @@ def _file_hash(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else "(absent)"
 
 
+def _clear_markers(monkeypatch) -> None:
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _ in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
+
+
+def _only_marker(monkeypatch, marker: str, value: str) -> None:
+    """Resolve ambient identity to exactly `marker`, clearing higher-precedence
+    markers (and FNO_AGENT_SELF) so the test is deterministic on any host."""
+    _clear_markers(monkeypatch)
+    monkeypatch.setenv(marker, value)
+
+
 def _make_workspace(tmp_path: Path, *, target: bool = False, walker: bool = False,
                     fleet: bool = False, malformed: bool = False) -> Path:
     project = tmp_path / "project"
@@ -192,6 +207,53 @@ class TestWhoami:
         assert result.exit_code == 0
         assert "fleet:" not in result.stdout
         assert "walker:" in result.stdout
+
+    # --- x-5ee2 US1: mail handle + run: relabel -------------------------------
+
+    def test_ac1_hp_mail_handle_surfaced(self, tmp_path, runner, monkeypatch):
+        """With an ambient harness session id, whoami prints the canonical reply
+        handle (human `mail:` line + additive JSON keys), and it equals the value
+        `stamp_from(None)` self-stamps on a name-lane send."""
+        from fno.agents.self_stamp import stamp_from
+
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
+        project = _make_workspace(tmp_path, target=True)
+        result = _invoke(runner, project, monkeypatch, "whoami")
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "mail:     claude-879d8d26" in result.stdout
+        # the run: relabel replaced the session-misnomer human line
+        assert "run:" in result.stdout and "session:" not in result.stdout
+        payload = json.loads(
+            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
+        )
+        assert payload["mail_handle"] == "claude-879d8d26" == stamp_from(None)
+        assert payload["harness_session_id"] == "879d8d26-2505-4977-9b87-000000000000"
+
+    def test_ac4_fr_degrades_without_identity(self, tmp_path, runner, monkeypatch):
+        """No ambient harness identity: no `mail:` line, JSON `mail_handle` null,
+        every existing line and the exit code unchanged."""
+        _clear_markers(monkeypatch)
+        project = _make_workspace(tmp_path, target=True)
+        result = _invoke(runner, project, monkeypatch, "whoami")
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "mail:" not in result.stdout
+        assert "provider:" in result.stdout  # existing lines intact
+        payload = json.loads(
+            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
+        )
+        assert payload["mail_handle"] is None
+        assert payload["harness_session_id"] is None
+
+    def test_ac5_edge_mesh_worker_shows_both_identities(self, tmp_path, runner, monkeypatch):
+        """A mesh worker with ambient identity surfaces both `agent:` (mesh name)
+        and `mail:` (canonical reply handle); they may differ, both reachable."""
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-abcd")
+        monkeypatch.setenv("FNO_AGENT_SELF", "myworker")
+        project = _make_workspace(tmp_path, target=True)
+        result = _invoke(runner, project, monkeypatch, "whoami")
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "agent:    myworker (mesh)" in result.stdout
+        assert "mail:     claude-879d8d26" in result.stdout
 
 
 # --- status --------------------------------------------------------------

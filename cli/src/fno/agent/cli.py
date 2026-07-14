@@ -36,6 +36,18 @@ from fno.agent.state import (
     MissingStateFileOverrideError,
     load_agent_context,
 )
+from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+
+def _mail_handle() -> tuple[Optional[str], Optional[str]]:
+    """(canonical reply handle, harness_session_id) from ambient identity, else
+    (None, None). Same derivation `stamp_from(None)` uses, so whoami advertises
+    the exact string a name-lane send self-stamps. Read-only: env + a string
+    slice, no discovery scan (whoami's md5-invariance contract)."""
+    ident = resolve_harness_identity()
+    if ident.session_id and ident.harness:
+        return canonical_handle(ident.harness, ident.session_id), ident.session_id
+    return None, None
 
 
 def _derive_status_from_events(project_root: Path, session_id: Optional[str]) -> str:
@@ -170,8 +182,12 @@ def whoami_command(
         no_fleet=no_fleet,
     )
     state = _drop_layers(_load_or_exit(opts), opts)
+    mail, harness_sid = _mail_handle()
     if opts.json_output:
-        typer.echo(json.dumps(_ctx_to_jsonable(state), indent=2, sort_keys=True))
+        payload = _ctx_to_jsonable(state)
+        payload["mail_handle"] = mail
+        payload["harness_session_id"] = harness_sid
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
         _emit_warnings(state)
         return
     typer.echo(f"project:  {state.project_root}")
@@ -195,9 +211,14 @@ def whoami_command(
         else:
             phase = ""
         status = f" status={state.session.status}" if state.session.status else ""
+        # 'run:' not 'session:': the value is the run-scoped ledger id (spans
+        # harness sessions across handoff/revival), not a session/mail handle -
+        # the misnomer that got copied as a --from-name and stranded a reply.
         typer.echo(
-            f"session:  {state.session.session_id or '(unknown)'} ({state.session.kind}){phase}{status}"
+            f"run:      {state.session.session_id or '(unknown)'} ({state.session.kind}){phase}{status} (ledger/run id - not a mail handle)"
         )
+    if mail:
+        typer.echo(f"mail:     {mail}  (reply handle - pass as --from-name, or omit to self-stamp)")
     typer.echo(f"provider: {state.provider}")
     # x-301a: opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this
