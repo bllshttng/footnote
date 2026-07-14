@@ -502,8 +502,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
             let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
             // Graduate only for the merge-less advisory terminal; a cross-project
             // advisory still waits for a derivable count (never graduate early).
-            let do_graduate =
-                reason == "DoneAdvisory" && (!m.cross_project || expected.is_some());
+            let do_graduate = reason == "DoneAdvisory" && (!m.cross_project || expected.is_some());
             match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate) {
                 Ok(()) => stamped = true,
                 Err(step) => {
