@@ -472,6 +472,21 @@ fn map_outcome(
             );
             DrainOutcome::Dispatched { node }
         }
+        // x-aba7: an exit-5 (PR OPEN, not merged) close arrives here as
+        // AwaitingMerge with a DonePRGreen reason (the DoneAwaitingMerge-reason
+        // early return above handles the other producer). It is a SUCCESSFUL
+        // dispatch - closed later at the human merge by reconcile - so it must
+        // never trip the cross-tick circuit breaker (mirror the DoneBatched /
+        // DoneAwaitingMerge-reason keep-set). Without this, every healthy
+        // ship-green close would count as a failed drain and auto-defer the node.
+        CloseOutcome::AwaitingMerge => {
+            breaker.record_success(&node);
+            let _ = journal.append(
+                "active_backlog_dispatched",
+                json!({"node_id": node, "awaiting_merge": true, "close": "awaiting-merge"}),
+            );
+            DrainOutcome::Dispatched { node }
+        }
         CloseOutcome::Parked(detail) | CloseOutcome::Refused(detail) => {
             let tripped = breaker.record_failure(&node);
             if tripped {
@@ -624,9 +639,11 @@ fn resolve_dispatch(
     // `fno backlog done` (retry_etxtbsy for a transient busy binary) and Closes
     // only on success - a failed `done` Parks with the error, so the breaker
     // counts it as a failure just as the supervised path did (never a false
-    // success). DoneBatched/DoneAwaitingMerge close at merge via reconcile and
-    // are NOT marked here - map_outcome's keep-set records them as a successful
-    // dispatch without a `done` write.
+    // success). Exit 5 (PR OPEN, not merged) is AwaitingMerge, not a failure:
+    // a no-merge dispatch lands its PR open, so `done` exits 5 and the node
+    // closes at the human merge via reconcile - map_outcome's keep-set counts
+    // it as a successful dispatch. DoneBatched/DoneAwaitingMerge close at merge
+    // via reconcile and are NOT marked here - map_outcome recognizes them too.
     let close = if is_done_reason(&ev.reason) {
         match retry_etxtbsy(|| {
             abi_cmd(&cfg.abi_bin)
@@ -635,6 +652,7 @@ fn resolve_dispatch(
                 .output()
         }) {
             Ok(o) if o.status.success() => CloseOutcome::Closed,
+            Ok(o) if o.status.code() == Some(5) => CloseOutcome::AwaitingMerge,
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
                 CloseOutcome::Parked(if stderr.is_empty() {
@@ -1380,6 +1398,48 @@ mod tests {
             1,
             "a failed `backlog done` must count as a failure, not a false success"
         );
+    }
+
+    #[test]
+    fn resolve_dispatch_done_exit5_is_awaiting_merge_success() {
+        // x-aba7: a no-merge dispatch lands its PR OPEN, so `fno backlog done`
+        // exits 5 (awaiting merge). That is a SUCCESSFUL dispatch (the node
+        // closes at the human merge via reconcile), so the breaker must NOT
+        // record a failure - mirror of MegawalkQueue::close's exit-5 mapping.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fno = bin.join("fno");
+        std::fs::write(
+            &fno,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'awaiting merge: PR OPEN' >&2; exit 5; fi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        breaker.record_failure("x-awm5001"); // pre-existing streak to prove reset
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-awm5001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "done".to_string(),
+            },
+        );
+
+        assert_eq!(
+            breaker.consecutive_failures("x-awm5001"),
+            0,
+            "done exit 5 (awaiting merge) is a success, never a failure"
+        );
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_dispatched") && l.contains("awaiting_merge")));
     }
 
     #[test]

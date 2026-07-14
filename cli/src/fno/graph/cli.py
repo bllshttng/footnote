@@ -4373,92 +4373,6 @@ def _done_gh_query(pr_number, **kwargs):
     return query_pr_merge_state(pr_number, **kwargs)
 
 
-def _done_ci_query(pr_number, *, repo=None, cwd=None):
-    """Query gh pr checks for a PR and return the list of check objects.
-
-    Each object has at least {"name": str, "state": str, "bucket": str}.
-    Raises ReconcileError on any subprocess failure. Returns [] when gh
-    reports no checks configured.
-    """
-    import json as _json
-    import subprocess
-    import shutil
-    from fno.graph._reconcile import GH_QUERY_TIMEOUT_S, ReconcileError
-
-    if shutil.which("gh") is None:
-        raise ReconcileError("gh CLI not found on PATH")
-
-    cmd = ["gh", "pr", "checks", str(pr_number), "--json", "name,state,bucket"]
-    if repo:
-        cmd = ["gh", "pr", "checks", str(pr_number), "--repo", repo, "--json", "name,state,bucket"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=GH_QUERY_TIMEOUT_S,
-            cwd=cwd,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ReconcileError(
-            f"gh pr checks #{pr_number} timed out after {GH_QUERY_TIMEOUT_S}s"
-        ) from exc
-    except OSError as exc:
-        raise ReconcileError(f"gh pr checks subprocess failed: {exc}") from exc
-
-    if result.returncode != 0:
-        raise ReconcileError(
-            f"gh pr checks #{pr_number} failed (rc={result.returncode}): "
-            f"{(result.stderr or '').strip()}"
-        )
-
-    try:
-        data = _json.loads(result.stdout or "[]")
-    except _json.JSONDecodeError as exc:
-        raise ReconcileError(f"gh pr checks stdout was not JSON: {exc}") from exc
-
-    if isinstance(data, list):
-        return data
-    # gh can return a wrapping object on some versions; be defensive
-    return []
-
-
-def _ci_is_green(checks: list) -> tuple[bool, str]:
-    """Return (is_green, reason_if_not_green) using bucket semantics.
-
-    Mirrors loopcheck.rs bucket evaluation:
-      - any fail/cancel bucket -> not green
-      - any non-pass/non-skipping bucket -> pending, not green
-      - empty list -> not green (no checks configured = no evidence)
-      - all pass/skipping -> green
-    """
-    if not checks:
-        return False, "no CI checks configured"
-
-    # Filter to dict items only; non-dict elements (e.g. strings from
-    # unexpected gh output) are ignored rather than raising AttributeError.
-    dict_checks = [c for c in checks if isinstance(c, dict)]
-    if not dict_checks:
-        return False, "no CI checks configured"
-
-    for check in dict_checks:
-        bucket = (check.get("bucket") or "").lower()
-        if bucket in ("fail", "cancel"):
-            name = check.get("name") or "unknown"
-            return False, f"fail={name} bucket={bucket}"
-
-    pending = [
-        check for check in dict_checks
-        if (check.get("bucket") or "").lower() not in ("pass", "skipping")
-    ]
-    if pending:
-        names = ",".join(c.get("name", "?") for c in pending[:3])
-        return False, f"pending checks: {names}"
-
-    return True, ""
-
-
 @cli.command("done")
 def cmd_done(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
@@ -4486,16 +4400,20 @@ def cmd_done(
     ``_status: done`` from that field and unblocks any dependents.
 
     Before mutation, a gh cross-check verifies that at least one referenced PR
-    is MERGED or OPEN with green CI. If no evidence is found the command
-    refuses and exits 3 (distinct from validation errors on exit 1/2).
+    is MERGED (x-aba7: graph done = merged, uniformly). An OPEN PR is NOT
+    closing evidence - the node is awaiting merge and closes on the actual
+    merge via reconcile / merge-triggered advance. CI state is irrelevant to
+    the close decision.
 
     Exit codes:
         0  success (node closed)
         1  validation error (bad id, node not found)
         2  usage error (--force without --reason)
-        3  gh cross-check refused: no merged/green evidence (retryable when
-           the PR merges or CI goes green; walker treats this as Parked)
+        3  gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence
+           (retryable when the PR merges; walker treats this as Parked)
         4  gh outage: subprocess failure / timeout / parse error; retryable
+        5  awaiting merge: PR OPEN, not merged; node stays in_review
+           (success-shaped; close lands via reconcile/advance at merge)
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
@@ -4548,10 +4466,15 @@ def cmd_done(
         repo = repo_slug_from_url(first_pr_url)
         cwd = node.get("cwd")
 
-        # Try each ref in order; the first one that gives us evidence wins.
+        # Try each ref in order; the first MERGED ref is closing evidence
+        # (x-aba7: graph done = merged). An OPEN ref means the node is awaiting
+        # merge - success-shaped (exit 5), never closing evidence. CI state is
+        # NOT consulted: whether CI is green is the session's finish-line concern
+        # (loop-check), not the graph-close decision.
         evidence_found = False
         refusal_reason: Optional[str] = None
         outage_error: Optional[str] = None
+        open_pr_number: Optional[int] = None  # first OPEN ref -> awaiting merge
 
         for pr_number, pr_url in refs:
             pr_repo = repo_slug_from_url(pr_url) or repo
@@ -4569,20 +4492,8 @@ def cmd_done(
                 break
 
             if pr_state.state == "OPEN":
-                # Check CI green
-                try:
-                    checks = _done_ci_query(pr_number, repo=pr_repo, cwd=pr_cwd)
-                except ReconcileError as exc:
-                    outage_error = str(exc)
-                    continue
-                green, ci_reason = _ci_is_green(checks)
-                if green:
-                    evidence_found = True
-                    evidence_pr_url = pr_url
-                    break
-                refusal_reason = (
-                    f"PR #{pr_number} state=OPEN, CI not green: {ci_reason}"
-                )
+                if open_pr_number is None:
+                    open_pr_number = pr_number
             else:
                 # CLOSED (not merged) or UNKNOWN
                 refusal_reason = (
@@ -4590,8 +4501,23 @@ def cmd_done(
                 )
 
         if not evidence_found:
-            if outage_error and refusal_reason is None:
-                # Only gh failures, no policy refusal -> retryable outage
+            # A definitive OPEN ref wins over an outage: we KNOW the node has a
+            # live PR awaiting merge, so exit 5 (success-shaped, retryable on
+            # merge) rather than the conservative outage retry.
+            if open_pr_number is not None:
+                typer.echo(
+                    f"awaiting merge: PR #{open_pr_number} is OPEN, not merged. "
+                    f"{task_id} stays in_review and closes on merge "
+                    f"(reconcile / merge-triggered advance). "
+                    f"Use --force --reason TEXT for an early close.",
+                    err=True,
+                )
+                raise typer.Exit(code=5)
+
+            # No MERGED, no OPEN. An outage on any ref is a retryable outage
+            # (covers pure outage AND the partial CLOSED+outage conservatism:
+            # never refuse when a ref we could not query might be evidence).
+            if outage_error:
                 typer.echo(
                     f"Error: gh cross-check failed for {task_id}: {outage_error}\n"
                     f"The check is retryable once gh is available again. Node stays open.",
@@ -4599,19 +4525,8 @@ def cmd_done(
                 )
                 raise typer.Exit(code=4)
 
-            if outage_error:
-                # Partial: some PRs queryable (policy failure), some not (outage).
-                # Treat as a retryable outage (most conservative outcome; AC3-FR).
-                typer.echo(
-                    f"Error: gh cross-check partially failed for {task_id} "
-                    f"(gh outage on some PRs: {outage_error}). "
-                    f"Retry after gh recovers. Node stays open.",
-                    err=True,
-                )
-                raise typer.Exit(code=4)
-
-            # Pure policy refusal - print the specific fact
-            msg = refusal_reason or f"PR #{first_pr_number}: no merged/green evidence"
+            # Pure policy refusal - CLOSED-unmerged / UNKNOWN only.
+            msg = refusal_reason or f"PR #{first_pr_number}: no merged evidence"
             typer.echo(
                 f"Refused: {task_id} cross-check failed: {msg}\n"
                 f"Use --force --reason TEXT to bypass.",

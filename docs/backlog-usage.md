@@ -113,11 +113,24 @@ fno backlog rank <id> --clear          # rejoin the priority fallback
 | Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `_status: deferred` |
 | Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
 | Replace with a newer node | `fno backlog supersede <new> --replaces <old> --reason "..."` | auto-defers old; `_status: superseded` |
-| Mark complete | `fno backlog done <id>` | sets `completed_at`, unblocks dependents |
+| Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
 | Remove permanently | `fno backlog remove <id>` | hard delete (use for dupes / dead nodes) |
 
 Blockers: `--blocked-by`, `--add-blocker`, `--remove-blocker` on `update`.
 A node with an open blocker derives to `_status: blocked` automatically.
+
+**done = merged.** `fno backlog done` closes a node only when a referenced PR is
+MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
+`in_review` and closes on the actual merge via `reconcile` / merge-triggered
+`advance`. A session finishes at PR-up + CI-green + reviewed (it never waits on a
+human merge); only the graph close waits for the merge, so the "done" state means
+"landed on main" uniformly, whoever closes it. Exit codes: 0 closed, 3 refusal
+(CLOSED-unmerged / no evidence), 4 gh outage (retryable), 5 awaiting merge.
+
+`fno backlog update <id> --completed` is the un-cross-checked operator bypass
+(same authority class as `done --force`, without the reason ceremony): it applies
+completion with no gh evidence check. Use it only by hand for a node whose real
+state the cross-check cannot see; automation must never call it.
 
 ## Priority tiers
 

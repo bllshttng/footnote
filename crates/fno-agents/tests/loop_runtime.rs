@@ -135,6 +135,7 @@ impl Queue for FixedQueue {
             CloseOutcome::Closed => CloseOutcome::Closed,
             CloseOutcome::Refused(s) => CloseOutcome::Refused(s.clone()),
             CloseOutcome::Parked(s) => CloseOutcome::Parked(s.clone()),
+            CloseOutcome::AwaitingMerge => CloseOutcome::AwaitingMerge,
         })
     }
 }

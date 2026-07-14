@@ -129,6 +129,11 @@ pub enum CloseOutcome {
     Refused(String),
     /// Unit was parked for later (e.g. dependents not yet resolved).
     Parked(String),
+    /// Unit built successfully (PR up, reviewed) but its PR is not yet merged
+    /// (x-aba7: graph done = merged). Success-shaped: the claim is RELEASED and
+    /// no failure is recorded; the node stays `in_review` and is closed at the
+    /// actual merge by `fno backlog reconcile` / merge-triggered advance.
+    AwaitingMerge,
 }
 
 /// Runtime-varying context passed to each Dispatcher::run call. Static
@@ -827,6 +832,10 @@ fn journal_node_closed(
         CloseOutcome::Closed => ("closed", String::new()),
         CloseOutcome::Parked(s) => ("parked", s.clone()),
         CloseOutcome::Refused(s) => ("refused", s.clone()),
+        CloseOutcome::AwaitingMerge => (
+            "awaiting-merge",
+            "PR not merged; node stays in_review, reconcile/advance close it at merge".to_string(),
+        ),
     };
     let reason_str = format!("{:?}", evidence.reason);
     journal.append(
