@@ -963,10 +963,12 @@ impl Queue for MegawalkQueue {
             .get(&unit.id)
             .map(|e| e.is_p0)
             .unwrap_or(false);
-        // AwaitingMerge is a success (x-aba7): a DoneAwaitingMerge-reason close
-        // has should_done=false, so record it explicitly here or its streak
-        // would count a healthy ship-green as a failure.
-        let close_success = should_done || matches!(outcome, CloseOutcome::AwaitingMerge);
+        // Success is outcome-shaped, not reason-shaped: only Closed or
+        // AwaitingMerge resets the streak. A done-reason whose `fno backlog done`
+        // failed (-> Parked) must count as a failure so the consecutive-failure
+        // pause can still fire; AwaitingMerge (a non-done reason) still counts as
+        // success.
+        let close_success = matches!(outcome, CloseOutcome::Closed | CloseOutcome::AwaitingMerge);
         self.policy_record_close(&unit.id, close_success, is_p0);
 
         // ── claim release vs. hold (park-exclusion) ───────────────────────────

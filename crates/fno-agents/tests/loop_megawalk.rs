@@ -2971,3 +2971,63 @@ exit 0"#,
         "AwaitingMerge must not trip consecutive_failures; next() should dequeue, not pause"
     );
 }
+
+// ── done-reason whose `backlog done` FAILS counts toward the streak ───────────
+//
+// Regression for the close_success invariant: a DonePRGreen close whose
+// `fno backlog done` fails (-> Parked) must count as a FAILURE (outcome-shaped,
+// not reason-shaped), so three in a row trip the consecutive-failure pause.
+
+#[test]
+fn done_reason_that_parks_trips_failure_streak() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let node_json = real_node_json("ab-parkstr0", "Park streak", None);
+
+    // backlog next always returns a node; claim ok; done always FAILS (exit 1).
+    write_stub(
+        &bin_dir,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then echo '{node_json}'; exit 0; fi
+if [[ "$1" == "claim" ]]; then exit 0; fi
+if [[ "$1" == "backlog" && "$2" == "done" ]]; then echo "done refused" >&2; exit 1; fi
+exit 0"#,
+            node_json = node_json,
+        ),
+    );
+
+    let abi_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(abi_stub, None, false);
+
+    // Close 3 DonePRGreen units whose `backlog done` fails -> Parked -> failure.
+    for i in 0..3 {
+        let unit = Unit {
+            id: format!("ab-parkstr{i}"),
+            title: "park".to_string(),
+            session_key: format!("sk-p{i}"),
+            plan_path: None,
+            extra_env: vec![],
+        };
+        let outcome = q
+            .close(
+                &unit,
+                &Evidence {
+                    reason: TerminationReason::DonePRGreen,
+                    message: "done failed".to_string(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, CloseOutcome::Parked(_)), "close {i}");
+    }
+
+    // Streak is now 3: next() must pause for consecutive_failures.
+    let pause_err = match q.next() {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected pause after 3 done-reason Parks"),
+    };
+    assert!(
+        pause_err.contains("consecutive_failures"),
+        "a done-reason that Parks must count toward the streak; got: {pause_err}"
+    );
+}
