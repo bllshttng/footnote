@@ -385,6 +385,14 @@ pub fn meta_rows() -> &'static [(&'static str, &'static str, KeySection)] {
 /// The single-byte chord table. LEADER (literal) and the digit range are
 /// structural specials; every other byte is resolved from [`key_bindings`], the
 /// same table the which-key modal renders, so dispatch and help cannot diverge.
+/// Resolve a post-leader byte to its [`Event`] as if the leader were held - the
+/// which-key modal's execution path (x-8ccf US3): a keypress in the modal runs
+/// EXACTLY what `prefix+<key>` runs, because both go through this one table.
+/// `Event::Bell` means the byte is unbound (the modal dismisses on it).
+pub fn resolve_chord(byte: u8) -> Event {
+    chord(byte)
+}
+
 fn chord(b: u8) -> Event {
     match b {
         LEADER => Event::Forward(vec![LEADER]), // leader-leader = literal

@@ -83,6 +83,10 @@ pub struct Popup {
     /// Flat index into `targets()`. Clamped on read; 0 lands on the first
     /// selectable target (or nothing when there are none).
     pub sel: usize,
+    /// First visible row when the block is taller than the terminal (the
+    /// which-key modal scrolls; short anchored menus keep this 0). Clamped in
+    /// [`Popup::render`] so it can never scroll past the last screenful.
+    pub scroll: usize,
 }
 
 /// One laid-out line ready to draw, plus its style and the selected sub-span
@@ -113,7 +117,14 @@ impl Popup {
             rows,
             anchor,
             sel: 0,
+            scroll: 0,
         }
+    }
+
+    /// Scroll the body by `delta` rows (negative = up), saturating at the top.
+    /// The bottom clamp happens in [`Popup::render`] against the live viewport.
+    pub fn scroll_by(&mut self, delta: isize) {
+        self.scroll = (self.scroll as isize + delta).max(0) as usize;
     }
 
     /// Every selectable target as `(row_index, cell_index_within_row)`, in
@@ -278,8 +289,13 @@ impl Popup {
             lines.push(line);
         }
 
+        // Window the body to the terminal height when it overflows (the modal
+        // scrolls); a block that fits keeps all its lines and its natural anchor.
         let block_h = lines.len();
-        let origin = origin(self.anchor, width, block_h, (trows, tcols));
+        let vis_h = block_h.min(trows);
+        let scroll = self.scroll.min(block_h - vis_h);
+        let lines = lines[scroll..scroll + vis_h].to_vec();
+        let origin = origin(self.anchor, width, vis_h, (trows, tcols));
         Rendered {
             origin,
             width,
@@ -501,6 +517,30 @@ mod tests {
         assert_eq!(r.lines[0].hits.len(), 1);
         assert_eq!(r.lines[0].hits[0].0, 0);
         assert_eq!(r.lines[1].hits[0].0, 1);
+    }
+
+    #[test]
+    fn render_windows_and_scrolls_a_tall_block() {
+        let rows: Vec<PopupRow> = (0..20)
+            .map(|i| entry("x", &format!("row{i}"), ""))
+            .collect();
+        let mut p = Popup::new(rows, Anchor::Center);
+        // Terminal only 6 rows tall: the 20-row block windows to 6.
+        let r = p.render((6, 80));
+        assert_eq!(r.lines.len(), 6);
+        assert!(r.lines[0].text.contains("row0"));
+        // Scroll down 5: the window starts at row5, clamped to the last screenful.
+        p.scroll_by(5);
+        let r = p.render((6, 80));
+        assert!(r.lines[0].text.contains("row5"));
+        // Over-scroll clamps to the last full screen (rows 14..20).
+        p.scroll_by(100);
+        let r = p.render((6, 80));
+        assert!(
+            r.lines[0].text.contains("row14"),
+            "clamped to last screenful"
+        );
+        assert!(r.lines[5].text.contains("row19"));
     }
 
     #[test]

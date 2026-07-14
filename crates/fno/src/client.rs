@@ -25,7 +25,8 @@ use crossterm::style::Color as CtColor;
 use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
-use crate::keys::{Event, Scanner};
+use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
+use crate::popup::{self, Anchor, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, AnswerablePrompt, BacklogCard,
     BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
@@ -394,9 +395,15 @@ struct View {
     /// The which-key hint line is painted over the bottom row (leader held
     /// past [`HINT_DELAY`]); any chord resolution clears it (AC4-HP).
     hint: bool,
-    /// The full key-table overlay (leader+?); the next keypress dismisses it
-    /// (AC4-EDGE).
-    overlay: bool,
+    /// The which-key keybinds modal (leader+?, x-8ccf US3): a centered popup
+    /// built from the leader-chord table. While open, a bound key executes
+    /// through the SAME dispatch as a direct chord (which-key); arrows/pgup
+    /// scroll+select, Enter runs the selected row, Esc/unbound closes. `None`
+    /// when closed. Replaces the old static top-left key-table poster.
+    keys_modal: Option<KeysModal>,
+    /// Pending escape bytes in modal mode (arrow/pgup folding), same split-arrow
+    /// safety as [`View::sel_esc`].
+    keys_modal_esc: Vec<u8>,
     /// Caret expansion per squad id - client-local, instant (AC6-UI).
     expanded: HashSet<u64>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
@@ -626,6 +633,71 @@ struct PeekView {
     name: String,
 }
 
+/// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
+/// the single-source leader-chord table, plus the [`Event`] each selectable row
+/// runs (`None` for headers, rules, and display-only meta rows). Keeping the
+/// events beside the popup lets Enter/click on the SELECTED row dispatch through
+/// the exact path a typed chord would, so help can never advertise an action it
+/// cannot run (Locked 3).
+struct KeysModal {
+    popup: Popup,
+    row_events: Vec<Option<Event>>,
+}
+
+/// Build the modal's rows from [`key_bindings`] (the dispatcher's own table):
+/// title, then each section's header + its bindings (key leading, action right),
+/// its display-only meta rows, then a footer hint. `row_events` runs parallel to
+/// `popup.rows` so a selected row's chord is one lookup away.
+fn build_keys_modal() -> KeysModal {
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut events: Vec<Option<Event>> = Vec::new();
+    let mut add = |row: PopupRow, ev: Option<Event>| {
+        rows.push(row);
+        events.push(ev);
+    };
+    add(PopupRow::Header("keybinds  ·  esc close".into()), None);
+    let bindings = key_bindings();
+    for section in [
+        KeySection::Global,
+        KeySection::Navigation,
+        KeySection::WorkspacesTabs,
+        KeySection::Panes,
+    ] {
+        add(PopupRow::Header(section.title().into()), None);
+        for kb in bindings.iter().filter(|kb| kb.section == section) {
+            add(
+                PopupRow::Entry {
+                    glyph: kb.disp.to_string(),
+                    label: kb.label.to_string(),
+                    hint: String::new(),
+                },
+                Some(kb.event.clone()),
+            );
+        }
+        // Display-only rows (1-9 select tab, C-b C-b literal): selectable so the
+        // reference shows them, but not single-event chords, so Enter BELs.
+        for (disp, label, _) in meta_rows().iter().filter(|(_, _, s)| *s == section) {
+            add(
+                PopupRow::Entry {
+                    glyph: (*disp).to_string(),
+                    label: (*label).to_string(),
+                    hint: String::new(),
+                },
+                None,
+            );
+        }
+    }
+    add(PopupRow::Rule, None);
+    add(
+        PopupRow::Header("scroll wheel · pgup/pgdn · ⏎/click/tap runs".into()),
+        None,
+    );
+    KeysModal {
+        popup: Popup::new(rows, Anchor::Center),
+        row_events: events,
+    }
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Seed with the active squad so the first frame already shows its tabs
@@ -639,7 +711,8 @@ impl View {
             panel_on: true,
             status_on: true,
             hint: false,
-            overlay: false,
+            keys_modal: None,
+            keys_modal_esc: Vec::new(),
             expanded,
             selector: None,
             sel_esc: Vec::new(),
@@ -983,6 +1056,46 @@ impl View {
     fn clear_peek(&mut self) {
         self.peek = None;
         self.peek_esc.clear();
+    }
+
+    /// Open the which-key keybinds modal (leader+?, x-8ccf US3). Clears peek like
+    /// every other overlay open so a mouse-driven open never leaves peek on top.
+    fn open_keys_modal(&mut self) {
+        self.clear_peek();
+        self.keys_modal = Some(build_keys_modal());
+        self.keys_modal_esc.clear();
+    }
+
+    /// The flat popup target under a screen cell while the modal is open, for
+    /// mouse hover/click. Renders the modal (windowed by the live scroll) and
+    /// walks the visible line's hit spans; `None` off the popup.
+    fn keys_modal_hit(&self, row: u16, col: u16) -> Option<usize> {
+        let m = self.keys_modal.as_ref()?;
+        let r = m.popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let li = (row as usize).checked_sub(r0)?;
+        let line = r.lines.get(li)?;
+        let cc = (col as usize).checked_sub(c0)?;
+        line.hits
+            .iter()
+            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .map(|(t, _, _)| *t)
+    }
+
+    /// Keep the selected modal row inside the scrolled viewport after an arrow
+    /// move (the block is one line per row, so the row index IS the line index).
+    fn follow_modal_selection(&mut self) {
+        let trows = self.term.0.max(1) as usize;
+        if let Some(m) = self.keys_modal.as_mut() {
+            let vis_h = m.popup.rows.len().min(trows);
+            if let Some((ri, _)) = m.popup.selected() {
+                if ri < m.popup.scroll {
+                    m.popup.scroll = ri;
+                } else if ri >= m.popup.scroll + vis_h {
+                    m.popup.scroll = ri + 1 - vis_h;
+                }
+            }
+        }
     }
 
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
@@ -1776,8 +1889,10 @@ impl View {
             // x-4e2d catch-up overlay: reuse the inverse-video chrome; any key
             // dismisses (handled in handle_stdin, like the key-table overlay).
             draw_lines_overlay(&mut cells, rows, cols, lines);
-        } else if self.overlay {
-            draw_overlay(&mut cells, rows, cols);
+        } else if let Some(m) = &self.keys_modal {
+            // x-8ccf US3: the centered which-key modal replaces the old top-left
+            // key-table poster (opaque, sectioned, scrollable).
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
         } else if let Some(sel) = self.answers {
             // x-feec needs-me queue (grown from the x-c929 answer overlay): the
             // severity-ranked union + the selected row's answer options, on the
@@ -1826,6 +1941,7 @@ impl View {
             && self.attach_place.is_none()
             && self.nav.is_none()
             && self.peek.is_none()
+            && self.keys_modal.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -2755,34 +2871,6 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
     p.to_string()
 }
 
-/// The full key table (leader+?), inverse-video over the content area's
-/// top-left. Any key dismisses it (AC4-EDGE). Cell-bounds-checked, so a tiny
-/// terminal shows a clipped table rather than nothing.
-const KEY_TABLE: &[&str] = &[
-    " fno keys · leader = Ctrl-b              ",
-    "  %  split horizontal   \"  split vertical ",
-    "  hjkl / arrows  focus  HJKL / C-arrows  resize ",
-    "  x  close pane         c  new tab        ",
-    "  n/p  cycle tabs       1-9  select tab   ",
-    "  &  close tab          w  panel selector ",
-    "     selector ⏎ acts on the row: squad/tab ",
-    "     · agent focus/attach · card dispatch · + create ",
-    "     · selector p places attach into a workspace split ",
-    "     organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder",
-    "     · space mark agent · R recruit marked → workspace ",
-    "  a  answer queue       b  toggle sideline ",
-    "  s  toggle status      ?  this key table  ",
-    "  [ ]  jump block       v  select block   ",
-    "  y  copy selection     r  rerun block    ",
-    "  g  grab work (dispatch next ready)     ",
-    "  ,  rename tab (empty resets to auto)   ",
-    "  /  search scrollback  n/N older/newer  ",
-    "  f  find: goto pane/agent · type filter  ",
-    "     · Tab state · C-n/C-p move · ⏎ goto  ",
-    "  d  detach             C-b C-b  literal  ",
-    " any key dismisses                        ",
-];
-
 /// Draw inverse-video overlay lines at the content area's top-left, one line
 /// per row, cell-bounds-checked (a tiny terminal clips rather than panics).
 /// Shared by the key-table overlay and the x-c929 answer overlay.
@@ -2806,10 +2894,6 @@ fn draw_lines_overlay<S: AsRef<str>>(cells: &mut [Cell], rows: usize, cols: usiz
             };
         }
     }
-}
-
-fn draw_overlay(cells: &mut [Cell], rows: usize, cols: usize) {
-    draw_lines_overlay(cells, rows, cols, KEY_TABLE);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -3607,6 +3691,15 @@ async fn handle_stdin(
         if rep.shift {
             continue;
         }
+        // x-8ccf US3: while the which-key modal is open, the mouse drives it
+        // (hover selects, wheel scrolls, click executes or dismisses) and is
+        // SWALLOWED - it never reaches a pane or the chrome underneath.
+        if view.keys_modal.is_some() {
+            if let StdinFlow::Detach = keys_modal_mouse(view, rep, sock_w).await? {
+                return Ok(StdinFlow::Detach);
+            }
+            continue;
+        }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
         // click / scroll cancels it and is SWALLOWED - it must never leak to a
         // pane underneath (the confirm prompt spans the full-width bottom row) nor
@@ -3658,13 +3751,12 @@ async fn handle_stdin(
         view.digest = None;
         return Ok(StdinFlow::Continue);
     }
-    if view.overlay {
-        // AC4-EDGE: one keypress dismisses the key table and does nothing
-        // else. The WHOLE chunk is swallowed - splitting it could leak the
-        // tail of an escape sequence into the pane, a worse bug than two
-        // coalesced keypresses both dying with the overlay.
-        view.overlay = false;
-        return Ok(StdinFlow::Continue);
+    if view.keys_modal.is_some() {
+        // x-8ccf US3 which-key: a bound key executes through the shared dispatch,
+        // arrows/pgup scroll+select, Enter runs the selected row, Esc/unbound
+        // dismiss. Routed here (same precedence as the old poster) so its keys
+        // never leak to a pane.
+        return keys_modal_keys(view, &passthrough, sock_w).await;
     }
     if view.confirm.is_some() {
         return confirm_keys(view, &passthrough, sock_w).await;
@@ -3825,7 +3917,7 @@ async fn dispatch_event(
                 .map_err(|e| format!("resize send failed: {e}"))?;
         }
         Event::ShowKeys => {
-            view.overlay = true;
+            view.open_keys_modal();
         }
         Event::BlockJump(dir) => {
             write_msg(
@@ -4006,6 +4098,250 @@ async fn confirm_keys(
         write_msg(sock_w, &ClientMsg::Command(cmd))
             .await
             .map_err(|e| format!("confirm-action send failed: {e}"))?;
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// A folded which-key modal key (x-8ccf US3). Arrows/pgup navigate the
+/// reference; `Byte`/`Enter` execute; `Esc` dismisses. Distinct from
+/// [`fold_selector_keys`] because the modal needs arrows kept as navigation
+/// (not folded to hjkl, which are executable bindings) and pgup/pgdn as scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModalKey {
+    Byte(u8),
+    Enter,
+    Esc,
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+}
+
+/// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
+/// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
+/// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
+/// special-cased by the caller for instant close) becomes `Esc`; every other
+/// printable byte is `Byte`, resolved by the caller through the chord table.
+fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
+    let mut out = Vec::new();
+    for &b in bytes {
+        if !esc.is_empty() {
+            match (esc.as_slice(), b) {
+                ([0x1b], b'[') => {
+                    esc.push(b);
+                    continue;
+                }
+                ([0x1b], _) => {
+                    // The pending ESC was a bare Esc press; emit it, then let the
+                    // fresh byte fall through to be processed below.
+                    out.push(ModalKey::Esc);
+                    esc.clear();
+                }
+                ([0x1b, b'['], b'A') => {
+                    out.push(ModalKey::Up);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'B') => {
+                    out.push(ModalKey::Down);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'C') => {
+                    out.push(ModalKey::Right);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'D') => {
+                    out.push(ModalKey::Left);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'5') | ([0x1b, b'['], b'6') => {
+                    esc.push(b); // PageUp `ESC[5~` / PageDown `ESC[6~` pending
+                    continue;
+                }
+                ([0x1b, b'[', b'5'], b'~') => {
+                    out.push(ModalKey::PageUp);
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'[', b'6'], b'~') => {
+                    out.push(ModalKey::PageDown);
+                    esc.clear();
+                    continue;
+                }
+                _ => {
+                    // Unknown escape tail: swallow it whole (never leak).
+                    esc.clear();
+                    continue;
+                }
+            }
+        }
+        match b {
+            0x1b => esc.push(0x1b),
+            b'\r' | b'\n' => out.push(ModalKey::Enter),
+            _ => out.push(ModalKey::Byte(b)),
+        }
+    }
+    out
+}
+
+/// Which-key modal keys (x-8ccf US3). A lone `0x1b` chunk closes instantly
+/// (bare Esc); arrows/pgup scroll+select; Enter/`click` run the selected row;
+/// a bound printable key runs immediately through the shared chord dispatch
+/// (which-key), an unbound one dismisses. No key ever reaches a pane.
+async fn keys_modal_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    // A lone Esc chunk is unambiguously the Escape key (a real escape sequence
+    // arrives as one multi-byte read): close now rather than waiting for a
+    // following key, so dismiss is instant.
+    if bytes == [0x1b] && view.keys_modal_esc.is_empty() {
+        view.keys_modal = None;
+        return Ok(StdinFlow::Continue);
+    }
+    let mut esc = std::mem::take(&mut view.keys_modal_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.keys_modal_esc = esc;
+    for tok in toks {
+        if view.keys_modal.is_none() {
+            break; // closed mid-chunk: swallow the rest, never forward
+        }
+        match tok {
+            ModalKey::Esc => view.keys_modal = None,
+            ModalKey::Up => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Up);
+                }
+                view.follow_modal_selection();
+            }
+            ModalKey::Down => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Down);
+                }
+                view.follow_modal_selection();
+            }
+            ModalKey::Left => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Left);
+                }
+            }
+            ModalKey::Right => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Right);
+                }
+            }
+            ModalKey::PageUp => {
+                let page = (view.term.0 as isize - 2).max(1);
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.scroll_by(-page);
+                }
+            }
+            ModalKey::PageDown => {
+                let page = (view.term.0 as isize - 2).max(1);
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.scroll_by(page);
+                }
+            }
+            ModalKey::Enter => {
+                if matches!(
+                    keys_modal_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            ModalKey::Byte(b) => match resolve_chord(b) {
+                // Unbound key dismisses (AC2-EDGE): no action fires.
+                Event::Bell => view.keys_modal = None,
+                // Bound key runs immediately through the SAME dispatch a typed
+                // chord uses (Locked 3), then the modal closes.
+                ev => {
+                    view.keys_modal = None;
+                    if matches!(
+                        dispatch_event(view, ev, sock_w).await?,
+                        DispatchFlow::Detach
+                    ) {
+                        return Ok(StdinFlow::Detach);
+                    }
+                }
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Run the modal's selected row (Enter/click) through the shared dispatch, then
+/// close - a header/meta row with no chord BELs and stays open (nothing ran, so
+/// the "execute always closes" invariant is not tripped). Returns the dispatch
+/// flow so a detach chord (leader+d) run from the modal actually detaches.
+async fn keys_modal_execute_selected(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    let ev = view.keys_modal.as_ref().and_then(|m| {
+        m.popup
+            .selected()
+            .and_then(|(ri, _)| m.row_events.get(ri).cloned().flatten())
+    });
+    match ev {
+        Some(ev) => {
+            view.keys_modal = None;
+            dispatch_event(view, ev, sock_w).await
+        }
+        None => {
+            let _ = raw_out(b"\x07");
+            Ok(DispatchFlow::Continue)
+        }
+    }
+}
+
+/// One mouse report while the which-key modal is open (x-8ccf US3): hover moves
+/// the selection, the wheel scrolls, a left click on a row runs it, a click off
+/// the popup dismisses (herdr click-elsewhere).
+async fn keys_modal_mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::WheelUp => {
+            if let Some(m) = view.keys_modal.as_mut() {
+                m.popup.scroll_by(-3);
+            }
+        }
+        MouseKind::WheelDown => {
+            if let Some(m) = view.keys_modal.as_mut() {
+                m.popup.scroll_by(3);
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => match view.keys_modal_hit(rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.select(t);
+                }
+                if matches!(
+                    keys_modal_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            None => view.keys_modal = None, // click off the popup dismisses
+        },
+        _ => {}
     }
     Ok(StdinFlow::Continue)
 }
@@ -6534,23 +6870,98 @@ mod tests {
     }
 
     #[test]
-    fn client_compose_overlay_renders_key_table() {
-        // AC4-EDGE: leader+? renders the full table over the content area.
+    fn client_compose_keys_modal_renders_the_which_key_reference() {
+        // x-8ccf US3: leader+? opens the centered which-key modal (replacing the
+        // top-left poster) built from the single-source binding table.
         let mut view = two_pane_view();
-        view.term = (30, 80);
-        view.overlay = true;
+        view.term = (40, 80);
+        view.open_keys_modal();
         let text = frame_text(&view.compose());
-        assert!(text.contains("fno keys"), "table header present");
-        assert!(text.contains("any key dismisses"));
-        // x-653d AC5-HP: the table documents leader+f and its filters.
-        assert!(text.contains("f  find"), "key table documents leader+f");
-        assert!(text.contains("Tab state"), "and its type/Tab/goto filters");
+        assert!(text.contains("keybinds"), "modal title present");
+        assert!(text.contains("esc close"), "dismiss affordance present");
+        // Section headers + a sampling of bindings the table advertises.
+        assert!(text.contains("panes"), "section header");
+        assert!(text.contains("detach"), "the d binding's action");
         assert!(
-            text.contains(
-                "organize: sel r name J/K reorder m move x rm · tab C-b , name </> reorder"
-            ),
-            "80-column key table documents every organize gesture"
+            text.contains("find: goto pane/agent"),
+            "the f binding's action"
         );
+    }
+
+    #[test]
+    fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
+        // The default selection is the first binding; row_events[selected] must
+        // be exactly the Event a direct chord of that key would produce (Locked
+        // 3 parity, at the modal boundary).
+        let m = super::build_keys_modal();
+        let (ri, _) = m.popup.selected().expect("a selectable row");
+        let ev = m.row_events[ri].clone().expect("first row is executable");
+        // The first section is Global; its first binding is `w` -> OpenSelector.
+        assert_eq!(ev, crate::keys::resolve_chord(b'w'));
+    }
+
+    #[tokio::test]
+    async fn keys_modal_which_key_executes_a_bound_key_to_the_wire() {
+        // AC2-HP: tapping a bound key in the modal runs it immediately through
+        // the SAME dispatch a direct chord uses, and the modal closes.
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        v.open_keys_modal();
+        let mut buf: Vec<u8> = Vec::new();
+        keys_modal_keys(&mut v, b"%", &mut buf).await.unwrap();
+        assert!(v.keys_modal.is_none(), "executing a chord closes the modal");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::SplitH) => {}
+            other => panic!("expected SplitH from `%`, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn keys_modal_unbound_key_and_bare_esc_dismiss_without_acting() {
+        // AC2-EDGE: an unbound key dismisses and NO action fires; a bare Esc
+        // closes instantly.
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        let mut buf: Vec<u8> = Vec::new();
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, b"Z", &mut buf).await.unwrap();
+        assert!(v.keys_modal.is_none(), "unbound key dismisses");
+        assert!(buf.is_empty(), "unbound key sends nothing");
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, b"\x1b", &mut buf).await.unwrap();
+        assert!(v.keys_modal.is_none(), "bare Esc closes");
+        assert!(buf.is_empty(), "Esc sends nothing");
+    }
+
+    #[tokio::test]
+    async fn keys_modal_wheel_scrolls_and_click_off_dismisses() {
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (8, 80); // short: the binding list overflows and scrolls
+        v.open_keys_modal();
+        let mut buf: Vec<u8> = Vec::new();
+        let wheel = MouseReport {
+            row: 4,
+            col: 40,
+            kind: MouseKind::WheelDown,
+            shift: false,
+        };
+        keys_modal_mouse(&mut v, wheel, &mut buf).await.unwrap();
+        assert_eq!(
+            v.keys_modal.as_ref().unwrap().popup.scroll,
+            3,
+            "wheel scrolls"
+        );
+        // A left click off the popup (top-left corner) dismisses.
+        let click = MouseReport {
+            row: 0,
+            col: 0,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        keys_modal_mouse(&mut v, click, &mut buf).await.unwrap();
+        assert!(v.keys_modal.is_none(), "click off the popup dismisses");
     }
 
     #[test]
