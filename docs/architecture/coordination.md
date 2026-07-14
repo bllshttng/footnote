@@ -38,7 +38,7 @@ so the prefix's colon is filename-safe.
 | `walker:` | `megawalk-loop:<pid>` | megawalk singleton |
 | `fleet:` | `megatron-commander:<pid>` | megatron `run()` |
 | `project:` | `megatron-project:<mission>:<project>` | (reserved) per-project worker |
-| `worktree:` | (reserved) | (future) worktree singleton |
+| `worktree:` | `<harness>-worktree:<sid>` | worktree harness guard (see below) |
 | `user:` | (reserved) | (future) human-imposed locks |
 
 Holder shape is convention, not enforced. The verb-level invariants are:
@@ -201,6 +201,45 @@ Two enforcement points:
    out a node a live session already owns. Best-effort: a claims-subsystem fault
    degrades to no filtering (the acquire/refuse mutex above is the authoritative
    backstop).
+
+## Worktree harness guard
+
+The invariant: **at most one harness owns a worktree/branch at a time.** The
+prior dispatch guard made `node:` claims harness-tagged and gave the *dispatcher*
+a guard, but it fires at dispatch time and only defers to a foreign harness. The
+uncovered path
+is the manual session - a human opens codex in a worktree a claude worker owns
+and nothing objects, producing duplicate work and conflicting commits. The
+`worktree:` claim closes that path.
+
+- **Key + collision unit.** `worktree:<physical-toplevel>` (a worktree checks
+  out exactly one branch, so path and branch are 1:1; the physical toplevel is
+  the cheapest thing to resolve, and `pwd -P` symlink resolution makes two
+  entry paths key on one lock). The key is repo-local, so `claims_root_for`
+  routes it to the canonical `.fno/claims`: every worktree of a repo shares one
+  claims dir and each worktree gets its own lock file.
+- **Ownership keys on HARNESS, not holder.** Two claude sessions (or a subagent)
+  in one worktree are the same harness and never refuse each other; a codex
+  session entering a claude-owned worktree is refused, naming the owner.
+  Atomicity and the harness tag come straight from `acquire_claim`, so the
+  concurrent-double-entry race has exactly one winner with no new machinery.
+- **Enforcement surfaces** (`fno claim worktree-guard` is the shared core):
+  - *first write* - a PreToolUse hook (`hooks/worktree-harness-guard.sh`, both
+    claude and codex) claims the worktree when free and blocks a foreign
+    harness. This is the surface that covers the manual session.
+  - *session start* - a read-only (`--no-acquire`) advisory heads-up in
+    `hooks/session-start.sh`, before the first write is even attempted.
+  - *boot* - `fno target init` acquires the claim so a dispatched worker owns
+    its worktree from boot, closing the boot-window before the first write.
+- **Liveness + release.** TTL plus the same session-pid arm as `node:` claims -
+  the claim dies with the session (dead pid / expired TTL -> stale ->
+  reclaimable), so there is deliberately **no refresh loop** and the
+  `fno claim refresh` "shrinks to 1 minute without `--ttl`" footgun cannot
+  apply. The owner keeps it fresh by idempotent re-acquire on its next write.
+- **Override.** `FNO_WORKTREE_OK=1` downgrades a foreign refusal to a
+  non-silent `override` verdict (mirrors `TARGET_LOCATION_OK`). Fail-open
+  throughout: no git checkout, no harness identity, or an `fno` too old to know
+  the verb enforces nothing.
 
 ## Operator runbook
 
