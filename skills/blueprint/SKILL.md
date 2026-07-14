@@ -1081,6 +1081,9 @@ is known):
    - Replace every stub marker: concrete `## Changes`, `## Files to Modify` (from
      the epic's File Ownership Map), `## Verification` (the checks that prove this
      slice), and a `kill_criteria`.
+   - Flip the frontmatter `status: stub` -> `status: ready` (`stub` is outside the
+     canonical PlanStatus vocabulary, so a linked-but-still-stub plan is later
+     archived by `fno plan reconcile-status`; the validator refuses to link one).
    - Validate, THEN link (link LAST, after the content is real):
      ```bash
      bash "${SKILL_DIR}/scripts/validate-plan.sh" <child-plan> \

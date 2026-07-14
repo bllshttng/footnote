@@ -926,15 +926,13 @@ def cmd_decompose(
     #     graph mutation already repointed each child's plan_path to its separate
     #     file; here we materialize the stub on disk. Skip a file that already
     #     exists so a builder's edits and idempotent re-runs are never clobbered.
-    scaffolded: list[str] = []
+    # US4: transcribe the epic's why (intent + Locked Decisions) once - every child
+    # scaffold is born grounded, AND a fan-out seed carries it so the /think worker
+    # stays grounded even when its origin transcript is unresolved. A missing
+    # Locked-Decisions block degrades to intent-only + a warning; an unreadable doc
+    # yields an empty digest (the scaffold then seeds the validator-rejected stub).
+    why_digest = ""
     if separate and base_box[0]:
-        source_doc = verbatim_base_box[0] or base_box[0]
-        # US4: transcribe the epic's why (intent + Locked Decisions) once, so every
-        # child scaffold is born grounded instead of pointing back at the epic. A
-        # missing Locked-Decisions block degrades to intent-only + a warning; an
-        # unreadable doc yields an empty digest and the scaffold seeds the _WHY_STUB
-        # sentinel (which the validator rejects, so the gap is loud, never silent).
-        why_digest = ""
         try:
             why_digest, why_warn = extract_why_digest(
                 Path(base_box[0]).read_text(encoding="utf-8")
@@ -943,6 +941,10 @@ def cmd_decompose(
                 typer.echo(f"warning: {why_warn}", err=True)
         except (OSError, UnicodeDecodeError):
             pass
+
+    scaffolded: list[str] = []
+    if separate and base_box[0]:
+        source_doc = verbatim_base_box[0] or base_box[0]
         for grp in norm:
             disk_path = Path(separate_plan_path(base_box[0], grp["slug"]))
             if disk_path.exists():
@@ -964,54 +966,21 @@ def cmd_decompose(
                     err=True,
                 )
 
-    # 4. Report what happened (AC1-UI).
-    if json_mode(ctx):
-        typer.echo(json.dumps(
-            {
-                "epic": epic_resolved_id,
-                "groups": results,
-                "orphaned": orphan_ids,
-                "downgrades": downgrades,
-                "packaging": plans,
-                "scaffolded": scaffolded,
-            },
-            default=str,
-        ))
-    else:
-        typer.echo(f"epic: {epic_resolved_id}")
-        typer.echo(
-            f"decomposed into {len(results)} group child node(s) "
-            f"(packaging: {plans}):"
-        )
-        for r in results:
-            waves = f" waves {r['waves']}" if r["waves"] else ""
-            blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
-            tier = " dep=contract" if r.get("dep") == "contract" else ""
-            marker = r["slug"]
-            typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
-        for f in scaffolded:
-            typer.echo(f"  scaffolded plan: {f}")
-        if orphan_ids:
-            typer.echo(
-                f"warning: {len(orphan_ids)} group child node(s) no longer in the spec, "
-                f"left in place: {', '.join(orphan_ids)}",
-                err=True,
-            )
-        for msg in downgrades:
-            typer.echo(f"warning: {msg}", err=True)
-
-    # 4b. Per-child design pass (x-edf7 US3) + born-with-why (v2 A1). Two lanes,
-    #     one shared RunState bounding the whole batch's blast radius (AC1-EDGE):
+    # 4a. Per-child design pass (x-edf7 US3) + born-with-why (v2 A1). Runs BEFORE
+    #     the report so a flagged fan-out's outcome rides in the --json payload
+    #     (a machine caller must see when a child was left an unlinked idea, not a
+    #     silent success). Two lanes, one shared RunState bounding the batch's blast
+    #     radius (AC1-EDGE):
     #       - `needs_think` group -> FORCE a fan-out /think+/blueprint design pass.
     #         The decompose invocation IS the operator consent (Locked Decision 3),
     #         so the gate + attended-offer are overridden (mirrors the
     #         dispatch_conversational env-forcing); the caps still bound it. A spawn
-    #         that does not fire leaves the child `idea` with its stub on disk and
-    #         prints the OFFER fallback (AC2-ERR / AC1-EDGE cap clamp).
+    #         that does not fire leaves the child `idea` with its stub on disk.
     #       - unflagged group -> today's opt-in born-with-why OFFER (gate-OFF
     #         default => complete no-op).
     #     Only UNLINKED children are candidates (a re-decompose never re-designs a
     #     child that already has a plan). Strictly non-fatal: never wedge decompose.
+    fanout: list[dict] = []
     flagged_slugs = {g["slug"] for g in norm if g["needs_think"]}
     slug_by_id = {r["id"]: r["slug"] for r in results}
     created_ids = {r["id"] for r in results if r["action"] == "created"}
@@ -1042,11 +1011,18 @@ def cmd_decompose(
                 if slug_by_id.get(cid) in flagged_slugs:
                     # chain_blueprint: the worker must continue /think -> /blueprint
                     # -> link, else the flagged child stays designless/idea forever
-                    # (a bare /think never links plan_path).
+                    # (a bare /think never links plan_path). why_digest keeps it
+                    # grounded when the transcript is unresolved; project_root scopes
+                    # the /think doc to the CHILD's repo (cross-repo routing).
+                    child_root = child.get("_resolved_cwd") or child.get("cwd")
                     res = maybe_spawn_think(
                         child, run_state=born_rs, env=forced_env,
                         quiet=json_mode(ctx), chain_blueprint=True,
+                        why_digest=why_digest,
+                        project_root=Path(child_root) if child_root else None,
                     )
+                    fanout.append({"id": cid, "decision": res.decision,
+                                   "reason": res.reason})
                     if res.decision != "spawned" and not json_mode(ctx):
                         typer.echo(
                             f"fan-out /think for {cid} did not spawn "
@@ -1062,6 +1038,46 @@ def cmd_decompose(
                                  quiet=json_mode(ctx))
         except Exception:  # noqa: BLE001 - additive; never wedge the decompose
             pass
+
+    # 4b. Report what happened (AC1-UI).
+    if json_mode(ctx):
+        typer.echo(json.dumps(
+            {
+                "epic": epic_resolved_id,
+                "groups": results,
+                "orphaned": orphan_ids,
+                "downgrades": downgrades,
+                "packaging": plans,
+                "scaffolded": scaffolded,
+                "fanout": fanout,
+            },
+            default=str,
+        ))
+    else:
+        typer.echo(f"epic: {epic_resolved_id}")
+        typer.echo(
+            f"decomposed into {len(results)} group child node(s) "
+            f"(packaging: {plans}):"
+        )
+        for r in results:
+            waves = f" waves {r['waves']}" if r["waves"] else ""
+            blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
+            tier = " dep=contract" if r.get("dep") == "contract" else ""
+            marker = r["slug"]
+            typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
+        for f in scaffolded:
+            typer.echo(f"  scaffolded plan: {f}")
+        for fo in fanout:
+            if fo["decision"] == "spawned":
+                typer.echo(f"  fan-out design pass dispatched: {fo['id']}")
+        if orphan_ids:
+            typer.echo(
+                f"warning: {len(orphan_ids)} group child node(s) no longer in the spec, "
+                f"left in place: {', '.join(orphan_ids)}",
+                err=True,
+            )
+        for msg in downgrades:
+            typer.echo(f"warning: {msg}", err=True)
 
     # 5. Record the group count N on the shared epic doc so it graduates only
     #    after all N group PRs ship (not after the first). The graph mutation

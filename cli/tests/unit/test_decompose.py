@@ -903,14 +903,14 @@ def test_validate_needs_think_rejects_non_bool():
 
 def _spy_spawn(monkeypatch):
     """Patch both spawn lanes; return (fanout_calls, offer_calls). Each fan-out
-    call records (node_id, forced_env) and returns a `spawned` result by default."""
+    call records a kwargs dict and returns a `spawned` result by default."""
     import fno.provenance.spawn_think as st
 
     fanout: list = []
     offers: list = []
 
     def fake_maybe(node, *, run_state=None, env=None, quiet=False, **k):
-        fanout.append(((node or {}).get("id"), env or {}))
+        fanout.append({"id": (node or {}).get("id"), "env": env or {}, **k})
         return st.ThinkSpawnResult("spawned", st.EVENT_SPAWNED, node_id=node.get("id"))
 
     def fake_born(node, *, run_state=None, **k):
@@ -921,7 +921,7 @@ def _spy_spawn(monkeypatch):
     return fanout, offers
 
 
-def test_flagged_group_forces_fanout_unflagged_offers(graph_env, monkeypatch):
+def test_flagged_group_forces_fanout_unflagged_offers(graph_env, monkeypatch, tmp_path):
     g, read_entries = graph_env
     fanout, offers = _spy_spawn(monkeypatch)
     groups = [
@@ -935,9 +935,28 @@ def test_flagged_group_forces_fanout_unflagged_offers(graph_env, monkeypatch):
     # The flagged child took the fan-out lane with the gate + spawn forced on;
     # the unflagged child got the born-with-why offer.
     assert len(fanout) == 1 and len(offers) == 1
-    _, env = fanout[0]
-    assert env.get("FNO_THINK_SPAWN") == "1"
-    assert env.get("FNO_THINK_SPAWN_ATTENDED") == "spawn"
+    call = fanout[0]
+    assert call["env"].get("FNO_THINK_SPAWN") == "1"
+    assert call["env"].get("FNO_THINK_SPAWN_ATTENDED") == "spawn"
+    # x-edf7 review fixes: fan-out chains blueprint, threads the why-digest (its
+    # content depends on the epic doc - extraction is covered separately), and
+    # scopes the /think doc to the CHILD's repo (project_root == child cwd).
+    assert call["chain_blueprint"] is True
+    assert "why_digest" in call
+    assert str(call["project_root"]) == str(tmp_path)  # graph_env epic cwd
+
+
+def test_fanout_project_root_is_child_repo_for_cross_repo(graph_env, monkeypatch):
+    # P1: a needs_think child routed into a foreign repo resolves its /think doc
+    # from THAT repo, not the epic's - project_root must be the child cwd.
+    g, read_entries = graph_env
+    fanout, _ = _spy_spawn(monkeypatch)
+    _patch_workmap(monkeypatch, {"web": "/repos/web"})
+    groups = [{"slug": "1", "title": "G1 web spike", "waves": "1",
+               "blocked_by_groups": [], "needs_think": True, "project": "web"}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    assert str(fanout[0]["project_root"]) == "/repos/web"
 
 
 def test_fanout_non_spawn_prints_offer_fallback(graph_env, monkeypatch):
@@ -959,6 +978,30 @@ def test_fanout_non_spawn_prints_offer_fallback(graph_env, monkeypatch):
     assert "did not spawn" in result.output and "/think" in result.output
     child = _child(read_entries(), "1")
     assert child["plan_path"] is None and child["_status"] == "idea"
+
+
+def test_json_mode_reports_fanout_outcome(graph_env, monkeypatch):
+    # P2: a machine caller must see when a flagged child was left an unlinked idea
+    # (the fallback stderr line is suppressed under --json), so the outcome rides
+    # in the JSON payload.
+    import fno.provenance.spawn_think as st
+
+    g, read_entries = graph_env
+
+    def fake_maybe(node, *, run_state=None, env=None, quiet=False, **k):
+        return st.ThinkSpawnResult("skipped", st.EVENT_SKIPPED, reason="cap-exceeded",
+                                   node_id=node.get("id"))
+
+    monkeypatch.setattr(st, "maybe_spawn_think", fake_maybe)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": [],
+               "needs_think": True}]
+    result = _invoke(["backlog", "--json", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert len(payload["fanout"]) == 1
+    assert payload["fanout"][0]["decision"] == "skipped"
+    assert payload["fanout"][0]["reason"] == "cap-exceeded"
 
 
 def test_redecompose_reattempts_unlinked_flagged_skips_linked(graph_env, monkeypatch):

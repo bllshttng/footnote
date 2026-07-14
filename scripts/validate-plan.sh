@@ -68,6 +68,16 @@ if [[ -f "$PLAN_DIR" ]]; then
         fi
     done
 
+    # A born scaffold carries `status: stub`, which is OUTSIDE the canonical
+    # PlanStatus vocabulary - `fno plan reconcile-status` would later archive a
+    # linked-but-still-stub plan off the board. So refuse to pass a plan still
+    # frontmatter-stamped `status: stub`: the fill step must flip it to `ready`.
+    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+            | grep -E '^[[:space:]]*status:[[:space:]]*["'"'"']?stub' >/dev/null; then
+        error "$(basename "$PLAN_DIR") is still 'status: stub'; set 'status: ready' after filling (a non-canonical status is archived by reconcile-status)"
+        _found_stub=1
+    fi
+
     # A group-child plan (frontmatter carries `parent_epic:`) must also carry a
     # non-empty `## Why (from epic)` - the transcribed intent grounds its tasks
     # (US4). Only enforced for group children; a normal quick/full plan has no
