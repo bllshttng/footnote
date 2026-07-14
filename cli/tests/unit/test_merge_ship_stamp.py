@@ -70,3 +70,26 @@ def test_merged_no_identity_skips_silently(tmp_path, monkeypatch):
     _sync_graph_merge_status("merged", 4444)  # must not raise
 
     assert _sessions(g, "ab-mrg00003") == []
+
+
+def test_merged_stamps_scoped_by_repo(tmp_path, monkeypatch):
+    """x-d5f9: the merge stamp scopes by the merging repo's slug, so a
+    same-numbered PR in another repo is never stamped. The slug is injected
+    (in-test gh is unauthed under the hermetic HOME, so it would degrade to
+    None); this asserts the threading + narrowing deterministically."""
+    g = _make_graph(tmp_path, [
+        {"id": "x-foot0388", "title": "footnote", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
+        {"id": "ab-abil0388", "title": "abilities", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/388"},
+    ])
+    _patch(monkeypatch, g)
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "merger-sid")
+
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_repo_slug", lambda cwd: "bllshttng/footnote")
+    M._sync_graph_merge_status("merged", 388, "/some/worktree")
+
+    assert [r["phase"] for r in _sessions(g, "x-foot0388")] == ["ship"]
+    assert _sessions(g, "ab-abil0388") == []  # other repo never stamped
