@@ -1144,11 +1144,11 @@ PYEOF
   if command -v fno >/dev/null 2>&1; then
     _WT_GUARD="$(fno claim worktree-guard --json 2>/dev/null || true)"
     if [[ -n "$_WT_GUARD" ]] && command -v jq >/dev/null 2>&1; then
-      _WT_VERDICT="$(printf '%s' "$_WT_GUARD" | jq -er '.verdict // empty' 2>/dev/null || true)"
+      _WT_VERDICT="$(printf '%s' "$_WT_GUARD" | jq -er '.verdict | select(. != "") // empty' 2>/dev/null || true)"
       case "$_WT_VERDICT" in
         acquired) echo "target: worktree claimed for this harness" >&2 ;;
         foreign)
-          _WT_OWNER="$(printf '%s' "$_WT_GUARD" | jq -er '.owner_harness // "another"' 2>/dev/null || echo another)"
+          _WT_OWNER="$(printf '%s' "$_WT_GUARD" | jq -er '.owner_harness | select(. != "") // "another"' 2>/dev/null || echo another)"
           echo "target: WARNING: worktree already owned by a $_WT_OWNER session (non-fatal; PreToolUse guard enforces)" >&2 ;;
       esac
     fi

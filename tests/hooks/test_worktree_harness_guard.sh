@@ -75,7 +75,7 @@ FOREIGN_BIN="$TMP_BASE/foreign"
 make_fno_stub "$FOREIGN_BIN" '{"verdict":"foreign","worktree":"'"$CWD"'","my_harness":"codex","owner_harness":"claude","owner_holder":"claude-worktree:s1"}' 1
 FOREIGN_OUT="$(run_guard "$FOREIGN_BIN" "$PAYLOAD")"
 assert_block "foreign verdict blocks" "$FOREIGN_OUT"
-if printf '%s' "$FOREIGN_OUT" | jq -r '.reason' | grep -q "claude"; then
+if printf '%s' "$FOREIGN_OUT" | jq -r '.reason' | grep "claude" >/dev/null; then
     pass "block reason names the owning harness"
 else
     fail "block reason omits the owner: $FOREIGN_OUT"

@@ -201,9 +201,9 @@ fi
 if command -v fno >/dev/null 2>&1; then
     wt_guard_json="$(fno claim worktree-guard --no-acquire --json 2>/dev/null || true)"
     if [[ -n "$wt_guard_json" ]] && command -v jq >/dev/null 2>&1; then
-        wt_verdict="$(printf '%s' "$wt_guard_json" | jq -er '.verdict // empty' 2>/dev/null || true)"
+        wt_verdict="$(printf '%s' "$wt_guard_json" | jq -er '.verdict | select(. != "") // empty' 2>/dev/null || true)"
         if [[ "$wt_verdict" == "foreign" ]]; then
-            wt_owner="$(printf '%s' "$wt_guard_json" | jq -er '.owner_harness // "another"' 2>/dev/null || echo another)"
+            wt_owner="$(printf '%s' "$wt_guard_json" | jq -er '.owner_harness | select(. != "") // "another"' 2>/dev/null || echo another)"
             wt_note="- This worktree is owned by a \`${wt_owner}\` session; a second harness working it concurrently is refused at first write (x-193d). Use that session, a different worktree, or \`FNO_WORKTREE_OK=1\` to override."
             if [[ -n "$hygiene_content" ]]; then
                 hygiene_content="${hygiene_content}"$'\n'"${wt_note}"

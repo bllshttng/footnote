@@ -55,10 +55,10 @@ OWNER_HARNESS=""
 OWNER_HOLDER=""
 WORKTREE=""
 if command -v jq >/dev/null 2>&1; then
-    VERDICT="$(printf '%s' "$OUT" | jq -er '.verdict // empty' 2>/dev/null || true)"
-    OWNER_HARNESS="$(printf '%s' "$OUT" | jq -er '.owner_harness // empty' 2>/dev/null || true)"
-    OWNER_HOLDER="$(printf '%s' "$OUT" | jq -er '.owner_holder // empty' 2>/dev/null || true)"
-    WORKTREE="$(printf '%s' "$OUT" | jq -er '.worktree // empty' 2>/dev/null || true)"
+    VERDICT="$(printf '%s' "$OUT" | jq -er '.verdict | select(. != "") // empty' 2>/dev/null || true)"
+    OWNER_HARNESS="$(printf '%s' "$OUT" | jq -er '.owner_harness | select(. != "") // empty' 2>/dev/null || true)"
+    OWNER_HOLDER="$(printf '%s' "$OUT" | jq -er '.owner_holder | select(. != "") // empty' 2>/dev/null || true)"
+    WORKTREE="$(printf '%s' "$OUT" | jq -er '.worktree | select(. != "") // empty' 2>/dev/null || true)"
 fi
 
 [[ "$VERDICT" == "foreign" ]] || _approve

@@ -106,6 +106,48 @@ class TestReadOnly:
         assert r.owner_harness == "claude"
 
 
+class TestLostRace:
+    def test_lost_race_winner_vanishes_retries_and_acquires(self, tmp_path, monkeypatch):
+        """A lost acquire whose winner then vanishes must NOT false-positive as
+        foreign: the retry loop re-acquires once the claim is free again."""
+        import fno.claims.worktree_guard as wg
+
+        calls = {"n": 0}
+        real_acquire = wg._try_acquire
+
+        def flaky(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None  # simulate a lost race on the first attempt
+            return real_acquire(*a, **kw)
+
+        monkeypatch.setattr(wg, "_try_acquire", flaky)
+        # No claim on disk -> the re-read after the None sees state=free, so the
+        # loop retries instead of returning foreign.
+        r = _guard(tmp_path, "claude", "s1")
+        assert r.verdict == VERDICT_ACQUIRED
+        assert calls["n"] == 2
+
+    def test_lost_race_to_live_foreign_refuses(self, tmp_path, monkeypatch):
+        """A lost race whose winner is a still-LIVE foreign owner is refused:
+        the re-read inside the retry loop sees the live codex claim."""
+        import fno.claims.worktree_guard as wg
+
+        def lose_then_plant_foreign(*a, **kw):
+            # Simulate the winning codex worker landing its claim between our
+            # (failed) acquire and the re-read.
+            acquire_claim(
+                worktree_claim_key(WT), "codex-worktree:c1", ttl_ms=600_000,
+                harness="codex", pid=1, root=tmp_path,
+            )
+            return None
+
+        monkeypatch.setattr(wg, "_try_acquire", lose_then_plant_foreign)
+        r = _guard(tmp_path, "claude", "s1")  # starts with no claim (state=free)
+        assert r.verdict == VERDICT_FOREIGN
+        assert r.owner_harness == "codex"
+
+
 class TestStaleRecovery:
     def test_foreign_but_stale_claim_is_reclaimed(self, tmp_path):
         """A dead foreign owner (TTL expired) does not block - it is stale and

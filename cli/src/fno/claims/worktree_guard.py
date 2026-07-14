@@ -35,6 +35,10 @@ from .core import ClaimHeldByOther, acquire_claim, claim_status
 # past TTL. A codex owner (no resolvable session pid) relies on the TTL arm.
 DEFAULT_TTL_MS = 2 * 60 * 60 * 1000
 
+# Bounded retries when an acquire loses a race whose winner then vanishes; keeps
+# a flapping claim from either spinning forever or false-positiving as foreign.
+_MAX_ACQUIRE_RETRIES = 3
+
 VERDICT_NO_WORKTREE = "no-worktree"  # not a git checkout / no harness -> no enforcement
 VERDICT_ACQUIRED = "acquired"        # claim was free, now ours
 VERDICT_OK = "ok"                    # same harness owns it (re-entry) - never refuse
@@ -159,31 +163,38 @@ def guard_worktree(
 
     # free / stale / corrupted -> establish ownership. acquire_claim handles
     # stale recovery and the concurrent-double-entry race atomically (exactly
-    # one winner); a lost race surfaces as the loser reading a foreign owner.
-    claim = _try_acquire(key, my_holder, my_harness, session_pid, ttl_ms, root)
-    if claim is None:
-        # Raced and lost: re-read to report the winner.
+    # one winner). Bounded retry on a LOST race: refuse only when the re-read
+    # confirms a LIVE foreign owner - if the winner vanished (released/expired
+    # between our failed acquire and the re-read), retry rather than
+    # false-positive as foreign and block the session.
+    for _ in range(_MAX_ACQUIRE_RETRIES):
+        claim = _try_acquire(key, my_holder, my_harness, session_pid, ttl_ms, root)
+        if claim is not None:
+            return WorktreeGuardResult(
+                verdict=VERDICT_ACQUIRED,
+                worktree=wt,
+                my_harness=my_harness,
+                owner_harness=my_harness,
+                owner_holder=my_holder,
+                owner_pid=claim.pid,
+            )
         st = claim_status(key, root=root)
         owner_harness = st.get("harness")
-        if owner_harness == my_harness or st.get("holder") == my_holder:
+        if st.get("holder") == my_holder or owner_harness == my_harness:
             return WorktreeGuardResult(
                 verdict=VERDICT_OK, worktree=wt, my_harness=my_harness,
                 owner_harness=owner_harness, owner_holder=st.get("holder"),
                 owner_pid=st.get("pid"),
             )
-        return WorktreeGuardResult(
-            verdict=VERDICT_OVERRIDE if override else VERDICT_FOREIGN,
-            worktree=wt, my_harness=my_harness, owner_harness=owner_harness,
-            owner_holder=st.get("holder"), owner_pid=st.get("pid"),
-        )
-    return WorktreeGuardResult(
-        verdict=VERDICT_ACQUIRED,
-        worktree=wt,
-        my_harness=my_harness,
-        owner_harness=my_harness,
-        owner_holder=my_holder,
-        owner_pid=claim.pid,
-    )
+        if st.get("state") in ("live", "suspect"):
+            return WorktreeGuardResult(
+                verdict=VERDICT_OVERRIDE if override else VERDICT_FOREIGN,
+                worktree=wt, my_harness=my_harness, owner_harness=owner_harness,
+                owner_holder=st.get("holder"), owner_pid=st.get("pid"),
+            )
+        # else: winner vanished (free/stale) -> loop and retry the acquire.
+    # A claim flapping across every retry: fail open (never a false block).
+    return WorktreeGuardResult(verdict=VERDICT_OK, worktree=wt, my_harness=my_harness)
 
 
 def _try_acquire(key, holder, harness, session_pid, ttl_ms, root):
