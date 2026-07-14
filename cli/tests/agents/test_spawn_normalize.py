@@ -143,3 +143,23 @@ def test_headless_flag_plus_trailing_substrate_token_exits_2():
 def test_ordinary_message_positional_is_not_a_substrate():
     out = _norm(["spawn", "foo", "hello"])
     assert out == ["spawn", "foo", "hello"]  # untouched; hello is the message
+
+
+# --- --argv payload boundary (codex finding) ---------------------------------
+
+def test_argv_payload_resume_flag_is_not_scanned():
+    # A --resume inside the provider payload must pass through untouched: it is
+    # the child command's flag, not an fno resume request (no --substrate bg added).
+    argv = ["spawn", "w", "--argv", "--", "tool", "--resume", "deadbeef"]
+    assert _norm(argv) == argv
+
+
+def test_argv_payload_substrate_word_is_not_a_substrate_token():
+    argv = ["spawn", "w", "--argv", "--", "tool", "bg"]
+    assert _norm(argv) == argv
+
+
+def test_nameless_spawn_with_payload_autogens_before_payload():
+    out = _norm(["spawn", "--argv", "--", "tool", "run"])
+    assert out[1] not in ("--argv",) and "-" in out[1]  # slug inserted as NAME
+    assert out[2:] == ["--argv", "--", "tool", "run"]  # payload untouched, after name

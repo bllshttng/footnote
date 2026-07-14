@@ -209,7 +209,15 @@ def normalize_spawn_args(
             return out
 
     err = stderr if stderr is not None else sys.stderr
-    toks = out[1:]
+    # Split off the `--argv` provider payload: every pass operates on the fno-arg
+    # HEAD only, and derived flags are appended before the payload, so a payload
+    # token (e.g. the child command's own `--resume`) is never scanned or rewritten.
+    body = out[1:]
+    if "--argv" in body:
+        cut = body.index("--argv")
+        toks, payload = body[:cut], body[cut:]
+    else:
+        toks, payload = body, []
 
     # Pass 1: trailing substrate token.
     positions = _positional_indices(toks)
@@ -282,7 +290,7 @@ def normalize_spawn_args(
         slug = _mint_slug(names, rng if rng is not None else random.Random(), err)
         toks.insert(0, slug)
 
-    return ["spawn", *toks]
+    return ["spawn", *toks, *payload]
 
 
 def _default_resolver(short_id: str) -> Optional[str]:
