@@ -13,6 +13,7 @@ raising, so the daemon never crashes on an operator config typo.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -96,6 +97,18 @@ def resolve_drain_targets() -> list[DrainTarget]:
         return []
     interval = cfg.interval_seconds()
     if interval is None:
+        return []
+
+    # Locked Decision 2 (x-0ad6): the same-project interval drain is RETIRED.
+    # Reaching here means the config WOULD resolve interval-drain targets, but
+    # that drain is retired: merge-triggered `fno backlog advance` (SessionStart
+    # reconcile + /pr merged) and manual dispatch are the same-project coverage.
+    # The daemon binary and its status-fanout loop are unaffected (neither uses
+    # this resolver). The legacy per-project interval drain stays reachable ONLY
+    # behind an explicit opt-in env, for a deliberate operator override during
+    # the transition - never by default. A cross-project orchestrator (its own
+    # epic) will add its own resolution path rather than resurrect this one.
+    if os.environ.get("FNO_ACTIVE_BACKLOG_LEGACY_DRAIN") != "1":
         return []
 
     paths = _workspace_paths()

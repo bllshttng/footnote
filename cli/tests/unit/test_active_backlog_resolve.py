@@ -25,11 +25,23 @@ def _patch(monkeypatch, *, enabled, interval="5m", failure_limit=3, mission=None
     import fno.config as cfgmod
 
     monkeypatch.setattr(cfgmod, "load_settings", lambda: _Settings())
+    # The same-project interval drain is retired by default (Locked Decision 2);
+    # these tests exercise the underlying resolution logic behind the opt-in.
+    monkeypatch.setenv("FNO_ACTIVE_BACKLOG_LEGACY_DRAIN", "1")
     return cfg
 
 
 def test_disabled_yields_no_targets(monkeypatch):
     _patch(monkeypatch, enabled=False, paths={"footnote": "/repo/footnote"})
+    assert ab.resolve_drain_targets() == []
+
+
+def test_default_retires_same_project_interval_drain(monkeypatch):
+    # Locked Decision 2 (x-0ad6): without the legacy opt-in, an ENABLED config
+    # resolves to NO drain targets - the same-project interval drain is retired.
+    # merge-triggered advance + manual dispatch are the same-project coverage.
+    _patch(monkeypatch, enabled=True, paths={"footnote": "/repo/footnote"})
+    monkeypatch.delenv("FNO_ACTIVE_BACKLOG_LEGACY_DRAIN", raising=False)
     assert ab.resolve_drain_targets() == []
 
 
