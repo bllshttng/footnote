@@ -408,13 +408,25 @@ fn read_installed_version(bin: &Path) -> Option<String> {
     }
 }
 
+/// A published version predating the `fno`->`fno-py` rename, i.e. one that ships
+/// no `fno-py` script. `fno-py` first ships in 0.3.0, so the pre-rename line is
+/// everything under it: 0.0.x / 0.1.x / 0.2.x (the only versions that ever
+/// existed before this release). A prefix check is enough for that real history
+/// and avoids a semver dependency.
+fn is_pre_rename_version(v: &str) -> bool {
+    v.starts_with("0.0.") || v.starts_with("0.1.") || v.starts_with("0.2.")
+}
+
 /// Pure locate-failure classifier, unit-tested without a venv: the caller does
 /// the venv probe and passes the results. `pre_rename_script` is whether the old
 /// `bin/fno` script is present; `installed_version` is the venv-reported version.
-/// Returns the stale-wheel message when either signal is readable, else None so
-/// the caller keeps the generic error (venv genuinely unreadable).
+/// Returns the stale-wheel message only when the evidence says the wheel is
+/// genuinely pre-rename (old `bin/fno` present, or a pre-0.3.0 version); a modern
+/// version that merely lacks `fno-py` is a broken install, not a stale wheel, so
+/// it falls through to None and the caller keeps the honest generic error.
 fn stale_wheel_message(pre_rename_script: bool, installed_version: Option<&str>) -> Option<String> {
-    if !pre_rename_script && installed_version.is_none() {
+    let is_stale = pre_rename_script || installed_version.is_some_and(is_pre_rename_version);
+    if !is_stale {
         return None;
     }
     let head = match installed_version {
@@ -680,9 +692,20 @@ mod tests {
     }
 
     #[test]
-    fn stale_wheel_none_when_nothing_readable() {
+    fn stale_wheel_old_version_without_script() {
+        // A pre-0.3.0 version with no readable `bin/fno` is still stale.
+        let m = stale_wheel_message(false, Some("0.2.1")).unwrap();
+        assert!(m.contains("(0.2.1)"), "{m}");
+    }
+
+    #[test]
+    fn stale_wheel_none_when_not_stale() {
         // Neither signal readable -> None, so the caller keeps the generic error.
         assert!(stale_wheel_message(false, None).is_none());
+        // A modern version (>= 0.3.0) with no pre-rename script is a broken
+        // install, not a stale wheel: fall through to the honest generic error.
+        assert!(stale_wheel_message(false, Some("0.3.0")).is_none());
+        assert!(stale_wheel_message(false, Some("1.0.0")).is_none());
     }
 
     /// A unique temp dir laid out as a valid fno checkout (`cli/pyproject.toml`).
