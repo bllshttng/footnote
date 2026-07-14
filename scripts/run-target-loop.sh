@@ -5,6 +5,20 @@
 # legacy flags onto the new verb and execs the binary - no loop logic here.
 # Resume after a crash is world-state driven: the Rust verb re-reads the
 # events journal and refuses to double-dispatch a terminated session.
+#
+# THE DOCUMENTED SUPERVISED-LOOP EXCEPTION (x-0ad6). Since the active_backlog
+# daemon retargeted to fire-and-forget `fno agents spawn`, this supervised loop
+# is the ONE sanctioned non-spawn dispatch path. It is required for harnesses
+# with no native resume, which carry the conversation across iterations via
+# HISTORY_FILE (a ShelloutDispatcher-owned child that this loop supervises):
+#   - openclaw (driver-openclaw.sh):  --history-file        => HISTORY_FILE IS the store
+#   - hermes   (driver-hermes.sh):    --conversation-history => HISTORY_FILE IS the store
+#   - opencode (driver-opencode.sh):  native `run --continue` => HISTORY_FILE is a bare
+#                                     "not iteration 1" marker, redundant as a store
+#   - claude   (driver-claude-code.sh): native `/target --resume` session store
+# A harness in the first group cannot be expressed as a fire-and-forget spawn
+# (nothing would carry its transcript), so it keeps this supervised loop. The
+# fire-and-forget spawn path is the default for everything else.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

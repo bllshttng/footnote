@@ -282,9 +282,10 @@ def select_lane_fill(
     prevented upstream by the singleton ``walker:<root>`` claim, so this stays a
     single-dispatcher selector, not a distributed lock.)
 
-    ``max_lanes < 2`` returns ``[]`` with no side effects: below two lanes there
-    is nothing to parallelize, so the caller falls back to the single-node
-    ``next`` path for byte-identical sequential behavior (AC1-EDGE).
+    ``max_lanes == 1`` selects a single ready node (distinct-domain is a no-op
+    for one pick): this is the retargeted active_backlog daemon's sequential
+    fire-and-forget dispatch (x-0ad6). ``max_lanes < 1`` returns ``[]`` with no
+    side effects.
 
     ``claim=False`` previews the selection (which nodes WOULD dispatch) without
     holding any slot - the read-only mode, mirroring ``fno backlog next`` sans
@@ -300,7 +301,7 @@ def select_lane_fill(
     """
     from fno.claims.lanes import acquire_lane_slot, find_lane_slot, release_lane_slot
 
-    if max_lanes < 2:
+    if max_lanes < 1:
         return []
 
     selected: list[dict] = []
@@ -689,8 +690,9 @@ def dispatch_lanes(
     `fno target init` reconciles the already-held slot rather than acquiring a
     fresh one.
 
-    ``max_lanes < 2`` selects nothing (byte-identical to today's sequential path;
-    the caller uses single-node dispatch), so this returns ``[]``.
+    ``max_lanes == 1`` dispatches a single node (the retargeted active_backlog
+    daemon's sequential fire-and-forget path, x-0ad6); ``max_lanes < 1`` selects
+    nothing and returns ``[]``.
 
     Per-lane spawn/isolation failure is contained: the lane's slot is released so
     the node stays re-dispatchable and its receipt records ``skipped``; peer

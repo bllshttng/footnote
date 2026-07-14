@@ -1,12 +1,27 @@
-//! Active backlog dispatcher: the drain-tick core + circuit breaker (node x-c070).
+//! Active backlog dispatcher: the drain-tick core + circuit breaker.
 //!
 //! This module is the engine for the always-on backlog drain. One *tick*
-//! claims the project's `walker:<cwd>` singleton, asks the existing
-//! [`MegawalkQueue`] for the next ready node, and runs it to termination
-//! through the unchanged [`run_loop`] primitive. The daemon's resident
+//! claims the project's `walker:<cwd>` singleton, RECONCILES any dispatch it
+//! fired on a prior tick from events, and - when nothing is in flight -
+//! DISPATCHES the next ready node fire-and-forget. The daemon's resident
 //! supervisor ([`run_supervisor`]) drives one independent drain loop PER
 //! enabled project, so a long-running drain in one project never starves
 //! another.
+//!
+//! ## Fire-and-forget scheduler (x-0ad6)
+//!
+//! The tick does NOT own the worker child. Sequential dispatch goes through the
+//! lane machinery (`fno backlog dispatch-lanes --max 1`, itself a `fno agents
+//! spawn`), which self-mints the worker session and re-anchors the `node:<id>`
+//! claim to `target-session:<sid>`. The tick returns immediately; a later tick
+//! RECONCILES the dispatch by reading the worker's session id back from the
+//! claim holder and polling its termination event (`Journal::find_termination`),
+//! then feeding the outcome through [`map_outcome`] - the same policy the old
+//! supervised path used, so the auto-defer streak is identical. A worker that
+//! dies without emitting any termination event is caught by the crash floor
+//! (claim gone past the boot window), which replaces the awaited-exit-code
+//! watchdog the fire-and-forget model can no longer read. See
+//! [`reconcile_pending`] / [`dispatch_one`].
 //!
 //! ## Single-owner contract (AC1-FR)
 //!
@@ -21,13 +36,11 @@
 //!
 //! ## One node per tick
 //!
-//! The queue is built with `max_units = Some(1)`, so `run_loop` stops after the
-//! first unit closes. The per-tick budget is generous (not the plan's literal
-//! `LoopBudget::new(1)`): a node that needs re-dispatch (a session that ends
-//! without a termination event) must still reach termination within the tick,
-//! and `LoopBudget::new(1)` would strand it claimed-but-unclosed for the claim
-//! TTL. The per-unit dispatch cap is the in-tick crash-loop backstop; the
-//! cross-tick [`CircuitBreaker`] is the slower, operator-visible one.
+//! Sequential mode keeps at most one worker in flight: a tick that finds a
+//! prior dispatch still pending reconciles it and yields without dispatching
+//! another. The in-flight worker's node closes when its termination event is
+//! polled (or at merge via `fno backlog reconcile` for a no-merge dispatch);
+//! only then does the next tick dispatch the next node.
 //!
 //! ## Circuit-breaker park (recoverable)
 //!
@@ -52,12 +65,11 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
-use crate::loop_dispatch::ShelloutDispatcher;
-use crate::loop_megawalk::{abi_cmd, MegawalkDispatcher, MegawalkQueue};
+use crate::loop_megawalk::{abi_cmd, retry_etxtbsy};
 use crate::loop_runtime::{
-    run_loop, CloseOutcome, DispatchCtx, Dispatcher, GlobalJournalPath, Journal, LoopBudget,
-    LoopError, ProjectJournalPath, Session, Unit,
+    CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };
 use crate::loopcheck::TerminationReason;
 
@@ -145,9 +157,9 @@ pub struct DrainConfig {
     /// path is byte-for-byte today's one-PR-per-node behavior.
     pub batch: bool,
     /// Parallel-mode lane cap (config.parallel.max_lanes, x-42d5 G4). `>= 2`
-    /// switches the tick to fire-and-forget lane-fill (`fno backlog
-    /// dispatch-lanes`); anything below is today's sequential in-tick drain
-    /// with no special-case code (AC1-EDGE).
+    /// fans the tick out into lane-fill; `< 2` runs the sequential fire-and-forget
+    /// drain, which dispatches ONE node via `dispatch-lanes --max 1` and
+    /// reconciles it from events on a later tick (x-0ad6).
     pub max_lanes: u64,
 }
 
@@ -243,6 +255,7 @@ fn walker_key_for(cwd: &Path) -> String {
 pub fn drain_tick(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
+    pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> DrainOutcome {
     let walker_key = walker_key_for(&cfg.cwd);
@@ -278,15 +291,23 @@ pub fn drain_tick(
     // Parallel mode (x-42d5 G4): with a lane cap >= 2, the tick fills lanes
     // instead of draining one node in-tick. Running under the walker singleton
     // is what makes the selection atomic (select_lane_fill's single-dispatcher
-    // contract) - the design's discretion point resolved to "lane-fill on the
-    // existing auto-continue tick". Below 2 the sequential path is untouched.
-    // Lane-fill takes precedence over batch: lane workers are plain
-    // `/target no-merge` runs; batching WITHIN a lane is future composition
-    // (design LD#5), never batching across lanes.
+    // contract). Below 2 the sequential path runs, now itself fire-and-forget
+    // (x-0ad6): reconcile prior dispatches from events, then dispatch one more
+    // only when nothing is in flight (sequential = at most one worker at a time).
     let outcome = if cfg.max_lanes >= 2 {
         lane_fill_tick(cfg, journal)
     } else {
-        run_one_node(cfg, breaker, journal)
+        reconcile_pending(cfg, breaker, pending, journal);
+        if pending.is_empty() {
+            dispatch_one(cfg, pending, journal)
+        } else {
+            // A worker from a prior tick is still in flight; a later tick
+            // reconciles it from events. The tick returns immediately instead of
+            // blocking on the child (the whole point of the retarget).
+            DrainOutcome::Skipped {
+                reason: format!("{} worker(s) in flight", pending.len()),
+            }
+        }
     };
 
     // Release the singleton on every exit path so a manual /megawalk can take
@@ -333,7 +354,7 @@ fn lane_fill_tick(cfg: &DrainConfig, journal: &Journal) -> DrainOutcome {
         cmd.args(["--mission", m]);
     }
     cmd.current_dir(&cfg.cwd);
-    let out = match cmd.output() {
+    let out = match retry_etxtbsy(|| cmd.output()) {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
@@ -384,319 +405,11 @@ fn lane_fill_tick(cfg: &DrainConfig, journal: &Journal) -> DrainOutcome {
     }
 }
 
-fn build_env(cfg: &DrainConfig) -> Vec<(String, String)> {
-    let abilities_dir = cfg.cwd.join(".fno");
-    let output_file = abilities_dir.join("target-last-output.txt");
-    let history_file = abilities_dir.join("target-history.txt");
-    let signal_file = abilities_dir.join("target-promise.signal");
-
-    let mut env: Vec<(String, String)> = vec![
-        (
-            "OUTPUT_FILE".to_string(),
-            output_file.to_string_lossy().into_owned(),
-        ),
-        (
-            "HISTORY_FILE".to_string(),
-            history_file.to_string_lossy().into_owned(),
-        ),
-        (
-            "SIGNAL_FILE".to_string(),
-            signal_file.to_string_lossy().into_owned(),
-        ),
-        ("MAX_TURNS".to_string(), cfg.max_turns.to_string()),
-        ("BUDGET_USD".to_string(), format!("{}", cfg.budget_usd)),
-        // CONTINUE_PROMPT is set per-unit by MegawalkDispatcher.
-        ("CONTINUE_PROMPT".to_string(), String::new()),
-        (
-            "FNO_CWD".to_string(),
-            cfg.cwd.to_string_lossy().into_owned(),
-        ),
-    ];
-    match &cfg.model {
-        Some(m) => env.push(("MODEL_FLAG".to_string(), format!("--model {m}"))),
-        None => env.push(("MODEL_FLAG".to_string(), String::new())),
-    }
-    env
-}
-
-/// Batch-lane dispatch wrapper (x-6cdf). Consults `fno backlog batch prepare`
-/// before each dispatch: on `batched` it dispatches `/target batched <id>` in
-/// the shared batch worktree (env TARGET_BATCHED/TARGET_BATCH_WORKTREE/BRANCH);
-/// on `solo` (or ANY failure - prepare is fail-safe) it delegates to the inner
-/// [`MegawalkDispatcher`] for today's `/target no-merge <id>` behavior.
-///
-/// All the batch policy lives in Python (`batch prepare`); this wrapper only
-/// rewrites the prompt + env when told to, so the Rust surface stays thin.
-struct BatchDispatcher {
-    inner: MegawalkDispatcher,
-    driver_lib: PathBuf,
-    static_env: Vec<(String, String)>,
-    abi_bin: String,
-    /// Canonical repo root, passed to `fno worktree ensure --repo`.
-    repo: PathBuf,
-    /// (node_id, domain) of the last node actually dispatched batched this tick.
-    /// run_one_node reads it to abandon the batch if the member then FAILED
-    /// (a solo dispatch never records here). Mutex because `Dispatcher::run`
-    /// takes `&self`; the daemon dispatches one node per tick so contention is nil.
-    last_batched: std::sync::Mutex<Option<(String, String)>>,
-}
-
-impl Dispatcher for BatchDispatcher {
-    fn run(&self, unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
-        let prep = abi_cmd(&self.abi_bin)
-            .args([
-                "backlog",
-                "batch",
-                "prepare",
-                "--node",
-                &unit.id,
-                "--repo",
-                &self.repo.to_string_lossy(),
-            ])
-            // Run from the target repo so the batch-state root resolves to this
-            // project's canonical checkout (matches ship_closeable_batches), not
-            // the daemon's launch cwd. Without this, prepare and ship-closeable
-            // could resolve different `.fno/batches/` roots.
-            .current_dir(&self.repo)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok());
-
-        let batched = prep
-            .as_ref()
-            .and_then(|v| v.get("worktree").and_then(|w| w.as_str()));
-        let (Some(prep), Some(worktree)) = (prep.as_ref(), batched) else {
-            // solo, or prepare unavailable/failed -> today's behavior.
-            return self.inner.run(unit, ctx);
-        };
-        if prep.get("mode").and_then(|m| m.as_str()) != Some("batched") {
-            return self.inner.run(unit, ctx);
-        }
-        let branch = prep
-            .get("branch")
-            .and_then(|b| b.as_str())
-            .unwrap_or_default();
-        if worktree.is_empty() || branch.is_empty() {
-            return self.inner.run(unit, ctx); // fail-safe: never dispatch batched without a worktree
-        }
-        // Record (node, domain) so run_one_node can abandon this batch if the
-        // member then fails (a solo dispatch never reaches here).
-        let domain = prep
-            .get("domain")
-            .and_then(|d| d.as_str())
-            .unwrap_or("")
-            .to_string();
-        if let Ok(mut slot) = self.last_batched.lock() {
-            *slot = Some((unit.id.clone(), domain));
-        }
-
-        // Batched dispatch: run `/target batched <id>` in the shared worktree.
-        let mut env = self.static_env.clone();
-        env.retain(|(k, _)| k != "CONTINUE_PROMPT" && k != "TARGET_SESSION_ID");
-        env.push((
-            "CONTINUE_PROMPT".to_string(),
-            format!("/target batched {}", unit.id),
-        ));
-        env.push(("TARGET_SESSION_ID".to_string(), unit.session_key.clone()));
-        env.push(("TARGET_BATCHED".to_string(), "1".to_string()));
-        env.push(("TARGET_BATCH_WORKTREE".to_string(), worktree.to_string()));
-        env.push(("TARGET_BATCH_BRANCH".to_string(), branch.to_string()));
-        env.extend(unit.extra_env.iter().cloned());
-
-        let dispatcher =
-            ShelloutDispatcher::new(self.driver_lib.clone(), env, PathBuf::from(worktree));
-        dispatcher.run(unit, ctx)
-    }
-}
-
-/// After a batched tick, ship any open batch whose close condition tripped.
-/// Best-effort: a failure here never wedges the daemon (the batch stays open
-/// and a later tick / drain ships it).
-fn ship_closeable_batches(cfg: &DrainConfig, journal: &Journal) {
-    let mut cmd = abi_cmd(&cfg.abi_bin);
-    cmd.args(["backlog", "batch", "ship-closeable"]);
-    if let Some(ref p) = cfg.project {
-        cmd.args(["--project", p]);
-    }
-    // Scope the close-peek to the same mission the daemon dispatches (codex P2),
-    // else an out-of-mission same-domain node keeps the mission batch open.
-    if let Some(ref m) = cfg.mission {
-        cmd.args(["--mission", m]);
-    }
-    cmd.current_dir(&cfg.cwd);
-    match cmd.output() {
-        Ok(o) if o.status.success() => {
-            let _ = journal.append(
-                "active_backlog_batch_ship",
-                json!({"stdout": String::from_utf8_lossy(&o.stdout).trim()}),
-            );
-        }
-        Ok(o) => {
-            let _ = journal.append(
-                "active_backlog_batch_ship",
-                json!({"error": String::from_utf8_lossy(&o.stderr).trim()}),
-            );
-        }
-        Err(e) => {
-            let _ = journal.append(
-                "active_backlog_batch_ship",
-                json!({"error": format!("{e}")}),
-            );
-        }
-    }
-}
-
-/// Abandon a domain's open batch and requeue its members as individual PRs (v1
-/// failure policy). Called when a batched member failed. Best-effort: a failure
-/// here never wedges the daemon.
-fn abandon_batch_for(cfg: &DrainConfig, journal: &Journal, domain: &str) {
-    let out = abi_cmd(&cfg.abi_bin)
-        .args(["backlog", "batch", "abandon", "--domain", domain])
-        .current_dir(&cfg.cwd)
-        .output();
-    // `member_count`/`members` are the runs_wasted term for the Wave-4-trigger
-    // metric (`fno backlog batch metrics`): the clean members this abandon
-    // requeued. Parsed from the abandon CLI's JSON; 0/[] when absent or failed.
-    let (detail, member_count, members) = match out {
-        Ok(o) if o.status.success() => {
-            let parsed: serde_json::Value =
-                serde_json::from_str(String::from_utf8_lossy(&o.stdout).trim())
-                    .unwrap_or(serde_json::Value::Null);
-            let count = parsed
-                .get("member_count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let members = parsed.get("requeued").cloned().unwrap_or_else(|| json!([]));
-            ("ok".to_string(), count, members)
-        }
-        Ok(o) => (
-            String::from_utf8_lossy(&o.stderr).trim().to_string(),
-            0,
-            json!([]),
-        ),
-        Err(e) => (format!("{e}"), 0, json!([])),
-    };
-    let _ = journal.append(
-        "active_backlog_batch_abandon",
-        json!({
-            "domain": domain,
-            "detail": detail,
-            "member_count": member_count,
-            "members": members,
-        }),
-    );
-}
-
-fn run_one_node(
-    cfg: &DrainConfig,
-    breaker: &mut CircuitBreaker,
-    journal: &Journal,
-) -> DrainOutcome {
-    let mut queue =
-        MegawalkQueue::new_with_max_units(cfg.abi_bin.clone(), cfg.project.clone(), false, Some(1))
-            .with_mission(cfg.mission.clone());
-    let inner = MegawalkDispatcher::new(
-        cfg.lib_path.clone(),
-        build_env(cfg),
-        cfg.cwd.clone(),
-        cfg.abi_bin.clone(),
-        cfg.allow_merge,
-    );
-    // When batch-lane is on, wrap the dispatcher so a candidate node can be
-    // coalesced onto a shared batch branch; otherwise dispatch as today.
-    let batch_dispatcher = cfg.batch.then(|| BatchDispatcher {
-        inner: MegawalkDispatcher::new(
-            cfg.lib_path.clone(),
-            build_env(cfg),
-            cfg.cwd.clone(),
-            cfg.abi_bin.clone(),
-            cfg.allow_merge,
-        ),
-        driver_lib: cfg.lib_path.clone(),
-        static_env: build_env(cfg),
-        abi_bin: cfg.abi_bin.clone(),
-        repo: crate::paths::canonical_repo_root(&cfg.cwd).unwrap_or_else(|| cfg.cwd.clone()),
-        last_batched: std::sync::Mutex::new(None),
-    });
-    let dispatcher: &dyn Dispatcher = match &batch_dispatcher {
-        Some(b) => b,
-        None => &inner,
-    };
-
-    let budget = match LoopBudget::new(cfg.max_iterations.max(1)) {
-        Ok(b) => b,
-        Err(e) => {
-            let _ = journal.append(
-                "active_backlog_skip",
-                json!({"reason": "bad-budget", "detail": format!("{e}")}),
-            );
-            return DrainOutcome::Skipped {
-                reason: format!("bad-budget: {e}"),
-            };
-        }
-    };
-
-    // A daemon tick honors the project cancel sentinel (the same one /target and
-    // megawalk watch); there is no SIGINT in the drain task's blocking thread.
-    let cancel_file = cfg.cwd.join(".fno").join(".target-cancelled");
-    let cancel = move || cancel_file.exists();
-
-    let outcome = match run_loop(
-        &mut queue,
-        dispatcher,
-        &budget,
-        journal,
-        &cancel,
-        Some(cfg.per_unit_max_dispatches),
-    ) {
-        Ok(o) => o,
-        Err(e) => {
-            let _ = journal.append(
-                "active_backlog_skip",
-                json!({"reason": "loop-error", "detail": format!("{e}")}),
-            );
-            return DrainOutcome::Skipped {
-                reason: format!("loop-error: {e}"),
-            };
-        }
-    };
-
-    // Batch-lane close handling, gated on the member's OUTCOME (codex P1):
-    //  - a batched member that FAILED (did not reach DoneBatched): abandon its
-    //    batch + requeue members (v1 policy), so ship-closeable can never open a
-    //    PR over a failed member's partial commits.
-    //  - EVERY other path (DoneBatched success, a solo dispatch, OR a NoWork/
-    //    no-unit drain): run ship-closeable, which evaluates should_close per
-    //    open batch. This is what closes a drained backlog's open batch: when
-    //    batched members are filtered out of `next`, a later tick returns NoWork
-    //    (no last unit) and the drain condition must still open the batch PR
-    //    (codex P1) - so it cannot be gated on a DoneBatched unit being present.
-    if cfg.batch {
-        let last = outcome.units.last();
-        let failed_batched_domain = last.and_then(|u| {
-            if matches!(u.evidence.reason, TerminationReason::DoneBatched) {
-                None
-            } else {
-                batch_dispatcher
-                    .as_ref()
-                    .and_then(|b| b.last_batched.lock().ok().and_then(|s| s.clone()))
-                    .filter(|(nid, _)| nid == &u.unit_id)
-                    .map(|(_, domain)| domain)
-            }
-        });
-        match failed_batched_domain {
-            Some(domain) => abandon_batch_for(cfg, journal, &domain),
-            None => ship_closeable_batches(cfg, journal),
-        }
-    }
-
-    map_outcome(cfg, breaker, journal, &outcome.reason, outcome.units.last())
-}
-
-/// Map a completed walk to a [`DrainOutcome`], updating the breaker and emitting
-/// the decision event. Split out from [`run_one_node`] so the policy is unit-
-/// testable without spawning a real worker.
+/// Map a dispatched node's termination outcome to a [`DrainOutcome`], updating
+/// the breaker and emitting the decision event. Fed by [`reconcile_pending`]
+/// with the evidence polled from the worker's own termination event, so the
+/// success/park policy is identical to the old supervised path without spawning
+/// a real worker.
 fn map_outcome(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
@@ -722,14 +435,11 @@ fn map_outcome(
 
     let node = last.unit_id.clone();
 
-    // Batch-lane (x-6cdf): a member that terminated DoneBatched succeeded - its
-    // commits are on the shared batch branch and it ships via the batch PR (the
-    // node is closed at merge by `fno backlog reconcile`, not here). MegawalkQueue
-    // Parks it because the node is not `done`, but for the daemon that is a
-    // SUCCESSFUL dispatch, not a failure. Recognize it here (in the keep-set,
-    // never by deepening loop_megawalk.rs) so a batched member never trips the
-    // cross-tick circuit breaker. ship-closeable (called by run_one_node) opens
-    // the batch PR once the close condition trips.
+    // Batch-lane: a member that terminated DoneBatched succeeded - its commits
+    // are on the shared batch branch and it ships via the batch PR, so the node
+    // closes at merge by `fno backlog reconcile`, not here. For the daemon that
+    // is a SUCCESSFUL dispatch, not a failure. Recognize it in the keep-set so a
+    // batched member never trips the cross-tick circuit breaker.
     if matches!(last.evidence.reason, TerminationReason::DoneBatched) {
         breaker.record_success(&node);
         let _ = journal.append(
@@ -798,6 +508,258 @@ fn map_outcome(
             }
         }
     }
+}
+
+// ── fire-and-forget sequential scheduler (x-0ad6) ────────────────────────────
+//
+// The retargeted sequential drain: a tick DISPATCHES one ready node
+// fire-and-forget through the proven lane machinery (`fno backlog dispatch-lanes
+// --max 1`, which routes through `fno agents spawn`, self-mints the worker
+// session, and re-anchors the `node:<id>` claim to `target-session:<sid>`), then
+// RECONCILES prior dispatches from events across later ticks - never owning the
+// worker child. This replaces the supervised `run_one_node`/`ShelloutDispatcher`
+// path whose `session.wait()` blocked the whole tick.
+//
+// Failure accounting is reconstructed from the worker's own termination event
+// (find_termination on the session id read back from the claim holder) fed
+// through the SAME `map_outcome` policy the supervised path used, so the
+// auto-defer streak is identical by construction. A worker that dies without
+// emitting any termination event is caught by the crash floor (claim gone past
+// the boot window), replacing the awaited-exit-code `node_failed` watchdog the
+// fire-and-forget model can no longer read.
+
+/// A ready node dispatched fire-and-forget in a prior tick, polled to completion
+/// from events.
+#[derive(Debug, Clone)]
+pub struct PendingDispatch {
+    node_id: String,
+    /// The worker's session id, read back from the `node:<id>` claim holder
+    /// (`target-session:<sid>`) once the worker inits and re-anchors the claim.
+    /// `None` until first observed; find_termination cannot be polled before it.
+    session_id: Option<String>,
+    /// Reconcile passes since dispatch. Guards the boot window: a worker that has
+    /// not yet taken the node claim holds none, which must not read as a death
+    /// until `BOOT_GRACE_TICKS` have elapsed.
+    ticks: u32,
+}
+
+/// Reconcile passes to wait for a dispatched worker to take its `node:<id>`
+/// claim before a claim-absent verdict counts as a boot crash.
+const BOOT_GRACE_TICKS: u32 = 3;
+
+/// True for the terminal reasons `MegawalkQueue::close` marks the node done
+/// (mirrors `loop_megawalk::is_done_reason`, kept local to avoid widening its
+/// visibility). `DoneBatched`/`DoneAwaitingMerge` are NOT here - they close at
+/// merge and are recognized as success by `map_outcome`'s keep-set instead.
+fn is_done_reason(r: &TerminationReason) -> bool {
+    matches!(
+        r,
+        TerminationReason::DonePRGreen | TerminationReason::DoneAdvisory
+    )
+}
+
+/// Poll each in-flight dispatch and retire the ones that finished, updating the
+/// breaker through `map_outcome` (identical policy to the supervised path).
+/// Resolved entries are removed from `pending`.
+fn reconcile_pending(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    pending: &mut Vec<PendingDispatch>,
+    journal: &Journal,
+) {
+    pending.retain_mut(|p| {
+        p.ticks += 1;
+        // `node:<id>` is a GLOBAL-id claim: it routes to $FNO_CLAIMS_ROOT (else
+        // $HOME) by prefix, NOT under the project cwd, so the worker (which
+        // acquires it via `fno claim` with no explicit root) and this read must
+        // resolve the SAME dir. Passing Some(cfg.cwd) would look in the wrong
+        // place and never find the worker's claim (claim_status root mismatch).
+        let (state, rec) = claims::status(&format!("node:{}", p.node_id), None);
+        if let Some(sid) = rec
+            .as_ref()
+            .and_then(|r| r.holder.strip_prefix("target-session:"))
+        {
+            p.session_id = Some(sid.to_string());
+        }
+        // Live/Suspect: the worker (or its TTL) still holds the node claim.
+        // Suspect is a respawned-supervisor worker, never a death (claims.rs).
+        let worker_live = matches!(state, ClaimState::Live | ClaimState::Suspect);
+
+        // A termination event is authoritative whenever we can poll for it,
+        // held claim or not (a worker can terminate a tick before release).
+        if let Some(sid) = p.session_id.clone() {
+            match journal.find_termination(&sid) {
+                Ok(Some(ev)) => {
+                    resolve_dispatch(cfg, breaker, journal, &p.node_id, ev);
+                    return false;
+                }
+                Ok(None) if !worker_live => {
+                    // Claim gone, session known, no event: the worker died
+                    // mid-flight without terminating. Crash floor -> failure.
+                    resolve_crash(cfg, breaker, journal, &p.node_id);
+                    return false;
+                }
+                _ => {} // still running, or an unreadable journal this pass: keep
+            }
+        } else if !worker_live && p.ticks >= BOOT_GRACE_TICKS {
+            // Never observed the worker take the node claim within the boot
+            // window: the dispatch failed to start. Crash floor -> failure.
+            resolve_crash(cfg, breaker, journal, &p.node_id);
+            return false;
+        }
+        true
+    });
+}
+
+/// Apply a polled termination event to the breaker via the shared `map_outcome`
+/// policy, mirroring the supervised path's `queue.close` side effects.
+fn resolve_dispatch(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    journal: &Journal,
+    node_id: &str,
+    ev: Evidence,
+) {
+    // Mirror MegawalkQueue::close EXACTLY: a DonePRGreen/DoneAdvisory close runs
+    // `fno backlog done` (retry_etxtbsy for a transient busy binary) and Closes
+    // only on success - a failed `done` Parks with the error, so the breaker
+    // counts it as a failure just as the supervised path did (never a false
+    // success). DoneBatched/DoneAwaitingMerge close at merge via reconcile and
+    // are NOT marked here - map_outcome's keep-set records them as a successful
+    // dispatch without a `done` write.
+    let close = if is_done_reason(&ev.reason) {
+        match retry_etxtbsy(|| {
+            abi_cmd(&cfg.abi_bin)
+                .args(["backlog", "done", node_id])
+                .current_dir(&cfg.cwd)
+                .output()
+        }) {
+            Ok(o) if o.status.success() => CloseOutcome::Closed,
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                CloseOutcome::Parked(if stderr.is_empty() {
+                    format!("fno backlog done {node_id} failed (exit {})", o.status)
+                } else {
+                    stderr
+                })
+            }
+            Err(e) => CloseOutcome::Parked(format!("fno backlog done {node_id} spawn failed: {e}")),
+        }
+    } else {
+        CloseOutcome::Parked(format!("session terminated: {:?}", ev.reason))
+    };
+    let reason = ev.reason.clone();
+    let ur = UnitResult {
+        unit_id: node_id.to_string(),
+        evidence: ev,
+        close,
+    };
+    map_outcome(cfg, breaker, journal, &reason, Some(&ur));
+}
+
+/// Crash floor: a dispatched worker died with no termination event. Synthesize
+/// NoProgress evidence and feed the SAME `map_outcome` path, so the failure
+/// counts toward the auto-defer streak exactly as the supervised `node_failed`
+/// watchdog did.
+fn resolve_crash(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    journal: &Journal,
+    node_id: &str,
+) {
+    let message = "worker exited with no termination event (fire-and-forget crash floor)";
+    let ur = UnitResult {
+        unit_id: node_id.to_string(),
+        evidence: Evidence {
+            reason: TerminationReason::NoProgress,
+            message: message.to_string(),
+        },
+        close: CloseOutcome::Parked(message.to_string()),
+    };
+    map_outcome(
+        cfg,
+        breaker,
+        journal,
+        &TerminationReason::NoProgress,
+        Some(&ur),
+    );
+}
+
+/// Node ids the daemon dispatched fire-and-forget, parsed from a `fno backlog
+/// dispatch-lanes` JSON receipt array (`status == "dispatched"`). Malformed or
+/// empty input yields an empty list (the caller records nothing to reconcile).
+fn dispatched_node_ids(stdout: &[u8]) -> Vec<String> {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched"))
+        .filter_map(|r| {
+            r.get("node_id")
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Fire-and-forget dispatch of one ready node through the lane machinery, with
+/// the dispatched node recorded in `pending` for later event reconcile. Used by
+/// the retargeted sequential tick (`max_lanes < 2`) in place of the supervised
+/// `run_one_node`.
+fn dispatch_one(
+    cfg: &DrainConfig,
+    pending: &mut Vec<PendingDispatch>,
+    journal: &Journal,
+) -> DrainOutcome {
+    let mut cmd = abi_cmd(&cfg.abi_bin);
+    cmd.args(["backlog", "dispatch-lanes", "--max", "1"]);
+    if let Some(ref p) = cfg.project {
+        cmd.args(["--project", p]);
+    }
+    if let Some(ref m) = cfg.mission {
+        cmd.args(["--mission", m]);
+    }
+    cmd.current_dir(&cfg.cwd);
+    let out = match retry_etxtbsy(|| cmd.output()) {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let _ = journal.append(
+                "active_backlog_skip",
+                json!({"reason": "dispatch-one-failed", "detail": detail}),
+            );
+            return DrainOutcome::Skipped {
+                reason: format!("dispatch-one-failed: {detail}"),
+            };
+        }
+        Err(e) => {
+            let _ = journal.append(
+                "active_backlog_skip",
+                json!({"reason": "dispatch-one-failed", "detail": format!("{e}")}),
+            );
+            return DrainOutcome::Skipped {
+                reason: format!("dispatch-one-failed: {e}"),
+            };
+        }
+    };
+    let ids = dispatched_node_ids(&out.stdout);
+    if ids.is_empty() {
+        return DrainOutcome::NoWork;
+    }
+    for node_id in &ids {
+        pending.push(PendingDispatch {
+            node_id: node_id.clone(),
+            session_id: None,
+            ticks: 0,
+        });
+    }
+    let node = ids[0].clone();
+    let _ = journal.append(
+        "active_backlog_dispatched",
+        json!({"node_id": node, "fire_and_forget": true}),
+    );
+    DrainOutcome::Dispatched { node }
 }
 
 // ── target resolution + resident supervisor ─────────────────────────────────────
@@ -1119,6 +1081,10 @@ async fn per_project_drain_loop(
 ) {
     let project = target.project.clone();
     let mut breaker = CircuitBreaker::new(target.failure_limit);
+    // In-flight fire-and-forget dispatches, reconciled from events across ticks
+    // (x-0ad6). Resident like the breaker so a worker dispatched one tick is
+    // polled to completion on the next.
+    let mut pending: Vec<PendingDispatch> = Vec::new();
     let mut last_nudge = nudge_mtime().await;
     let mut backoff = Duration::from_secs(1);
 
@@ -1144,17 +1110,21 @@ async fn per_project_drain_loop(
         };
         let journal = journal_for(&cfg.cwd);
 
-        // run_loop is synchronous; offload so the async runtime is never stalled.
-        // Move the breaker in and hand it back so the streak survives the tick.
-        let taken = std::mem::take(&mut breaker);
+        // drain_tick is synchronous; offload so the async runtime is never
+        // stalled. Move the breaker AND pending set in and hand them back so the
+        // streak and in-flight tracking survive the tick.
+        let taken_b = std::mem::take(&mut breaker);
+        let taken_p = std::mem::take(&mut pending);
         let handle = tokio::task::spawn_blocking(move || {
-            let mut b = taken;
-            let outcome = drain_tick(&cfg, &mut b, &journal);
-            (outcome, b)
+            let mut b = taken_b;
+            let mut p = taken_p;
+            let outcome = drain_tick(&cfg, &mut b, &mut p, &journal);
+            (outcome, b, p)
         });
         match handle.await {
-            Ok((_outcome, b)) => {
+            Ok((_outcome, b, p)) => {
                 breaker = b;
+                pending = p;
                 backoff = Duration::from_secs(1);
             }
             Err(join_err) => {
@@ -1164,7 +1134,10 @@ async fn per_project_drain_loop(
                 );
                 // The panicked breaker's streak is lost (rare); a fresh one is
                 // safe (a crash-looping node re-accrues failures and re-defers).
+                // Pending tracking is also lost, but the in-flight workers still
+                // run and their nodes close at merge via `fno backlog reconcile`.
                 breaker = CircuitBreaker::new(t.failure_limit);
+                pending = Vec::new();
                 sleep_interruptible(backoff, &shutdown).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
                 continue;
@@ -1213,6 +1186,260 @@ mod tests {
     #[test]
     fn lane_receipts_garbage_is_error() {
         assert!(count_lane_receipts(b"wedged traceback").is_err());
+    }
+
+    #[test]
+    fn dispatched_node_ids_keeps_only_dispatched() {
+        let out = br#"[
+            {"node_id": "x-a", "status": "dispatched", "short_id": "s1"},
+            {"node_id": "x-b", "status": "skipped", "error": "no slot"},
+            {"node_id": "x-c", "status": "dispatched", "short_id": "s2"}
+        ]"#;
+        assert_eq!(dispatched_node_ids(out), vec!["x-a", "x-c"]);
+    }
+
+    #[test]
+    fn dispatched_node_ids_empty_on_garbage_or_none() {
+        // Malformed input, an empty receipt, and an all-skipped receipt all
+        // yield nothing to reconcile (never a panic).
+        assert!(dispatched_node_ids(b"wedged traceback").is_empty());
+        assert!(dispatched_node_ids(b"[]").is_empty());
+        assert!(dispatched_node_ids(br#"[{"node_id":"x-a","status":"skipped"}]"#).is_empty());
+    }
+
+    #[test]
+    fn is_done_reason_only_pr_green_and_advisory() {
+        // The two reasons MegawalkQueue::close treats as a `backlog done`;
+        // DoneBatched/DoneAwaitingMerge are the map_outcome keep-set, not here.
+        assert!(is_done_reason(&TerminationReason::DonePRGreen));
+        assert!(is_done_reason(&TerminationReason::DoneAdvisory));
+        assert!(!is_done_reason(&TerminationReason::DoneBatched));
+        assert!(!is_done_reason(&TerminationReason::DoneAwaitingMerge));
+        assert!(!is_done_reason(&TerminationReason::NoProgress));
+    }
+
+    // ── reconcile policy (x-0ad6) ────────────────────────────────────────────
+    //
+    // These drive the private reconcile helpers directly with a stub `fno` (for
+    // the defer/done side effects) + a temp Journal, so the failure-streak policy
+    // is covered without env-mutating claim setup. The crash-floor boot-grace
+    // path uses a unique fake node id that is naturally `Free` at the real global
+    // claims root, so it reads real state for a key that never exists (and never
+    // writes there).
+
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A stub `fno` that appends its argv to `record` and exits 0, so a test can
+    /// assert which `backlog done`/`defer` side effects the reconcile fired.
+    fn stub_fno(dir: &std::path::Path, record: &std::path::Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\nexit 0\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    fn test_cfg(tmp: &std::path::Path, abi_bin: String, failure_limit: u32) -> DrainConfig {
+        DrainConfig {
+            cwd: tmp.to_path_buf(),
+            project: Some("footnote".to_string()),
+            mission: None,
+            lib_path: tmp.join("lib/driver-claude-code.sh"),
+            abi_bin,
+            allow_merge: false,
+            max_turns: 5,
+            budget_usd: 25.0,
+            model: None,
+            max_iterations: 10,
+            per_unit_max_dispatches: 1,
+            failure_limit,
+            batch: false,
+            max_lanes: 1,
+        }
+    }
+
+    fn test_journal(tmp: &std::path::Path) -> (Journal, PathBuf) {
+        let project = tmp.join(".fno").join("events.jsonl");
+        let global = tmp.join("global-events.jsonl");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        (Journal::new_raw(project.clone(), global), project)
+    }
+
+    fn journal_lines(p: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn resolve_dispatch_done_records_success_and_marks_done() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        breaker.record_failure("x-suc0001"); // pre-existing streak to prove reset
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-suc0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "done".to_string(),
+            },
+        );
+
+        assert_eq!(
+            breaker.consecutive_failures("x-suc0001"),
+            0,
+            "success resets the streak"
+        );
+        // is_done_reason -> the reconcile marks the node done (mirrors queue.close).
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-suc0001"), "calls: {calls}");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_dispatched") && l.contains("x-suc0001")));
+    }
+
+    #[test]
+    fn resolve_dispatch_awaiting_merge_is_success_without_done() {
+        // DoneAwaitingMerge is a successful dispatch (closes at merge via
+        // reconcile) - the keep-set records success but must NOT `backlog done`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        breaker.record_failure("x-awm0001");
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-awm0001",
+            Evidence {
+                reason: TerminationReason::DoneAwaitingMerge,
+                message: String::new(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-awm0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(
+            !calls.contains("backlog done"),
+            "awaiting-merge must not mark done: {calls}"
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_failed_done_records_failure_not_false_success() {
+        // Parity with MegawalkQueue::close: if `fno backlog done` FAILS, the node
+        // was not actually closed, so the dispatch must Park (a failure toward the
+        // streak), never a false success. Regression guard for the review finding.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fno = bin.join("fno");
+        std::fs::write(
+            &fno,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'node has open blockers' >&2; exit 1; fi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-donefail",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "done".to_string(),
+            },
+        );
+
+        assert_eq!(
+            breaker.consecutive_failures("x-donefail"),
+            1,
+            "a failed `backlog done` must count as a failure, not a false success"
+        );
+    }
+
+    #[test]
+    fn resolve_crash_at_limit_defers_and_parks() {
+        // AC1-FR: a worker death (no termination event) counts as a failure; the
+        // Nth consecutive death trips the breaker -> defer + parked event.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 2);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(2);
+
+        resolve_crash(&cfg, &mut breaker, &journal, "x-cra0001"); // failure 1/2
+        assert_eq!(breaker.consecutive_failures("x-cra0001"), 1);
+        resolve_crash(&cfg, &mut breaker, &journal, "x-cra0001"); // failure 2/2 -> trip
+
+        // Trip defers the node (graph exclusion) and resets the streak.
+        assert_eq!(breaker.consecutive_failures("x-cra0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog defer x-cra0001"), "calls: {calls}");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_parked") && l.contains("x-cra0001")));
+    }
+
+    #[test]
+    fn reconcile_boot_grace_then_crash_floor() {
+        // A dispatched worker that never takes its `node:<id>` claim (never
+        // booted) is kept for BOOT_GRACE_TICKS reconcile passes, then counted as
+        // a crash. Uses a unique fake node id (naturally Free at the global root).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = vec![PendingDispatch {
+            node_id: "x-bootgrace-never-real".to_string(),
+            session_id: None,
+            ticks: 0,
+        }];
+
+        // Passes before the grace expires keep the dispatch and record nothing.
+        for _ in 1..BOOT_GRACE_TICKS {
+            reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+            assert_eq!(
+                pending.len(),
+                1,
+                "must keep the dispatch during the boot window"
+            );
+            assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 0);
+        }
+        // The pass that reaches the grace counts a crash-floor failure and drops it.
+        reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+        assert!(
+            pending.is_empty(),
+            "the never-booted dispatch is retired as a crash"
+        );
+        assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 1);
     }
 
     #[test]
