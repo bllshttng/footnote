@@ -366,8 +366,11 @@ for id in "${NODES[@]}"; do
   # the allowlist and caps the brief at 8 KB, so a launcher never assembles a
   # verb string from a graph field (a trust boundary). No overrides -> the
   # built-in /target no-merge assembly below, byte-identical to before.
-  dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb // empty' 2>/dev/null)"
-  dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief // empty' 2>/dev/null)"
+  # select(. != "") before // empty: jq's // treats an empty string as truthy,
+  # so a field serialized as "" (not null) would otherwise pass through as "" -
+  # the repo's standard empty-string fallback idiom.
+  dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != "") // empty' 2>/dev/null)"
+  dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
   TARGET_BRIEF_ENV=""
   if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
     resolve_args=(dispatch resolve --node "$id" -J)
@@ -383,7 +386,7 @@ for id in "${NODES[@]}"; do
       continue
     fi
     tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
-    TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF // empty')"
+    TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
     # Merge posture stays a launcher flag (not part of the verb string): inject
     # no-merge for a /target-family command unless --allow-merge, mirroring the
     # default path below.
