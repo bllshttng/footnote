@@ -335,6 +335,32 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     assert entry.claude_short_id == receipt["short_id"]
 
 
+def test_spawn_claude_receipt_surfaces_moved_cwd(workdir_claude, monkeypatch) -> None:
+    """x-85fe: when the default moves the worker off the caller (canonical !=
+    caller), the bg receipt appends the effective cwd LAST, and the stderr
+    redirect note fires (AC1-HP / AC1-UI). The unmoved receipt stays byte-
+    identical (proven by test_spawn_claude_plain)."""
+    from fno.agents.cli import agents_app
+
+    canon = workdir_claude / "canon"
+    canon.mkdir()
+    monkeypatch.setenv("FNO_REPO_ROOT", str(canon))
+
+    runner = _make_runner()
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "moved-c", "-p", "claude", "hello", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    first_line = result.output.split("\n")[0].strip()
+    receipt = json.loads(first_line)
+    assert receipt["cwd"] == str(canon.resolve())
+    # cwd is the LAST key (byte-parity contract with Rust claude_ask).
+    assert first_line.rstrip("}").rstrip().endswith(f'"cwd": "{canon.resolve()}"')
+    assert "dispatching from canonical main" in result.output
+
+
 # ---------------------------------------------------------------------------
 # claude --once: refused, exit 2
 # ---------------------------------------------------------------------------

@@ -72,37 +72,42 @@ assert {member.value for member in AgentStatusFilter} == set(_KNOWN_STATUSES), (
 
 
 def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
-    """Worker launch dir honoring --cwd > --fresh > caller cwd.
+    """Worker launch dir honoring --cwd > --here (caller) > default canonical.
 
-    Mirrors the Rust client's ``effective_worker_cwd`` precedence (ab-77b691dc,
-    AC6): an explicit ``--cwd`` always wins; ``--fresh`` resolves the canonical
-    (main) checkout so a worker dispatched from a linked worktree starts from
-    canonical; ``--here``/``--in-place`` suppresses ``--fresh``. A canonical that
-    lands on the caller's own dir is a no-op (no redirect note). Only the Python
-    fallback runtime reaches this -- when an installed binary auto-routes the
-    verb, the Rust client owns the identical precedence.
+    Mirrors the Rust client's ``effective_worker_cwd`` precedence. x-85fe
+    inverted the default (was ab-77b691dc's caller-cwd): a spawn with NO explicit
+    cwd source now resolves to the canonical (main) checkout, so the identical
+    command behaves the same regardless of where the launcher happens to stand.
+    ``--here``/``--in-place`` is the explicit opt-in to keep the caller's cwd.
+    ``--fresh`` survives as an accepted no-op alias (the default already resolves
+    canonical). A canonical that lands on the caller's own dir is a no-op (no
+    redirect note). Only the Python fallback runtime reaches this -- when an
+    installed binary auto-routes the verb, the Rust client owns the identical
+    precedence.
     """
+    del fresh  # accepted no-op alias: the default already resolves canonical.
     if cwd:
         return Path(cwd).resolve()
     caller = Path(os.getcwd()).resolve()
-    if fresh and not here:
-        from fno.paths import resolve_canonical_repo_root
+    if here:
+        return caller
+    from fno.paths import resolve_canonical_repo_root
 
-        # Best-effort: any resolution error (missing git, odd environment) falls
-        # back to the caller cwd, the safe side, rather than crashing the dispatch
-        # (review MEDIUM).
-        try:
-            canonical = resolve_canonical_repo_root().resolve()
-        except Exception:
-            return caller
-        if canonical != caller:
-            print(
-                f"fno agents: --fresh: dispatching from canonical main ({canonical}); "
-                "pass --here to stay in this worktree",
-                file=sys.stderr,
-            )
-        return canonical
-    return caller
+    # Best-effort: any resolution error (missing git, odd environment) falls
+    # back to the caller cwd, the safe side, rather than crashing the dispatch.
+    try:
+        canonical = resolve_canonical_repo_root().resolve()
+    except Exception:
+        return caller
+    if canonical != caller:
+        # Never silent: the redirect note fires on every actual move, default
+        # path included (x-85fe Locked Decision 5).
+        print(
+            f"fno agents: dispatching from canonical main (default) ({canonical}); "
+            "pass --here to stay in this worktree",
+            file=sys.stderr,
+        )
+    return canonical
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +553,11 @@ def cmd_spawn(
     )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
+    # x-85fe: the effective launch dir surfaces in the receipt whenever it
+    # differs from the caller (the default now moves a node-less spawn to
+    # canonical), so the move is legible in the receipt too, not only the
+    # stderr note. None (worker stays put) keeps the receipt byte-identical.
+    _moved_cwd = str(workdir) if workdir != Path(os.getcwd()).resolve() else None
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
@@ -766,6 +776,8 @@ def cmd_spawn(
             # so the unset receipt is unchanged.
             if permission_mode is not None:
                 receipt_obj["permission_mode"] = permission_mode
+            if _moved_cwd is not None:
+                receipt_obj["cwd"] = _moved_cwd
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
@@ -820,9 +832,17 @@ def cmd_spawn(
             if eff_mode
             else ""
         )
+        # x-85fe: append the effective cwd only when the default (or --cwd)
+        # moved the worker off the caller. Escape `"` defensively; the field is
+        # LAST so an unmoved receipt is byte-identical (Rust claude_ask parity).
+        cwd_field = (
+            f', "cwd": "{_moved_cwd.replace(chr(34), chr(92) + chr(34))}"'
+            if _moved_cwd is not None
+            else ""
+        )
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
-            f'"provider": "{result.provider}", "status": "live"{perm_field}}}'
+            f'"provider": "{result.provider}", "status": "live"{perm_field}{cwd_field}}}'
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
