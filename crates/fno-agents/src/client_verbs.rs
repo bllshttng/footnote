@@ -19,6 +19,7 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
+use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use serde::Serialize;
@@ -793,6 +794,63 @@ fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
     }
 }
 
+/// True iff `s` is a lowercase `8-4-4-4-12` hex UUID (the shape `claude --resume`
+/// accepts). Guards the dead-arm argv so a malformed/empty recorded uuid can
+/// never reach `claude --resume` (x-9844 Failure Modes / Boundaries).
+fn is_uuid_shaped(s: &str) -> bool {
+    let groups = [8usize, 4, 4, 4, 12];
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == groups.len()
+        && parts.iter().zip(groups).all(|(p, n)| {
+            p.len() == n
+                && p.chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        })
+}
+
+/// The claude arm of `resume` (x-9844 Fix 1): liveness-probe first, then pick the
+/// argv. A live (incl. idle) supervisor -> `claude attach <short_id>` (today's
+/// behavior); a dead/absent one -> `claude --resume <uuid>` in the recorded cwd.
+/// Probe reality (locate_session + a 250 ms socket connect), never the registry
+/// `status` field: a stale-exited row whose supervisor is actually alive must
+/// attach, not `--resume` into a second writer on one transcript. The chosen lane
+/// is printed to stderr before returning so the operator always knows which
+/// fired. `Err(code)` carries the exit code for the uuid-absent refusal.
+fn claude_resume_argv(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+) -> Result<Vec<String>, i32> {
+    let short_id = entry
+        .get("claude_short_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let uuid = entry
+        .get("claude_session_uuid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+
+    let live = !short_id.is_empty()
+        && locate_session(claude_home, short_id)
+            .map(|loc| liveness_probe(&loc.messaging_socket_path))
+            .unwrap_or(false);
+
+    if live {
+        eprintln!("fno agents resume: {name} is live - attaching");
+        Ok(vec!["claude".into(), "attach".into(), short_id.into()])
+    } else if is_uuid_shaped(uuid) {
+        eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
+        Ok(vec!["claude".into(), "--resume".into(), uuid.into()])
+    } else {
+        eprintln!(
+            "fno agents resume: {} has no claude session recorded; nothing to resume.",
+            py_repr_str(name)
+        );
+        Err(13)
+    }
+}
+
 /// POSIX shell quoting matching Python's `shlex.quote`: empty -> `''`; a string
 /// of only "safe" chars (`[\w@%+=:,./-]`) is returned as-is; otherwise it is
 /// single-quoted with embedded `'` escaped as `'"'"'`.
@@ -1003,27 +1061,37 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 13;
     }
 
-    // Provider support is checked BEFORE session_id so an unknown provider
-    // surfaces "not supported" rather than a misleading "no session_id".
-    let argv = match build_resume_argv(provider, session_id) {
-        Some(v) => v,
-        None => {
+    // claude gets the liveness-probed smart fork (US1/US2, x-9844): a live
+    // (incl. idle) supervisor -> attach; a dead/absent one -> `claude --resume
+    // <uuid>`. Other providers keep their settled-session resume CLI, checked
+    // BEFORE session_id so an unknown provider surfaces "not supported" rather
+    // than a misleading "no session_id".
+    let argv = if provider == "claude" {
+        match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
+            Ok(v) => v,
+            Err(code) => return code,
+        }
+    } else {
+        let v = match build_resume_argv(provider, session_id) {
+            Some(v) => v,
+            None => {
+                eprintln!(
+                    "fno agents resume: provider {} resume not supported by this fno version.",
+                    py_repr_str(provider)
+                );
+                return 13;
+            }
+        };
+        if session_id.is_empty() {
             eprintln!(
-                "fno agents resume: provider {} resume not supported by this fno version.",
+                "fno agents resume: agent {} has no recorded session_id for provider {}.",
+                py_repr_str(&name),
                 py_repr_str(provider)
             );
             return 13;
         }
+        v
     };
-
-    if session_id.is_empty() {
-        eprintln!(
-            "fno agents resume: agent {} has no recorded session_id for provider {}.",
-            py_repr_str(&name),
-            py_repr_str(provider)
-        );
-        return 13;
-    }
 
     if !which_on_path(&argv[0]) {
         eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
@@ -2122,6 +2190,79 @@ mod tests {
             Some(vec!["gemini".into(), "--resume".into(), "g-1".into()])
         );
         assert_eq!(build_resume_argv("opencode", "x"), None);
+    }
+
+    #[test]
+    fn is_uuid_shaped_accepts_only_lowercase_8_4_4_4_12_hex() {
+        assert!(is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"));
+        assert!(!is_uuid_shaped("")); // empty
+        assert!(!is_uuid_shaped("not-a-uuid"));
+        assert!(!is_uuid_shaped("0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9")); // uppercase
+        assert!(!is_uuid_shaped("0a1b2c3d4e5f6071829 3a4b5c6d7e8f9")); // no dashes
+        assert!(!is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f")); // 11-char tail
+    }
+
+    // Fixture: write a `<pid>.json` bg session under a ClaudeHome so
+    // locate_session finds it (mirrors claude_ask.rs::write_session).
+    fn cv_tmpdir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "abi-cv-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn claude_resume_argv_live_attaches_dead_resumes_absent_refuses() {
+        use std::os::unix::net::UnixListener;
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+
+        // Dead row (no session file) with a recorded uuid -> `claude --resume`.
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(&home);
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude",
+            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+        });
+        assert_eq!(
+            claude_resume_argv(&ch, &entry, "w").unwrap(),
+            vec!["claude".to_string(), "--resume".into(), uuid.into()]
+        );
+
+        // uuid absent -> refuse (Err 13), never `claude --resume ""`.
+        let entry_no_uuid = serde_json::json!({
+            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+        });
+        assert_eq!(claude_resume_argv(&ch, &entry_no_uuid, "w"), Err(13));
+
+        // Live supervisor (socket answers) beats a stale "exited" registry ->
+        // `claude attach <short_id>`, no --resume (AC1-EDGE).
+        let home2 = cv_tmpdir();
+        let sessions = home2.join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let sock = home2.join("live.sock");
+        let _listener = UnixListener::bind(&sock).unwrap();
+        fs::write(
+            sessions.join("222.json"),
+            format!(
+                "{{\"jobId\":\"7c5dcf5d\",\"kind\":\"bg\",\"messagingSocketPath\":\"{}\",\"sessionId\":\"s\",\"cwd\":\"/tmp\"}}",
+                sock.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let ch2 = ClaudeHome::at(&home2);
+        assert_eq!(
+            claude_resume_argv(&ch2, &entry, "w").unwrap(),
+            vec!["claude".to_string(), "attach".into(), "7c5dcf5d".into()]
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&home2).ok();
     }
 
     #[test]
