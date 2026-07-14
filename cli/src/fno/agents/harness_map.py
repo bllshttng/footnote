@@ -134,9 +134,20 @@ def normalize_command(command: str, harness: str) -> str:
     non-slash string is returned unchanged for the slash/codex surfaces (nothing
     to rewrite). Pure string transform; no config or IO."""
     surface = capabilities(harness)["command_surface"]
-    if surface == _PROSE:
-        return _PROSE_BRIEF
     cmd = command.strip()
+    if surface == _PROSE:
+        # Only `/target` has a verified prose translation (the implementation
+        # brief). A different verb (e.g. `/think`) would silently become
+        # "implement the node" - the wrong intent - so reject it loudly instead:
+        # a prose harness has no skill surface to run it (codex review P1).
+        verb = cmd.split(maxsplit=1)[0].lstrip("/") if cmd else ""
+        if verb and verb != "target":
+            raise DispatchResolveError(
+                f"harness {harness!r} has no footnote skill surface, so only "
+                f"'/target' has a verified prose translation; '/{verb}' cannot be "
+                f"dispatched there (route /{verb} to a claude/codex/agy harness)"
+            )
+        return _PROSE_BRIEF
     if surface == _CODEX_SKILL and cmd.startswith("/"):
         return "$fno:" + cmd[1:]
     return cmd

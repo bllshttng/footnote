@@ -289,11 +289,19 @@ for id in "${NODES[@]}"; do
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
 
-  # x-dfa4: forward the permission mode to every worker spawn (same array
+  # x-dfa4: forward the permission mode to the worker spawn (same array
   # discipline as model_args - avoids word-splitting at the trust boundary).
-  # Empty => zero args => byte-identical to today.
+  # CLAUDE-ONLY on the autonomous lane (codex review P2): `fno agents spawn`
+  # REJECTS --permission-mode for a non-claude provider on a non-pane substrate
+  # (cli.py), so forwarding it to a codex/gemini/agy/opencode headless worker
+  # fails the whole dispatch. Non-claude workers get their bypass from the
+  # resolved permission_bypass caps, not this flag. Empty => byte-identical.
   perm_args=()
-  [[ -n "$PERMISSION_MODE" ]] && perm_args=("--permission-mode" "$PERMISSION_MODE")
+  perm_hint=""  # dry-run preview mirror of perm_args (claude-gated, codex review P2)
+  if [[ -n "$PERMISSION_MODE" && "$DISPATCH_PROVIDER" == "claude" ]]; then
+    perm_args=("--permission-mode" "$PERMISSION_MODE")
+    perm_hint="--permission-mode $PERMISSION_MODE "
+  fi
 
   # x-b0b4: a claude worker rides the build lane. The build/route lane is
   # claude-SPECIFIC (model routing over the claude subscription), and the runtime
@@ -428,9 +436,9 @@ for id in "${NODES[@]}"; do
   dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
   TARGET_BRIEF_ENV=""
   if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
-    # --harness so the resolver's per-harness builtin applies where no explicit
-    # verb string is given; the verb string itself stays claude-syntax (a
-    # per-harness verb translation is a follow-up).
+    # --harness so the resolver normalizes the verb per-harness (x-a5e4): a
+    # `/target` verb resolves to `$fno:target {id}` on codex, `/target {id}` on
+    # claude/agy, a prose brief on gemini/opencode. no-merge is injected below.
     resolve_args=(dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" -J)
     [[ -n "$dispatch_verb" ]] && resolve_args+=(--verb "$dispatch_verb")
     [[ -n "$dispatch_brief" ]] && resolve_args+=(--brief "$dispatch_brief")
@@ -445,16 +453,22 @@ for id in "${NODES[@]}"; do
     fi
     tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
     TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
-    # /target-family command: thread --flags + the no-merge default (a non-target
-    # command like $fno:target or a prose brief takes neither).
-    if [[ "$tgt_cmd" == "/target "* ]]; then
-      rest="${tgt_cmd#/target }"
+    # /target-family command (claude `/target`, codex `$fno:target`): thread
+    # --flags + the no-merge default. Both invoke the same target skill, so both
+    # must get no-merge - else a codex node with dispatch_verb=/target resolves to
+    # `$fno:target <id>` WITHOUT no-merge and a configured auto-merge could merge
+    # it (codex review P1). A prose brief carries "do not merge" in its prose.
+    tgt_prefix=""
+    [[ "$tgt_cmd" == "/target "* ]] && tgt_prefix="/target "
+    [[ "$tgt_cmd" == '$fno:target '* ]] && tgt_prefix='$fno:target '
+    if [[ -n "$tgt_prefix" ]]; then
+      rest="${tgt_cmd#"$tgt_prefix"}"
       inject=""
       [[ -n "$FLAGS" ]] && inject="$FLAGS "
       if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* && " $rest " != *" no-merge "* ]]; then
         inject="${inject}no-merge "
       fi
-      tgt_cmd="/target ${inject}${rest}"
+      tgt_cmd="${tgt_prefix}${inject}${rest}"
     fi
   elif [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
     # claude native /target, built locally: /target [FLAGS] [no-merge] <id>
@@ -503,7 +517,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}$agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi

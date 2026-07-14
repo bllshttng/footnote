@@ -148,3 +148,18 @@ def test_verb_path_falls_to_prose_for_prose_harness():
     assert not out["command"].startswith("/")
     assert not out["command"].startswith("$fno")
     assert "x-abcd" in out["command"]
+
+
+@pytest.mark.parametrize("harness", ["opencode", "gemini"])
+def test_non_target_verb_on_prose_harness_is_rejected(harness):
+    # /think has no verified prose translation - it must NOT silently become the
+    # /target implementation brief (codex review P1). Reject loudly.
+    with pytest.raises(DispatchResolveError, match="prose translation"):
+        resolve_dispatch(harness=harness, node_id="x-abcd", verb="/think")
+
+
+def test_normalize_command_rejects_non_target_verb_on_prose():
+    with pytest.raises(DispatchResolveError):
+        normalize_command("/think {id}", "opencode")
+    # /target still translates (the implementation brief).
+    assert normalize_command("/target {id}", "opencode")
