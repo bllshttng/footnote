@@ -275,8 +275,8 @@ fn finalize_postmortem_on_interrupted_or_aborted() {
     }
 }
 
-/// A ship reason runs ledger + stamp + graduate + handoff and emits
-/// session_finalized. (AC5-HP.)
+/// A ship reason runs ledger + stamp + handoff and emits session_finalized.
+/// Ship stamps `shipped` only; it does NOT graduate (done = merged, x-f34f). (AC5-HP.)
 #[test]
 fn finalize_ship_gated() {
     let env = setup("S-ship", false);
@@ -288,7 +288,10 @@ fn finalize_ship_gated() {
         "ledger: {c}"
     );
     assert!(c.contains("stamp-plan stamp"), "stamp must fire: {c}");
-    assert!(c.contains("stamp-plan graduate"), "graduate must fire: {c}");
+    assert!(
+        !c.contains("stamp-plan graduate"),
+        "graduate must NOT fire at ship (done = merged): {c}"
+    );
     // W6 verifier advisory rides the ship branch with the manifest's fields;
     // this line is the Rust->Python flag-shape contract (a flag rename on
     // either side fails here).
@@ -475,8 +478,8 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
         "ship fire must stamp after a non-ship terminal: {c}"
     );
     assert!(
-        c.contains("stamp-plan graduate"),
-        "ship fire must graduate: {c}"
+        !c.contains("stamp-plan graduate"),
+        "ship fire stamps only; done = merged, no graduate (x-f34f): {c}"
     );
     assert_eq!(handoff_files(&env).len(), 1, "ship fire writes the handoff");
     assert_eq!(

@@ -473,6 +473,10 @@ def cmd_graduate(args: argparse.Namespace) -> int:
 
     if len(urls) >= expected:
         fields["status"] = "done"
+        # done_at = the merge/graduation timestamp (first-write-only, mirrors
+        # shipped_at). done now means MERGED on both plan and graph (x-f34f).
+        if not fields.get("done_at"):
+            fields["done_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         write_plan_file(target, fields, rest, dry_run=args.dry_run)
 
     return 0

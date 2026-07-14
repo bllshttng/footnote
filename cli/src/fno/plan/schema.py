@@ -72,7 +72,8 @@ class PlanFrontmatter(BaseModel):
     # markdown-heading form stays out of scope (Locked Decision 3).
     kill_criteria: str | list[Any] | None = None
     updated: datetime | None = None
-    shipped_at: datetime | None = None
+    shipped_at: datetime | None = None  # PR creation (implementation complete)
+    done_at: datetime | None = None  # PR merged (first-write-only; x-f34f)
     urls: list[str] = []
     session_ids: list[str] = []
     # >= 1 when present: graduate gates on `len(urls) >= expected`, so 0/negative
