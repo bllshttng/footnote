@@ -261,6 +261,21 @@ append_section "$mail_content"
 gc_helper="${SCRIPT_DIR}/helpers/gc-dead-target-manifest.sh"
 [[ -f "$gc_helper" ]] && bash "$gc_helper" "$STATE_FILE" || true
 
+# Plan status reconcile sweep (x-f34f US5) — project canonical-but-stale plan
+# frontmatter from graph truth. Daily-watermark gated and fully async so the
+# 452-file parse never lands on the session-start critical path more than once a
+# day; bg output is discarded so it can never corrupt this hook's JSON stdout.
+# Watermark written BEFORE launch = at-most-once-per-day even if the sweep dies
+# (the write-time projection and post-merge ritual are the other two layers).
+if command -v fno >/dev/null 2>&1; then
+    rs_watermark=".fno/.reconcile-status-watermark"
+    rs_today="$(date +%Y-%m-%d 2>/dev/null || echo "")"
+    if [[ -n "$rs_today" && "$(cat "$rs_watermark" 2>/dev/null || echo "")" != "$rs_today" ]]; then
+        printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
+        ( fno plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
+    fi
+fi
+
 hydrate_state_provider_context
 
 # No context to inject — exit silently

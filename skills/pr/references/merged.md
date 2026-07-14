@@ -265,6 +265,16 @@ no node, that is fine (reconcile closes nothing, exit 0, `NODE_IDS` empty) -
 continue. A non-zero exit is a genuine failure (e.g. corrupt graph.json): keep
 going so the inbox prose still lands, but flag it in the report.
 
+### Step 2a: Reconcile plan-frontmatter status (x-f34f)
+
+Beside `backlog reconcile`, project any canonical-but-stale plan frontmatter
+status from graph truth (the x-76ea class: a plan left `design` while its node
+merged to `done`). Idempotent, best-effort, never blocks the ritual.
+
+```bash
+fno plan reconcile-status --apply || echo "post-merge: plan reconcile-status failed (non-fatal)" >&2
+```
+
 ### Step 2b: Stamp ship provenance (post-merge takeover, x-b6e4)
 
 A post-merge session that runs this ritual is a distinct ship-phase contributor
