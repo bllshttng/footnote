@@ -26,7 +26,7 @@ use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
 use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
-use crate::popup::{self, Anchor, NavDir, Popup, PopupRow};
+use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, AnswerablePrompt, BacklogCard,
     BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
@@ -404,6 +404,13 @@ struct View {
     /// Pending escape bytes in modal mode (arrow/pgup folding), same split-arrow
     /// safety as [`View::sel_esc`].
     keys_modal_esc: Vec<u8>,
+    /// (x-8ccf US2) The right-click / `m` row context menu over a sideline agent
+    /// row: an anchored popup whose entries route to existing commands. `None`
+    /// when closed. The target is pinned by name so a layout reshuffle can only
+    /// stale-refuse an action, never redirect it.
+    row_menu: Option<RowMenu>,
+    /// Pending escape bytes in row-menu mode (arrow folding).
+    row_menu_esc: Vec<u8>,
     /// Caret expansion per squad id - client-local, instant (AC6-UI).
     expanded: HashSet<u64>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
@@ -698,6 +705,100 @@ fn build_keys_modal() -> KeysModal {
     }
 }
 
+/// (x-8ccf US2) The right-click / `m` row context menu over a sideline agent
+/// row. The target is pinned by NAME (not index) so a layout reshuffle between
+/// open and click can only turn an action into a stale-name refusal, never
+/// redirect it to a different agent (Concurrency). `actions` runs parallel to
+/// the popup's flat targets (`popup.sel` indexes it directly).
+struct RowMenu {
+    popup: Popup,
+    target: String,
+    actions: Vec<MenuAction>,
+}
+
+/// What a context-menu entry does, resolved against the LIVE agent row (found by
+/// name) at execution time - a stale target becomes a Notice, not a wrong action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    /// Attach a bg (paneless) agent as a new tab.
+    NewTab,
+    /// Attach a bg agent as a directional split of the current tab.
+    Split(Dir),
+    /// Focus an existing pane-hosted row.
+    Focus,
+    /// Open the read-only peek overlay.
+    Peek,
+    /// Stop a live row (StopAgent, or StopExternal for a daemon-roster row).
+    Stop,
+    /// Remove an exited row (RemoveAgent, or RemoveExternal for a roster row).
+    Remove,
+}
+
+/// Build the per-state row menu for the agent at `display_rows()` index `i`,
+/// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
+/// Entry sets mirror the row's state so no dead item ever renders: a paneless
+/// bg row gets the new-tab + 2x2 split grid (its whole point); a pane row gets
+/// focus; an exited row gets remove; peek/stop apply where they make sense.
+fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut actions: Vec<MenuAction> = Vec::new();
+    let mut add = |row: PopupRow, acts: &[MenuAction]| {
+        rows.push(row);
+        actions.extend_from_slice(acts);
+    };
+    let entry = |glyph: &str, label: &str| PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: String::new(),
+    };
+    let cell = |glyph: &str, label: &str| GridCell {
+        glyph: glyph.into(),
+        label: label.into(),
+    };
+    add(PopupRow::Header(agent.name.clone()), &[]);
+    add(PopupRow::Rule, &[]);
+    if agent.exited {
+        add(entry("✕", "Remove"), &[MenuAction::Remove]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+    } else if agent.pane_id.is_some() {
+        // Live pane row: already placed, so focus/peek/stop (no splits).
+        add(entry("→", "Focus"), &[MenuAction::Focus]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(PopupRow::Rule, &[]);
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+    } else if agent.attach_id.is_some() {
+        // Paneless bg row: the motivating case - open as a tab or a split pane.
+        add(
+            PopupRow::FullWidth("▭ New Tab".into()),
+            &[MenuAction::NewTab],
+        );
+        add(PopupRow::Rule, &[]);
+        // 2x2 spatial grid: Left/Right on top, Up/Down below (the cell you pick
+        // IS the direction). Glyphs are half-block squares; a non-nerd-font
+        // terminal still shows the label beside them.
+        add(
+            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
+            &[MenuAction::Split(Dir::Left), MenuAction::Split(Dir::Right)],
+        );
+        add(
+            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
+            &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
+        );
+        add(PopupRow::Rule, &[]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+    } else {
+        // A live row that is neither pane-hosted nor attachable here.
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+    }
+    RowMenu {
+        popup: Popup::new(rows, anchor),
+        target: agent.name.clone(),
+        actions,
+    }
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Seed with the active squad so the first frame already shows its tabs
@@ -713,6 +814,8 @@ impl View {
             hint: false,
             keys_modal: None,
             keys_modal_esc: Vec::new(),
+            row_menu: None,
+            row_menu_esc: Vec::new(),
             expanded,
             selector: None,
             sel_esc: Vec::new(),
@@ -1096,6 +1199,35 @@ impl View {
                 }
             }
         }
+    }
+
+    /// Open the row context menu on `display_rows()` index `i`, anchored at
+    /// `anchor` (x-8ccf US2). Returns whether it opened - `false` for a non-agent
+    /// row (the caller then leaves the press alone / forwards it).
+    fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
+        let agent = match self.display_rows().get(i) {
+            Some(DisplayRow::Agent(a)) => (*a).clone(),
+            _ => return false,
+        };
+        self.clear_peek();
+        self.row_menu = Some(build_row_menu(&agent, anchor));
+        self.row_menu_esc.clear();
+        true
+    }
+
+    /// The flat popup target under a screen cell while the row menu is open, for
+    /// mouse hover/click; `None` off the popup.
+    fn row_menu_hit(&self, row: u16, col: u16) -> Option<usize> {
+        let m = self.row_menu.as_ref()?;
+        let r = m.popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let li = (row as usize).checked_sub(r0)?;
+        let line = r.lines.get(li)?;
+        let cc = (col as usize).checked_sub(c0)?;
+        line.hits
+            .iter()
+            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .map(|(t, _, _)| *t)
     }
 
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
@@ -1893,6 +2025,9 @@ impl View {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
             popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+        } else if let Some(m) = &self.row_menu {
+            // x-8ccf US2: the anchored row context menu, drawn at the pointer.
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
         } else if let Some(sel) = self.answers {
             // x-feec needs-me queue (grown from the x-c929 answer overlay): the
             // severity-ranked union + the selected row's answer options, on the
@@ -1942,6 +2077,7 @@ impl View {
             && self.nav.is_none()
             && self.peek.is_none()
             && self.keys_modal.is_none()
+            && self.row_menu.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -3700,6 +3836,12 @@ async fn handle_stdin(
             }
             continue;
         }
+        // x-8ccf US2: the row context menu owns the mouse while open (hover
+        // selects, click runs, right-press re-anchors) and is swallowed.
+        if view.row_menu.is_some() {
+            row_menu_mouse(view, rep, sock_w).await?;
+            continue;
+        }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
         // click / scroll cancels it and is SWALLOWED - it must never leak to a
         // pane underneath (the confirm prompt spans the full-width bottom row) nor
@@ -3723,6 +3865,22 @@ async fn handle_stdin(
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                 apply_hit(view, hit, sock_w).await?;
+                continue;
+            }
+        }
+        // x-8ccf US2: right-click a sideline row opens its context menu (agent
+        // rows) or is swallowed (non-agent chrome). A right-click on a PANE cell
+        // (sideline_row_at -> None) falls through and forwards to the inner app,
+        // so pane right-click behavior is untouched (AC3-EDGE).
+        if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) {
+            if let Some(i) = view.sideline_row_at(rep.row, rep.col) {
+                view.open_row_menu(
+                    i,
+                    Anchor::At {
+                        row: rep.row,
+                        col: rep.col,
+                    },
+                );
                 continue;
             }
         }
@@ -3757,6 +3915,11 @@ async fn handle_stdin(
         // dismiss. Routed here (same precedence as the old poster) so its keys
         // never leak to a pane.
         return keys_modal_keys(view, &passthrough, sock_w).await;
+    }
+    if view.row_menu.is_some() {
+        // x-8ccf US2: the row context menu consumes keys while open (arrows walk
+        // the entries + grid, Enter runs, Esc/q close) - never leaks to a pane.
+        return row_menu_keys(view, &passthrough, sock_w).await;
     }
     if view.confirm.is_some() {
         return confirm_keys(view, &passthrough, sock_w).await;
@@ -4346,6 +4509,212 @@ async fn keys_modal_mouse(
     Ok(StdinFlow::Continue)
 }
 
+/// Run a row-menu entry (x-8ccf US2) against the LIVE agent row (found by the
+/// pinned name). A stale target is a Notice (AC1-ERR), never a misrouted action;
+/// every action maps to an existing Command / overlay / confirm (zero proto).
+async fn execute_row_menu_action(
+    view: &mut View,
+    action: MenuAction,
+    target: String,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let Some(a) = view
+        .layout
+        .agents
+        .iter()
+        .find(|a| a.name == target)
+        .cloned()
+    else {
+        view.set_notice(format!("agent {target} is no longer here"));
+        return Ok(());
+    };
+    match action {
+        MenuAction::NewTab | MenuAction::Split(_) => {
+            let Some(id) = a.attach_id.clone() else {
+                view.set_notice("agent is no longer attachable".into());
+                return Ok(());
+            };
+            let split = match action {
+                MenuAction::Split(d) => Some(d),
+                _ => None,
+            };
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::AttachAgent {
+                    id,
+                    placement: PanePlacement {
+                        target: PaneTarget::CurrentRoute,
+                        split,
+                    },
+                }),
+            )
+            .await
+            .map_err(|e| format!("attach send failed: {e}"))?;
+        }
+        MenuAction::Focus => match a.pane_id {
+            Some(pid) => write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
+                .await
+                .map_err(|e| format!("focus send failed: {e}"))?,
+            None => view.set_notice("agent has no pane here".into()),
+        },
+        MenuAction::Peek => {
+            let idx = view
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == target));
+            match idx {
+                Some(idx) => fetch_peek(view, idx, target, sock_w).await?,
+                None => view.set_notice("agent is no longer here".into()),
+            }
+        }
+        MenuAction::Stop | MenuAction::Remove => {
+            // A confirm owns the bottom row; a too-short terminal refuses rather
+            // than arm an invisible prompt (matching the selector's stop/reap).
+            if view.term.0 < MIN_ROWS_FOR_STATUS {
+                view.set_notice("terminal too short for the confirm prompt".into());
+                return Ok(());
+            }
+            let kind = match (action, a.external, a.attach_id.clone()) {
+                (MenuAction::Stop, true, Some(id)) => ConfirmKind::StopExternal {
+                    attach_id: id,
+                    name: a.name.clone(),
+                },
+                (MenuAction::Stop, _, _) => ConfirmKind::StopAgent {
+                    name: a.name.clone(),
+                },
+                (MenuAction::Remove, true, Some(id)) => ConfirmKind::RemoveExternal {
+                    attach_id: id,
+                    name: a.name.clone(),
+                },
+                (_, _, _) => ConfirmKind::RemoveAgent {
+                    name: a.name.clone(),
+                },
+            };
+            view.open_confirm(ConfirmAction {
+                action: kind,
+                label: a.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Run the row menu's selected entry (Enter/click), then close - the popup never
+/// lingers after execute (AC1-FR).
+async fn row_menu_execute_selected(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let picked = view.row_menu.as_ref().and_then(|m| {
+        m.actions
+            .get(m.popup.sel)
+            .copied()
+            .map(|a| (a, m.target.clone()))
+    });
+    view.row_menu = None;
+    if let Some((action, target)) = picked {
+        execute_row_menu_action(view, action, target, sock_w).await?;
+    }
+    Ok(())
+}
+
+/// Row-menu keys (x-8ccf US2): arrows walk the entries + 2x2 grid, Enter runs
+/// the selection, Esc/`q` close. A lone Esc closes instantly; no key reaches a
+/// pane.
+async fn row_menu_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    if bytes == [0x1b] && view.row_menu_esc.is_empty() {
+        view.row_menu = None;
+        return Ok(StdinFlow::Continue);
+    }
+    let mut esc = std::mem::take(&mut view.row_menu_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.row_menu_esc = esc;
+    for tok in toks {
+        if view.row_menu.is_none() {
+            break;
+        }
+        match tok {
+            ModalKey::Esc => view.row_menu = None,
+            ModalKey::Byte(b'q') => view.row_menu = None,
+            ModalKey::Up => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Up);
+                }
+            }
+            ModalKey::Down => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Down);
+                }
+            }
+            ModalKey::Left => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Left);
+                }
+            }
+            ModalKey::Right => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.nav(NavDir::Right);
+                }
+            }
+            ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
+            _ => {
+                let _ = raw_out(b"\x07");
+            }
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// One mouse report while the row menu is open (x-8ccf US2): hover selects, a
+/// left click runs the entry, a right press re-anchors on the row under the
+/// pointer (or dismisses off the sideline), a click off the popup dismisses.
+async fn row_menu_mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = view.row_menu_hit(rep.row, rep.col) {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => match view.row_menu_hit(rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.row_menu.as_mut() {
+                    m.popup.select(t);
+                }
+                row_menu_execute_selected(view, sock_w).await?;
+            }
+            None => view.row_menu = None,
+        },
+        MouseKind::Press(MouseButton::Right) => match view.sideline_row_at(rep.row, rep.col) {
+            // Re-anchor on the row under the second right-press (never stack two
+            // menus); a non-agent row leaves nothing open.
+            Some(i) => {
+                if !view.open_row_menu(
+                    i,
+                    Anchor::At {
+                        row: rep.row,
+                        col: rep.col,
+                    },
+                ) {
+                    view.row_menu = None;
+                }
+            }
+            None => view.row_menu = None,
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Fold raw selector-mode bytes into simple key bytes, carrying escape state
 /// in `esc` ACROSS reads (gemini medium: an arrow sequence split at a read
 /// boundary must neither close the selector nor leak its tail into the
@@ -4850,6 +5219,15 @@ async fn selector_keys(
                 }
             }
             b'm' => {
+                // x-8ccf US2: `m` on an AGENT row opens its context menu
+                // (mouse-off parity), anchored at the row and sitting over the
+                // selector like peek; Esc drops back into the selector.
+                if matches!(view.display_rows().get(cur), Some(DisplayRow::Agent(_))) {
+                    let arow =
+                        (TAB_BAR_ROWS as usize + cur.saturating_sub(view.sideline_offset)) as u16;
+                    view.open_row_menu(cur, Anchor::At { row: arow, col: 1 });
+                    continue;
+                }
                 // Move a tab into another squad (x-96e8): open the numbered
                 // picker over the OTHER squads (a squad is moved with J/K, not
                 // m). Tab rows left the sideline (x-0090), so `m` on a squad row
@@ -6962,6 +7340,111 @@ mod tests {
         };
         keys_modal_mouse(&mut v, click, &mut buf).await.unwrap();
         assert!(v.keys_modal.is_none(), "click off the popup dismisses");
+    }
+
+    #[test]
+    fn row_menu_entries_gate_by_agent_state() {
+        // US2: no dead item - a bg row gets new-tab + the 2x2 split grid; a pane
+        // row gets focus and NO splits (already placed); an exited row gets
+        // remove and no stop.
+        let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+            squad: None,
+            name: name.into(),
+            pane_id,
+            badge: None,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: attach.map(Into::into),
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        };
+        let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
+        assert!(bg.actions.contains(&super::MenuAction::NewTab));
+        assert!(bg.actions.contains(&super::MenuAction::Split(Dir::Right)));
+        assert!(bg.actions.contains(&super::MenuAction::Split(Dir::Up)));
+        assert!(bg.actions.contains(&super::MenuAction::Stop));
+        assert!(!bg.actions.contains(&super::MenuAction::Focus));
+        let pane = super::build_row_menu(&mk("p", Some(9), None, false), Anchor::Center);
+        assert!(pane.actions.contains(&super::MenuAction::Focus));
+        assert!(
+            !pane
+                .actions
+                .iter()
+                .any(|a| matches!(a, super::MenuAction::Split(_))),
+            "a placed pane row offers no splits"
+        );
+        let dead = super::build_row_menu(&mk("d", None, None, true), Anchor::Center);
+        assert!(dead.actions.contains(&super::MenuAction::Remove));
+        assert!(!dead.actions.contains(&super::MenuAction::Stop));
+    }
+
+    #[tokio::test]
+    async fn row_menu_bg_split_right_attaches_to_current_route() {
+        // AC1-HP: "Split Right" on a bg row sends AttachAgent placing it as a
+        // right split of the current tab - an existing command, zero proto bump.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Split(Dir::Right))
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "executing closes the menu");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert_eq!(placement.split, Some(Dir::Right));
+                assert!(matches!(
+                    placement.target,
+                    crate::proto::PaneTarget::CurrentRoute
+                ));
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_stale_target_notices_without_acting() {
+        // AC1-ERR: the target racing out between open and execute becomes a
+        // Notice, and nothing goes on the wire.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        v.open_row_menu(idx, Anchor::Center);
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Split(Dir::Right))
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        v.layout.agents.retain(|a| a.name != "bg-claude"); // it vanishes
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "a stale target sends nothing");
+        assert!(v.notice.is_some(), "and surfaces a notice");
+    }
+
+    #[test]
+    fn row_menu_opens_only_on_agent_rows() {
+        // Row 0 is a squad row, not an agent - the menu refuses (right-click
+        // there is swallowed as chrome).
+        let mut v = unified_rows_view();
+        assert!(!v.open_row_menu(0, Anchor::Center));
+        assert!(v.row_menu.is_none());
     }
 
     #[test]
