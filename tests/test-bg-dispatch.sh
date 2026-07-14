@@ -111,6 +111,19 @@ case "$sub $verb" in
     fi
     # ask_noid models a broken receipt: exit 0 but no parseable short_id.
     if [[ -f "$S/ask_noid" ]]; then echo "Sure, starting on that now."; else echo '{"name": "tgt-aaaa1111", "short_id": "deadbeef01", "provider": "claude", "status": "live"}'; fi ;;
+  "dispatch resolve")
+    # x-567d: provider/substrate resolver. Default resolves claude/bg (every
+    # existing scenario expects the claude bg lane). A resolve_* state file
+    # overrides: resolve_fail -> exit 2 (no autonomous substrate); resolve_pair
+    # holds a "harness/substrate" pair (headless fallback scenarios).
+    if [[ -f "$S/resolve_fail" ]]; then echo "dispatch resolve: unknown harness (mock)" >&2; exit 2; fi
+    if [[ -f "$S/resolve_pair" ]]; then
+      pair="$(cat "$S/resolve_pair")"
+      printf '{"harness":"%s","substrate":"%s"}\n' "${pair%%/*}" "${pair##*/}"
+    else
+      printf '{"harness":"claude","substrate":"bg"}\n'
+    fi ;;
+  "event emit") : ;;  # x-567d: fallback/fail telemetry; noop under the mock
   *) exit 0 ;;
 esac
 MOCK
@@ -124,7 +137,7 @@ set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2"
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 
 echo "=============================================="
@@ -452,6 +465,31 @@ out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
 echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"a peer dispatcher holds dispatch:ab-aaaa1111" && [[ "$(ask_count)" -eq 0 ]] \
   && pass "codex-P1: peer-held reservation -> already-running, no ask (race closed pre-injection)" \
   || fail "codex-P1: reservation race not closed: $out (asks=$(ask_count))"
+
+# ---- x-567d AC1-EDGE: a non-bg harness resolves to headless with a loud note,
+#      spawning --provider <h> --substrate headless (not the claude bg lane) ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo "codex/headless" > "$MOCKSTATE/resolve_pair"
+out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
+echo "$out" | grep -q "note: harness 'codex' has no bg substrate; dispatching via headless" \
+  && pass "x-567d AC1-EDGE: non-bg harness prints the loud headless-fallback note" \
+  || fail "x-567d AC1-EDGE: missing fallback note: $out"
+echo "$out" | grep -q -- "--provider codex --substrate headless" \
+  && pass "x-567d AC1-EDGE: dispatch resolves --provider codex --substrate headless" \
+  || fail "x-567d AC1-EDGE: wrong provider/substrate: $out"
+
+# ---- x-567d AC2-ERR: no autonomous substrate (resolve fails) -> hard-fail
+#      naming config.dispatch.harness, node NOT launched ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+: > "$MOCKSTATE/resolve_fail"
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+if echo "$out" | grep -q "^failed ab-aaaa1111 reason=\"no autonomous substrate resolved" \
+   && echo "$out" | grep -q "config.dispatch.harness" \
+   && [[ "$(ask_count)" -eq 0 ]]; then
+  pass "x-567d AC2-ERR: unresolvable harness hard-fails naming the config key, no launch"
+else
+  fail "x-567d AC2-ERR: expected loud hard-fail naming config key, got: $out (asks=$(ask_count))"
+fi
 
 echo ""
 echo "=============================================="
