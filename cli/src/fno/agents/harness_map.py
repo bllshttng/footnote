@@ -33,45 +33,76 @@ from typing import Mapping, Optional
 
 # Bump when a capability KEY is added/removed or a value's meaning changes, so a
 # consumer can assert the shape it was written against.
-MAP_VERSION = 1
+MAP_VERSION = 2  # +dispatch_command (x-567d)
 
-# capability -> per-harness value. Keys are the READABLE_PROVIDERS set; only
-# claude/codex/gemini are dispatchable today (agy/opencode are headless-only
-# readable rows whose bypass is owned by their own adapter - US4 fills them in).
+# Prose-brief dispatch template for harnesses with NO native footnote skill
+# surface (gemini extension / opencode plugin). A general coding agent reads the
+# node via the fno CLI and delivers; `{id}` is substituted by resolve_dispatch.
+# This is the builtin default only - config.dispatch.command and a node's own
+# brief (x-f78d) override it.
+_PROSE_BRIEF = (
+    "Implement footnote backlog node {id} end-to-end. Read its spec with "
+    "`fno backlog get {id}` (title, details, plan_path), then implement it: write "
+    "the code and its tests, run the suite, commit atomically, push, and open a "
+    "pull request. Do NOT merge the PR."
+)
+
+# capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Every
+# harness now carries a `dispatch_command` (x-567d): a native skill invocation
+# where one exists and is verified (claude `/target`, codex `$fno:target`, agy
+# `/target`), else the prose-brief lane (gemini/opencode). `bg` stays claude-only.
 _HARNESS_CAPS: dict[str, dict] = {
     "claude": {
         "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-session",  # session store + --resume <uuid>
         "bg": True,  # claude --bg
         "stop_hook": "native",
+        # Native slash-command invocation of the target skill (verified).
+        "dispatch_command": "/target no-merge {id}",
     },
     "codex": {
         "permission_bypass": ["--dangerously-bypass-approvals-and-sandbox"],
         "resume": "native-thread",  # CODEX_THREAD_ID + exec resume
         "bg": False,  # -> headless
         "stop_hook": "native",
+        # `$fno:target` invokes the footnote plugin skill. VERIFIED: `codex exec`
+        # injects the fno skill definitions and expands `$fno:target` (not a
+        # literal prompt). Supersedes the old "prose brief only" guidance.
+        "dispatch_command": "$fno:target no-merge {id}",
     },
     "gemini": {
         "permission_bypass": ["--yolo"],
         "resume": "native-continue",
         "bg": False,
         "stop_hook": "native",
+        # gemini CLI is effectively deprecated (agy is its successor) and footnote
+        # is a gemini *extension* (context injection), not a gemini *skill* - so
+        # there is no verified `/target` surface. Prose-brief lane: a general
+        # coding agent implements node {id} from the repo + `fno backlog get`.
+        "dispatch_command": _PROSE_BRIEF,
     },
     "agy": {
-        # Antigravity: headless-only readable row. Bypass owned by the agy
-        # adapter/Rust spawn path; left empty here until a dispatch path needs it.
-        "permission_bypass": [],
+        # Antigravity CLI (gemini's successor). Its migration guide converts
+        # legacy commands to skills and recognizes `.agents/skills/` entries as
+        # active slash commands, so the target skill invokes as `/target`
+        # (grounded in antigravity.google/docs/cli/gcli-migration; live-verify
+        # before relying on it for production dispatch).
+        "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-continue",
         "bg": False,
         "stop_hook": "native",
+        "dispatch_command": "/target no-merge {id}",
     },
     "opencode": {
-        # Headless-only (serve). US4 wires the opencode headless one-shot; its
-        # bypass flag is confirmed there, not guessed here.
-        "permission_bypass": [],
+        # Headless one-shot `opencode run` (wired x-567d); bypass confirmed
+        # against opencode v1.14.50. footnote is an opencode plugin (session
+        # orchestration), not a slash-command surface, so a literal `/target`
+        # would run verbatim -> no-op. Prose-brief lane, same as gemini.
+        "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-continue",  # opencode run --continue
         "bg": False,
         "stop_hook": "native",
+        "dispatch_command": _PROSE_BRIEF,
     },
 }
 
@@ -118,7 +149,6 @@ def effort_values(harness: str) -> list[str]:
 
 
 _VALID_SUBSTRATES = ("bg", "headless", "pane")
-_DEFAULT_COMMAND = "/target no-merge {id}"
 
 
 def resolve_dispatch(
@@ -206,15 +236,20 @@ def resolve_dispatch(
             "(a pane stalls waiting for a human); use 'bg' or 'headless'"
         )
 
-    # 3. command template + substitution
-    template = (command or cfg.get("command") or _DEFAULT_COMMAND).strip()
+    # 3. command template + substitution. The builtin is per-harness
+    # (dispatch_command): a native skill invocation (claude `/target`, codex
+    # `$fno:target`, agy `/target`) or the prose-brief lane (gemini/opencode).
+    # An explicit --command / config.dispatch.command still overrides it.
+    template = (command or cfg.get("command") or caps["dispatch_command"]).strip()
     if not template:
         raise DispatchResolveError("resolved command is empty")
     if node_id:
-        if template.count("{id}") != 1:
+        # `{id}` must appear at least once; a prose brief may reference it more
+        # than once (str.replace substitutes every occurrence).
+        if "{id}" not in template:
             raise DispatchResolveError(
-                f"command template {template!r} must contain '{{id}}' exactly "
-                f"once for substitution; found {template.count('{id}')}"
+                f"command template {template!r} must contain '{{id}}' at least "
+                f"once for substitution"
             )
         resolved_command = template.replace("{id}", node_id.strip())
         decision.append(f"command=substituted({resolved_command})")
