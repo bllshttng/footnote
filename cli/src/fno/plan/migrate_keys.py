@@ -97,8 +97,8 @@ def migrate_text(text: str) -> tuple[Optional[str], list[str]]:
             out.append(line)
             continue
         key = km.group("key")
-        if key in RENAME:
-            target = RENAME[key]
+        target = RENAME.get(key)
+        if target is not None:
             if target in present:
                 notes.append(f"kept {key} ({target} also present) - review")
                 out.append(line)

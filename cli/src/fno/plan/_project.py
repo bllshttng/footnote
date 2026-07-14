@@ -62,8 +62,9 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
     # write (not a straight mirror) and stamps done_at on the terminal write.
     graph_status = node.get("_status")
     if graph_status:
-        projected = project_plan_status(fields.get("status"), graph_status)
-        if projected is not None and fields.get("status") != projected:
+        current_status = fields.get("status")
+        projected = project_plan_status(current_status, graph_status)
+        if projected is not None and current_status != projected:
             fields["status"] = projected
             changed = True
             if projected == "done" and not fields.get("done_at"):

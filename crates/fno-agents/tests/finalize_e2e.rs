@@ -322,6 +322,22 @@ fn finalize_ship_gated() {
     assert_eq!(count_event(&env.events, "session_finalized", "S-ship"), 1);
 }
 
+/// An advisory ship (DoneAdvisory) has no merge event, so ship IS its
+/// completion: it stamps AND graduates the plan to done, unlike a code ship
+/// (DonePRGreen) which stamps `shipped` only and flips at merge (codex P2, x-f34f).
+#[test]
+fn finalize_advisory_ship_graduates() {
+    let env = setup("S-adv", false);
+    let out = run_finalize(&env, "DoneAdvisory");
+    assert!(out.status.success());
+    let c = calls(&env);
+    assert!(c.contains("stamp-plan stamp"), "advisory ship stamps: {c}");
+    assert!(
+        c.contains("stamp-plan graduate"),
+        "advisory ship graduates to done (no merge event to flip it): {c}"
+    );
+}
+
 /// Idempotency: N stop-hook fires after a successful finalize produce exactly
 /// one ledger row, one stamp, one handoff, one session_finalized. (AC5-EDGE.)
 #[test]

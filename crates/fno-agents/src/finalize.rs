@@ -9,8 +9,10 @@
 //!   `graph_node_id` + `provider_id` + scalar `session_id` + `cost_usd` + a new
 //!   `termination_reason`, so a node's true cost and full session list roll up
 //!   by grouping ledger entries on `graph_node_id` (US7).
-//! - **Ship only** (`DonePRGreen` / `DoneAdvisory`): plan stamp (`shipped`, not
-//!   `done`: done = merged, x-f34f) and a mechanical git-derived handoff artifact.
+//! - **Ship only** (`DonePRGreen` / `DoneAdvisory`): plan stamp + a mechanical
+//!   git-derived handoff artifact. A code ship (DonePRGreen) stamps `shipped`
+//!   only (done = merged, x-f34f; the flip happens at merge). An advisory ship
+//!   (DoneAdvisory) has no merge event, so it also graduates to `done` here.
 //!
 //! ## Why this does not break the read-only stop hook
 //!
@@ -484,19 +486,25 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     };
 
-    // ── SHIP ONLY: stamp + handoff ─────────────────────────────────────────
-    // Ship = PR creation, so the plan is stamped `shipped` (not `done`): done
-    // now means MERGED (x-f34f). The `shipped -> done` flip happens at merge
-    // via the write-time status projection when the close paths mark the node
-    // done; finalize no longer graduates. expected_url_count is still recorded
-    // for the manual `graduate` verb and cross-project safety net.
+    // ── SHIP ONLY: stamp (+ graduate for advisory) + handoff ───────────────
+    // For a CODE ship (DonePRGreen) the plan is stamped `shipped` only: done now
+    // means MERGED (x-f34f), and the `shipped -> done` flip happens at merge via
+    // the write-time status projection. An ADVISORY/doc ship (DoneAdvisory) has
+    // NO merge event - ship IS its completion - so it must still graduate to
+    // `done` here, else the plan is stranded at `shipped` on the active board
+    // (codex P2). expected_url_count is still recorded either way for the manual
+    // `graduate` verb and the cross-project safety net.
     let mut stamped = false;
     let mut handoff_path: Option<String> = None;
     if ship {
         let plan = m.plan_path.clone().unwrap_or_default();
         if !plan.is_empty() {
             let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
-            match stamp_plan(&cwd, &plan, &session_id, expected) {
+            // Graduate only for the merge-less advisory terminal; a cross-project
+            // advisory still waits for a derivable count (never graduate early).
+            let do_graduate =
+                reason == "DoneAdvisory" && (!m.cross_project || expected.is_some());
+            match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate) {
                 Ok(()) => stamped = true,
                 Err(step) => {
                     eprintln!("finalize: {step} failed");
@@ -878,16 +886,20 @@ fn validate_stamped_frontmatter(cwd: &Path, plan_path: &str) {
     }
 }
 
-/// Stamp the plan `shipped` at the ship gate (PR creation). Does NOT graduate:
-/// done = merged (x-f34f), and the `shipped -> done` flip happens at merge via
-/// the write-time status projection on the close paths. `expected_url_count` is
-/// still recorded so the manual `graduate` verb and the cross-project safety
-/// net can gate on it later.
-fn stamp_plan(
+/// Stamp the plan `shipped` and, when `do_graduate`, flip it to `done`.
+///
+/// For a CODE ship (`DonePRGreen`) the caller passes `do_graduate = false`: done
+/// means merged (x-f34f), so the `shipped -> done` flip happens later via the
+/// write-time projection at merge, not here. For an ADVISORY ship
+/// (`DoneAdvisory`) there is no merge event, so the caller passes `true` and
+/// this graduates the plan now. `expected_url_count` is recorded either way for
+/// the manual `graduate` verb and the cross-project safety net.
+fn stamp_and_graduate(
     cwd: &Path,
     plan_path: &str,
     session_id: &str,
     expected_url_count: Option<u32>,
+    do_graduate: bool,
 ) -> Result<(), String> {
     let pr_url = gh_pr_url(cwd);
     let mut stamp = py_module(cwd);
@@ -921,6 +933,27 @@ fn stamp_plan(
     // finalize (finalize is idempotent/non-fatal by design).
     validate_stamped_frontmatter(cwd, plan_path);
 
+    // A code ship stamps `shipped` only; done flips at merge via the projection.
+    if !do_graduate {
+        return Ok(());
+    }
+
+    let out = py_module(cwd)
+        .arg("-m")
+        .arg("fno.plan._stamp")
+        .arg("graduate")
+        .arg("--plan-path")
+        .arg(plan_path)
+        .output()
+        .map_err(|_| "graduate".to_string())?;
+    if !out.status.success() {
+        eprintln!(
+            "finalize: fno.plan._stamp graduate exit {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return Err("graduate".into());
+    }
     Ok(())
 }
 
