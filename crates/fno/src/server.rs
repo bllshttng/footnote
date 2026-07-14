@@ -2914,6 +2914,32 @@ impl Core {
         }
     }
 
+    /// The net line delta an interpreted wheel-scroll applies, or `None` when the
+    /// event isn't a mux-interpreted scroll (a mouse-app passthrough, a select, or
+    /// an ignore). The core drain folds a contiguous run of wheel ticks on one
+    /// pane - including a direction reversal queued behind in-flight opposite
+    /// ticks - into a single apply+broadcast, so a fast trackpad flick settles in
+    /// one frame instead of rubber-banding through every intermediate offset.
+    fn scroll_delta(&self, pane: u64, event: &MouseEvent) -> Option<i32> {
+        let modes = self.panes.get(&pane)?.vt.modes();
+        match route_mouse(modes, event.kind) {
+            MouseAction::Scroll(delta) => Some(delta),
+            _ => None,
+        }
+    }
+
+    /// Scroll a pane by a net line delta and push one frame. A zero net (a
+    /// fully-cancelled reversal) moves nothing, so it skips the redundant frame.
+    fn apply_scroll(&mut self, pane: u64, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        if let Some(e) = self.panes.get_mut(&pane) {
+            e.vt.scroll(delta);
+        }
+        self.broadcast_pane(pane);
+    }
+
     /// Route a client's pane-rect mouse event (brief Locked 2, US1/US2/US3).
     /// An app that negotiated SGR mouse reporting owns its mouse: the event is
     /// SGR-encoded onto its PTY and the mux consumes nothing (AC3-HP). Otherwise
@@ -2932,12 +2958,7 @@ impl Core {
                     let _ = entry.pty.write_input(&bytes);
                 }
             }
-            MouseAction::Scroll(delta) => {
-                if let Some(e) = self.panes.get_mut(&pane) {
-                    e.vt.scroll(delta);
-                }
-                self.broadcast_pane(pane);
-            }
+            MouseAction::Scroll(delta) => self.apply_scroll(pane, delta),
             MouseAction::SelectStart => {
                 if let Some(e) = self.panes.get_mut(&pane) {
                     e.vt.selection_start(event.row, event.col);
@@ -5305,6 +5326,43 @@ async fn serve(
                         flow = core.handle(m);
                     }
                     if flow == Flow::Shutdown { break Flow::Shutdown; }
+                } else if let CoreMsg::Mouse { id, pane, event } = msg {
+                    // Wheel-scroll coalescing (mirrors the resize-storm coalescer
+                    // above): fold a contiguous run of interpreted wheel ticks on
+                    // one pane into a single net scroll+broadcast. A reversal
+                    // queued behind in-flight opposite ticks nets down to its true
+                    // delta here instead of rubber-banding, and a fast flick lands
+                    // in one frame instead of a jagged catch-up. Any non-scroll
+                    // event (passthrough/select) or passive sender stops the fold,
+                    // so ordering and read-only gating stay unchanged.
+                    if core.is_passive(id) {
+                        if core.handle(CoreMsg::Mouse { id, pane, event }) == Flow::Shutdown {
+                            break Flow::Shutdown;
+                        }
+                    } else if let Some(d0) = core.scroll_delta(pane, &event) {
+                        let mut net = d0;
+                        let mut trailer = None;
+                        while let Ok(m) = core_rx.try_recv() {
+                            if let CoreMsg::Mouse { id: mid, pane: mpane, event: mev } = &m {
+                                if *mpane == pane && !core.is_passive(*mid) {
+                                    if let Some(d) = core.scroll_delta(pane, mev) {
+                                        net += d;
+                                        continue;
+                                    }
+                                }
+                            }
+                            trailer = Some(m);
+                            break;
+                        }
+                        core.apply_scroll(pane, net);
+                        if let Some(m) = trailer {
+                            if core.handle(m) == Flow::Shutdown {
+                                break Flow::Shutdown;
+                            }
+                        }
+                    } else if core.handle(CoreMsg::Mouse { id, pane, event }) == Flow::Shutdown {
+                        break Flow::Shutdown;
+                    }
                 } else if core.handle(msg) == Flow::Shutdown {
                     break Flow::Shutdown;
                 }
@@ -8636,6 +8694,51 @@ mod tests {
             Arc::new(Notify::new()),
         );
         (core, client_id, p1, p2, rx)
+    }
+
+    #[test]
+    fn scroll_delta_classifies_only_interpreted_wheel_ticks() {
+        // The wheel-coalescing fold (x-316d) is only correct if it folds real
+        // scrolls and STOPS at anything else. A plain pane's wheel is an
+        // interpreted scroll (foldable, +/- MOUSE_WHEEL_LINES); a left press is a
+        // selection (not foldable) so it must break the run and preserve order.
+        let (core, _cid, p1, _p2, _rx) = seen_test_core();
+        let ev = |kind| MouseEvent {
+            row: 1,
+            col: 1,
+            kind,
+        };
+        assert_eq!(
+            core.scroll_delta(p1, &ev(MouseKind::WheelUp)),
+            Some(MOUSE_WHEEL_LINES)
+        );
+        assert_eq!(
+            core.scroll_delta(p1, &ev(MouseKind::WheelDown)),
+            Some(-MOUSE_WHEEL_LINES)
+        );
+        assert_eq!(
+            core.scroll_delta(p1, &ev(MouseKind::Press(MouseButton::Left))),
+            None,
+            "a select must stop the fold, not coalesce into it"
+        );
+        assert_eq!(
+            core.scroll_delta(999, &ev(MouseKind::WheelUp)),
+            None,
+            "an unknown pane never folds"
+        );
+        // A direction reversal nets down to its true delta (the bug: it used to
+        // rubber-band through every intermediate offset before settling).
+        let run = [
+            MouseKind::WheelDown,
+            MouseKind::WheelDown,
+            MouseKind::WheelDown,
+            MouseKind::WheelUp,
+        ];
+        let net: i32 = run
+            .iter()
+            .map(|&k| core.scroll_delta(p1, &ev(k)).unwrap())
+            .sum();
+        assert_eq!(net, -2 * MOUSE_WHEEL_LINES, "3 down + 1 up nets to 2 down");
     }
 
     #[test]
