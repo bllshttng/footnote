@@ -689,4 +689,4 @@ def test_build_lane_routes_when_configured_with_slash() -> None:
 def test_route_table_target_uses_slash() -> None:
     rows = mr.build_route_table(settings=_settings(), env={"ZAI_API_KEY": "k"})
     by_role = {r["role"]: r for r in rows}
-    assert by_role["coordinate"]["target"] == "zai/glm-5.2"
+    assert by_role["coordinate"]["provider_model"] == "zai/glm-5.2"

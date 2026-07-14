@@ -47,15 +47,15 @@ def test_route_table_shows_builtins_config_build_and_protected() -> None:
     by_role = {r["role"]: r for r in rows}
 
     for r in ("coordinate", "tidy", "orient", "consolidate", "post-merge"):
-        assert by_role[r]["target"] == "zai/glm-5.2"
-    assert by_role["codex-verify"]["target"] == "zai-openai/glm-4.6"
+        assert by_role[r]["provider_model"] == "zai/glm-5.2"
+    assert by_role["codex-verify"]["provider_model"] == "zai-openai/glm-4.6"
     assert by_role["codex-verify"]["protocol"] == "openai"
-    assert by_role["build"]["target"] == "unconfigured"
+    assert by_role["build"]["provider_model"] == "unconfigured"
     for p in ("implement", "review-verdict"):
-        assert "never routed" in by_role[p]["target"]
+        assert "never routed" in by_role[p]["provider_model"]
     # Every row carries the canonical 5-field shape (AC1-UI).
     for r in rows:
-        assert set(r) == {"role", "target", "protocol", "key", "assigned_by"}
+        assert set(r) == {"role", "provider_model", "protocol", "key", "assigned_by"}
 
 
 def test_route_table_key_status_names_source_and_missing() -> None:
@@ -71,7 +71,7 @@ def test_ls_json_matches_table() -> None:
     data = json.loads(res.stdout)
     assert isinstance(data, list) and data
     for row in data:
-        assert set(row) == {"role", "target", "protocol", "key", "assigned_by"}
+        assert set(row) == {"role", "provider_model", "protocol", "key", "assigned_by"}
 
 
 def test_ls_text_has_header() -> None:

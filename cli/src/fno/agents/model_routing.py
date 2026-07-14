@@ -626,7 +626,7 @@ def build_route_table(
     """The effective routing table, one row per role, for ``fno route ls``.
 
     Merges built-in roles/providers with config overrides. Each row is the
-    canonical 5-field shape: ``role | target | protocol | key | assigned_by``
+    canonical 5-field shape: ``role | provider_model | protocol | key | assigned_by``
     (AC1-UI). Protected roles render as explicit never-routed rows; a known lane
     with no config line (``build``) renders as unconfigured. Degrades a missing
     key to ``MISSING (checked ...)`` rather than raising, so an unreadable/absent
@@ -656,7 +656,7 @@ def build_route_table(
             rows.append(
                 {
                     "role": role,
-                    "target": "never routed (hard guard)",
+                    "provider_model": "never routed (hard guard)",
                     "protocol": "-",
                     "key": "-",
                     "assigned_by": "protected (hard guard)",
@@ -671,7 +671,7 @@ def build_route_table(
             rows.append(
                 {
                     "role": role,
-                    "target": "unconfigured",
+                    "provider_model": "unconfigured",
                     "protocol": "-",
                     "key": "-",
                     "assigned_by": _provenance(role, "unconfigured"),
@@ -683,7 +683,7 @@ def build_route_table(
             rows.append(
                 {
                     "role": role,
-                    "target": f"{raw} (malformed)",
+                    "provider_model": f"{raw} (malformed)",
                     "protocol": "-",
                     "key": "-",
                     "assigned_by": _provenance(role, source),
@@ -696,7 +696,7 @@ def build_route_table(
             rows.append(
                 {
                     "role": role,
-                    "target": f"{pname}/{model}",
+                    "provider_model": f"{pname}/{model}",
                     "protocol": "unknown provider",
                     "key": "-",
                     "assigned_by": _provenance(role, source),
@@ -713,7 +713,7 @@ def build_route_table(
         rows.append(
             {
                 "role": role,
-                "target": f"{pname}/{model}",
+                "provider_model": f"{pname}/{model}",
                 "protocol": protocol,
                 "key": key_status,
                 "assigned_by": _provenance(role, source),

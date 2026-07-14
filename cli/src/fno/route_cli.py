@@ -56,10 +56,10 @@ def ls_cmd(
         typer.echo(json.dumps(rows, indent=2))
         return
 
-    cols = ("role", "target", "protocol", "key", "assigned_by")
+    cols = ("role", "provider_model", "protocol", "key", "assigned_by")
     header = {
         "role": "ROLE",
-        "target": "TARGET",
+        "provider_model": "PROVIDER/MODEL",
         "protocol": "PROTOCOL",
         "key": "KEY",
         "assigned_by": "ASSIGNED-BY",
@@ -80,7 +80,7 @@ def ls_cmd(
 @route_app.command("set")
 def set_cmd(
     role: str = typer.Argument(..., help="Lane/role name, e.g. build."),
-    target: str = typer.Argument(
+    provider_model: str = typer.Argument(
         ...,
         help="provider/model - e.g. zai/glm-5.2 or zai/glm-5.2[1m] "
         "(legacy comma form zai,glm-5.2 is also accepted).",
@@ -117,11 +117,11 @@ def set_cmd(
         )
         raise typer.Exit(2)
 
-    parsed = _parse_target(target)
+    parsed = _parse_target(provider_model)
     if parsed is None:
         typer.echo(
-            f"error: target must be 'provider/model' with a non-empty model "
-            f"token; got {target!r}. Config unchanged.",
+            f"error: provider/model must be 'provider/model' with a non-empty "
+            f"model token; got {provider_model!r}. Config unchanged.",
             err=True,
         )
         raise typer.Exit(2)
