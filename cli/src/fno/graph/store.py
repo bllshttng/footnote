@@ -656,6 +656,7 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     pre pr_url stamp) is unattributable and never matches - refusing to guess is
     correct, not a regression.
     """
+    want = repo.lower()
     urls = [node.get("pr_url")]
     urls += [
         extra.get("url")
@@ -665,9 +666,17 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     for url in urls:
         if not isinstance(url, str):
             continue
-        head, sep, tail = url.rpartition("/pull/")
-        if sep and tail == str(pr_number) and head.endswith("/" + repo):
-            return True
+        # Footnote's own stamps are canonical, but a hand-passed url may carry a
+        # query, fragment, or trailing slash; the repo slug is case-insensitive.
+        clean = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        head, sep, tail = clean.rpartition("/pull/")
+        if not sep:
+            continue
+        try:
+            if int(tail) == pr_number and head.lower().endswith("/" + want):
+                return True
+        except ValueError:
+            continue
     return False
 
 

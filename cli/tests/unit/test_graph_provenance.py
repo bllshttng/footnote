@@ -878,6 +878,24 @@ def test_stamp_repo_scoped_pull_number_boundary(tmp_path, monkeypatch):
     ) == (None, "no-node")
 
 
+@pytest.mark.parametrize("url,repo", [
+    ("https://github.com/bllshttng/footnote/pull/388/", "bllshttng/footnote"),      # trailing slash
+    ("https://github.com/bllshttng/footnote/pull/388?w=1", "bllshttng/footnote"),   # query
+    ("https://github.com/bllshttng/footnote/pull/388#issue-1", "bllshttng/footnote"),  # fragment
+    ("https://github.com/Bllshttng/Footnote/pull/388", "bllshttng/footnote"),       # casing mismatch
+])
+def test_stamp_repo_scoped_matches_url_variants(tmp_path, monkeypatch, url, repo):
+    """gemini review: trailing slash / query / fragment / casing must not false-negative."""
+    g = _make_graph(tmp_path, [{"id": "x-var00001", "title": "t", "pr_number": 388, "pr_url": url}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import stamp_session_for_pr
+
+    node_id, status = stamp_session_for_pr(
+        g, 388, phase="ship", harness="claude", session_id="S", repo=repo,
+    )
+    assert (node_id, status) == ("x-var00001", "added")
+
+
 # -- `fno backlog session add` CLI (reuses _clear_session_env above) --
 
 
