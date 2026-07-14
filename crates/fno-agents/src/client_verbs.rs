@@ -851,6 +851,38 @@ fn claude_resume_argv(
     }
 }
 
+/// The dead-row pointer for `attach` (x-9844 Fix 2): `Some(message)` when `entry`
+/// is a claude row whose supervisor is gone (probe says dead) AND a well-shaped
+/// session uuid is recorded - the two revival commands to print instead of
+/// dead-ending in claude's own "session not found". `None` when the row is live
+/// (fall through to a normal attach) or carries no revivable uuid (nothing to
+/// point at - never print an unusable command). Probes reality (locate_session +
+/// socket), never the registry `status` field, matching the resume smart verb.
+fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
+    let short_id = entry
+        .get("claude_short_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let uuid = entry
+        .get("claude_session_uuid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if short_id.is_empty() || !is_uuid_shaped(uuid) {
+        return None;
+    }
+    let live = locate_session(claude_home, short_id)
+        .map(|loc| liveness_probe(&loc.messaging_socket_path))
+        .unwrap_or(false);
+    if live {
+        return None;
+    }
+    Some(format!(
+        "{name} has exited - fno agents resume {name} (continue it in your terminal)\n\
+         or: fno agents spawn {name} --resume {uuid} --substrate bg (detached worker)"
+    ))
+}
+
 /// POSIX shell quoting matching Python's `shlex.quote`: empty -> `''`; a string
 /// of only "safe" chars (`[\w@%+=:,./-]`) is returned as-is; otherwise it is
 /// single-quoted with embedded `'` escaped as `'"'"'`.
@@ -1265,6 +1297,27 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
             py_repr_str(&name)
         );
         return 12;
+    }
+
+    // Attach stays live-only, but a dead claude row (supervisor gone) with a
+    // recorded session uuid refuses with the exact revival commands instead of
+    // dead-ending in claude's own "session not found" (US3). The decision is a
+    // pure helper so it is testable without the exec path.
+    if let Some(msg) = claude_attach_pointer(&ClaudeHome::from_env(), entry, &name) {
+        eprintln!("{msg}");
+        append_agents_event(
+            &events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.clone())),
+                ("provider", Value::String("claude".to_string())),
+                (
+                    "reason",
+                    Value::String("exited-revivable-pointer".to_string()),
+                ),
+            ],
+        );
+        return 13;
     }
 
     if !which_on_path("claude") {
@@ -2263,6 +2316,51 @@ mod tests {
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&home2).ok();
+    }
+
+    #[test]
+    fn claude_attach_pointer_only_for_dead_revivable_claude_row() {
+        use std::os::unix::net::UnixListener;
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let dead = cv_tmpdir();
+        let ch_dead = ClaudeHome::at(&dead);
+
+        // Dead row + uuid -> pointer naming both revival commands.
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude",
+            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+        });
+        let msg = claude_attach_pointer(&ch_dead, &entry, "w").expect("dead row -> pointer");
+        assert!(msg.contains("fno agents resume w"));
+        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
+
+        // No uuid -> no pointer (never print an unusable command).
+        let no_uuid = serde_json::json!({
+            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+        });
+        assert_eq!(claude_attach_pointer(&ch_dead, &no_uuid, "w"), None);
+
+        // Live supervisor -> no pointer (fall through to a real attach).
+        let live_home = cv_tmpdir();
+        let sessions = live_home.join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let sock = live_home.join("live.sock");
+        let _l = UnixListener::bind(&sock).unwrap();
+        fs::write(
+            sessions.join("222.json"),
+            format!(
+                "{{\"jobId\":\"7c5dcf5d\",\"kind\":\"bg\",\"messagingSocketPath\":\"{}\",\"sessionId\":\"s\",\"cwd\":\"/tmp\"}}",
+                sock.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            claude_attach_pointer(&ClaudeHome::at(&live_home), &entry, "w"),
+            None
+        );
+
+        fs::remove_dir_all(&dead).ok();
+        fs::remove_dir_all(&live_home).ok();
     }
 
     #[test]
