@@ -93,6 +93,19 @@ class TestSameHarnessReentry:
         assert st["holder"] == "claude-worktree:s1"
 
 
+class TestReadOnly:
+    def test_read_only_does_not_acquire(self, tmp_path):
+        r = _guard(tmp_path, "claude", "s1", acquire=False)
+        assert r.verdict == VERDICT_NO_WORKTREE
+        assert not claim_status(worktree_claim_key(WT), root=tmp_path).get("holder")
+
+    def test_read_only_reports_foreign_owner(self, tmp_path):
+        _guard(tmp_path, "claude", "s1")  # claude owns W
+        r = _guard(tmp_path, "codex", "s2", acquire=False)
+        assert r.verdict == VERDICT_FOREIGN
+        assert r.owner_harness == "claude"
+
+
 class TestStaleRecovery:
     def test_foreign_but_stale_claim_is_reclaimed(self, tmp_path):
         """A dead foreign owner (TTL expired) does not block - it is stale and

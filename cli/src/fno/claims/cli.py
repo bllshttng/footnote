@@ -338,6 +338,75 @@ def lane_count(
         typer.echo(str(n))
 
 
+@cli.command(name="worktree-guard")
+def worktree_guard_cmd(
+    acquire_if_free: bool = typer.Option(
+        True,
+        "--acquire/--no-acquire",
+        help="Claim the worktree for this harness when free (default). --no-acquire only reads.",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON to stdout"),
+) -> None:
+    """Consult (and, when free, acquire) the worktree/branch harness claim.
+
+    Enforces the epic invariant: at most one harness owns a worktree at a time.
+    Reads the ambient harness identity + cwd; a foreign-harness owner exits 1 so
+    a PreToolUse hook can block. ``FNO_WORKTREE_OK=1`` bypasses the refusal
+    (downgrades ``foreign`` to ``override``). No git checkout or no harness ->
+    ``no-worktree`` (enforces nothing, exit 0).
+    """
+    import os
+
+    from ..harness_identity import resolve_harness_identity
+    from .session_pid import resolve_session_pid
+    from .worktree_guard import (
+        VERDICT_NO_WORKTREE,
+        guard_worktree,
+        resolve_worktree_root,
+    )
+
+    ident = resolve_harness_identity()
+    holder = (
+        f"{ident.harness}-worktree:{ident.session_id}"
+        if ident.harness and ident.session_id
+        else f"{ident.harness or 'unknown'}-worktree:{os.getpid()}"
+    )
+    override = os.environ.get("FNO_WORKTREE_OK", "").strip() not in ("", "0", "false", "False")
+
+    try:
+        session_pid = resolve_session_pid()
+    except Exception:
+        session_pid = None
+
+    result = guard_worktree(
+        resolve_worktree_root(),
+        my_harness=ident.harness,
+        my_holder=holder,
+        session_pid=session_pid,
+        override=override,
+        acquire=acquire_if_free,
+    )
+
+    payload = {
+        "verdict": result.verdict,
+        "worktree": result.worktree,
+        "my_harness": result.my_harness,
+        "owner_harness": result.owner_harness,
+        "owner_holder": result.owner_holder,
+        "owner_pid": result.owner_pid,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload))
+    elif result.verdict != VERDICT_NO_WORKTREE:
+        typer.echo(
+            f"{result.verdict}: {result.worktree or '-'} "
+            f"(owner_harness={result.owner_harness or '-'}, mine={result.my_harness or '-'})"
+        )
+
+    if result.blocked:
+        raise typer.Exit(code=1)
+
+
 @cli.command(name="force-release")
 def force_release(
     key: str = typer.Argument(...),

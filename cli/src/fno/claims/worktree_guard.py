@@ -97,9 +97,10 @@ def guard_worktree(
     session_pid: Optional[int] = None,
     ttl_ms: Optional[int] = DEFAULT_TTL_MS,
     override: bool = False,
+    acquire: bool = True,
     root: Optional[Path] = None,
 ) -> WorktreeGuardResult:
-    """Consult (and, when free, acquire) the worktree claim.
+    """Consult (and, when free and ``acquire``, take) the worktree claim.
 
     Returns a verdict; the CALLER decides how to act (the PreToolUse hook blocks
     on ``foreign``, ``fno target init`` only warns). Fail-open by design: no git
@@ -110,7 +111,9 @@ def guard_worktree(
     are the SAME harness and never refuse each other (AC2-EDGE); a codex session
     entering a claude-owned worktree is ``foreign``. ``override`` (the
     ``FNO_WORKTREE_OK`` escape hatch) downgrades a foreign verdict to
-    ``override`` so the caller can proceed - never silent.
+    ``override`` so the caller can proceed - never silent. ``acquire=False`` is
+    the read-only path (the SessionStart advisory): report a foreign owner but
+    never establish ownership.
     """
     if worktree_root is None or not my_harness:
         return WorktreeGuardResult(verdict=VERDICT_NO_WORKTREE, my_harness=my_harness)
@@ -146,6 +149,12 @@ def guard_worktree(
             owner_harness=owner_harness,
             owner_holder=owner_holder,
             owner_pid=status.get("pid"),
+        )
+
+    # free / stale / corrupted and read-only: no owner to warn about.
+    if not acquire:
+        return WorktreeGuardResult(
+            verdict=VERDICT_NO_WORKTREE, worktree=wt, my_harness=my_harness
         )
 
     # free / stale / corrupted -> establish ownership. acquire_claim handles
