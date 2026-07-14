@@ -887,16 +887,22 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
 def test_is_role_bearing_spawn_predicate() -> None:
     assert rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])
     assert rr._is_role_bearing_spawn("spawn", ["spawn", "--role=orient"])
-    # x-c772: -r is the mobile short for --role; must also stay Python-only.
-    assert rr._is_role_bearing_spawn("spawn", ["spawn", "w", "-r", "tidy"])
+    # x-f76e: -r is NO LONGER a role alias (it means --resume now); role is
+    # long-form only, and a bare -r is resume-bearing, not role-bearing.
+    assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "-r", "tidy"])
     assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--provider", "claude"])
     assert not rr._is_role_bearing_spawn("ask", ["ask", "--role", "tidy"])
 
 
 def test_is_resume_bearing_spawn_predicate() -> None:
+    # A resume-bearing spawn stays Python (Rust cannot parse --resume yet).
+    # x-9844 added --resume revival; x-f76e reassigned -r to --resume, so the
+    # predicate matches both spellings.
     uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"
     assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--resume", uuid])
     assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", f"--resume={uuid}"])
+    assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "-r", "6501096a"])
     assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--substrate", "bg"])
+    assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])
     # A --resume flag on a non-spawn verb never matches (resume is its own verb).
     assert not rr._is_resume_bearing_spawn("ask", ["ask", "w", "--resume", uuid])
