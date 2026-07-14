@@ -2031,3 +2031,34 @@ def test_ac2_new_no_project_unchanged(tmp_graph, tmp_path):
     entries = _read_graph(tmp_graph)
     assert len(entries) == 1
     assert entries[0]["cwd"] == "/git/root"
+
+
+# --- US3: per-node dispatch verb + brief -----------------------------------
+
+
+def test_update_dispatch_verb_and_brief_write(tmp_graph):
+    r = _invoke("graph", "add", "Verb node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("graph", "update", nid, "--dispatch-verb", "/think",
+                 "--dispatch-brief", "brainstorm the retry design")
+    assert r2.exit_code == 0, r2.output
+    node = _read_graph(tmp_graph)[0]
+    assert node["dispatch_verb"] == "/think"
+    assert node["dispatch_brief"] == "brainstorm the retry design"
+
+
+def test_update_dispatch_verb_null_clears(tmp_graph):
+    r = _invoke("graph", "add", "Verb node")
+    nid = json.loads(r.output)["id"]
+    _invoke("graph", "update", nid, "--dispatch-verb", "/think")
+    _invoke("graph", "update", nid, "--dispatch-verb", "null")
+    assert _read_graph(tmp_graph)[0]["dispatch_verb"] is None
+
+
+def test_dispatch_fields_default_absent(tmp_graph):
+    """A node with no dispatch overrides carries null verb/brief (built-in path)."""
+    r = _invoke("graph", "add", "Plain node")
+    nid = json.loads(r.output)["id"]
+    node = next(n for n in _read_graph(tmp_graph) if n["id"] == nid)
+    assert node.get("dispatch_verb") is None
+    assert node.get("dispatch_brief") is None

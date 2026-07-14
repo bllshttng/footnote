@@ -131,6 +131,12 @@ class Entry(BaseModel):
     # protected pydantic namespace).
     model: Optional[str] = None
     batch: Optional[str] = None
+    # Per-node dispatch overrides (US3). dispatch_verb picks the worker command
+    # (`<verb> {id}`, allowlist-validated at resolve, not write); dispatch_brief
+    # rides TARGET_BRIEF env into cold-start. Both null = the built-in
+    # `/target no-merge {id}` default. Old graph.json entries parse without them.
+    dispatch_verb: Optional[str] = None
+    dispatch_brief: Optional[str] = None
     plan_path: Optional[str] = None
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None

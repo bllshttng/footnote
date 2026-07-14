@@ -360,14 +360,57 @@ for id in "${NODES[@]}"; do
   esac
 
   # ---- Build the worker command + resolve the launch cwd ----
-  # no-merge is the default for a fire-and-forget worker (Locked Decision 4);
-  # --allow-merge opts out.
-  tgt_cmd="/target"
-  [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
-  if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
-    tgt_cmd="$tgt_cmd no-merge"
+  # Per-node dispatch overrides (US3): a node may carry a dispatch_verb (e.g.
+  # /think) and/or a dispatch_brief. When either is set, the shared resolver
+  # (`fno dispatch resolve`) owns the command - it validates the verb against
+  # the allowlist and caps the brief at 8 KB, so a launcher never assembles a
+  # verb string from a graph field (a trust boundary). No overrides -> the
+  # built-in /target no-merge assembly below, byte-identical to before.
+  # select(. != "") before // empty: jq's // treats an empty string as truthy,
+  # so a field serialized as "" (not null) would otherwise pass through as "" -
+  # the repo's standard empty-string fallback idiom.
+  dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != "") // empty' 2>/dev/null)"
+  dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
+  TARGET_BRIEF_ENV=""
+  if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
+    resolve_args=(dispatch resolve --node "$id" -J)
+    [[ -n "$dispatch_verb" ]] && resolve_args+=(--verb "$dispatch_verb")
+    [[ -n "$dispatch_brief" ]] && resolve_args+=(--brief "$dispatch_brief")
+    resolved_json="$(fno "${resolve_args[@]}" 2>/dev/null)"; resolve_rc=$?
+    if [[ "$resolve_rc" -ne 0 ]] || ! printf '%s' "$resolved_json" | jq -e '.command' >/dev/null 2>&1; then
+      # Refused verb / oversized brief (or a stale fno without the flags): fail
+      # closed and leave the node re-dispatchable, never launch a wrong command.
+      fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      echo "failed $id reason=\"dispatch resolve refused verb/brief (rc=$resolve_rc); node not dispatched\""
+      n_failed=$((n_failed + 1))
+      continue
+    fi
+    tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
+    TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
+    # Launcher flag policy for a /target-family command: apply --flags AND the
+    # no-merge default, same as the fallback branch below, so a brief/verb-bearing
+    # target node still honors `--flags "L"` etc. instead of silently dropping it.
+    # A non-target verb (/think) takes neither - target size/profile flags do not
+    # apply to it. Ordering matches the fallback: /target [FLAGS] [no-merge] <id>.
+    if [[ "$tgt_cmd" == "/target "* ]]; then
+      rest="${tgt_cmd#/target }"
+      inject=""
+      [[ -n "$FLAGS" ]] && inject="$FLAGS "
+      if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* && " $rest " != *" no-merge "* ]]; then
+        inject="${inject}no-merge "
+      fi
+      tgt_cmd="/target ${inject}${rest}"
+    fi
+  else
+    # no-merge is the default for a fire-and-forget worker (Locked Decision 4);
+    # --allow-merge opts out.
+    tgt_cmd="/target"
+    [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
+    if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
+      tgt_cmd="$tgt_cmd no-merge"
+    fi
+    tgt_cmd="$tgt_cmd $id"
   fi
-  tgt_cmd="$tgt_cmd $id"
 
   # Launch in the node's _resolved_cwd (work-map root when project mapped;
   # falls back to recorded .cwd against an older installed fno without the
@@ -396,7 +439,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}--role build ${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\" route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}--role build ${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -440,6 +483,10 @@ for id in "${NODES[@]}"; do
   # branches keep the optional --cwd off an empty-array path (bash 3.2 set -u
   # safe). stderr goes to a temp file, NOT 2>&1: a stderr warning must never
   # pollute the JSON receipt parse below (house rule; gemini review PR #457).
+  # Carry the US3 brief to the worker via env (inherited by claude --bg), never
+  # on the command line. Exported unconditionally (empty when the node has no
+  # brief) so a prior loop iteration's brief can never leak into a later node.
+  export TARGET_BRIEF="$TARGET_BRIEF_ENV"
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
   # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->

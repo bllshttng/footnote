@@ -187,6 +187,7 @@ FIELD_META: dict[str, Meta] = {
     "dispatch.harness": Meta("advanced", "Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.", default_source="default"),
     "dispatch.substrate": Meta("advanced", "Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).", default_source="default"),
     "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}; empty = '/target no-merge {id}'.", default_source="default"),
+    "dispatch.allowed_verbs": Meta("advanced", "Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).", default_source="default"),
     # --- config.auto_continue.* ---
     "auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
     # --- config.keep_going.* ---

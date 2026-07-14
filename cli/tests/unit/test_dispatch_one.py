@@ -105,3 +105,37 @@ def test_spawn_failure_releases_the_slot(monkeypatch, tmp_path):
     assert v["outcome"] == "failed"
     assert "spawn failed" in v["detail"]
     assert active_lane_count() == 0  # slot released -> node re-dispatchable
+
+
+# --- `fno dispatch resolve` --verb/--brief (US3) ---------------------------
+
+
+def _resolve_cli(*args):
+    from typer.testing import CliRunner
+
+    return CliRunner().invoke(dispatch.dispatch_app, ["resolve", *args])
+
+
+def test_resolve_verb_brief_json():
+    """--verb assembles `<verb> {id}`; --brief rides env.TARGET_BRIEF, JSON out."""
+    import json
+
+    r = _resolve_cli("--node", "x-1", "--verb", "/think", "--brief", "hi there", "-J")
+    assert r.exit_code == 0
+    out = json.loads(r.stdout)
+    assert out["command"] == "/think x-1"
+    assert out["env"]["TARGET_BRIEF"] == "hi there"
+
+
+def test_resolve_out_of_allowlist_verb_exits_2():
+    """An out-of-allowlist verb refuses with exit 2 and no resolved tuple."""
+    r = _resolve_cli("--node", "x-1", "--verb", "rm -rf; /target")
+    assert r.exit_code == 2
+    assert "allowlist" in (r.stdout + str(r.stderr)).lower() or "rm -rf" in (r.stdout + str(r.stderr))
+
+
+def test_resolve_brief_bytes_reported_in_kv():
+    """key=value output reports brief size (the brief may be multi-line)."""
+    r = _resolve_cli("--node", "x-1", "--verb", "/target", "--brief", "abc")
+    assert r.exit_code == 0
+    assert "brief_bytes=3" in r.stdout

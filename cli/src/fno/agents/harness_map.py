@@ -119,6 +119,11 @@ def effort_values(harness: str) -> list[str]:
 
 _VALID_SUBSTRATES = ("bg", "headless", "pane")
 _DEFAULT_COMMAND = "/target no-merge {id}"
+# US3: the built-in verb allowlist (config.dispatch.allowed_verbs overrides).
+_DEFAULT_ALLOWED_VERBS = ("/target", "/think")
+# The env budget a brief must fit; 8 KB, measured in UTF-8 bytes (Locked
+# Decision 9 / epic Boundaries). Oversized -> explicit error, never truncation.
+_BRIEF_MAX_BYTES = 8192
 
 
 def resolve_dispatch(
@@ -127,16 +132,25 @@ def resolve_dispatch(
     substrate: Optional[str] = None,
     node_id: Optional[str] = None,
     command: Optional[str] = None,
+    verb: Optional[str] = None,
+    brief: Optional[str] = None,
     trigger: str = "autonomous",
     settings: object = None,
-    dispatch_cfg: Optional[Mapping[str, str]] = None,
+    dispatch_cfg: Optional[Mapping[str, object]] = None,
 ) -> dict:
     """Map (config + context) -> the dispatch tuple. Pure; never spawns/claims.
 
     Precedence (each field independent):
       harness    : explicit > config.dispatch.harness > ``claude``
       substrate  : explicit > config.dispatch.substrate > per-harness default
-      command    : explicit > config.dispatch.command   > ``/target no-merge {id}``
+      command    : explicit > node ``verb`` > config.dispatch.command > ``/target no-merge {id}``
+
+    ``verb`` is a node's ``dispatch_verb`` (US3): validated against the allowlist
+    (``config.dispatch.allowed_verbs`` > built-in ``/target``, ``/think``) and
+    assembled as ``<verb> {id}`` - a graph field is a trust boundary, so an
+    out-of-allowlist verb is refused. ``brief`` is a node's ``dispatch_brief``:
+    it rides ``env['TARGET_BRIEF']`` only (never the command line) and is capped
+    at 8 KB with an explicit error, never truncated.
 
     ``trigger`` is ``autonomous`` (fire-and-forget) or ``attended``. An
     autonomous trigger may never resolve ``pane`` (it stalls waiting for a human).
@@ -206,8 +220,29 @@ def resolve_dispatch(
             "(a pane stalls waiting for a human); use 'bg' or 'headless'"
         )
 
-    # 3. command template + substitution
-    template = (command or cfg.get("command") or _DEFAULT_COMMAND).strip()
+    # 3. command template. Precedence: explicit --command > node verb > config
+    # template > builtin. A node verb is validated against the allowlist (a graph
+    # field is a trust boundary) and assembled as `<verb> {id}`; the merge posture
+    # (no-merge) is NOT part of the verb string - it stays a launcher flag.
+    if command is not None and command.strip():
+        template = command.strip()
+        decision.append("command=explicit")
+    elif verb is not None:
+        chosen_verb = verb.strip()
+        if not chosen_verb:
+            raise DispatchResolveError("explicit dispatch verb must not be empty")
+        allowed = list(cfg.get("allowed_verbs") or _DEFAULT_ALLOWED_VERBS)
+        if chosen_verb not in allowed:
+            raise DispatchResolveError(
+                f"dispatch verb {chosen_verb!r} is not in the allowlist "
+                f"({', '.join(allowed)}); set config.dispatch.allowed_verbs to extend it"
+            )
+        template = f"{chosen_verb} {{id}}"
+        decision.append(f"command=verb({chosen_verb})")
+    else:
+        template = (cfg.get("command") or _DEFAULT_COMMAND).strip()
+        decision.append("command=config" if cfg.get("command") else "command=builtin")
+
     if not template:
         raise DispatchResolveError("resolved command is empty")
     if node_id:
@@ -222,6 +257,19 @@ def resolve_dispatch(
         resolved_command = template
         decision.append(f"command=template({resolved_command})")
 
+    # 4. brief -> TARGET_BRIEF env only (never the command line). Byte-capped at
+    # the 8 KB env budget; an oversized brief is an explicit error, not truncation.
+    env: dict[str, str] = {}
+    if brief:
+        n_bytes = len(brief.encode("utf-8"))
+        if n_bytes > _BRIEF_MAX_BYTES:
+            raise DispatchResolveError(
+                f"dispatch brief is {n_bytes} bytes, over the {_BRIEF_MAX_BYTES}-byte "
+                f"(8 KB) env budget; shorten it (no silent truncation)"
+            )
+        env["TARGET_BRIEF"] = brief
+        decision.append(f"brief={n_bytes}B->TARGET_BRIEF")
+
     return {
         "map_version": MAP_VERSION,
         "harness": chosen_harness,
@@ -231,7 +279,7 @@ def resolve_dispatch(
         "resume": caps["resume"],
         "bg": caps["bg"],
         "effort_values": effort_values(chosen_harness),
-        "env": {},  # US3 adds TARGET_BRIEF here
+        "env": env,
         "decision": decision,
     }
 
@@ -252,6 +300,7 @@ def _load_dispatch_cfg(settings: object) -> dict:
             "harness": (d.harness or "").strip(),
             "substrate": (d.substrate or "").strip(),
             "command": (d.command or "").strip(),
+            "allowed_verbs": list(getattr(d, "allowed_verbs", None) or []),
         }
     except Exception:  # noqa: BLE001
         return {}
