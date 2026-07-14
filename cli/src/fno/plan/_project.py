@@ -12,10 +12,12 @@ never reorders keys or reformats opaque blocks like `kill_criteria`.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fno.plan._stamp import read_plan_file, write_plan_file
+from fno.plan._status import project_plan_status
 
 # Graph-authoritative fields mirrored into frontmatter. `type` is usually
 # already present; the projection keeps it in sync with the node.
@@ -54,6 +56,20 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
         if fields.get(key) != value:
             fields[key] = value
             changed = True
+
+    # Status projection (x-f34f): map the graph derived `_status` onto the plan,
+    # forward-only. Kept out of MIRROR_KEYS because it is a mapped, monotonic
+    # write (not a straight mirror) and stamps done_at on the terminal write.
+    graph_status = node.get("_status")
+    if graph_status:
+        projected = project_plan_status(fields.get("status"), graph_status)
+        if projected is not None and fields.get("status") != projected:
+            fields["status"] = projected
+            changed = True
+            if projected == "done" and not fields.get("done_at"):
+                fields["done_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
 
     if changed:
         write_plan_file(target, fields, rest)
