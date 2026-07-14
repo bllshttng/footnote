@@ -381,3 +381,39 @@ def reconcile_status(
         typer.echo(f"  ! {warn}", err=True)
     prefix = "" if apply else "[dry-run] "
     typer.echo(f"{prefix}{res.summary()}")
+
+
+@plan_app.command(
+    "migrate-keys",
+    help=(
+        "Collapse synonym frontmatter keys to the canonical set (graph_node_id->"
+        "node, created_at->created, depends_on->blocked_by, kind->type; drop a "
+        "claims that equals node). Byte-preserving, idempotent. Dry-run by "
+        "default; pass --apply to write."
+    ),
+)
+def migrate_keys(
+    plans_dir: Optional[str] = typer.Option(
+        None, "--plans-dir", help="Plans dir to migrate (default: resolved plans-content dir)."
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Write the changes (default: dry-run, report only)."
+    ),
+) -> None:
+    """Sweep the plans dir, renaming synonym frontmatter keys in place."""
+    from fno.paths import plans_content_dir
+    from fno.plan.migrate_keys import migrate
+
+    target = Path(plans_dir) if plans_dir else plans_content_dir()
+    res = migrate(target, apply=apply)
+
+    for path, notes in res.changes:
+        typer.echo(f"  {Path(path).name}: {', '.join(notes)}")
+    if res.review_files:
+        typer.echo("  needs manual review (kept legacy key untouched):")
+        for path, notes in res.review_files:
+            typer.echo(f"    {Path(path).name}: {', '.join(notes)}")
+    for warn in res.warnings:
+        typer.echo(f"  ! {warn}", err=True)
+    prefix = "" if apply else "[dry-run] "
+    typer.echo(f"{prefix}{res.summary()}")

@@ -1,7 +1,11 @@
 """Frontmatter status state machine for lean single-doc plan architecture.
 
 Enforces the monotonic progression:
-    design -> ready -> in_progress -> reviewing -> shipping -> shipped
+    design -> ready -> in_progress -> shipped
+
+`reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
+graph has no derived state that distinguishes them, so they never got written.
+The reconcile sweep now folds them into `shipped` as Tier-1 synonyms.
 
 Backward transitions, identity transitions, and unknown statuses all raise
 StatusTransitionError. No silent fallbacks.
@@ -9,14 +13,12 @@ StatusTransitionError. No silent fallbacks.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 STATUS_PROGRESSION: tuple[str, ...] = (
     "design",
     "ready",
     "in_progress",
-    "reviewing",
-    "shipping",
     "shipped",
 )
 
@@ -28,6 +30,62 @@ TERMINAL_STATUSES: tuple[str, ...] = ("done", "archived")
 # The full canonical plan-status vocabulary: axis + terminals. The reconcile
 # sweep leaves any status in this set untouched (it corrects drift only).
 KNOWN_STATUSES: frozenset[str] = frozenset(STATUS_PROGRESSION) | frozenset(TERMINAL_STATUSES)
+
+# Graph derived `_status` -> plan `status` projection (x-f34f). Total over the
+# graph vocabulary; None means "no plan write" (a graph-side gate that must not
+# touch plan state). The graph vocabulary is NOT renamed - this map IS the
+# alignment layer between the two.
+GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
+    "idea": "design",  # node exists, blueprint pending
+    "ready": "ready",
+    "claimed": "in_progress",
+    "blocked": None,  # graph-side gate; plan keeps its current state
+    "in_review": "shipped",  # PR open = implementation complete
+    "done": "done",  # merged
+    "superseded": "archived",
+    "deferred": None,  # pause is reversible; plan state stands
+}
+
+# Forward-only ordering for the projection. `done` caps the axis; `archived`
+# (from `superseded`) is a terminal reachable from any non-terminal state and is
+# never rank-compared.
+_PROJECTION_RANK: dict[str, int] = {
+    "design": 0,
+    "ready": 1,
+    "in_progress": 2,
+    "shipped": 3,
+    "done": 4,
+}
+
+
+def _norm_status(raw: object) -> str:
+    """Bare lowercase token from a raw frontmatter status value."""
+    return str(raw if raw is not None else "").strip().strip("'\"").lower()
+
+
+def project_plan_status(current: object, graph_status: str) -> Optional[str]:
+    """Plan status to WRITE for a node in ``graph_status``, or None to leave it.
+
+    Forward-only along design < ready < in_progress < shipped < done. Returns
+    None when the graph status maps to no write, the target equals the current
+    status, or the target would be a backward move (graph wins forward, a human
+    hand-edit wins backward). ``archived`` is written over any non-terminal
+    plan state (superseded) but never over ``done`` or ``archived``.
+    """
+    target = GRAPH_TO_PLAN_STATUS.get(graph_status)
+    if not target:
+        return None
+    cur = _norm_status(current)
+    if target == cur:
+        return None
+    if target == "archived":
+        return None if cur in ("done", "archived") else "archived"
+    # target is a forward-axis status (design..done)
+    if cur in ("done", "archived"):
+        return None  # terminal: never auto-rewritten forward off a terminal
+    if _PROJECTION_RANK[target] <= _PROJECTION_RANK.get(cur, -1):
+        return None
+    return target
 
 
 class StatusTransitionError(ValueError):

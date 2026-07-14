@@ -275,8 +275,8 @@ fn finalize_postmortem_on_interrupted_or_aborted() {
     }
 }
 
-/// A ship reason runs ledger + stamp + graduate + handoff and emits
-/// session_finalized. (AC5-HP.)
+/// A ship reason runs ledger + stamp + handoff and emits session_finalized.
+/// Ship stamps `shipped` only; it does NOT graduate (done = merged, x-f34f). (AC5-HP.)
 #[test]
 fn finalize_ship_gated() {
     let env = setup("S-ship", false);
@@ -288,7 +288,10 @@ fn finalize_ship_gated() {
         "ledger: {c}"
     );
     assert!(c.contains("stamp-plan stamp"), "stamp must fire: {c}");
-    assert!(c.contains("stamp-plan graduate"), "graduate must fire: {c}");
+    assert!(
+        !c.contains("stamp-plan graduate"),
+        "graduate must NOT fire at ship (done = merged): {c}"
+    );
     // W6 verifier advisory rides the ship branch with the manifest's fields;
     // this line is the Rust->Python flag-shape contract (a flag rename on
     // either side fails here).
@@ -317,6 +320,22 @@ fn finalize_ship_gated() {
     );
     assert!(handoff.contains("S-ship"), "handoff names the session");
     assert_eq!(count_event(&env.events, "session_finalized", "S-ship"), 1);
+}
+
+/// An advisory ship (DoneAdvisory) has no merge event, so ship IS its
+/// completion: it stamps AND graduates the plan to done, unlike a code ship
+/// (DonePRGreen) which stamps `shipped` only and flips at merge (codex P2, x-f34f).
+#[test]
+fn finalize_advisory_ship_graduates() {
+    let env = setup("S-adv", false);
+    let out = run_finalize(&env, "DoneAdvisory");
+    assert!(out.status.success());
+    let c = calls(&env);
+    assert!(c.contains("stamp-plan stamp"), "advisory ship stamps: {c}");
+    assert!(
+        c.contains("stamp-plan graduate"),
+        "advisory ship graduates to done (no merge event to flip it): {c}"
+    );
 }
 
 /// Idempotency: N stop-hook fires after a successful finalize produce exactly
@@ -475,8 +494,8 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
         "ship fire must stamp after a non-ship terminal: {c}"
     );
     assert!(
-        c.contains("stamp-plan graduate"),
-        "ship fire must graduate: {c}"
+        !c.contains("stamp-plan graduate"),
+        "ship fire stamps only; done = merged, no graduate (x-f34f): {c}"
     );
     assert_eq!(handoff_files(&env).len(), 1, "ship fire writes the handoff");
     assert_eq!(

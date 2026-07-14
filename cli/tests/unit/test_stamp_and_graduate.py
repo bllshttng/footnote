@@ -36,6 +36,7 @@ def test_never_shipped_plan_with_url_reaches_done(tmp_path):
     text = plan.read_text()
     assert "status: done" in text  # one url >= expected (default 1) -> graduated
     assert "shipped_at:" in text
+    assert "done_at:" in text  # merge timestamp stamped on graduation (x-f34f)
     assert "https://github.com/o/r/pull/9" in text
     assert "session_ids: [sess-1]" in text
 

@@ -1655,6 +1655,7 @@ def cmd_update(
         raise typer.Exit(code=2)
 
     projected_node: list = [None]
+    cascade_closed_update: list = []
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
     # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
@@ -1856,30 +1857,33 @@ def cmd_update(
         # cascade-close now-all-done ancestor epics (x-33b2).
         if completed and not node.get("completed_at"):
             _apply_completion_fields(node)
-            _cascade_close_parents(entries, node["id"])
+            cascade_closed_update.extend(
+                _cascade_close_parents(entries, node["id"])
+            )
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"Updated {task_id}")
 
-    # Mirror the graph-authoritative navigation fields onto the plan doc when a
-    # mirrored field (or the plan link itself) changed. Best-effort: a missing
-    # or unreadable plan never fails the graph mutation.
-    node = projected_node[0]
-    if node and node.get("plan_path") and (
-        priority is not None
+    # Project the graph-authoritative fields (nav mirror + forward-only status)
+    # onto the plan when a mirrored OR status-affecting field changed. Routed
+    # through the fresh-re-read helper (not the pre-recompute `projected_node`)
+    # so the node carries its recomputed _status: a `--locked-by` claim reads
+    # `claimed` -> plan `in_progress` (AC1-HP; the claim goes through this update
+    # path, not the `claim` verb), and a `--completed` close reads `done` ->
+    # `done` + `done_at`, including cascade-closed epic parents. Best-effort.
+    if projected_node[0] and (
+        completed
+        or locked_by is not None
+        or priority is not None
         or project is not None
         or type_ is not None
         or has_blocker_edit
         or plan_path is not None
     ):
-        from fno.graph._intake import repo_root
-        from fno.plan._project import project_node_to_plan
-
-        p = Path(node["plan_path"])
-        if not p.is_absolute():
-            p = Path(repo_root()) / p
-        project_node_to_plan(node, p)
+        _project_plans_from_graph(
+            [projected_node[0]["id"], *cascade_closed_update]
+        )
 
 
 # -- unclaim / release --
@@ -4039,6 +4043,51 @@ def cmd_undefer(
 
 # -- done --
 
+def _project_plans_from_graph(node_ids: list[str]) -> None:
+    """Project each named node's forward status onto its linked plan (x-f34f).
+
+    Re-reads the graph so every node carries its recomputed ``_status`` (a claim
+    reads ``claimed`` -> ``in_progress``; a close reads ``done`` -> ``done`` +
+    ``done_at``), then runs the forward-only status projection. Covers
+    cascade-closed epic parents that ``_stamp_and_graduate_plan`` never stamps.
+    Best-effort per node: a missing or unreadable plan never fails the mutation.
+    """
+    ids = [i for i in dict.fromkeys(node_ids) if i]
+    if not ids:
+        return
+    try:
+        from fno.graph._intake import _find_node, repo_root
+        from fno.graph.store import read_graph
+        from fno.plan._project import project_node_to_plan
+
+        entries = read_graph(_graph_path())
+    except Exception as e:  # noqa: BLE001 - additive; never wedge the close
+        sys.stderr.write(f"warning: post-close plan projection setup failed: {e}\n")
+        return
+    root: Optional[str] = None
+    for nid in ids:
+        try:
+            node = _find_node(entries, nid)
+            if not node or not node.get("plan_path"):
+                continue
+            p = Path(node["plan_path"])
+            if not p.is_absolute():
+                if root is None:
+                    root = repo_root()
+                p = Path(root) / p
+            # A close-time projection for a node whose plan file is absent is a
+            # silent no-op (the sweep is the catch-all); skip before
+            # project_node_to_plan so its missing-file warning stays off the
+            # machine-readable close output.
+            if not p.is_file():
+                continue
+            project_node_to_plan(node, p)
+        except Exception as e:  # noqa: BLE001 - per-node best-effort
+            sys.stderr.write(
+                f"warning: post-close plan projection failed for {nid}: {e}\n"
+            )
+
+
 def _apply_completion_fields(node: dict) -> None:
     """Set the fields that mark a node done.
 
@@ -4621,6 +4670,7 @@ def cmd_done(
     # -- Step 4: Mutation under the lock --
     plan_path_out: list = [None]
     already_holder: list = [False]
+    cascade_closed_out: list = []
 
     # Cost stamp (Wave 2.2): the ledger has per-plan cost the node never captured
     # (2-3 fills). Aggregate it outside the lock; ledger absent/rowless -> null,
@@ -4652,7 +4702,7 @@ def cmd_done(
             n["cost_sessions"] = cost_rollup["cost_sessions"]
         # Close any now-all-done ancestor epic (x-33b2): the box is done when its
         # children are, and it carries no PR of its own to close it explicitly.
-        _cascade_close_parents(entries, task_id)
+        cascade_closed_out.extend(_cascade_close_parents(entries, task_id))
         plan_path_out[0] = n.get("plan_path")
         return entries
 
@@ -4691,6 +4741,15 @@ def cmd_done(
             url=evidence_pr_url,
             session_id=node.get("session_id"),
         )
+
+    # Project the closed node + any cascade-closed epic parents onto their plans
+    # (forward-only, stamps done_at) AFTER the stamp above, so the primary plan's
+    # shipped_at is written before its done_at (never done-before-shipped). The
+    # primary is already `done` here, so this is a no-op on it and its real job
+    # is the cascade-closed epic parents that _stamp_and_graduate_plan skips.
+    # --skip-stamp suppresses ALL plan writes, projection included.
+    if not skip_stamp:
+        _project_plans_from_graph([task_id, *cascade_closed_out])
 
     # A2 (x-122a): retro-at-done lifecycle trigger. Dispatch a `retro` context
     # /think while the closed node's session context is still resolvable. Gated
@@ -5146,6 +5205,13 @@ def cmd_reconcile(
                         f"{record.node_id} failed: {_pm_exc}",
                         err=True,
                     )
+
+        # Project every closed node (records + cascade-closed epic parents) onto
+        # its plan (forward-only, stamps done_at). The per-record stamp above
+        # only touches directly-closed records; the epic parents need this.
+        _project_plans_from_graph(
+            [r.node_id for r in actually_closed] + list(cascade_closed_acc)
+        )
 
         # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a node
         # blocked_by the epic). The per-record loop above only dispatched the
