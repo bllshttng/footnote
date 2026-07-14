@@ -18,9 +18,10 @@
 # --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
 #   to every worker spawn. Fails CLOSED in the spawn (unknown/non-anthropic/
 #   keyless refuses -> the node stays dispatchable). Wins over the build lane.
-#   Every worker also carries --role build unconditionally: the build lane is a
-#   fail-safe no-op until `fno route set build ...` opts in, so this is
-#   byte-identical to today until configured.
+#   A CLAUDE worker carries --role build (the build lane is a fail-safe no-op
+#   until `fno route set build ...` opts in). Non-claude workers do NOT: the
+#   build/route lane is claude-specific, and a role-bearing spawn is classified
+#   Python-owned by the runtime, which rejects opencode/agy (x-567d / codex P1).
 #
 # --here / --in-place: keep a worker without a recorded node cwd in the
 #   dispatcher's cwd. Default (no node cwd) is --fresh: start from canonical
@@ -159,6 +160,12 @@ resolve_json="$(fno dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
 # fallback (repo rule) - a resolver that ever returned "" must read as absent.
 DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
 DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
+# Per-harness command TEMPLATE (x-567d): a native skill invocation where one is
+# verified (claude `/target`, codex `$fno:target`, agy `/target`) or a prose
+# brief (opencode/gemini, which have no footnote slash surface). `{id}` is
+# substituted per node below. claude keeps its local tgt_cmd builder (FLAGS /
+# --allow-merge), so a missing template only matters for the non-claude lanes.
+DISPATCH_COMMAND="$(printf '%s' "$resolve_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
 if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
   reason="no autonomous substrate resolved (rc=$resolve_rc); set config.dispatch.harness to a harness with one (claude=bg, codex/gemini/agy/opencode=headless)"
   fno event emit -t dispatch_no_autonomous_substrate -s backlog \
@@ -288,14 +295,22 @@ for id in "${NODES[@]}"; do
   perm_args=()
   [[ -n "$PERMISSION_MODE" ]] && perm_args=("--permission-mode" "$PERMISSION_MODE")
 
-  # x-b0b4: every worker rides the build lane unconditionally (same array
-  # discipline). resolve_route returns None for an unconfigured `build`, so this
-  # is byte-identical to today until `fno route set build ...` opts in - no
-  # config read in bash, no conditional. An explicit --route (fail-closed in the
-  # spawn) is forwarded per-dispatch and wins over the lane.
-  role_args=("--role" "build")
+  # x-b0b4: a claude worker rides the build lane. The build/route lane is
+  # claude-SPECIFIC (model routing over the claude subscription), and the runtime
+  # classifies any role-/route-bearing spawn as Python-owned - but Python's
+  # dispatchable set is claude/codex/gemini only, so a role-bearing opencode/agy
+  # spawn exits "unknown provider" BEFORE reaching its Rust headless dispatcher
+  # (x-567d / codex P1). Gate both on claude: non-claude spawns carry neither, so
+  # they reach their native dispatch path. Empty arrays need the bash-3.2 `+`
+  # guard at expansion (below) - do NOT expand a bare "${role_args[@]+"${role_args[@]}"}".
+  role_args=()
   route_args=()
-  [[ -n "$ROUTE" ]] && route_args=("--route" "$ROUTE")
+  role_hint=""  # dry-run preview mirror of role_args (safe for the empty case)
+  if [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
+    role_args=("--role" "build")
+    role_hint="--role build "
+    [[ -n "$ROUTE" ]] && route_args=("--route" "$ROUTE")
+  fi
   # Receipt route= token, resolved PER NODE (not once before the loop) so a
   # `route set`/`unset` racing a bulk dispatch is stamped per worker, never
   # inferred from a stale run-start snapshot (codex P2; plan's per-worker
@@ -307,7 +322,11 @@ for id in "${NODES[@]}"; do
   # exits 0 only when a real route resolves; `route ls -J` then supplies the
   # provider,model string. A stale `fno` without the verb (or any failure) leaves
   # `primary` - the honest conservative claim (routing not confirmed).
-  if [[ -n "$ROUTE" ]]; then
+  if [[ "$DISPATCH_PROVIDER" != "claude" ]]; then
+    # Non-claude carries no build/route lane (gated above); the receipt reflects
+    # the native provider, not a claude route.
+    route_val="$DISPATCH_PROVIDER"
+  elif [[ -n "$ROUTE" ]]; then
     route_val="$ROUTE"
   else
     route_val="primary"
@@ -396,14 +415,29 @@ for id in "${NODES[@]}"; do
   esac
 
   # ---- Build the worker command + resolve the launch cwd ----
-  # no-merge is the default for a fire-and-forget worker (Locked Decision 4);
-  # --allow-merge opts out.
-  tgt_cmd="/target"
-  [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
-  if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
-    tgt_cmd="$tgt_cmd no-merge"
+  # claude runs the native `/target` slash command; --flags + the default
+  # no-merge (Locked Decision 4; --allow-merge opts out) apply to it.
+  # Non-claude workers get the harness-native command the resolver chose
+  # (x-567d): codex `$fno:target ...`, agy `/target ...`, or a prose brief for
+  # opencode/gemini. That template bakes in no-merge for the autonomous lane, so
+  # --flags / --allow-merge (claude `/target` concepts) do not re-thread here; a
+  # missing template (stale fno) fails this node loudly rather than sending an
+  # empty prompt.
+  if [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
+    tgt_cmd="/target"
+    [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
+    if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
+      tgt_cmd="$tgt_cmd no-merge"
+    fi
+    tgt_cmd="$tgt_cmd $id"
+  elif [[ -n "$DISPATCH_COMMAND" ]]; then
+    tgt_cmd="${DISPATCH_COMMAND//\{id\}/$id}"
+  else
+    fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    echo "failed $id reason=\"resolver returned no command for harness '$DISPATCH_PROVIDER'; update fno or set config.dispatch.command\""
+    n_failed=$((n_failed + 1))
+    continue
   fi
-  tgt_cmd="$tgt_cmd $id"
 
   # Launch in the node's _resolved_cwd (work-map root when project mapped;
   # falls back to recorded .cwd against an older installed fno without the
@@ -432,7 +466,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}--role build ${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\" route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\" route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -485,7 +519,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
@@ -495,16 +529,16 @@ for id in "${NODES[@]}"; do
       # may not shell out to a repo-root script (shellout-drift gate).
       _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
       [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then

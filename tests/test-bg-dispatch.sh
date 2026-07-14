@@ -117,12 +117,17 @@ case "$sub $verb" in
     # overrides: resolve_fail -> exit 2 (no autonomous substrate); resolve_pair
     # holds a "harness/substrate" pair (headless fallback scenarios).
     if [[ -f "$S/resolve_fail" ]]; then echo "dispatch resolve: unknown harness (mock)" >&2; exit 2; fi
-    if [[ -f "$S/resolve_pair" ]]; then
-      pair="$(cat "$S/resolve_pair")"
-      printf '{"harness":"%s","substrate":"%s"}\n' "${pair%%/*}" "${pair##*/}"
-    else
-      printf '{"harness":"claude","substrate":"bg"}\n'
-    fi ;;
+    pair="claude/bg"
+    [[ -f "$S/resolve_pair" ]] && pair="$(cat "$S/resolve_pair")"
+    h="${pair%%/*}"
+    # command mirrors harness_map dispatch_command (x-567d): native invocation
+    # where verified, else the prose-brief lane.
+    case "$h" in
+      claude|agy) cmd='/target no-merge {id}' ;;
+      codex)      cmd='$fno:target no-merge {id}' ;;
+      *)          cmd='Implement footnote backlog node {id} end-to-end. Do NOT merge.' ;;
+    esac
+    printf '{"harness":"%s","substrate":"%s","command":"%s"}\n' "$h" "${pair##*/}" "$cmd" ;;
   "event emit") : ;;  # x-567d: fallback/fail telemetry; noop under the mock
   *) exit 0 ;;
 esac
@@ -477,6 +482,26 @@ echo "$out" | grep -q "note: harness 'codex' has no bg substrate; dispatching vi
 echo "$out" | grep -q -- "--provider codex --substrate headless" \
   && pass "x-567d AC1-EDGE: dispatch resolves --provider codex --substrate headless" \
   || fail "x-567d AC1-EDGE: wrong provider/substrate: $out"
+# codex gets its NATIVE skill invocation, not a literal claude /target (P1 #1).
+echo "$out" | grep -qF "'\$fno:target no-merge ab-aaaa1111'" \
+  && pass "x-567d P1: codex worker gets the native \$fno:target invocation" \
+  || fail "x-567d P1: codex command not \$fno:target: $out"
+# Non-claude carries NO --role build (would route Python-owned -> unknown provider; P1 #2).
+echo "$out" | grep -q -- "--role build" \
+  && fail "x-567d P1: non-claude spawn must NOT carry --role build: $out" \
+  || pass "x-567d P1: non-claude spawn drops the claude-only --role/--route lane"
+
+# ---- x-567d P1: an opencode (no native footnote skill) worker gets a PROSE
+#      BRIEF, never a literal /target that would run verbatim and no-op ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo "opencode/headless" > "$MOCKSTATE/resolve_pair"
+out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
+if echo "$out" | grep -qF "Implement footnote backlog node ab-aaaa1111" \
+   && ! echo "$out" | grep -qF "'/target"; then
+  pass "x-567d P1: opencode worker gets a prose brief, not a literal /target"
+else
+  fail "x-567d P1: opencode command should be a prose brief: $out"
+fi
 
 # ---- x-567d AC2-ERR: no autonomous substrate (resolve fails) -> hard-fail
 #      naming config.dispatch.harness, node NOT launched ----
