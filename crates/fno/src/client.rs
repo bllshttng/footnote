@@ -55,6 +55,11 @@ const STATUS_ROWS: u16 = 1;
 /// Below this many terminal rows the bottom chrome (status row + which-key
 /// hint) auto-hides and the content area recovers the line (AC4-ERR).
 const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
+/// The sideline footer's `+ new` and `☰ menu` labels (x-8ccf US4). The menu
+/// button rides the existing new-workspace footer row's right edge when the
+/// panel is wide enough (see [`View::footer_menu_range`]).
+const FOOTER_NEW_LABEL: &str = "+ new workspace";
+const FOOTER_MENU: &str = "☰ menu";
 /// How long a pending leader chord waits before the which-key hint paints
 /// (US4, AC4-HP). `leader+?` shows the full table instantly instead.
 const HINT_DELAY: Duration = Duration::from_millis(400);
@@ -411,6 +416,11 @@ struct View {
     row_menu: Option<RowMenu>,
     /// Pending escape bytes in row-menu mode (arrow folding).
     row_menu_esc: Vec<u8>,
+    /// (x-8ccf US4/US5) The sideline MENU popup or the settings modal (they share
+    /// one slot; MENU chains into settings). `None` when closed.
+    aux: Option<AuxPopup>,
+    /// Pending escape bytes in aux-popup mode (arrow folding).
+    aux_esc: Vec<u8>,
     /// Caret expansion per squad id - client-local, instant (AC6-UI).
     expanded: HashSet<u64>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
@@ -799,6 +809,54 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     }
 }
 
+/// (x-8ccf US4/US5) The sideline MENU popup and the minimal settings modal share
+/// this one aux-popup type: a [`Popup`] plus the [`AuxAction`] each selectable
+/// row runs. The two chain (MENU -> settings) by swapping the `aux` slot.
+struct AuxPopup {
+    popup: Popup,
+    actions: Vec<AuxAction>,
+}
+
+/// What a MENU / settings-modal row does. Menu entries open a surface or detach;
+/// settings entries flip a session-local view toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuxAction {
+    OpenKeybinds,
+    OpenSettings,
+    Detach,
+    ToggleHoverFocus,
+    ToggleStatus,
+}
+
+/// Build the sideline MENU popup (US4), anchored at the footer's menu cell:
+/// keybinds / settings / detach. `reload config` is intentionally absent - there
+/// is no config-reload machinery to route it to (a net-new capability, not a
+/// re-route), so the menu advertises only what actually works.
+fn build_sideline_menu(anchor: Anchor) -> AuxPopup {
+    let entry = |glyph: &str, label: &str| PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: String::new(),
+    };
+    AuxPopup {
+        popup: Popup::new(
+            vec![
+                PopupRow::Header("menu".into()),
+                PopupRow::Rule,
+                entry("⌨", "keybinds"),
+                entry("⚙", "settings"),
+                entry("⏏", "detach"),
+            ],
+            anchor,
+        ),
+        actions: vec![
+            AuxAction::OpenKeybinds,
+            AuxAction::OpenSettings,
+            AuxAction::Detach,
+        ],
+    }
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Seed with the active squad so the first frame already shows its tabs
@@ -816,6 +874,8 @@ impl View {
             keys_modal_esc: Vec::new(),
             row_menu: None,
             row_menu_esc: Vec::new(),
+            aux: None,
+            aux_esc: Vec::new(),
             expanded,
             selector: None,
             sel_esc: Vec::new(),
@@ -1230,6 +1290,51 @@ impl View {
             .map(|(t, _, _)| *t)
     }
 
+    /// Open the sideline MENU popup anchored at `anchor` (x-8ccf US4).
+    fn open_sideline_menu(&mut self, anchor: Anchor) {
+        self.clear_peek();
+        self.aux = Some(build_sideline_menu(anchor));
+        self.aux_esc.clear();
+    }
+
+    /// Build the minimal settings modal (x-8ccf US5): 2 session-only toggles that
+    /// live-apply to this session. Persistence to config.toml is out of scope for
+    /// v1, so each row is honestly labeled "session only" rather than pretending
+    /// it persisted (the modal must never claim persistence it did not achieve).
+    fn build_settings_modal(&self) -> AuxPopup {
+        let toggle = |on: bool, label: &str| PopupRow::Entry {
+            glyph: if on { "☑".into() } else { "☐".into() },
+            label: label.into(),
+            hint: "session only".into(),
+        };
+        AuxPopup {
+            popup: Popup::new(
+                vec![
+                    PopupRow::Header("settings".into()),
+                    PopupRow::Rule,
+                    toggle(self.hover_focus, "focus follows mouse"),
+                    toggle(self.status_on, "status row"),
+                ],
+                Anchor::Center,
+            ),
+            actions: vec![AuxAction::ToggleHoverFocus, AuxAction::ToggleStatus],
+        }
+    }
+
+    /// The flat popup target under a screen cell while an aux popup is open.
+    fn aux_hit(&self, row: u16, col: u16) -> Option<usize> {
+        let m = self.aux.as_ref()?;
+        let r = m.popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let li = (row as usize).checked_sub(r0)?;
+        let line = r.lines.get(li)?;
+        let cc = (col as usize).checked_sub(c0)?;
+        line.hits
+            .iter()
+            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .map(|(t, _, _)| *t)
+    }
+
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
     /// only when peek is open AND `seq` is the current request. Returns whether
     /// it applied (the caller redraws on true). A stale body (any other seq) is
@@ -1329,6 +1434,16 @@ impl View {
         None
     }
 
+    /// The column range of the footer's `☰ menu` button (x-8ccf US4), shared by
+    /// the renderer and the hit-test so a click lands where it draws. `None` when
+    /// the panel is too narrow to add the button beside the `+ new workspace`
+    /// affordance, or a recruit-mark tally is competing for the row.
+    fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
+        let tw = panel_w.saturating_sub(1); // last column is the divider
+        let mw = FOOTER_MENU.chars().count();
+        (self.marks.is_empty() && tw >= FOOTER_NEW_LABEL.len() + 2 + mw).then(|| (tw - mw)..tw)
+    }
+
     /// Map a left-click on chrome (the tab bar or the sideline) to what it does:
     /// switch tab/squad, focus an agent's pane, open a new tab, or a local hint
     /// for a row that isn't directly actionable (a work-only agent, a card).
@@ -1371,7 +1486,17 @@ impl View {
         // Display row i is painted at TAB_BAR_ROWS + (i - sideline_offset)
         // (draw_sideline), so invert with the offset - else a click on a scrolled
         // row activates the wrong unscrolled row (codex P2). Mirrors sideline_row_at.
-        self.row_action((row - TAB_BAR_ROWS) as usize + self.sideline_offset)
+        let i = (row - TAB_BAR_ROWS) as usize + self.sideline_offset;
+        // x-8ccf US4: a click on the footer's `☰ menu` region opens the sideline
+        // MENU popup; the rest of the footer row keeps its `+ new` create action.
+        if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
+            if let Some(range) = self.footer_menu_range(panel_w as usize) {
+                if range.contains(&(col as usize)) {
+                    return Some(ChromeHit::OpenSidelineMenu { row, col });
+                }
+            }
+        }
+        self.row_action(i)
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -2028,6 +2153,9 @@ impl View {
         } else if let Some(m) = &self.row_menu {
             // x-8ccf US2: the anchored row context menu, drawn at the pointer.
             popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+        } else if let Some(m) = &self.aux {
+            // x-8ccf US4/US5: the sideline MENU popup or settings modal.
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
         } else if let Some(sel) = self.answers {
             // x-feec needs-me queue (grown from the x-c929 answer overlay): the
             // severity-ranked union + the selected row's answer options, on the
@@ -2078,6 +2206,7 @@ impl View {
             && self.peek.is_none()
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
+            && self.aux.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -2708,10 +2837,17 @@ impl View {
                 DisplayRow::NewSquad => {
                     // The recruit-mark footer count rides the create affordance
                     // (x-8f11): `space` marks, `R` recruits the marked set.
-                    let label = if self.marks.is_empty() {
-                        "+ new workspace".to_string()
+                    let base = if self.marks.is_empty() {
+                        FOOTER_NEW_LABEL.to_string()
                     } else {
-                        format!("+ new workspace   {} marked ·R", self.marks.len())
+                        format!("{FOOTER_NEW_LABEL}   {} marked ·R", self.marks.len())
+                    };
+                    // x-8ccf US4: the `☰ menu` button rides the footer's right edge
+                    // when the panel is wide enough (footer_menu_range gates it);
+                    // the same range routes a click there to the MENU popup.
+                    let label = match self.footer_menu_range(panel_w) {
+                        Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
+                        None => base,
                     };
                     (label, cell_flags::DIM)
                 }
@@ -2795,6 +2931,12 @@ enum ChromeHit {
     OpenCreate,
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
     ToggleExpand(u64),
+    /// Open the sideline MENU popup anchored at the footer's menu cell (x-8ccf
+    /// US4). Carries the click cell so the popup anchors under the pointer.
+    OpenSidelineMenu {
+        row: u16,
+        col: u16,
+    },
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else attach a paneless
@@ -3842,6 +3984,13 @@ async fn handle_stdin(
             row_menu_mouse(view, rep, sock_w).await?;
             continue;
         }
+        // x-8ccf US4/US5: the MENU popup / settings modal owns the mouse.
+        if view.aux.is_some() {
+            if let StdinFlow::Detach = aux_mouse(view, rep, sock_w).await? {
+                return Ok(StdinFlow::Detach);
+            }
+            continue;
+        }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
         // click / scroll cancels it and is SWALLOWED - it must never leak to a
         // pane underneath (the confirm prompt spans the full-width bottom row) nor
@@ -3920,6 +4069,10 @@ async fn handle_stdin(
         // x-8ccf US2: the row context menu consumes keys while open (arrows walk
         // the entries + grid, Enter runs, Esc/q close) - never leaks to a pane.
         return row_menu_keys(view, &passthrough, sock_w).await;
+    }
+    if view.aux.is_some() {
+        // x-8ccf US4/US5: the MENU popup / settings modal consumes keys.
+        return aux_keys(view, &passthrough, sock_w).await;
     }
     if view.confirm.is_some() {
         return confirm_keys(view, &passthrough, sock_w).await;
@@ -4227,6 +4380,10 @@ async fn apply_hit(
         // Pure state flip, no I/O - usable even when the socket write path
         // is failing (x-2f99, AC1-FR).
         ChromeHit::ToggleExpand(id) => view.toggle_expand(id),
+        // x-8ccf US4: open the sideline MENU popup anchored at the clicked cell.
+        ChromeHit::OpenSidelineMenu { row, col } => {
+            view.open_sideline_menu(Anchor::At { row, col })
+        }
     }
     Ok(())
 }
@@ -4713,6 +4870,151 @@ async fn row_menu_mouse(
         _ => {}
     }
     Ok(())
+}
+
+/// Run one aux-popup action (x-8ccf US4/US5). Menu entries open a surface or
+/// detach; settings toggles flip a session-local view flag and rebuild the modal
+/// so its glyph reflects the new state (the popup stays open for another toggle).
+async fn execute_aux_action(
+    view: &mut View,
+    action: AuxAction,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    match action {
+        AuxAction::OpenKeybinds => {
+            view.aux = None;
+            view.open_keys_modal();
+        }
+        AuxAction::OpenSettings => view.aux = Some(view.build_settings_modal()),
+        AuxAction::Detach => {
+            view.aux = None;
+            return Ok(DispatchFlow::Detach);
+        }
+        AuxAction::ToggleHoverFocus => {
+            view.hover_focus = !view.hover_focus;
+            view.aux = Some(view.build_settings_modal());
+        }
+        AuxAction::ToggleStatus => {
+            view.status_on = !view.status_on;
+            // The status row changed the content area; report the new size so the
+            // panes reflow (same accounting as Event::ToggleStatus).
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+            view.aux = Some(view.build_settings_modal());
+        }
+    }
+    Ok(DispatchFlow::Continue)
+}
+
+/// Run the aux popup's selected row (Enter/click), propagating a detach.
+async fn aux_execute_selected(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    let picked = view
+        .aux
+        .as_ref()
+        .and_then(|m| m.actions.get(m.popup.sel).copied());
+    match picked {
+        Some(a) => execute_aux_action(view, a, sock_w).await,
+        None => {
+            let _ = raw_out(b"\x07");
+            Ok(DispatchFlow::Continue)
+        }
+    }
+}
+
+/// Aux-popup keys (US4/US5): arrows select, Enter runs, Esc/`q` close. A lone Esc
+/// closes instantly; a detach entry propagates StdinFlow::Detach.
+async fn aux_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    if bytes == [0x1b] && view.aux_esc.is_empty() {
+        view.aux = None;
+        return Ok(StdinFlow::Continue);
+    }
+    let mut esc = std::mem::take(&mut view.aux_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.aux_esc = esc;
+    for tok in toks {
+        if view.aux.is_none() {
+            break;
+        }
+        match tok {
+            ModalKey::Esc => view.aux = None,
+            ModalKey::Byte(b'q') => view.aux = None,
+            ModalKey::Up => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Up);
+                }
+            }
+            ModalKey::Down => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Down);
+                }
+            }
+            ModalKey::Left => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Left);
+                }
+            }
+            ModalKey::Right => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.nav(NavDir::Right);
+                }
+            }
+            ModalKey::Enter => {
+                if matches!(
+                    aux_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            _ => {
+                let _ = raw_out(b"\x07");
+            }
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// One mouse report while an aux popup is open (US4/US5): hover selects, a left
+/// click runs the entry (propagating detach), a click off the popup dismisses.
+async fn aux_mouse(
+    view: &mut View,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = view.aux_hit(rep.row, rep.col) {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => match view.aux_hit(rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.aux.as_mut() {
+                    m.popup.select(t);
+                }
+                if matches!(
+                    aux_execute_selected(view, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            None => view.aux = None,
+        },
+        _ => {}
+    }
+    Ok(StdinFlow::Continue)
 }
 
 /// Fold raw selector-mode bytes into simple key bytes, carrying escape state
@@ -6807,6 +7109,7 @@ mod tests {
             Some(ChromeHit::Confirm(_)) => "Confirm",
             Some(ChromeHit::OpenCreate) => "OpenCreate",
             Some(ChromeHit::ToggleExpand(_)) => "ToggleExpand",
+            Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
         }
     }
 
@@ -7445,6 +7748,89 @@ mod tests {
         let mut v = unified_rows_view();
         assert!(!v.open_row_menu(0, Anchor::Center));
         assert!(v.row_menu.is_none());
+    }
+
+    #[test]
+    fn footer_menu_region_routes_a_click_to_the_sideline_menu() {
+        // US4: a click on the footer's `☰ menu` region opens the MENU popup; the
+        // rest of the `+ new workspace` row still opens create.
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        let footer = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::NewSquad))
+            .unwrap();
+        let panel_w = v.panel_w() as usize;
+        let range = v
+            .footer_menu_range(panel_w)
+            .expect("a wide panel shows the menu button");
+        let trow = (TAB_BAR_ROWS as usize + footer - v.sideline_offset) as u16;
+        assert!(matches!(
+            v.chrome_hit(trow, range.start as u16),
+            Some(ChromeHit::OpenSidelineMenu { .. })
+        ));
+        assert!(matches!(v.chrome_hit(trow, 2), Some(ChromeHit::OpenCreate)));
+    }
+
+    #[tokio::test]
+    async fn sideline_menu_settings_toggle_flips_session_state_and_stays_open() {
+        // US4->US5: MENU -> settings chains, and a toggle flips session state and
+        // keeps the modal open (labeled session-only, no config write).
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.open_sideline_menu(Anchor::Center);
+        let settings = v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == AuxAction::OpenSettings)
+            .unwrap();
+        v.aux.as_mut().unwrap().popup.sel = settings;
+        let mut buf: Vec<u8> = Vec::new();
+        aux_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .contains(&AuxAction::ToggleHoverFocus));
+        let before = v.hover_focus;
+        let hf = v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == AuxAction::ToggleHoverFocus)
+            .unwrap();
+        v.aux.as_mut().unwrap().popup.sel = hf;
+        aux_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert_eq!(v.hover_focus, !before, "toggle flips session state");
+        assert!(v.aux.is_some(), "settings stays open for another toggle");
+    }
+
+    #[tokio::test]
+    async fn sideline_menu_detach_entry_detaches() {
+        let mut v = two_pane_view();
+        v.open_sideline_menu(Anchor::Center);
+        let idx = v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == AuxAction::Detach)
+            .unwrap();
+        v.aux.as_mut().unwrap().popup.sel = idx;
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(matches!(
+            aux_execute_selected(&mut v, &mut buf).await.unwrap(),
+            DispatchFlow::Detach
+        ));
+        assert!(v.aux.is_none());
     }
 
     #[test]
