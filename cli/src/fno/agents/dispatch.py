@@ -1323,6 +1323,7 @@ def _claude_create_path(
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
     resume_session_id: Optional[str] = None,
+    revive: bool = False,
     add_dir: Optional[str] = None,
     agent: Optional[str] = None,
     tools: Optional[str] = None,
@@ -1347,6 +1348,28 @@ def _claude_create_path(
     effective_mode = permission_mode or ("bypassPermissions" if yolo else None)
 
     from fno.agents.providers import claude as claude_mod
+
+    # x-9844 Lane 2: guard the detached revival's critical section with the
+    # session single-writer claim so a concurrent revival of the same uuid (the
+    # residual window the per-agent flock's name-scoped serialization leaves
+    # open, plus the cross-name case) can't spawn a second supervisor onto one
+    # transcript. Released right after the registry write below - the new
+    # supervisor's own liveness is the ongoing guard, and holding it longer would
+    # hoard the writer (the documented regression where footnote blocks native
+    # attach).
+    revive_claim_holder: Optional[str] = None
+    if revive and resume_session_id:
+        revive_claim_holder = f"revive:{os.getpid()}"
+        try:
+            claude_mod.acquire_session_writer_claim(
+                session_uuid=resume_session_id, holder=revive_claim_holder
+            )
+        except claude_mod.SessionWriterClaimError as exc:
+            raise DispatchAskError(
+                f"session {resume_session_id} is held by another writer; refusing "
+                f"to open a second writer on one transcript ({exc})",
+                exit_code=11,
+            ) from exc
 
     try:
         result: ProviderResult = claude_mod.bg_create(
@@ -1393,7 +1416,12 @@ def _claude_create_path(
     # stream-json `--resume` target alongside the 8-hex short-id so the worker
     # is adoptable by the live `/agents chat` lane. Runs after the receipt is
     # captured; a miss leaves the field None and never gates the launch.
-    session_uuid = claude_mod.resolve_session_uuid_at_spawn(short_id)
+    # x-9844 Fix 3: a revival preserves the resumed uuid (the identity being
+    # continued) rather than re-resolving from the fresh short_id, so the
+    # invariant "same conversation, new short_id" holds even if resolution slips.
+    session_uuid = (
+        resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
+    )
 
     # Capture the spawning session's ambient identity (Task 2.2, x-30f6).
     # Best-effort: never raises, degrades to (None, None, None) when absent.
@@ -1418,8 +1446,17 @@ def _claude_create_path(
         spawned_by_cwd=spawned_by_cwd,
     )
 
+    # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
+    # (never appends a duplicate name). The load-modify-write is atomic under
+    # update_registry's own lock, so a concurrent reader sees the old exited row
+    # or the new live row, never a torn/absent state.
+    def _write(entries: list) -> list:
+        if revive:
+            return [new_entry if e.name == name else e for e in entries]
+        return entries + [new_entry]
+
     try:
-        update_registry(lambda entries: entries + [new_entry])
+        update_registry(_write)
     except (OSError, RegistryVersionError) as exc:
         events.emit(
             "agent_ask_failed",
@@ -1441,6 +1478,15 @@ def _claude_create_path(
             f"(registry not updated)",
             exit_code=12,
         ) from exc
+
+    # Revival succeeded and the row is live: release the critical-section claim
+    # so the new supervisor's own liveness (not a lingering lockfile) is the
+    # ongoing single-writer guard. Idempotent, so a never-recorded claim is a
+    # no-op.
+    if revive_claim_holder is not None and resume_session_id:
+        claude_mod.release_session_writer_claim(
+            session_uuid=resume_session_id, holder=revive_claim_holder
+        )
 
     # Spawn event (Task 2.2, x-30f6): exactly one per successful create.
     # Open schema — flattens onto the JSONL record alongside ts/kind.
@@ -1769,6 +1815,43 @@ def validate_spawn_name(name: str) -> None:
         )
 
 
+def _is_revival(
+    existing: "AgentEntry", provider: str, resume_session_id: Optional[str]
+) -> bool:
+    """True iff spawning an existing same-name row with ``--resume`` is a revival,
+    not a collision (x-9844 Fix 3).
+
+    Gated on: the spawn carries ``--resume``, both the spawn and the row are
+    claude, the row's own recorded ``claude_session_uuid`` equals the ``--resume``
+    target, and the row's supervisor is NOT live. Liveness is a reality probe
+    (``session_is_live``), never the registry ``status`` field, so a row whose
+    supervisor is actually alive can never be revived into a second writer on one
+    transcript. Every other same-name case (live row, uuid mismatch, no
+    ``--resume``) stays fail-closed. The uuid check runs before the (heavier)
+    liveness probe so the common mismatch never pays for a socket connect.
+    """
+    if not resume_session_id or provider != "claude":
+        return False
+    if getattr(existing, "provider", None) != "claude":
+        return False
+    if getattr(existing, "claude_session_uuid", None) != resume_session_id:
+        return False
+    from fno.agents.providers import claude as claude_mod
+
+    short_id = getattr(existing, "claude_short_id", None)
+    if short_id:
+        # A liveness-probe error fails SAFE toward "possibly live": never revive
+        # (--resume) into what could be a second writer on one transcript. A
+        # spurious collision refusal is retryable; a double writer is not. So a
+        # probe crash refuses the revival, it does not wave it through.
+        try:
+            if claude_mod.session_is_live(short_id):
+                return False
+        except Exception:
+            return False
+    return True
+
+
 def dispatch_spawn(
     name: str,
     message: str,
@@ -1869,7 +1952,16 @@ def dispatch_spawn(
             except (OSError, ValueError, RegistryVersionError) as exc:
                 raise DispatchAskError(f"registry read failed: {exc}", exit_code=12) from exc
 
-            if any(e.name == name for e in entries):
+            # Revive-in-place (x-9844 Fix 3): a --resume spawn whose target uuid
+            # matches an EXITED same-name claude row is a revival, not a
+            # collision - the row is updated in place below (new short_id, same
+            # uuid) instead of refused. Every other same-name case stays
+            # fail-closed (live row, uuid mismatch, no --resume).
+            existing = next((e for e in entries if e.name == name), None)
+            revive = existing is not None and _is_revival(
+                existing, provider, resume_session_id
+            )
+            if existing is not None and not revive:
                 raise DispatchAskError(
                     f"agent {name!r} already exists; "
                     f"use 'fno agents rm {name}' first or pick another name",
@@ -1957,6 +2049,7 @@ def dispatch_spawn(
                         permission_mode=permission_mode,
                         effort=effort,
                         resume_session_id=resume_session_id,
+                        revive=revive,
                         add_dir=add_dir,
                         agent=agent,
                         tools=tools,

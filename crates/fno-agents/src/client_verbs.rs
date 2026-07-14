@@ -19,6 +19,7 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
+use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use serde::Serialize;
@@ -793,6 +794,137 @@ fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
     }
 }
 
+/// True iff `s` is a lowercase `8-4-4-4-12` hex UUID (the shape `claude --resume`
+/// accepts). Guards the dead-arm argv so a malformed/empty recorded uuid can
+/// never reach `claude --resume` (x-9844 Failure Modes / Boundaries).
+fn is_uuid_shaped(s: &str) -> bool {
+    let groups = [8usize, 4, 4, 4, 12];
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == groups.len()
+        && parts.iter().zip(groups).all(|(p, n)| {
+            p.len() == n
+                && p.chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        })
+}
+
+/// The claude arm of `resume` (x-9844 Fix 1): liveness-probe first, then pick the
+/// argv. A live (incl. idle) supervisor -> `claude attach <short_id>` (today's
+/// behavior); a dead/absent one -> `claude --resume <uuid>` in the recorded cwd.
+/// Probe reality (locate_session + a 250 ms socket connect), never the registry
+/// `status` field: a stale-exited row whose supervisor is actually alive must
+/// attach, not `--resume` into a second writer on one transcript. The chosen lane
+/// is printed to stderr before returning so the operator always knows which
+/// fired. `Err(code)` carries the exit code for the uuid-absent refusal.
+/// Returns `(argv, claim_uuid)`. `claim_uuid` is `Some(uuid)` only for the
+/// dead-arm (`claude --resume`), which the caller must guard with the
+/// `session:<uuid>` single-writer claim before exec; the live attach arm returns
+/// `None` (claude's own supervisor owns attach safety).
+fn claude_resume_argv(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+) -> Result<(Vec<String>, Option<String>), i32> {
+    let short_id = entry
+        .get("claude_short_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let uuid = entry
+        .get("claude_session_uuid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+
+    let live = !short_id.is_empty()
+        && locate_session(claude_home, short_id)
+            .map(|loc| liveness_probe(&loc.messaging_socket_path))
+            .unwrap_or(false);
+
+    if live {
+        eprintln!("fno agents resume: {name} is live - attaching");
+        Ok((
+            vec!["claude".into(), "attach".into(), short_id.into()],
+            None,
+        ))
+    } else if is_uuid_shaped(uuid) {
+        eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
+        Ok((
+            vec!["claude".into(), "--resume".into(), uuid.into()],
+            Some(uuid.to_string()),
+        ))
+    } else {
+        eprintln!(
+            "fno agents resume: {} has no claude session recorded; nothing to resume.",
+            py_repr_str(name)
+        );
+        Err(13)
+    }
+}
+
+/// Acquire the `session:<uuid>` single-writer claim for an interactive dead-row
+/// resume, anchored to THIS process. `exec` keeps the pid, so the claim is held
+/// by the resumed claude and self-releases when the operator quits (no explicit
+/// release). Two racing resumers both probe dead, but only one wins this atomic
+/// claim; the loser gets `Err` and refuses instead of opening a second writer on
+/// one transcript - the residual double-writer window the liveness probe alone
+/// cannot close. `root` is `None` in prod (session: keys route to
+/// `$FNO_CLAIMS_ROOT`/`$HOME`); tests inject a temp root.
+fn acquire_resume_session_claim(uuid: &str, root: Option<&Path>) -> Result<(), (i32, String)> {
+    use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
+    let holder = format!("resume:{}", std::process::id());
+    let opts = AcquireOpts {
+        root: root.map(Path::to_path_buf),
+        reason: Some("interactive resume single-writer".to_string()),
+        ..Default::default()
+    };
+    match acquire(&format!("session:{uuid}"), &holder, opts) {
+        AcquireOutcome::Acquired(_) => Ok(()),
+        AcquireOutcome::HeldByOther { holder, pid, host } => Err((
+            11,
+            format!(
+                "fno agents resume: session {uuid} is held live by another writer \
+                 ({holder}, pid={pid}, host={host}); not opening a second writer on one transcript."
+            ),
+        )),
+        AcquireOutcome::Error(e) => Err((
+            12,
+            format!("fno agents resume: could not claim session {uuid}: {e}"),
+        )),
+    }
+}
+
+/// The dead-row pointer for `attach` (x-9844 Fix 2): `Some(message)` when `entry`
+/// is a claude row whose supervisor is gone (probe says dead) AND a well-shaped
+/// session uuid is recorded - the two revival commands to print instead of
+/// dead-ending in claude's own "session not found". `None` when the row is live
+/// (fall through to a normal attach) or carries no revivable uuid (nothing to
+/// point at - never print an unusable command). Probes reality (locate_session +
+/// socket), never the registry `status` field, matching the resume smart verb.
+fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
+    let short_id = entry
+        .get("claude_short_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let uuid = entry
+        .get("claude_session_uuid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if short_id.is_empty() || !is_uuid_shaped(uuid) {
+        return None;
+    }
+    let live = locate_session(claude_home, short_id)
+        .map(|loc| liveness_probe(&loc.messaging_socket_path))
+        .unwrap_or(false);
+    if live {
+        return None;
+    }
+    Some(format!(
+        "{name} has exited - fno agents resume {name} (continue it in your terminal)\n\
+         or: fno agents spawn {name} --resume {uuid} --substrate bg (detached worker)"
+    ))
+}
+
 /// POSIX shell quoting matching Python's `shlex.quote`: empty -> `''`; a string
 /// of only "safe" chars (`[\w@%+=:,./-]`) is returned as-is; otherwise it is
 /// single-quoted with embedded `'` escaped as `'"'"'`.
@@ -1003,27 +1135,37 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 13;
     }
 
-    // Provider support is checked BEFORE session_id so an unknown provider
-    // surfaces "not supported" rather than a misleading "no session_id".
-    let argv = match build_resume_argv(provider, session_id) {
-        Some(v) => v,
-        None => {
+    // claude gets the liveness-probed smart fork (US1/US2, x-9844): a live
+    // (incl. idle) supervisor -> attach; a dead/absent one -> `claude --resume
+    // <uuid>`. Other providers keep their settled-session resume CLI, checked
+    // BEFORE session_id so an unknown provider surfaces "not supported" rather
+    // than a misleading "no session_id".
+    let (argv, claim_uuid) = if provider == "claude" {
+        match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
+            Ok(plan) => plan,
+            Err(code) => return code,
+        }
+    } else {
+        let v = match build_resume_argv(provider, session_id) {
+            Some(v) => v,
+            None => {
+                eprintln!(
+                    "fno agents resume: provider {} resume not supported by this fno version.",
+                    py_repr_str(provider)
+                );
+                return 13;
+            }
+        };
+        if session_id.is_empty() {
             eprintln!(
-                "fno agents resume: provider {} resume not supported by this fno version.",
+                "fno agents resume: agent {} has no recorded session_id for provider {}.",
+                py_repr_str(&name),
                 py_repr_str(provider)
             );
             return 13;
         }
+        (v, None)
     };
-
-    if session_id.is_empty() {
-        eprintln!(
-            "fno agents resume: agent {} has no recorded session_id for provider {}.",
-            py_repr_str(&name),
-            py_repr_str(provider)
-        );
-        return 13;
-    }
 
     if !which_on_path(&argv[0]) {
         eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
@@ -1038,6 +1180,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             .join(" ");
         println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
         return 0;
+    }
+
+    // Guard a dead-row `claude --resume` with the session single-writer claim
+    // before exec (--print-command already returned above, so it never claims).
+    // exec keeps this pid, so the claim is held by the resumed claude and
+    // self-releases when the operator quits.
+    if let Some(uuid) = &claim_uuid {
+        if let Err((code, msg)) = acquire_resume_session_claim(uuid, None) {
+            eprintln!("{msg}");
+            return code;
+        }
     }
 
     // chdir BEFORE the emit so a stale cwd surfaces as exit 13 rather than a
@@ -1197,6 +1350,27 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
             py_repr_str(&name)
         );
         return 12;
+    }
+
+    // Attach stays live-only, but a dead claude row (supervisor gone) with a
+    // recorded session uuid refuses with the exact revival commands instead of
+    // dead-ending in claude's own "session not found" (US3). The decision is a
+    // pure helper so it is testable without the exec path.
+    if let Some(msg) = claude_attach_pointer(&ClaudeHome::from_env(), entry, &name) {
+        eprintln!("{msg}");
+        append_agents_event(
+            &events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.clone())),
+                ("provider", Value::String("claude".to_string())),
+                (
+                    "reason",
+                    Value::String("exited-revivable-pointer".to_string()),
+                ),
+            ],
+        );
+        return 13;
     }
 
     if !which_on_path("claude") {
@@ -2122,6 +2296,144 @@ mod tests {
             Some(vec!["gemini".into(), "--resume".into(), "g-1".into()])
         );
         assert_eq!(build_resume_argv("opencode", "x"), None);
+    }
+
+    #[test]
+    fn is_uuid_shaped_accepts_only_lowercase_8_4_4_4_12_hex() {
+        assert!(is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"));
+        assert!(!is_uuid_shaped("")); // empty
+        assert!(!is_uuid_shaped("not-a-uuid"));
+        assert!(!is_uuid_shaped("0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9")); // uppercase
+        assert!(!is_uuid_shaped("0a1b2c3d4e5f6071829 3a4b5c6d7e8f9")); // no dashes
+        assert!(!is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f")); // 11-char tail
+    }
+
+    // Fixture: an auto-cleaned temp dir used as a fake $HOME under which the
+    // tests write bg session files. Returns a tempfile::TempDir (the pattern the
+    // rest of this module's tests use) so a panicking test never leaks a /tmp
+    // tree.
+    fn cv_tmpdir() -> tempfile::TempDir {
+        tempfile::TempDir::new().unwrap()
+    }
+
+    #[test]
+    fn claude_resume_argv_live_attaches_dead_resumes_absent_refuses() {
+        use std::os::unix::net::UnixListener;
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+
+        // Dead row (no session file) with a recorded uuid -> `claude --resume`.
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude",
+            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+        });
+        assert_eq!(
+            claude_resume_argv(&ch, &entry, "w").unwrap(),
+            (
+                vec!["claude".to_string(), "--resume".into(), uuid.into()],
+                Some(uuid.to_string()), // dead-arm carries the uuid to claim
+            )
+        );
+
+        // uuid absent -> refuse (Err 13), never `claude --resume ""`.
+        let entry_no_uuid = serde_json::json!({
+            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+        });
+        assert_eq!(claude_resume_argv(&ch, &entry_no_uuid, "w"), Err(13));
+
+        // Live supervisor (socket answers) beats a stale "exited" registry ->
+        // `claude attach <short_id>`, no --resume (AC1-EDGE).
+        let home2 = cv_tmpdir();
+        let sessions = home2.path().join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let sock = home2.path().join("live.sock");
+        let _listener = UnixListener::bind(&sock).unwrap();
+        fs::write(
+            sessions.join("222.json"),
+            format!(
+                "{{\"jobId\":\"7c5dcf5d\",\"kind\":\"bg\",\"messagingSocketPath\":\"{}\",\"sessionId\":\"s\",\"cwd\":\"/tmp\"}}",
+                sock.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let ch2 = ClaudeHome::at(home2.path());
+        assert_eq!(
+            claude_resume_argv(&ch2, &entry, "w").unwrap(),
+            (
+                vec!["claude".to_string(), "attach".into(), "7c5dcf5d".into()],
+                None, // live attach arm claims nothing
+            )
+        );
+    }
+
+    #[test]
+    fn acquire_resume_session_claim_refuses_when_held_by_other() {
+        use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let root = cv_tmpdir();
+
+        // A different live writer already holds the session claim.
+        let pre = acquire(
+            &format!("session:{uuid}"),
+            "other-writer",
+            AcquireOpts {
+                root: Some(root.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pre, AcquireOutcome::Acquired(_)));
+
+        // The racing resumer loses: refuses (exit 11) instead of a 2nd writer.
+        let err = acquire_resume_session_claim(uuid, Some(root.path())).unwrap_err();
+        assert_eq!(err.0, 11);
+        assert!(err.1.contains("held live by another writer"));
+
+        // A session with no holder: the resumer wins.
+        let uuid2 = "1111abcd-2222-3333-4444-555566667777";
+        assert!(acquire_resume_session_claim(uuid2, Some(root.path())).is_ok());
+    }
+
+    #[test]
+    fn claude_attach_pointer_only_for_dead_revivable_claude_row() {
+        use std::os::unix::net::UnixListener;
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let dead = cv_tmpdir();
+        let ch_dead = ClaudeHome::at(dead.path());
+
+        // Dead row + uuid -> pointer naming both revival commands.
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude",
+            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+        });
+        let msg = claude_attach_pointer(&ch_dead, &entry, "w").expect("dead row -> pointer");
+        assert!(msg.contains("fno agents resume w"));
+        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
+
+        // No uuid -> no pointer (never print an unusable command).
+        let no_uuid = serde_json::json!({
+            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+        });
+        assert_eq!(claude_attach_pointer(&ch_dead, &no_uuid, "w"), None);
+
+        // Live supervisor -> no pointer (fall through to a real attach).
+        let live_home = cv_tmpdir();
+        let sessions = live_home.path().join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let sock = live_home.path().join("live.sock");
+        let _l = UnixListener::bind(&sock).unwrap();
+        fs::write(
+            sessions.join("222.json"),
+            format!(
+                "{{\"jobId\":\"7c5dcf5d\",\"kind\":\"bg\",\"messagingSocketPath\":\"{}\",\"sessionId\":\"s\",\"cwd\":\"/tmp\"}}",
+                sock.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            claude_attach_pointer(&ClaudeHome::at(live_home.path()), &entry, "w"),
+            None
+        );
     }
 
     #[test]

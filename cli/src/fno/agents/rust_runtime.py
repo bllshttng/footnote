@@ -454,6 +454,21 @@ def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     return any(a in prov or a.startswith(tuple(f"{p}=" for p in prov)) for a in args)
 
 
+def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--resume`` (x-9844 Fix 3).
+
+    ``--resume <uuid>`` is parsed only by the Python spawn verb (``cmd_spawn``
+    -> ``dispatch_spawn(resume_session_id=...)``), which owns the revive-in-place
+    collision exemption. The Rust client's spawn parser has no ``--resume`` flag,
+    so a ``spawn ... --resume <uuid>`` auto-routed to the binary would fail on an
+    unknown flag before the exemption is ever reached. Keeping it Python (the
+    ``_is_role_bearing_spawn`` precedent) covers every caller in one place -
+    including the mux respawn key, which shells this porcelain server-side."""
+    if verb != "spawn":
+        return False
+    return any(a == "--resume" or a.startswith("--resume=") for a in args)
+
+
 def route_to_rust(
     args: Sequence[str],
     *,
@@ -652,11 +667,14 @@ def make_agents_group_cls() -> type:
                 # binary would route it to the retiring daemon PTY host.
                 # A provenance-bearing spawn (x-84a8, --node/--slug/--plan) is
                 # Python-only for the same reason as --role: the binary cannot
-                # parse those flags.
+                # parse those flags. A --resume-bearing spawn (x-9844 revive-in-
+                # place) is Python-only for the same reason: the Rust spawn
+                # parser has no --resume flag, and Python owns the revival.
                 py_spawn = (
                     _is_role_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)
                     or _is_provenance_bearing_spawn(verb, args)
+                    or _is_resume_bearing_spawn(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
                     route_to_rust(list(args))  # execs; does not return
