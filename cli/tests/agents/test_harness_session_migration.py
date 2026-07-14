@@ -44,9 +44,24 @@ def test_sync_codex_canonical_only_syncs_its_legacy_key():
 
 
 def test_sync_skips_null_string_legacy():
-    d = {"harness": "claude", "claude_session_uuid": "null", "codex_session_id": "REAL"}
+    """A 'null'-string legacy value for the row's own harness is not adopted."""
+    d = {"harness": "claude", "claude_session_uuid": "null"}
     sync_harness_aliases(d, M)
-    assert d["harness_session_id"] == "REAL"
+    assert d.get("harness_session_id") is None
+
+
+def test_sync_does_not_cross_contaminate_from_another_harness():
+    """A claude row must NOT adopt a codex id: only its own harness key is read."""
+    d = {"harness": "claude", "claude_session_uuid": "null", "codex_session_id": "CODEX-ID"}
+    sync_harness_aliases(d, M)
+    assert d.get("harness_session_id") is None
+
+
+def test_sync_unknown_harness_backfills_from_first_present_legacy():
+    """A pre-migration row whose harness is unresolved falls back to a scan."""
+    d = {"codex_session_id": "T"}  # no harness set
+    sync_harness_aliases(d, M)
+    assert d["harness_session_id"] == "T"
 
 
 def test_sync_unknown_harness_never_crashes():

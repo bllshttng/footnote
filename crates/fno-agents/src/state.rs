@@ -526,11 +526,20 @@ impl RegistryEntry {
                 _ => {}
             },
             _ => {
-                let legacy = self
-                    .claude_session_uuid
-                    .clone()
-                    .or_else(|| self.codex_session_id.clone())
-                    .or_else(|| self.gemini_session_id.clone());
+                // Adopt from THIS harness's own legacy key when known, so a stale
+                // legacy id of a DIFFERENT harness can't cross-contaminate; only a
+                // genuinely unknown harness scans all keys (a pre-migration row
+                // whose harness has not been resolved).
+                let legacy = match self.harness.as_deref() {
+                    Some("claude") => self.claude_session_uuid.clone(),
+                    Some("codex") => self.codex_session_id.clone(),
+                    Some("gemini") => self.gemini_session_id.clone(),
+                    _ => self
+                        .claude_session_uuid
+                        .clone()
+                        .or_else(|| self.codex_session_id.clone())
+                        .or_else(|| self.gemini_session_id.clone()),
+                };
                 if let Some(value) = legacy {
                     if !value.is_empty() && value != "null" {
                         self.harness_session_id = Some(value);
@@ -1123,6 +1132,21 @@ mod tests {
         e.backfill_harness_aliases();
         assert_eq!(e.harness_session_id.as_deref(), Some("CANON"));
         assert_eq!(e.claude_session_uuid.as_deref(), Some("CANON"));
+    }
+
+    #[test]
+    fn harness_backfill_does_not_cross_contaminate() {
+        // A claude row carrying a stale codex id must NOT adopt it: only the
+        // row's own harness key is consulted when harness is known.
+        let mut e = sample_entry("w");
+        e.provider = "claude".into();
+        e.harness = Some("claude".into());
+        e.harness_session_id = None;
+        e.claude_session_uuid = None;
+        e.codex_session_id = Some("STALE-CODEX".into());
+        e.session_id = None;
+        e.backfill_harness_aliases();
+        assert_eq!(e.harness_session_id, None);
     }
 
     #[test]

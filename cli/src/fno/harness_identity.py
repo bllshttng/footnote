@@ -48,13 +48,21 @@ def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> 
     """
     if not isinstance(data, dict):
         return data
+    harness = str(data.get("harness") or "").lower()
     if data.get("harness_session_id"):
-        harness = str(data.get("harness") or "").lower()
         legacy_key = legacy_session_keys.get(harness)
         if legacy_key:
             data[legacy_key] = data["harness_session_id"]
     else:
-        for legacy_key in legacy_session_keys.values():
+        # Adopt from THIS harness's own legacy key when the harness is known, so a
+        # row carrying a stale legacy id of a DIFFERENT harness can't cross-
+        # contaminate. Only a genuinely unknown/absent harness scans all keys (the
+        # pre-migration row whose harness has not yet been resolved).
+        if harness in legacy_session_keys:
+            candidate_keys = [legacy_session_keys[harness]]
+        else:
+            candidate_keys = list(legacy_session_keys.values())
+        for legacy_key in candidate_keys:
             value = data.get(legacy_key)
             if value and str(value).strip() and str(value).strip().lower() != "null":
                 data["harness_session_id"] = value

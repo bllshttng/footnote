@@ -94,7 +94,7 @@ def _find_by_session(registry: list[AgentEntry], session_uuid: str) -> Optional[
     """
     for entry in registry:
         if session_uuid in (
-            getattr(entry, "harness_session_id", None),
+            entry.harness_session_id,
             entry.claude_session_uuid,
             entry.cc_session_id,
         ):
