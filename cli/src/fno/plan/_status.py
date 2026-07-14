@@ -1,7 +1,11 @@
 """Frontmatter status state machine for lean single-doc plan architecture.
 
 Enforces the monotonic progression:
-    design -> ready -> in_progress -> reviewing -> shipping -> shipped
+    design -> ready -> in_progress -> shipped
+
+`reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
+graph has no derived state that distinguishes them, so they never got written.
+The reconcile sweep now folds them into `shipped` as Tier-1 synonyms.
 
 Backward transitions, identity transitions, and unknown statuses all raise
 StatusTransitionError. No silent fallbacks.
@@ -15,8 +19,6 @@ STATUS_PROGRESSION: tuple[str, ...] = (
     "design",
     "ready",
     "in_progress",
-    "reviewing",
-    "shipping",
     "shipped",
 )
 

@@ -40,6 +40,8 @@ def test_archived_is_a_known_terminal_not_on_the_axis():
     ("draft", "design"),
     ("designed", "design"),        # typo
     ("design-locked", "ready"),
+    ("reviewing", "shipped"),      # pruned axis states (x-f34f) fold into shipped
+    ("shipping", "shipped"),
     ("superseded", "archived"),
 ])
 def test_tier1_synonyms(raw, expected):

@@ -11,12 +11,11 @@ from fno.plan._status import (
 
 class TestStatusProgression:
     def test_progression_contains_all_expected_statuses(self):
+        # reviewing/shipping pruned (x-f34f): zero consumers, no graph state.
         assert STATUS_PROGRESSION == (
             "design",
             "ready",
             "in_progress",
-            "reviewing",
-            "shipping",
             "shipped",
         )
 
@@ -32,14 +31,8 @@ class TestValidateTransition:
     def test_AC1_HP_ready_to_in_progress(self):
         validate_transition("ready", "in_progress")
 
-    def test_AC1_HP_in_progress_to_reviewing(self):
-        validate_transition("in_progress", "reviewing")
-
-    def test_AC1_HP_reviewing_to_shipping(self):
-        validate_transition("reviewing", "shipping")
-
-    def test_AC1_HP_shipping_to_shipped(self):
-        validate_transition("shipping", "shipped")
+    def test_AC1_HP_in_progress_to_shipped(self):
+        validate_transition("in_progress", "shipped")
 
     def test_AC1_HP_multi_step_skip_is_allowed(self):
         # design -> in_progress skips "ready" - forward multi-step is allowed
@@ -57,9 +50,9 @@ class TestValidateTransition:
         with pytest.raises(StatusTransitionError):
             validate_transition("shipped", "ready")
 
-    def test_AC2_ERR_reviewing_to_in_progress_rejected(self):
+    def test_AC2_ERR_shipped_to_in_progress_rejected(self):
         with pytest.raises(StatusTransitionError):
-            validate_transition("reviewing", "in_progress")
+            validate_transition("shipped", "in_progress")
 
     def test_AC2_ERR_shipped_to_design_rejected(self):
         with pytest.raises(StatusTransitionError):
