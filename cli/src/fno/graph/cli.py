@@ -1489,6 +1489,16 @@ def cmd_update(
         "--batch",
         help="Set the batch id this node is a member of (marks node.batch, batch-lane Wave 2). Pass 'null' to clear (requeue for individual ship on abandon).",
     ),
+    dispatch_verb: Optional[str] = typer.Option(
+        None,
+        "--dispatch-verb",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs at dispatch, not here. Pass 'null' to clear (revert to /target no-merge).",
+    ),
+    dispatch_brief: Optional[str] = typer.Option(
+        None,
+        "--dispatch-brief",
+        help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Capped at 8 KB at dispatch. Pass 'null' to clear.",
+    ),
     type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
     public: Optional[bool] = typer.Option(None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"),
     project: Optional[str] = typer.Option(None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"),
@@ -1719,6 +1729,12 @@ def cmd_update(
             # 'null' clears the mark (requeue as individual ship on abandon); any
             # other value records the batch id this node is a member of.
             node["batch"] = None if batch.lower() == "null" else batch
+        # Dispatch overrides (US3). Stored permissively; the resolver is the trust
+        # boundary (allowlist + 8 KB cap at dispatch time, not write time).
+        if dispatch_verb is not None:
+            node["dispatch_verb"] = None if dispatch_verb.lower() == "null" else dispatch_verb
+        if dispatch_brief is not None:
+            node["dispatch_brief"] = None if dispatch_brief.lower() == "null" else dispatch_brief
         if priority is not None:
             node["priority"] = priority
         if project is not None:
