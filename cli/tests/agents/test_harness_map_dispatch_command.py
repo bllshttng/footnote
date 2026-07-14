@@ -101,6 +101,19 @@ def test_normalize_command_prose_returns_the_brief(harness):
     assert "{id}" in out  # the brief still names the node for substitution
 
 
+@pytest.mark.parametrize(
+    "verb_cmd,expected",
+    [
+        ("/blueprint {id}", "$fno:blueprint {id}"),
+        ("/pr create", "$fno:pr create"),
+        ("/think {id}", "$fno:think {id}"),
+    ],
+)
+def test_normalize_command_is_verb_agnostic_for_codex(verb_cmd, expected):
+    # ANY footnote /verb -> $fno:verb on codex, not just /target.
+    assert normalize_command(verb_cmd, "codex") == expected
+
+
 def test_dispatch_command_builtin_matches_normalize():
     # The builtin is exactly the normalize of the canonical autonomous command.
     for h in ("claude", "codex", "agy", "opencode", "gemini"):

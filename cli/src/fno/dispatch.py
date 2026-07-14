@@ -131,7 +131,7 @@ def cmd_resolve(
     if json_output:
         typer.echo(json.dumps(out))
     else:
-        for key in ("harness", "substrate", "command"):
+        for key in ("harness", "substrate", "command", "command_surface"):
             typer.echo(f"{key}={out[key]}")
         typer.echo(f"permission_bypass={' '.join(out['permission_bypass'])}")
         typer.echo(f"bg={out['bg']}")
