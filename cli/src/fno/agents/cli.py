@@ -1439,9 +1439,12 @@ def cmd_whoami(
     # shared resolver finds nothing so today's claude behavior is unchanged.
     from fno.harness_identity import resolve_harness_identity
 
-    session_uuid = (
-        resolve_harness_identity().session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
-    )
+    _ident = resolve_harness_identity()
+    session_uuid = _ident.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    # Scope registry matching to this process's harness so a provider-local session
+    # id can't match a same-id row of another harness (x-ec59). The env fallback is
+    # CLAUDE_CODE_SESSION_ID, so an unresolved marker means claude.
+    session_harness = _ident.harness or ("claude" if session_uuid else None)
     live_warnings: list[str] = []
 
     def _live_status_fn(short_id: str) -> str | None:
@@ -1458,6 +1461,7 @@ def cmd_whoami(
         session_uuid=session_uuid,
         live_status_fn=_live_status_fn,
         node_fn=lambda: whoami_mod.find_held_node(session_uuid=session_uuid),
+        harness=session_harness,
     )
 
     for warn in (*result.warnings, *live_warnings):

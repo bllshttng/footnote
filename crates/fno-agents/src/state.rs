@@ -52,7 +52,10 @@ use std::path::{Path, PathBuf};
 /// `screen_state` verdict: absent reads as `None`, but a pre-v7 writer would
 /// silently drop a stored verdict on write-back and blind the manifest rung
 /// of the badge lattice. Accepted set widens to 1..=7.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 7;
+// v8 (x-ec59) is the canonical-identity bump for `harness` / `harness_session_id`
+// (mirrors Python's SCHEMA_VERSION): a pre-v8 reader rejects the store rather than
+// silently dropping the canonical fields on a read-modify-write.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 8;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -1706,15 +1709,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v8, or - for an old daemon -
-        // a v7 it cannot interpret), while v1..=v7 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v9, or - for an old daemon -
+        // a v8 it cannot interpret), while v1..=v8 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":8,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":9,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 8);
+                assert_eq!(found, 9);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

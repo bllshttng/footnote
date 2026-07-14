@@ -112,7 +112,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # write-back. Reads stay backward-compatible: load_registry accepts
 # 1..=SCHEMA_VERSION. v6 (4a-G2) is the mux-ref bump; v7 (screen-manifest
 # fallback authority) the same bump for the additive `screen_state` verdict.
-SCHEMA_VERSION = 7
+# v8 (x-ec59) is the canonical-identity bump for `harness` / `harness_session_id`:
+# every Python-authored row emits these keys, so a pre-v8 reader must REJECT the
+# store (clean "upgrade fno") rather than accept the version and then TypeError on
+# the unknown AgentEntry kwargs (the PR #364 brick) or silently drop the fields on
+# a Rust read-modify-write. Same forward-compat rationale as the v4-v7 bumps.
+SCHEMA_VERSION = 8
 
 
 class RegistryVersionError(RuntimeError):

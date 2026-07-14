@@ -74,24 +74,60 @@ def _find_by_name(registry: list[AgentEntry], name: str) -> Optional[AgentEntry]
     return None
 
 
-def _find_by_session(registry: list[AgentEntry], session_uuid: str) -> Optional[AgentEntry]:
+def _row_harness(entry: AgentEntry) -> str:
+    """This row's harness for matching: canonical ``harness``, legacy ``provider``
+    as fallback (a pre-migration row has only ``provider``)."""
+    return (getattr(entry, "harness", None) or entry.provider or "").lower()
+
+
+def _find_by_session(
+    registry: list[AgentEntry],
+    session_uuid: str,
+    harness: Optional[str] = None,
+) -> Optional[AgentEntry]:
     """Match a registry row whose recorded session id equals ``session_uuid``.
 
-    Two passes, most-specific first. ``session_uuid`` here is the full
-    ``CLAUDE_CODE_SESSION_ID`` (a UUID), always a non-empty real string, so a
-    ``None`` stored field never spuriously matches.
+    Session ids are provider-local: the SAME id may be registered under different
+    harnesses, so when ``harness`` is known (x-ec59) matching is SCOPED to rows of
+    that harness and to that harness's own id fields. This prevents a codex/gemini
+    id from matching a same-id claude row, and stops a non-claude id from falling
+    through to the claude short-id prefix (a 32-bit jobId prefix that could collide).
 
-    1. Exact match against the canonical ``harness_session_id`` (x-ec59: a codex
-       or gemini worker resolves its own row here too, not just claude), the full
-       claude session UUID, or the cc session id.
-    2. Prefix match against the 8-hex ``claude_short_id`` - the jobId is a
-       32-bit prefix of the session UUID (``claude attach`` / the jobs-dir use
-       it). An older / partially-captured claude row may carry ONLY the short
-       id, so an exact full-UUID check would miss it and the worker would get a
-       false "not registered" (exit 3) precisely on this fallback path the verb
-       adds. The exact pass runs first across every row so a real full-id match
-       always wins over a shared-prefix coincidence.
+    Two passes, most-specific first:
+    1. Exact match against the harness's own id fields (canonical
+       ``harness_session_id`` plus that harness's legacy field).
+    2. Prefix match against the 8-hex ``claude_short_id`` - CLAUDE ONLY, because the
+       jobId is a 32-bit prefix of a claude session UUID; a partially-captured
+       claude row may carry only the short id.
+
+    ``harness=None`` keeps the original claude-shaped scan for callers that do not
+    know the harness (back-compat).
     """
+    if harness:
+        h = harness.lower()
+        for entry in registry:
+            if _row_harness(entry) != h:
+                continue
+            fields = [entry.harness_session_id]
+            if h == "claude":
+                fields += [entry.claude_session_uuid, entry.cc_session_id]
+            elif h == "codex":
+                fields.append(entry.codex_session_id)
+            elif h == "gemini":
+                fields.append(entry.gemini_session_id)
+            if session_uuid in fields:
+                return entry
+        if h == "claude":
+            norm = session_uuid.replace("-", "").lower()
+            for entry in registry:
+                if _row_harness(entry) != "claude":
+                    continue
+                short_id = entry.claude_short_id
+                if short_id and norm.startswith(short_id.lower()):
+                    return entry
+        return None
+
+    # Unknown harness: preserve the original claude-shaped behavior.
     for entry in registry:
         if session_uuid in (
             entry.harness_session_id,
@@ -114,6 +150,7 @@ def resolve_self(
     session_uuid: Optional[str] = None,
     live_status_fn: Optional[Callable[[str], Optional[str]]] = None,
     node_fn: Optional[Callable[[], Optional[str]]] = None,
+    harness: Optional[str] = None,
 ) -> WhoamiResult:
     """Resolve this process's mesh identity from env + registry.
 
@@ -149,7 +186,7 @@ def resolve_self(
         resolved_via = "env"
         row = _find_by_name(registry, self_name)
     elif session_uuid:
-        row = _find_by_session(registry, session_uuid)
+        row = _find_by_session(registry, session_uuid, harness)
         if row is not None:
             name = row.name
             resolved_via = "session-fallback"

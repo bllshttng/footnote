@@ -183,6 +183,28 @@ def test_whoami_resolves_codex_via_harness_session_id():
         harness_session_id="THREAD-1",
         codex_session_id="THREAD-1",
     )
-    res = whoami.resolve_self(env={}, registry=[row], session_uuid="THREAD-1")
+    res = whoami.resolve_self(
+        env={}, registry=[row], session_uuid="THREAD-1", harness="codex"
+    )
     assert res.registered
     assert res.name == "c1"
+
+
+def test_whoami_does_not_cross_match_another_harness():
+    """A codex id must NOT resolve a claude row that happens to share the id:
+    session ids are provider-local, so matching is scoped to the row's harness."""
+    from fno.agents import whoami
+
+    claude_row = AgentEntry(
+        name="cl",
+        provider="claude",
+        cwd="/x",
+        log_path="/x/l",
+        harness="claude",
+        harness_session_id="SHARED",
+        claude_session_uuid="SHARED",
+    )
+    res = whoami.resolve_self(
+        env={}, registry=[claude_row], session_uuid="SHARED", harness="codex"
+    )
+    assert not res.registered

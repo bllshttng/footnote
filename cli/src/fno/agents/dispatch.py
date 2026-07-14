@@ -2658,10 +2658,14 @@ def reconcile_agents(
     skipped: list[dict] = []
     errors: list[dict] = []
     backfilled: list[dict] = []
-    # name -> resolved harness_session_id for a live row whose canonical id never
-    # landed (x-ec59). Folded into the SAME batched update_registry write as the
-    # status flips, so no new write cycle or lock scope appears.
-    pending_backfill: dict[str, str] = {}
+    # name -> (probed_claude_short_id, resolved harness_session_id) for a live row
+    # whose canonical id never landed (x-ec59). Folded into the SAME batched
+    # update_registry write as the status flips, so no new write cycle or lock
+    # scope appears. The probed short_id is retained so the write only stamps a row
+    # that STILL matches what we probed: a slow reconcile can race a rm + same-name
+    # re-register, and stamping by name alone would put the old row's claude uuid
+    # onto a replacement (possibly codex/gemini) row and misroute its mail.
+    pending_backfill: dict[str, tuple[Optional[str], str]] = {}
 
     # ``pending_updates`` accumulates per-name status flips across the
     # probe loop; at the end we apply ALL of them via a SINGLE
@@ -2943,7 +2947,7 @@ def reconcile_agents(
                 except Exception:  # noqa: BLE001 — a resolver error is a tolerated miss
                     healed = None
                 if healed:
-                    pending_backfill[entry.name] = healed
+                    pending_backfill[entry.name] = (entry.claude_short_id, healed)
                     backfilled.append(
                         {
                             "name": entry.name,
@@ -3012,12 +3016,16 @@ def reconcile_agents(
                 if e.name in pending_updates:
                     updates["status"] = pending_updates[e.name].status
                 if e.name in pending_backfill:
-                    # Canonical wins: set harness_session_id and sync the legacy
-                    # claude uuid so both readers (canonical-first + legacy) resolve.
-                    hsid = pending_backfill[e.name]
-                    updates["harness_session_id"] = hsid
-                    updates["harness"] = e.harness or e.provider
-                    updates["claude_session_uuid"] = hsid
+                    probed_short, hsid = pending_backfill[e.name]
+                    # Only stamp a row that STILL matches the row we probed: a
+                    # same-name rm+re-register during the probe loop would put this
+                    # claude uuid onto a replacement row (misrouting its mail).
+                    if e.provider == "claude" and e.claude_short_id == probed_short:
+                        # Canonical wins: set harness_session_id and sync the legacy
+                        # claude uuid so both readers resolve.
+                        updates["harness_session_id"] = hsid
+                        updates["harness"] = e.harness or e.provider
+                        updates["claude_session_uuid"] = hsid
                 out.append(replace(e, **updates) if updates else e)
             return out
 
