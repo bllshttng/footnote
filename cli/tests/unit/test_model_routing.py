@@ -454,15 +454,19 @@ def test_codex_route_never_routes_protected_role(role: str) -> None:
 
 def test_codex_route_bails_on_unsafe_provider_name() -> None:
     notes, sink = _collector()
+    # A dot is a valid single non-whitespace token (so _parse_target accepts it)
+    # but is not a safe codex bareword provider id, so resolve_codex_route's own
+    # regex guard is what bails + notices here. (A space in the provider is caught
+    # earlier by _parse_target; see test_parse_target_rejects_internal_whitespace.)
     s = _settings(
         providers={
-            "b ad": {
+            "b.ad": {
                 "protocol": "openai",
                 "base_url": "https://x/v4",
                 "api_key_env": "OPENAI_API_KEY",
             }
         },
-        roles={"tidy": "b ad,glm-5.2"},
+        roles={"tidy": "b.ad,glm-5.2"},
     )
     route = mr.resolve_codex_route(
         "tidy", settings=s, env={"OPENAI_API_KEY": "k"}, notice=sink
@@ -595,3 +599,94 @@ def test_extra_env_compact_window_wins_over_injection() -> None:
     )
     assert route is not None
     assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
+
+
+# ---------------------------------------------------------------------------
+# build lane (x-b0b4): opt-in by config presence, not in DEFAULT_ROUTED_ROLES
+# ---------------------------------------------------------------------------
+
+
+def test_build_lane_unconfigured_returns_none() -> None:
+    # AC2-EDGE precondition: build is NOT auto-routed. With no config line it
+    # resolves None (fail-safe -> primary Anthropic model), byte-identical to
+    # today for a --role build spawn.
+    assert "build" not in mr.DEFAULT_ROUTED_ROLES
+    assert mr.resolve_route("build", settings=_settings(), env={"ZAI_API_KEY": "k"}) is None
+
+
+def test_build_lane_routes_when_configured() -> None:
+    # AC2-HP: writing model_routing.roles.build is the opt-in; a --role build
+    # spawn then gets the full z.ai env block.
+    route = mr.resolve_route(
+        "build",
+        settings=_settings(roles={"build": "zai,glm-5.2"}),
+        env={"ZAI_API_KEY": "zk"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert route["ANTHROPIC_AUTH_TOKEN"] == "zk"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_build_lane_configured_missing_key_fails_safe() -> None:
+    # AC2-EDGE: configured build with no resolvable key falls back to the
+    # primary model (None), a notice names the missing key.
+    notes, sink = _collector()
+    route = mr.resolve_route(
+        "build",
+        settings=_settings(roles={"build": "zai,glm-5.2"}),
+        env={},
+        notice=sink,
+    )
+    assert route is None
+    assert any("ZAI_API_KEY" in n or "no API key" in n for n in notes)
+
+
+def test_build_is_in_known_lane_roles_not_protected() -> None:
+    assert "build" in mr.KNOWN_LANE_ROLES
+    assert "build" not in mr.PROTECTED_ROLES
+
+
+@pytest.mark.parametrize(
+    "raw", ["zai,glm 5.2", "zai,glm\n5.2", "z ai,glm-5.2", "zai,gl\tm"]
+)
+def test_parse_target_rejects_internal_whitespace(raw: str) -> None:
+    # One non-whitespace model token per the route contract; an embedded space
+    # is an invalid id and a newline would corrupt the dispatch receipt line.
+    assert mr._parse_target(raw) is None
+
+
+def test_parse_target_accepts_one_m_suffix() -> None:
+    assert mr._parse_target("zai,glm-5.2[1m]") == ("zai", "glm-5.2[1m]")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("zai/glm-5.2", ("zai", "glm-5.2")),
+        ("zai/glm-5.2[1m]", ("zai", "glm-5.2[1m]")),
+        ("zai-openai/glm-4.6", ("zai-openai", "glm-4.6")),
+        # First slash splits, so a namespaced model id keeps its slashes.
+        ("zai/z-ai/glm-5.2", ("zai", "z-ai/glm-5.2")),
+        # Legacy comma still parses.
+        ("zai,glm-5.2", ("zai", "glm-5.2")),
+    ],
+)
+def test_parse_target_accepts_slash_and_comma(raw: str, expected: tuple) -> None:
+    assert mr._parse_target(raw) == expected
+
+
+def test_build_lane_routes_when_configured_with_slash() -> None:
+    route = mr.resolve_route(
+        "build",
+        settings=_settings(roles={"build": "zai/glm-5.2"}),
+        env={"ZAI_API_KEY": "zk"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_route_table_target_uses_slash() -> None:
+    rows = mr.build_route_table(settings=_settings(), env={"ZAI_API_KEY": "k"})
+    by_role = {r["role"]: r for r in rows}
+    assert by_role["coordinate"]["provider_model"] == "zai/glm-5.2"

@@ -11,16 +11,23 @@
 # Usage:
 #   dispatch-node.sh <node-id...> [--flags "<extra /target flags>"]
 #                                 [--allow-merge] [--max N] [--dry-run] [--here]
-#                                 [--permission-mode <mode>]
+#                                 [--permission-mode <mode>] [--route provider/model]
 #   dispatch-node.sh --all-ready  [--flags "..."] [--allow-merge] [--max N] [--dry-run] [--here]
-#                                 [--permission-mode <mode>]
+#                                 [--permission-mode <mode>] [--route provider/model]
+#
+# --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
+#   to every worker spawn. Fails CLOSED in the spawn (unknown/non-anthropic/
+#   keyless refuses -> the node stays dispatchable). Wins over the build lane.
+#   Every worker also carries --role build unconditionally: the build lane is a
+#   fail-safe no-op until `fno route set build ...` opts in, so this is
+#   byte-identical to today until configured.
 #
 # --here / --in-place: keep a worker without a recorded node cwd in the
 #   dispatcher's cwd. Default (no node cwd) is --fresh: start from canonical
 #   main so a dispatch from a linked worktree does not inherit that worktree.
 #
 # Per-node outcome lines (stdout; one per node; NEVER silent):
-#   launched         <node> name=<agent> session=<sid> hint="fno agents logs <agent>"
+#   launched         <node> name=<agent> session=<sid> cwd=<path> hint="fno agents logs <agent>" route=<provider/model|primary>
 #   already-running  <node> reason="live target worker holds node:<id> (<holder>)"
 #   skipped-contested <node> reason="suspect claim (respawned worker); advancing" (x-ba4b)
 #   parked           <node> reason="blocked|deferred|<status> (not up-next)"
@@ -75,6 +82,7 @@ MAX=0          # 0 => no cap (quota is the throttle; do not invent a hard cap)
 DRY_RUN=0
 HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of --fresh)
 PERMISSION_MODE=""  # x-dfa4: forwarded as --permission-mode to each worker spawn
+ROUTE=""       # x-b0b4: per-dispatch explicit provider,model route (fail-closed)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -85,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)    DRY_RUN=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
+    --route)      [[ $# -ge 2 ]] || { echo "failed: --route reason=\"requires a provider/model value\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; ROUTE="$2"; shift 2 ;;
     --) shift; while [[ $# -gt 0 ]]; do NODES+=("$1"); shift; done ;;
     -*) echo "failed: $1 reason=\"unknown flag\"" >&2; exit 2 ;;
     *)  NODES+=("$1"); shift ;;
@@ -243,6 +252,35 @@ for id in "${NODES[@]}"; do
   perm_args=()
   [[ -n "$PERMISSION_MODE" ]] && perm_args=("--permission-mode" "$PERMISSION_MODE")
 
+  # x-b0b4: every worker rides the build lane unconditionally (same array
+  # discipline). resolve_route returns None for an unconfigured `build`, so this
+  # is byte-identical to today until `fno route set build ...` opts in - no
+  # config read in bash, no conditional. An explicit --route (fail-closed in the
+  # spawn) is forwarded per-dispatch and wins over the lane.
+  role_args=("--role" "build")
+  route_args=()
+  [[ -n "$ROUTE" ]] && route_args=("--route" "$ROUTE")
+  # Receipt route= token, resolved PER NODE (not once before the loop) so a
+  # `route set`/`unset` racing a bulk dispatch is stamped per worker, never
+  # inferred from a stale run-start snapshot (codex P2; plan's per-worker
+  # provenance invariant). Explicit --route wins. Otherwise the AUTHORITATIVE
+  # build-lane predicate is `fno route env build`: it runs the same
+  # resolve_route('build') the worker's bg_create uses, so it catches every
+  # fall-safe-to-primary reason (model_routing.enabled=false, a keyed but
+  # non-anthropic provider) that a target+key table heuristic would miss. env
+  # exits 0 only when a real route resolves; `route ls -J` then supplies the
+  # provider,model string. A stale `fno` without the verb (or any failure) leaves
+  # `primary` - the honest conservative claim (routing not confirmed).
+  if [[ -n "$ROUTE" ]]; then
+    route_val="$ROUTE"
+  else
+    route_val="primary"
+    if fno route env build >/dev/null 2>&1; then
+      _bpm="$(fno route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .provider_model' 2>/dev/null || true)"
+      [[ -n "$_bpm" && "$_bpm" != "unconfigured" ]] && route_val="$_bpm"
+    fi
+  fi
+
   # ---- Guards 1+2 via the shared spawn-guard verb (x-73cc) ----
   # The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
   # reservation (Guard 2) live in `fno agents spawn-guard` so this path and
@@ -358,7 +396,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\""
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}--role build ${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${PERMISSION_MODE:+--permission-mode $PERMISSION_MODE }$agent_name '$tgt_cmd'\" route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -410,7 +448,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
@@ -420,16 +458,16 @@ for id in "${NODES[@]}"; do
       # may not shell out to a repo-root script (shellout-drift gate).
       _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
       [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --provider claude --substrate bg "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg "${role_args[@]}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then
@@ -462,7 +500,7 @@ for id in "${NODES[@]}"; do
   fi
   # Launched. Leave the reservation to expire by TTL (the worker now owns
   # node:<id>, which guards later dispatches).
-  echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\""
+  echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\" route=${route_val}"
   n_launched=$((n_launched + 1))
 done
 

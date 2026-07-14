@@ -6,6 +6,12 @@ consolidation) is routed to a *secondary* model provider (z.ai GLM, DeepSeek,
 diff, the correctness verdict) stays on the primary Anthropic model,
 byte-for-byte as today.
 
+The ``build`` lane extends the same mechanism to *delivery* spawns (``/target
+bg`` + blueprint autolaunch). It is opt-in by config presence: unconfigured it
+routes nothing (fail-safe ``None``); writing ``model_routing.roles.build`` is
+the consent. ``build`` is not in :data:`DEFAULT_ROUTED_ROLES` but is named in
+:data:`KNOWN_LANE_ROLES` so ``fno route ls`` renders it even before it is set.
+
 Mechanism (Locked Decision 2): a spawn stamps ``ANTHROPIC_BASE_URL`` +
 ``ANTHROPIC_AUTH_TOKEN`` + the model env vars into the worker env. No proxy in
 the critical path; each worker is a fresh process, so switching base_url per
@@ -90,6 +96,15 @@ DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate", "post-mer
 # correctness verdict). Hard guard, enforced before any config is read.
 PROTECTED_ROLES = frozenset({"implement", "review-verdict"})
 
+# Routable lanes that are part of the known vocabulary but are NOT auto-routed
+# by default: config presence is the opt-in (writing model_routing.roles.build
+# IS the consent). `_role_target` already resolves any config-present name, so
+# these need no resolution-path change; they exist so `fno route ls` can render
+# a lane that has no config line yet (an unconfigured `build` row) instead of
+# hiding it. `build` is the sanctioned delivery lane for /target bg + blueprint
+# autolaunch; unconfigured it fails safe to the primary Anthropic model.
+KNOWN_LANE_ROLES = ("build",)
+
 # Every tier Claude Code may request internally. Setting all of them to the
 # routed model keeps the entire worker (incl. background haiku) on the secondary
 # provider, so zero Anthropic usage is recorded.
@@ -112,13 +127,37 @@ def _normalize(role: Optional[str]) -> str:
 
 
 def _parse_target(raw: str) -> Optional[tuple[str, str]]:
-    """Parse a ``"provider,model"`` role value into (provider, model).
+    """Parse a ``"provider/model"`` (or legacy ``"provider,model"``) target into
+    (provider, model).
+
+    Slash is the canonical, ecosystem-standard form (``zai/glm-5.2[1m]``); comma
+    is still accepted for the existing peer-lane / built-in values and any config
+    written before the switch, so nothing already configured breaks. A comma, if
+    present, wins as the separator (it never appears inside a model id, so it is
+    unambiguous); otherwise the FIRST slash splits, which keeps a namespaced model
+    id intact (``zai/z-ai/glm-5.2`` -> provider ``zai``, model ``z-ai/glm-5.2``).
 
     Returns None for a malformed value (fail-safe; caller degrades to primary)."""
-    parts = [p.strip() for p in raw.split(",")]
-    if len(parts) != 2 or not parts[0] or not parts[1]:
+    raw = raw.strip()
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) != 2:
+            return None
+        provider, model = parts
+    else:
+        provider, found, model = raw.partition("/")
+        if not found:
+            return None
+        provider, model = provider.strip(), model.strip()
+    if not provider or not model:
         return None
-    return parts[0].lower(), parts[1]
+    # Reject INTERNAL whitespace (a space or newline inside a token): the
+    # contract is one non-whitespace model token, an embedded space yields an
+    # invalid model id and a newline would corrupt the line-oriented dispatch
+    # receipt. Outer whitespace was already stripped above.
+    if any(c.isspace() for c in provider) or any(c.isspace() for c in model):
+        return None
+    return provider.lower(), model
 
 
 def _key_from_env_file(path_str: str, key_name: str) -> Optional[str]:
@@ -158,6 +197,35 @@ def _resolve_key(
     if key_file and key_name:
         return _key_from_env_file(key_file, key_name)
     return None
+
+
+def key_source(
+    provider: Mapping[str, Optional[str]], env: Optional[Mapping[str, str]] = None
+) -> tuple[Optional[str], list[str]]:
+    """Report WHERE a provider's key resolved, never the key value itself.
+
+    Returns ``(satisfying, checked)``: ``satisfying`` is the env-var name or the
+    file path that yielded a key (``None`` when missing); ``checked`` lists every
+    source consulted, in precedence order, for a legible ``MISSING (checked ...)``
+    message. Same env-beats-file precedence as :func:`_resolve_key`; used by
+    ``fno route ls`` so the key column names its source without leaking secrets.
+    """
+    if env is None:
+        import os
+
+        env = os.environ
+    checked: list[str] = []
+    key_name = provider.get("api_key_env") or ""
+    if key_name:
+        checked.append(key_name)
+        if env.get(key_name):
+            return key_name, checked
+    key_file = provider.get("api_key_file")
+    if key_file and key_name:
+        checked.append(str(key_file))
+        if _key_from_env_file(str(key_file), key_name):
+            return str(key_file), checked
+    return None, checked
 
 
 def resolve_route(
@@ -521,3 +589,134 @@ def _resolve_provider(
         merged.update(_provider_to_dict(rec))
         providers[name] = merged
     return providers.get(pname)
+
+
+def effective_providers(
+    block: "ModelRoutingBlock",
+) -> dict[str, dict[str, Optional[str]]]:
+    """Public: the merged built-in + config providers map (config wins per field).
+
+    Used by ``fno route ls`` (render) and ``fno route set`` (reject a target
+    naming a provider absent from this map) so provider knowledge lives in one
+    place."""
+    providers: dict[str, dict[str, Optional[str]]] = {
+        name: dict(rec) for name, rec in _DEFAULT_PROVIDERS.items()
+    }
+    for name, rec in (getattr(block, "providers", None) or {}).items():
+        merged = dict(providers.get(name, {}))
+        merged.update(_provider_to_dict(rec))
+        providers[name] = merged
+    return providers
+
+
+# Static provenance: which auto-dispatch surface passes each role. Everything
+# not named here is "manual only" (a role reachable only by an explicit --role).
+AUTO_ASSIGNED_BY: dict[str, str] = {
+    "post-merge": "pr_watch post-merge dispatch",
+    "codex-verify": "codex verify lane",
+    "build": "/target bg + blueprint autolaunch",
+}
+
+
+def build_route_table(
+    *,
+    settings: "Optional[SettingsModel]" = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> list[dict[str, str]]:
+    """The effective routing table, one row per role, for ``fno route ls``.
+
+    Merges built-in roles/providers with config overrides. Each row is the
+    canonical 5-field shape: ``role | provider_model | protocol | key | assigned_by``
+    (AC1-UI). Protected roles render as explicit never-routed rows; a known lane
+    with no config line (``build``) renders as unconfigured. Degrades a missing
+    key to ``MISSING (checked ...)`` rather than raising, so an unreadable/absent
+    ``.env`` never errors the whole table (AC-degraded). Never raises.
+    """
+    if env is None:
+        import os
+
+        env = os.environ
+    block = _routing_block(settings)
+    eff = _effective_roles(block)
+    config_roles = {
+        str(k).strip().lower() for k in (getattr(block, "roles", None) or {})
+    }
+
+    names: list[str] = []
+    for r in (*DEFAULT_ROUTED_ROLES, *KNOWN_LANE_ROLES, *sorted(config_roles), *sorted(PROTECTED_ROLES)):
+        if r not in names:
+            names.append(r)
+
+    def _provenance(role: str, source: str) -> str:
+        return f"{AUTO_ASSIGNED_BY.get(role, 'manual only')} ({source})"
+
+    rows: list[dict[str, str]] = []
+    for role in names:
+        if role in PROTECTED_ROLES:
+            rows.append(
+                {
+                    "role": role,
+                    "provider_model": "never routed (hard guard)",
+                    "protocol": "-",
+                    "key": "-",
+                    "assigned_by": "protected (hard guard)",
+                }
+            )
+            continue
+        source = "config" if role in config_roles else (
+            "built-in" if role in DEFAULT_ROUTED_ROLES else "known lane"
+        )
+        raw = eff.get(role)
+        if not raw:
+            rows.append(
+                {
+                    "role": role,
+                    "provider_model": "unconfigured",
+                    "protocol": "-",
+                    "key": "-",
+                    "assigned_by": _provenance(role, "unconfigured"),
+                }
+            )
+            continue
+        parsed = _parse_target(str(raw))
+        if parsed is None:
+            rows.append(
+                {
+                    "role": role,
+                    "provider_model": f"{raw} (malformed)",
+                    "protocol": "-",
+                    "key": "-",
+                    "assigned_by": _provenance(role, source),
+                }
+            )
+            continue
+        pname, model = parsed
+        provider = _resolve_provider(pname, block)
+        if provider is None:
+            rows.append(
+                {
+                    "role": role,
+                    "provider_model": f"{pname}/{model}",
+                    "protocol": "unknown provider",
+                    "key": "-",
+                    "assigned_by": _provenance(role, source),
+                }
+            )
+            continue
+        protocol = (provider.get("protocol") or "anthropic").lower()
+        satisfying, checked = key_source(provider, env)
+        key_status = (
+            f"found via {satisfying}"
+            if satisfying
+            else f"MISSING (checked {', '.join(checked) or 'nothing'})"
+        )
+        rows.append(
+            {
+                "role": role,
+                "provider_model": f"{pname}/{model}",
+                "protocol": protocol,
+                "key": key_status,
+                "assigned_by": _provenance(role, source),
+            }
+        )
+    return rows

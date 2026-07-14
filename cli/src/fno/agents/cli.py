@@ -370,10 +370,24 @@ def cmd_spawn(
         "-r",
         help=(
             "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
-            "roles (coordinate|tidy|orient|consolidate) route to a secondary "
-            "provider (z.ai GLM by default) when a key is configured; production "
-            "roles (implement|review-verdict) and the default (no --role) stay "
-            "on the primary Anthropic model."
+            "roles (coordinate|tidy|orient|consolidate|post-merge) and the "
+            "delivery lane (build) route to a secondary provider (z.ai GLM by "
+            "default) when configured; the build lane is opt-in by config "
+            "presence (set model_routing.roles.build). Production roles "
+            "(implement|review-verdict) and the default (no --role) stay on the "
+            "primary Anthropic model."
+        ),
+    ),
+    route: str | None = typer.Option(
+        None,
+        "--route",
+        help=(
+            "Explicit per-dispatch model route as provider/model (e.g. "
+            "zai/glm-5.2; legacy comma zai,glm-5.2 also accepted). Bypasses the "
+            "--role table and guard (explicit intent "
+            "is not auto-routing) and wins over any configured lane. FAILS CLOSED: "
+            "an unknown provider, non-anthropic protocol, or missing key refuses "
+            "the spawn - never a silent primary-model launch. claude only."
         ),
     ),
     model: str | None = typer.Option(
@@ -651,6 +665,43 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    # Explicit --route override (x-b0b4). Resolve + FAIL CLOSED here, BEFORE the
+    # gate, so a refusal spawns nothing, acquires no gate slot, and leaves the
+    # node dispatchable. resolve_explicit_route bypasses the role table + guard
+    # (explicit intent) and returns None for unknown/non-anthropic/keyless - which
+    # for --route is a hard refusal, not the role lane's silent fallback.
+    route_env: dict[str, str] | None = None
+    if route is not None:
+        if provider != "claude" or substrate != "bg":
+            print(
+                "--route is claude + --substrate bg only (the delivery-dispatch "
+                f"lane); got provider {provider!r} substrate {substrate!r}.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        from fno.agents.model_routing import _parse_target, resolve_explicit_route
+
+        parsed = _parse_target(route)
+        if parsed is None:
+            print(
+                f"--route must be 'provider,model' with a non-empty model token; "
+                f"got {route!r}",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        notes: list[str] = []
+        route_env = resolve_explicit_route(
+            parsed[0], parsed[1], notice=notes.append
+        )
+        if not route_env:
+            reason = "; ".join(notes) or "provider unknown, non-anthropic, or keyless"
+            print(
+                f"--route {route!r} refused ({reason}); no worker launched, node "
+                "stays dispatchable.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
     # that reaches cmd_spawn (the front door execs the binary for bg/headless,
@@ -729,6 +780,7 @@ def cmd_spawn(
                 from_name=from_name,
                 yolo=yolo,
                 role=role,
+                route_env=route_env,
                 model=model,
                 permission_mode=permission_mode,
                 effort=effort,
