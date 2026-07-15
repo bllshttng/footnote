@@ -84,3 +84,51 @@ def test_marker_does_not_false_match_other_pr(tmp_path: Path) -> None:
     inbox.write_text("<!-- post-merge:pr-123 -->\n", encoding="utf-8")
     assert _run(str(inbox), "12").returncode == 1
     assert _run(str(inbox), "123").returncode == 0
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True)
+
+
+def test_canonical_root_derivation_finds_marker_across_cwd(tmp_path: Path) -> None:
+    """AC2-HP / AC5-FR: the marker written at the CANONICAL parking-lot path is
+    found when merged.md derives CANON_ROOT (git --git-common-dir) from a worktree
+    cwd, whereas the OLD worktree-root join misses it - the regression x-071c closes.
+
+    The failure precondition is a lane worktree WITHOUT the `internal/` symlink
+    (a bg-healed lane): a worktree-root join lands on a nonexistent lane-local
+    file, so the belt-and-braces sees no marker and re-runs the destructive ritual.
+    """
+    canon = tmp_path / "canon"
+    canon.mkdir()
+    _git("init", "-q", cwd=canon)
+    _git("config", "user.email", "t@t", cwd=canon)
+    _git("config", "user.name", "t", cwd=canon)
+    _git("commit", "--allow-empty", "-qm", "init", cwd=canon)
+
+    rel = "internal/parking-lot.md"
+    (canon / "internal").mkdir()
+    (canon / rel).write_text(
+        "<!-- post-merge:pr-777 -->\n## Post-merge follow-ups - PR #777\n",
+        encoding="utf-8",
+    )
+
+    # A linked worktree that does NOT carry the canonical `internal/` symlink.
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(wt), "-b", "feature/x", cwd=canon)
+    assert not (wt / rel).exists()  # the failure precondition the fix addresses
+
+    # merged.md's CANON_ROOT derivation, run FROM the worktree cwd.
+    derive = (
+        'GCD="$(git rev-parse --path-format=absolute --git-common-dir)"; '
+        'printf %s "$(dirname "$GCD")"'
+    )
+    canon_root = subprocess.run(
+        ["bash", "-c", derive], cwd=str(wt), capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert Path(canon_root).resolve() == canon.resolve()
+
+    # Canonical-derived path -> marker found (exit 0).
+    assert _run(f"{canon_root}/{rel}", "777").returncode == 0
+    # OLD worktree-root join -> marker missed (exit 1): the bug the fix removes.
+    assert _run(f"{wt}/{rel}", "777").returncode == 1
