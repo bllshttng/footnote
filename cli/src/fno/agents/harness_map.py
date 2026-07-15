@@ -335,14 +335,17 @@ def resolve_dispatch(
 
     if not template:
         raise DispatchResolveError("resolved command is empty")
-    # Single normalization seam (x-f0e2): a template that leads with `/` is
-    # canonical claude slash syntax on EVERY rung - normalize it once here, per
-    # the chosen harness, before `{id}` substitution. This is what makes the
-    # config and explicit rungs stop handing a codex worker a raw `/target` (or a
-    # prose harness a no-op slash string). Non-slash templates (harness-native
-    # `$fno:...`, custom prose) pass through untouched. Idempotent over the
-    # builtin/verb rungs' output, so it never double-prefixes.
-    if template.startswith("/"):
+    # Single normalization seam (x-f0e2): a footnote slash command (`/verb ...`)
+    # is canonical claude syntax on EVERY rung - normalize it once here, per the
+    # chosen harness, before `{id}` substitution. This stops the config and
+    # explicit rungs handing a codex worker a raw `/target` (or a prose harness a
+    # no-op slash string). Gate on the FIRST word being a single slash-led token
+    # with no internal slash: that admits `/target`/`/think`/`/custom` but NOT an
+    # absolute-path template like `/usr/bin/script {id}`, which must pass through
+    # literally. Non-slash templates (`$fno:...`, prose) also pass through, and
+    # the call is idempotent over the builtin/verb rungs' output.
+    first_word = template.split(maxsplit=1)[0]
+    if first_word.startswith("/") and "/" not in first_word[1:]:
         template = normalize_command(template, chosen_harness)
         decision.append(f"command=normalized({chosen_harness})")
     if node_id:

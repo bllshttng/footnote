@@ -161,6 +161,18 @@ def test_config_non_slash_prose_template_untouched():
         ] == "implement node x-9 and open a PR"
 
 
+def test_config_absolute_path_template_untouched():
+    """An absolute-path template leads with `/` but is NOT a footnote slash
+    command (its first word carries internal slashes), so it must pass through
+    literally on every harness - never rewritten to `$fno:usr/...` on codex or
+    rejected on a prose harness."""
+    cfg = {"command": "/usr/bin/custom-script {id}"}
+    for h in ("opencode", "gemini", "codex", "claude"):
+        assert resolve_dispatch(harness=h, node_id="x-9", dispatch_cfg=cfg)[
+            "command"
+        ] == "/usr/bin/custom-script x-9"
+
+
 def test_config_already_native_template_not_double_prefixed():
     """AC2-EDGE: an already-codex-native `$fno:` template is not slash-leading,
     so it passes through unchanged - normalization is idempotent."""
