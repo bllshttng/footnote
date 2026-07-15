@@ -483,7 +483,11 @@ async fn run(args: Vec<String>) -> i32 {
             // explicit --cwd intact.
             let (_fresh, here) = fresh_here_flags(&params);
             let explicit_cwd = params.get("cwd").is_some();
-            let stamp = if !explicit_cwd && !here {
+            // Only spawn consumes the launch dir: an `agent.ask` follows its
+            // registered session and takes cwd as `_cwd`, so it never takes the
+            // canonical default nor the redirect note (a false diagnostic for a
+            // non-consuming op -- x-85fe review). spawn keeps the inverted default.
+            let stamp = if !explicit_cwd && !here && method == "agent.spawn" {
                 match fno_agents::paths::canonical_repo_root(&caller) {
                     Some(canon) => {
                         note_fresh_redirect(&caller, &canon);
@@ -595,14 +599,20 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
         .get("from_name")
         .and_then(|v| v.as_str())
         .unwrap_or("abilities");
-    // Resolve cwd to an absolute path before it reaches the registry row, so a
-    // relative --cwd (e.g. ".") isn't later re-normalized against a *listing*
-    // process's directory and mis-bucketed under the wrong project (Codex P2).
-    // resolve_dispatch_cwd canonicalizes an explicit --cwd (Python's
-    // `Path(cwd).resolve()`) and honors --here (x-85fe): --cwd > --here (caller)
-    // > default canonical. ask has no receipt cwd field, so the move flag is
-    // unused here.
-    let (cwd, _moved) = resolve_dispatch_cwd(params);
+    // ask is a follow-up to an already-registered session: dispatch_claude_ask
+    // takes the cwd as `_cwd` and never launches in it. So resolve only an
+    // explicit --cwd (canonicalized, Python's `Path(cwd).resolve()`; empty is
+    // absent) or the caller cwd -- NEVER the canonical default or the redirect
+    // note, which would be a false diagnostic for an operation that does not
+    // consume the launch dir (x-85fe review).
+    let cwd = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(canonicalize_cwd)
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
     let timeout = params
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -1803,6 +1813,11 @@ fn resolve_dispatch_cwd(params: &Value) -> (std::path::PathBuf, bool) {
     let explicit = params
         .get("cwd")
         .and_then(|v| v.as_str())
+        // An empty --cwd is absent, never the empty-string path (Failure Modes >
+        // Boundaries; Python's `if cwd:` twin). Without this, canonicalize_cwd("")
+        // resolves to the caller dir and suppresses the canonical default -- the
+        // exact worktree leak this change prevents (x-85fe review).
+        .filter(|s| !s.is_empty())
         .map(canonicalize_cwd);
     let (fresh, here) = fresh_here_flags(params);
     // Default path (no explicit --cwd, no --here) resolves canonical; --fresh is

@@ -1930,11 +1930,14 @@ pub fn dispatch_claude_spawn(
     // x-85fe: append the effective launch dir on the default canonical move
     // (surface_cwd, decided by the caller alongside the redirect note), so the
     // move is legible in the receipt too. LAST key, so an unmoved / explicit-cwd
-    // receipt is byte-identical (Python cmd_spawn parity, AC1-EDGE).
+    // receipt is byte-identical (Python cmd_spawn parity, AC1-EDGE). Full
+    // JSON-string encode (not just `"`-escape): a repo path may carry a backslash
+    // or control char that would otherwise produce invalid JSON receipt consumers
+    // fail to parse (review); json_string_ascii matches Python's json.dumps.
     let cwd_field = if surface_cwd {
         format!(
-            r#", "cwd": "{}""#,
-            cwd.display().to_string().replace('"', "\\\"")
+            ", \"cwd\": {}",
+            json_string_ascii(&cwd.display().to_string())
         )
     } else {
         String::new()

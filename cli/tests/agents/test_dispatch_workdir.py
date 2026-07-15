@@ -59,6 +59,18 @@ def test_here_keeps_caller(monkeypatch, capsys):
     assert "dispatching from canonical main" not in capsys.readouterr().err
 
 
+def test_empty_cwd_is_absent(monkeypatch, capsys):
+    # An empty --cwd is absent, never the empty-string path (Failure Modes >
+    # Boundaries) -> falls through to the canonical default. The Rust twin
+    # (resolve_dispatch_cwd) filters the empty string for the same reason
+    # (x-85fe review; codex #2).
+    monkeypatch.setattr(os, "getcwd", lambda: "/worktree")
+    monkeypatch.setenv("FNO_REPO_ROOT", "/canonical")
+    got = _resolve_dispatch_workdir("", fresh=False, here=False)
+    assert got == Path("/canonical").resolve()
+    assert "dispatching from canonical main" in capsys.readouterr().err
+
+
 def test_fresh_is_noop_alias(monkeypatch):
     # --fresh survives as an accepted no-op alias: identical to passing nothing
     # (AC2-EDGE), the default already being canonical.

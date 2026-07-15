@@ -840,11 +840,13 @@ def cmd_spawn(
             if eff_mode
             else ""
         )
-        # x-85fe: append the effective cwd only when the default (or --cwd)
-        # moved the worker off the caller. Escape `"` defensively; the field is
-        # LAST so an unmoved receipt is byte-identical (Rust claude_ask parity).
+        # x-85fe: append the effective cwd only on the default move. json.dumps
+        # (not a bare `"`-escape) so a path with a backslash or control char stays
+        # valid JSON for receipt consumers (review); it matches Rust's
+        # json_string_ascii byte-for-byte. LAST field so an unmoved receipt is
+        # byte-identical.
         cwd_field = (
-            f', "cwd": "{_moved_cwd.replace(chr(34), chr(92) + chr(34))}"'
+            f", \"cwd\": {json.dumps(_moved_cwd)}"
             if _moved_cwd is not None
             else ""
         )
@@ -1120,7 +1122,11 @@ def cmd_ask(
         resolve_to_project,
     )
 
-    workdir = _resolve_dispatch_workdir(cwd, fresh, here)
+    # ask is a follow-up to an existing session and never launches in workdir, so
+    # it stays in the caller cwd (here=True): never the canonical default nor the
+    # redirect note, which would be a false diagnostic for a non-consuming op
+    # (x-85fe review). An explicit --cwd still wins inside the resolver.
+    workdir = _resolve_dispatch_workdir(cwd, fresh, here=True)
 
     # Project mode: resolve to a single live peer, then ask by name. The message
     # is the sole positional, so it may land in the `name` slot.
