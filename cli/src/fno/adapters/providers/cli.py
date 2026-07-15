@@ -80,7 +80,7 @@ def list_providers(
     config = _load()
     slot_active: dict[str, Optional[str]] = {}  # per-CLI slot occupant, read once
 
-    def _is_active(record) -> bool:
+    def _is_active(record: ProviderRecord) -> bool:
         # For managed accounts the meaningful "active" is which one is
         # materialized in that CLI's slot; fall back to routing-active otherwise.
         if record.auth == "managed":
@@ -1101,11 +1101,11 @@ def combos_use(
 @combos_cli.command("update")
 def combos_update(
     name: str = typer.Argument(..., help="Existing combo to update (must exist)"),
-    strategy: str = typer.Option(
-        "fallback", "--strategy", help="Rotation strategy: fallback | round_robin"
+    strategy: Optional[str] = typer.Option(
+        None, "--strategy", help="Rotation strategy: fallback | round_robin (unset = keep current)"
     ),
-    sticky_limit: int = typer.Option(
-        1, "--sticky", help="round_robin only: calls per provider before advancing"
+    sticky_limit: Optional[int] = typer.Option(
+        None, "--sticky", help="round_robin calls per provider (unset = keep current)"
     ),
     providers_csv: str = typer.Option(
         ..., "--providers", help="Comma-separated provider IDs (the new ordered members)"
@@ -1119,6 +1119,10 @@ def combos_update(
     combo. Reordering members changes compute_providers_hash, so the stored
     round-robin cursor is invalidated (read_cursor returns None on the new hash)
     without any explicit reset here.
+
+    ``--strategy``/``--sticky`` default to the combo's CURRENT values when
+    omitted, so a pure reorder (the UI's common case) never silently rewrites a
+    round_robin combo to fallback/1.
     """
     from fno.adapters.providers.loader import atomic_mutate_settings
     from fno.adapters.providers.rotation import Combo
@@ -1138,32 +1142,37 @@ def combos_update(
         )
         raise typer.Exit(1)
 
-    try:
-        Combo(
-            name=name,
-            strategy=strategy,  # type: ignore[arg-type]
-            sticky_limit=sticky_limit,
-            providers=tuple(providers_list),
-        )
-    except ValueError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(1)
-
     target = _combos_settings_path(scope)
+    applied: dict[str, object] = {}
 
     def mutator(data: dict) -> dict:
         providers_section = data.setdefault("providers", {})
         combos_section = providers_section.setdefault("combos", {})
-        if name not in combos_section:
+        existing = combos_section.get(name)
+        if existing is None:
             raise ValueError(
                 f"combo {name!r} not found in {scope} settings; "
                 "use `combos add` to create it"
             )
+        # Inherit the current strategy/sticky when the flag is omitted, so a
+        # reorder preserves round_robin/sticky instead of defaulting them away.
+        eff_strategy = strategy if strategy is not None else existing.get("strategy", "fallback")
+        eff_sticky = (
+            sticky_limit if sticky_limit is not None else existing.get("sticky_limit", 1)
+        )
+        # Validate the resolved combo (raises ValueError, aborting the write).
+        Combo(
+            name=name,
+            strategy=eff_strategy,  # type: ignore[arg-type]
+            sticky_limit=eff_sticky,
+            providers=tuple(providers_list),
+        )
         combos_section[name] = {
-            "strategy": strategy,
-            "sticky_limit": sticky_limit,
+            "strategy": eff_strategy,
+            "sticky_limit": eff_sticky,
             "providers": providers_list,
         }
+        applied.update(strategy=eff_strategy, sticky_limit=eff_sticky)
         return data
 
     try:
@@ -1176,6 +1185,6 @@ def combos_update(
         raise typer.Exit(1)
 
     typer.echo(
-        f"Combo {name!r} updated (strategy={strategy}, sticky={sticky_limit}, "
-        f"providers={providers_list}, scope={scope})."
+        f"Combo {name!r} updated (strategy={applied['strategy']}, "
+        f"sticky={applied['sticky_limit']}, providers={providers_list}, scope={scope})."
     )

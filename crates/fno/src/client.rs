@@ -995,10 +995,11 @@ impl View {
             cv.gen = self.conn_gen;
             cv.state = crate::connections_view::ModalState::Loading;
             cv.notice = None;
-            // A manual refresh supersedes any in-flight mutation: its result now
-            // carries a stale gen and will be dropped, so clear the single-flight
-            // guard here or the modal would wedge on "busy" forever.
-            cv.acting = false;
+            // NB: do NOT clear `acting` here. A manual R during an in-flight
+            // mutation must keep the single-flight guard up until the subprocess
+            // actually exits, or a second use/register/update could overlap the
+            // first and race two config/credential writes. The action-result arm
+            // clears `acting` unconditionally on completion, so R can't wedge it.
         }
         self.conn_want = true;
     }
@@ -4046,9 +4047,15 @@ async fn attach_and_run(
                 }
             }
             Some((gen, result, is_login)) = conn_act_rx.recv() => {
-                // x-84d7: a mutation/login verb finished. Under the gen guard,
-                // surface its notice and re-read so the modal shows current truth
-                // (never optimistic local state). A stale/closed result is dropped.
+                // x-84d7: a mutation/login verb finished. Clear the single-flight
+                // guard UNCONDITIONALLY (the subprocess has exited, whatever the
+                // modal's read-gen), so a manual R during the mutation can never
+                // wedge `acting` on nor let a second write overlap this one. The
+                // notice + re-read are still gen-guarded: a stale/closed result
+                // shows nothing (never optimistic state).
+                if let Some(cv) = view.connections.as_mut() {
+                    cv.acting = false;
+                }
                 if gen == view.conn_gen && view.connections.is_some() {
                     if let Some(cv) = view.connections.as_mut() {
                         if is_login {
@@ -4058,7 +4065,7 @@ async fn attach_and_run(
                                 cv.notice = Some(result.msg);
                             }
                         } else {
-                            cv.apply_action_result(result.ok, result.msg);
+                            cv.notice = Some(result.msg);
                         }
                     }
                     view.rearm_connections_read();

@@ -991,6 +991,33 @@ class TestCombosUpdate:
         assert result.exit_code != 0
         assert "ghost" in result.output
 
+    def test_update_preserves_strategy_when_omitted(self, combos_cli_env: Path):
+        """A pure reorder must NOT silently rewrite round_robin -> fallback."""
+        _invoke(
+            [
+                "combos", "add", "main",
+                "--strategy", "round_robin",
+                "--sticky", "3",
+                "--providers", "claude-primary,gemini-backup",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        # Reorder only: no --strategy/--sticky.
+        result = _invoke(
+            [
+                "combos", "update", "main",
+                "--providers", "gemini-backup,claude-primary",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        assert result.exit_code == 0, result.output
+        combo = tomllib.loads(
+            (combos_cli_env / ".fno" / "config.toml").read_text()
+        )["providers"]["combos"]["main"]
+        assert combo["strategy"] == "round_robin"  # preserved
+        assert combo["sticky_limit"] == 3           # preserved
+        assert combo["providers"] == ["gemini-backup", "claude-primary"]
+
     def test_update_can_change_strategy(self, combos_cli_env: Path):
         """--strategy on update replaces the stored strategy."""
         _invoke(

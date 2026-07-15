@@ -14,6 +14,10 @@
 use serde::Deserialize;
 use std::time::Duration;
 
+// Reuse the server's `fno` binary resolver ($FNO_BIN, else the running exe) so
+// the modal's shell-outs and the server never drift (PR #421 review).
+use crate::server::fno_bin;
+
 /// Fail-open budget for a read shell-out, matching the needs/digest overlays: a
 /// read slower than this degrades the modal with a visible banner (AC2-ERR),
 /// never blocks the UI loop.
@@ -204,6 +208,21 @@ pub fn valid_account_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// Expand a leading `~/` to the home dir. `env`/exec do NOT expand `~`, so a
+/// literal `~/.claude-<id>` in `CLAUDE_CONFIG_DIR` would resolve against the
+/// spawned process's cwd, not `$HOME`. Pure (home injected) for testability;
+/// falls back to the input verbatim when there is no `~/` prefix or no home.
+pub fn expand_tilde(path: &str, home: Option<&std::ffi::OsStr>) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(h) = home {
+            let mut p = std::path::PathBuf::from(h);
+            p.push(rest);
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 /// A pending destructive action awaiting the operator's one-key confirm. `label`
 /// is shown in the footer prompt; `argv` is what Enter runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,15 +322,6 @@ impl ConnectionsView {
     /// The account the Accounts-tab cursor is on, if any.
     pub fn selected_account(&self) -> Option<&Account> {
         self.accounts.get(self.acct_sel)
-    }
-
-    /// Apply a mutation's result: clear the single-flight guard and surface the
-    /// outcome as a footer notice. The caller arms the re-read separately so the
-    /// modal always shows current truth after a mutation (Locked Decision 5).
-    pub fn apply_action_result(&mut self, ok: bool, msg: String) {
-        self.acting = false;
-        self.notice = Some(msg);
-        let _ = ok; // both branches surface a notice; ok only shapes the text
     }
 
     /// Apply a read fold under the caller's gen guard already checked. Clears the
@@ -812,7 +822,10 @@ impl ConnectionsView {
     /// login`) via the `fno mux pane run` PaneRun front door.
     fn finish_login(&mut self) -> ConnIntent {
         let w = self.wizard.take().expect("wizard present");
-        let (cli, dir) = (w.kind.cli().to_string(), w.dir.clone());
+        // Expand `~/` NOW so both the login spawn and the later register use an
+        // absolute CLAUDE_CONFIG_DIR (env/exec never expand `~`).
+        let cli = w.kind.cli().to_string();
+        let dir = expand_tilde(&w.dir, std::env::var_os("HOME").as_deref());
         self.pending.push(PendingLogin {
             id: w.id.clone(),
             cli: cli.clone(),
@@ -1189,14 +1202,6 @@ fn stderr_tail(stderr: &[u8]) -> String {
         .to_string()
 }
 
-/// Resolve the `fno` binary: `$FNO_BIN`, else bare `fno` on PATH.
-pub(crate) fn fno_bin() -> std::path::PathBuf {
-    if let Some(v) = std::env::var_os("FNO_BIN") {
-        return std::path::PathBuf::from(v);
-    }
-    std::path::PathBuf::from("fno")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1410,12 +1415,15 @@ mod tests {
     }
 
     #[test]
-    fn action_result_clears_acting_and_sets_notice() {
-        let mut v = ready_view();
-        v.acting = true;
-        v.apply_action_result(false, "providers use ccr failed: boom".into());
-        assert!(!v.acting);
-        assert!(v.notice.as_deref().unwrap().contains("boom"));
+    fn expand_tilde_expands_leading_home_only() {
+        use std::ffi::OsStr;
+        let home = Some(OsStr::new("/Users/x"));
+        assert_eq!(expand_tilde("~/.claude-ccm", home), "/Users/x/.claude-ccm");
+        // No `~/` prefix -> verbatim; a bare `~` is not expanded.
+        assert_eq!(expand_tilde("/abs/dir", home), "/abs/dir");
+        assert_eq!(expand_tilde("~notme", home), "~notme");
+        // No home -> verbatim (fail-open).
+        assert_eq!(expand_tilde("~/.claude", None), "~/.claude");
     }
 
     #[test]
@@ -1455,26 +1463,26 @@ mod tests {
         assert_eq!(intent, ConnIntent::Redraw);
         assert_eq!(v.wizard.as_ref().unwrap().dir, "~/.claude-ccm2");
         let intent = v.on_key(b'\r'); // commit dir -> spawn login
+                                      // The dir is tilde-expanded before the spawn (env/exec never expand ~).
+        let expected_dir = expand_tilde("~/.claude-ccm2", std::env::var_os("HOME").as_deref());
         match intent {
             ConnIntent::SpawnLogin(argv) => {
-                assert_eq!(
-                    argv,
-                    vec![
-                        "mux",
-                        "pane",
-                        "run",
-                        "env",
-                        "CLAUDE_CONFIG_DIR=~/.claude-ccm2",
-                        "claude",
-                        "/login",
-                    ]
+                assert_eq!(argv[0..4], ["mux", "pane", "run", "env"]);
+                assert_eq!(argv[4], format!("CLAUDE_CONFIG_DIR={expected_dir}"));
+                assert!(
+                    !argv[4].contains('~'),
+                    "tilde must be expanded, got {}",
+                    argv[4]
                 );
+                assert_eq!(argv[5..], ["claude", "/login"]);
             }
             other => panic!("expected SpawnLogin, got {other:?}"),
         }
         assert!(v.wizard.is_none());
         // Pending row rendered, and register targets it with the config-dir env.
         assert_eq!(v.pending.len(), 1);
+        // The stored pending dir is expanded too (register reuses it).
+        assert_eq!(v.pending[0].dir, expected_dir);
         let out = v.render().join("\n");
         assert!(out.contains("ccm2  [claude] …login pending"));
     }
