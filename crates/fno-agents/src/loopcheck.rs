@@ -3876,10 +3876,20 @@ fn async_wait_class(
     {
         return None;
     }
-    if pr.ci_has_pending {
+    // CI still pending AND nothing has concluded red yet: idle on CI. If a
+    // check has ALREADY failed while others run, do NOT idle - the agent should
+    // start debugging the failure now rather than wait out the rest (gemini).
+    if pr.ci_has_pending && !matches!(pr.ci_conclusion, CiConclusion::Failure(_)) {
         return Some("ci");
     }
-    if pr.ci_conclusion.is_ok() && !pr.reviewed && !pr.review_skipped {
+    // Awaiting an EXTERNAL bot review: a real GitHub login WILL post it, so
+    // idling until it does is correct. `reviewed == false` with an EMPTY
+    // missing_bots is instead a LOCAL-attestation gate (config.review.reviewers,
+    // e.g. sigma) or an unaddressed finding - work the agent must DO, and no
+    // GitHub reviewer will ever appear to wake it, so idling would park the
+    // session forever. Require an outstanding bot (codex P1).
+    if pr.ci_conclusion.is_ok() && !pr.reviewed && !pr.review_skipped && !pr.missing_bots.is_empty()
+    {
         return Some("review");
     }
     None
@@ -3893,8 +3903,19 @@ fn async_wait_class(
 /// template (gh's `--watch` exit varies by version); the design depends only on
 /// the task EXITING, never on its exit code.
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
+    // The watcher must WAIT on the actual blocker. `gh pr checks --watch` exits
+    // the instant CI has no pending checks, so on a review wait (CI already
+    // green) it returns immediately and the session just re-blocks - the review
+    // path needs a watcher that polls REVIEW state, not checks (codex P2).
+    let watcher = if blocker == "review" {
+        format!(
+            "background Bash `timeout 1800 bash -c 'n=$(gh pr view {pr_number} --json reviews --jq \".reviews|length\"); while [ \"$(gh pr view {pr_number} --json reviews --jq \".reviews|length\")\" -le \"$n\" ]; do sleep 60; done'` (wakes when a new review posts, or at the timeout)"
+        )
+    } else {
+        format!("background Bash `timeout 1800 gh pr checks {pr_number} --watch`")
+    };
     format!(
-        " Arm a harness-tracked watcher with a hard timeout (e.g. background Bash `timeout 1800 gh pr checks {pr_number} --watch`), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
+        " Arm a harness-tracked watcher with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
     )
 }
 
@@ -4586,15 +4607,56 @@ mod tests {
 
     #[test]
     fn watch_idle_classifies_awaiting_review() {
-        // CI green, no pending checks, but a required bot has not reviewed.
+        // CI green, no pending checks, and a required GitHub bot has not reviewed.
         let pr = PrInfo {
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
             reviewed: false,
             review_skipped: false,
+            missing_bots: vec!["chatgpt-codex-connector".into()],
             ..watch_pr()
         };
         assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+    }
+
+    #[test]
+    fn watch_idle_rejects_ci_pending_with_a_failure() {
+        // gemini finding: a check has ALREADY concluded red while others run.
+        // The agent should debug now, not idle out the remaining pending checks.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Failure(Some("unit".into())),
+            ci_has_pending: true,
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_local_attestation_review_gate() {
+        // codex P1: reviewed=false with an EMPTY missing_bots is a local
+        // attestation (sigma) or unaddressed-finding gate - no GitHub reviewer
+        // will ever post to wake the session, so idling would park it forever.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            review_skipped: false,
+            missing_bots: vec![],
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn unwatched_async_nudge_review_uses_review_aware_watcher() {
+        // codex P2: the review-wait watcher must poll REVIEW state, not
+        // `gh pr checks --watch` (which exits instantly when CI is green).
+        let hint = arm_watch_hint(404, "review");
+        assert!(hint.contains("--json reviews"), "got: {hint}");
+        assert!(!hint.contains("gh pr checks"), "got: {hint}");
+        // The CI-wait watcher still uses checks --watch.
+        let ci_hint = arm_watch_hint(404, "ci");
+        assert!(ci_hint.contains("gh pr checks"), "got: {ci_hint}");
     }
 
     #[test]
