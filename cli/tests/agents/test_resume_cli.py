@@ -231,7 +231,9 @@ def test_unknown_agent_exits_13() -> None:
     )
     assert res.exit_code == 13
     assert "ghost" in res.stderr
-    assert "not found" in res.stderr
+    # x-1b1e: the shared resolver's not-found message lists the accepted forms.
+    assert "no agent matching" in res.stderr
+    assert "accepted forms" in res.stderr
 
 
 def test_unsupported_provider_exits_13_not_14() -> None:
