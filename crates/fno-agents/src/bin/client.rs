@@ -1481,6 +1481,30 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--channel-id" => {
                 params.insert("mcp_channel_id".into(), str_arg(&mut it, "--channel-id")?);
             }
+            "--envelope" => {
+                // push-channel delivery envelope (JSON object). `-` reads it from
+                // stdin (envelopes can be large). Absent -> confirm-only push.
+                let arg = str_arg(&mut it, "--envelope")?;
+                let arg = arg.as_str().unwrap_or_default();
+                let raw: String = if arg == "-" {
+                    use std::io::Read;
+                    let mut s = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut s)
+                        .map_err(|e| format!("read --envelope from stdin: {e}"))?;
+                    s
+                } else {
+                    arg.to_string()
+                };
+                let val: Value = serde_json::from_str(&raw)
+                    .map_err(|e| format!("--envelope must be a JSON object: {e}"))?;
+                // Fail fast client-side: the daemon also rejects a non-object,
+                // but catching it here avoids a pointless IPC round-trip.
+                if !val.is_object() {
+                    return Err("--envelope must be a JSON object".to_string());
+                }
+                params.insert("envelope".into(), val);
+            }
             "--status" => {
                 params.insert("status".into(), str_arg(&mut it, "--status")?);
             }
@@ -2246,7 +2270,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "reconcile",
     "register-channel --cc-session-id <id> [<name>]",
     "unregister-channel --channel-id <id>",
-    "push-channel --channel-id <id>",
+    "push-channel --channel-id <id> [--envelope <json|->]  (no envelope = confirm-only)",
     "drive-authority [--json]",
     "trace [options]",
     "ping",
