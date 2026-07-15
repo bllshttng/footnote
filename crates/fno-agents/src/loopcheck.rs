@@ -616,6 +616,16 @@ fn session_cost_from_ledger(ledger_path: &Path, session_id: &str) -> f64 {
 enum Intent {
     Promise,
     Aborted { reason: String },
+    /// Agent-declared async watch (x-e2c8): it has armed a harness-tracked
+    /// watcher and wants the session to idle until that watcher fires rather
+    /// than re-blocking every stop tick. All attributes are advisory (used for
+    /// the event and the lease math), never load-bearing: external truth
+    /// decides whether idling is actually allowed.
+    Watching {
+        reason: String,
+        pr: Option<String>,
+        timeout: Option<String>,
+    },
     None,
 }
 
@@ -644,7 +654,10 @@ fn extract_assistant_text(val: &Value) -> String {
     String::new()
 }
 
-/// Detect intent with proper attribute extraction for aborted reason.
+/// Detect intent with proper attribute extraction. Precedence within one
+/// message: aborted > watching > promise (x-e2c8). aborted is the hardest stop;
+/// watching outranks promise so a session that both promises and asks to idle
+/// idles (its promise is re-evaluated on the next wake).
 fn detect_intent_from_text(text: &str) -> Intent {
     // Look for <aborted ...> tag
     if let Some(aborted_start) = text.find("<aborted") {
@@ -653,6 +666,16 @@ fn detect_intent_from_text(text: &str) -> Intent {
             let tag_text = &text[aborted_start..aborted_start + gt + 1];
             let reason = parse_xml_attr(tag_text, "reason").unwrap_or_default();
             return Intent::Aborted { reason };
+        }
+    }
+    if let Some(w_start) = text.find("<watching") {
+        if let Some(gt) = text[w_start..].find('>') {
+            let tag_text = &text[w_start..w_start + gt + 1];
+            return Intent::Watching {
+                reason: parse_xml_attr(tag_text, "reason").unwrap_or_default(),
+                pr: parse_xml_attr(tag_text, "pr"),
+                timeout: parse_xml_attr(tag_text, "timeout"),
+            };
         }
     }
     if text.contains("<promise>") {
@@ -716,6 +739,10 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
 
     let lines: Vec<&str> = content.lines().collect();
     let mut scanned: usize = 0;
+    // `watching` is honored ONLY from the single newest assistant entry
+    // (x-e2c8): a stale watch-request from earlier work must not idle a session
+    // that has since moved on. `promise`/`aborted` keep their bounded lookback.
+    let mut newest_entry = true;
     for line in lines.iter().rev() {
         let line = line.trim();
         if line.is_empty() {
@@ -743,8 +770,17 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
                     return Intent::None;
                 }
             }
+            // A watching tag below the newest entry is stale: skip it (counts
+            // as a scanned entry) and keep scanning for a promise/aborted.
+            Intent::Watching { .. } if !newest_entry => {
+                scanned += 1;
+                if scanned >= INTENT_LOOKBACK_ENTRIES {
+                    return Intent::None;
+                }
+            }
             tagged => return tagged,
         }
+        newest_entry = false;
     }
     Intent::None
 }
@@ -4098,6 +4134,107 @@ mod tests {
         );
         assert!(matches!(intent, Intent::Aborted { ref reason } if reason == "kill"));
         assert_eq!(source, "payload");
+    }
+
+    #[test]
+    fn watching_intent_parses_all_attrs() {
+        let (intent, source) = detect_intent(
+            Some("waiting <watching reason=\"ci\" pr=\"404\" timeout=\"30m\">"),
+            Path::new("/nonexistent"),
+        );
+        assert_eq!(source, "payload");
+        assert_eq!(
+            intent,
+            Intent::Watching {
+                reason: "ci".into(),
+                pr: Some("404".into()),
+                timeout: Some("30m".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn watching_intent_malformed_attrs_default_to_absent() {
+        // A bare tag: attributes absent, not an error; lease math applies its
+        // own default window downstream.
+        let (intent, _) = detect_intent(Some("<watching>"), Path::new("/nonexistent"));
+        assert_eq!(
+            intent,
+            Intent::Watching {
+                reason: String::new(),
+                pr: None,
+                timeout: None,
+            }
+        );
+    }
+
+    #[test]
+    fn watching_intent_aborted_beats_watching() {
+        let (intent, _) = detect_intent(
+            Some("<watching reason=\"ci\" pr=\"1\"> <aborted reason=\"kill\">"),
+            Path::new("/nonexistent"),
+        );
+        assert!(matches!(intent, Intent::Aborted { ref reason } if reason == "kill"));
+    }
+
+    #[test]
+    fn watching_intent_beats_promise() {
+        let (intent, _) = detect_intent(
+            Some("<promise>done</promise> <watching reason=\"review\" pr=\"9\">"),
+            Path::new("/nonexistent"),
+        );
+        assert!(matches!(intent, Intent::Watching { .. }));
+    }
+
+    #[test]
+    fn watching_intent_newest_transcript_entry_honored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let line = serde_json::json!({
+            "message": {"role": "assistant", "content": "<watching reason=\"ci\" pr=\"7\">"}
+        });
+        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
+        assert!(matches!(detect_intent_full(&path), Intent::Watching { .. }));
+    }
+
+    #[test]
+    fn watching_intent_stale_transcript_not_honored() {
+        // AC3-EDGE: a watching tag 2 entries back with a tag-less newest entry
+        // must NOT resurrect as Watching (payload-or-newest-entry rule).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let mut content = String::new();
+        for text in [
+            "<watching reason=\"ci\" pr=\"3\">", // oldest
+            "still going",
+            "moving on to unrelated work", // newest
+        ] {
+            let line = serde_json::json!({"message": {"role": "assistant", "content": text}});
+            content.push_str(&serde_json::to_string(&line).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(detect_intent_full(&path), Intent::None);
+    }
+
+    #[test]
+    fn watching_intent_stale_watch_does_not_shadow_deeper_promise() {
+        // A stale watching in the newest-but-one entry is skipped, and a real
+        // promise deeper in the lookback window still wins.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let mut content = String::new();
+        for text in [
+            "<promise>MISSION COMPLETE: shipped</promise>", // oldest, real
+            "<watching reason=\"ci\" pr=\"3\">",            // stale (not newest)
+            "tag-less newest",                              // newest
+        ] {
+            let line = serde_json::json!({"message": {"role": "assistant", "content": text}});
+            content.push_str(&serde_json::to_string(&line).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(detect_intent_full(&path), Intent::Promise);
     }
 
     #[test]
