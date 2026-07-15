@@ -37,6 +37,10 @@
 #      ${FNO_HOME}/sessions - see below - so only the sidecar READ remains).
 #      This is a large, actively-developed surface (multi-provider agent
 #      discovery) - allowlisted by file below rather than re-derived here.
+#      The mux Connections UI (crates/fno/src/connections_view.rs) belongs
+#      here too: its login-wizard default config dir `~/.claude-<id>` is a
+#      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
+#      state), the same multi-account convention managed.py already uses.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
@@ -183,6 +187,7 @@ crates/fno-agents/src/bin/client.rs
 crates/fno-agents/tests/claude_ask_dispatch.rs
 crates/fno-agents/tests/claude_ask_parity.rs
 crates/fno/src/agents_view.rs
+crates/fno/src/connections_view.rs
 hooks/cache-keepalive-inject.sh
 hooks/corrections-git-postcommit.sh
 hooks/session-start.sh
