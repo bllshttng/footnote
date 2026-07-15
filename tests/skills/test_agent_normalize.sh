@@ -415,6 +415,27 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude)"
 [[ "$(field "$OUT" allow_merge)" == "0" ]] && pass "P2-1 default -> allow_merge=0 field emitted" || fail "allow_merge=0: $OUT"
 
+# --- x-4391: config.dispatch.auto_merge drives posture when no flag is given ---
+# Stub `fno` on PATH so the read is hermetic (normalize.sh's only runtime fno
+# call is `fno config get`; provider/slug resolution use their own env stubs).
+STUB_FNO_TRUE_DIR="$TMP/bin-fno-true"; mkdir -p "$STUB_FNO_TRUE_DIR"
+printf '#!/usr/bin/env bash\n[[ "$1 $2 $3" == "config get dispatch.auto_merge" ]] && { echo True; exit 0; }\nexit 0\n' > "$STUB_FNO_TRUE_DIR/fno"; chmod +x "$STUB_FNO_TRUE_DIR/fno"
+STUB_FNO_ERR_DIR="$TMP/bin-fno-err"; mkdir -p "$STUB_FNO_ERR_DIR"
+printf '#!/usr/bin/env bash\n[[ "$1 $2 $3" == "config get dispatch.auto_merge" ]] && { echo "unknown config key" >&2; exit 1; }\nexit 0\n' > "$STUB_FNO_ERR_DIR/fno"; chmod +x "$STUB_FNO_ERR_DIR/fno"
+
+# AC2-HP: auto_merge=true (no flag) -> allow_merge=1
+OUT="$(PATH="$STUB_FNO_TRUE_DIR:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude)"
+[[ "$(field "$OUT" allow_merge)" == "1" ]] && pass "x-4391 config auto_merge=true -> allow_merge=1 (no flag)" || fail "config true: $OUT"
+# AC3-HP: explicit --no-merge beats config=true
+OUT="$(PATH="$STUB_FNO_TRUE_DIR:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude --no-merge)"
+[[ "$(field "$OUT" allow_merge)" == "0" ]] && pass "x-4391 --no-merge beats config true -> allow_merge=0" || fail "--no-merge vs config true: $OUT"
+# AC1-ERR: a failed config read (stale fno rejecting the key) degrades to no-merge
+OUT="$(PATH="$STUB_FNO_ERR_DIR:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude)"
+[[ "$(field "$OUT" allow_merge)" == "0" ]] && pass "x-4391 config read error -> allow_merge=0 (degrade)" || fail "config err degrade: $OUT"
+# claude build message under allow posture carries NO no-merge token
+OUT="$(PATH="$STUB_FNO_TRUE_DIR:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude)"
+[[ "$(field "$OUT" message)" != *"no-merge"* ]] && pass "x-4391 allow posture: claude /target message omits no-merge" || fail "allow message no-merge: $OUT"
+
 # P2-2c (review): ask payloads are exempt from the vocabulary scan - a flag token
 # in a question is part of the prompt, not a mangled dispatch flag.
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --ask --input "what does grep -i do")"

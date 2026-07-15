@@ -13,7 +13,10 @@
 # config-driven provider fallback, which degrades to `claude` if fno is absent).
 #
 # Usage:
-#   normalize.sh --input "<raw payload>" [--name <n>] [--provider <p>] [--allow-merge]
+#   normalize.sh --input "<raw payload>" [--name <n>] [--provider <p>] [--allow-merge|--no-merge]
+#
+# --allow-merge / --no-merge: per-run merge posture (x-4391). Neither => posture
+#   from config.dispatch.auto_merge (default false = no-merge; fno absent => false).
 #
 # Emits key=value lines on stdout (one per line; values are NOT shell-quoted -
 # read them line by line, never `eval`):
@@ -47,7 +50,10 @@ MODEL=""           # exact model name forwarded to `fno agents spawn --model`
 EFFORT=""          # reasoning effort forwarded to `fno agents spawn --effort`.
                    # Dashless: `effort <value>`; the CLI validates per provider.
 EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
-ALLOW_MERGE=0
+# x-4391 tri-state: "" = unset (resolve from config.dispatch.auto_merge after
+# arg parse); 1 = allow (--allow-merge / dashless `merge`); 0 = no-merge
+# (--no-merge). Resolved to 0/1 before any read, so `allow_merge=` never emits "".
+ALLOW_MERGE=""
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
 SUBSTRATE=""       # x-2c27: ""|bg|headless trailing-posture word (the spawn
@@ -105,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --fresh)          FRESH=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     -m|--allow-merge) ALLOW_MERGE=1; shift ;;
+    --no-merge)       ALLOW_MERGE=0; shift ;;
     -y|--yes)         YES=1; shift ;;
     -i|--interactive) MODE="interactive"; shift ;;
     --yolo)           YOLO=1; shift ;;
@@ -279,7 +286,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
+      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
@@ -287,6 +294,20 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
   set +f
 fi
 set +f
+
+# x-4391: resolve merge posture when no explicit flag/word set it. Rung 2 =
+# config.dispatch.auto_merge; rung 3 = builtin no-merge. `fno config get` prints
+# a Python bool (`True`/`False`), so lowercase before the exact-`true` compare.
+# fno absent, a stale binary rejecting the unmodeled key, or any error degrades
+# to no-merge (matches this file's provider-fallback degrade; never grant merge
+# on a failed read).
+if [[ -z "$ALLOW_MERGE" ]]; then
+  ALLOW_MERGE=0
+  if command -v fno >/dev/null 2>&1; then
+    _am="$(fno config get dispatch.auto_merge 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
+    [[ "$_am" == "true" ]] && ALLOW_MERGE=1
+  fi
+fi
 
 # ---- 2. node detection + resolution-tier classification ----------------------
 # A backlog node id is exactly `ab-` + 8 lowercase hex (tier 1, exact). Three
