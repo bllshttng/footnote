@@ -245,15 +245,24 @@ case "/$PARKING_LOT_REL/" in
 esac
 
 PARKING_LOT_PATH="$CANON_ROOT/$PARKING_LOT_REL"
-# PROJECT is read from the CURRENT cwd, NOT CANON_ROOT: in a parallel-mode lane
-# worktree this is the lane's ephemeral project.id (still worktree-local; x-071c
-# kept project.id in the allowlist). Step 3b runs `fno backlog advance --project
-# "$PROJECT"`, and the lane id is load-bearing there - it makes nested
-# auto-continue find no same-project `next`, so the top-level dispatcher stays
-# the sole `max_lanes` authority. Anchoring this on CANON_ROOT would let each
-# merged lane chain a successor outside the dispatcher and blow the lane cap.
-# Only the parking-lot PATH anchors on canonical; node attribution stays per-lane.
-PROJECT="$(fno config get config.project.id 2>/dev/null || echo "")"   # best-effort; backlog idea auto-detects when empty
+# Two project ids, because attribution and auto-continue want opposite things:
+#
+# PROJECT (canonical): the REAL project a follow-up node belongs to. `backlog
+# idea` files new nodes under it, so a follow-up filed from a parallel-mode lane
+# worktree lands in the shared backlog instead of orphaning under the lane's
+# ephemeral `<base>-<node>` project.id. Read from CANON_ROOT (the canonical
+# config has no lane override). In a non-lane checkout this equals the lane read.
+PROJECT="$( (cd "$CANON_ROOT" && fno config get config.project.id) 2>/dev/null || echo "")"   # canonical base id; backlog idea auto-detects when empty
+#
+# LANE_PROJECT (current cwd): in a parallel-mode lane worktree this is the lane's
+# ephemeral project.id (worktree-local; x-071c kept project.id in the allowlist).
+# It is load-bearing ONLY for Step 3b's `fno backlog advance --project`: the
+# ephemeral id makes nested auto-continue find no same-project `next`, so the
+# top-level dispatcher stays the sole `max_lanes` authority. Anchoring auto-
+# continue on the canonical id would let each merged lane chain a successor
+# outside the dispatcher and blow the lane cap. In a non-lane checkout
+# LANE_PROJECT == PROJECT, so behavior there is unchanged.
+LANE_PROJECT="$(fno config get config.project.id 2>/dev/null || echo "")"   # lane (worktree-local) id; auto-continue neuter only
 ```
 
 An empty `$PARKING_LOT_REL` here means the key is genuinely unset (the read
@@ -362,7 +371,7 @@ hand the merge event to the shared auto-continue verb so the next now-unblocked
 node auto-builds without a manual "kick off the next group?" prompt:
 
 ```bash
-fno backlog advance --closed "$NODE_ID" --project "$PROJECT" \
+fno backlog advance --closed "$NODE_ID" --project "$LANE_PROJECT" \
   || echo "post-merge: auto-continue advance returned non-zero (non-fatal) - record in report" >&2
 ```
 
@@ -374,7 +383,8 @@ for the same merge dispatches the successor at most once (AC1-FR). Pass
 `--closed "$NODE_ID"` only if a node id was resolved for this PR; otherwise drop
 the flag (advance reads `fno backlog next` regardless - the flag is just
 race-ordering provenance). `$NODE_ID` is optional; if the skill never resolved
-one, run `fno backlog advance --project "$PROJECT"`.
+one, run `fno backlog advance --project "$LANE_PROJECT"` (the lane id, so a lane's
+nested auto-continue stays neutered).
 
 The reconcile in Step 2 already fires advance for a node it closes; this
 explicit call covers the case where the node was already closed before
@@ -428,13 +438,20 @@ The merge lands inside the 3-day window where deferral returns actually happen,
 so this is the cheapest moment to decide the fate of the nodes W1's `/pr create`
 step filed from this PR's "Out of scope" section. Each such node carries
 `deferred from PR:` in its details and (when the ship session knew its node)
-`parent: $NODE_ID`. Collect them by provenance, scoped to this project:
+`parent: $NODE_ID`. Collect them by provenance:
 
 ```bash
-BORN_JSON="$(fno backlog find 'deferred from PR' --project "$PROJECT" -J 2>/dev/null || echo '[]')"
+BORN_JSON="$(fno backlog find 'deferred from PR' -J 2>/dev/null || echo '[]')"
 ```
 
-Do NOT add `-s idea`: a deferral-born node may have already been triaged or moved before the merge landed, and those are exactly the ones warm-window triage should still surface. Provenance + parent linkage is the scope.
+Do NOT scope this by `--project`: `/pr create` files each born node with
+`--parent "$NODE_ID"` but NO explicit project, so its project is whatever the
+ship session's cwd auto-detected - the canonical id from a normal worktree, but
+the ephemeral lane id from a parallel-mode lane. A `--project` narrowing would
+silently miss the lane-born nodes. Provenance + the `parent == "$NODE_ID"` filter
+below is the real (project-agnostic) scope. Do NOT add `-s idea` either: a
+deferral-born node may have already been triaged or moved before the merge
+landed, and those are exactly the ones warm-window triage should still surface.
 
 Keep only the rows that belong to THIS PR: `parent == "$NODE_ID"` when `$NODE_ID`
 is set, else those whose `details` name this PR's branch. If the filtered set is
