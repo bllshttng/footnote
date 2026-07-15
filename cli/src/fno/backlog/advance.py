@@ -472,10 +472,15 @@ def _spawn_worker(
         settings_obj = (
             load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
         )
-        allow_merge = bool(settings_obj.dispatch.auto_merge)
-    except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
-        allow_merge = False
+    except Exception:  # noqa: BLE001 - unreadable config -> defaults below
         settings_obj = None
+    # Read auto_merge in its OWN guard so a missing/odd .dispatch never disables the
+    # independent permission-mode read that also consumes settings_obj.
+    if settings_obj is not None:
+        try:
+            allow_merge = bool(settings_obj.dispatch.auto_merge)
+        except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
+            allow_merge = False
 
     # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
     # verb path (never a merge); with no verb, auto_merge routes the /target verb
@@ -522,7 +527,10 @@ def _spawn_worker(
     # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
     mode = (permission_mode or "").strip()
     if not mode and settings_obj is not None:
-        mode = (settings_obj.agents.spawn_permission_mode or "").strip()
+        try:
+            mode = (settings_obj.agents.spawn_permission_mode or "").strip()
+        except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
+            mode = ""
     if mode:
         cmd += ["--permission-mode", mode]
     cmd += [agent_name, target_cmd]
