@@ -413,6 +413,18 @@ def state_dir() -> Path:
     return _resolve(settings.state_dir)
 
 
+def locks_dir() -> Path:
+    """Advisory-lock sidecar directory (``~/.fno/locks``).
+
+    Deliberately config-free (``$HOME`` only, no settings load) so
+    ``fno.plan._stamp`` can compute it under the bare python - no tomli_w - that
+    Rust finalize invokes. The plan-doc lock is keyed by the plan's resolved path,
+    so the two fno writers only need to agree on this directory; a config
+    ``state_dir`` override deliberately does NOT move it (moving it would desync
+    the config-loading append side from the config-free stamp side)."""
+    return Path.home() / ".fno" / "locks"
+
+
 def graph_json() -> Path:
     """Return the path to graph.json."""
     settings = _settings()

@@ -388,7 +388,10 @@ def test_json_webhook_cloudevents_wrap(tmp_path, monkeypatch):
     assert set(body) == {"id", "source", "type", "time", "data"}
     assert body["type"] == "run_summary" and body["time"] == "2026-07-12T00:00:05Z"
     assert body["data"] == ev
-    assert body["id"] == "R1:2026-07-12T00:00:05Z:run_summary"
+    # id = run:ts:type:<8-hex content hash> (x-25d0: distinct same-second events
+    # get distinct ids; the prefix is stable, the suffix is a deterministic digest).
+    assert body["id"].startswith("R1:2026-07-12T00:00:05Z:run_summary:")
+    assert len(body["id"].rsplit(":", 1)[1]) == 8
 
 
 def test_json_webhook_4xx_drops_immediately_no_retry(tmp_path, monkeypatch):
@@ -951,3 +954,261 @@ def test_tick_same_second_split_across_rotation_boundary(tmp_path):
     res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
     assert res.sinks[0].dispatched == 2  # t3, t4 delivered, not lost
     assert _cursor(ss, "s") == {"ts": T, "n": 4}
+
+
+# ── PR A hardening (x-8cce + siblings): 5 consolidated status_fanout fixes ────
+
+
+# Change 1 (x-25d0): CloudEvents id content-hash suffix.
+
+
+def test_cloudevents_id_deterministic_same_event_same_id():
+    from fno import status_fanout as sf
+
+    ev = _ev("2026-07-12T00:00:05Z", "run_summary", **{"run": "R1"})
+    assert sf._cloudevents_wrap(dict(ev))["id"] == sf._cloudevents_wrap(dict(ev))["id"]
+
+
+def test_cloudevents_id_distinct_for_distinct_same_second_events():
+    from fno import status_fanout as sf
+
+    base = _ev("2026-07-12T00:00:05Z", "run_summary", **{"run": "R1"})
+    e1 = dict(base); e1["data"] = {"reason": "one"}
+    e2 = dict(base); e2["data"] = {"reason": "two"}
+    # Same run+ts+type, distinct payload -> distinct id (a deduping receiver keeps
+    # both), yet the prefix is unchanged.
+    assert sf._cloudevents_wrap(e1)["id"] != sf._cloudevents_wrap(e2)["id"]
+    assert sf._cloudevents_wrap(e1)["id"].startswith("R1:2026-07-12T00:00:05Z:run_summary:")
+
+
+# Change 2 (x-8cce, PRIMARY): rotation-stable read in _stream_since.
+
+
+def _one_event_file(tmp_path):
+    import json as _json
+    fno_dir = tmp_path / ".fno"; fno_dir.mkdir(parents=True)
+    active = fno_dir / "events.jsonl"
+    with active.open("w") as fh:
+        fh.write(_json.dumps(_ev("2026-07-12T00:00:05Z", "blocked")) + "\n")
+    return active
+
+
+def test_stream_since_rotation_between_stats_triggers_one_retry(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    active = _one_event_file(tmp_path)
+    # inode readings: pass1 before=1/after=2 (rotation detected) -> retry;
+    # pass2 before=3/after=3 (stable) -> accept.
+    seq = iter([1, 2, 3, 3])
+    monkeypatch.setattr(sf, "_active_inode", lambda p: next(seq))
+    real_pass = sf._stream_pass
+    passes = {"n": 0}
+    monkeypatch.setattr(sf, "_stream_pass",
+                        lambda a, s: (passes.__setitem__("n", passes["n"] + 1) or real_pass(a, s)))
+    events, _ = sf._stream_since(active, None)
+    assert passes["n"] == 2  # exactly one retry
+    assert [e["ts"] for e in events] == ["2026-07-12T00:00:05Z"]
+
+
+def test_stream_since_persistent_rotation_bounded_at_two_passes(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    active = _one_event_file(tmp_path)
+    seq = iter([1, 2, 3, 4])  # every pass sees a rotation
+    monkeypatch.setattr(sf, "_active_inode", lambda p: next(seq))
+    real_pass = sf._stream_pass
+    passes = {"n": 0}
+    monkeypatch.setattr(sf, "_stream_pass",
+                        lambda a, s: (passes.__setitem__("n", passes["n"] + 1) or real_pass(a, s)))
+    sf._stream_since(active, None)
+    assert passes["n"] == 2  # never more than 2 passes; second pass returned anyway
+
+
+def test_stream_since_discards_inflated_pass_no_same_ts_overcount(tmp_path, monkeypatch):
+    # The loss path this fix closes: a racing rotation makes a pass double-count
+    # same-ts events, inflating the occurrence index n and skipping real same-second
+    # events next tick. The retry discards that pass and returns the consistent one.
+    from fno import status_fanout as sf
+
+    active = tmp_path / "events.jsonl"; active.write_text("")
+    T = "2026-07-12T00:00:05Z"
+    inflated = ([_ev(T, "blocked"), _ev(T, "blocked"), _ev(T, "blocked")], 0)
+    clean = ([_ev(T, "blocked")], 0)
+    results = iter([inflated, clean])
+    monkeypatch.setattr(sf, "_stream_pass", lambda a, s: next(results))
+    seq = iter([1, 2, 3, 3])  # pass1 rotated, pass2 stable
+    monkeypatch.setattr(sf, "_active_inode", lambda p: next(seq))
+    events, _ = sf._stream_since(active, None)
+    assert len(events) == 1  # the clean pass won; n not inflated
+
+
+# Change 3 (x-ecd4): 401/403/408 join the transient (retry -> short-circuit) class.
+
+
+@pytest.mark.parametrize("code", [401, 403, 408])
+def test_json_webhook_transient_4xx_holds_cursor_short_circuits(monkeypatch, code):
+    from fno import status_fanout as sf
+
+    calls = {"n": 0}
+    monkeypatch.setattr(sf, "_post_json",
+                        lambda u, b, t: (calls.__setitem__("n", calls["n"] + 1)
+                                         or sf._HttpResult(ok=False, status=code)))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    status, detail = sf._dispatch_json_webhook(
+        _json_sink(), _ev("2026-07-12T00:00:05Z", "run_summary"), StatusFanoutConfig(retries=2))
+    assert status == sf.SHORT_CIRCUIT   # transient, not an immediate drop
+    assert calls["n"] == 3              # retried (1 + 2), like 429/connect-class
+    assert str(code) in detail
+
+
+def test_integration_tick_401_holds_cursor_and_logs(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=401))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    ss = tmp_path / ".fno" / "status-sinks"; ss.mkdir(parents=True)
+    _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
+                            url="https://x", template="hi", field="content")
+    res = sf.run_tick(tmp_path, [sink], StatusFanoutConfig(retries=1))
+    assert res.sinks[0].short_circuited is True
+    assert _cursor(ss, "d")["ts"] == "2026-07-12T00:00:00Z"  # cursor held (retries next tick)
+    assert (ss / "d.errors.jsonl").exists()
+
+
+# Change 4 (x-7492): Slack broadcast defang on non-Discord fields.
+
+
+def _capture_post(monkeypatch, sf, posted):
+    monkeypatch.setattr(sf, "_post_json",
+                        lambda u, b, t: (posted.update(body=b) or sf._HttpResult(ok=True, status=200)))
+
+
+def test_text_webhook_slack_field_defangs_broadcast(monkeypatch):
+    from fno import status_fanout as sf
+
+    posted = {}; _capture_post(monkeypatch, sf, posted)
+    ev = _ev("t", "blocked"); ev["data"] = {"reason": "<!channel> ship it"}
+    sink = StatusSinkConfig(name="s", type="text-webhook", events=["blocked"],
+                            url="https://slack", template="{data.reason}", field="text")
+    sf._dispatch_text_webhook(sink, ev, StatusFanoutConfig())
+    assert posted["body"]["text"] == "&lt;!channel> ship it"  # Slack renders &lt; as <
+    assert "<!" not in posted["body"]["text"]                 # no live broadcast token
+
+
+def test_text_webhook_no_broadcast_token_is_byte_identical(monkeypatch):
+    from fno import status_fanout as sf
+
+    posted = {}; _capture_post(monkeypatch, sf, posted)
+    sink = StatusSinkConfig(name="s", type="text-webhook", events=["blocked"],
+                            url="https://slack", template="plain reason", field="text")
+    sf._dispatch_text_webhook(sink, _ev("t", "blocked"), StatusFanoutConfig())
+    assert posted["body"] == {"text": "plain reason"}  # unchanged when no <! present
+
+
+def test_text_webhook_discord_content_not_defanged(monkeypatch):
+    from fno import status_fanout as sf
+
+    posted = {}; _capture_post(monkeypatch, sf, posted)
+    ev = _ev("t", "blocked"); ev["data"] = {"reason": "<!channel>"}
+    sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
+                            url="https://discord", template="{data.reason}", field="content")
+    sf._dispatch_text_webhook(sink, ev, StatusFanoutConfig())
+    assert posted["body"]["content"] == "<!channel>"          # Discord path byte-for-byte
+    assert posted["body"]["allowed_mentions"] == {"parse": []}  # its own guard intact
+
+
+# Change 5 (x-9f6b): shared plan-doc lock serializes stamp vs progress append.
+
+
+def test_plan_doc_lock_serializes_concurrent_stamp_and_append(tmp_path):
+    import os as _os
+    import threading
+    from fno import status_fanout as sf
+    from fno.plan.locking import plan_doc_lock
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ntitle: t\n---\n\n# Plan\n")
+    barrier = threading.Barrier(2)
+
+    def stamp_writer():
+        barrier.wait()
+        with plan_doc_lock(plan):
+            content = plan.read_text()
+            new = content.replace("title: t", "title: t\nstatus: shipped")
+            tmp = plan.with_suffix(".md.tmp"); tmp.write_text(new); _os.replace(tmp, plan)
+
+    def append_writer():
+        barrier.wait()
+        sf._append_plan_progress(str(plan), "T1 progress", tmp_path)
+
+    threads = [threading.Thread(target=stamp_writer), threading.Thread(target=append_writer)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = plan.read_text()
+    assert "status: shipped" in final   # stamp survived
+    assert "- T1 progress" in final     # append survived (neither clobbered the other)
+
+
+def test_append_plan_progress_preserves_file_mode(tmp_path):
+    # Review finding (codex P2): the atomic tmp+replace must carry the plan's
+    # original mode, else a private 0600 vault note is loosened to the umask
+    # default. Reusing _stamp._atomic_write preserves it.
+    import os as _os
+    import stat as _stat
+    from fno import status_fanout as sf
+
+    p = tmp_path / "plan.md"; p.write_text("# Plan\n")
+    _os.chmod(p, 0o600)
+    sf._append_plan_progress(str(p), "T1", tmp_path)
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600  # not widened by the replace
+    assert "- T1" in p.read_text()
+
+
+def test_append_plan_progress_leaves_no_orphan_tmp(tmp_path):
+    # Review finding (gemini): no ``.tmp`` sidecar left after a normal append.
+    from fno import status_fanout as sf
+
+    p = tmp_path / "plan.md"; p.write_text("# Plan\n")
+    sf._append_plan_progress(str(p), "T1", tmp_path)
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_append_plan_progress_skips_silently_on_lock_timeout(tmp_path, monkeypatch):
+    import contextlib
+    from fno import status_fanout as sf
+
+    plan = tmp_path / "plan.md"; plan.write_text("# Plan\n")
+
+    @contextlib.contextmanager
+    def timing_out(path, timeout=2.0):
+        raise TimeoutError("busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(sf, "plan_doc_lock", timing_out)
+    sf._append_plan_progress(str(plan), "T1", tmp_path)  # must not raise
+    assert plan.read_text() == "# Plan\n"  # unchanged, silent skip
+
+
+def test_backlog_progress_delivered_even_when_plan_lock_times_out(tmp_path, monkeypatch):
+    import contextlib
+    from fno import status_fanout as sf
+    import fno.graph.store as gs
+
+    plan_doc = tmp_path / "plan.md"; plan_doc.write_text("# Plan\n")
+    monkeypatch.setattr(gs, "append_progress_note", lambda path, nid, note: (True, str(plan_doc)))
+
+    @contextlib.contextmanager
+    def timing_out(path, timeout=2.0):
+        raise TimeoutError("busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(sf, "plan_doc_lock", timing_out)
+    ev = _ev("2026-07-12T00:00:05Z", "task_done", **{"node": "x-9"})
+    status, _ = sf._dispatch_backlog_progress(
+        StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
+    assert status == sf.DELIVERED  # plan-doc append is best-effort; delivery unaffected

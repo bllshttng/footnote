@@ -21,6 +21,7 @@ Correctness spine (see the plan's Locked Decisions):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import string
@@ -32,6 +33,8 @@ import typer
 
 from fno import paths
 from fno.config import StatusFanoutConfig, StatusSinkConfig
+from fno.plan._stamp import _atomic_write as _atomic_write_plan
+from fno.plan.locking import plan_doc_lock
 
 # Dispatch outcomes. A dispatch attempt classifies its result so the tick knows
 # whether to advance the cursor past the event (DELIVERED / DROPPED) or hold it
@@ -120,12 +123,38 @@ def _first_ts(active: Path) -> Optional[str]:
     return None
 
 
+def _active_inode(active: Path) -> int:
+    """The active file's inode, or -1 (a sentinel distinct from any real inode) when
+    absent/unstatable, so 'appeared' and 'vanished' both read as a change."""
+    try:
+        return active.stat().st_ino
+    except OSError:
+        return -1
+
+
 def _stream_since(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
-    """All events with ts >= since_ts, draining the rotated ``.1`` first ONLY when
-    the cursor predates the active file's first line (else ``.1`` is fully covered
-    and re-scanning its up-to-8MB tail every tick is wasted IO). Rotated history is
-    prepended so the returned list stays ts-ordered (both files are individually
-    ordered and ``.1`` is strictly older)."""
+    """Rotation-stable read: snapshot the active file's inode around the read pass.
+    A worker rotating the log mid-pass (``events.jsonl`` -> ``.1`` + a fresh active)
+    can put old content in both files and inflate the same-``ts`` occurrence index,
+    whose over-count would skip real same-second events next tick. If the inode
+    changed (or the file appeared/vanished) between the stats, discard and re-run
+    the pass ONCE; a second racing rotation returns anyway - at-least-once tolerates
+    the duplicate, only the index inflation had a loss path."""
+    result: "tuple[list[dict[str, Any]], int]" = ([], 0)
+    for _ in range(2):
+        ino_before = _active_inode(active)
+        result = _stream_pass(active, since_ts)
+        if _active_inode(active) == ino_before:
+            break  # no rotation raced this pass; its counts are trustworthy
+    return result
+
+
+def _stream_pass(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
+    """One read pass: all events with ts >= since_ts, draining the rotated ``.1``
+    first ONLY when the cursor predates the active file's first line (else ``.1`` is
+    fully covered and re-scanning its up-to-8MB tail every tick is wasted IO).
+    Rotated history is prepended so the returned list stays ts-ordered (both files
+    are individually ordered and ``.1`` is strictly older)."""
     active_events, active_skipped = _read_events(active, since_ts)
     rotated = active.with_name(active.name + ".1")
     if not rotated.exists():
@@ -433,12 +462,20 @@ def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
         return _HttpResult(ok=False, status=None)  # connect-class
 
 
+# 4xx codes that are a fixable/transient operator or timeout condition, not a
+# permanent client error: a bad baked-in secret (401/403) or a request timeout
+# (408) should hold the cursor and retry (mirroring 429), not silently DROP every
+# event forever the way a missing url_env already short-circuits.
+_TRANSIENT_4XX = frozenset((401, 403, 408, 429))
+
+
 def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tuple[str, str]":
     """Retry/failure-class driver shared by the webhook adapters.
 
-    - 4xx except 429  -> DROPPED immediately (permanent; advance past it).
-    - connect-class / 5xx / 429 -> bounded retry, then SHORT_CIRCUIT (transient;
-      hold the cursor and retry next tick). 429 honors Retry-After within budget.
+    - 4xx except 401/403/408/429 -> DROPPED immediately (permanent; advance past it).
+    - connect-class / 5xx / 401 / 403 / 408 / 429 -> bounded retry, then
+      SHORT_CIRCUIT (transient; hold the cursor and retry next tick). 429 honors
+      Retry-After within budget; 401/403/408 use the backoff schedule.
     """
     attempts = max(1, fanout.retries + 1)
     result = _HttpResult(ok=False)
@@ -446,7 +483,7 @@ def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tup
         result = _post_json(url, body, float(fanout.http_timeout_secs))
         if result.ok:
             return DELIVERED, ""
-        if result.status is not None and 400 <= result.status < 500 and result.status != 429:
+        if result.status is not None and 400 <= result.status < 500 and result.status not in _TRANSIENT_4XX:
             return DROPPED, f"http {result.status}"
         if i < attempts - 1:
             if result.status == 429 and result.retry_after:
@@ -492,10 +529,14 @@ def dispatch_event(
 
 def _cloudevents_wrap(event: dict[str, Any]) -> dict[str, Any]:
     """Wrap the canonical event in the 5-field CloudEvents envelope. `id` is
-    derived from run+ts+type so a re-delivered event carries a stable id (a
-    receiver can dedupe on it)."""
+    run+ts+type plus a content-hash suffix: deterministic, so a re-delivered
+    event keeps a stable id (receiver dedup works), while two distinct events in
+    the same run+ts+type second get distinct ids and neither is deduped away.
+    Byte-identical duplicate lines share an id - correct, they are the same event."""
+    canonical = json.dumps(event, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode()).hexdigest()[:8]
     return {
-        "id": f"{event.get('run', '')}:{event.get('ts', '')}:{event.get('type', '')}",
+        "id": f"{event.get('run', '')}:{event.get('ts', '')}:{event.get('type', '')}:{digest}",
         "source": event.get("source", "fno"),
         "type": event.get("type", ""),
         "time": event.get("ts", ""),
@@ -553,11 +594,18 @@ def _dispatch_text_webhook(
     adapter serves Discord (``content``) / Slack-incoming (``text``) / ntfy via
     the configurable ``field``. A Discord-shaped post (``field == "content"``)
     sends ``allowed_mentions: {"parse": []}`` so a worker-influenced reason
-    containing ``@everyone`` cannot ping the server."""
+    containing ``@everyone`` cannot ping the server. For any non-Discord field the
+    rendered text is defanged - ``<!`` -> ``&lt;!`` - so Slack's broadcast tokens
+    (``<!channel>`` / ``<!here>`` / ``<!everyone>`` / ``<!subteam^...>``) render as
+    literal text instead of pinging the workspace (Slack shows ``&lt;`` as ``<``,
+    so the visible text is unchanged; ntfy is plain text and unaffected)."""
     url, err = _resolve_url(sink)
     if url is None:
         return SHORT_CIRCUIT, err or "no url"
-    body: dict[str, Any] = {sink.field: _render_template(sink.template, event)}
+    rendered = _render_template(sink.template, event)
+    if sink.field != "content":
+        rendered = rendered.replace("<!", "&lt;!")
+    body: dict[str, Any] = {sink.field: rendered}
     if sink.field == "content":
         body["allowed_mentions"] = {"parse": []}
     return _deliver(url, body, fanout)
@@ -582,7 +630,11 @@ def _append_plan_progress(plan_path: str, text: str, project_root: Path) -> None
     Best-effort - a missing/unresolvable path or any IO error is skipped silently
     (a vault miss is never a delivery failure). The heading is created at EOF on
     first use; since this adapter is the sole body-appender, Progress stays the
-    trailing section and later notes append beneath it."""
+    trailing section and later notes append beneath it. Serialized against the
+    ship-gate stamp via ``plan_doc_lock`` (both are whole-file rewrites; an atomic
+    write alone would still lose one side's update); the read happens INSIDE the
+    lock so a concurrent stamp's change is never clobbered. A lock timeout or any
+    IO error skips the append - best-effort, the tick still reports DELIVERED."""
     if not plan_path:
         return
     p = Path(plan_path)
@@ -590,19 +642,23 @@ def _append_plan_progress(plan_path: str, text: str, project_root: Path) -> None
         p = project_root / plan_path
     try:
         p = p.resolve()
-        if not p.is_file():
-            return
-        content = p.read_text(encoding="utf-8")
     except OSError:
         return
+    if not p.is_file():
+        return
     line = f"- {text}"
-    if "## Progress" in content:
-        new = content.rstrip("\n") + "\n" + line + "\n"
-    else:
-        new = content.rstrip("\n") + "\n\n## Progress\n\n" + line + "\n"
     try:
-        p.write_text(new, encoding="utf-8")
-    except OSError:
+        with plan_doc_lock(p):
+            content = p.read_text(encoding="utf-8")
+            if "## Progress" in content:
+                new = content.rstrip("\n") + "\n" + line + "\n"
+            else:
+                new = content.rstrip("\n") + "\n\n## Progress\n\n" + line + "\n"
+            # Reuse the stamp side's atomic writer: tmp + os.replace, but it also
+            # preserves the plan's existing mode (so a private 0600 vault note is
+            # not loosened to the umask default) and unlinks the tmp on failure.
+            _atomic_write_plan(p, new)
+    except (TimeoutError, OSError):
         return
 
 
