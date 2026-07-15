@@ -28,7 +28,7 @@ def _callback() -> None:
 @mcp_app.command("send")
 def send(
     session: str = typer.Option(
-        ..., "--session", help="Registered channel session id."
+        ..., "--session-id", help="Registered channel session id (the mcp_channel_id)."
     ),
 ) -> None:
     """Route a JSON envelope (read from stdin) to the channel under SESSION.

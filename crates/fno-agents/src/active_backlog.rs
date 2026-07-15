@@ -880,7 +880,16 @@ const TICK_CHILD_CAP: Duration = Duration::from_secs(300);
 /// leaks one subprocess per tick. Extracted for unit-testability.
 async fn output_with_cap(mut cmd: tokio::process::Command, cap: Duration) -> bool {
     cmd.kill_on_drop(true);
-    tokio::time::timeout(cap, cmd.output()).await.is_err()
+    match tokio::time::timeout(cap, cmd.output()).await {
+        Ok(Ok(_)) => false,
+        // Spawn/exec failure (binary missing, cwd gone, ...) is best-effort like
+        // the tick itself, but log it - a swallowed missing-`fno` is undiagnosable.
+        Ok(Err(e)) => {
+            eprintln!("fanout tick failed to execute: {e}");
+            false
+        }
+        Err(_) => true,
+    }
 }
 
 async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown: Arc<AtomicBool>) {

@@ -4086,7 +4086,7 @@ fn deliver_envelope(channel_id: &str, envelope: &Value) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = crate::loop_megawalk::abi_cmd("fno")
-        .args(["mcp", "send", "--session", channel_id])
+        .args(["mcp", "send", "--session-id", channel_id])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

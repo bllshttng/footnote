@@ -1498,6 +1498,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 };
                 let val: Value = serde_json::from_str(&raw)
                     .map_err(|e| format!("--envelope must be a JSON object: {e}"))?;
+                // Fail fast client-side: the daemon also rejects a non-object,
+                // but catching it here avoids a pointless IPC round-trip.
+                if !val.is_object() {
+                    return Err("--envelope must be a JSON object".to_string());
+                }
                 params.insert("envelope".into(), val);
             }
             "--status" => {

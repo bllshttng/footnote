@@ -431,7 +431,7 @@ class TestMcpSendCli:
 
         monkeypatch.setattr(client_mod, "send_to_channel", _fake_send)
         result = CliRunner().invoke(
-            mcp_app, ["send", "--session", "sess-x"], input='{"a": 1}'
+            mcp_app, ["send", "--session-id", "sess-x"], input='{"a": 1}'
         )
         assert result.exit_code == 0, result.output
         assert captured == {"session_id": "sess-x", "envelope": {"a": 1}}
@@ -448,7 +448,7 @@ class TestMcpSendCli:
             lambda *a, **k: called.__setitem__("n", called["n"] + 1),
         )
         result = CliRunner().invoke(
-            mcp_app, ["send", "--session", "s"], input="not json"
+            mcp_app, ["send", "--session-id", "s"], input="not json"
         )
         assert result.exit_code == 2, result.output
         assert called["n"] == 0
@@ -461,7 +461,7 @@ class TestMcpSendCli:
 
         monkeypatch.setattr(client_mod, "send_to_channel", lambda *a, **k: None)
         result = CliRunner().invoke(
-            mcp_app, ["send", "--session", "s"], input="[1, 2, 3]"
+            mcp_app, ["send", "--session-id", "s"], input="[1, 2, 3]"
         )
         assert result.exit_code == 2, result.output
 
@@ -476,7 +476,7 @@ class TestMcpSendCli:
 
         monkeypatch.setattr(client_mod, "send_to_channel", _boom)
         result = CliRunner().invoke(
-            mcp_app, ["send", "--session", "s"], input='{"a": 1}'
+            mcp_app, ["send", "--session-id", "s"], input='{"a": 1}'
         )
         assert result.exit_code == 1, result.output
 
@@ -517,7 +517,7 @@ class TestMcpSendCli:
 
             result = CliRunner().invoke(
                 mcp_app,
-                ["send", "--session", "sess-cli"],
+                ["send", "--session-id", "sess-cli"],
                 input=json.dumps({"op": "deliver-me", "params": {"meta": {"k": "v"}}}),
             )
             assert result.exit_code == 0, result.output
