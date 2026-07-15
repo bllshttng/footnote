@@ -118,24 +118,40 @@ def test_ready_when_active_and_configured(tmp_path: Path) -> None:
     assert verdict.note is None  # project.id set -> no soft note
 
 
-def test_ready_via_worktree_local_override(tmp_path: Path) -> None:
-    # x-cbce / codex PR #128: a worktree may set parking_lot_path ONLY in the
-    # per-worktree settings.local.yaml (shared settings.yaml has post_merge
-    # enabled but no path). The oracle must apply the same override layer as
-    # load_settings() and report ready, not unconfigured.
+def test_local_parking_lot_path_ignored_project_id_still_layers(tmp_path: Path) -> None:
+    # x-071c: parking_lot_path left the worktree-local allowlist, so a lane-local
+    # settings.local.yaml can no longer supply it - only the shared/canonical
+    # config can. With shared post_merge enabled but PATH-less, a local-only
+    # parking_lot_path is ignored and the oracle reports unconfigured, NOT ready.
+    # project.id (the surviving allowlist key) still layers.
     repo = _repo(tmp_path, "config:\n  post_merge:\n    enabled: true\n")
     (repo / ".fno" / "settings.local.yaml").write_text(
         "config:\n"
         "  post_merge:\n"
-        "    parking_lot_path: worktree/parking-lot.md\n"
+        "    parking_lot_path: worktree/parking-lot.md\n"  # ignored (not allowlisted)
         "  project:\n"
         "    id: this-worktree\n",
         encoding="utf-8",
     )
     _mark_active(repo)
     verdict = post_merge_readiness(repo)
+    assert verdict.status == "unconfigured"
+    assert verdict.parking_lot_path != "worktree/parking-lot.md"
+
+
+def test_ready_via_shared_path_with_local_project_id(tmp_path: Path) -> None:
+    # The path comes from shared/canonical config (x-071c); project.id still
+    # layers from the per-worktree local file.
+    repo = _repo(
+        tmp_path, "config:\n  post_merge:\n    parking_lot_path: docs/parking-lot.md\n"
+    )
+    (repo / ".fno" / "settings.local.yaml").write_text(
+        "config:\n  project:\n    id: this-worktree\n", encoding="utf-8"
+    )
+    _mark_active(repo)
+    verdict = post_merge_readiness(repo)
     assert verdict.status == "ready"
-    assert verdict.parking_lot_path == "worktree/parking-lot.md"
+    assert verdict.parking_lot_path == "docs/parking-lot.md"
     assert verdict.project_id == "this-worktree"
 
 

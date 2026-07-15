@@ -2028,11 +2028,12 @@ class ParallelBlock(BaseModel):
     Decision #3): it trades CI minutes for throughput, never the reverse.
 
     ``max_lanes`` is deliberately SHARED config, NOT in the per-worktree
-    ``settings.local.yaml`` override allowlist (:data:`WORKTREE_LOCAL_KEYS`,
+    ``config.local.toml`` override allowlist (:data:`WORKTREE_LOCAL_KEYS`,
     Locked Decision #10): a per-lane cap is meaningless - every lane must see
     one global ceiling or the cap does not bound anything. The allowlist is an
-    exact-match frozenset of ``{parking_lot_path, project.id}``, so this key is
-    excluded by construction; do NOT add ``config.parallel.max_lanes`` to it.
+    exact-match frozenset of ``{project.id}`` (x-071c narrowed it to this sole
+    key), so this key is excluded by construction; do NOT add
+    ``config.parallel.max_lanes`` to it.
 
     Fields
     ------
@@ -2840,7 +2841,12 @@ class SettingsModel(ConfigBlock):
 # config.local.toml is flat, so no `config.` prefix.
 WORKTREE_LOCAL_KEYS: frozenset[str] = frozenset(
     {
-        "post_merge.parking_lot_path",
+        # post_merge.parking_lot_path was removed (x-071c): the post-merge ritual
+        # is a serial one-shot durable write, and its two write vehicles (capture
+        # add under a file lock, narrative append under the per-PR reconcile mutex
+        # with O_APPEND) are already safe on the shared canonical file. Redirecting
+        # it per-lane only orphaned the prose into an untracked file archive-worktree
+        # deletes. The ritual now always resolves against the canonical root.
         "project.id",
     }
 )
