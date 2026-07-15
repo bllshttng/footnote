@@ -3737,10 +3737,8 @@ async fn attach_and_run(
     // back here, tagged with the generation it was kicked under, so a slow `fno`
     // never blocks the modal and a result landing after a close/refresh is
     // discarded. Carries a full ReadOutcome (Ok lists, or a named degrade).
-    let (conn_tx, mut conn_rx) = tokio::sync::mpsc::unbounded_channel::<(
-        u64,
-        crate::connections_view::ReadOutcome,
-    )>();
+    let (conn_tx, mut conn_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::connections_view::ReadOutcome)>();
 
     // x-84d7: a Connections single-flight mutation verb reports its result here,
     // gen-tagged like the read, so a result for a closed/superseded modal is

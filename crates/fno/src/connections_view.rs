@@ -547,7 +547,12 @@ impl ConnectionsView {
         let name = combo.name.clone();
         self.acting = true;
         self.notice = None;
-        ConnIntent::Run(vec!["providers".into(), "combos".into(), "use".into(), name])
+        ConnIntent::Run(vec![
+            "providers".into(),
+            "combos".into(),
+            "use".into(),
+            name,
+        ])
     }
 
     /// d: remove the selected combo behind an Enter-confirm.
@@ -813,7 +818,10 @@ impl ConnectionsView {
             cli: cli.clone(),
             dir: dir.clone(),
         });
-        self.notice = Some(format!("login pane opened for {} - press r when done", w.id));
+        self.notice = Some(format!(
+            "login pane opened for {} - press r when done",
+            w.id
+        ));
         let inner: Vec<String> = if cli == "claude" {
             vec![
                 "env".into(),
@@ -1273,7 +1281,7 @@ mod tests {
         assert!(out.contains("main"));
         assert!(out.contains("[fallback]"));
         assert!(out.contains("●")); // active combo badge
-        // members numbered in rotation order under the selected combo
+                                    // members numbered in rotation order under the selected combo
         assert!(out.contains("1. ccm"));
         assert!(out.contains("2. ccr"));
         assert!(out.contains("3. glm"));
@@ -1452,8 +1460,13 @@ mod tests {
                 assert_eq!(
                     argv,
                     vec![
-                        "mux", "pane", "run", "env", "CLAUDE_CONFIG_DIR=~/.claude-ccm2",
-                        "claude", "/login",
+                        "mux",
+                        "pane",
+                        "run",
+                        "env",
+                        "CLAUDE_CONFIG_DIR=~/.claude-ccm2",
+                        "claude",
+                        "/login",
                     ]
                 );
             }
@@ -1589,7 +1602,10 @@ mod tests {
         assert_eq!(v.member_sel, 0);
         assert_eq!(v.on_key(b'J'), ConnIntent::Redraw); // ccm <-> ccr
         assert_eq!(v.on_key(b'J'), ConnIntent::Redraw); // ccm <-> glm
-        assert_eq!(v.dirty_order, Some(vec!["ccr".into(), "glm".into(), "ccm".into()]));
+        assert_eq!(
+            v.dirty_order,
+            Some(vec!["ccr".into(), "glm".into(), "ccm".into()])
+        );
         // Dirty hint shows; Enter commits one update call with the new order.
         assert!(v.render().join("\n").contains("Enter: commit"));
         let intent = v.on_key(b'\r');
@@ -1666,7 +1682,11 @@ mod tests {
         v.on_key(b'\t'); // -> Order
         assert!(v.render().join("\n").contains("gone  (dangling)"));
         assert_eq!(v.on_key(b' '), ConnIntent::Redraw); // activate refused
-        assert!(v.notice.as_deref().unwrap().contains("dangling member gone"));
+        assert!(v
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("dangling member gone"));
     }
 
     #[test]
