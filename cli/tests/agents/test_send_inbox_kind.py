@@ -259,3 +259,58 @@ def test_cmd_send_no_kind_still_default_send(isolated, runner) -> None:
     # No live peer -> durable queue for the project (existing US6 behavior).
     assert result.exit_code == 0, result.output
     assert "queued (durable)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --from-self (x-5ee2 US2): stamp the sender's own reply handle, not the project
+# ---------------------------------------------------------------------------
+
+
+def _only_marker(monkeypatch, marker: str, value: str) -> None:
+    """Force ambient identity to resolve to exactly `marker`, clearing the
+    higher-precedence markers so the test is deterministic on any host."""
+    for m, _ in __import__("fno.harness_identity", fromlist=["x"]).HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv(marker, value)
+
+
+def test_cmd_send_from_self_stamps_canonical_handle(isolated, runner, monkeypatch) -> None:
+    """--from-self stamps the session's canonical handle as sender, so a reply to
+    a --to-project note lands in the sender's session lane, not the project inbox."""
+    from fno.inbox.store import read_unread_threads
+
+    _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
+    result = _invoke(
+        runner,
+        "--to-project", "acme-docs",
+        "--kind", "question",
+        "--from-self",
+        "--body", "which auth?",
+    )
+    assert result.exit_code == 0, result.output
+    assert read_unread_threads("acme-docs")[0].from_project == "claude-879d8d26"
+
+
+def test_cmd_send_from_self_with_from_name_is_usage_error(isolated, runner, monkeypatch) -> None:
+    _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-aaaa")
+    result = _invoke(
+        runner,
+        "--to-project", "x", "--kind", "question",
+        "--from-self", "--from-name", "acme-web",
+        "--body", "q",
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in (result.stdout + (result.stderr or ""))
+
+
+def test_cmd_send_from_self_without_identity_fails_loud(isolated, runner, monkeypatch) -> None:
+    """No ambient harness identity -> exit 2 with an explicit message, nothing sent
+    (never the silent 'fno' floor stamp_from uses)."""
+    for m, _ in __import__("fno.harness_identity", fromlist=["x"]).HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    result = _invoke(
+        runner,
+        "--to-project", "x", "--kind", "question", "--from-self", "--body", "q",
+    )
+    assert result.exit_code == 2
+    assert "no ambient harness identity" in (result.stdout + (result.stderr or ""))

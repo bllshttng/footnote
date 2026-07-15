@@ -112,6 +112,17 @@ fno mail send --to-project "<to_project>" "<body>"
 Relay the **real** msg-id and the resolved recipient/project so delivery is
 auditable. Both lines are success.
 
+#### Send-and-hold: make your reply reachable
+
+A name-lane send (`send <name>`) already self-stamps the sender: omit `--from-name`
+and the envelope carries your canonical reply handle, so a reply resolves. A
+`--to-project` send instead stamps the *project* as sender by default (correct for
+fire-and-forget notes, wrong when you hold for an answer). If you send
+`--to-project` and will wait for the reply, pass `--from-self` - it stamps your own
+reply handle (exit 2 if there is no ambient harness identity, never a silent
+floor). The `mail:` line of `fno whoami` is the only identity field that is a valid
+`--from-name`; never copy the `run:` line (a ledger id, not a handle).
+
 - **Unknown name** (`fno mail send` exits 16): report "unknown agent `<name>` -
   nothing was written" and do NOT guess a recipient.
 - **Broadcast ambiguity** (multiple live peers for a project, exit nonzero): relay

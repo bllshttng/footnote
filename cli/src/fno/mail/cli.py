@@ -876,6 +876,15 @@ def cmd_send(
             "dir's project for an inbox-kind send."
         ),
     ),
+    from_self: bool = typer.Option(
+        False, "--from-self",
+        help=(
+            "Stamp the sender with this session's own canonical mail handle "
+            "(the reply handle `fno whoami` shows) instead of the project. "
+            "Use with --to-project when you will hold for the reply. Fails loud "
+            "(exit 2) with no ambient harness identity - never a silent floor."
+        ),
+    ),
     to_project: str | None = typer.Option(
         None, "--to-project",
         help=(
@@ -947,6 +956,25 @@ def cmd_send(
     from fno.agents.self_stamp import resolve_self_model, stamp_from
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
+
+    # --from-self resolves this session's own canonical handle and threads it as
+    # from_name, so every lane below (project-note / --to-project / name) stamps a
+    # reachable reply address instead of the project. It fails LOUD without ambient
+    # identity - the silent "fno" floor stamp_from uses is the exact bug this kills.
+    if from_self:
+        if from_name is not None:
+            print("error: --from-self and --from-name are mutually exclusive", file=sys.stderr)
+            raise typer.Exit(code=2)
+        from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+        ident = resolve_harness_identity()
+        if not (ident.session_id and ident.harness):
+            print(
+                "error: --from-self: no ambient harness identity - cannot self-stamp",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        from_name = canonical_handle(ident.harness, ident.session_id)
 
     # Inbox-kind mode: heads-up / question / fyi are inbox-style durable notes
     # the recipient's drain dispatches on (heads-up -> triage, question ->
