@@ -918,13 +918,17 @@ fn drain_config_for(target: &ResolvedTarget, abi_bin: &str) -> Option<DrainConfi
     let lib_dir = cwd.join("scripts").join("lib");
     let lib_path = preflight("claude-code", &lib_dir, None).ok()?;
     let max_iterations = driver_default_max(&lib_path).unwrap_or(PER_UNIT_MAX_DISPATCHES);
+    // x-4391: merge posture per TARGET cwd (not the daemon's own), so one daemon
+    // draining multiple projects honors each project's config.dispatch.auto_merge;
+    // a parse failure in one degrades only that project to no-merge.
+    let allow_merge = crate::agents_config::dispatch_auto_merge(&cwd);
     Some(DrainConfig {
         cwd,
         project: Some(target.project.clone()),
         mission: target.mission.clone(),
         lib_path,
         abi_bin: abi_bin.to_string(),
-        allow_merge: false,
+        allow_merge,
         max_turns: daemon_max_turns(),
         budget_usd: daemon_budget_usd(),
         model: None,

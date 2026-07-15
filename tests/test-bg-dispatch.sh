@@ -149,6 +149,22 @@ case "$sub $verb" in
     # The real resolver substitutes {id} when --node is given (per-node path).
     [[ -n "$r_node" ]] && cmd="${cmd//\{id\}/$r_node}"
     printf '{"harness":"%s","substrate":"%s","command":"%s"}\n' "$h" "${pair##*/}" "$cmd" ;;
+  "config get")
+    # x-4391: only dispatch.auto_merge is modeled; every other key (e.g.
+    # agents.spawn_permission_mode) falls through to empty, matching prod's
+    # "unset => empty" so the permission-mode read stays a no-op under the mock.
+    key="${3:-}"
+    if [[ "$key" == "dispatch.auto_merge" ]]; then
+      [[ -f "$S/cfg_auto_merge_err" ]] && { echo "unknown config key 'dispatch.auto_merge'" >&2; exit 1; }
+      # x-4391 per-node (codex P2): `fno config get` reads the CURRENT cwd. The
+      # launcher cd's into each node's project cwd before the read, so a node
+      # carrying its own .fno/auto_merge (written by the test) simulates a
+      # cross-project posture; the global cfg_auto_merge state is the fallback.
+      [[ -f "$PWD/.fno/auto_merge" ]] && { cat "$PWD/.fno/auto_merge"; exit 0; }
+      cat "$S/cfg_auto_merge" 2>/dev/null || echo False   # prints a Python bool
+      exit 0
+    fi
+    : ;;
   "event emit") : ;;  # x-567d: fallback/fail telemetry; noop under the mock
   *) exit 0 ;;
 esac
@@ -163,7 +179,7 @@ set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2"
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 
 echo "=============================================="
@@ -197,6 +213,91 @@ out="$(bash "$DISPATCH" --allow-merge ab-aaaa1111 ab-bbbb2222 2>&1)"
 grep -q "no-merge" "$MOCKSTATE/ask.log" \
   && fail "AC5-HP: --allow-merge should suppress no-merge but ask.log has it" \
   || pass "AC5-HP: --allow-merge suppresses the no-merge default"
+
+# ============================================================
+# x-4391: config-driven merge posture (config.dispatch.auto_merge)
+# ============================================================
+
+# AC2-HP: auto_merge=true -> claude builtin path omits no-merge (skip-inject).
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo True > "$MOCKSTATE/cfg_auto_merge"
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+if grep -q '/target ab-aaaa1111' "$MOCKSTATE/ask.log" && ! grep -q 'no-merge' "$MOCKSTATE/ask.log"; then
+  pass "x-4391 AC2-HP: config auto_merge=true -> claude /target without no-merge"
+else
+  fail "x-4391 claude allow posture: $(cat "$MOCKSTATE/ask.log")"
+fi
+
+# AC2-HP (the strip): a codex builtin command bakes no-merge (_AUTONOMOUS_COMMAND);
+# under allow posture the launcher STRIPS it, not merely skip-injects.
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo True > "$MOCKSTATE/cfg_auto_merge"; echo codex/headless > "$MOCKSTATE/resolve_pair"
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+if grep -q 'fno:target ab-aaaa1111' "$MOCKSTATE/ask.log" && ! grep -q 'no-merge' "$MOCKSTATE/ask.log"; then
+  pass "x-4391 AC2-HP: auto_merge=true strips baked no-merge from codex \$fno:target"
+else
+  fail "x-4391 codex strip: $(cat "$MOCKSTATE/ask.log")"
+fi
+
+# AC1-HP: default posture (no config key) keeps the baked no-merge on the codex builtin.
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo codex/headless > "$MOCKSTATE/resolve_pair"
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+grep -q 'fno:target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
+  && pass "x-4391 AC1-HP: default posture keeps no-merge on codex builtin" \
+  || fail "x-4391 codex default: $(cat "$MOCKSTATE/ask.log")"
+
+# AC3-HP: explicit --no-merge beats config auto_merge=true.
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo True > "$MOCKSTATE/cfg_auto_merge"
+out="$(bash "$DISPATCH" --no-merge ab-aaaa1111 2>&1)"
+grep -q '/target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
+  && pass "x-4391 AC3-HP: --no-merge beats config auto_merge=true" \
+  || fail "x-4391 --no-merge override: $(cat "$MOCKSTATE/ask.log")"
+
+# AC1-ERR: a failed config read (stale fno rejecting the key) degrades to no-merge.
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+touch "$MOCKSTATE/cfg_auto_merge_err"
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+grep -q '/target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
+  && pass "x-4391 AC1-ERR: config read failure degrades to no-merge" \
+  || fail "x-4391 config err degrade: $(cat "$MOCKSTATE/ask.log")"
+
+# AC1-EDGE: the REAL strip_no_merge (loaded from the script, no drift) removes
+# only the space-delimited standalone token, never a substring, and skips a
+# non-/target command.
+eval "$(sed -n '/^strip_no_merge() {/,/^}/p' "$DISPATCH")"
+[[ "$(strip_no_merge '/target no-merge x-1')" == '/target x-1' ]] \
+  && pass "x-4391 AC1-EDGE: standalone no-merge stripped" || fail "AC1-EDGE standalone: $(strip_no_merge '/target no-merge x-1')"
+[[ "$(strip_no_merge '/target no-merger-x')" == '/target no-merger-x' ]] \
+  && pass "x-4391 AC1-EDGE: no-merge substring preserved" || fail "AC1-EDGE substring: $(strip_no_merge '/target no-merger-x')"
+[[ "$(strip_no_merge '$fno:target no-merge x-1')" == '$fno:target x-1' ]] \
+  && pass "x-4391 AC1-EDGE: codex \$fno:target token stripped" || fail "AC1-EDGE codex"
+[[ "$(strip_no_merge '/think x-1')" == '/think x-1' ]] \
+  && pass "x-4391 AC1-EDGE: non-/target command untouched" || fail "AC1-EDGE non-target"
+
+# AC2-EDGE (codex P2): per-node posture reads THIS node's project cwd, not the
+# dispatcher's. Node B's project opts in via its own .fno/auto_merge while the
+# global default stays no-merge -> B dispatches allow (from B's config).
+reset_mock
+projB="$TMP/projB"; mkdir -p "$projB/.fno"; echo True > "$projB/.fno/auto_merge"
+set_status ab-bbbb2222 ready; set_claim ab-bbbb2222 free; set_resolved_cwd ab-bbbb2222 "$projB"
+out="$(bash "$DISPATCH" ab-bbbb2222 2>&1)"
+if grep -q '/target ab-bbbb2222' "$MOCKSTATE/ask.log" && ! grep -q 'no-merge' "$MOCKSTATE/ask.log"; then
+  pass "x-4391 AC2-EDGE: per-node posture reads the node's OWN project cwd"
+else
+  fail "x-4391 per-node cwd routing: $(cat "$MOCKSTATE/ask.log")"
+fi
+
+# The dispatcher's own cwd opting in must NOT leak to a node whose project has no
+# opt-in: with the global default false and no per-node config, B stays no-merge.
+reset_mock
+projC="$TMP/projC"; mkdir -p "$projC/.fno"   # no auto_merge file -> project default
+set_status ab-bbbb2222 ready; set_claim ab-bbbb2222 free; set_resolved_cwd ab-bbbb2222 "$projC"
+out="$(bash "$DISPATCH" ab-bbbb2222 2>&1)"
+grep -q '/target no-merge ab-bbbb2222' "$MOCKSTATE/ask.log" \
+  && pass "x-4391 AC2-EDGE: no cross-project posture leak (node project opts out)" \
+  || fail "x-4391 posture leak: $(cat "$MOCKSTATE/ask.log")"
 
 # ---- AC5-ERR: dispatch failure surfaces, node stays ready, exit 1, no fallback ----
 reset_mock; set_status ab-aaaa1111 ready; : > "$MOCKSTATE/ask.fail"

@@ -1399,6 +1399,51 @@ fn ac14_max_units_zero_rejected() {
     );
 }
 
+// ── x-4391: merge-posture flags are megawalk-only under --driver target ───────
+#[test]
+fn target_driver_rejects_allow_merge() {
+    let args: Vec<String> = vec![
+        "run",
+        "--driver",
+        "target",
+        "--allow-merge",
+        "--driver-lib-dir",
+        "/tmp",
+        "--cwd",
+        "/tmp",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(
+        fno_agents::loop_target::run_loop_verb(&args),
+        2,
+        "--allow-merge is megawalk-only; --driver target must exit 2"
+    );
+}
+
+#[test]
+fn target_driver_rejects_no_merge() {
+    let args: Vec<String> = vec![
+        "run",
+        "--driver",
+        "target",
+        "--no-merge",
+        "--driver-lib-dir",
+        "/tmp",
+        "--cwd",
+        "/tmp",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(
+        fno_agents::loop_target::run_loop_verb(&args),
+        2,
+        "--no-merge is megawalk-only; --driver target must exit 2"
+    );
+}
+
 // ── AC15-ERR: claim acquire exit 2 -> Queue error, not silent retry ───────────
 //
 // Finding 1 (sigma-review HIGH): every non-zero fno claim acquire exit was

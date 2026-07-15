@@ -1109,6 +1109,22 @@ class DispatchBlock(BaseModel):
     # US3 verb allowlist: a node-supplied dispatch verb must match one of these
     # or the resolver refuses (no worker). Empty = the built-in default set.
     allowed_verbs: list[str] = Field(default_factory=lambda: ["/target", "/think"])
+    # x-4391: per-project merge posture for AUTONOMOUS dispatch. Default False =
+    # today's `no-merge` floor (a fresh install is byte-identical). Each dispatch
+    # path (dispatch-node.sh / normalize.sh / advance.py / the Rust loop) defaults
+    # its posture from this key; an explicit --allow-merge/--no-merge flag wins.
+    # Layer-separate from config.auto_merge.* (the worker-side review gate).
+    auto_merge: bool = False
+
+    @field_validator("auto_merge", mode="before")
+    @classmethod
+    def _coerce_auto_merge(cls, v: object) -> object:
+        """Only a real TOML boolean grants merge; anything else degrades to
+        no-merge. Locked Decision 6 + Errors invariant: a config error can never
+        grant merge rights, so a lax-coercible string like "yes" (which a plain
+        bool would read as True) resolves False. Mirrors the _coerce_* idiom on
+        AgentsBlock: never raise, always degrade toward safety."""
+        return v if isinstance(v, bool) else False
 
 
 class AgentsBlock(BaseModel):

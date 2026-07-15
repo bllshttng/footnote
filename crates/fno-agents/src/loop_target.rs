@@ -279,7 +279,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // Megawalk-only flags.
     let mut project: Option<String> = None;
     let mut all = false;
-    let mut allow_merge = false;
+    // x-4391 tri-state: None = unset (megawalk resolves config.dispatch.auto_merge;
+    // target rejects any posture flag). Some(true)=--allow-merge, Some(false)=--no-merge.
+    let mut allow_merge: Option<bool> = None;
     let mut parallel_cap: Option<u64> = None;
     let mut max_units: Option<u64> = None;
     // Megawalk flags (group 3, ab-9fd662c6).
@@ -361,7 +363,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 all = true;
             }
             "--allow-merge" => {
-                allow_merge = true;
+                allow_merge = Some(true);
+            }
+            "--no-merge" => {
+                allow_merge = Some(false);
             }
             "--parallel-cap" => {
                 let v = require_value!("--parallel-cap", args, i);
@@ -413,9 +418,11 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             return Ok(2);
         }
         Some("megawalk") => {
-            // Validate that --allow-merge is not passed with --driver target.
-            // (allow_merge is megawalk-only; if somehow we get here with target
-            //  the check below would fire.)
+            // x-4391: an explicit --allow-merge/--no-merge wins; otherwise the
+            // per-project config.dispatch.auto_merge decides (default false =
+            // no-merge). Resolve before `cwd` is moved into run().
+            let allow_merge =
+                allow_merge.unwrap_or_else(|| crate::agents_config::dispatch_auto_merge(&cwd));
             return Ok(crate::loop_megawalk::run(
                 &dispatcher_name,
                 max_iterations,
@@ -436,11 +443,17 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             ));
         }
         Some("target") => {
-            // --allow-merge is megawalk-only; reject with clear message.
-            if allow_merge {
+            // A merge-posture flag is megawalk-only; a /target session's merge
+            // posture is its own concern and config is never consulted here
+            // (x-4391). Reject either flag with an accurate message.
+            if allow_merge == Some(true) {
                 eprintln!(
                     "fno-agents loop run: --allow-merge is only valid with --driver megawalk"
                 );
+                return Ok(2);
+            }
+            if allow_merge == Some(false) {
+                eprintln!("fno-agents loop run: --no-merge is only valid with --driver megawalk");
                 return Ok(2);
             }
             // --max-units is megawalk-only; reject with clear message.
