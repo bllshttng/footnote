@@ -2976,9 +2976,8 @@ mod tests {
         )
         .expect("--account must parse");
         assert_eq!(space["account"], "readyrule");
-        let (_m2, eq) =
-            build_request("spawn", &["wk".to_string(), "--account=makers".to_string()])
-                .expect("--account= must parse");
+        let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--account=makers".to_string()])
+            .expect("--account= must parse");
         assert_eq!(eq["account"], "makers");
     }
 
