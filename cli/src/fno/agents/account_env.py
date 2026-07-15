@@ -151,10 +151,15 @@ def resolve_account_overlay(
 
         active = active_slot_id("claude", providers_root)
         if account_id == active or record.account_id == active:
-            # Lane 3: the account IS the active ~/.claude slot occupant; the
-            # worker rides it (correct billing) and extends the live-pin (a slot
-            # switch defers until it exits). Empty overlay by design.
-            return AccountOverlay(account_id, {}, "managed-active")
+            # Lane 3: the account IS the active slot occupant; the worker rides
+            # the shared ~/.claude slot (correct billing) and extends the
+            # live-pin. Pin CLAUDE_CONFIG_DIR to the canonical slot rather than
+            # returning {} - an empty overlay would let a stale parent
+            # CLAUDE_CONFIG_DIR (e.g. exported from a prior alt-account session)
+            # leak through and silently bill the wrong account. Managed claude
+            # accounts materialize into ~/.claude by definition.
+            slot = str(Path.home() / ".claude")
+            return AccountOverlay(account_id, {"CLAUDE_CONFIG_DIR": slot}, "managed-active")
 
         # A managed account that is NOT the active slot occupant has no correct
         # env overlay: a setup-token injected via CLAUDE_CODE_OAUTH_TOKEN

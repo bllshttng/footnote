@@ -2017,6 +2017,7 @@ def dispatch_spawn(
                                 agent=agent,
                                 tools=tools,
                                 deny_tools=deny_tools,
+                                account_env=account_env,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
                             _emit_ev(

@@ -217,6 +217,7 @@ def headless_create(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    account_env: Optional[Mapping[str, str]] = None,
 ) -> ProviderResult:
     """Run a one-shot ``claude -p`` without creating a background session."""
     argv = ["claude", "-p"]
@@ -231,6 +232,13 @@ def headless_create(
     # x-b6e2: Tier-3 passthrough, same order as the Rust headless builder.
     argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     argv.append(message or "hello")
+    # Per-spawn account overlay (x-d012): a one-shot `claude -p` inherits the
+    # parent env, so without this an --account headless spawn would silently
+    # drop CLAUDE_CONFIG_DIR and bill the operator's current account.
+    spawn_env: Optional[dict[str, str]] = None
+    if account_env:
+        spawn_env = dict(os.environ)
+        spawn_env.update(account_env)
     started = time.monotonic()
     try:
         result = _subprocess_run(
@@ -239,6 +247,7 @@ def headless_create(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **({"env": spawn_env} if spawn_env is not None else {}),
         )
     except subprocess.TimeoutExpired as exc:
         raise ProviderSubprocessError(124, f"claude -p timed out after {exc.timeout}s") from exc

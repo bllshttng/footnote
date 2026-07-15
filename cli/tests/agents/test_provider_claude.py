@@ -374,3 +374,49 @@ def test_build_argv_tier3_parity() -> None:
     assert _build_argv("a", "hi", False, add_dir="", agent=None) == [
         "claude", "--bg", "--name", "a", "hi",
     ]
+
+
+def test_headless_create_applies_account_env(tmp_path: Path, monkeypatch) -> None:
+    """x-d012: --account headless must thread CLAUDE_CONFIG_DIR into the -p env
+    (a one-shot claude -p inherits the parent env otherwise -> mis-bill)."""
+    from fno.agents.providers import claude as claude_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(
+        message="hi", cwd=cwd, account_env={"CLAUDE_CONFIG_DIR": "/x/.claude-alt"}
+    )
+    env = captured["env"]
+    assert env is not None and env["CLAUDE_CONFIG_DIR"] == "/x/.claude-alt"
+
+
+def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) -> None:
+    """No --account -> no explicit env (byte-identical to today: inherits parent)."""
+    from fno.agents.providers import claude as claude_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["has_env"] = "env" in kwargs
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd)
+    assert captured["has_env"] is False

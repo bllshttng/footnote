@@ -99,7 +99,9 @@ def test_non_claude_record_refused(tmp_path: Path, providers_root: Path) -> None
 
 # --- lane 3: managed active rides the shared slot ---------------------------
 
-def test_managed_active_empty_overlay(tmp_path: Path, providers_root: Path) -> None:
+def test_managed_active_pins_shared_slot(tmp_path: Path, providers_root: Path) -> None:
+    """Lane 3 pins CLAUDE_CONFIG_DIR to ~/.claude (not {}), so a stale parent
+    CLAUDE_CONFIG_DIR export can't leak and bill the wrong account."""
     _stamp_active(providers_root, "makers")
     repo = _write_settings(
         tmp_path,
@@ -107,7 +109,7 @@ def test_managed_active_empty_overlay(tmp_path: Path, providers_root: Path) -> N
     )
     ov = resolve_account_overlay("makers", repo_root=repo, providers_root=providers_root)
     assert ov.lane == "managed-active"
-    assert ov.env == {}
+    assert ov.env == {"CLAUDE_CONFIG_DIR": str(Path.home() / ".claude")}
 
 
 # --- managed non-active: refuse, point at config-dir (the correct mechanism) --
