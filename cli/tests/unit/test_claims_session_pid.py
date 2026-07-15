@@ -11,29 +11,47 @@ from fno.claims.session_pid import resolve_session_pid
 
 
 class _FakeProc:
-    """Minimal psutil.Process stand-in for a chosen ancestor chain."""
+    """Minimal psutil.Process stand-in for a chosen ancestor chain.
 
-    def __init__(self, pid, name, exe, parent=None):
+    ``name``/``exe``/``cmdline`` may each be an exception INSTANCE, in which case
+    the corresponding getter raises it (models a per-getter psutil failure).
+    ``cmdline`` defaults to ``[exe]`` so plain (pid, name, exe) specs behave like
+    a real process without a bespoke argv.
+    """
+
+    def __init__(self, pid, name, exe, parent=None, cmdline=None):
         self.pid = pid
         self._name = name
         self._exe = exe
         self._parent = parent
+        self._cmdline = [exe] if cmdline is None else cmdline
+
+    def _get(self, value):
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     def name(self):
-        return self._name
+        return self._get(self._name)
 
     def exe(self):
-        return self._exe
+        return self._get(self._exe)
+
+    def cmdline(self):
+        return self._get(self._cmdline)
 
     def parent(self):
         return self._parent
 
 
 def _chain(*specs):
-    """Build a child->...->root chain from (pid, name, exe) specs (child first)."""
+    """Build a child->...->root chain (child first). Each spec is
+    (pid, name, exe) or (pid, name, exe, cmdline)."""
     parent = None
-    for pid, name, exe in reversed(specs):
-        parent = _FakeProc(pid, name, exe, parent=parent)
+    for spec in reversed(specs):
+        pid, name, exe = spec[0], spec[1], spec[2]
+        cmdline = spec[3] if len(spec) > 3 else None
+        parent = _FakeProc(pid, name, exe, parent=parent, cmdline=cmdline)
     # walk back to the first (child) node
     node = parent
     nodes = []
@@ -138,3 +156,113 @@ def test_env_override_non_positive_ignored():
             with patch("psutil.Process", return_value=child):
                 # 0 is rejected -> walk runs -> finds the claude ancestor.
                 assert resolve_session_pid(from_pid=10) == 20
+
+
+# --- non-claude harness resolution (x-5e58) -----------------------------------
+
+
+def _resolve_from(child, from_pid):
+    """Run resolve_session_pid over a fake chain with FNO_SESSION_PID unset."""
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("FNO_SESSION_PID", None)
+        with patch("psutil.Process", return_value=child):
+            return resolve_session_pid(from_pid=from_pid)
+
+
+@pytest.mark.parametrize("token", ["codex", "opencode", "agy"])
+def test_native_binary_harness_resolves_by_basename(token):
+    """Native-binary harnesses have their name as the exe basename."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, token, f"/opt/homebrew/bin/{token}"),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_node_shim_gemini_resolves_via_cmdline_symlink():
+    """gemini is a node shim: name()==node, exe()==node, cmdline()[1]==bin/gemini."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "node", "/usr/bin/node", ["node", "/Users/x/.gemini/bin/gemini"]),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_node_shim_gemini_resolves_via_cmdline_resolved_script():
+    """The resolved-script argv shape (gemini.js) matches via the stem rule."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "node", "/usr/bin/node", ["node", "/Users/x/lib/gemini-cli/gemini.js"]),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_substring_trap_legacy_does_not_match_agy():
+    """`agy` is a substring of `legacy`; segment-exact matching must not match it."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "tool", "/opt/legacy/bin/tool", ["/opt/legacy/bin/tool", "--run"]),
+    )
+    assert _resolve_from(child, 10) is None
+
+
+def test_substring_trap_codex_framework_does_not_match_codex():
+    """The ChatGPT app's `Codex Framework.framework` segments are not `codex`."""
+    exe = (
+        "/Applications/ChatGPT.app/Contents/Frameworks/"
+        "Codex Framework.framework/Versions/A/helper"
+    )
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "helper", exe, [exe]),
+    )
+    assert _resolve_from(child, 10) is None
+
+
+def test_nearest_harness_wins_across_mixed_chain():
+    """A claude worker nested under codex anchors the NEAREST harness (claude)."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "claude", "/Users/x/.local/bin/claude"),   # nearest
+        (30, "codex", "/opt/homebrew/bin/codex"),        # outer
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_cmdline_access_denied_degrades_to_other_getters():
+    """cmdline() raising AccessDenied still lets name()/exe() resolve the harness."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "codex", "/opt/homebrew/bin/codex", psutil.AccessDenied(20)),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_cmdline_zombie_on_only_source_continues_walk():
+    """A node-shim ancestor whose cmdline() zombies yields no match; walk continues."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        # name/exe say only "node"; its one identifying source (cmdline) zombies.
+        (20, "node", "/usr/bin/node", psutil.ZombieProcess(20)),
+        (30, "codex", "/opt/homebrew/bin/codex"),
+    )
+    assert _resolve_from(child, 10) == 30
+
+
+def test_claude_substring_never_matches_a_cmdline_wrapper_path():
+    """codex P1 (#419): a hook/wrapper `bash` whose argv carries a `.claude/`
+    install path must NOT match as claude (a substring test there would return the
+    transient shell pid); the walk continues to the real claude process. The
+    claude substring rule applies to name()/exe() only, never to argv."""
+    child = _chain(
+        (
+            10,
+            "bash",
+            "/bin/bash",
+            ["bash", "/Users/x/.claude/plugins/fno/hooks/helpers/init-target-state.sh"],
+        ),
+        (20, "2.1.177", "/Users/x/.local/share/claude/versions/2.1.177"),
+    )
+    # Without the guard this returns 10 (the wrapper shell); with it, the real
+    # claude ancestor (20).
+    assert _resolve_from(child, 10) == 20

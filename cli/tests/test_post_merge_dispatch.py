@@ -221,6 +221,103 @@ def test_spawn_worker_config_failure_falls_open(monkeypatch):
     assert _model_of(captured["cmd"]) == "claude-sonnet-5"
 
 
+# --- x-5e58: non-claude ritual claim anchors a durable pid ------------------
+#
+# End-to-end wiring: the acquire DEFAULT (no --pid) resolves the durable session
+# pid, so a healthy non-claude ritual's reconcile:pr-<n> claim reads `live` and
+# the x-616b guard persists the marker instead of withholding it. The inverse
+# (a dead-pid unexpired claim) must still read `suspect` -> lock-contention so
+# crash recovery survives.
+
+
+def _dead_pid():
+    import psutil
+
+    dead = 999_999
+    while psutil.pid_exists(dead):
+        dead += 1
+    return dead
+
+
+def test_nonclaude_ritual_live_claim_guard_persists_marker(tmp_path, monkeypatch):
+    """AC1-HP + AC1-UI: acquire anchors the resolved harness pid, claim_status
+    reads live, and the guard returns ritual-claim-live + writes the marker."""
+    import os
+
+    from typer.testing import CliRunner
+    from fno import claims
+    from fno.claims.cli import cli
+    from fno.claims.io import claims_root_for
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # This test process is a known-live, long-lived "durable session" pid; the
+    # default acquire resolution is forced to return it (stands in for the
+    # codex/gemini session ancestor the real walk would find).
+    live_pid = os.getpid()
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: live_pid
+    )
+
+    result = CliRunner().invoke(
+        cli, ["acquire", "reconcile:pr-77", "--holder", "postmerge:pr-77:codex-1", "--ttl", "15m"]
+    )
+    assert result.exit_code == 0
+    assert f"pid={live_pid}" in result.output  # AC1-UI: anchored pid is visible
+
+    state = claims.claim_status(
+        "reconcile:pr-77", root=claims_root_for("reconcile:pr-77")
+    ).get("state")
+    assert state == "live"
+
+    canonical = tmp_path / "canon"
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        77, dedup_key="shaLive", auto_run=True, canonical_root=canonical, spawn=spawn
+    )
+    assert res.outcome == "already-dispatched"
+    assert res.detail == "ritual-claim-live"
+    assert (canonical / ".fno" / "post-merge-dispatched" / "shaLive").exists()
+    assert spawn.calls == []
+
+
+def test_nonclaude_ritual_dead_pid_preserves_crash_recovery(tmp_path, monkeypatch):
+    """AC1-FR: a dead-pid unexpired claim reads suspect, so the guard returns
+    lock-contention with NO marker - the recovery worker is not suppressed."""
+    from typer.testing import CliRunner
+    from fno import claims
+    from fno.claims.cli import cli
+    from fno.claims.io import claims_root_for
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: _dead_pid()
+    )
+
+    result = CliRunner().invoke(
+        cli, ["acquire", "reconcile:pr-88", "--holder", "postmerge:pr-88:codex-2", "--ttl", "15m"]
+    )
+    assert result.exit_code == 0
+
+    state = claims.claim_status(
+        "reconcile:pr-88", root=claims_root_for("reconcile:pr-88")
+    ).get("state")
+    assert state == "suspect"
+
+    canonical = tmp_path / "canon"
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        88, dedup_key="shaDead", auto_run=True, canonical_root=canonical, spawn=spawn
+    )
+    assert res.outcome == "already-dispatched"
+    assert res.detail == "lock-contention"
+    assert not (canonical / ".fno" / "post-merge-dispatched" / "shaDead").exists()
+    assert spawn.calls == []
+
+
 # --- task 2.3: location - dispatch marker lands under canonical ----------
 
 
