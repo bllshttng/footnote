@@ -227,6 +227,8 @@ substrate = ""
 command = ""
 # Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).
 allowed_verbs = ["/target", "/think"]
+# Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false.
+auto_merge = false
 
 [auto_continue]
 # Auto-dispatch the next ready node after a PR merges.
