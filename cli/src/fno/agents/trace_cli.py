@@ -139,24 +139,36 @@ class _RegistryReadError(RuntimeError):
     """
 
 
-def _agent_exists_in_registry(name: str) -> bool:
-    """Check whether ``name`` is registered.
+def _resolve_registry_name(token: str) -> "str | None":
+    """Resolve a trace ``token`` (name | 8-hex short | full session id, x-1b1e)
+    to its canonical registry name, or ``None`` when it matches nothing.
+
+    Events key on the name, so the caller filters by the RESOLVED name — trace
+    accepts any address form in parity with the Rust binary. ``None`` (unknown /
+    ambiguous) makes the caller report the token not-found (exit 13).
 
     Raises:
-        _RegistryReadError: if the registry file is unreadable or
-            malformed. The caller (``trace_logic``) maps this into a
-            distinct exit code with a "registry read failed" stderr
-            message so the operator can investigate the substrate.
+        _RegistryReadError: if the registry is unreadable or malformed, so the
+            caller can surface the distinct exit 12 instead of a misleading
+            "agent not found".
     """
     try:
-        from fno.agents.registry import load_registry, RegistryVersionError
+        from fno.agents.registry import (
+            AgentResolutionError,
+            RegistryVersionError,
+            load_registry,
+            resolve_agent_in,
+        )
     except ImportError as exc:
         raise _RegistryReadError(f"registry module unavailable: {exc}") from exc
     try:
         entries = load_registry()
     except (OSError, ValueError, RegistryVersionError) as exc:
         raise _RegistryReadError(f"registry load failed: {exc}") from exc
-    return any(getattr(e, "name", None) == name for e in entries)
+    try:
+        return resolve_agent_in(entries, token).entry.name
+    except AgentResolutionError:
+        return None
 
 
 def _format_request_id(rid: Optional[str], json_mode: bool) -> str:
@@ -230,18 +242,20 @@ def trace_logic(
                 f"as ISO8601; falling back to raw-string compare\n"
             )
 
-    # AC1-ERR: gate on registry membership unless --all.
-    # Surface registry read failures distinctly (exit 12) so the operator
-    # sees the real cause instead of a misleading "agent not found".
+    # AC1-ERR: gate on registry membership unless --all, resolving the token to
+    # its canonical name (x-1b1e) so the event filter below matches regardless of
+    # the address form. Surface registry read failures distinctly (exit 12) so
+    # the operator sees the real cause instead of a misleading "agent not found".
+    resolved_name = name
     if name is not None and not all_agents and registry_check:
         try:
-            exists = _agent_exists_in_registry(name)
+            resolved_name = _resolve_registry_name(name)
         except _RegistryReadError as exc:
             return TraceResult(
                 exit_code=12,
                 stderr=f"fno agents trace: {exc}\n",
             )
-        if not exists:
+        if resolved_name is None:
             return TraceResult(
                 exit_code=13,
                 stderr=f"fno agents trace: agent {name!r} not found in registry\n",
@@ -251,11 +265,12 @@ def trace_logic(
 
     # Filter: by name (when not --all), by request_id, by since.
     def _matches(ev: dict[str, Any]) -> bool:
-        if not all_agents and name is not None:
+        if not all_agents and resolved_name is not None:
             # to_name (from EventContext) is the canonical recipient;
-            # legacy emits also carry `name` for back-compat.
+            # legacy emits also carry `name` for back-compat. Filter by the
+            # resolved canonical name so a short/uuid token matches too.
             recipient = _ev_field(ev, "to_name") or _ev_field(ev, "name")
-            if recipient != name:
+            if recipient != resolved_name:
                 return False
         if request_id is not None:
             if _ev_field(ev, "request_id") != request_id:

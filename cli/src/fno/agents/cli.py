@@ -118,26 +118,6 @@ def _agents_home_dir() -> Path:
     return Path(os.path.expanduser("~")) / ".fno" / "agents"
 
 
-def _resolve_stream_short_id(name: str) -> "str | None":
-    """Resolve an agent name to its worker short_id via the RAW registry.json.
-
-    The parsed Python ``AgentEntry`` drops ``short_id`` (the worker-socket key),
-    so read the on-disk registry directly. Returns None when absent/unreadable.
-    """
-    reg = _agents_home_dir() / "registry.json"
-    try:
-        data = json.loads(reg.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    # The on-disk top-level key is `agents` (the Rust `entries` field serializes
-    # under that name); accept `entries` too for forward/backward safety.
-    rows = data.get("agents") or data.get("entries") or []
-    for e in rows:
-        if isinstance(e, dict) and e.get("name") == name:
-            return e.get("short_id")
-    return None
-
-
 def _worker_rpc(
     sock_path: Path,
     method: str,
@@ -262,10 +242,18 @@ def cmd_watch(
     worker's frame log. Ctrl-C to stop. Exits 0 when the thread is no longer
     live, 1 when no live worker exists, 2 when the name is unknown.
     """
-    short_id = _resolve_stream_short_id(name)
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
+    try:
+        resolved = resolve_agent(name)
+    except AgentResolutionError as exc:
+        print(f"fno agents watch: {exc}", file=sys.stderr)
+        raise typer.Exit(exc.exit_code) from exc
+    short_id = resolved.worker_short_id
     if short_id is None:
         print(
-            f"fno agents watch: no agent named {name!r} in the registry",
+            f"fno agents watch: agent {resolved.entry.name!r} has no worker "
+            "short id on file; nothing to watch",
             file=sys.stderr,
         )
         raise typer.Exit(2)

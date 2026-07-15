@@ -28,6 +28,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -299,6 +300,149 @@ class AgentEntry:
         # `short_id` is a str defaulting to "" (never None); normalize the
         # empty transport key to None so callers keep their `is None` checks.
         return (getattr(self, field_name) or None) if field_name else None
+
+
+# ---------------------------------------------------------------------------
+# Shared identifier resolver (x-1b1e): every session-connecting `fno agents`
+# verb accepts ONE of three address forms — the registry name/slug, the full
+# harness_session_id, or an 8-hex short. This one function is the single lookup
+# choke point so no verb re-implements a name-only `.find`.
+# ---------------------------------------------------------------------------
+
+# Exactly-8 lowercase hex, the `spawn --resume` convention (_SHORT_ID_RE, PR #397).
+# A 7- or 9-char token is NOT a short; it falls through to name/full-id, then the
+# not-found error.
+_DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
+
+_ACCEPTED_FORMS = "accepted forms: name, 8-hex short id, or full session id"
+
+
+class AgentResolutionError(RuntimeError):
+    """No entry, an ambiguous token, or an unreadable registry.
+
+    Carries ``exit_code`` (2, matching the verbs' name-not-found code) so a
+    caller can ``raise typer.Exit(exc.exit_code)`` without reclassifying.
+    """
+
+    def __init__(self, message: str, *, exit_code: int = 2) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+@dataclass
+class ResolvedAgent:
+    """The entry a token resolved to, plus which rule matched.
+
+    ``worker_short_id`` is the transport handle a session-connecting verb
+    shells out with (``claude attach/logs <short>`` etc.); ``None`` when the
+    row recorded no short (a pre-heal claude row) so the verb can raise its own
+    explicit "no short id on file" error instead of shelling an empty arg.
+    """
+
+    entry: AgentEntry
+    matched_by: str  # "name" | "full_session_id" | "short_id" | "derived_short"
+
+    @property
+    def worker_short_id(self) -> Optional[str]:
+        return self.entry.short_id or None
+
+
+def _full_session_ids(entry: object) -> list[str]:
+    """The canonical id plus the legacy per-provider full-id fields, lowercased.
+
+    Mirrors the read order dispatch.py uses during the migration window
+    (canonical first, legacy as fallback). ``getattr`` so the resolver core also
+    accepts a duck-typed registry row (e.g. a test's SimpleNamespace)."""
+    ids = [
+        getattr(entry, "harness_session_id", None),
+        getattr(entry, "claude_session_uuid", None),
+        getattr(entry, "codex_session_id", None),
+        getattr(entry, "gemini_session_id", None),
+    ]
+    return [i.lower() for i in ids if i]
+
+
+def _derived_short(entry: object) -> Optional[str]:
+    """The canonical addressing short: the first 8 hex of harness_session_id
+    (claude's jobId is built the same way, so for a claude row it equals the
+    stored short_id). ``None`` for a row whose id is unresolved or non-hex
+    (e.g. an opencode ``ses_...`` id), so the derived rule simply never fires."""
+    hsid = getattr(entry, "harness_session_id", None)
+    if not hsid:
+        return None
+    lead = hsid.split("-", 1)[0].lower()
+    return lead if _DERIVED_SHORT_RE.match(lead) else None
+
+
+def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
+    """Return the single matched entry, or raise on a real ambiguity.
+
+    Dedups by ``name`` (the PK), so the SAME entry matching a tier via multiple
+    rules is not ambiguous; two DISTINCT entries are (git's ambiguous-short-SHA
+    behavior — never silently pick one)."""
+    distinct = {getattr(e, "name", None): e for e in hits}
+    if len(distinct) > 1:
+        cands = ", ".join(
+            f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
+            f"{getattr(e, 'provider', '?')})"
+            for e in distinct.values()
+        )
+        raise AgentResolutionError(
+            f"token {token!r} is ambiguous across {len(distinct)} agents: "
+            f"{cands}. Disambiguate with the name or full session id."
+        )
+    return ResolvedAgent(entry=next(iter(distinct.values())), matched_by=matched_by)
+
+
+def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
+    """The 4-rule matching core over an already-loaded entry list (the Rust
+    ``find_agent_entry`` mirror). Precedence: exact name, exact full session id
+    (case-insensitive), exact stored short_id (shape-agnostic), derived 8-hex
+    prefix. Name wins first so a hex-shaped name is byte-stable.
+
+    ``getattr``-based, so both real ``AgentEntry`` rows and duck-typed rows (a
+    verb that injects its own registry loader) resolve identically. Raises
+    :class:`AgentResolutionError` (exit 2) on empty/unknown/ambiguous."""
+    token = (token or "").strip()
+    if not token:
+        raise AgentResolutionError(f"empty agent token; {_ACCEPTED_FORMS}")
+    low = token.lower()
+
+    named = [e for e in entries if getattr(e, "name", None) == token]
+    if named:
+        return _one_or_ambiguous(named, "name", token)
+
+    by_full = [e for e in entries if low in _full_session_ids(e)]
+    if by_full:
+        return _one_or_ambiguous(by_full, "full_session_id", token)
+
+    by_short = [
+        e for e in entries if getattr(e, "short_id", None) and e.short_id == token
+    ]
+    if by_short:
+        return _one_or_ambiguous(by_short, "short_id", token)
+
+    if _DERIVED_SHORT_RE.match(low):
+        by_derived = [e for e in entries if _derived_short(e) == low]
+        if by_derived:
+            return _one_or_ambiguous(by_derived, "derived_short", token)
+
+    raise AgentResolutionError(f"no agent matching {token!r}; {_ACCEPTED_FORMS}")
+
+
+def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
+    """Resolve ``token`` to one registry entry, loading the registry first.
+
+    Wraps :func:`resolve_agent_in`; a malformed/unreadable registry degrades to
+    a clean :class:`AgentResolutionError`, never a traceback leaking to the
+    verb. See ``resolve_agent_in`` for the matching rules."""
+    try:
+        entries = load_registry(path=path)
+    except RegistryVersionError as exc:
+        raise AgentResolutionError(
+            f"registry unreadable ({exc}); cannot resolve {token!r}"
+        ) from exc
+    return resolve_agent_in(entries, token)
 
 
 def _registry_path(path: Optional[Path]) -> Path:

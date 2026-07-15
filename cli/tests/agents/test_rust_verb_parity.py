@@ -233,6 +233,46 @@ def test_resume_print_command_parity(tmp_path) -> None:
 
 
 @requires_rust
+def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
+    """x-1b1e AC1-UI / AC2-HP: `resume` reaches the same row by name, by the
+    derived 8-hex prefix of its session id, and by the full session id - the
+    Rust binary and the Python resume_logic agree on all three forms."""
+    from fno.agents import resume_cli
+
+    full = "a1b2c3d4-1111-2222-3333-444455556666"
+    entries = [
+        {
+            "name": "cx",
+            "short_id": "cxworker",  # daemon name-derived key (not the uuid prefix)
+            "provider": "codex",
+            "cwd": "/tmp/proj",
+            "project_root": "/tmp/proj",
+            "log_path": "/tmp/proj/l.jsonl",
+            "codex_session_id": full,
+            "harness_session_id": full,
+            "status": "live",
+            "created_at": "2026-05-26T09:00:00Z",
+        }
+    ]
+    agents = tmp_path / "agents"
+    _seed_registry(agents, entries)
+
+    def loader():
+        return [SimpleNamespace(**e) for e in entries]
+
+    by_name = _run_rust(["resume", "cx", "--print-command"], agents)
+    assert by_name.returncode == 0, by_name.stderr
+    for token in ("a1b2c3d4", full, "cxworker"):
+        rust = _run_rust(["resume", token, "--print-command"], agents)
+        assert rust.stdout == by_name.stdout, f"token {token} diverged"
+        assert rust.returncode == 0
+        py = resume_cli.resume_logic(
+            name=token, print_command=True, registry_loader=loader
+        )
+        assert rust.stdout == py.output, f"rust/py parity for token {token}"
+
+
+@requires_rust
 @pytest.mark.parametrize(
     "name,expected_exit",
     [("nope", 13), ("no-cwd", 13), ("no-sid", 13)],
@@ -281,12 +321,15 @@ def test_attach_refuses_codex_parity(tmp_path) -> None:
 @requires_rust
 def test_attach_missing_agent_exit2(tmp_path) -> None:
     # attach uses the lifecycle convention: missing agent is exit 2 (NOT 13,
-    # which is resume's convention). The Python _resolve_registry_entry raises
-    # DispatchAskError(exit_code=2).
+    # which is resume's convention). The shared resolver (x-1b1e) prints the
+    # accepted-forms not-found message; the exit code is unchanged.
     agents = tmp_path / "agents"
     _seed_registry(agents, [])
     rust = _run_rust(["attach", "ghost"], agents)
-    assert rust.stderr == "agent 'ghost' not found in registry\n"
+    assert rust.stderr == (
+        "no agent matching 'ghost'; "
+        "accepted forms: name, 8-hex short id, or full session id\n"
+    )
     assert rust.returncode == 2
 
 
@@ -384,7 +427,10 @@ def test_logs_agent_not_found_parity(tmp_path) -> None:
     agents = tmp_path / "agents"
     _seed_registry(agents, [])
     rust = _run_rust(["logs", "ghost"], agents)
-    assert rust.stderr == "agent not found: ghost\n"
+    assert rust.stderr == (
+        "no agent matching 'ghost'; "
+        "accepted forms: name, 8-hex short id, or full session id\n"
+    )
     assert rust.returncode == 13
 
 

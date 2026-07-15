@@ -2222,6 +2222,23 @@ def _validate_lifecycle_name(name: str) -> None:
         )
 
 
+def _canonical_agent_name(token: str, *, registry_path: Optional[Path] = None) -> str:
+    """Translate a lifecycle token (name | 8-hex short | full session id) to the
+    canonical registry name, so ``stop``/``rm`` address a session by any of the
+    three forms (x-1b1e) while still locking + acting on the canonical name.
+
+    Falls back to the token UNCHANGED on any resolution miss (unknown, ambiguous,
+    unreadable registry), so the downstream name lookup raises its familiar
+    ``agent {name!r} not found in registry`` error rather than a second variant -
+    the not-found/exit-2 contract the lifecycle tests pin stays intact."""
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
+    try:
+        return resolve_agent(token, path=registry_path).entry.name
+    except AgentResolutionError:
+        return token
+
+
 def _resolve_registry_entry(name: str, *, registry_path: Optional[Path] = None) -> AgentEntry:
     """Load the registry and return the entry for ``name``.
 
@@ -2361,6 +2378,9 @@ def stop_agent(
             PATH, claude shellout timeout, lock timeout.
     """
     _validate_lifecycle_name(name)
+    # Accept any of the three address forms (x-1b1e): translate to the canonical
+    # name before the flock, which keys on it.
+    name = _canonical_agent_name(name)
     # Pre-flock fast-fail + capture provider for the lock-timeout event
     # payload. The authoritative load happens inside
     # ``with_agent_lock_and_entry`` below; this pre-read exists ONLY so
@@ -2532,6 +2552,8 @@ def rm_agent(
     fields.
     """
     _validate_lifecycle_name(name)
+    # Accept any of the three address forms (x-1b1e); lock on the canonical name.
+    name = _canonical_agent_name(name)
     # Pre-flock fast-fail + capture provider for lock-timeout event
     # payload. See ``stop_agent`` for the lint-pattern rationale: the
     # body does NOT call ``hold_agent_lock`` directly — that lives inside

@@ -154,10 +154,10 @@ fn available_bytes() -> Option<u64> {
 /// already reflects every process the roster holds.
 ///
 /// The roster IS still read here, but only as a LIVENESS ORACLE, not as a
-/// population to count: a fno `claude --bg` row is minted with a `claude_short_id`
-/// but NO local `pid` (its process lives in the claude daemon, so liveness is in
-/// the roster — see `claude_ask.rs`). Such a row's liveness is resolved by
-/// looking its `claude_short_id` up in the roster. This counts real fno bg
+/// population to count: a fno `claude --bg` row is minted with a jobId in
+/// `short_id` but NO local `pid` (its process lives in the claude daemon, so
+/// liveness is in the roster — see `claude_ask.rs`). Such a row's liveness is
+/// resolved by looking its `short_id` up in the roster. This counts real fno bg
 /// workers (which a pid-only filter would drop, letting the cap admit unbounded
 /// bg workers — Codex P1 on PR #235) WITHOUT counting non-fno sessions: a
 /// claude-mem observer has no registry row, so it is never reached.
@@ -617,21 +617,21 @@ pub fn qos_demote_pid(config_cwd: &Path, pid: u32) {
 /// After a `--substrate bg` dispatch, poll the roster briefly for the new
 /// worker's pid and demote it post-hoc (its exec is claude's, not ours).
 /// Bounded ~10s; one warning if the pid never appears (AC3-UI).
-pub fn qos_demote_bg_worker(config_cwd: &Path, claude_short_id: &str) {
-    if !agents_config::worker_qos_enabled(config_cwd) || claude_short_id.is_empty() {
+pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
+    if !agents_config::worker_qos_enabled(config_cwd) || job_id.is_empty() {
         return;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(roster) = ClaudeRoster::load_default() {
-            if let Some(pid) = roster.find(claude_short_id).and_then(|w| w.pid) {
+            if let Some(pid) = roster.find(job_id).and_then(|w| w.pid) {
                 qos_demote_pid(config_cwd, pid);
                 return;
             }
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "spawn-gate: bg worker {claude_short_id} pid not in roster within 10s; \
+                "spawn-gate: bg worker {job_id} pid not in roster within 10s; \
                  QoS demotion skipped (non-fatal)"
             );
             return;
