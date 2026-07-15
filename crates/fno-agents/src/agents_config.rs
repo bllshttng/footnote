@@ -175,6 +175,18 @@ pub fn worker_qos_enabled(cwd: &Path) -> bool {
     )
 }
 
+/// Resolve `dispatch.auto_merge`: the per-project merge posture for autonomous
+/// dispatch (x-4391). Degrades to `false` (no-merge) on any missing/malformed
+/// value, so a config error never grants merge rights (Locked Decision 6). Only
+/// a real TOML boolean grants merge — `as_bool()` returns None for a string like
+/// `"yes"`, mirroring the Python `DispatchBlock` coercer.
+pub fn dispatch_auto_merge(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("dispatch")?.as_table()?.get("auto_merge")?.as_bool()
+    })
+    .unwrap_or(false)
+}
+
 /// The normalized raw scalar for a direct child of `agents:` (the generalized
 /// `dead_row_grace_secs` chain), so each caller applies its own coercion.
 fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
@@ -489,5 +501,41 @@ mod tests {
             !got,
             "absent key under FNO_CONFIG -> hang-safe BOUNDED default (false)"
         );
+    }
+
+    // --- x-4391: dispatch.auto_merge reader ---------------------------------
+
+    #[test]
+    fn dispatch_auto_merge_absent_is_false() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("am-absent", "schema_version = 1\n");
+        assert!(!dispatch_auto_merge(&cwd));
+    }
+
+    #[test]
+    fn dispatch_auto_merge_true_grants() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("am-true", "[dispatch]\nauto_merge = true\n");
+        assert!(dispatch_auto_merge(&cwd));
+    }
+
+    #[test]
+    fn dispatch_auto_merge_false_no_merge() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("am-false", "[dispatch]\nauto_merge = false\n");
+        assert!(!dispatch_auto_merge(&cwd));
+    }
+
+    #[test]
+    fn dispatch_auto_merge_non_bool_degrades_to_false() {
+        // Only a real TOML boolean grants merge (Locked Decision 6): a string
+        // "yes" yields None from as_bool() -> false, mirroring the Python coercer.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("am-str", "[dispatch]\nauto_merge = \"yes\"\n");
+        assert!(!dispatch_auto_merge(&cwd));
     }
 }
