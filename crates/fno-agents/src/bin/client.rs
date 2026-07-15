@@ -600,8 +600,9 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
     // process's directory and mis-bucketed under the wrong project (Codex P2).
     // resolve_dispatch_cwd canonicalizes an explicit --cwd (Python's
     // `Path(cwd).resolve()`) and honors --here (x-85fe): --cwd > --here (caller)
-    // > default canonical.
-    let cwd = resolve_dispatch_cwd(params);
+    // > default canonical. ask has no receipt cwd field, so the move flag is
+    // unused here.
+    let (cwd, _moved) = resolve_dispatch_cwd(params);
     let timeout = params
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -787,23 +788,15 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // The `pane` substrate falls through to the daemon RPC below, which resolves
     // canonical itself; resolving here too would double the git call and the
     // redirect note (review MEDIUM 3).
-    let cwd = if substrate == "pane" {
-        std::path::PathBuf::new()
+    // x-85fe: `surface_cwd` is the move decision resolve_dispatch_cwd already
+    // made (the note condition), so the receipt's cwd field couples to the note
+    // with no second comparison. pane re-execs Python and resolves canonical
+    // itself, so it neither resolves cwd here nor surfaces it.
+    let (cwd, surface_cwd) = if substrate == "pane" {
+        (std::path::PathBuf::new(), false)
     } else {
         resolve_dispatch_cwd(params)
     };
-    // x-85fe: surface the effective cwd in the receipt only on the DEFAULT
-    // canonical move -- no explicit --cwd (which arrives as params["cwd"], the
-    // -P/node-resolved path included) and the resolved dir differs from the
-    // caller. This is exactly when resolve_dispatch_cwd emitted the redirect
-    // note; the two stay coupled. Symlink-resolved compare matches the note.
-    let surface_cwd = params.get("cwd").is_none()
-        && std::env::current_dir()
-            .ok()
-            .and_then(|d| std::fs::canonicalize(d).ok())
-            .zip(std::fs::canonicalize(&cwd).ok())
-            .map(|(caller, resolved)| caller != resolved)
-            .unwrap_or(false);
     let timeout = params
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -1799,11 +1792,13 @@ fn note_fresh_redirect(caller: &std::path::Path, chosen: &std::path::Path) {
 }
 
 /// Resolve the worker cwd for a client-side (claude/codex) spawn/ask dispatch,
-/// honoring `--cwd` > `--fresh` > caller-cwd. Shells to git only when `--fresh`
-/// is set without `--here` and no explicit `--cwd`; emits the redirect note on an
-/// actual move. Single source of cwd truth for the two client-side dispatch
-/// blocks (claude `ask`, claude `spawn`).
-fn resolve_dispatch_cwd(params: &Value) -> std::path::PathBuf {
+/// honoring `--cwd` > `--here` (caller) > default canonical. Shells to git only
+/// on the default path (no `--cwd`, no `--here`); emits the redirect note on an
+/// actual move. Returns `(cwd, moved)` where `moved` is exactly the note
+/// condition, so a caller surfacing `cwd` in a receipt couples to the note with
+/// no second, divergent comparison (x-85fe; gemini review). Single source of cwd
+/// truth for the two client-side dispatch blocks (claude `ask`, claude `spawn`).
+fn resolve_dispatch_cwd(params: &Value) -> (std::path::PathBuf, bool) {
     let caller = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let explicit = params
         .get("cwd")
@@ -1819,10 +1814,11 @@ fn resolve_dispatch_cwd(params: &Value) -> std::path::PathBuf {
         None
     };
     let chosen = effective_worker_cwd(explicit.clone(), fresh, here, canonical, caller.clone());
-    if default_path {
+    let moved = default_path && chosen != caller;
+    if moved {
         note_fresh_redirect(&caller, &chosen);
     }
-    chosen
+    (chosen, moved)
 }
 
 fn str_arg(
