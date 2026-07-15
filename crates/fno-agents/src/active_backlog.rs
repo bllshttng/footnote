@@ -868,6 +868,21 @@ fn resolve_fanout_targets(abi_bin: &str) -> Vec<FanoutTarget> {
 /// re-resolves its own enablement (codex P2): a new `interval_secs` is picked up,
 /// and removing the project's sinks EXITS the loop (so `retain(!is_finished)`
 /// reaps it) rather than ticking forever. Exits on shutdown.
+/// Cap on a single `fno status-fanout tick` child. A legitimately slow tick
+/// (several stalled sinks x (retries+1) x http_timeout + backoff) can reach
+/// minutes; 300s bounds the pathological hang, not normal work.
+const TICK_CHILD_CAP: Duration = Duration::from_secs(300);
+
+/// Await `cmd`'s completion bounded by `cap`, killing the child on timeout.
+/// Returns `true` if the child exceeded the cap and was killed. `kill_on_drop`
+/// is load-bearing: on timeout the `output()` future is dropped, which SIGKILLs
+/// the child - without it a wedged tick parks the loop's shutdown response and
+/// leaks one subprocess per tick. Extracted for unit-testability.
+async fn output_with_cap(mut cmd: tokio::process::Command, cap: Duration) -> bool {
+    cmd.kill_on_drop(true);
+    tokio::time::timeout(cap, cmd.output()).await.is_err()
+}
+
 async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown: Arc<AtomicBool>) {
     let project = target.project.clone();
     let mut interval = Duration::from_secs(target.interval_seconds.max(1));
@@ -883,15 +898,13 @@ async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown
             Some(t) => interval = Duration::from_secs(t.interval_seconds.max(1)),
             None => break, // sinks removed for this project -> stop ticking.
         }
-        let bin = abi_bin.clone();
-        let cwd = target.cwd.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = std::process::Command::new(&bin)
-                .args(["status-fanout", "tick"])
-                .current_dir(&cwd)
-                .output();
-        })
-        .await;
+        let mut cmd = tokio::process::Command::new(&abi_bin);
+        cmd.args(["status-fanout", "tick"]).current_dir(&target.cwd);
+        // Failure otherwise swallowed (next tick retries; at-least-once cursor
+        // semantics). The kill must NOT be silent - the one line below is required.
+        if output_with_cap(cmd, TICK_CHILD_CAP).await {
+            eprintln!("fanout tick for {project} exceeded {TICK_CHILD_CAP:?}; killed, retrying next tick");
+        }
         sleep_interruptible(interval, &shutdown).await;
     }
 }
@@ -1188,6 +1201,29 @@ mod tests {
     fn status_fanout_targets_empty_on_garbage() {
         let targets: Vec<FanoutTarget> = serde_json::from_slice(b"not json").unwrap_or_default();
         assert!(targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_child_killed_at_cap() {
+        // A tick child that never exits must be dead within cap+epsilon so the
+        // loop (and daemon shutdown) proceeds, not block on the hung child.
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("60");
+        let start = std::time::Instant::now();
+        let timed_out = output_with_cap(cmd, Duration::from_millis(150)).await;
+        assert!(timed_out, "a hung child must report timed-out");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must return near the cap, not wait on the 60s child"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_child_within_cap_reports_ok() {
+        // A child that finishes under the cap is not reported as timed-out.
+        let cmd = tokio::process::Command::new("true");
+        let timed_out = output_with_cap(cmd, Duration::from_secs(30)).await;
+        assert!(!timed_out, "a fast child must not be reported as timed-out");
     }
 
     #[test]
