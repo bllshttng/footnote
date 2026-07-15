@@ -3788,7 +3788,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, wait silently and do not reply or narrate until the state changes.",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `timeout 1800 gh pr checks <N> --watch`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
         &cwd,
         &session_id,
     );
@@ -3863,6 +3863,19 @@ fn async_wait_class(pr: &PrInfo, local_head: &str, open_findings_empty: bool) ->
     None
 }
 
+/// The arm-and-tag ritual (x-e2c8, US3) that converts an unwatched async wait
+/// into a single idle turn. Supersedes the old "wait silently" prose: waiting
+/// silently still costs a full model invocation every ~90s tick, whereas arming
+/// a harness-tracked watcher and emitting `<watching>` idles the session to ZERO
+/// invocations until the watcher fires. The `timeout N gh pr checks` shape is a
+/// template (gh's `--watch` exit varies by version); the design depends only on
+/// the task EXITING, never on its exit code.
+fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
+    format!(
+        " Arm a harness-tracked watcher with a hard timeout (e.g. background Bash `timeout 1800 gh pr checks {pr_number} --watch`), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
+    )
+}
+
 fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
     if !pr.state.is_open_or_merged() {
         return format!(
@@ -3893,8 +3906,9 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
         // into debugging a nonexistent failure on every quiet fire.
         if pr.ci_conclusion == CiConclusion::Pending {
             return format!(
-                "CI still running on PR #{}; wait for it to finish. Nothing to do here: wait silently and do not reply or narrate until this state changes.",
-                pr.number
+                "CI still running on PR #{}.{}",
+                pr.number,
+                arm_watch_hint(pr.number, "ci")
             );
         }
         let check_name = match &pr.ci_conclusion {
@@ -3907,11 +3921,13 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
     if !pr.reviewed {
         if !pr.missing_bots.is_empty() {
             // AC1-UI: name the specific missing bot(s), not a generic
-            // "not reviewed".
+            // "not reviewed". Awaiting a bot review is an async wait, so teach
+            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
             return format!(
-                "PR #{}: {} has not reviewed",
+                "PR #{}: {} has not reviewed.{}",
                 pr.number,
-                pr.missing_bots.join(", ")
+                pr.missing_bots.join(", "),
+                arm_watch_hint(pr.number, "review")
             );
         }
         if !pr.unaddressed_findings.is_empty() {
@@ -3927,7 +3943,11 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
                 pr.number, f.author, f.severity, f.path, f.line, more
             );
         }
-        return format!("PR #{} not yet reviewed by a bot reviewer", pr.number);
+        return format!(
+            "PR #{} not yet reviewed by a bot reviewer.{}",
+            pr.number,
+            arm_watch_hint(pr.number, "review")
+        );
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
@@ -4470,6 +4490,37 @@ mod tests {
             "pending CI must not read as red; got: {reason}"
         );
         assert!(!reason.contains("failed"), "got: {reason}");
+    }
+
+    #[test]
+    fn unwatched_async_nudge_ci_pending_teaches_arm_and_tag() {
+        // AC3-HP: the CI-pending block message must instruct arming a
+        // harness-tracked watcher with a timeout and emitting <watching>,
+        // replacing the old "wait silently" prose.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Pending,
+            ci_has_pending: true,
+            ..watch_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(reason.contains("<watching"), "got: {reason}");
+        assert!(reason.contains("timeout"), "got: {reason}");
+        assert!(reason.contains("gh pr checks"), "got: {reason}");
+        assert!(!reason.contains("wait silently"), "got: {reason}");
+    }
+
+    #[test]
+    fn unwatched_async_nudge_missing_review_teaches_arm_and_tag() {
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            missing_bots: vec!["chatgpt-codex-connector".into()],
+            ..watch_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
+        assert!(reason.contains("<watching"), "got: {reason}");
     }
 
     // ── Watching idle-allow classification (x-e2c8) ───────────────────────
