@@ -557,6 +557,101 @@ mod tests {
         assert!(bashrc.contains("_FNO_OSC133"));
     }
 
+    /// Write a per-pane mux-hop ZDOTDIR (mirrors `apply_shell_integration`) and
+    /// return its path. Caller removes it.
+    #[cfg(test)]
+    fn write_hop_zdotdir(tag: &str) -> PathBuf {
+        let hop = std::env::temp_dir().join(format!("fno-test-hop-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&hop);
+        fs::create_dir_all(&hop).unwrap();
+        fs::write(hop.join(".zshenv"), ZSH_ZSHENV).unwrap();
+        fs::write(hop.join(".zshrc"), zsh_zshrc()).unwrap();
+        hop
+    }
+
+    #[cfg(test)]
+    fn have_zsh() -> bool {
+        std::process::Command::new("zsh")
+            .arg("--version")
+            .output()
+            .map_or(false, |o| o.status.success())
+    }
+
+    #[test]
+    fn zsh_hop_preserves_user_default_zdotdir_and_installs_osc133() {
+        // Regression guard: a non-exporting user (no ZDOTDIR in env) must
+        // see ZDOTDIR *unset* when their own .zshrc runs, so a modular
+        // ${ZDOTDIR:-$HOME/.config/zsh} idiom resolves to the user default and
+        // their config loads - byte-identical to a plain terminal. The old hop
+        // force-set ZDOTDIR=$HOME first, silently killing the whole config.
+        if !have_zsh() {
+            eprintln!("skipping zsh_hop_preserves_user_default_zdotdir: zsh absent");
+            return;
+        }
+        let hop = write_hop_zdotdir("default");
+        let home = std::env::temp_dir().join(format!("fno-test-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".config/zsh")).unwrap();
+        fs::write(
+            home.join(".zshrc"),
+            "ZDOTDIR=\"${ZDOTDIR:-$HOME/.config/zsh}\"\n\
+             [ -r \"$ZDOTDIR/aliases.zsh\" ] && source \"$ZDOTDIR/aliases.zsh\"\n",
+        )
+        .unwrap();
+        fs::write(home.join(".config/zsh/aliases.zsh"), "alias fno_marker='ok'\n").unwrap();
+
+        let out = std::process::Command::new("zsh")
+            .arg("-ic")
+            .arg("alias fno_marker; typeset -f _fno_osc133_precmd >/dev/null && echo PRECMD_OK; echo ZD=$ZDOTDIR")
+            .env_remove("USER_ZDOTDIR") // non-exporting user: the hop leaves USER_ZDOTDIR unset
+            .env("ZDOTDIR", &hop)
+            .env("HOME", &home)
+            .output()
+            .expect("spawn zsh");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let _ = fs::remove_dir_all(&hop);
+        let _ = fs::remove_dir_all(&home);
+
+        // AC1-HP: the alias loaded (the :- default fired) and ZDOTDIR ended at the user default.
+        assert!(stdout.contains("fno_marker=ok"), "alias missing (ZDOTDIR clobbered): {stdout}");
+        assert!(
+            stdout.contains(&format!("ZD={}/.config/zsh", home.display())),
+            "ZDOTDIR not the user default: {stdout}"
+        );
+        // AC2-HP: OSC 133 hooks installed - the snippet ran last, not skipped by the fix.
+        assert!(stdout.contains("PRECMD_OK"), "OSC 133 precmd hook missing: {stdout}");
+    }
+
+    #[test]
+    fn zsh_hop_no_user_rc_opens_bare_shell_with_osc133() {
+        // AC1-EDGE: a $HOME with no .zshrc opens a working bare zsh with OSC 133
+        // installed and prints no rc error.
+        if !have_zsh() {
+            eprintln!("skipping zsh_hop_no_user_rc: zsh absent");
+            return;
+        }
+        let hop = write_hop_zdotdir("norc");
+        let home = std::env::temp_dir().join(format!("fno-test-home-norc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap(); // no .zshrc, no .zshenv
+
+        let out = std::process::Command::new("zsh")
+            .arg("-ic")
+            .arg("typeset -f _fno_osc133_precmd >/dev/null && echo PRECMD_OK")
+            .env_remove("USER_ZDOTDIR")
+            .env("ZDOTDIR", &hop)
+            .env("HOME", &home)
+            .output()
+            .expect("spawn zsh");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let _ = fs::remove_dir_all(&hop);
+        let _ = fs::remove_dir_all(&home);
+
+        assert!(stdout.contains("PRECMD_OK"), "OSC 133 hook missing on bare shell: {stdout}");
+        assert!(stderr.is_empty(), "temp rc printed an error on the no-user-rc path: {stderr}");
+    }
+
     #[tokio::test]
     async fn server_spine_unspawnable_shell_falls_back() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
