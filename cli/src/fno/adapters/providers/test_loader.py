@@ -1379,3 +1379,27 @@ class TestLoadAgents:
         assert "code-reviewer" in error_msg
         # The error must reference the unknown field (Pydantic surfaces "unknown_field")
         assert "unknown_field" in error_msg
+
+    def test_non_binding_agent_entries_skipped(self, tmp_path: Path):
+        """config.agents is a shared namespace: provider pins live alongside
+        unrelated agent settings (max_live, spawn_permission_mode, a2a, codex,
+        defaults). The loader must parse only binding-shaped entries (dicts with
+        a 'provider' key) and skip the rest instead of raising."""
+        from fno.adapters.providers.loader import load_providers
+
+        base = _valid_providers_block()
+        base["agents"] = {
+            "max_live": 15,
+            "spawn_permission_mode": "bypassPermissions",
+            "a2a": {"auto": True, "turn_ceiling": 6},
+            "codex": {"headless_yolo": True},
+            "defaults": {"model": "opus"},
+            "reviewer": {"provider": "claude-primary"},
+        }
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, base)
+
+        result = load_providers(repo_root=tmp_path)
+
+        assert set(result.agents) == {"reviewer"}
+        assert result.agents["reviewer"].provider == "claude-primary"
