@@ -223,7 +223,7 @@ headless_yolo = false
 harness = ""
 # Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).
 substrate = ""
-# Dispatch command template with a single {id}; empty = '/target no-merge {id}'.
+# Dispatch command template with a single {id}; empty = '/target no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve (a leading /verb becomes $fno:verb on codex, a prose brief on gemini/opencode); a non-slash template passes through literally.
 command = ""
 # Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).
 allowed_verbs = ["/target", "/think"]
