@@ -453,9 +453,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 return Ok(2);
             }
             if allow_merge == Some(false) {
-                eprintln!(
-                    "fno-agents loop run: --no-merge is only valid with --driver megawalk"
-                );
+                eprintln!("fno-agents loop run: --no-merge is only valid with --driver megawalk");
                 return Ok(2);
             }
             // --max-units is megawalk-only; reject with clear message.

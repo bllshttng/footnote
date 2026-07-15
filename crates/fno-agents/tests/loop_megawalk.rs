@@ -1403,8 +1403,14 @@ fn ac14_max_units_zero_rejected() {
 #[test]
 fn target_driver_rejects_allow_merge() {
     let args: Vec<String> = vec![
-        "run", "--driver", "target", "--allow-merge",
-        "--driver-lib-dir", "/tmp", "--cwd", "/tmp",
+        "run",
+        "--driver",
+        "target",
+        "--allow-merge",
+        "--driver-lib-dir",
+        "/tmp",
+        "--cwd",
+        "/tmp",
     ]
     .into_iter()
     .map(String::from)
@@ -1419,8 +1425,14 @@ fn target_driver_rejects_allow_merge() {
 #[test]
 fn target_driver_rejects_no_merge() {
     let args: Vec<String> = vec![
-        "run", "--driver", "target", "--no-merge",
-        "--driver-lib-dir", "/tmp", "--cwd", "/tmp",
+        "run",
+        "--driver",
+        "target",
+        "--no-merge",
+        "--driver-lib-dir",
+        "/tmp",
+        "--cwd",
+        "/tmp",
     ]
     .into_iter()
     .map(String::from)
