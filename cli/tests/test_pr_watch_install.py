@@ -673,9 +673,39 @@ def test_bounce_bootstrap_failure_is_reported(tmp_launch_agents):
     msg, rc = m.bounce(
         plist_path=tmp_launch_agents / "x.plist", uid=501,
         run=_record_runner(calls, rc_by_verb={"bootstrap": 5}),
+        sleep=lambda _s: None,
     )
     assert rc == 1 and "bootstrap" in msg
-    assert [c[0] for c in calls] == ["bootout", "bootstrap"]  # never kickstarts
+    # A persistently-failing bootstrap is retried, then reported; never kickstarts.
+    bootstrap_calls = [c[0] for c in calls if c[0] == "bootstrap"]
+    assert len(bootstrap_calls) == m._BOOTSTRAP_RETRIES
+    assert "kickstart" not in [c[0] for c in calls]
+
+
+def test_bounce_bootstrap_retries_past_bootout_race(tmp_launch_agents):
+    """`launchctl bootout` is async: a bootstrap fired too soon fails (rc=5)
+    while the label is still settling. The bounce must retry and then succeed,
+    not report a spurious failure (the `fno update` pr-watch refresh rc=5)."""
+    m = _install()
+    calls: list[tuple] = []
+    # bootstrap fails once (rc=5, label still present), then succeeds.
+    state = {"bootstrap_calls": 0}
+
+    def _run(*args, timeout_s=0):
+        calls.append(args)
+        verb = args[0]
+        if verb == "bootstrap":
+            state["bootstrap_calls"] += 1
+            return (0, False) if state["bootstrap_calls"] >= 2 else (5, False)
+        return (0, False)
+
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_run, sleep=lambda _s: None,
+    )
+    assert rc == 0, msg
+    assert state["bootstrap_calls"] == 2  # failed once, retried, succeeded
+    assert [c[0] for c in calls] == ["bootout", "bootstrap", "bootstrap", "kickstart"]
 
 
 def test_bounce_kickstart_hang_names_the_wedged_step(tmp_launch_agents):
