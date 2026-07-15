@@ -3,19 +3,24 @@
 Node ab-3cd195b6. When a backlog node's PR merges, a merge-detector
 (``fno backlog reconcile`` or the /pr merged skill) calls this verb after the
 node-close write commits. If auto-continue is armed for the project and no live
-walk owns it, advance dispatches a fresh background ``/target no-merge`` worker
-for the next now-unblocked node, so a merge-gated epic walks itself group-by-
+walk owns it, advance dispatches a fresh background ``/target`` worker (with the
+merge posture from ``config.dispatch.auto_merge``, default ``no-merge``) for the
+next now-unblocked node, so a merge-gated epic walks itself group-by-
 group across merges with no manual re-invocation.
 
 Locked Decisions this module embodies:
   1. Decoupled from the loop driver - driven by the merge event, so megawalk /
      /target / /megatron all inherit auto-continue (no driver-specific code).
-  4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target no-merge <id>``.
+  4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target [no-merge] <id>``
+     (the ``no-merge`` token is gated on ``config.dispatch.auto_merge``; x-4391).
   5. Concurrency via ``fno claim``: honor ``walker:<root>`` (no double-dispatch
      during a live walk); reserve ``dispatch:<id>`` (O_EXCL dedup + bridge token
      that outlives this short-lived process until the worker owns ``node:<id>``,
      LD#11 / AC1-CLAIM - mirrors handoff.sh + dispatch-node.sh).
-  6. advance never merges - only dispatches no-merge workers.
+  6. advance never merges the PR itself - it dispatches a worker whose merge
+     posture comes from ``config.dispatch.auto_merge`` (default ``no-merge``);
+     an actual merge, when enabled, is still gated by the worker's own
+     ``config.auto_merge.*`` review layer (x-4391, revisits epic LD#4).
   7. Non-fatal: a failed spawn never wedges the host op (reconcile/post-merge).
  12. Every code path emits EXACTLY ONE decision event before returning
      (advance_dispatched | advance_skipped{reason} | advance_failed), so a
@@ -419,14 +424,15 @@ def _spawn_worker(
     ``--substrate bg`` (the detached ``claude --bg`` thread that self-isolates
     into a worktree), NOT the post-x-3ab8 default ``pane`` substrate, which is an
     owned-PTY pane that would STALL a fire-and-forget dispatch at the placement
-    prompt (x-2c27 fixed this everywhere; this 4th surface was missed). ``no-merge``
-    rides as a command token (NOT an env var; the shipped sibling proves this is
-    the reliable channel), the agent is named ``target-<full-node-id>-<slug>`` (see
-    ``_worker_agent_name``), and the cwd resolves to the node's recorded root
-    (``--cwd``) or canonical main (``--fresh``).
+    prompt (x-2c27 fixed this everywhere; this 4th surface was missed). The merge
+    posture (``no-merge``, unless ``config.dispatch.auto_merge`` is set for the
+    node's project) rides as a command token (NOT an env var; the shipped sibling
+    proves this is the reliable channel), the agent is named
+    ``target-<full-node-id>-<slug>`` (see ``_worker_agent_name``), and the cwd
+    resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
 
     When ``reconcile_manifest`` is set (G4), the command becomes
-    ``/target no-merge --reconcile <manifest> <id>`` and the agent name carries
+    ``/target [no-merge] --reconcile <manifest> <id>`` and the agent name carries
     the ``reconcile`` prefix.
 
     Returns the spawn receipt's short_id. Raises SpawnAlreadyRunning on a
@@ -464,10 +470,24 @@ def _spawn_worker(
             mode = ""
     if mode:
         cmd += ["--permission-mode", mode]
+    # x-4391: merge posture from config.dispatch.auto_merge. Per-project, read via
+    # the SAME node_cwd precedence as the permission-mode block above, so a
+    # cross-project dispatch reads the DEPENDENT node's config (AC2-EDGE), never
+    # the merged repo's. advance takes no per-run flag, so config is the sole
+    # non-builtin rung; any read failure -> no-merge (Locked Decision 6).
+    allow_merge = False
+    try:
+        from fno.config import load_settings, load_settings_for_repo
+
+        _s = load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
+        allow_merge = bool(_s.dispatch.auto_merge)
+    except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
+        allow_merge = False
+    _nm = "" if allow_merge else "no-merge "
     target_cmd = (
-        f"/target no-merge --reconcile {reconcile_manifest} {node_id}"
+        f"/target {_nm}--reconcile {reconcile_manifest} {node_id}"
         if is_reconcile
-        else f"/target no-merge {node_id}"
+        else f"/target {_nm}{node_id}"
     )
     cmd += [agent_name, target_cmd]
 

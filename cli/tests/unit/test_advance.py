@@ -1081,3 +1081,70 @@ def test_spawn_worker_error_contract_unchanged(monkeypatch):
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
+
+
+# ---------------------------------------------------------------------------
+# x-4391: config.dispatch.auto_merge drives the merge posture token
+# ---------------------------------------------------------------------------
+
+
+def _settings_ns(auto_merge=False, perm=""):
+    import types
+
+    return types.SimpleNamespace(
+        agents=types.SimpleNamespace(spawn_permission_mode=perm),
+        dispatch=types.SimpleNamespace(auto_merge=auto_merge),
+    )
+
+
+def test_spawn_worker_auto_merge_true_omits_no_merge(monkeypatch):
+    """AC2-HP: config.dispatch.auto_merge=true -> /target <id> (no no-merge)."""
+    import fno.config as _config
+
+    captured = _capture_spawn_argv(monkeypatch)
+    monkeypatch.setattr(_config, "load_settings_for_repo", lambda _p: _settings_ns(auto_merge=True))
+    adv._spawn_worker("ab-2222aaaa", "/work/dir")
+    assert captured["cmd"][-1] == "/target ab-2222aaaa"
+
+
+def test_spawn_worker_auto_merge_reconcile_variant(monkeypatch):
+    """Allow posture drops no-merge from the G4 --reconcile variant too."""
+    import fno.config as _config
+
+    captured = _capture_spawn_argv(monkeypatch)
+    monkeypatch.setattr(_config, "load_settings_for_repo", lambda _p: _settings_ns(auto_merge=True))
+    adv._spawn_worker("ab-2222aaaa", "/work/dir", reconcile_manifest="/tmp/m.md")
+    assert captured["cmd"][-1] == "/target --reconcile /tmp/m.md ab-2222aaaa"
+
+
+def test_spawn_worker_auto_merge_reads_dependent_cwd(monkeypatch):
+    """AC2-EDGE: posture is read from the DEPENDENT node's project via
+    load_settings_for_repo(node_cwd), never the caller / merged repo."""
+    import fno.config as _config
+
+    captured = _capture_spawn_argv(monkeypatch)
+    seen = {}
+
+    def _lsfr(p):
+        seen["path"] = str(p)
+        return _settings_ns(auto_merge=True)
+
+    monkeypatch.setattr(_config, "load_settings_for_repo", _lsfr)
+    adv._spawn_worker("ab-2222aaaa", "/dependent/repo")
+    assert seen["path"] == "/dependent/repo"
+    assert captured["cmd"][-1] == "/target ab-2222aaaa"
+
+
+def test_spawn_worker_auto_merge_read_failure_no_merge(monkeypatch):
+    """AC2-ERR: a settings read that raises degrades to no-merge (never grant
+    merge on a failed read)."""
+    import fno.config as _config
+
+    captured = _capture_spawn_argv(monkeypatch)
+
+    def _boom(_p):
+        raise RuntimeError("corrupt toml")
+
+    monkeypatch.setattr(_config, "load_settings_for_repo", _boom)
+    adv._spawn_worker("ab-2222aaaa", "/work/dir")
+    assert captured["cmd"][-1] == "/target no-merge ab-2222aaaa"
