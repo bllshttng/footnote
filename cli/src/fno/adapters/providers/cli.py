@@ -478,22 +478,94 @@ def add_provider(
 # register (managed credential store, US1)
 # ---------------------------------------------------------------------------
 
+def _register_config_dir_account(
+    provider_id: str,
+    cli_name: str,
+    priority: int,
+    name: Optional[str],
+    config_dir: str,
+    scope: str,
+) -> None:
+    """Register a per-account CLAUDE_CONFIG_DIR account (x-d012).
+
+    The dir IS the account (a full second login); no shared-slot snapshot. The
+    resolver keys `spawn --account` off config_dir, so auth is a formality -
+    managed (which rejects credentials_source/env) keeps the record minimal.
+    """
+    if cli_name != "claude":
+        typer.echo("error: --config-dir accounts are claude-only", err=True)
+        raise typer.Exit(1)
+    cfg = Path(config_dir).expanduser()
+    if not cfg.is_absolute():
+        typer.echo(f"error: --config-dir must be absolute (got {config_dir!r})", err=True)
+        raise typer.Exit(1)
+    if not cfg.exists():
+        typer.echo(f"error: config dir {cfg} does not exist; sign in there first "
+                   f"(CLAUDE_CONFIG_DIR={cfg} claude /login)", err=True)
+        raise typer.Exit(1)
+    try:
+        record = ProviderRecord(
+            id=provider_id, name=name or provider_id, cli="claude",
+            auth="managed", priority=priority, config_dir=cfg,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface pydantic validation receipts
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    repo_root = _get_repo_root()
+    try:
+        config = load_providers(repo_root=repo_root)
+    except ProviderConfigError as exc:
+        typer.echo(f"error loading existing config: {exc}", err=True)
+        raise typer.Exit(1)
+    from fno.adapters.providers.model import ProvidersConfig
+
+    new_records = [r for r in config.records if r.id != record.id]
+    new_records.append(record)
+    try:
+        save_providers(ProvidersConfig(records=new_records, active=config.active), scope=scope)  # type: ignore[arg-type]
+    except OSError as exc:
+        typer.echo(f"error: failed to write config: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo(
+        f"Registered config-dir account '{record.id}' (CLAUDE_CONFIG_DIR={cfg}, "
+        f"scope={scope}). `fno agents spawn --account {record.id}` now bills it."
+    )
+
+
 @cli.command("register")
 def register_provider(
     provider_id: str = typer.Argument(..., help="Unique account id (lowercase alphanumeric + hyphens)"),
     cli_name: str = typer.Option("claude", "--cli", "-c", help="claude|codex"),
     priority: int = typer.Option(100, "--priority", "-p"),
     name: Optional[str] = typer.Option(None, "--name"),
+    config_dir: Optional[str] = typer.Option(
+        None,
+        "--config-dir",
+        help=(
+            "Register a per-account CLAUDE_CONFIG_DIR account (x-d012) instead of "
+            "a shared-slot managed snapshot. Point at a full second login in its "
+            "own dir (e.g. ~/.claude-alt sharing projects/plugins/settings with "
+            "~/.claude via symlinks). This is the verified-correct multi-account "
+            "mechanism that bills the right account; `spawn --account <id>` then "
+            "injects CLAUDE_CONFIG_DIR. Skips the shared-slot snapshot."
+        ),
+    ),
     scope: str = typer.Option("global", "--scope", "-s", help="global|project"),
 ) -> None:
-    """Snapshot the CURRENT login into a managed account store and record it.
+    """Register a managed (shared-slot) or config-dir account.
 
-    Sign into the account you want to register (`claude /login`), then run this.
-    It captures the live credential (Keychain blob on darwin, credential file
-    elsewhere; codex `auth.json`) into ``~/.fno/providers/<id>/`` and writes an
-    ``auth: managed`` ProviderRecord. Idempotent: re-running refreshes the
-    snapshot for an already-registered account (US1).
+    Default (no --config-dir): snapshot the CURRENT ~/.claude login into a
+    managed account store. Sign into the account first (`claude /login`), then
+    run this; it captures the live credential into ``~/.fno/providers/<id>/``
+    and writes an ``auth: managed`` record.
+
+    With --config-dir <path>: register an account that lives in its OWN config
+    dir (a full second login). No shared-slot snapshot - the dir IS the account.
     """
+    if config_dir is not None:
+        _register_config_dir_account(provider_id, cli_name, priority, name, config_dir, scope)
+        return
     try:
         record = ProviderRecord(
             id=provider_id,
