@@ -1191,17 +1191,19 @@ def test_session_id_property_matches_resume_cli_session_id_for() -> None:
         assert entry.session_id == _session_id_for(entry) == value, provider
 
 
-def test_provider_session_id_fields_covers_known_providers() -> None:
-    """Every known provider must have a resume-target field mapping.
+def test_harness_session_id_fields_covers_known_providers() -> None:
+    """Every dispatchable harness must have a resume-target field mapping.
 
     Guards against adding a provider to KNOWN_PROVIDERS without teaching
     session_id / _session_id_for how to resolve its resume id (which
-    would silently return None for the new provider).
+    would silently return None for the new harness). Keyed on
+    HARNESS_SESSION_ID_FIELDS now (x-8dfc); the old PROVIDER_SESSION_ID_FIELDS
+    name is a free alias, so the dispatchable set still round-trips.
     """
     from fno.agents.providers import KNOWN_PROVIDERS
-    from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS
+    from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
-    assert set(PROVIDER_SESSION_ID_FIELDS) == set(KNOWN_PROVIDERS)
+    assert set(HARNESS_SESSION_ID_FIELDS) == set(KNOWN_PROVIDERS)
 
 
 # ---------------------------------------------------------------------------

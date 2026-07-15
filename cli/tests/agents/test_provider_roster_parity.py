@@ -1,12 +1,19 @@
-"""US1 (opencode buildout): the Rust and Python provider rosters must agree.
+"""The Rust and Python provider rosters must agree.
 
 Rust's single source is ``KNOWN_PROVIDERS`` in
-``crates/fno-agents/src/provider.rs`` (registry acceptance in client_verbs,
-the spawn gates in bin/client.rs, and ``for_name`` all ride it); Python's
-registry-acceptance mirror is ``READABLE_PROVIDERS``. agy taught the lesson:
-it joined the Rust lists but not Python's, and a single agy registry row
-hard-failed every Python consumer until READABLE_PROVIDERS grew. This test
-pins the two lists together so the next provider add cannot drift.
+``crates/fno-agents/src/provider.rs`` (the spawn gates in bin/client.rs and
+``for_name`` ride it); Python's spawn/pane read-tolerance mirror is
+``READABLE_PROVIDERS``.
+
+NOTE (x-8dfc): neither list is the registry LOAD gate anymore -- both readers
+shape-check identity, so an alien harness reads without bricking and the old
+"agy split-brain" (a row one language's loader rejected) is now impossible.
+These lists now gate only the spawn/``for_name`` seam, and this test still
+pins them together so the next spawn-hostable provider add cannot drift one
+side. The behavioral load-path parity (both readers accept the same alien
+fixture, refuse the same corrupt one) lives in the two AC1-FR halves:
+``test_load_gate_x8dfc`` (Python) and
+``client_verbs::load_registry_gate_shape_check_x8dfc`` (Rust).
 """
 
 import re
