@@ -11,29 +11,47 @@ from fno.claims.session_pid import resolve_session_pid
 
 
 class _FakeProc:
-    """Minimal psutil.Process stand-in for a chosen ancestor chain."""
+    """Minimal psutil.Process stand-in for a chosen ancestor chain.
 
-    def __init__(self, pid, name, exe, parent=None):
+    ``name``/``exe``/``cmdline`` may each be an exception INSTANCE, in which case
+    the corresponding getter raises it (models a per-getter psutil failure).
+    ``cmdline`` defaults to ``[exe]`` so plain (pid, name, exe) specs behave like
+    a real process without a bespoke argv.
+    """
+
+    def __init__(self, pid, name, exe, parent=None, cmdline=None):
         self.pid = pid
         self._name = name
         self._exe = exe
         self._parent = parent
+        self._cmdline = [exe] if cmdline is None else cmdline
+
+    def _get(self, value):
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     def name(self):
-        return self._name
+        return self._get(self._name)
 
     def exe(self):
-        return self._exe
+        return self._get(self._exe)
+
+    def cmdline(self):
+        return self._get(self._cmdline)
 
     def parent(self):
         return self._parent
 
 
 def _chain(*specs):
-    """Build a child->...->root chain from (pid, name, exe) specs (child first)."""
+    """Build a child->...->root chain (child first). Each spec is
+    (pid, name, exe) or (pid, name, exe, cmdline)."""
     parent = None
-    for pid, name, exe in reversed(specs):
-        parent = _FakeProc(pid, name, exe, parent=parent)
+    for spec in reversed(specs):
+        pid, name, exe = spec[0], spec[1], spec[2]
+        cmdline = spec[3] if len(spec) > 3 else None
+        parent = _FakeProc(pid, name, exe, parent=parent, cmdline=cmdline)
     # walk back to the first (child) node
     node = parent
     nodes = []
