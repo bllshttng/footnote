@@ -1814,6 +1814,11 @@ pub fn dispatch_claude_spawn(
     permission_mode: Option<&str>,
     effort: Option<&str>,
     flags: HarnessFlags,
+    // x-85fe: append the effective `cwd` to the receipt (LAST key). True only on
+    // the DEFAULT canonical move (no explicit --cwd, cwd differs from caller),
+    // coupled with the redirect note the caller already emitted. False keeps the
+    // receipt byte-identical (explicit --cwd, --here, or a stay-put spawn).
+    surface_cwd: bool,
 ) -> AskOutcome {
     // spawn allows an empty initial message (Python dispatch_spawn parity).
     if let Err(msg) = validate_spawn_inputs(name, from_name) {
@@ -1922,9 +1927,24 @@ pub fn dispatch_claude_spawn(
         Some(m) => format!(r#", "permission_mode": "{}""#, m.replace('"', "\\\"")),
         None => String::new(),
     };
+    // x-85fe: append the effective launch dir on the default canonical move
+    // (surface_cwd, decided by the caller alongside the redirect note), so the
+    // move is legible in the receipt too. LAST key, so an unmoved / explicit-cwd
+    // receipt is byte-identical (Python cmd_spawn parity, AC1-EDGE). Full
+    // JSON-string encode (not just `"`-escape): a repo path may carry a backslash
+    // or control char that would otherwise produce invalid JSON receipt consumers
+    // fail to parse (review); json_string_ascii matches Python's json.dumps.
+    let cwd_field = if surface_cwd {
+        format!(
+            ", \"cwd\": {}",
+            json_string_ascii(&cwd.display().to_string())
+        )
+    } else {
+        String::new()
+    };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "provider": "claude", "status": "live"{perm_field}}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "provider": "claude", "status": "live"{perm_field}{cwd_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,

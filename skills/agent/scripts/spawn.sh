@@ -93,9 +93,12 @@ while [[ $# -gt 0 ]]; do
     --agent)        AGENT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --tools)        TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --deny-tools)   DENY_TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    # Pass-through cwd flags (ab-77b691dc): forwarded to `fno agents spawn` so a
-    # target-class dispatcher can request canonical-root cwd. NOT defaulted here:
-    # plain interactive ask/host/spawn keep caller cwd unless asked (AC3).
+    # Pass-through cwd flags: forwarded verbatim to `fno agents spawn`. x-85fe
+    # inverted the runtime default -- a spawn with NO cwd source now lands on
+    # canonical, so this script defaults NOTHING and behavior follows the runtime:
+    # --here keeps the caller cwd, --fresh is an accepted no-op alias. A code
+    # payload still auto-isolates to a fresh worktree (maybe_auto_worktree sets
+    # CWD, forwarded as an explicit --cwd that wins).
     --fresh)        FRESH=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     *) fail "unknown argument: $1" ;;

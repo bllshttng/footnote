@@ -72,37 +72,42 @@ assert {member.value for member in AgentStatusFilter} == set(_KNOWN_STATUSES), (
 
 
 def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
-    """Worker launch dir honoring --cwd > --fresh > caller cwd.
+    """Worker launch dir honoring --cwd > --here (caller) > default canonical.
 
-    Mirrors the Rust client's ``effective_worker_cwd`` precedence (ab-77b691dc,
-    AC6): an explicit ``--cwd`` always wins; ``--fresh`` resolves the canonical
-    (main) checkout so a worker dispatched from a linked worktree starts from
-    canonical; ``--here``/``--in-place`` suppresses ``--fresh``. A canonical that
-    lands on the caller's own dir is a no-op (no redirect note). Only the Python
-    fallback runtime reaches this -- when an installed binary auto-routes the
-    verb, the Rust client owns the identical precedence.
+    Mirrors the Rust client's ``effective_worker_cwd`` precedence. x-85fe
+    inverted the default (was ab-77b691dc's caller-cwd): a spawn with NO explicit
+    cwd source now resolves to the canonical (main) checkout, so the identical
+    command behaves the same regardless of where the launcher happens to stand.
+    ``--here``/``--in-place`` is the explicit opt-in to keep the caller's cwd.
+    ``--fresh`` survives as an accepted no-op alias (the default already resolves
+    canonical). A canonical that lands on the caller's own dir is a no-op (no
+    redirect note). Only the Python fallback runtime reaches this -- when an
+    installed binary auto-routes the verb, the Rust client owns the identical
+    precedence.
     """
+    del fresh  # accepted no-op alias: the default already resolves canonical.
     if cwd:
         return Path(cwd).resolve()
     caller = Path(os.getcwd()).resolve()
-    if fresh and not here:
-        from fno.paths import resolve_canonical_repo_root
+    if here:
+        return caller
+    from fno.paths import resolve_canonical_repo_root
 
-        # Best-effort: any resolution error (missing git, odd environment) falls
-        # back to the caller cwd, the safe side, rather than crashing the dispatch
-        # (review MEDIUM).
-        try:
-            canonical = resolve_canonical_repo_root().resolve()
-        except Exception:
-            return caller
-        if canonical != caller:
-            print(
-                f"fno agents: --fresh: dispatching from canonical main ({canonical}); "
-                "pass --here to stay in this worktree",
-                file=sys.stderr,
-            )
-        return canonical
-    return caller
+    # Best-effort: any resolution error (missing git, odd environment) falls
+    # back to the caller cwd, the safe side, rather than crashing the dispatch.
+    try:
+        canonical = resolve_canonical_repo_root().resolve()
+    except Exception:
+        return caller
+    if canonical != caller:
+        # Never silent: the redirect note fires on every actual move, default
+        # path included (x-85fe Locked Decision 5).
+        print(
+            f"fno agents: dispatching from canonical main (default) ({canonical}); "
+            "pass --here to stay in this worktree",
+            file=sys.stderr,
+        )
+    return canonical
 
 
 # ---------------------------------------------------------------------------
@@ -345,15 +350,18 @@ def cmd_spawn(
         False,
         "--fresh",
         help=(
-            "Resolve the worker cwd to the canonical (main) repo root regardless "
-            "of caller cwd. Opt-in; an explicit --cwd still wins."
+            "Accepted no-op alias: the worker cwd already defaults to the "
+            "canonical (main) repo root (x-85fe). Kept for dispatcher compat."
         ),
     ),
     here: bool = typer.Option(
         False,
         "--here",
         "--in-place",
-        help="Opt out of --fresh: keep the worker in the caller's cwd.",
+        help=(
+            "Keep the worker in the caller's cwd instead of the canonical-root "
+            "default. The explicit opt-in for extending WIP right here."
+        ),
     ),
     role: str | None = typer.Option(
         None,
@@ -536,6 +544,16 @@ def cmd_spawn(
     )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
+    # x-85fe: the effective launch dir surfaces in the receipt on the DEFAULT
+    # move (a node-less spawn now lands on canonical), coupled with the stderr
+    # redirect note. An explicit --cwd (incl. -P/node-resolved) is the caller's
+    # own choice and never surfaces -- gate on `not cwd` so the receipt stays
+    # byte-identical for explicit-cwd and stay-put spawns (AC1-EDGE).
+    _moved_cwd = (
+        str(workdir)
+        if not cwd and workdir != Path(os.getcwd()).resolve()
+        else None
+    )
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
@@ -754,6 +772,8 @@ def cmd_spawn(
             # so the unset receipt is unchanged.
             if permission_mode is not None:
                 receipt_obj["permission_mode"] = permission_mode
+            if _moved_cwd is not None:
+                receipt_obj["cwd"] = _moved_cwd
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
@@ -808,9 +828,19 @@ def cmd_spawn(
             if eff_mode
             else ""
         )
+        # x-85fe: append the effective cwd only on the default move. json.dumps
+        # (not a bare `"`-escape) so a path with a backslash or control char stays
+        # valid JSON for receipt consumers (review); it matches Rust's
+        # json_string_ascii byte-for-byte. LAST field so an unmoved receipt is
+        # byte-identical.
+        cwd_field = (
+            f", \"cwd\": {json.dumps(_moved_cwd)}"
+            if _moved_cwd is not None
+            else ""
+        )
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
-            f'"provider": "{result.provider}", "status": "live"{perm_field}}}'
+            f'"provider": "{result.provider}", "status": "live"{perm_field}{cwd_field}}}'
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
@@ -1044,15 +1074,18 @@ def cmd_ask(
         False,
         "--fresh",
         help=(
-            "Resolve the worker cwd to the canonical (main) repo root regardless "
-            "of caller cwd. Opt-in; an explicit --cwd still wins."
+            "Accepted no-op alias: the worker cwd already defaults to the "
+            "canonical (main) repo root (x-85fe). Kept for dispatcher compat."
         ),
     ),
     here: bool = typer.Option(
         False,
         "--here",
         "--in-place",
-        help="Opt out of --fresh: keep the worker in the caller's cwd.",
+        help=(
+            "Keep the worker in the caller's cwd instead of the canonical-root "
+            "default (WIP-scoped ask). The explicit opt-in."
+        ),
     ),
 ) -> None:
     """Send a message to a registered agent (follow-up only).
@@ -1077,7 +1110,11 @@ def cmd_ask(
         resolve_to_project,
     )
 
-    workdir = _resolve_dispatch_workdir(cwd, fresh, here)
+    # ask is a follow-up to an existing session and never launches in workdir, so
+    # it stays in the caller cwd (here=True): never the canonical default nor the
+    # redirect note, which would be a false diagnostic for a non-consuming op
+    # (x-85fe review). An explicit --cwd still wins inside the resolver.
+    workdir = _resolve_dispatch_workdir(cwd, fresh, here=True)
 
     # Project mode: resolve to a single live peer, then ask by name. The message
     # is the sole positional, so it may land in the `name` slot.
