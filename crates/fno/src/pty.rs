@@ -285,12 +285,16 @@ fn integration_disabled(knob: Option<&OsStr>) -> bool {
 const ZSH_ZSHENV: &str =
     "[ -f \"${USER_ZDOTDIR:-$HOME}/.zshenv\" ] && . \"${USER_ZDOTDIR:-$HOME}/.zshenv\"\n";
 
-/// The temp `.zshrc`: restore `ZDOTDIR` for the user rc + subshells, source the
-/// user's real `.zshrc`, then eval the snippet LAST so it wins the prompt.
+/// The temp `.zshrc`: restore `ZDOTDIR` when the user exported one, else UNSET
+/// it - a non-exporting user's rc must see the same pristine state a plain
+/// terminal gives it, so `${ZDOTDIR:-default}` modular-config idioms fire.
+/// Force-setting `ZDOTDIR=$HOME` here killed those configs silently. Source the
+/// user rc from `${USER_ZDOTDIR:-$HOME}` (NOT `$ZDOTDIR`, which may now be
+/// unset), then eval the snippet LAST so it wins the prompt.
 fn zsh_zshrc() -> String {
     format!(
-        "ZDOTDIR=\"${{USER_ZDOTDIR:-$HOME}}\"\n\
-         [ -f \"$ZDOTDIR/.zshrc\" ] && . \"$ZDOTDIR/.zshrc\"\n\
+        "if [ -n \"${{USER_ZDOTDIR:-}}\" ]; then ZDOTDIR=\"$USER_ZDOTDIR\"; else unset ZDOTDIR; fi\n\
+         [ -f \"${{USER_ZDOTDIR:-$HOME}}/.zshrc\" ] && . \"${{USER_ZDOTDIR:-$HOME}}/.zshrc\"\n\
          {ZSH_SHELL_INIT}"
     )
 }
@@ -537,10 +541,11 @@ mod tests {
 
     #[test]
     fn shell_integration_rc_embeds_snippet_and_sources_user_rc() {
-        // zsh: restore ZDOTDIR first, source the user's .zshrc, snippet LAST.
+        // zsh: restore-or-unset ZDOTDIR, source the user's .zshrc from
+        // ${USER_ZDOTDIR:-$HOME} (not $ZDOTDIR, which may be unset), snippet LAST.
         let zshrc = zsh_zshrc();
-        assert!(zshrc.starts_with("ZDOTDIR=\"${USER_ZDOTDIR:-$HOME}\""));
-        assert!(zshrc.contains("$ZDOTDIR/.zshrc"));
+        assert!(zshrc.starts_with("if [ -n \"${USER_ZDOTDIR:-}\" ]; then ZDOTDIR=\"$USER_ZDOTDIR\"; else unset ZDOTDIR; fi"));
+        assert!(zshrc.contains(". \"${USER_ZDOTDIR:-$HOME}/.zshrc\""));
         assert!(zshrc.contains("_FNO_OSC133"));
         assert!(zshrc.trim_end().ends_with(ZSH_SHELL_INIT.trim_end()));
         // .zshenv must NOT restore ZDOTDIR (keeps zsh reading our .zshrc next).
