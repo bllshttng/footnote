@@ -41,23 +41,23 @@ pub fn adopted_name(short_id: &str) -> String {
 /// PTY; `claude_session_uuid` is the full resume key AND the row's identity,
 /// `pid`/`pid_start_time` are the EXTERNAL claude worker's (for reuse-detection).
 ///
-/// The `short_id` FIELD is left empty: footnote-side addressing keys on the full
-/// `claude_session_uuid`, never the wire-derived 8-hex short. That short lives in
-/// `claude_short_id` (the value the `control.sock` boundary + the `pty:<short>`
-/// claim holder use); it is not an fno-worker-socket identity, which is what the
-/// `short_id` field means.
+/// footnote-side addressing keys on the full `claude_session_uuid`, but since v9
+/// the wire-derived 8-hex short (the value the `control.sock` boundary + the
+/// `pty:<short>` claim holder use) lives in the unified `short_id` field, same as
+/// every other claude transport key. The `pty:<short>` claim holder is computed
+/// from the roster worker directly (see [`adopt`]), not from this field, so the
+/// storage move does not affect claim/control.sock routing.
 pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     let short = w.short_id().to_string();
     RegistryEntry {
         name: adopted_name(&short),
-        short_id: String::new(),
+        short_id: short,
         provider: "claude".into(),
         harness: Some("claude".into()),
         harness_session_id: Some(w.session_id.clone()),
         cwd: w.cwd.clone(),
         project_root: w.worktree_path.clone().unwrap_or_else(|| w.cwd.clone()),
         session_id: None,
-        claude_short_id: Some(short),
         claude_session_uuid: Some(w.session_id.clone()),
         messaging_socket_path: None,
         codex_session_id: None,
@@ -76,6 +76,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         exited_at: None,
         mux: None,
         screen_state: None,
+        legacy_claude_short_id: None,
     }
 }
 
@@ -221,14 +222,13 @@ mod tests {
         assert_eq!(e.name, "cc-a1b2c3d4");
         assert_eq!(e.provider, "claude");
         assert_eq!(e.host_mode.as_deref(), Some("attached"));
-        // Addressing identity is the full uuid; the worker-socket short_id field
-        // is empty (no fno worker), the wire short lives in claude_short_id.
-        assert_eq!(e.short_id, "");
+        // Addressing identity is the full uuid; since v9 the wire short lives in
+        // the unified short_id field (was claude_short_id).
         assert_eq!(
             e.claude_session_uuid.as_deref(),
             Some("a1b2c3d4-1111-2222-3333-444455556666")
         );
-        assert_eq!(e.claude_short_id.as_deref(), Some("a1b2c3d4"));
+        assert_eq!(e.short_id, "a1b2c3d4");
         assert_eq!(e.pid, Some(5001));
         assert_eq!(e.pid_start_time, Some(99887766));
         assert_eq!(e.status, AgentStatus::Live);
@@ -241,8 +241,8 @@ mod tests {
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert!(!e.is_interactive());
         assert_ne!(e.host_mode_or_default(), HOST_MODE_INTERACTIVE);
-        // Empty short_id but a live pid -> not a one-shot ask either.
-        assert!(!e.is_one_shot_ask(), "empty short_id but pid present");
+        // Wire short in short_id + a live pid -> not a one-shot ask either.
+        assert!(!e.is_one_shot_ask(), "adopted row with pid present");
     }
 
     #[test]

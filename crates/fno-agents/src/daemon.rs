@@ -168,13 +168,19 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
 
     // Steps 2-5: per registry entry, reconcile its state.json.
     for entry in &registry.entries {
-        // A row with no short_id is a non-PTY (shellout, e.g. Python-authored
-        // `claude`) agent: it has no per-agent state dir, so there is nothing to
-        // reconcile. Skip it rather than probe `state_json("")` -- which would
-        // collide across every such row on one path and emit a spurious
-        // `agent_inconsistent` per row (Gemini medium, PR #364). The orphan-PID
-        // reap below already skips these (their `pid` is `None`).
-        if entry.short_id.is_empty() {
+        // Skip rows with no fno-managed per-agent state dir -- probing
+        // `state_json` for one would emit a spurious `agent_inconsistent`
+        // (Gemini medium, PR #364). Two shapes qualify:
+        //   1. empty short_id: a codex/gemini shellout row (no worker key).
+        //   2. a claude shellout (`ask`/`--bg`) or adopted row. Since v9 (x-1b1e)
+        //      these carry the claude jobId in `short_id` (was `claude_short_id`),
+        //      so the empty-short_id proxy no longer catches them; the only claude
+        //      lane the daemon PTY-manages (and writes a state.json for) is the
+        //      interactive stream-json worker, so a non-interactive claude row is
+        //      a shellout/adopted row with no state dir.
+        let is_claude_shellout = entry.provider == "claude"
+            && entry.host_mode_or_default() != crate::state::HOST_MODE_INTERACTIVE;
+        if entry.short_id.is_empty() || is_claude_shellout {
             continue;
         }
         let state_path = home.state_json(&entry.short_id);
@@ -1379,7 +1385,7 @@ fn build_claude_stream_entry(
         cwd: cwd_s.clone(),
         project_root: cwd_s,
         session_id: None,
-        claude_short_id: None,
+        legacy_claude_short_id: None,
         claude_session_uuid: Some(uuid.into()),
         messaging_socket_path: None,
         codex_session_id: None,
@@ -2631,25 +2637,27 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
             // claude; ClaudeProvider.as_pty() is None). The field is kept (null)
             // to preserve the serialize_entry parity shape for JSON consumers.
             //
-            // session_id: Python uses the provider-specific resume id (claude_short_id
-            // for claude, codex_session_id for codex, gemini_session_id for gemini).
-            // The Rust registry stores these in separate optional fields; we replicate
-            // the Python resolution logic here.
+            // session_id: Python uses the provider-specific resume id (short_id
+            // for claude since v9, codex_session_id for codex, gemini_session_id
+            // for gemini). The Rust registry stores these in separate optional
+            // fields; we replicate the Python resolution logic here.
             // Provider-specific resume id, falling back to the generic
             // `session_id` when the provider field is None (matches Python's
             // resolution + the resolve_session_id helper below; gemini-code-assist
             // medium on PR #361 — without the fallback a row with only the generic
             // session_id set would report null here).
             let resume_id: Option<String> = match e.provider.as_str() {
-                "claude" => e.claude_short_id.clone().or_else(|| e.session_id.clone()),
+                "claude" => e
+                    .transport_short()
+                    .map(str::to_string)
+                    .or_else(|| e.session_id.clone()),
                 "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
                 "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
                 _ => e.session_id.clone(),
             };
             let session_id: Value = resume_id.map(Value::String).unwrap_or(Value::Null);
             let short_id: Value = e
-                .claude_short_id
-                .as_deref()
+                .transport_short()
                 .map(|s| Value::String(s.to_string()))
                 .unwrap_or(Value::Null);
             let log_path: Value = e
@@ -2779,12 +2787,33 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
+/// Resolve a lifecycle token (name | 8-hex short | full session id) to the
+/// canonical registry name via the shared resolver (x-1b1e), so the daemon
+/// `stop`/`rm` handlers accept all three address forms like their Python
+/// counterparts (`_canonical_agent_name`) instead of matching on name alone.
+/// Falls back to the raw token on any miss (unknown/ambiguous/serialize error)
+/// so the caller's familiar `agent {name} not found` path still fires.
+fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
+    let Ok(Value::Array(rows)) = serde_json::to_value(&registry.entries) else {
+        return token.to_string();
+    };
+    match crate::client_verbs::find_agent_entry(&rows, token) {
+        Ok(e) => e
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(token)
+            .to_string(),
+        Err(_) => token.to_string(),
+    }
+}
+
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     let name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let name = canonical_name_in(&registry, &name);
     let entry = match registry.find(&name) {
         Some(e) => e.clone(),
         None => {
@@ -2954,8 +2983,7 @@ async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
 /// `stop` on the agent's short id and marks the registry row exited on success.
 async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry) -> Response {
     let short = match entry
-        .claude_short_id
-        .as_deref()
+        .transport_short()
         .or(entry.session_id.as_deref())
         .filter(|s| !s.is_empty())
     {
@@ -2995,9 +3023,9 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 .emitter
                 .emit("agent_stopped", &json!({"name": name, "backend": "claude"}));
             // Report the id we actually stopped with (`short`), not
-            // `entry.short_id`: a Python-authored claude row has an empty
-            // short_id but a populated claude_short_id, so echoing entry.short_id
-            // would print `stopped: <name> ()` and break the stop output
+            // `entry.short_id`: a row with only a generic session_id and an empty
+            // short_id would otherwise print `stopped: <name> ()` and break the
+            // stop output
             // contract for exactly the rows ab-e5a57efa makes readable (Codex P2).
             Response::ok(
                 req.id,
@@ -3031,6 +3059,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let name = canonical_name_in(&registry, &name);
     let entry = match registry.find(&name) {
         Some(e) => e.clone(),
         None => {
@@ -3294,7 +3323,10 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
     let session_id = match e.provider.as_str() {
         "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
         "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
-        "claude" => e.claude_short_id.clone().or_else(|| e.session_id.clone()),
+        "claude" => e
+            .transport_short()
+            .map(str::to_string)
+            .or_else(|| e.session_id.clone()),
         _ => e.session_id.clone(),
     };
     crate::provider::AgentEntry {
@@ -3670,7 +3702,7 @@ enum UuidBackfill {
 }
 
 /// Find the `claude --bg` row awaiting its full session uuid. A bg spawn writes
-/// the row with `claude_short_id` (the 8-hex jobId) but `claude_session_uuid:
+/// the row with the 8-hex jobId in `short_id` (v9) but `claude_session_uuid:
 /// null` -- the full uuid only arrives on the first inside-leg report, so until
 /// it is backfilled `entry_holds_session` never matches and every report is
 /// buffered-then-lost (x-c393). Match a null-uuid claude row whose short-id is
@@ -3680,12 +3712,12 @@ enum UuidBackfill {
 fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
     let mut found = None;
     for (i, e) in entries.iter().enumerate() {
-        // Only a claude bg row owns a claude_short_id + uuid identity; skip any
-        // other provider so a malformed foreign row can't adopt a claude uuid.
+        // Only a claude bg row owns a jobId + uuid identity; skip any other
+        // provider so a malformed foreign row can't adopt a claude uuid.
         if e.provider != "claude" || e.claude_session_uuid.is_some() {
             continue;
         }
-        let Some(short) = e.claude_short_id.as_deref() else {
+        let Some(short) = e.transport_short() else {
             continue;
         };
         // Require the group boundary (`<short>-`) so a short cannot match a
@@ -4151,7 +4183,7 @@ mod tests {
             cwd: "/tmp".into(),
             project_root: String::new(),
             session_id: None,
-            claude_short_id: None,
+            legacy_claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: None,
@@ -4259,7 +4291,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4326,7 +4358,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4363,6 +4395,67 @@ mod tests {
     }
 
     #[test]
+    fn recovery_skips_claude_shellout_rows_no_spurious_inconsistent() {
+        // x-1b1e regression: v9 gives a claude `--bg`/`ask` row a non-empty
+        // short_id (the jobId), and an adopted row keeps its external pid. Neither
+        // has an fno state.json (their process is claude's, not a daemon PTY), so
+        // recover() must NOT probe state_json(jobId) and emit a spurious
+        // agent_inconsistent -- the empty-short_id proxy no longer catches them.
+        let home = tmp_home("recover-claude-shellout");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            // bg/ask: host_mode exec (None), pid None.
+            let mut bg = bg_claude_row("bg-ask", "7c5dcf5d");
+            bg.host_mode = None;
+            r.entries.push(bg);
+            // adopted: host_mode attached, external pid set.
+            let mut adopted = bg_claude_row("cc-adopt", "deadbeef");
+            adopted.host_mode = Some(crate::state::HOST_MODE_ATTACHED.into());
+            adopted.pid = Some(4242);
+            r.entries.push(adopted);
+        })
+        .unwrap();
+        // No state.json written for either row.
+        let report = recover(&home, &emitter);
+        assert!(
+            report.inconsistent.is_empty(),
+            "claude shellout/adopted rows must not be flagged inconsistent: {:?}",
+            report.inconsistent
+        );
+        let events = read_events(&home);
+        assert!(
+            !events.iter().any(|e| e["type"] == "agent_inconsistent"),
+            "no agent_inconsistent event for claude shellout rows"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn canonical_name_in_resolves_all_three_address_forms() {
+        // x-1b1e regression: the daemon stop/rm handlers must accept name |
+        // 8-hex short | full session id (parity with Python `_canonical_agent_name`),
+        // not just the name. A miss falls back to the raw token so the familiar
+        // `agent {name} not found` still fires.
+        let full = "aabbccdd-1111-2222-3333-444455556666";
+        let mut row = rentry("billing", AgentStatus::Live, None);
+        row.short_id = "a1b2c3d4".into();
+        row.harness_session_id = Some(full.into());
+        let reg = crate::state::Registry {
+            schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
+            entries: vec![row],
+        };
+        assert_eq!(canonical_name_in(&reg, "billing"), "billing"); // by name
+        assert_eq!(canonical_name_in(&reg, "a1b2c3d4"), "billing"); // by stored short
+        assert_eq!(canonical_name_in(&reg, full), "billing"); // by full session id
+        assert_eq!(
+            canonical_name_in(&reg, "AABBCCDD-1111-2222-3333-444455556666"),
+            "billing"
+        ); // case-insensitive
+           // Unknown token -> unchanged, so the caller's not-found path fires.
+        assert_eq!(canonical_name_in(&reg, "nope"), "nope");
+    }
+
+    #[test]
     fn recovery_reaps_dead_pid() {
         let home = tmp_home("recover-reap");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
@@ -4376,7 +4469,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4492,7 +4585,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: None,
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -4580,7 +4673,7 @@ mod tests {
             cwd: "/".into(),
             project_root: "/".into(),
             session_id: None,
-            claude_short_id: None,
+            legacy_claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: None,
@@ -4615,7 +4708,7 @@ mod tests {
             cwd: "/tmp".into(),
             project_root: "/tmp".into(),
             session_id: Some("sid".into()),
-            claude_short_id: None,
+            legacy_claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: None,
@@ -4643,11 +4736,11 @@ mod tests {
 
     // --- find_uuid_backfill_row (x-c393): backfill a null-uuid bg row ---------
 
-    /// A `claude --bg` row: `claude_short_id` set, `claude_session_uuid` null.
+    /// A `claude --bg` row: jobId in `short_id`, `claude_session_uuid` null.
     fn bg_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = rentry(name, AgentStatus::Live, None);
         e.provider = "claude".into();
-        e.claude_short_id = Some(short_id.into());
+        e.short_id = short_id.into();
         e.claude_session_uuid = None;
         e
     }
@@ -4689,7 +4782,7 @@ mod tests {
 
     #[test]
     fn find_uuid_backfill_row_skips_non_claude_rows() {
-        // codex P2: a foreign-provider row carrying a claude_short_id must not
+        // codex P2: a foreign-provider row carrying a short must not
         // adopt a claude uuid.
         let mut row = bg_claude_row("w", "3228ccad");
         row.provider = "codex".into();
@@ -5365,7 +5458,7 @@ done
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
-                claude_short_id: None,
+                legacy_claude_short_id: None,
                 claude_session_uuid: Some(format!("uuid-{short_id}")),
                 messaging_socket_path: None,
                 codex_session_id: None,
@@ -5566,8 +5659,9 @@ done
         assert_eq!(e.claude_session_uuid.as_deref(), Some("FULL-UUID-3"));
         assert_eq!(e.status, AgentStatus::Live);
         assert_eq!(e.pid, Some(4242));
-        // The resume key lives in claude_session_uuid, NOT the jobId field.
-        assert_eq!(e.claude_short_id, None);
+        // The resume key lives in claude_session_uuid; a stream thread carries
+        // its worker short in short_id ("sw3"), not the removed jobId field.
+        assert_eq!(e.short_id, "sw3");
     }
 
     /// AC1-ERR / front-door routing: a fresh `host --provider claude` with no

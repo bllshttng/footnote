@@ -83,7 +83,7 @@ class TestClassify:
 class _Entry:
     def __init__(self, provider, short_id):
         self.provider = provider
-        self.claude_short_id = short_id
+        self.short_id = short_id
 
 
 class _Locator:

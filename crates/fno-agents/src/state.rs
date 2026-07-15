@@ -55,7 +55,13 @@ use std::path::{Path, PathBuf};
 // v8 (x-ec59) is the canonical-identity bump for `harness` / `harness_session_id`
 // (mirrors Python's SCHEMA_VERSION): a pre-v8 reader rejects the store rather than
 // silently dropping the canonical fields on a read-modify-write.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 8;
+//
+// v9 (x-1b1e) removes `claude_short_id`: the claude jobId (a pure prefix of the
+// session UUID) now lives in `short_id`, unifying the transport-key field across
+// providers. A legacy row's `claude_short_id` backfills into `short_id` on load
+// (see `backfill_short_id`); a pre-v9 reader must reject a v9 store rather than
+// drop the jobId on a read-modify-write. Accepted set widens to 1..=9.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 9;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -341,10 +347,8 @@ pub struct RegistryEntry {
     /// (ab-b946b59c).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(default)]
-    pub claude_short_id: Option<String>,
     /// The FULL claude session UUID -- the stream-json `--resume` target,
-    /// distinct from the 8-hex `claude_short_id`/jobId (a 32-bit prefix, not
+    /// distinct from the 8-hex jobId in `short_id` (a 32-bit prefix, not
     /// collision-proof as a resume key). Shared field with Python's `AgentEntry`
     /// (`#[serde(default)]`, always emitted as null when absent, matching the
     /// sibling provider-id fields), so a row round-trips between the two
@@ -459,24 +463,32 @@ pub struct RegistryEntry {
     /// `screen_state: Optional[dict]` (X3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_state: Option<ScreenStateReport>,
+    /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
+    /// (under its old key) so a legacy row's jobId survives the read, but NEVER
+    /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
+    /// `short_id` at load and clears it, so it never round-trips. This is the
+    /// Rust mirror of Python's `load_registry` popping `claude_short_id` from the
+    /// raw row. Not part of identity; no consumer reads it directly.
+    #[serde(default, rename = "claude_short_id", skip_serializing)]
+    pub legacy_claude_short_id: Option<String>,
 }
 
 /// The one-live-ref invariant (brief Locked 7), checked at write time by both
 /// [`update_registry`] (Rust) and Python's `write_registry`: a row that carries
-/// the `mux` ref must not ALSO carry a worker-socket identity (non-empty
-/// `short_id`) or a `claude --bg` thread id (`claude_short_id`) - a double-ref
-/// row would make consumers dispatch the same agent down two substrates.
-/// Scoped to mux rows only: pre-existing worker/bg field combinations are not
-/// this invariant's business.
+/// the `mux` ref must not ALSO carry a transport identity (non-empty `short_id`:
+/// a worker-socket key or, since v9, a `claude --bg` jobId) - a double-ref row
+/// would make consumers dispatch the same agent down two substrates. Scoped to
+/// mux rows only: pre-existing worker/bg field combinations are not this
+/// invariant's business. (Backfill runs before this check, so a legacy bg
+/// row's jobId is already in `short_id`.)
 pub fn validate_single_live_ref(entry: &RegistryEntry) -> Result<(), String> {
     if entry.mux.is_none() {
         return Ok(());
     }
-    if !entry.short_id.is_empty() || entry.claude_short_id.is_some() {
+    if !entry.short_id.is_empty() {
         return Err(format!(
-            "registry row {:?} carries a mux ref alongside a {} ref; a row holds exactly one live ref (mux XOR worker XOR bg)",
+            "registry row {:?} carries a mux ref alongside a worker/bg ref; a row holds exactly one live ref (mux XOR worker XOR bg)",
             entry.name,
-            if entry.short_id.is_empty() { "bg-thread" } else { "worker" },
         ));
     }
     Ok(())
@@ -552,6 +564,38 @@ impl RegistryEntry {
         }
     }
 
+    /// v9 transport-key backfill (x-1b1e), the Rust mirror of Python's
+    /// `load_registry` popping the removed `claude_short_id` into `short_id`.
+    /// Applied at load, before [`validate_single_live_ref`]: a legacy row's
+    /// jobId (deserialized into `legacy_claude_short_id`) moves into an empty
+    /// `short_id` and the transient is cleared so it never round-trips. A
+    /// conflicting pair (both set, different values -- the drift this removal
+    /// kills) KEEPS `short_id` and returns the legacy value so the caller can
+    /// warn once; it never silently prefers the legacy value.
+    pub fn backfill_short_id(&mut self) -> Option<String> {
+        let legacy = self.legacy_claude_short_id.take()?;
+        if legacy.is_empty() {
+            return None;
+        }
+        if self.short_id.is_empty() {
+            self.short_id = legacy;
+            None
+        } else if self.short_id != legacy {
+            Some(legacy) // conflict: keep short_id, surface for a warn
+        } else {
+            None
+        }
+    }
+
+    /// The provider transport key (v9, x-1b1e), or `None` when this row has
+    /// none: the non-empty `short_id`. For claude it is the jobId (`claude
+    /// attach/logs <jobId>`); for a daemon PTY row the worker-socket key. The
+    /// single accessor consumers use to reach a session's wire handle, so no
+    /// verb re-implements the empty-string guard. [x-1b1e transport extraction]
+    pub fn transport_short(&self) -> Option<&str> {
+        (!self.short_id.is_empty()).then_some(self.short_id.as_str())
+    }
+
     /// The hosting mode with the absent==exec rule applied in one place.
     /// `None` on disk (and the legacy rows that predate the field) read as
     /// [`HOST_MODE_EXEC`]; an explicit value passes through. Reconcile/liveness
@@ -580,11 +624,19 @@ impl RegistryEntry {
     /// finished ask to `exited` by process-liveness alone, never consulting
     /// session-file reachability for status. [plan ab-70faa65b, Locked Decision #1]
     pub fn is_one_shot_ask(&self) -> bool {
+        // v9 (x-1b1e) moved the claude jobId from `claude_short_id` into
+        // `short_id`, so a claude shellout (`ask`/`--bg`) row now carries a
+        // non-empty short_id and the empty-short_id proxy no longer catches it.
+        // Mirror recover()'s provider+host_mode guard: a non-interactive claude
+        // row has no daemon PTY, so its surviving session file is a resumability
+        // artifact, not "running" -- without this it would fall through to the
+        // reachability probe and be kept falsely `live` forever.
+        let is_claude_shellout = self.provider == "claude" && !self.is_interactive();
         // A mux-hosted row (4a-G2) also has an empty short_id and may lack a
         // pid (the pane-child lookup is best-effort), but it is a LIVE hosted
         // agent, never a finished ask - without this exclusion the reconcile
         // sweep would flip it to Exited unprobed (codex P1, PR #142).
-        self.short_id.is_empty() && self.pid.is_none() && self.mux.is_none()
+        (self.short_id.is_empty() || is_claude_shellout) && self.pid.is_none() && self.mux.is_none()
     }
 }
 
@@ -790,6 +842,15 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
     // read choke point) covers both load_registry and update_registry's RMW read.
     for entry in &mut reg.entries {
         entry.backfill_harness_aliases();
+        // v9 transport-key backfill (x-1b1e): move a legacy row's
+        // `claude_short_id` into `short_id`. A conflicting pair keeps `short_id`
+        // and warns once (never silently prefers the legacy value).
+        if let Some(legacy) = entry.backfill_short_id() {
+            eprintln!(
+                "fno agents: warning: registry row {:?} carries short_id={:?} and legacy claude_short_id={:?}; keeping short_id",
+                entry.name, entry.short_id, legacy
+            );
+        }
     }
     // Forward-compat guard on the TYPED daemon path (Codex P2, ab-a171ceb2):
     // the raw client path (client_verbs::load_registry_entries) already rejects
@@ -1046,7 +1107,6 @@ mod tests {
             cwd: "/tmp/x".into(),
             project_root: "/tmp/x".into(),
             session_id: Some("uuid-1".into()),
-            claude_short_id: None,
             claude_session_uuid: None,
             messaging_socket_path: None,
             codex_session_id: Some("uuid-1".into()),
@@ -1065,6 +1125,7 @@ mod tests {
             exited_at: None,
             mux: None,
             screen_state: None,
+            legacy_claude_short_id: None,
         }
     }
 
@@ -1107,6 +1168,28 @@ mod tests {
         e.backfill_harness_aliases();
         assert_eq!(e.harness.as_deref(), Some("claude"));
         assert_eq!(e.harness_session_id.as_deref(), Some("UUID-1"));
+    }
+
+    #[test]
+    fn backfill_short_id_moves_legacy_into_empty_short() {
+        // AC2-EDGE (Rust side): a legacy row's claude_short_id moves into short_id.
+        let legacy = r#"{"name":"w","provider":"claude","cwd":"/p","log_path":null,
+            "claude_short_id":"7c5dcf5d","created_at":"2026-07-13T00:00:00Z","status":"live"}"#;
+        let mut e: RegistryEntry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(e.backfill_short_id(), None);
+        assert_eq!(e.short_id, "7c5dcf5d");
+        assert_eq!(e.legacy_claude_short_id, None); // consumed
+    }
+
+    #[test]
+    fn backfill_short_id_conflict_keeps_short_and_reports_legacy() {
+        // AC3-EDGE (Rust side): both set, different -> short_id wins, legacy surfaced.
+        let conflict = r#"{"name":"w","provider":"claude","cwd":"/p","log_path":null,
+            "short_id":"aaaaaaaa","claude_short_id":"bbbbbbbb",
+            "created_at":"2026-07-13T00:00:00Z","status":"live"}"#;
+        let mut e: RegistryEntry = serde_json::from_str(conflict).unwrap();
+        assert_eq!(e.backfill_short_id().as_deref(), Some("bbbbbbbb"));
+        assert_eq!(e.short_id, "aaaaaaaa"); // short_id wins
     }
 
     #[test]
@@ -1194,6 +1277,44 @@ mod tests {
     }
 
     #[test]
+    fn state_v9_claude_shellout_row_is_a_one_shot_ask() {
+        // x-1b1e regression: v9 moved the claude jobId into short_id, so a
+        // finished claude `ask`/`--bg` row now carries a NON-empty short_id.
+        // The empty-short_id proxy no longer catches it; without the provider+
+        // host_mode guard reconcile would fall through to the reachability probe
+        // and keep the row falsely `live` off its surviving (resumability-only)
+        // session file -- the exact defect recover() already had to fix.
+        let mut ask = sample_entry("cc-ask");
+        ask.provider = "claude".into();
+        ask.short_id = "7c5dcf5d".into(); // v9: jobId lives here now
+        ask.host_mode = None; // exec (shellout), not interactive
+        ask.pid = None;
+        ask.mux = None;
+        assert!(
+            ask.is_one_shot_ask(),
+            "a v9 claude shellout row (non-empty short_id, exec, no pid) is a one-shot ask"
+        );
+
+        // An interactive claude stream worker DOES have a daemon PTY: probe it,
+        // never settle it by liveness-alone.
+        let mut worker = ask.clone();
+        worker.host_mode = Some(HOST_MODE_INTERACTIVE.into());
+        assert!(
+            !worker.is_one_shot_ask(),
+            "an interactive claude worker is PTY-managed, not a one-shot ask"
+        );
+
+        // An adopted row carries an external pid -> excluded by the pid guard.
+        let mut adopted = ask.clone();
+        adopted.host_mode = Some(HOST_MODE_ATTACHED.into());
+        adopted.pid = Some(4242);
+        assert!(
+            !adopted.is_one_shot_ask(),
+            "an adopted row (external pid) is not a one-shot ask"
+        );
+    }
+
+    #[test]
     fn state_update_registry_enforces_one_live_ref() {
         // Write-time invariant (brief Locked 7): a mux ref alongside a worker
         // short_id (or a bg claude_short_id) is refused; the store is left
@@ -1216,11 +1337,10 @@ mod tests {
             load_registry(&path).unwrap().entries.is_empty(),
             "refused write must not persist"
         );
-        // bg-thread ref + mux is refused the same way.
+        // bg-thread ref (jobId in short_id, v9) + mux is refused the same way.
         let res = update_registry(&path, |r| {
             let mut e = sample_entry("bg-double");
-            e.short_id = String::new();
-            e.claude_short_id = Some("abcd1234".into());
+            e.short_id = "abcd1234".into();
             e.mux = Some(MuxRef {
                 session: "main".into(),
                 pane_id: 2,
@@ -1292,9 +1412,10 @@ mod tests {
         let e = reg.find("worker-claude").unwrap();
         assert_eq!(e.provider, "claude");
         assert_eq!(e.status, AgentStatus::Live);
-        assert_eq!(e.claude_short_id.as_deref(), Some("abc123"));
-        // Rust-only fields default to empty for Python-authored rows.
-        assert_eq!(e.short_id, "");
+        // v9: the legacy claude_short_id backfills into short_id on load.
+        assert_eq!(e.short_id, "abc123");
+        assert_eq!(e.legacy_claude_short_id, None); // consumed by the backfill
+                                                    // The other Rust-only field defaults to empty for Python-authored rows.
         assert_eq!(e.project_root, "");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1709,15 +1830,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v9, or - for an old daemon -
-        // a v8 it cannot interpret), while v1..=v8 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v10, or - for an old daemon -
+        // a v9 it cannot interpret), while v1..=v9 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":9,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":10,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 9);
+                assert_eq!(found, 10);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

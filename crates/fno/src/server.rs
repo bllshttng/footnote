@@ -7874,8 +7874,8 @@ mod tests {
         // still empty then). Pure over the raw file contents: an exited registry
         // row is dead, a live one and a roster worker are live.
         let reg = r#"{"agents":[
-            {"name":"w","cwd":"/x","status":"live","claude_short_id":"c19cd2c3"},
-            {"name":"d","cwd":"/x","status":"exited","claude_short_id":"deadbeef"}
+            {"name":"w","cwd":"/x","status":"live","provider":"claude","short_id":"c19cd2c3"},
+            {"name":"d","cwd":"/x","status":"exited","provider":"claude","short_id":"deadbeef"}
         ]}"#;
         let roster = r#"{"workers":{"k":{"sessionId":"aa11bb22-xyz","cwd":"/y"}}}"#;
         let live = live_ids_from(Some(reg), Some(roster), 0);

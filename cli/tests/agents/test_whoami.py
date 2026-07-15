@@ -26,7 +26,7 @@ def _claude(**kw) -> AgentEntry:
         provider="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/spawn-x-301a-whoami/output.jsonl",
-        claude_short_id="4a1f9c2b",
+        short_id="4a1f9c2b",
         created_at="2026-06-16T17:00:00Z",
         status="live",
     )
@@ -90,7 +90,7 @@ class TestResolveSelf:
         # codex P2: an older claude row may carry ONLY the 8-hex short id (a
         # 32-bit prefix of the full session UUID). The full CLAUDE_CODE_SESSION_ID
         # must still resolve it on the fallback path.
-        reg = [_claude(claude_short_id="3410f056", claude_session_uuid=None)]
+        reg = [_claude(short_id="3410f056", claude_session_uuid=None)]
         result = whoami_mod.resolve_self(
             env={},
             registry=reg,
@@ -103,9 +103,9 @@ class TestResolveSelf:
     def test_session_fallback_prefers_exact_full_id_over_prefix(self):
         # The exact full-id pass runs across every row first, so a shared 8-hex
         # prefix never steals a real full-UUID match.
-        prefix_row = _claude(name="prefix-collision", claude_short_id="3410f056",
+        prefix_row = _claude(name="prefix-collision", short_id="3410f056",
                              claude_session_uuid=None)
-        exact_row = _claude(name="exact-match", claude_short_id="ffffffff",
+        exact_row = _claude(name="exact-match", short_id="ffffffff",
                             claude_session_uuid="3410f056-d832-480c-9b55-09d1842a39b1")
         result = whoami_mod.resolve_self(
             env={},

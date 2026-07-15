@@ -73,7 +73,7 @@ def _write_existing_entry(name: str, provider: str, session_id: str) -> None:
             log_path="/tmp/a.log",
             codex_session_id=session_id if provider == "codex" else None,
             gemini_session_id=session_id if provider == "gemini" else None,
-            claude_short_id=session_id if provider == "claude" else None,
+            short_id=session_id if provider == "claude" else "",
         )
     ])
 
@@ -332,7 +332,7 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     entry = next((e for e in entries if e.name == "myagent-c"), None)
     assert entry is not None, "registry row must exist after claude spawn"
     assert entry.provider == "claude"
-    assert entry.claude_short_id == receipt["short_id"]
+    assert entry.short_id == receipt["short_id"]
 
 
 # ---------------------------------------------------------------------------

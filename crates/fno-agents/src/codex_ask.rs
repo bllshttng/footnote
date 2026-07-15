@@ -1161,7 +1161,7 @@ fn dispatch_create(
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
-        claude_short_id: None,
+        legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
         codex_session_id: Some(session_id.clone()),

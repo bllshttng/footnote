@@ -360,7 +360,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/claude-peer.log",
-            claude_short_id="abcd1234",
+            short_id="abcd1234",
             status="live",
         )
     ])
@@ -421,7 +421,7 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/claude-stream.log",
-            claude_short_id="abcd1234",
+            short_id="abcd1234",
             claude_session_uuid="11111111-2222-3333-4444-555555555555",
             status="live",
         )
@@ -988,7 +988,7 @@ def test_deliver_live_claude_mcp_send_only_no_reply_wait(
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/claude-mcp.log",
-            claude_short_id="abcd1234",
+            short_id="abcd1234",
             status="live",
             mcp_channel_id="abcd1234",
         )
@@ -1043,7 +1043,7 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/claude-mcp2.log",
-            claude_short_id="efgh5678",
+            short_id="efgh5678",
             status="live",
             mcp_channel_id="efgh5678",
         )

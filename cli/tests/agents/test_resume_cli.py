@@ -25,7 +25,7 @@ class _FakeAgentEntry:
     provider: str
     cwd: str
     log_path: str = "/tmp/log.jsonl"
-    claude_short_id: Optional[str] = None
+    short_id: Optional[str] = None
     codex_session_id: Optional[str] = None
     gemini_session_id: Optional[str] = None
 
@@ -156,7 +156,7 @@ def test_claude_path_uses_attach_substrate() -> None:
     entry = _FakeAgentEntry(
         name="alpha", provider="claude",
         cwd="/cwd",
-        claude_short_id="deadbeef",
+        short_id="deadbeef",
     )
     res = resume_logic(
         name="alpha",
@@ -231,7 +231,9 @@ def test_unknown_agent_exits_13() -> None:
     )
     assert res.exit_code == 13
     assert "ghost" in res.stderr
-    assert "not found" in res.stderr
+    # x-1b1e: the shared resolver's not-found message lists the accepted forms.
+    assert "no agent matching" in res.stderr
+    assert "accepted forms" in res.stderr
 
 
 def test_unsupported_provider_exits_13_not_14() -> None:

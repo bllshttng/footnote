@@ -30,9 +30,9 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
 
     Returns the same key set for every provider so JSON consumers can
     iterate a list of agents without per-provider branching (AC3-HP).
-    ``short_id`` is populated only for Claude entries (kept for
-    back-compat). ``session_id`` is the unified, provider-resolving
-    resume-target id: ``claude_short_id`` for claude, ``codex_session_id``
+    ``short_id`` is the provider transport key (claude jobId or daemon
+    worker key; null when absent). ``session_id`` is the unified,
+    provider-resolving resume-target id: ``short_id`` for claude, ``codex_session_id``
     for codex, ``gemini_session_id`` for gemini. It surfaces the codex
     resume UUID — the argument ``codex resume`` / ``fno agents resume``
     consume — which was previously stored but invisible in list output.
@@ -45,7 +45,7 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
     return {
         "name": entry.name,
         "provider": entry.provider,
-        "short_id": entry.claude_short_id,
+        "short_id": entry.short_id or None,
         "session_id": entry.session_id,
         "cwd": entry.cwd,
         "created_at": entry.created_at,

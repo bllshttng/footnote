@@ -77,7 +77,7 @@ def _seed_agent_entry(tmp_path: Path, name: str, provider: str = "claude") -> No
             provider=provider,
             cwd=str(tmp_path),
             log_path=str(tmp_path / f"{name}.log"),
-            claude_short_id="abc12345" if provider == "claude" else None,
+            short_id="abc12345" if provider == "claude" else "",
             codex_session_id="sess-abc" if provider == "codex" else None,
         )
     ])
@@ -253,7 +253,7 @@ def test_context_var_resets_between_dispatches(
             provider="claude",
             cwd=str(tmp_path),
             log_path=str(tmp_path / "d2.log"),
-            claude_short_id="abc12345",
+            short_id="abc12345",
         )
     ])
 

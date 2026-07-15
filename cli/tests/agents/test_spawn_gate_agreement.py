@@ -69,8 +69,7 @@ def test_slot_count_agrees_with_rust_gate_fixture(name, sc, tmp_path, monkeypatc
             log_path="/tmp/log",
             status=row["status"],
             pid=_pid(row.get("pid")),
-            claude_short_id=row.get("claude_short_id"),
-            short_id="",
+            short_id=row.get("short_id") or "",
         )
         for row in sc["registry"]
     ]

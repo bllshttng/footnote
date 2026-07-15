@@ -559,7 +559,7 @@ fn gemini_registry_entry(name: &str, cwd: &str, sid: &str, log_path: &str) -> Re
         cwd: cwd.to_string(),
         project_root: String::new(),
         session_id: None,
-        claude_short_id: None,
+        legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
         codex_session_id: None,

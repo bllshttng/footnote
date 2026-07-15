@@ -379,7 +379,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// reads of v1..=v4 are retained. Anything else is a hard error - which is the
 /// point of each bump: a pre-inside-leg reader pinned to {1,2,3,4} rejects a v5
 /// store instead of silently dropping the inside-leg report.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -460,7 +460,39 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
             }
         }
     }
-    Ok(rows.clone())
+    // v9 transport-key backfill (x-1b1e), the raw-Value mirror of Python
+    // `load_registry` popping `claude_short_id` into `short_id`: a legacy row's
+    // jobId moves into an empty `short_id` and the old key is dropped so no verb
+    // body reads it. A conflicting pair keeps `short_id` and warns once.
+    let mut out = rows.clone();
+    for row in &mut out {
+        if let Some(obj) = row.as_object_mut() {
+            let legacy = obj
+                .remove("claude_short_id")
+                .and_then(|v| v.as_str().map(str::to_string))
+                .filter(|s| !s.is_empty());
+            if let Some(legacy) = legacy {
+                let existing = obj
+                    .get("short_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                match existing {
+                    None => {
+                        obj.insert("short_id".into(), Value::String(legacy));
+                    }
+                    Some(short) if short != legacy => {
+                        let name = obj.get("name").and_then(Value::as_str).unwrap_or("?");
+                        eprintln!(
+                            "fno agents: warning: registry row {name:?} carries short_id={short:?} and legacy claude_short_id={legacy:?}; keeping short_id"
+                        );
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// String field accessor with a default (Python `ev.get(key, "")`).
@@ -570,31 +602,39 @@ fn trace_logic(args: &TraceArgs, events_path: &Path, registry_path: &Path) -> Tr
         }
     }
 
-    // Registry membership gate (unless --all).
-    if let Some(name) = &args.name {
+    // Registry membership gate (unless --all). Resolve the token (name | short |
+    // full id, x-1b1e) to its canonical name so events - which key on the name -
+    // filter correctly regardless of the address form the caller used.
+    let mut resolved_name: Option<String> = args.name.clone();
+    if let Some(token) = &args.name {
         if !args.all_agents {
             match load_registry_entries(registry_path) {
-                Err(_) => {
+                Err(exc) => {
                     return TraceResult {
                         exit_code: 12,
                         output: String::new(),
-                        stderr: "fno agents trace: registry load failed\n".to_string(),
+                        stderr: format!("fno agents trace: registry load failed: {exc}\n"),
                     };
                 }
-                Ok(rows) => {
-                    let found = rows
-                        .iter()
-                        .any(|e| e.get("name").and_then(Value::as_str) == Some(name.as_str()));
-                    if !found {
+                Ok(rows) => match find_agent_entry(&rows, token) {
+                    Ok(e) => {
+                        resolved_name = Some(
+                            e.get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(token)
+                                .to_string(),
+                        );
+                    }
+                    Err(_) => {
                         return TraceResult {
                             exit_code: 13,
                             output: String::new(),
                             stderr: format!(
-                                "fno agents trace: agent '{name}' not found in registry\n"
+                                "fno agents trace: agent '{token}' not found in registry\n"
                             ),
                         };
                     }
-                }
+                },
             }
         }
     }
@@ -604,7 +644,7 @@ fn trace_logic(args: &TraceArgs, events_path: &Path, registry_path: &Path) -> Tr
     // Filter: by name (unless --all), by request_id, by since.
     let matches = |ev: &Value| -> bool {
         if !args.all_agents {
-            if let Some(name) = &args.name {
+            if let Some(name) = &resolved_name {
                 let recipient = ev
                     .get("to_name")
                     .and_then(Value::as_str)
@@ -773,14 +813,165 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Provider -> session-id registry field, mirroring Python
-/// `registry.PROVIDER_SESSION_ID_FIELDS`.
+/// `registry.PROVIDER_SESSION_ID_FIELDS`. v9 (x-1b1e): claude resolves to the
+/// unified `short_id` transport key (was `claude_short_id`). This is the ONLY
+/// place a verb touches a provider-specific identity field; every session-
+/// connecting verb reaches a row via [`find_agent_entry`] instead of its own
+/// name-only `.find`.
 fn session_id_field(provider: &str) -> Option<&'static str> {
     match provider {
-        "claude" => Some("claude_short_id"),
+        "claude" => Some("short_id"),
         "codex" => Some("codex_session_id"),
         "gemini" => Some("gemini_session_id"),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared identifier resolver (x-1b1e): the Rust mirror of Python
+// `registry.resolve_agent`. Every session-connecting verb (resume, attach,
+// logs, trace) resolves a token to one row through this, so a session is
+// addressable by name/slug, full harness_session_id, or an 8-hex short. Same
+// four-rule precedence + ambiguity semantics as the Python resolver; the US4
+// parity matrix asserts the two agree.
+// ---------------------------------------------------------------------------
+
+const ACCEPTED_FORMS_MSG: &str = "accepted forms: name, 8-hex short id, or full session id";
+
+/// A resolution failure. Verbs map these to their own exit codes (resume/logs
+/// 13, attach 2) and never see a panic.
+#[derive(Debug)]
+pub(crate) enum ResolveError {
+    /// The token matched nothing; carries the token (empty when blank input).
+    NotFound(String),
+    /// Two or more distinct rows matched the same tier; carries the candidate list.
+    Ambiguous(String),
+}
+
+impl ResolveError {
+    /// The one-line message a verb prints (prefix it with its own verb name).
+    fn message(&self) -> String {
+        match self {
+            ResolveError::NotFound(tok) if tok.is_empty() => {
+                format!("empty agent token; {ACCEPTED_FORMS_MSG}")
+            }
+            ResolveError::NotFound(tok) => {
+                format!(
+                    "no agent matching {}; {ACCEPTED_FORMS_MSG}",
+                    py_repr_str(tok)
+                )
+            }
+            ResolveError::Ambiguous(msg) => msg.clone(),
+        }
+    }
+}
+
+/// The canonical id plus the legacy per-provider full-id fields, lowercased.
+fn full_session_ids(entry: &Value) -> Vec<String> {
+    [
+        "harness_session_id",
+        "claude_session_uuid",
+        "codex_session_id",
+        "gemini_session_id",
+    ]
+    .iter()
+    .filter_map(|k| entry.get(*k).and_then(Value::as_str))
+    .filter(|s| !s.is_empty())
+    .map(|s| s.to_ascii_lowercase())
+    .collect()
+}
+
+/// The derived canonical short: the first hex group of `harness_session_id`
+/// when it is exactly 8 hex (claude's jobId is built the same way). `None` for a
+/// row whose id is unresolved or non-hex (e.g. an opencode `ses_...` id).
+fn derived_short(entry: &Value) -> Option<String> {
+    let hsid = entry.get("harness_session_id").and_then(Value::as_str)?;
+    let lead = hsid.split('-').next()?.to_ascii_lowercase();
+    (lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit())).then_some(lead)
+}
+
+/// Return the single matched row, or an ambiguity error. Dedups by `name` (the
+/// PK), so the SAME row matching a tier via multiple rules is not ambiguous.
+fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, ResolveError> {
+    let mut by_name: std::collections::BTreeMap<&str, &'a Value> =
+        std::collections::BTreeMap::new();
+    for e in hits {
+        let n = e.get("name").and_then(Value::as_str).unwrap_or("?");
+        by_name.entry(n).or_insert(e);
+    }
+    if by_name.len() > 1 {
+        let cands = by_name
+            .values()
+            .map(|e| {
+                let n = e.get("name").and_then(Value::as_str).unwrap_or("?");
+                let s = e
+                    .get("short_id")
+                    .and_then(Value::as_str)
+                    .filter(|x| !x.is_empty())
+                    .unwrap_or("-");
+                let p = e.get("provider").and_then(Value::as_str).unwrap_or("?");
+                format!("{n} (short={s}, {p})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ResolveError::Ambiguous(format!(
+            "token {} is ambiguous across {} agents: {cands}. Disambiguate with the name or full session id.",
+            py_repr_str(token),
+            by_name.len()
+        )));
+    }
+    Ok(*by_name.values().next().unwrap())
+}
+
+/// Resolve `token` (name | full harness_session_id | 8-hex short) to one row.
+/// Precedence: exact name, exact full session id (case-insensitive), exact
+/// stored short_id (shape-agnostic), derived 8-hex prefix. Name wins first so a
+/// hex-shaped name is byte-stable. Mirrors Python `resolve_agent`.
+pub(crate) fn find_agent_entry<'a>(
+    rows: &'a [Value],
+    token: &str,
+) -> Result<&'a Value, ResolveError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(ResolveError::NotFound(String::new()));
+    }
+    let low = token.to_ascii_lowercase();
+
+    let named: Vec<&Value> = rows
+        .iter()
+        .filter(|e| e.get("name").and_then(Value::as_str) == Some(token))
+        .collect();
+    if !named.is_empty() {
+        return one_or_ambiguous(named, token);
+    }
+
+    let by_full: Vec<&Value> = rows
+        .iter()
+        .filter(|e| full_session_ids(e).iter().any(|i| i == &low))
+        .collect();
+    if !by_full.is_empty() {
+        return one_or_ambiguous(by_full, token);
+    }
+
+    let by_short: Vec<&Value> = rows
+        .iter()
+        .filter(|e| matches!(e.get("short_id").and_then(Value::as_str), Some(s) if !s.is_empty() && s == token))
+        .collect();
+    if !by_short.is_empty() {
+        return one_or_ambiguous(by_short, token);
+    }
+
+    if low.len() == 8 && low.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let by_derived: Vec<&Value> = rows
+            .iter()
+            .filter(|e| derived_short(e).as_deref() == Some(low.as_str()))
+            .collect();
+        if !by_derived.is_empty() {
+            return one_or_ambiguous(by_derived, token);
+        }
+    }
+
+    Err(ResolveError::NotFound(token.to_string()))
 }
 
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
@@ -825,10 +1016,7 @@ fn claude_resume_argv(
     entry: &Value,
     name: &str,
 ) -> Result<(Vec<String>, Option<String>), i32> {
-    let short_id = entry
-        .get("claude_short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     let uuid = entry
         .get("claude_session_uuid")
         .and_then(Value::as_str)
@@ -901,10 +1089,7 @@ fn acquire_resume_session_claim(uuid: &str, root: Option<&Path>) -> Result<(), (
 /// point at - never print an unusable command). Probes reality (locate_session +
 /// socket), never the registry `status` field, matching the resume smart verb.
 fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
-    let short_id = entry
-        .get("claude_short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     let uuid = entry
         .get("claude_session_uuid")
         .and_then(Value::as_str)
@@ -1105,15 +1290,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             return 13;
         }
     };
-    let entry = entries
-        .iter()
-        .find(|e| e.get("name").and_then(Value::as_str) == Some(name.as_str()));
-    let entry = match entry {
-        Some(e) => e,
-        None => {
+    let entry = match find_agent_entry(&entries, &name) {
+        Ok(e) => e,
+        Err(err) => {
             eprintln!(
-                "fno agents resume: agent {} not found in registry. Use `fno agents list` to see registered agents.",
-                py_repr_str(&name)
+                "fno agents resume: {}. Use `fno agents list` to see registered agents.",
+                err.message()
             );
             return 13;
         }
@@ -1295,13 +1477,10 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
             return 12;
         }
     };
-    let entry = match entries
-        .iter()
-        .find(|e| e.get("name").and_then(Value::as_str) == Some(name.as_str()))
-    {
-        Some(e) => e,
-        None => {
-            eprintln!("agent {} not found in registry", py_repr_str(&name));
+    let entry = match find_agent_entry(&entries, &name) {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("{}", err.message());
             return 2;
         }
     };
@@ -1340,13 +1519,10 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         return 2;
     }
 
-    let short_id = entry
-        .get("claude_short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     if short_id.is_empty() {
         eprintln!(
-            "registry entry {} has no claude_short_id; cannot attach.",
+            "registry entry {} has no short id on file; cannot attach.",
             py_repr_str(&name)
         );
         return 12;
@@ -1558,13 +1734,10 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
             return 1;
         }
     };
-    let entry = match entries
-        .iter()
-        .find(|e| e.get("name").and_then(Value::as_str) == Some(args.name.as_str()))
-    {
-        Some(e) => e,
-        None => {
-            eprintln!("agent not found: {}", args.name);
+    let entry = match find_agent_entry(&entries, &args.name) {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("{}", err.message());
             return 13;
         }
     };
@@ -1604,7 +1777,14 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
 
     if args.follow {
         // Stream subsequent lines via the agent.logs daemon RPC (Locked Decision #5).
-        return crate::logs_client::follow(home, &args.name).await;
+        // The daemon looks up log_path by exact registry `name`, so carry the
+        // RESOLVED row's canonical name (x-1b1e: args.name may be a short/session
+        // id) rather than the raw token, or the follow attach silently misses.
+        let resolved_name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(args.name.as_str());
+        return crate::logs_client::follow(home, resolved_name).await;
     }
     0
 }
@@ -1637,17 +1817,14 @@ fn run_logs_claude(entry: &Value, args: &LogsArgs) -> i32 {
             "WARN: JSON output for Claude logs not implemented in US3; falling back to raw passthrough"
         );
     }
-    let short_id = entry
-        .get("claude_short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     if short_id.is_empty() {
         let created = entry
             .get("created_at")
             .and_then(Value::as_str)
             .unwrap_or("");
         eprintln!(
-            "claude agent {} (created {created}) has no claude_short_id on file; cannot read logs. This entry may predate US1's short-id capture; try re-dispatching with `fno agents ask`.",
+            "claude agent {} (created {created}) has no short id on file; cannot read logs. This entry may predate US1's short-id capture; try re-dispatching with `fno agents ask`.",
             args.name
         );
         return 1;
@@ -2098,6 +2275,111 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // --- find_agent_entry (x-1b1e): parity with Python resolve_agent ----------
+
+    fn claude_row(name: &str, short: &str, uuid: &str) -> Value {
+        json!({
+            "name": name, "provider": "claude", "cwd": "/w", "log_path": "/l",
+            "short_id": short, "claude_session_uuid": uuid, "harness_session_id": uuid,
+        })
+    }
+
+    const RESOLVE_UUID: &str = "7c5dcf5d-c078-4b53-a8c9-7199b831eae4";
+
+    #[test]
+    fn find_agent_entry_resolves_all_three_forms() {
+        // AC1-HP: name, full uuid (case-insensitive), and 8-hex short all hit one row.
+        let rows = vec![claude_row("billing", "7c5dcf5d", RESOLVE_UUID)];
+        for tok in [
+            "billing",
+            RESOLVE_UUID,
+            &RESOLVE_UUID.to_uppercase(),
+            "7c5dcf5d",
+        ] {
+            let e = find_agent_entry(&rows, tok).expect("resolves");
+            assert_eq!(e["name"], "billing");
+        }
+    }
+
+    #[test]
+    fn find_agent_entry_daemon_and_derived_short_both_resolve() {
+        // AC2-HP: a codex row resolves by its name-derived daemon short AND by
+        // the derived 8-hex prefix of its thread id.
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let row = json!({
+            "name": "reviewer", "provider": "codex", "cwd": "/w", "log_path": "/l",
+            "short_id": "billingf", "codex_session_id": uuid, "harness_session_id": uuid,
+        });
+        let rows = vec![row];
+        assert_eq!(
+            find_agent_entry(&rows, "billingf").unwrap()["name"],
+            "reviewer"
+        );
+        assert_eq!(
+            find_agent_entry(&rows, "a1b2c3d4").unwrap()["name"],
+            "reviewer"
+        );
+    }
+
+    #[test]
+    fn find_agent_entry_name_precedence_over_hex() {
+        // AC1-EDGE: a hex-shaped name wins over a different row's short_id.
+        let rows = vec![
+            claude_row(
+                "deadbeef",
+                "aaaa0000",
+                "aaaa0000-0000-0000-0000-000000000000",
+            ),
+            claude_row("other", "deadbeef", "deadbeef-1111-1111-1111-111111111111"),
+        ];
+        assert_eq!(
+            find_agent_entry(&rows, "deadbeef").unwrap()["name"],
+            "deadbeef"
+        );
+    }
+
+    #[test]
+    fn find_agent_entry_ambiguous_same_tier_short_collision() {
+        // AC2-ERR: two rows sharing a short_id error as ambiguous, never first-match.
+        let rows = vec![
+            claude_row("aa", "abcd1234", "11111111-0000-0000-0000-000000000000"),
+            claude_row("bb", "abcd1234", "22222222-0000-0000-0000-000000000000"),
+        ];
+        assert!(matches!(
+            find_agent_entry(&rows, "abcd1234"),
+            Err(ResolveError::Ambiguous(_))
+        ));
+    }
+
+    #[test]
+    fn find_agent_entry_unknown_and_empty_and_boundary() {
+        // AC1-ERR: unknown token; empty token; 7/9-hex are not shorts.
+        let rows = vec![claude_row("billing", "7c5dcf5d", RESOLVE_UUID)];
+        for tok in ["nope", "", "   ", "7c5dcf5", "7c5dcf5dd"] {
+            assert!(matches!(
+                find_agent_entry(&rows, tok),
+                Err(ResolveError::NotFound(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn find_agent_entry_opencode_row_degrades_to_name_and_full_id() {
+        // An opencode ses_ id has no hex prefix: resolvable by name/full-id only.
+        let ses = "ses_7f3a9b2c1d0e";
+        let row = json!({
+            "name": "oc", "provider": "opencode", "cwd": "/w", "log_path": "/l",
+            "harness_session_id": ses,
+        });
+        let rows = vec![row];
+        assert_eq!(find_agent_entry(&rows, "oc").unwrap()["name"], "oc");
+        assert_eq!(find_agent_entry(&rows, ses).unwrap()["name"], "oc");
+        assert!(matches!(
+            find_agent_entry(&rows, "7f3a9b2c"),
+            Err(ResolveError::NotFound(_))
+        ));
+    }
+
     #[test]
     fn report_params_full_payload() {
         let p = build_report_params(&[
@@ -2278,7 +2560,7 @@ mod tests {
 
     #[test]
     fn session_id_field_and_resume_argv_match_python() {
-        assert_eq!(session_id_field("claude"), Some("claude_short_id"));
+        assert_eq!(session_id_field("claude"), Some("short_id"));
         assert_eq!(session_id_field("codex"), Some("codex_session_id"));
         assert_eq!(session_id_field("gemini"), Some("gemini_session_id"));
         assert_eq!(session_id_field("unknown"), None);
@@ -2326,7 +2608,7 @@ mod tests {
         let ch = ClaudeHome::at(home.path());
         let entry = serde_json::json!({
             "name": "w", "provider": "claude",
-            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
         });
         assert_eq!(
             claude_resume_argv(&ch, &entry, "w").unwrap(),
@@ -2338,7 +2620,7 @@ mod tests {
 
         // uuid absent -> refuse (Err 13), never `claude --resume ""`.
         let entry_no_uuid = serde_json::json!({
-            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
         });
         assert_eq!(claude_resume_argv(&ch, &entry_no_uuid, "w"), Err(13));
 
@@ -2404,7 +2686,7 @@ mod tests {
         // Dead row + uuid -> pointer naming both revival commands.
         let entry = serde_json::json!({
             "name": "w", "provider": "claude",
-            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
         });
         let msg = claude_attach_pointer(&ch_dead, &entry, "w").expect("dead row -> pointer");
         assert!(msg.contains("fno agents resume w"));
@@ -2412,7 +2694,7 @@ mod tests {
 
         // No uuid -> no pointer (never print an unusable command).
         let no_uuid = serde_json::json!({
-            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
         });
         assert_eq!(claude_attach_pointer(&ch_dead, &no_uuid, "w"), None);
 
@@ -2635,10 +2917,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v9 is the future-drift case a pre-bump reader would have on v8.
+        // v10 is the future-drift case a pre-bump reader would have on v9.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":9,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":10,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown provider -> Err (aider: a real CLI we deliberately do not

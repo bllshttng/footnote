@@ -50,7 +50,7 @@ def _register(name, project_cwd, *, status="live", last_message_at=None):
             provider="claude",
             cwd=str(project_cwd),
             log_path=f"/tmp/{name}.log",
-            claude_short_id=f"id-{name}",
+            short_id=f"id-{name}",
             status=status,
             last_message_at=last_message_at,
         )

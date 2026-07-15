@@ -45,7 +45,7 @@ def _seed_row(name: str, short_id: str, uuid) -> None:
         provider="claude",
         cwd="/tmp",
         log_path="/tmp/rev.log",
-        claude_short_id=short_id,
+        short_id=short_id,
         claude_session_uuid=uuid,
     )
     update_registry(lambda entries: entries + [row])
@@ -62,7 +62,7 @@ def _mk(**kw) -> AgentEntry:
         provider="claude",
         cwd="/tmp",
         log_path="/tmp/rev.log",
-        claude_short_id="deadbeef",
+        short_id="deadbeef",
         claude_session_uuid=DEAD_UUID,
     )
     base.update(kw)
@@ -112,7 +112,7 @@ def test_spawn_resume_revives_in_place(workdir_claude, monkeypatch) -> None:
 
     rows = [e for e in load_registry() if e.name == "rev-agent"]
     assert len(rows) == 1  # revived in place, not a same-name duplicate
-    assert rows[0].claude_short_id == "7c5dcf5d"  # fresh short_id from the new spawn
+    assert rows[0].short_id == "7c5dcf5d"  # fresh short_id from the new spawn
     assert rows[0].claude_session_uuid == DEAD_UUID  # same conversation preserved
 
 
@@ -134,7 +134,7 @@ def test_spawn_resume_uuid_mismatch_is_collision(workdir_claude, monkeypatch) ->
     assert result.exit_code == 2, result.output
     rows = [e for e in load_registry() if e.name == "rev-agent"]
     assert len(rows) == 1
-    assert rows[0].claude_short_id == "deadbeef"  # unchanged
+    assert rows[0].short_id == "deadbeef"  # unchanged
 
 
 def test_spawn_same_name_no_resume_is_collision(workdir_claude, monkeypatch) -> None:
@@ -182,4 +182,4 @@ def test_spawn_resume_refused_when_session_claim_held(
     assert result.exit_code == 11, result.output
     rows = [e for e in load_registry() if e.name == "rev-agent"]
     assert len(rows) == 1
-    assert rows[0].claude_short_id == "deadbeef"  # not revived - no 2nd supervisor
+    assert rows[0].short_id == "deadbeef"  # not revived - no 2nd supervisor

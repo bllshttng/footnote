@@ -50,7 +50,7 @@ def _register_claude_peer(name: str = "red", short_id: str = "abcd1234") -> None
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/red.log",
-            claude_short_id=short_id,
+            short_id=short_id,
             status="live",
         )
     ])
@@ -321,7 +321,7 @@ def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/red.log",
-            claude_short_id="abcd1234",
+            short_id="abcd1234",
             status="orphaned",
         )
     ])
@@ -353,7 +353,7 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
             provider="claude",
             cwd="/tmp",
             log_path="/tmp/red.log",
-            claude_short_id="abcd1234",
+            short_id="abcd1234",
             status="orphaned",
         )
     ])

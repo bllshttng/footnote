@@ -12,7 +12,7 @@ Provider resume substrates (Locked Decision #6):
 
 - ``codex`` → ``codex resume <codex_session_id>`` (bypasses the
   exec-source picker filter via direct UUID argument).
-- ``claude`` → ``claude attach <claude_short_id>`` (reuses the existing
+- ``claude`` → ``claude attach <short_id>`` (reuses the existing
   attach surface).
 - ``gemini`` → ``gemini --session <gemini_session_id>``  (TBD at
   implementation time; if gemini lacks a native resume verb, exit 14
@@ -134,12 +134,17 @@ def resume_logic(
             stderr=f"fno agents resume: registry read failed: {exc}\n",
         )
 
-    entry = next((e for e in entries if getattr(e, "name", None) == name), None)
-    if entry is None:
+    # Resolve by any of the three address forms (x-1b1e): name, full session id,
+    # or 8-hex short. The shared core keeps Rust `find_agent_entry` in parity.
+    from fno.agents.registry import AgentResolutionError, resolve_agent_in
+
+    try:
+        entry = resolve_agent_in(entries, name).entry
+    except AgentResolutionError as exc:
         return ResumeResult(
             exit_code=13,
             stderr=(
-                f"fno agents resume: agent {name!r} not found in registry. "
+                f"fno agents resume: {exc}. "
                 f"Use `fno agents list` to see registered agents.\n"
             ),
         )

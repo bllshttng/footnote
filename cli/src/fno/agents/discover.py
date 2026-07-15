@@ -300,18 +300,19 @@ def _discover_from_registry(
             continue
         if provider == "claude":
             # session_id keeps the full uuid for dedup/canonical identity, but
-            # short_id MUST be the authoritative jobId -- claude_short_id and the
-            # uuid's first 8 hex are distinct fields that can differ, and the
-            # jobId is what `fno mail send <short>` and mail-inject key on.
+            # short_id MUST be the authoritative jobId -- the stored short and
+            # the uuid's first 8 hex can differ, and the jobId is what
+            # `fno mail send <short>` and mail-inject key on.
             # Canonical harness_session_id leads (x-ec59): a row whose only
             # identity is the canonical field (a heal-backfilled bg row) resolves
             # here, where before it fell through to durable-only forever.
+            short_val = getattr(e, "short_id", "") or None
             sid = (
                 getattr(e, "harness_session_id", None)
                 or getattr(e, "claude_session_uuid", None)
-                or getattr(e, "claude_short_id", None)
+                or short_val
             )
-            short = getattr(e, "claude_short_id", None) or (sid[:8] if sid else None)
+            short = short_val or (sid[:8] if sid else None)
         else:
             sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)
             short = sid[:8] if sid else None

@@ -133,7 +133,8 @@ def test_trace_missing_agent_exits_13(
     # Stub registry-check to report "not registered" — simulating a
     # name the user typed that doesn't match any live agent.
     from fno.agents import trace_cli as trace_mod
-    monkeypatch.setattr(trace_mod, "_agent_exists_in_registry", lambda _n: False)
+    # x-1b1e: the gate resolves the token; None == unknown -> exit 13.
+    monkeypatch.setattr(trace_mod, "_resolve_registry_name", lambda _n: None)
 
     res = trace_logic(name="ghost", events_path=tmp_path / "events.jsonl")
     assert res.exit_code == 13
@@ -366,10 +367,10 @@ def test_trace_surfaces_registry_read_failure(tmp_path: Path) -> None:
     from fno.agents.trace_cli import trace_logic, _RegistryReadError
     from fno.agents import trace_cli as trace_mod
 
-    def boom(_name: str) -> bool:
+    def boom(_name: str) -> "str | None":
         raise _RegistryReadError("permission denied reading registry")
 
-    _pytest.MonkeyPatch().setattr(trace_mod, "_agent_exists_in_registry", boom)
+    _pytest.MonkeyPatch().setattr(trace_mod, "_resolve_registry_name", boom)
     res = trace_logic(
         name="alpha",
         events_path=tmp_path / "events.jsonl",

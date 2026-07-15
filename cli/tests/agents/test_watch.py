@@ -12,7 +12,6 @@ from typer.testing import CliRunner
 
 from fno.agents.cli import (
     _render_stream_frame,
-    _resolve_stream_short_id,
     _watch_loop,
     agents_app,
 )
@@ -65,20 +64,30 @@ def test_watch_loop_advances_cursor_and_bounds_polls() -> None:
     assert seen_cursors == [0, 1, 2], "cursor must advance via the worker's next"
 
 
-def test_resolve_short_id_reads_raw_registry(tmp_path: Path, monkeypatch) -> None:
+def test_watch_resolves_worker_short_via_shared_resolver(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`watch` now resolves through the shared resolver (x-1b1e): a name maps to
+    the row's worker short_id, and an unknown token raises the not-found error."""
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
     home = tmp_path / "agents"
     home.mkdir()
-    # The real registry's top-level key is `agents` (not `entries`).
     (home / "registry.json").write_text(json.dumps({
-        "schema_version": 4,
+        "schema_version": 9,
         "agents": [
-            {"name": "alpha", "short_id": "sw-alpha", "provider": "claude"},
-            {"name": "beta", "short_id": "sw-beta", "provider": "claude"},
+            {"name": "alpha", "short_id": "sw-alpha", "provider": "claude",
+             "cwd": "/w", "log_path": "/tmp/a.log"},
+            {"name": "beta", "short_id": "sw-beta", "provider": "claude",
+             "cwd": "/w", "log_path": "/tmp/b.log"},
         ],
     }))
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
-    assert _resolve_stream_short_id("beta") == "sw-beta"
-    assert _resolve_stream_short_id("ghost") is None
+    reg = home / "registry.json"
+    assert resolve_agent("beta", path=reg).worker_short_id == "sw-beta"
+    # Addressable by the stored worker short too (shape-agnostic rule).
+    assert resolve_agent("sw-beta", path=reg).entry.name == "beta"
+    with pytest.raises(AgentResolutionError):
+        resolve_agent("ghost", path=reg)
 
 
 def test_cmd_watch_unknown_name_exits_2(tmp_path: Path, monkeypatch, runner: CliRunner) -> None:

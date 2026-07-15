@@ -358,10 +358,10 @@ def _followup_path(
         DispatchAskError: with the documented exit code per AC2 failure
             mode (1, 11, 12, 13, 15 mapped from provider errors).
     """
-    short_id = existing.claude_short_id
+    short_id = existing.short_id
     if not short_id:
         raise DispatchAskError(
-            f"registry entry {name!r} has no claude_short_id; cannot follow up. "
+            f"registry entry {name!r} has no short id on file; cannot follow up. "
             f"Remove with 'fno agents rm {name}' and recreate.",
             exit_code=12,
         )
@@ -1436,7 +1436,7 @@ def _claude_create_path(
         provider=chosen,
         cwd=str(cwd),
         log_path=str(log_path),
-        claude_short_id=short_id,
+        short_id=short_id,
         claude_session_uuid=session_uuid,
         # Canonical identity at birth (x-ec59): a bg claude row is born routable
         # by name. A raced uuid-resolution miss leaves harness_session_id None
@@ -1840,7 +1840,7 @@ def _is_revival(
         return False
     from fno.agents.providers import claude as claude_mod
 
-    short_id = getattr(existing, "claude_short_id", None)
+    short_id = getattr(existing, "short_id", "") or None
     if short_id:
         # A liveness-probe error fails SAFE toward "possibly live": never revive
         # (--resume) into what could be a second writer on one transcript. A
@@ -2222,6 +2222,23 @@ def _validate_lifecycle_name(name: str) -> None:
         )
 
 
+def _canonical_agent_name(token: str, *, registry_path: Optional[Path] = None) -> str:
+    """Translate a lifecycle token (name | 8-hex short | full session id) to the
+    canonical registry name, so ``stop``/``rm`` address a session by any of the
+    three forms (x-1b1e) while still locking + acting on the canonical name.
+
+    Falls back to the token UNCHANGED on any resolution miss (unknown, ambiguous,
+    unreadable registry), so the downstream name lookup raises its familiar
+    ``agent {name!r} not found in registry`` error rather than a second variant -
+    the not-found/exit-2 contract the lifecycle tests pin stays intact."""
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
+    try:
+        return resolve_agent(token, path=registry_path).entry.name
+    except AgentResolutionError:
+        return token
+
+
 def _resolve_registry_entry(name: str, *, registry_path: Optional[Path] = None) -> AgentEntry:
     """Load the registry and return the entry for ``name``.
 
@@ -2361,6 +2378,9 @@ def stop_agent(
             PATH, claude shellout timeout, lock timeout.
     """
     _validate_lifecycle_name(name)
+    # Accept any of the three address forms (x-1b1e): translate to the canonical
+    # name before the flock, which keys on it.
+    name = _canonical_agent_name(name)
     # Pre-flock fast-fail + capture provider for the lock-timeout event
     # payload. The authoritative load happens inside
     # ``with_agent_lock_and_entry`` below; this pre-read exists ONLY so
@@ -2403,10 +2423,10 @@ def stop_agent(
                     exit_code=2,
                 )
 
-            short_id = existing.claude_short_id
+            short_id = existing.short_id
             if not short_id:
                 raise DispatchAskError(
-                    f"registry entry {name!r} has no claude_short_id; "
+                    f"registry entry {name!r} has no short id on file; "
                     f"cannot stop. Run 'fno agents rm {name}' to clear.",
                     exit_code=12,
                 )
@@ -2532,6 +2552,8 @@ def rm_agent(
     fields.
     """
     _validate_lifecycle_name(name)
+    # Accept any of the three address forms (x-1b1e); lock on the canonical name.
+    name = _canonical_agent_name(name)
     # Pre-flock fast-fail + capture provider for lock-timeout event
     # payload. See ``stop_agent`` for the lint-pattern rationale: the
     # body does NOT call ``hold_agent_lock`` directly — that lives inside
@@ -2550,7 +2572,7 @@ def rm_agent(
             claude_exit: Optional[int] = None
 
             if existing.provider == "claude":
-                short_id = existing.claude_short_id
+                short_id = existing.short_id
                 if not short_id:
                     if not force:
                         # Help text promises --force can drop the orphan row,
@@ -2559,7 +2581,7 @@ def rm_agent(
                         # --force, refuse; with --force, fall through to
                         # the registry-only removal at the bottom.
                         raise DispatchAskError(
-                            f"registry entry {name!r} has no claude_short_id; "
+                            f"registry entry {name!r} has no short id on file; "
                             f"cannot rm via claude shellout. Re-run with --force "
                             "to drop the orphan registry entry.",
                             exit_code=12,
@@ -2567,7 +2589,7 @@ def rm_agent(
                     # --force on a corrupted row: skip the claude shellout,
                     # emit a forensic WARN, proceed to registry-only removal.
                     sys.stderr.write(
-                        "WARN: registry entry has no claude_short_id; "
+                        "WARN: registry entry has no short id on file; "
                         "--force given, removing registry row without "
                         "shelling out to claude.\n"
                     )
@@ -2755,7 +2777,7 @@ def reconcile_agents(
     skipped: list[dict] = []
     errors: list[dict] = []
     backfilled: list[dict] = []
-    # name -> (probed_claude_short_id, resolved harness_session_id) for a live row
+    # name -> (probed short_id, resolved harness_session_id) for a live row
     # whose canonical id never landed (x-ec59). Folded into the SAME batched
     # update_registry write as the status flips, so no new write cycle or lock
     # scope appears. The probed short_id is retained so the write only stamps a row
@@ -2966,12 +2988,12 @@ def reconcile_agents(
                     {
                         "name": entry.name,
                         "provider": "claude",
-                        "id": entry.claude_short_id,
+                        "id": entry.short_id,
                         "reason": "claude-cli-not-on-path",
                     }
                 )
                 continue
-            if not entry.claude_short_id:
+            if not entry.short_id:
                 events.emit(
                     "agent_inconsistent",
                     name=entry.name,
@@ -3004,7 +3026,7 @@ def reconcile_agents(
                     reachable = claude_mod.mcp_channel_reachable(entry.mcp_channel_id, timeout=0.25)
                 else:
                     reachable = claude_mod.claude_logs_reachable(
-                        entry.claude_short_id, timeout=claude_logs_timeout
+                        entry.short_id, timeout=claude_logs_timeout
                     )
             except ReachabilityProbeError as exc:
                 # Catch the lifted base class (US4-gemini Wave 1.1) so
@@ -3026,7 +3048,7 @@ def reconcile_agents(
                     {
                         "name": entry.name,
                         "provider": "claude",
-                        "id": entry.claude_short_id,
+                        "id": entry.short_id,
                         "reason": f"{probe_label}: {exc.reason}",
                     }
                 )
@@ -3038,13 +3060,13 @@ def reconcile_agents(
             # it from claude's own store -- the same jsonl the liveness probe just
             # read -- and fold the write into reconcile's single batched cycle. A
             # miss leaves it null (the durable queue stays the floor); never fatal.
-            if reachable and not entry.harness_session_id and entry.claude_short_id:
+            if reachable and not entry.harness_session_id and entry.short_id:
                 try:
-                    healed = claude_mod.resolve_session_uuid(entry.claude_short_id)
+                    healed = claude_mod.resolve_session_uuid(entry.short_id)
                 except Exception:  # noqa: BLE001 — a resolver error is a tolerated miss
                     healed = None
                 if healed:
-                    pending_backfill[entry.name] = (entry.claude_short_id, healed)
+                    pending_backfill[entry.name] = (entry.short_id, healed)
                     backfilled.append(
                         {
                             "name": entry.name,
@@ -3082,7 +3104,7 @@ def reconcile_agents(
             # gemini agents flipped between live/orphaned with "id": null
             # which rendered as "?" in human output and broke follow-up
             # tooling.
-            "id": (entry.claude_short_id or entry.codex_session_id or entry.gemini_session_id),
+            "id": (entry.short_id or entry.codex_session_id or entry.gemini_session_id),
         }
         if new_status == "orphaned":
             orphaned.append(change)
@@ -3117,7 +3139,7 @@ def reconcile_agents(
                     # Only stamp a row that STILL matches the row we probed: a
                     # same-name rm+re-register during the probe loop would put this
                     # claude uuid onto a replacement row (misrouting its mail).
-                    if e.provider == "claude" and e.claude_short_id == probed_short:
+                    if e.provider == "claude" and e.short_id == probed_short:
                         # Canonical wins: set harness_session_id and sync the legacy
                         # claude uuid so both readers resolve.
                         updates["harness_session_id"] = hsid
@@ -3209,10 +3231,10 @@ def attach_agent(name: str) -> AttachResult:
             exit_code=2,
         )
 
-    short_id = existing.claude_short_id
+    short_id = existing.short_id
     if not short_id:
         raise DispatchAskError(
-            f"registry entry {name!r} has no claude_short_id; cannot attach.",
+            f"registry entry {name!r} has no short id on file; cannot attach.",
             exit_code=12,
         )
 
@@ -3264,7 +3286,7 @@ def attach_agent(name: str) -> AttachResult:
 # create-or-ask calls against the same name therefore serialize on the
 # per-agent lock and the rename is atomic.
 #
-# Design note: ``mcp_channel_id`` currently equals ``claude_short_id``
+# Design note: ``mcp_channel_id`` currently equals the claude jobId (``short_id``)
 # (1:1 mapping; see providers/claude.py module-level note). The value
 # is generated here at registration time so a future UUIDv4 swap is a
 # one-line change.
@@ -3288,12 +3310,12 @@ def register_mcp_channel(
 
     Returns:
         The assigned ``mcp_channel_id`` (today this equals the agent's
-        ``claude_short_id``; in a follow-up it will be a UUIDv4
+        ``short_id``; in a follow-up it will be a UUIDv4
         generated here).
 
     Raises:
         DispatchAskError(exit_code=2): agent name not found, or entry
-            has no ``claude_short_id`` (cannot generate an mcp id for
+            has no ``short_id`` (cannot generate an mcp id for
             a non-Claude or pre-create entry).
     """
     with with_agent_lock_and_entry(name, registry_path=registry_path) as (
@@ -3307,10 +3329,10 @@ def register_mcp_channel(
                 "this release",
                 exit_code=2,
             )
-        if not entry.claude_short_id:
+        if not entry.short_id:
             raise DispatchAskError(
                 f"register_mcp_channel: agent {name!r} has no "
-                "claude_short_id; cannot derive mcp_channel_id",
+                "short id on file; cannot derive mcp_channel_id",
                 exit_code=12,
             )
         # Idempotent: if already set, return the existing value.
@@ -3318,16 +3340,16 @@ def register_mcp_channel(
             events.emit(
                 events.KIND_MCP_CHANNEL_REGISTERED,
                 name=name,
-                short_id=entry.claude_short_id,
+                short_id=entry.short_id,
                 mcp_channel_id=entry.mcp_channel_id,
                 idempotent=True,
             )
             return entry.mcp_channel_id
 
-        # Today the mcp_channel_id IS the claude_short_id (1:1; see
+        # Today the mcp_channel_id IS the claude jobId in short_id (1:1; see
         # providers/claude.py module note). A follow-up will swap in
         # uuid.uuid4().hex here without a schema change.
-        new_id = entry.claude_short_id
+        new_id = entry.short_id
 
         from dataclasses import replace
 
@@ -3350,7 +3372,7 @@ def register_mcp_channel(
             events.emit(
                 "mcp_channel_register_failed",
                 name=name,
-                short_id=entry.claude_short_id,
+                short_id=entry.short_id,
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
@@ -3363,7 +3385,7 @@ def register_mcp_channel(
         events.emit(
             events.KIND_MCP_CHANNEL_REGISTERED,
             name=name,
-            short_id=entry.claude_short_id,
+            short_id=entry.short_id,
             mcp_channel_id=new_id,
             idempotent=False,
         )
@@ -3871,7 +3893,7 @@ def _chat_busy_reason(entry: "AgentEntry") -> Optional[str]:
     re-checks atomically (AC3-FR), so this pre-check only buys a fast, friendly
     refusal for the common non-racing case.
     """
-    short_id = getattr(entry, "claude_short_id", None)
+    short_id = getattr(entry, "short_id", "") or None
     if not short_id:
         return None
     if getattr(entry, "host_mode", None) == "interactive":
@@ -4232,7 +4254,7 @@ def _mux_followup_path(
     """Follow-up delivery to a mux-hosted agent (any provider).
 
     A mux row's PTY is a mux pane, not a provider socket / MCP / worker lane,
-    so the legacy provider follow-up paths (which key on claude_short_id /
+    so the legacy provider follow-up paths (which key on short_id /
     codex_session_id / gemini_session_id) cannot reach it and raise exit 12.
     Deliver over PaneSend instead -- the same claim->text->CR->release burst
     _deliver_live uses for live mail. PaneSend is fire-and-forget: there is no
@@ -4514,7 +4536,7 @@ def _deliver_live(
     # verb resolves the handle itself via ClaudeRoster (accepts the full session
     # uuid or 8-hex short id) and returns False (-> durable) when not reachable.
     recipient = (
-        entry.harness_session_id or entry.claude_session_uuid or entry.claude_short_id
+        entry.harness_session_id or entry.claude_session_uuid or entry.short_id
     )
     if not recipient:
         return False
@@ -4653,7 +4675,6 @@ def dispatch_send(
                     getattr(sender_entry, "harness_session_id", None)
                     or getattr(sender_entry, "claude_session_uuid", None)
                     or getattr(sender_entry, "short_id", None)
-                    or getattr(sender_entry, "claude_short_id", None)
                 )
             # A `fno mail send <name>` is always directed -> stamp the recipient's
             # short id as the envelope `to` (node x-1f23: optional, set when known).
@@ -4661,7 +4682,7 @@ def dispatch_send(
                 from_name,
                 from_session,
                 provider_from,
-                to=(existing.claude_short_id or existing.short_id or None),
+                to=(existing.short_id or None),
             )
             msg_id = generate_msg_id()
 
@@ -5015,7 +5036,6 @@ def dispatch_send_to_project(
             from_session = (
                 getattr(_se, "claude_session_uuid", None)
                 or getattr(_se, "short_id", None)
-                or getattr(_se, "claude_short_id", None)
             )
     except Exception:  # noqa: BLE001 - sender identity is best-effort
         pass

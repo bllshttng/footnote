@@ -35,8 +35,8 @@ pub struct RegistryAgent {
     /// when this row is `blocked` on a numbered menu the daemon could extract;
     /// `None` for a hook-badged block or a focus-only blocked prompt.
     pub answerable: Option<AnswerablePrompt>,
-    /// The `claude attach <id>` target: the claude bg-session jobId
-    /// (`claude_short_id`) that lets a paneless watch-only row be attached into
+    /// The `claude attach <id>` target: the claude bg-session jobId (in
+    /// `short_id` since v9) that lets a paneless watch-only row be attached into
     /// a mux pane. `None` for a row with no jobId (non-claude, or a claude row
     /// that never recorded one). Present regardless of `mux`, but only the
     /// watch-only (paneless) click path consumes it - a pane-hosted row focuses
@@ -541,12 +541,19 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             ))
         });
         // The claude bg jobId, when present, is the `claude attach <id>` target
-        // for a paneless row (only claude rows carry it - codex/gemini use their
-        // own session-id fields and a different lane).
-        let attach_id = row
-            .get("claude_short_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+        // for a paneless row. Since v9 it lives in `short_id` (the unified
+        // transport key), so this must be claude-scoped: a codex/gemini row's
+        // short_id is a daemon socket key, not a claude attach target. A legacy
+        // `claude_short_id` row is tolerated as a fallback (raw read, no backfill).
+        let is_claude = row.get("provider").and_then(|v| v.as_str()) == Some("claude");
+        let attach_id = is_claude
+            .then(|| {
+                row.get("short_id")
+                    .or_else(|| row.get("claude_short_id"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+            .flatten()
             .map(str::to_string);
         let (badge, reason, answerable) = match row.get("inside_leg") {
             Some(leg) if !leg.is_null() => {
@@ -643,8 +650,8 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
 
 /// Union the fno registry rows with claude's roster (x-0a2e). Pure so the
 /// whole merge is unit-testable without files or a clock, exactly like
-/// `derive_rows`. The join key is the registry row's `attach_id` (== its
-/// `claude_short_id`) against the roster worker's `short_id`; a registry row
+/// `derive_rows`. The join key is the registry row's `attach_id` (== its claude
+/// jobId in `short_id`) against the roster worker's `short_id`; a registry row
 /// always wins a collision (dedup registry-wins, Locked 4).
 ///
 /// 1. Registry rows pass through.
@@ -997,7 +1004,7 @@ mod tests {
         // A claude bg row's jobId (`claude_short_id`) is the `claude attach <id>`
         // target; a row without one (or with an empty one) is not attachable.
         let raw = reg(
-            r#"{"name":"bg","cwd":"/w","status":"live","claude_short_id":"c19cd2c3"},
+            r#"{"name":"bg","cwd":"/w","status":"live","provider":"claude","short_id":"c19cd2c3"},
                {"name":"plain","cwd":"/w","status":"live"}"#,
         );
         let rows = derive_rows(&raw, NOW).unwrap();
@@ -1148,7 +1155,7 @@ mod tests {
     #[test]
     fn merge_appends_foreign_rows_and_sorts(/* AC1-HP */) {
         let reg = derive_rows(
-            &reg(r#"{"name":"mmm","cwd":"/w","status":"live","claude_short_id":"aa11bb22"}"#),
+            &reg(r#"{"name":"mmm","cwd":"/w","status":"live","provider":"claude","short_id":"aa11bb22"}"#),
             NOW,
         )
         .unwrap();
@@ -1174,7 +1181,7 @@ mod tests {
     #[test]
     fn merge_upgrades_exited_registry_row_present_in_roster(/* AC3-HP */) {
         let reg = derive_rows(
-            &reg(r#"{"name":"stale","cwd":"/w","status":"exited","claude_short_id":"ab12cd34"}"#),
+            &reg(r#"{"name":"stale","cwd":"/w","status":"exited","provider":"claude","short_id":"ab12cd34"}"#),
             NOW,
         )
         .unwrap();
@@ -1194,7 +1201,7 @@ mod tests {
     #[test]
     fn merge_empty_roster_is_byte_equal_to_registry_only(/* AC3-EDGE */) {
         let raw = reg(
-            r#"{"name":"z","cwd":"/w","status":"live","claude_short_id":"aa11bb22"},
+            r#"{"name":"z","cwd":"/w","status":"live","provider":"claude","short_id":"aa11bb22"},
                         {"name":"a","cwd":"/x","status":"exited"}"#,
         );
         let reg = derive_rows(&raw, NOW).unwrap();
@@ -1305,7 +1312,7 @@ mod tests {
         // (plan merge step 2), never a badged one.
         let reg = derive_rows(
             &reg(
-                r#"{"name":"x","cwd":"/w","status":"exited","claude_short_id":"ab12cd34",
+                r#"{"name":"x","cwd":"/w","status":"exited","provider":"claude","short_id":"ab12cd34",
                      "inside_leg":{"state":"working","received_at":"2020-01-01T00:00:00Z"}}"#,
             ),
             NOW,

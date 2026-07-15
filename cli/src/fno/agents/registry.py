@@ -28,6 +28,8 @@ import contextlib
 import fcntl
 import json
 import os
+import re
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +88,7 @@ KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 # provider -> field mapping lives in exactly one place and cannot drift
 # between the two. Adding a provider here updates both call sites at once.
 PROVIDER_SESSION_ID_FIELDS = {
-    "claude": "claude_short_id",
+    "claude": "short_id",
     "codex": "codex_session_id",
     "gemini": "gemini_session_id",
 }
@@ -117,7 +119,11 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # store (clean "upgrade fno") rather than accept the version and then TypeError on
 # the unknown AgentEntry kwargs (the PR #364 brick) or silently drop the fields on
 # a Rust read-modify-write. Same forward-compat rationale as the v4-v7 bumps.
-SCHEMA_VERSION = 8
+# v9 removes `claude_short_id`: the claude jobId (a pure prefix of the session
+# UUID) now lives in `short_id`, unifying the transport-key field across
+# providers. Legacy rows backfill on load (see load_registry); a pre-v9 reader
+# must reject a v9 store rather than drop the jobId on write-back.
+SCHEMA_VERSION = 9
 
 
 class RegistryVersionError(RuntimeError):
@@ -160,7 +166,6 @@ class AgentEntry:
     provider: str
     cwd: str
     log_path: str
-    claude_short_id: Optional[str] = None
     codex_session_id: Optional[str] = None
     gemini_session_id: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
@@ -177,7 +182,7 @@ class AgentEntry:
     # Python's coercion maps the absence back to "exec". [interactive-drive node]
     host_mode: Optional[str] = None
     # The FULL claude session UUID, the stream-json `--resume` target. Distinct
-    # from `claude_short_id` (the 8-hex jobId, a 32-bit prefix used by `claude
+    # from the 8-hex jobId in `short_id` (a 32-bit prefix used by `claude
     # attach` + the jobs-dir, not collision-proof as a resume key). None until a
     # claude session is adopted into the daemon stream-json host lane, which
     # resolves it via `_claude_session_registry.resolve_session_uuid` and
@@ -227,6 +232,12 @@ class AgentEntry:
     # short_id/project_root are Rust `String` (NOT Option), so they default to
     # "" -- emitting "short_id": null would fail Rust's deserialize (null is not
     # a String). The Option fields below emit null, which Rust reads as None.
+    #
+    # short_id is the provider's transport key (v9, x-1b1e): claude rows carry
+    # the 8-hex jobId (`claude attach/logs <jobId>`, by construction the first 8
+    # hex of the session UUID); daemon PTY rows carry the name-derived worker
+    # socket key. The legacy `claude_short_id` field was removed at v9 --
+    # load_registry backfills it into short_id on read and never writes it back.
     short_id: str = ""
     project_root: str = ""
     messaging_socket_path: Optional[str] = None
@@ -275,7 +286,7 @@ class AgentEntry:
         """The provider-specific resume-target id.
 
         Resolves to whichever stored field the resume path consumes:
-        ``claude_short_id`` (``claude attach``), ``codex_session_id``
+        ``short_id`` (``claude attach``), ``codex_session_id``
         (``codex resume <uuid>``), or ``gemini_session_id``. ``None`` for
         unknown providers or when the id was never captured.
 
@@ -286,7 +297,153 @@ class AgentEntry:
         on-disk storage field.
         """
         field_name = PROVIDER_SESSION_ID_FIELDS.get(self.provider)
-        return getattr(self, field_name) if field_name else None
+        # `short_id` is a str defaulting to "" (never None); normalize the
+        # empty transport key to None so callers keep their `is None` checks.
+        return (getattr(self, field_name) or None) if field_name else None
+
+
+# ---------------------------------------------------------------------------
+# Shared identifier resolver (x-1b1e): every session-connecting `fno agents`
+# verb accepts ONE of three address forms — the registry name/slug, the full
+# harness_session_id, or an 8-hex short. This one function is the single lookup
+# choke point so no verb re-implements a name-only `.find`.
+# ---------------------------------------------------------------------------
+
+# Exactly-8 lowercase hex, the `spawn --resume` convention (_SHORT_ID_RE, PR #397).
+# A 7- or 9-char token is NOT a short; it falls through to name/full-id, then the
+# not-found error.
+_DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
+
+_ACCEPTED_FORMS = "accepted forms: name, 8-hex short id, or full session id"
+
+
+class AgentResolutionError(RuntimeError):
+    """No entry, an ambiguous token, or an unreadable registry.
+
+    ``exit_code`` defaults to 2 (the lifecycle name-not-found convention) for a
+    caller that maps the error straight through (``raise typer.Exit(exc.exit_code)``,
+    e.g. ``watch``). Verbs with their own convention still override it — resume
+    reports 13, trace/stop/rm map through their existing not-found path — so this
+    default is the fallback, not a universal choke point.
+    """
+
+    def __init__(self, message: str, *, exit_code: int = 2) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+@dataclass
+class ResolvedAgent:
+    """The entry a token resolved to, plus which rule matched.
+
+    ``worker_short_id`` is the transport handle a session-connecting verb
+    shells out with (``claude attach/logs <short>`` etc.); ``None`` when the
+    row recorded no short (a pre-heal claude row) so the verb can raise its own
+    explicit "no short id on file" error instead of shelling an empty arg.
+    """
+
+    entry: AgentEntry
+    matched_by: str  # "name" | "full_session_id" | "short_id" | "derived_short"
+
+    @property
+    def worker_short_id(self) -> Optional[str]:
+        return self.entry.short_id or None
+
+
+def _full_session_ids(entry: object) -> list[str]:
+    """The canonical id plus the legacy per-provider full-id fields, lowercased.
+
+    Mirrors the read order dispatch.py uses during the migration window
+    (canonical first, legacy as fallback). ``getattr`` so the resolver core also
+    accepts a duck-typed registry row (e.g. a test's SimpleNamespace)."""
+    ids = [
+        getattr(entry, "harness_session_id", None),
+        getattr(entry, "claude_session_uuid", None),
+        getattr(entry, "codex_session_id", None),
+        getattr(entry, "gemini_session_id", None),
+    ]
+    return [i.lower() for i in ids if i]
+
+
+def _derived_short(entry: object) -> Optional[str]:
+    """The canonical addressing short: the first 8 hex of harness_session_id
+    (claude's jobId is built the same way, so for a claude row it equals the
+    stored short_id). ``None`` for a row whose id is unresolved or non-hex
+    (e.g. an opencode ``ses_...`` id), so the derived rule simply never fires."""
+    hsid = getattr(entry, "harness_session_id", None)
+    if not hsid:
+        return None
+    lead = hsid.split("-", 1)[0].lower()
+    return lead if _DERIVED_SHORT_RE.match(lead) else None
+
+
+def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
+    """Return the single matched entry, or raise on a real ambiguity.
+
+    Dedups by ``name`` (the PK), so the SAME entry matching a tier via multiple
+    rules is not ambiguous; two DISTINCT entries are (git's ambiguous-short-SHA
+    behavior — never silently pick one)."""
+    distinct = {getattr(e, "name", None): e for e in hits}
+    if len(distinct) > 1:
+        cands = ", ".join(
+            f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
+            f"{getattr(e, 'provider', '?')})"
+            for e in distinct.values()
+        )
+        raise AgentResolutionError(
+            f"token {token!r} is ambiguous across {len(distinct)} agents: "
+            f"{cands}. Disambiguate with the name or full session id."
+        )
+    return ResolvedAgent(entry=next(iter(distinct.values())), matched_by=matched_by)
+
+
+def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
+    """The 4-rule matching core over an already-loaded entry list (the Rust
+    ``find_agent_entry`` mirror). Precedence: exact name, exact full session id
+    (case-insensitive), exact stored short_id (shape-agnostic), derived 8-hex
+    prefix. Name wins first so a hex-shaped name is byte-stable.
+
+    ``getattr``-based, so both real ``AgentEntry`` rows and duck-typed rows (a
+    verb that injects its own registry loader) resolve identically. Raises
+    :class:`AgentResolutionError` (exit 2) on empty/unknown/ambiguous."""
+    token = (token or "").strip()
+    if not token:
+        raise AgentResolutionError(f"empty agent token; {_ACCEPTED_FORMS}")
+    low = token.lower()
+
+    named = [e for e in entries if getattr(e, "name", None) == token]
+    if named:
+        return _one_or_ambiguous(named, "name", token)
+
+    by_full = [e for e in entries if low in _full_session_ids(e)]
+    if by_full:
+        return _one_or_ambiguous(by_full, "full_session_id", token)
+
+    by_short = [e for e in entries if getattr(e, "short_id", None) == token]
+    if by_short:
+        return _one_or_ambiguous(by_short, "short_id", token)
+
+    if _DERIVED_SHORT_RE.match(low):
+        by_derived = [e for e in entries if _derived_short(e) == low]
+        if by_derived:
+            return _one_or_ambiguous(by_derived, "derived_short", token)
+
+    raise AgentResolutionError(f"no agent matching {token!r}; {_ACCEPTED_FORMS}")
+
+
+def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
+    """Resolve ``token`` to one registry entry, loading the registry first.
+
+    Wraps :func:`resolve_agent_in`; a malformed/unreadable registry degrades to
+    a clean :class:`AgentResolutionError`, never a traceback leaking to the
+    verb. See ``resolve_agent_in`` for the matching rules."""
+    try:
+        entries = load_registry(path=path)
+    except RegistryVersionError as exc:
+        raise AgentResolutionError(
+            f"registry unreadable ({exc}); cannot resolve {token!r}"
+        ) from exc
+    return resolve_agent_in(entries, token)
 
 
 def _registry_path(path: Optional[Path]) -> Path:
@@ -331,19 +488,18 @@ def _hold_registry_lock(registry_path: Path) -> Iterator[None]:
 def _validate_single_live_ref(entry: AgentEntry) -> None:
     """One-live-ref invariant (4a-G2, mirrors Rust ``validate_single_live_ref``).
 
-    A row carrying the ``mux`` ref must not ALSO carry a worker-socket
-    identity (non-empty ``short_id``) or a ``claude --bg`` thread id
-    (``claude_short_id``) - a double-ref row would make consumers dispatch one
+    A row carrying the ``mux`` ref must not ALSO carry a transport identity
+    (non-empty ``short_id``: a worker-socket key or, since v9, a ``claude
+    --bg`` jobId) - a double-ref row would make consumers dispatch one
     agent down two substrates. Scoped to mux rows only; pre-existing
     worker/bg field combinations are untouched.
     """
     if entry.mux is None:
         return
-    if entry.short_id or entry.claude_short_id is not None:
-        other = "worker" if entry.short_id else "bg-thread"
+    if entry.short_id:
         raise ValueError(
             f"registry row {entry.name!r} carries a mux ref alongside a "
-            f"{other} ref; a row holds exactly one live ref (mux XOR worker XOR bg)"
+            f"worker/bg ref; a row holds exactly one live ref (mux XOR worker XOR bg)"
         )
 
 
@@ -490,6 +646,23 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         if not row.get("harness") and row.get("provider"):
             row = {**row, "harness": row["provider"]}
         row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
+        # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
+        # READ only -- a legacy row's jobId moves into `short_id` (the unified
+        # transport key) and the key dies here, so asdict never re-emits it.
+        # A conflicting pair keeps `short_id` (the drift this removal kills)
+        # and warns once, never silently prefers the legacy value.
+        legacy_short = row.pop("claude_short_id", None)
+        if legacy_short:
+            existing_short = row.get("short_id")
+            if not existing_short:
+                row["short_id"] = legacy_short
+            elif existing_short != legacy_short:
+                print(
+                    f"fno agents: warning: registry row {row.get('name')!r} "
+                    f"carries short_id={existing_short!r} and legacy "
+                    f"claude_short_id={legacy_short!r}; keeping short_id",
+                    file=sys.stderr,
+                )
         # `session_id` is a computed @property on AgentEntry, not an init field.
         # A Rust PTY row may serialize it (Rust skips it when None, so this only
         # fires for a row that recorded one); passing it to AgentEntry(**row)

@@ -41,7 +41,7 @@ def _seed_entry(name: str, provider: str = "claude") -> AgentEntry:
         provider=provider,
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / f"{name}.log"),
-        claude_short_id="aaaaaaaa" if provider == "claude" else None,
+        short_id="aaaaaaaa" if provider == "claude" else "",
         codex_session_id=(
             "deadbeef-dead-beef-dead-beefdeadbeef"
             if provider == "codex" else None
@@ -124,7 +124,7 @@ def test_staged_resolve_pattern_proves_post_lock_value_is_used(
         provider="claude",
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / "worker-A.log"),
-        claude_short_id="00000000",  # stale short-id
+        short_id="00000000",  # stale short-id
         codex_session_id=None,
         created_at="2026-01-01T00:00:00Z",
         last_message_at="2026-01-01T00:00:00Z",
@@ -148,9 +148,9 @@ def test_staged_resolve_pattern_proves_post_lock_value_is_used(
     with with_agent_lock_and_entry("worker-A") as (_, existing):
         # AC2-FR: the yielded entry MUST be the real one, not the stale
         # snapshot. If the helper accidentally yielded the pre-flock
-        # value, this assertion would fail because claude_short_id would
+        # value, this assertion would fail because short_id would
         # be "00000000" and status would be "orphaned".
-        assert existing.claude_short_id == "aaaaaaaa"
+        assert existing.short_id == "aaaaaaaa"
         assert existing.status == "live"
     assert call_count["n"] == 2, "helper must read twice (pre + post lock)"
 
@@ -209,7 +209,7 @@ def test_registry_path_override_routes_both_lock_and_entry_reads(
             provider="claude",
             cwd=str(tmp_path),
             log_path=str(tmp_path / "default-w.log"),
-            claude_short_id="ddddffff",  # default-registry short_id
+            short_id="ddddffff",  # default-registry short_id
             status="live",
         ),
     ])
@@ -224,7 +224,7 @@ def test_registry_path_override_routes_both_lock_and_entry_reads(
                 provider="claude",
                 cwd=str(tmp_path),
                 log_path=str(tmp_path / "override-w.log"),
-                claude_short_id="0fffff11",  # override-registry short_id
+                short_id="0fffff11",  # override-registry short_id
                 status="live",
             ),
         ],
@@ -237,7 +237,7 @@ def test_registry_path_override_routes_both_lock_and_entry_reads(
     with with_agent_lock_and_entry(
         "worker-A", registry_path=override_registry
     ) as (_lock, existing):
-        assert existing.claude_short_id == "0fffff11", (
+        assert existing.short_id == "0fffff11", (
             "registry_path override was not honored by the "
             "_resolve_registry_entry calls; helper read entries from "
             f"the default registry instead: {existing!r}"

@@ -158,7 +158,6 @@ def test_parallel_codex_asks_serialize_via_flock(
                 "cwd": str(tmp_path),
                 "log_path": str(tmp_path / "log.jsonl"),
                 "status": "live",
-                "claude_short_id": None,
                 "codex_session_id": seed_session_id,
                 "gemini_session_id": None,
                 "created_at": None,

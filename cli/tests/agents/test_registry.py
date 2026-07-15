@@ -53,7 +53,7 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
         name="my-agent",
         provider="claude",
         cwd="/home/user/project",
-        claude_short_id="abc123",
+        short_id="abc123",
         codex_session_id=None,
         gemini_session_id=None,
         log_path="/tmp/my-agent.log",
@@ -68,7 +68,7 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
     assert e.name == "my-agent"
     assert e.provider == "claude"
     assert e.cwd == "/home/user/project"
-    assert e.claude_short_id == "abc123"
+    assert e.short_id == "abc123"
     assert e.codex_session_id is None
     assert e.gemini_session_id is None
     assert e.log_path == "/tmp/my-agent.log"
@@ -95,7 +95,7 @@ def test_ac1_hp_optional_session_ids(tmp_path: Path, monkeypatch) -> None:
     loaded = load_registry(path=registry_path)
 
     assert loaded[0].codex_session_id == "sess-xyz"
-    assert loaded[0].claude_short_id is None
+    assert loaded[0].short_id == ""
     assert loaded[0].gemini_session_id is None
 
 
@@ -251,7 +251,7 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
 def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> None:
     """AC4-ERR: loading a file with a future schema_version raises RegistryVersionError.
 
-    SCHEMA_VERSION is now 8 (canonical-identity bump); v9 is the future-drift case.
+    SCHEMA_VERSION is now 9 (claude_short_id removal); v10 is the future-drift case.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -260,15 +260,15 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
-        json.dumps({"schema_version": 9, "agents": []}), encoding="utf-8"
+        json.dumps({"schema_version": 10, "agents": []}), encoding="utf-8"
     )
 
     with pytest.raises(RegistryVersionError) as exc_info:
         load_registry(path=registry_path)
 
     msg = str(exc_info.value)
-    assert "9" in msg  # read version present
-    assert "8" in msg  # expected version present
+    assert "10" in msg  # read version present
+    assert "9" in msg  # expected version present
 
 
 def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatch) -> None:
@@ -607,7 +607,7 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -730,7 +730,7 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1098,7 +1098,7 @@ def test_session_id_property_resolves_provider_specific_id() -> None:
 
     claude = AgentEntry(
         name="c", provider="claude", cwd="/tmp", log_path="/tmp/c.log",
-        claude_short_id="abc12345",
+        short_id="abc12345",
     )
     codex = AgentEntry(
         name="x", provider="codex", cwd="/tmp", log_path="/tmp/x.log",
@@ -1164,7 +1164,7 @@ def test_session_id_property_matches_resume_cli_session_id_for() -> None:
     from fno.agents.resume_cli import _session_id_for
 
     cases = [
-        ("claude", "claude_short_id", "abc12345"),
+        ("claude", "short_id", "abc12345"),
         ("codex", "codex_session_id", "019e51db-a995-75e1-a3bb-3dde6b207661"),
         ("gemini", "gemini_session_id", "gem-sess-1"),
     ]
@@ -1408,14 +1408,14 @@ def test_claude_session_uuid_round_trips(tmp_path: Path, monkeypatch) -> None:
         provider="claude",
         cwd="/tmp",
         log_path="/tmp/claude-peer.log",
-        claude_short_id="7c5dcf5d",
+        short_id="7c5dcf5d",
         claude_session_uuid="019e7157-4236-7bb1-b274-ebbac6040ace",
     )
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     write_registry([entry], path=registry_path)
 
     loaded = load_registry(path=registry_path)
-    assert loaded[0].claude_short_id == "7c5dcf5d"
+    assert loaded[0].short_id == "7c5dcf5d"
     assert loaded[0].claude_session_uuid == "019e7157-4236-7bb1-b274-ebbac6040ace"
 
 
@@ -1427,7 +1427,7 @@ def test_claude_session_uuid_defaults_to_none(tmp_path: Path, monkeypatch) -> No
 
     entry = AgentEntry(
         name="c", provider="claude", cwd="/tmp", log_path="/tmp/c.log",
-        claude_short_id="7c5dcf5d",
+        short_id="7c5dcf5d",
     )
     assert entry.claude_session_uuid is None
 
@@ -1481,7 +1481,6 @@ def _rust_pty_row(name: str = "worker-claude", **overrides) -> dict:
         "provider": "claude",
         "cwd": "/Users/x/proj",
         "project_root": "/Users/x/proj",
-        "claude_short_id": "abc123",
         "messaging_socket_path": "/tmp/abilities/sock/wk-abc123.sock",
         "status": "live",
         "created_at": "2026-05-26T00:00:00Z",
@@ -1539,8 +1538,8 @@ def test_rust_pty_row_with_stored_session_id_is_not_a_brick(
     _write_raw(registry_path, [_rust_pty_row(session_id="abc123")])
 
     loaded = load_registry(path=registry_path)  # must not raise
-    # session_id is the claude projection of claude_short_id.
-    assert loaded[0].session_id == "abc123"
+    # session_id is the claude projection of short_id (v9 unified transport key).
+    assert loaded[0].session_id == "wk-abc123"
 
 
 def test_mixed_registry_python_and_rust_rows(tmp_path: Path, monkeypatch) -> None:
@@ -1653,9 +1652,9 @@ def test_mux_ref_roundtrips_and_reaches_rust_shape(tmp_path: Path, monkeypatch) 
 
 
 def test_write_registry_rejects_double_ref_rows(tmp_path: Path, monkeypatch) -> None:
-    """One live ref per row (brief Locked 7): a mux ref alongside a worker
-    short_id or a bg-thread claude_short_id is refused at write time, and the
-    prior store is left intact."""
+    """One live ref per row (brief Locked 7): a mux ref alongside a non-empty
+    short_id (a worker key or, since v9, a bg jobId) is refused at write time,
+    and the prior store is left intact."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, write_registry
 
@@ -1681,7 +1680,7 @@ def test_write_registry_rejects_double_ref_rows(tmp_path: Path, monkeypatch) -> 
         provider="claude",
         cwd="/p",
         log_path="/l",
-        claude_short_id="abcd1234",
+        short_id="abcd1234",
         mux={"session": "main", "pane_id": 2},
     )
     with pytest.raises(ValueError, match="one live ref"):
@@ -1690,3 +1689,99 @@ def test_write_registry_rejects_double_ref_rows(tmp_path: Path, monkeypatch) -> 
     # The refused writes must not have clobbered the store.
     raw = json.loads(registry_path.read_text(encoding="utf-8"))
     assert [r["name"] for r in raw["agents"]] == ["ok"]
+
+
+# ---------------------------------------------------------------------------
+# v9 claude_short_id removal + load-time backfill (x-1b1e)
+# ---------------------------------------------------------------------------
+
+
+def test_v9_agent_entry_has_no_claude_short_id_field() -> None:
+    """AC3-HP: the removed field is not a constructor kwarg any more."""
+    from fno.agents.registry import AgentEntry
+
+    with pytest.raises(TypeError):
+        AgentEntry(
+            name="c", provider="claude", cwd="/tmp", log_path="/l",
+            claude_short_id="deadbeef",  # type: ignore[call-arg]
+        )
+
+
+def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-EDGE: a legacy v8 row carrying only claude_short_id resolves by that
+    value after load; on write-back it carries short_id and no claude_short_id."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, write_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 8,
+                "agents": [
+                    {
+                        "name": "legacy",
+                        "provider": "claude",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/legacy.log",
+                        "claude_short_id": "7c5dcf5d",
+                        "created_at": "2026-05-19T00:00:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].short_id == "7c5dcf5d"
+    # The claude projection resolves by the backfilled short.
+    assert loaded[0].session_id == "7c5dcf5d"
+
+    # Write-back drops the legacy key and carries short_id at the current schema.
+    write_registry(loaded, path=registry_path)
+    raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 9
+    row = raw["agents"][0]
+    assert "claude_short_id" not in row
+    assert row["short_id"] == "7c5dcf5d"
+
+
+def test_v9_conflicting_legacy_pair_keeps_short_id_and_warns(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC3-EDGE: a row carrying BOTH short_id and a DIFFERENT claude_short_id
+    keeps short_id (the drift this removal kills), warns once, and the legacy
+    value no longer resolves."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 8,
+                "agents": [
+                    {
+                        "name": "conflict",
+                        "provider": "claude",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/c.log",
+                        "short_id": "aaaaaaaa",
+                        "claude_short_id": "bbbbbbbb",
+                        "created_at": "2026-05-19T00:00:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].short_id == "aaaaaaaa"  # short_id wins
+    err = capsys.readouterr().err
+    assert "conflict" in err and "keeping short_id" in err

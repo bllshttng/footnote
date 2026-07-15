@@ -1,5 +1,5 @@
 {
-  "note": "AC1-FR (x-bdf9): the Rust spawn gate (crates/fno-agents/src/spawn_gate.rs::slot_count) and the Python mirror (cli/src/fno/agents/spawn_gate.py::census().slot_count) must return the same worker-slot count for each scenario. Both test suites read THIS file. pid 'self' = the running test process (alive); pid 'dead' = a never-alive pid; an absent pid = a disk-only row. A registry row's optional 'claude_short_id' and a roster session's optional 'short' let a scenario force a roster<->registry short_id collision (the bg/adopted-worker case). Roster sessions must NOT count toward the slot cap; a live fno registry row must, even when it collides with a roster session.",
+  "note": "AC1-FR (x-bdf9): the Rust spawn gate (crates/fno-agents/src/spawn_gate.rs::slot_count) and the Python mirror (cli/src/fno/agents/spawn_gate.py::census().slot_count) must return the same worker-slot count for each scenario. Both test suites read THIS file. pid 'self' = the running test process (alive); pid 'dead' = a never-alive pid; an absent pid = a disk-only row. A registry row's optional 'short_id' (the jobId) and a roster session's optional 'short' let a scenario force a roster<->registry short_id collision (the bg/adopted-worker case). Roster sessions must NOT count toward the slot cap; a live fno registry row must, even when it collides with a roster session.",
   "scenarios": [
     {
       "name": "roster_excluded_two_live_workers",
@@ -43,7 +43,7 @@
     {
       "name": "bg_worker_in_both_registry_and_roster_counts_once",
       "registry": [
-        {"name": "bgw", "status": "busy", "pid": "self", "claude_short_id": "abcd1234"}
+        {"name": "bgw", "status": "busy", "pid": "self", "short_id": "abcd1234"}
       ],
       "roster": [
         {"short": "abcd1234", "pid": "self"}
@@ -53,7 +53,7 @@
     {
       "name": "bg_row_no_local_pid_alive_via_roster",
       "registry": [
-        {"name": "bgw", "status": "live", "claude_short_id": "beef0001"}
+        {"name": "bgw", "status": "live", "short_id": "beef0001"}
       ],
       "roster": [
         {"short": "beef0001", "pid": "self"}
@@ -63,7 +63,7 @@
     {
       "name": "bg_row_no_local_pid_dead_roster_not_counted",
       "registry": [
-        {"name": "stalebg", "status": "live", "claude_short_id": "dead0002"}
+        {"name": "stalebg", "status": "live", "short_id": "dead0002"}
       ],
       "roster": [
         {"short": "dead0002", "pid": "dead"}

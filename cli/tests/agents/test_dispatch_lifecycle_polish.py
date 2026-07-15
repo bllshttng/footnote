@@ -83,7 +83,7 @@ def test_stop_claude_flips_status_to_orphaned(tmp_path: Path, monkeypatch) -> No
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="live",
             last_message_at="2026-05-20T12:00:00Z",
         ),
@@ -122,7 +122,7 @@ def test_stop_claude_nonzero_exit_leaves_status_untouched(
         dict(
             name="worker-claude",
             provider="claude",
-            claude_short_id="7c5dcf5d",
+            short_id="7c5dcf5d",
             status="live",
         ),
     )

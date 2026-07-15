@@ -32,7 +32,7 @@ dispatcher side; the CC session is otherwise unaffected.
 Invocation:
 
     python -m fno.mcp.channel_server \
-        --session-id <claude_short_id> \
+        --session-id <claude jobId (registry short_id)> \
         --channel-name <name>
 
 Both flags are required. ``--session-id`` is the Claude session this

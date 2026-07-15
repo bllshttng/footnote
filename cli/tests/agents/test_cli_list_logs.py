@@ -26,7 +26,7 @@ def _claude(**kw) -> AgentEntry:
         provider="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/worker-frontend/output.jsonl",
-        claude_short_id="abc12345",
+        short_id="abc12345",
         created_at="2026-05-20T17:00:00Z",
         status="live",
         last_message_at="2026-05-20T17:30:12Z",
@@ -166,7 +166,7 @@ def test_list_filter_by_status_orphaned(
             _claude(
                 name="dead",
                 status="orphaned",
-                claude_short_id="def67890",
+                short_id="def67890",
             ),
         ]
     )
@@ -379,15 +379,15 @@ def test_logs_claude_entry_missing_short_id_exits_1(tmp_path, monkeypatch, runne
     This is the code-reviewer Finding 3 — exit 13 was overloaded.
     """
     use_tmpdir(monkeypatch, tmp_path)
-    # Construct a registry entry with no claude_short_id (data drift).
-    write_registry([_claude(name="alpha", claude_short_id=None)])
+    # Construct a registry entry with no short_id (data drift).
+    write_registry([_claude(name="alpha", short_id="")])
 
     from fno.agents.cli import agents_app
 
     result = runner.invoke(agents_app, ["logs", "alpha"])
 
     assert result.exit_code == 1
-    assert "claude_short_id" in result.output.lower() or "short_id" in result.output.lower()
+    assert "short id" in result.output.lower() or "short_id" in result.output.lower()
 
 
 def test_agent_status_filter_in_sync_with_known_statuses():
