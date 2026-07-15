@@ -335,6 +335,7 @@ fn spawn_claude_receipt_byte_shape() {
         None,
         None,
         fno_agents::claude_ask::HarnessFlags::default(),
+        false, // surface_cwd: explicit --cwd, no default move (x-85fe)
     );
 
     assert_eq!(
@@ -373,6 +374,50 @@ fn spawn_claude_receipt_byte_shape() {
     );
 }
 
+// x-85fe: surface_cwd=true appends the effective cwd as the LAST key (AC1-HP /
+// AC1-UI). Byte-parity with the Python cmd_spawn receipt; the unmoved receipt
+// (surface_cwd=false) is proven byte-identical by spawn_claude_receipt_byte_shape.
+#[test]
+fn spawn_claude_receipt_surfaces_moved_cwd() {
+    use fno_agents::claude_ask::{dispatch_claude_spawn, ClaudeHome};
+
+    let home = AgentsHome::at(tmpdir("spawn-mv-home"));
+    let ch = ClaudeHome::at(tmpdir("spawn-mv-claude"));
+    let cwd = tmpdir("spawn-mv-cwd");
+    let bin = tmpdir("spawn-mv-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "movedspawn",
+        "hello",
+        "abilities",
+        &cwd,
+        false,
+        None,
+        &[("PATH", path.as_str())],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        true, // surface_cwd: the default canonical move
+    );
+
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    let receipt = out.stdout.trim_end_matches('\n');
+    // cwd is the LAST key.
+    assert!(
+        receipt.ends_with(&format!(r#""cwd": "{}"}}"#, cwd.display())),
+        "receipt must end with the cwd field: {}",
+        out.stdout
+    );
+    let v: serde_json::Value = serde_json::from_str(receipt).expect("receipt must be valid JSON");
+    assert_eq!(v["cwd"], cwd.display().to_string());
+    assert_eq!(v["status"], "live");
+}
+
 // ---------------------------------------------------------------------------
 // AC3-ERR: dispatch_claude_spawn - collision check (name already exists)
 // ---------------------------------------------------------------------------
@@ -402,6 +447,7 @@ fn spawn_claude_collision_exits_2() {
         None,
         None,
         fno_agents::claude_ask::HarnessFlags::default(),
+        false, // surface_cwd: explicit --cwd, no default move (x-85fe)
     );
 
     assert_eq!(

@@ -472,15 +472,18 @@ async fn run(args: Vec<String>) -> i32 {
     // /tmp launch) rather than silently adopting its own start dir.
     match std::env::current_dir() {
         Ok(caller) => {
-            // --fresh (without --here) stamps the canonical repo root instead of
-            // the caller cwd for daemon-bound codex/gemini spawn. An explicit
-            // --cwd wins, so when params already carries one we resolve nothing
-            // and emit no redirect note (it would falsely claim a redirect that
-            // ensure_request_cwd's keep-explicit guard never performs -- review
-            // MEDIUM 4); ensure_request_cwd then leaves the explicit --cwd intact.
-            let (fresh, here) = fresh_here_flags(&params);
+            // x-85fe: the default (no explicit --cwd, no --here) stamps the
+            // canonical repo root instead of the caller cwd for daemon-bound
+            // codex/gemini spawn -- the same inversion as the client-side path.
+            // An explicit --cwd wins, so when params already carries one we
+            // resolve nothing and emit no redirect note (it would falsely claim a
+            // redirect that ensure_request_cwd's keep-explicit guard never
+            // performs -- review MEDIUM 4); --here keeps the caller cwd. --fresh
+            // is an accepted no-op alias. ensure_request_cwd then leaves the
+            // explicit --cwd intact.
+            let (_fresh, here) = fresh_here_flags(&params);
             let explicit_cwd = params.get("cwd").is_some();
-            let stamp = if fresh && !here && !explicit_cwd {
+            let stamp = if !explicit_cwd && !here {
                 match fno_agents::paths::canonical_repo_root(&caller) {
                     Some(canon) => {
                         note_fresh_redirect(&caller, &canon);
@@ -596,8 +599,8 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
     // relative --cwd (e.g. ".") isn't later re-normalized against a *listing*
     // process's directory and mis-bucketed under the wrong project (Codex P2).
     // resolve_dispatch_cwd canonicalizes an explicit --cwd (Python's
-    // `Path(cwd).resolve()`) and honors --fresh/--here (AC6): --cwd > --fresh >
-    // caller cwd.
+    // `Path(cwd).resolve()`) and honors --here (x-85fe): --cwd > --here (caller)
+    // > default canonical.
     let cwd = resolve_dispatch_cwd(params);
     let timeout = params
         .get("timeout")
@@ -777,9 +780,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .get("from_name")
         .and_then(|v| v.as_str())
         .unwrap_or("abilities");
-    // --cwd > --fresh > caller cwd (AC6); resolve_dispatch_cwd canonicalizes an
-    // explicit --cwd and shells to git only when --fresh && !--here. Resolve only
-    // for CLIENT-SIDE spawns, which are the non-`pane` substrates (bg + headless).
+    // --cwd > --here (caller) > default canonical (x-85fe); resolve_dispatch_cwd
+    // canonicalizes an explicit --cwd and shells to git on the default path
+    // (no --cwd, no --here). Resolve only for CLIENT-SIDE spawns, which are the
+    // non-`pane` substrates (bg + headless).
     // The `pane` substrate falls through to the daemon RPC below, which resolves
     // canonical itself; resolving here too would double the git call and the
     // redirect note (review MEDIUM 3).
@@ -788,6 +792,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     } else {
         resolve_dispatch_cwd(params)
     };
+    // x-85fe: surface the effective cwd in the receipt only on the DEFAULT
+    // canonical move -- no explicit --cwd (which arrives as params["cwd"], the
+    // -P/node-resolved path included) and the resolved dir differs from the
+    // caller. This is exactly when resolve_dispatch_cwd emitted the redirect
+    // note; the two stay coupled. Symlink-resolved compare matches the note.
+    let surface_cwd = params.get("cwd").is_none()
+        && std::env::current_dir()
+            .ok()
+            .and_then(|d| std::fs::canonicalize(d).ok())
+            .zip(std::fs::canonicalize(&cwd).ok())
+            .map(|(caller, resolved)| caller != resolved)
+            .unwrap_or(false);
     let timeout = params
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -997,6 +1013,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 permission_mode,
                 effort,
                 claude_flags,
+                surface_cwd,
             );
             if !outcome.stderr.is_empty() {
                 eprint!("{}", outcome.stderr);
@@ -1572,13 +1589,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     .or_insert_with(|| Value::String("headless".into()));
             }
             "--fresh" => {
-                // Resolve the worker cwd to the canonical repo root (main
-                // checkout) regardless of caller cwd. Opt-in; --cwd still wins.
+                // Accepted no-op alias (x-85fe): the worker cwd already defaults
+                // to the canonical repo root. Parsed for dispatcher compat.
                 params.insert("fresh".into(), Value::Bool(true));
             }
             "--here" | "--in-place" => {
-                // Explicit opt-out of --fresh: keep the worker in the caller's
-                // cwd (the policy layer passes this to override a default --fresh).
+                // Explicit opt-in to the caller's cwd instead of the canonical
+                // default (x-85fe): extend WIP right here.
                 params.insert("here".into(), Value::Bool(true));
             }
             "--timeout" | "-t" => {
@@ -1744,14 +1761,18 @@ fn fresh_here_flags(params: &Value) -> (bool, bool) {
     (fresh, here)
 }
 
-/// Pure cwd precedence for a spawn/ask dispatch: explicit `--cwd` > `--fresh`
-/// (canonical) > caller cwd. `--here` suppresses `--fresh`; an unresolved
-/// canonical (None) falls back to the caller cwd, the safe side. No git / env /
-/// IO, so the precedence is unit-testable (AC6; Failure Modes > Invariants:
-/// `--cwd` is the highest-priority cwd source and wins over `--fresh`).
+/// Pure cwd precedence for a spawn/ask dispatch: explicit `--cwd` > `--here`
+/// (caller) > default canonical. x-85fe inverted the default: with no explicit
+/// cwd source the worker lands on the canonical root, so the identical command
+/// behaves the same regardless of where the launcher stands; `--here` is the
+/// explicit opt-in to keep the caller's cwd. `--fresh` is an accepted no-op
+/// alias (the default already resolves canonical). An unresolved canonical
+/// (None) falls back to the caller cwd, the safe side. No git / env / IO, so the
+/// precedence is unit-testable (Failure Modes > Invariants: `--cwd` is the
+/// highest-priority cwd source and wins over everything).
 fn effective_worker_cwd(
     explicit_cwd: Option<std::path::PathBuf>,
-    fresh: bool,
+    _fresh: bool,
     here: bool,
     canonical: Option<std::path::PathBuf>,
     caller: std::path::PathBuf,
@@ -1759,18 +1780,19 @@ fn effective_worker_cwd(
     if let Some(c) = explicit_cwd {
         return c; // explicit --cwd always wins
     }
-    if fresh && !here {
-        return canonical.unwrap_or(caller);
+    if here {
+        return caller; // --here: explicit opt-in to the caller's cwd
     }
-    caller
+    canonical.unwrap_or(caller) // default: canonical; caller on resolution failure
 }
 
-/// One-line stderr note when `--fresh` actually moves the worker cwd off the
-/// caller's dir, so the redirect is never silent (Failure Modes > Errors).
+/// One-line stderr note when the default (or `--fresh` alias) actually moves the
+/// worker cwd off the caller's dir, so the redirect is never silent on any path,
+/// default included (x-85fe Locked Decision 5; Failure Modes > Errors).
 fn note_fresh_redirect(caller: &std::path::Path, chosen: &std::path::Path) {
     if chosen != caller {
         eprintln!(
-            "fno-agents: --fresh: dispatching from canonical main ({}); pass --here to stay in this worktree",
+            "fno-agents: dispatching from canonical main (default) ({}); pass --here to stay in this worktree",
             chosen.display()
         );
     }
@@ -1788,13 +1810,16 @@ fn resolve_dispatch_cwd(params: &Value) -> std::path::PathBuf {
         .and_then(|v| v.as_str())
         .map(canonicalize_cwd);
     let (fresh, here) = fresh_here_flags(params);
-    let canonical = if explicit.is_none() && fresh && !here {
+    // Default path (no explicit --cwd, no --here) resolves canonical; --fresh is
+    // now a no-op alias since canonical IS the default (x-85fe).
+    let default_path = explicit.is_none() && !here;
+    let canonical = if default_path {
         fno_agents::paths::canonical_repo_root(&caller)
     } else {
         None
     };
     let chosen = effective_worker_cwd(explicit.clone(), fresh, here, canonical, caller.clone());
-    if explicit.is_none() && fresh && !here {
+    if default_path {
         note_fresh_redirect(&caller, &chosen);
     }
     chosen
@@ -3403,11 +3428,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ab-77b691dc: --fresh / --here canonical-dispatch mechanism
+    // x-85fe: canonical-by-default cwd precedence (inverts ab-77b691dc)
     //
-    // effective_worker_cwd encodes the AC6 precedence (--cwd > --fresh >
-    // caller cwd; --here suppresses --fresh; unresolved canonical -> caller,
-    // the safe side). It is pure so the precedence is provable without git.
+    // effective_worker_cwd encodes: --cwd > --here (caller) > default canonical
+    // (unresolved canonical -> caller, the safe side). --fresh is an accepted
+    // no-op alias. It is pure so the precedence is provable without git.
     // -----------------------------------------------------------------------
 
     fn pb(s: &str) -> std::path::PathBuf {
@@ -3415,42 +3440,45 @@ mod tests {
     }
 
     #[test]
-    fn effective_cwd_no_flags_keeps_caller() {
-        // No --fresh: behavior is unchanged (backward compatible).
+    fn effective_cwd_default_resolves_canonical() {
+        // No flags: the inverted default lands on canonical (AC1-HP).
         let got = effective_worker_cwd(None, false, false, Some(pb("/canon")), pb("/wt"));
-        assert_eq!(got, pb("/wt"));
-    }
-
-    #[test]
-    fn effective_cwd_fresh_resolves_canonical() {
-        // --fresh moves the worker to the canonical root (AC1 / AC6).
-        let got = effective_worker_cwd(None, true, false, Some(pb("/canon")), pb("/wt"));
         assert_eq!(got, pb("/canon"));
     }
 
     #[test]
-    fn effective_cwd_here_suppresses_fresh() {
-        // --here opt-out keeps the worker in the caller's worktree (AC2).
-        let got = effective_worker_cwd(None, true, true, Some(pb("/canon")), pb("/wt"));
+    fn effective_cwd_fresh_is_noop_alias() {
+        // --fresh is an accepted no-op alias: identical to passing nothing, the
+        // default already being canonical (AC2-EDGE).
+        let with_fresh = effective_worker_cwd(None, true, false, Some(pb("/canon")), pb("/wt"));
+        let without = effective_worker_cwd(None, false, false, Some(pb("/canon")), pb("/wt"));
+        assert_eq!(with_fresh, without);
+        assert_eq!(with_fresh, pb("/canon"));
+    }
+
+    #[test]
+    fn effective_cwd_here_keeps_caller() {
+        // --here is the explicit opt-in to stay in the caller's worktree (AC2-HP).
+        let got = effective_worker_cwd(None, false, true, Some(pb("/canon")), pb("/wt"));
         assert_eq!(got, pb("/wt"));
     }
 
     #[test]
     fn effective_cwd_unresolved_canonical_falls_back_to_caller() {
         // Ambiguous / git-missing canonical resolution -> caller cwd, the safe
-        // side (Failure Modes > Boundaries: never guess canonical).
-        let got = effective_worker_cwd(None, true, false, None, pb("/wt"));
+        // side (AC1-ERR; Failure Modes > Boundaries: never guess canonical).
+        let got = effective_worker_cwd(None, false, false, None, pb("/wt"));
         assert_eq!(got, pb("/wt"));
     }
 
     #[test]
-    fn effective_cwd_explicit_cwd_wins_over_fresh() {
-        // --cwd is the highest-priority cwd source and wins over --fresh (AC6;
-        // Failure Modes > Invariants).
+    fn effective_cwd_explicit_cwd_wins_over_everything() {
+        // --cwd is the highest-priority cwd source and wins over --here/--fresh
+        // (AC2-ERR; Failure Modes > Invariants).
         let got = effective_worker_cwd(
             Some(pb("/explicit")),
             true,
-            false,
+            true,
             Some(pb("/canon")),
             pb("/wt"),
         );
