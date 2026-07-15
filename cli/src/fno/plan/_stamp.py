@@ -40,6 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fno.plan.locking import plan_doc_lock
+
 
 # ---------------------------------------------------------------------------
 # Frontmatter parsing / serialization
@@ -366,6 +368,15 @@ def cmd_stamp(args: argparse.Namespace) -> int:
 
     plan_path = Path(args.plan_path).expanduser().resolve()
 
+    # Serialize the full read-modify-write against a concurrent status-fanout
+    # progress append on the same doc (both are whole-file rewrites; an atomic
+    # write alone loses one side). The append yields on timeout, so the ship-gate
+    # stamp is the winner and effectively never waits.
+    with plan_doc_lock(plan_path):
+        return _do_stamp(args, plan_path)
+
+
+def _do_stamp(args: argparse.Namespace, plan_path: Path) -> int:
     try:
         target, fields, rest = read_plan_file(plan_path)
     except FileNotFoundError as exc:
@@ -440,7 +451,11 @@ def cmd_stamp(args: argparse.Namespace) -> int:
 def cmd_graduate(args: argparse.Namespace) -> int:
     """Flip status: shipped -> done when enough URLs have accumulated."""
     plan_path = Path(args.plan_path).expanduser().resolve()
+    with plan_doc_lock(plan_path):  # serialize with a concurrent progress append
+        return _do_graduate(args, plan_path)
 
+
+def _do_graduate(args: argparse.Namespace, plan_path: Path) -> int:
     try:
         target, fields, rest = read_plan_file(plan_path)
     except FileNotFoundError as exc:
