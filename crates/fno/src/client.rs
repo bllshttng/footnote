@@ -1526,6 +1526,18 @@ impl View {
         )
     }
 
+    /// Content viewport as `(origin, dims)` in `usize`, for centering a
+    /// [`draw_lines_overlay`] popover against the content rect (right of the
+    /// sideline, above any splits) instead of the outer terminal. One call
+    /// site for every corner-anchored popover (x-e9c3).
+    fn overlay_viewport(&self) -> ((usize, usize), (usize, usize)) {
+        let (rows, cols) = self.content_dims();
+        (
+            (TAB_BAR_ROWS as usize, self.panel_w() as usize),
+            (rows as usize, cols as usize),
+        )
+    }
+
     /// Map an outer-terminal cell (0-based) to `(pane, pane_row, pane_col)` when
     /// it falls inside a pane's content rect. `None` for a chrome cell (tab bar,
     /// sideline) or a content divider, so the caller swallows it - a mouse event
@@ -2254,10 +2266,11 @@ impl View {
         }
 
         self.draw_bottom_row(&mut cells, rows, cols);
+        let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(lines) = &self.digest {
             // x-4e2d catch-up overlay: reuse the inverse-video chrome; any key
             // dismisses (handled in handle_stdin, like the key-table overlay).
-            draw_lines_overlay(&mut cells, rows, cols, lines);
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, lines);
         } else if let Some(m) = &self.keys_modal {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
@@ -2277,19 +2290,26 @@ impl View {
             let (queue, dropped) = self.needs_view();
             let sel = sel.min(queue.len().saturating_sub(1));
             let lines = needs_overlay_lines(&queue, sel, dropped, self.needs_footer());
-            draw_lines_overlay(&mut cells, rows, cols, &lines);
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
         } else if let Some((_, squads)) = &self.move_pick {
             // x-96e8 move-tab picker: `move tab to:` + one numbered line per
             // candidate squad, on the same inverse-video overlay chrome.
             let lines = self.move_pick_lines(squads);
-            draw_lines_overlay(&mut cells, rows, cols, &lines);
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
-            draw_lines_overlay(&mut cells, rows, cols, &lines);
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
         } else if let Some(conn) = &self.connections {
             // x-84d7 Connections modal: accounts + combos lists on the shared
             // inverse-video chrome. Drawn from the modal's own render (pure).
-            draw_lines_overlay(&mut cells, rows, cols, &conn.render());
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &conn.render(),
+            );
         } else if let Some(peek) = &self.peek {
             // x-c376 peek overlay: the peeked agent row (re-read LIVE from the
             // layout, navigator-style) header + transcript, on the shared
@@ -2300,14 +2320,14 @@ impl View {
                 _ => None,
             });
             let lines = peek_overlay_lines(agent, peek);
-            draw_lines_overlay(&mut cells, rows, cols, &lines);
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
         } else if let Some(nav) = &self.nav {
             // x-653d navigator: the filtered flat catalog + query/chip line, on
             // the same inverse-video overlay chrome. Rows recompute per frame
             // from the live layout (no cache), so a push repopulates it.
             let filtered = self.nav_filtered(nav);
             let lines = nav_overlay_lines(&filtered, nav);
-            draw_lines_overlay(&mut cells, rows, cols, &lines);
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -3266,18 +3286,38 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
     p.to_string()
 }
 
-/// Draw inverse-video overlay lines at the content area's top-left, one line
-/// per row, cell-bounds-checked (a tiny terminal clips rather than panics).
-/// Shared by the key-table overlay and the x-c929 answer overlay.
-fn draw_lines_overlay<S: AsRef<str>>(cells: &mut [Cell], rows: usize, cols: usize, lines: &[S]) {
-    let origin_r = TAB_BAR_ROWS as usize + 1;
+/// Draw inverse-video overlay lines centered in the content viewport (right of
+/// the sideline, above any splits), one line per row, cell-bounds-checked (a
+/// tiny terminal clips rather than panics). `content_origin` is `(TAB_BAR_ROWS,
+/// panel_w)`; `content_dims` is the content viewport's `(rows, cols)` (status
+/// row excluded). Shared by every corner-anchored popover (key-table, needs
+/// queue, nav, peek, move-pick, attach-place, connections) so centering all of
+/// them is this one change (x-e9c3; placement policy per x-9f75).
+fn draw_lines_overlay<S: AsRef<str>>(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    content_origin: (usize, usize),
+    content_dims: (usize, usize),
+    lines: &[S],
+) {
+    let (base_r, base_c) = content_origin;
+    let (content_rows, content_cols) = content_dims;
+    let box_h = lines.len();
+    let box_w = lines
+        .iter()
+        .map(|l| l.as_ref().chars().count())
+        .max()
+        .unwrap_or(0);
+    let origin_r = base_r + content_rows.saturating_sub(box_h) / 2;
+    let origin_c = base_c + content_cols.saturating_sub(box_w) / 2;
     for (i, line) in lines.iter().enumerate() {
         let r = origin_r + i;
         if r >= rows {
             break;
         }
         for (j, ch) in line.as_ref().chars().enumerate() {
-            let c = 2 + j;
+            let c = origin_c + j;
             if c >= cols {
                 break;
             }
@@ -7029,6 +7069,42 @@ mod tests {
         assert_eq!(frame.cursor_row, 1);
         assert_eq!(frame.cursor_col, 28 + 36);
         assert!(frame.cursor_visible);
+    }
+
+    #[test]
+    fn overlay_viewport_matches_content_origin_and_dims() {
+        // x-e9c3: overlay_viewport() is the single source of centering
+        // geometry every popover shares - it must track content_dims()/
+        // panel_w() exactly, not a separately hand-computed value.
+        let view = two_pane_view();
+        let (origin, dims) = view.overlay_viewport();
+        let (content_rows, content_cols) = view.content_dims();
+        assert_eq!(origin, (TAB_BAR_ROWS as usize, view.panel_w() as usize));
+        assert_eq!(dims, (content_rows as usize, content_cols as usize));
+    }
+
+    #[test]
+    fn draw_lines_overlay_centers_within_viewport() {
+        // x-e9c3: popovers used to anchor at the outer terminal's top-left
+        // corner (origin_r = TAB_BAR_ROWS + 1, col 2), overlapping the
+        // sideline. They now center within the content viewport passed in.
+        let (rows, cols) = (20usize, 40usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        let content_origin = (2usize, 4usize);
+        let content_dims = (10usize, 30usize); // roomy viewport, right of a sideline
+        let lines = ["ab", "cd"]; // box_h=2, box_w=2
+        draw_lines_overlay(&mut cells, rows, cols, content_origin, content_dims, &lines);
+
+        // origin_r = 2 + (10-2)/2 = 6; origin_c = 4 + (30-2)/2 = 18
+        let (r, c) = (6, 18);
+        assert_eq!(cells[r * cols + c].c, 'a');
+        assert_eq!(
+            cells[r * cols + c].flags & cell_flags::INVERSE,
+            cell_flags::INVERSE
+        );
+        assert_eq!(cells[(r + 1) * cols + c].c, 'c');
+        // Nothing painted at the old hardcoded top-left corner.
+        assert_eq!(cells[(TAB_BAR_ROWS as usize + 1) * cols + 2].c, ' ');
     }
 
     #[test]

@@ -149,9 +149,11 @@ def _parse_providers_block(
     """Parse a config.providers dict into ProvidersConfig.
 
     If agents_block is provided (from config.agents — a YAML sibling of
-    config.providers), each entry is parsed into AgentProviderBinding and
-    validated against the parsed provider records. An unknown provider id
-    in any agent binding raises ProviderConfigError immediately.
+    config.providers), each binding-shaped entry (a dict with a 'provider'
+    key) is parsed into AgentProviderBinding and validated against the parsed
+    provider records; non-binding entries (other agent settings sharing the
+    namespace) are skipped. An unknown provider id in any agent binding
+    raises ProviderConfigError immediately.
 
     Raises ProviderConfigError on any validation failure.
     """
@@ -209,11 +211,11 @@ def _parse_providers_block(
     if agents_block is not None:
         known_ids = config_obj.by_id
         for agent_name, raw_binding in agents_block.items():
-            if not isinstance(raw_binding, dict):
-                raise ProviderConfigError(
-                    f"agent '{agent_name}' binding must be a mapping, "
-                    f"got {type(raw_binding).__name__}"
-                )
+            # config.agents is a shared namespace: provider pins sit beside
+            # unrelated agent settings (max_live, a2a, defaults, ...). Only
+            # dicts with a 'provider' key are ours; skip everything else.
+            if not isinstance(raw_binding, dict) or "provider" not in raw_binding:
+                continue
             try:
                 binding = AgentProviderBinding.model_validate(raw_binding)
             except pydantic.ValidationError as exc:
