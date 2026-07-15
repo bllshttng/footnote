@@ -1403,3 +1403,29 @@ class TestLoadAgents:
 
         assert set(result.agents) == {"reviewer"}
         assert result.agents["reviewer"].provider == "claude-primary"
+
+    def test_agents_defaults_with_provider_field_not_treated_as_binding(
+        self, tmp_path: Path
+    ):
+        """codex review (P1, PR#426): config.agents.defaults (SpawnDefaultsBlock)
+        carries its OWN 'provider' field (the bare-spawn default provider, e.g.
+        docs/config.example.toml's `[agents.defaults] provider = ""`), a
+        different concept from a per-agent-name binding. A 'has a provider key'
+        heuristic alone would misclassify it as an AgentProviderBinding and then
+        raise on its 'model'/'effort' fields (extra='forbid') - reproducing the
+        original bug for this key instead of `max_live`. `defaults` must be
+        excluded outright, never parsed as a binding named 'defaults'."""
+        from fno.adapters.providers.loader import load_providers
+
+        base = _valid_providers_block()
+        base["agents"] = {
+            "defaults": {"provider": "codex", "model": "", "effort": ""},
+            "reviewer": {"provider": "claude-primary"},
+        }
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, base)
+
+        result = load_providers(repo_root=tmp_path)
+
+        assert set(result.agents) == {"reviewer"}
+        assert result.agents["reviewer"].provider == "claude-primary"

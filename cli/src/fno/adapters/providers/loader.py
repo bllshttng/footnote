@@ -142,6 +142,26 @@ def _strip_none(data: Any) -> Any:
     return data
 
 
+# Field names of fno.config.AgentsBlock: config.agents sub-keys that are
+# never a per-agent provider binding, regardless of shape. Kept as a literal
+# set rather than an import of AgentsBlock to avoid coupling this leaf loader
+# to the config module's field list at runtime; update alongside AgentsBlock.
+_RESERVED_AGENTS_KEYS = frozenset(
+    {
+        "a2a",
+        "defaults",
+        "confirm",
+        "dead_row_grace",
+        "codex",
+        "gemini",
+        "max_live",
+        "min_free_gb",
+        "worker_qos",
+        "spawn_permission_mode",
+    }
+)
+
+
 def _parse_providers_block(
     block: dict[str, Any],
     agents_block: dict[str, Any] | None = None,
@@ -212,8 +232,15 @@ def _parse_providers_block(
         known_ids = config_obj.by_id
         for agent_name, raw_binding in agents_block.items():
             # config.agents is a shared namespace: provider pins sit beside
-            # unrelated agent settings (max_live, a2a, defaults, ...). Only
-            # dicts with a 'provider' key are ours; skip everything else.
+            # unrelated agent settings owned by AgentsBlock (fno.config).
+            # `defaults` (SpawnDefaultsBlock) carries its OWN `provider` field
+            # (the spawn-default provider, a different concept from a
+            # per-agent-name pin) plus `model`/`effort`, which AgentProviderBinding
+            # (extra='forbid') would reject - so a 'provider' key alone is not
+            # enough to identify a binding; reserved keys are excluded outright
+            # regardless of shape (panel review, PR#426).
+            if agent_name in _RESERVED_AGENTS_KEYS:
+                continue
             if not isinstance(raw_binding, dict) or "provider" not in raw_binding:
                 continue
             try:
