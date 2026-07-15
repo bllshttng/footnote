@@ -1963,6 +1963,26 @@ event_types:
           description: "The just-merged node whose close triggered this advance."
     consumers: [operator]
 
+  - name: dispatch_failover
+    description: "Emitted by `fno backlog advance` (x-0676) when config.dispatch.on_exhaustion='failover' and the resolved provider is exhausted: instead of deferring, advance dispatched the next non-exhausted provider in the active combo. Paired with the following advance_dispatched (this is the receipt of the switch, not a competing decision); a whole-combo exhaustion falls back to a quota-deferred skip instead. The switch may cross harnesses (claude->codex)."
+    sources: [backlog]
+    data:
+      required: [node_id, from, to]
+      properties:
+        node_id:
+          type: string
+          description: "The node being dispatched onto the failover provider."
+        from:
+          type: string
+          description: "The exhausted provider record id advance would have deferred on."
+        to:
+          type: string
+          description: "The next non-exhausted provider record id selected from the active combo."
+        harness_to:
+          type: string
+          description: "The failover provider's harness (cli), when it differs from claude (a cross-harness failover, e.g. codex). Empty/omitted for a same-harness account switch."
+    consumers: [operator]
+
   - name: quota_deferred
     description: "Emitted by an autonomous dispatcher (mux grab / active-backlog tick) when a ready node is NOT dispatched because its resolved provider has no quota headroom (EXHAUSTED, or LOW with a reset inside the defer horizon). Quota-aware dispatch (x-5d3e). The node is left untouched in ready; the first tick after retry_at dispatches it. Advisory + opt-in (config.providers.quota.defer_dispatch); p0 and explicit human verbs never defer."
     sources: [backlog]

@@ -1582,8 +1582,8 @@ event_types:
           description: "The decision made this fire."
         intent:
           type: string
-          enum: [promise, aborted, backstop, none]
-          description: "Intent detected in the transcript."
+          enum: [promise, aborted, watching, backstop, none]
+          description: "Intent detected in the transcript. 'watching' = the agent declared an armed async watcher and the fire idled non-terminally (x-e2c8)."
         intent_source:
           type: string
           enum: [payload, transcript]
@@ -1645,6 +1645,33 @@ event_types:
         stderr_tail:
           type: string
           description: "Last few lines of gh stderr, or empty string if unavailable."
+    consumers: [operator]
+
+  - name: loop_check_watch_idle
+    description: "Emitted when a loop-check fire idles a session non-terminally on a verified async wait after the agent declared a <watching> tag (x-e2c8). The claim lease was extended to cover the watch window; the session parks until its harness-tracked watcher fires. On codex this event doubles as the daemon's watch registration."
+    sources: [hook]
+    data:
+      required: [session_id, pr, blocker, lease_ms]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        pr:
+          type: integer
+          description: "PR number the session is watching."
+        blocker:
+          type: string
+          enum: [ci, review]
+          description: "The async blocker being waited on: 'ci' (checks pending) or 'review' (a bot review outstanding)."
+        declared_timeout:
+          type: string
+          description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."
+        reason:
+          type: string
+          description: "Optional. The raw reason attribute from the <watching> tag."
+        lease_ms:
+          type: integer
+          description: "The claim-lease window (ms) the fire renewed to cover the watch: declared timeout clamped to [5m,2h] plus slack."
     consumers: [operator]
 
   - name: loop_advisory_mode
@@ -1934,6 +1961,26 @@ event_types:
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance."
+    consumers: [operator]
+
+  - name: dispatch_failover
+    description: "Emitted by `fno backlog advance` (x-0676) when config.dispatch.on_exhaustion='failover' and the resolved provider is exhausted: instead of deferring, advance dispatched the next non-exhausted provider in the active combo. Paired with the following advance_dispatched (this is the receipt of the switch, not a competing decision); a whole-combo exhaustion falls back to a quota-deferred skip instead. The switch may cross harnesses (claude->codex)."
+    sources: [backlog]
+    data:
+      required: [node_id, from, to]
+      properties:
+        node_id:
+          type: string
+          description: "The node being dispatched onto the failover provider."
+        from:
+          type: string
+          description: "The exhausted provider record id advance would have deferred on."
+        to:
+          type: string
+          description: "The next non-exhausted provider record id selected from the active combo."
+        harness_to:
+          type: string
+          description: "The failover provider's harness (cli), when it differs from claude (a cross-harness failover, e.g. codex). Empty/omitted for a same-harness account switch."
     consumers: [operator]
 
   - name: quota_deferred

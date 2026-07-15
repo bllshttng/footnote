@@ -114,3 +114,27 @@ Use only mechanical inputs. Do not hide subjective judgment inside the weights.
 - Bounded mode: stop exactly at `Iterations: N`
 - Unbounded mode: continue until interrupted or until the calling skill's completion rule is met
 - Early stop: stop and report `BLOCKED` if verify or guard cannot be run safely
+
+## Async-wait idling (the `<watching>` contract)
+
+When your only outstanding work is an async external check - CI still running, or a bot review not yet posted - with nothing to do until it settles, do NOT keep waking every stop tick to re-check. Each wake is a full model invocation that produces zero progress. Instead, idle the session to ZERO invocations until the watched state changes:
+
+1. **Arm a harness-tracked watcher with a hard timeout.** Use a background task the harness re-invokes the model on when it exits - background `Bash` (`run_in_background`) or a `Monitor` - whose command embeds a hard timeout, e.g.:
+
+   ```bash
+   timeout 1800 gh pr checks <PR> --watch
+   ```
+
+   The timeout doubles as the heartbeat: a hung `gh` is bounded, and a killed watcher still wakes the session. Detached processes (`nohup`, `disown`, a bare `&`) are FORBIDDEN - they exit without re-invoking anyone, so the session would idle forever. The exact `gh` incantation is a template, not load-bearing (its `--watch` exit varies by version); the design depends only on the task exiting.
+
+2. **End your turn with the tag, and nothing else.** After arming the watcher, close the turn with:
+
+   ```
+   <watching reason="ci" pr="<PR>" timeout="30m">
+   ```
+
+   `reason` is `ci` or `review`; the attributes are advisory (used for the event and the claim-lease math). loop-check verifies against external truth that the only blocker is the async class (PR open, HEAD pushed, no unaddressed findings), extends your node claim to cover the window, and idles the session non-terminally. If any real blocker exists (CI red, unpushed HEAD, an unaddressed finding) the tag is ignored and you are told the real reason.
+
+3. **On wake, re-check and either proceed or re-arm.** The harness re-invokes you when the watcher exits (settle, timeout, or kill). If the state settled, proceed. If the timeout fired and it is still pending, re-arm the watcher and re-emit `<watching>` - one cheap turn per ~30 min instead of one per ~90 s.
+
+**Residual-turn austerity.** The few turns that remain (the initial arm-and-tag, a timeout re-arm) must be near-empty: the tag plus at most one short line. No status recap, no "waiting for it to settle" narration, no restating what you armed. The transcript is the operator's review artifact; the wait machinery's job is to be invisible in it.

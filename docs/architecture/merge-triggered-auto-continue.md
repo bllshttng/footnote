@@ -83,7 +83,16 @@ Both triggers observing one merge dispatch the successor at most once: the `disp
 
 ## Dispatch mechanics
 
-The worker spawn mirrors `dispatch-node.sh` exactly: `no-merge` rides as a command token (`/target no-merge <id>`), not an env var (the shipped sibling proves the token is the reliable channel through `fno agents spawn`); the agent is named `target-<full-node-id>-<slug>`; cwd resolves to the node's recorded root (`--cwd`) or canonical main (`--fresh`). Subscription lane only (`fno agents spawn --provider claude`), never `-p` / API credit.
+The worker spawn routes through the shared resolver (`fno.agents.harness_map.resolve_dispatch`, the same one `fno dispatch resolve` and `dispatch-node.sh` use), not a hardcoded `/target` f-string. The resolver returns the substrate (`bg` for claude, `headless` for codex/others) and the per-harness-normalized command; `_spawn_worker` spawns exactly that. A node's `dispatch_verb`/`dispatch_brief` route the verb path (`/think <id>`, brief on `TARGET_BRIEF` env); with no verb the builtin `/target` is used. `no-merge` stays a launcher decision, never baked into a node verb: the default builtin bakes it, `config.dispatch.auto_merge=true` routes the `/target` verb path (omitting it, preserving the configured merge posture). The agent is named `target-<full-node-id>-<slug>`; cwd resolves to the node's recorded root (`--cwd`) or canonical main (`--fresh`). Subscription lane only (`fno agents spawn`), never `-p` / API credit.
+
+## Exhaustion failover (`config.dispatch.on_exhaustion`)
+
+When the resolved provider is out of quota headroom, `advance` consults `config.dispatch.on_exhaustion`:
+
+- **`defer`** (default, byte-identical to before): the node stays `ready` and the tick after the provider's window reset re-dispatches it (`advance_skipped{quota-deferred}`). No combo is read.
+- **`failover`**: instead of deferring, `advance` picks the next non-exhausted provider from the **active combo** (`config.providers.active_combo`, resolved via the CG8 `settings_combo` rung) and dispatches there. Selection reuses the live `headroom()` read (the same primitive as quota-aware ordering; `UNKNOWN`/`LOW`/`OK` all count as healthy targets, fail-open, so a GLM/gemini record with no headroom signal is a valid destination, only `EXHAUSTED` is skipped) and walks the operator's configured priority order (`next_healthy_provider`, `rotation.py`). A provider record carries its own `cli`, so the combo can span accounts (`CLAUDE_CONFIG_DIR`), backends (`base_url`), **and** harnesses: a **claude to codex** failover is in scope and resolves to `headless` automatically.
+
+Failover is pinned once at dispatch (the worker never re-switches mid-run) and degrades to the `defer` floor on every miss: an explicit `--provider`/node provider pin (precedence `explicit > node pin > combo`), no active combo, a whole-combo exhaustion, or any config/combo read error. A single `dispatch_failover{from, to, harness_to?}` receipt precedes the paired `advance_dispatched`.
 
 ## Cross-project successor dispatch (G1)
 
@@ -105,11 +114,12 @@ Deferred (Phase 2, gated on Phase 1 dogfooding): a per-repo launchd watcher that
 
 ## Events
 
-Three kinds, registered in `cli/src/fno/events/schema.yaml`, source `backlog`:
+Four kinds, registered in `cli/src/fno/events/schema.yaml`, source `backlog`:
 
 - `advance_dispatched{node_id, short_id, agent_name, closed_node_id?, cross_project?}` - surfaced loudly in the next SessionStart reconcile reminder. `cross_project: true` marks a G1 edge-following dispatch into a different project.
-- `advance_skipped{reason, node_id?, closed_node_id?, detail?}` - `dispatched`/`failed` are surfaced; pure skips stay quiet. G1 adds the reasons `unmapped-project` / `no-project` / `dependents-error`.
+- `advance_skipped{reason, node_id?, closed_node_id?, detail?}` - `dispatched`/`failed` are surfaced; pure skips stay quiet. G1 adds the reasons `unmapped-project` / `no-project` / `dependents-error`; `quota-deferred` is the `on_exhaustion=defer` floor.
 - `advance_failed{node_id, error, closed_node_id?}` - surfaced loudly (a failed chain must be visible); the next reconcile retries.
+- `dispatch_failover{node_id, from, to, harness_to?}` - the receipt of an `on_exhaustion=failover` switch, emitted just before the paired `advance_dispatched` (not a competing decision). `harness_to` is set on a cross-harness failover (e.g. `codex`).
 
 ## Files
 

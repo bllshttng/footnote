@@ -111,6 +111,9 @@ def auto_continue_enabled(
 EVENT_DISPATCHED = "advance_dispatched"
 EVENT_SKIPPED = "advance_skipped"
 EVENT_FAILED = "advance_failed"
+# x-0676: paired receipt (not a decision) emitted just before an advance_dispatched
+# when on_exhaustion=failover rotates off an exhausted provider.
+EVENT_FAILOVER = "dispatch_failover"
 _EVENT_SOURCE = "backlog"
 
 
@@ -416,82 +419,132 @@ def _spawn_worker(
     reconcile_manifest: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    harness: Optional[str] = None,
+    verb: Optional[str] = None,
+    brief: Optional[str] = None,
+    extra_env: Optional[dict] = None,
     permission_mode: Optional[str] = None,
 ) -> str:
-    """Dispatch a fire-and-forget detached ``claude --bg`` ``/target`` worker.
+    """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
-    Mirrors the current skills/target/scripts/dispatch-node.sh: it spawns with
-    ``--substrate bg`` (the detached ``claude --bg`` thread that self-isolates
-    into a worktree), NOT the post-x-3ab8 default ``pane`` substrate, which is an
-    owned-PTY pane that would STALL a fire-and-forget dispatch at the placement
-    prompt (x-2c27 fixed this everywhere; this 4th surface was missed). The merge
-    posture (``no-merge``, unless ``config.dispatch.auto_merge`` is set for the
-    node's project) rides as a command token (NOT an env var; the shipped sibling
-    proves this is the reliable channel), the agent is named
-    ``target-<full-node-id>-<slug>`` (see ``_worker_agent_name``), and the cwd
+    Routes the substrate + the per-harness-normalized command through the shared
+    resolver (``fno.agents.harness_map.resolve_dispatch``) instead of hardcoding
+    ``--substrate bg`` + a ``/target`` f-string (x-0676). ``harness`` (the selected
+    provider record's ``cli``; ``None`` = config/``claude``) picks the substrate:
+    ``bg`` for claude (the detached ``claude --bg`` thread that self-isolates into a
+    worktree, never the pane default that would STALL a fire-and-forget dispatch,
+    x-2c27), ``headless`` for codex/others. A node's ``dispatch_verb``/
+    ``dispatch_brief`` (``verb``/``brief``) route the verb path (``/think {id}``,
+    brief on ``TARGET_BRIEF`` env); with no verb the builtin ``/target`` is used.
+
+    Merge posture (x-4391) stays a launcher decision, never baked into a node verb:
+    the default builtin bakes ``no-merge``; ``config.dispatch.auto_merge`` routes the
+    ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
+    ``/target [no-merge] --reconcile <manifest> {id}`` template. The agent is named
+    ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
     resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
 
-    When ``reconcile_manifest`` is set (G4), the command becomes
-    ``/target [no-merge] --reconcile <manifest> <id>`` and the agent name carries
-    the ``reconcile`` prefix.
-
     Returns the spawn receipt's short_id. Raises SpawnAlreadyRunning on a
-    name-collision (a peer beat us in the boot window) and SpawnError otherwise.
+    name-collision (a peer beat us in the boot window), DispatchResolveError on an
+    unresolvable harness/substrate/verb (caught non-fatally by the caller), and
+    SpawnError otherwise.
     """
     is_reconcile = bool(reconcile_manifest)
     agent_name = _worker_agent_name(
         node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
     )
-    # provider defaults to claude (the bg substrate is claude-only); a per-node or
-    # dispatch-time provider pin overrides it and fails loud downstream if the
-    # substrate cannot host it, rather than being silently dropped.
+    # --provider selects the account/record (or a bare kind like "claude"); a
+    # per-node or dispatch-time pin overrides the claude default. Layer-separate
+    # from `harness` (the record's cli, which drives the resolver's substrate).
     prov = (provider or "").strip() or "claude"
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", prov, "--substrate", "bg"]
+
+    # x-4391: merge posture from config.dispatch.auto_merge, read with the node_cwd
+    # precedence so a cross-project dispatch reads the DEPENDENT node's config
+    # (AC2-EDGE), never the merged repo's. advance takes no per-run flag, so config
+    # is the sole non-builtin rung; any read failure -> no-merge (Locked Decision
+    # 6). The same settings object feeds the resolver (config.dispatch.*) and the
+    # permission-mode read below, so all three config reads are node-consistent.
+    allow_merge = False
+    settings_obj = None
+    try:
+        from fno.config import load_settings, load_settings_for_repo
+
+        settings_obj = (
+            load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
+        )
+    except Exception:  # noqa: BLE001 - unreadable config -> defaults below
+        settings_obj = None
+    # Read auto_merge in its OWN guard so a missing/odd .dispatch never disables the
+    # independent permission-mode read that also consumes settings_obj.
+    if settings_obj is not None:
+        try:
+            allow_merge = bool(settings_obj.dispatch.auto_merge)
+        except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
+            allow_merge = False
+
+    # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
+    # verb path (never a merge); with no verb, auto_merge routes the /target verb
+    # path (omits no-merge, byte-identical to x-4391's token drop on claude) while
+    # the default bakes no-merge via the builtin; reconcile stays explicit. A
+    # DispatchResolveError propagates to the caller's non-fatal spawn-failure path.
+    from fno.agents import harness_map
+
+    node_verb = (verb or "").strip() or None
+    resolve_kwargs: dict = {
+        "harness": (harness or None),
+        "node_id": node_id,
+        "brief": (brief or None),
+        "trigger": "autonomous",
+        "settings": settings_obj,
+    }
+    if is_reconcile:
+        _nm = "" if allow_merge else "no-merge "
+        resolve_kwargs["command"] = (
+            f"/target {_nm}--reconcile {reconcile_manifest} {{id}}"
+        )
+    elif node_verb:
+        resolve_kwargs["verb"] = node_verb
+    elif allow_merge:
+        resolve_kwargs["verb"] = "/target"
+    resolved = harness_map.resolve_dispatch(**resolve_kwargs)
+    substrate = resolved["substrate"]
+    target_cmd = resolved["command"]
+    spawn_env = resolved.get("env") or {}
+
+    cmd = [
+        *_subprocess_util.fno_py_cmd(),
+        "agents", "spawn", "--provider", prov, "--substrate", substrate,
+    ]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
         cmd += ["--fresh"]
-    # x-571f: a per-node model pin rides as a spawn flag (US1 honors it on the
-    # claude/bg arm). Empty/None = provider default, byte-identical to today.
+    # x-571f: a per-node model pin rides as a spawn flag. Empty/None = provider
+    # default, byte-identical to today.
     if model:
         cmd += ["--model", model]
     # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
     # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
     mode = (permission_mode or "").strip()
-    if not mode:
+    if not mode and settings_obj is not None:
         try:
-            from fno.config import load_settings, load_settings_for_repo
-
-            settings = (
-                load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
-            )
-            mode = (settings.agents.spawn_permission_mode or "").strip()
+            mode = (settings_obj.agents.spawn_permission_mode or "").strip()
         except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
             mode = ""
     if mode:
         cmd += ["--permission-mode", mode]
-    # x-4391: merge posture from config.dispatch.auto_merge. Per-project, read via
-    # the SAME node_cwd precedence as the permission-mode block above, so a
-    # cross-project dispatch reads the DEPENDENT node's config (AC2-EDGE), never
-    # the merged repo's. advance takes no per-run flag, so config is the sole
-    # non-builtin rung; any read failure -> no-merge (Locked Decision 6).
-    allow_merge = False
-    try:
-        from fno.config import load_settings, load_settings_for_repo
-
-        _s = load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
-        allow_merge = bool(_s.dispatch.auto_merge)
-    except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
-        allow_merge = False
-    _nm = "" if allow_merge else "no-merge "
-    target_cmd = (
-        f"/target {_nm}--reconcile {reconcile_manifest} {node_id}"
-        if is_reconcile
-        else f"/target {_nm}{node_id}"
-    )
     cmd += [agent_name, target_cmd]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
+    # command line), mirroring dispatch-node.sh's `export TARGET_BRIEF`. A failover
+    # account's env (dispatch_env: CLAUDE_CONFIG_DIR / base_url / api key) rides
+    # here too, so `--provider <harness>` selects the CLI while extra_env selects
+    # the account (x-0676; --provider never carries a record id).
+    merged_env = {**spawn_env, **(extra_env or {})}
+    run_env = {**os.environ, **merged_env} if merged_env else None
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=600, env=run_env
+    )
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
@@ -500,7 +553,15 @@ def _spawn_worker(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
-    # Receipt is one compact JSON line on clean stdout: {"name", "short_id", ...}.
+    # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
+    # spawn lands a DETACHED thread and returns a compact JSON receipt with a
+    # short_id we require as launch proof: {"name", "short_id", ...}. A `headless`
+    # one-shot (a codex/others failover) already ran to completion on exit 0 - no
+    # detached thread, no short_id - so the clean exit IS the proof and we skip
+    # the requirement (else the parse below would raise SpawnError, release the
+    # reservation, and redispatch a node whose headless worker already ran).
+    if substrate != "bg":
+        return "headless"
     # Keep scanning past a line that merely MENTIONS short_id but is not the JSON
     # receipt (banner/log noise) - only stop once a short_id is actually parsed.
     short_id = ""
@@ -793,6 +854,8 @@ def dispatch_lanes(
                 node_id, str(worktree), slug,
                 model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
                 provider=eff_provider,
+                verb=node.get("dispatch_verb"),
+                brief=node.get("dispatch_brief"),
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
@@ -906,6 +969,70 @@ def _emit(kind: str, data: dict, events_path: Path) -> None:
         print(f"advance: WARNING: event emit failed ({kind}): {exc}", file=sys.stderr)
 
 
+def _select_exhaustion_failover(
+    node_cwd: Optional[str], exhausted_provider: str
+) -> Optional[tuple[str, str, dict]]:
+    """x-0676: pick the next non-exhausted provider from the active combo when
+    ``config.dispatch.on_exhaustion == "failover"``.
+
+    Returns ``(record_id, harness, account_env)`` for the selected provider, or
+    ``None`` for the defer floor: not configured for failover, no active COMBO to
+    walk (a bare active-provider is not a combo), the whole combo exhausted, an
+    unresolvable harness, an unstageable account, or ANY read error. Failover never
+    guesses - every non-clean path degrades to defer.
+
+    The three parts stage a spawn correctly (a combo member is a provider RECORD
+    id, NOT a harness): ``harness`` (the record's ``cli``) becomes ``--provider``
+    (validated against the harness set, so a record id must never go there) and
+    drives the resolver's substrate; ``account_env`` (``dispatch_env`` of the
+    record: ``CLAUDE_CONFIG_DIR`` / ``base_url`` / api key) selects the ACCOUNT via
+    the spawn subprocess env. A cross-harness failover (claude->codex) rides the
+    ``harness`` change.
+    """
+    try:
+        from fno.config import load_settings, load_settings_for_repo
+
+        s = load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
+        if (s.dispatch.on_exhaustion or "defer") != "failover":
+            return None
+    except Exception:  # noqa: BLE001 - unreadable config -> defer floor
+        return None
+    try:
+        from fno.adapters.providers.dispatch import dispatch_env
+        from fno.adapters.providers.loader import load_combos, load_providers
+        from fno.adapters.providers.rotation import next_healthy_provider
+        from fno.sigma_dispatch import resolve_dispatch_target
+
+        # The active combo via the CG8 settings_combo rung (env={} so no TARGET_COMBO
+        # pin leaks in; a synthetic agent name has no per-agent pin). A bare active
+        # PROVIDER (no combo) resolves to combo_name=None -> defer (nothing to walk).
+        target = resolve_dispatch_target(
+            "advance-failover",
+            repo_root=Path(node_cwd) if node_cwd else None,
+            env={},
+        )
+        if not target.combo_name:
+            return None
+        combo = load_combos().get(target.combo_name)
+        if combo is None:
+            return None
+        pid = next_healthy_provider(combo, exclude={exhausted_provider})
+        if pid is None:
+            return None
+        rec = load_providers().by_id.get(pid)
+        harness = (getattr(rec, "cli", "") or "").strip()
+        if not harness:
+            return None  # a record with no cli cannot pick a --provider
+        # Stage the account env; an unstaged/unresolvable account -> defer (never
+        # spawn onto a broken account).
+        account_env = dispatch_env(
+            pid, repo_root=Path(node_cwd) if node_cwd else None
+        )
+        return (pid, harness, account_env)
+    except Exception:  # noqa: BLE001 - never dispatch onto an unresolved provider
+        return None
+
+
 # ---------------------------------------------------------------------------
 # advance() - the decision matrix
 # ---------------------------------------------------------------------------
@@ -996,6 +1123,10 @@ def advance(
     #     defers. The node stays in ready (skip mutates nothing); the next tick
     #     after the reset dispatches it. Never fatal - a defer read failure just
     #     proceeds to dispatch.
+    failover_record: Optional[str] = None
+    failover_harness: Optional[str] = None
+    failover_env: Optional[dict] = None
+    failover_from: Optional[str] = None
     try:
         from fno.adapters.providers.loader import load_providers
         from fno.adapters.providers.runtime_state import evaluate_quota_defer
@@ -1011,12 +1142,30 @@ def advance(
     except Exception:  # noqa: BLE001 - a quota read must never wedge advance
         decision = None
     if decision is not None:
-        return skip(
-            "quota-deferred",
-            node_id=node_id,
-            provider=decision.provider_id,
-            retry_at=decision.retry_at,
+        # x-0676: the resolved provider is exhausted. Default = defer (the floor).
+        # config.dispatch.on_exhaustion == "failover" + NO explicit/node provider
+        # pin -> rotate to the next healthy provider in the active combo (precedence
+        # explicit > node pin > combo, so a pin never fails over). Any miss (not
+        # configured, no active combo, whole-combo exhausted, read error) falls back
+        # to today's quota-deferred skip. Selection is pinned here; the worker never
+        # re-switches. The dispatch_failover receipt is emitted at the spawn below so
+        # it only lands when a worker is actually launched.
+        has_pin = bool(
+            (provider or "").strip() or str(node.get("provider") or "").strip()
         )
+        selected = (
+            None if has_pin
+            else _select_exhaustion_failover(node_cwd, decision.provider_id)
+        )
+        if selected is None:
+            return skip(
+                "quota-deferred",
+                node_id=node_id,
+                provider=decision.provider_id,
+                retry_at=decision.retry_at,
+            )
+        failover_record, failover_harness, failover_env = selected
+        failover_from = decision.provider_id
 
     # 5. Reserve dispatch:<id> (O_EXCL dedup + boot-window bridge token).
     from fno.claims.core import ClaimHeldByOther, acquire_claim
@@ -1041,11 +1190,33 @@ def advance(
     #    stays re-dispatchable (a later reconcile retries - AC2-FR). The release
     #    is non-raising (_safe_release) so the decision event below always lands.
     try:
-        eff_provider = provider if provider is not None else node.get("provider")
+        if failover_record is not None:
+            # x-0676: the pre-spawn failover receipt (from -> to), paired with the
+            # advance_dispatched below - not a competing decision. `to` is the
+            # record id; --provider gets the harness, the account env selects it.
+            _emit(
+                EVENT_FAILOVER,
+                {
+                    "node_id": node_id,
+                    "from": failover_from or "",
+                    "to": failover_record,
+                    "harness_to": failover_harness or "",
+                },
+                ev_path,
+            )
+            # --provider is the HARNESS (a record id would be rejected by the spawn
+            # front door's known-provider gate); the account rides extra_env.
+            eff_provider = failover_harness
+        else:
+            eff_provider = provider if provider is not None else node.get("provider")
         short_id = _spawn_worker(
             node_id, node_cwd, node.get("slug") or node.get("title"),
             model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
             provider=eff_provider,
+            harness=failover_harness,
+            extra_env=failover_env,
+            verb=node.get("dispatch_verb"),
+            brief=node.get("dispatch_brief"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -1281,6 +1452,8 @@ def _dispatch_one_dependent(
             node_id, root, dep.get("slug"),
             model=_route_resolve.node_model(dep, explicit=model, provider=eff_provider),
             provider=eff_provider,
+            verb=dep.get("dispatch_verb"),
+            brief=dep.get("dispatch_brief"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
