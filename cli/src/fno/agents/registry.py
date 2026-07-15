@@ -82,16 +82,23 @@ KNOWN_STATUSES = frozenset(
 # stays load_registry-readable from Python instead of bricking the registry.
 KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 
-# Single source of truth for "which stored field is a provider's resume
+# Single source of truth for "which stored field is a harness's resume
 # target". Consumed by both AgentEntry.session_id (real entries) and
 # resume_cli._session_id_for (duck-typed against test fakes), so the
-# provider -> field mapping lives in exactly one place and cannot drift
-# between the two. Adding a provider here updates both call sites at once.
-PROVIDER_SESSION_ID_FIELDS = {
+# harness -> field mapping lives in exactly one place and cannot drift
+# between the two. Keyed on the row's harness now (x-8dfc): identity is one
+# axis, and the mapping answers "which stored field is the resume target"
+# (claude attaches by short_id, codex resumes by codex_session_id, gemini by
+# gemini_session_id) -- a per-harness truth, not a dispatch capability.
+HARNESS_SESSION_ID_FIELDS = {
     "claude": "short_id",
     "codex": "codex_session_id",
     "gemini": "gemini_session_id",
 }
+# Deprecated alias kept for one release: test fixtures and out-of-tree callers
+# still import the old name. harness == provider on every current row, so the
+# alias is a free rename bridge until they migrate.
+PROVIDER_SESSION_ID_FIELDS = HARNESS_SESSION_ID_FIELDS
 
 from fno import paths
 from fno.harness_identity import canonical_handle, sync_harness_aliases
@@ -283,20 +290,22 @@ class AgentEntry:
 
     @property
     def session_id(self) -> Optional[str]:
-        """The provider-specific resume-target id.
+        """The harness-specific resume-target id.
 
         Resolves to whichever stored field the resume path consumes:
         ``short_id`` (``claude attach``), ``codex_session_id``
         (``codex resume <uuid>``), or ``gemini_session_id``. ``None`` for
-        unknown providers or when the id was never captured.
+        unknown harnesses or when the id was never captured.
 
-        The provider -> field mapping comes from the module-level
-        :data:`PROVIDER_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
-        also reads, so the two cannot drift. As a ``@property`` this is
-        excluded from ``asdict`` serialization and never becomes an
-        on-disk storage field.
+        The harness -> field mapping comes from the module-level
+        :data:`HARNESS_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
+        also reads, so the two cannot drift. Keyed on ``harness`` (x-8dfc,
+        identity is one axis) with ``provider`` as belt-and-braces fallback for
+        a not-yet-backfilled in-memory row (load always backfills). As a
+        ``@property`` this is excluded from ``asdict`` serialization and never
+        becomes an on-disk storage field.
         """
-        field_name = PROVIDER_SESSION_ID_FIELDS.get(self.provider)
+        field_name = HARNESS_SESSION_ID_FIELDS.get(self.harness or self.provider)
         # `short_id` is a str defaulting to "" (never None); normalize the
         # empty transport key to None so callers keep their `is None` checks.
         return (getattr(self, field_name) or None) if field_name else None
@@ -710,14 +719,14 @@ def register_existing_session(
     (``register_session.main``) fails open and emits a warning event
     (AC7-ERR), so a locked/unwritable registry never blocks session start.
     """
-    if provider not in PROVIDER_SESSION_ID_FIELDS:
+    if provider not in HARNESS_SESSION_ID_FIELDS:
         raise ValueError(
-            f"unknown provider for registration: {provider!r}; "
-            f"known: {sorted(PROVIDER_SESSION_ID_FIELDS)}"
+            f"unknown harness for registration: {provider!r}; "
+            f"known: {sorted(HARNESS_SESSION_ID_FIELDS)}"
         )
     if not session_id:
         raise ValueError("session_id must be non-empty")
-    session_field = PROVIDER_SESSION_ID_FIELDS[provider]
+    session_field = HARNESS_SESSION_ID_FIELDS[provider]
 
     # A hand-started session has NO live messaging transport (no daemon PTY,
     # no bg jobId/socket): a peer cannot inject into it. Registering it "live"

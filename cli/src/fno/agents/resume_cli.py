@@ -50,17 +50,19 @@ class ResumeResult:
 
 
 def _session_id_for(entry: Any) -> Optional[str]:
-    """Pick the provider-specific session id from an AgentEntry.
+    """Pick the harness-specific session id from an AgentEntry.
 
-    Reads the provider -> field mapping from the shared
-    :data:`fno.agents.registry.PROVIDER_SESSION_ID_FIELDS` so this
-    duck-typed resolver and ``AgentEntry.session_id`` stay in sync. Uses
-    ``getattr`` (not the property) so it still works on the test fakes,
-    which carry the underlying id fields but not the property.
+    Reads the harness -> field mapping from the shared
+    :data:`fno.agents.registry.HARNESS_SESSION_ID_FIELDS` so this
+    duck-typed resolver and ``AgentEntry.session_id`` stay in sync. Keyed on
+    ``harness`` (x-8dfc) with ``provider`` fallback. Uses ``getattr`` (not the
+    property) so it still works on the test fakes, which carry the underlying
+    id fields but not the property.
     """
-    from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS
+    from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
-    field_name = PROVIDER_SESSION_ID_FIELDS.get(getattr(entry, "provider", None))
+    key = getattr(entry, "harness", None) or getattr(entry, "provider", None)
+    field_name = HARNESS_SESSION_ID_FIELDS.get(key)
     return getattr(entry, field_name, None) if field_name else None
 
 
@@ -149,7 +151,9 @@ def resume_logic(
             ),
         )
 
-    provider = getattr(entry, "provider", None)
+    # Identity is one axis (x-8dfc): resume keys on harness (provider fallback
+    # for a not-yet-backfilled row); harness == provider on every current row.
+    harness = getattr(entry, "harness", None) or getattr(entry, "provider", None)
     cwd = getattr(entry, "cwd", None)
     session_id = _session_id_for(entry)
 
@@ -162,18 +166,18 @@ def resume_logic(
             ),
         )
 
-    # Check provider support BEFORE session_id so an unknown provider
+    # Check harness support BEFORE session_id so an unknown harness
     # surfaces the right error ("not supported") rather than a
     # misleading "no recorded session_id" (which is true for unknown
-    # providers because _session_id_for returns None for them). Both
+    # harnesses because _session_id_for returns None for them). Both
     # are exit 13 — module contract reserves 14 for "CLI not on PATH"
     # to keep wrapper diagnostics unambiguous. Codex P2 round 2.
-    argv = _build_resume_argv(provider or "?", session_id or "")
+    argv = _build_resume_argv(harness or "?", session_id or "")
     if argv is None:
         return ResumeResult(
             exit_code=13,
             stderr=(
-                f"fno agents resume: provider {provider!r} resume not supported "
+                f"fno agents resume: harness {harness!r} resume not supported "
                 f"by this fno version.\n"
             ),
         )
@@ -183,7 +187,7 @@ def resume_logic(
             exit_code=13,
             stderr=(
                 f"fno agents resume: agent {name!r} has no recorded session_id "
-                f"for provider {provider!r}.\n"
+                f"for harness {harness!r}.\n"
             ),
         )
 
@@ -235,7 +239,7 @@ def resume_logic(
         emit_event(
             "agent_resumed",
             name=name,
-            provider=provider,
+            provider=harness,
             session_id=session_id,
             cwd=cwd,
         )
