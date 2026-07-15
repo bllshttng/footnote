@@ -118,9 +118,12 @@ def test_canonical_root_derivation_finds_marker_across_cwd(tmp_path: Path) -> No
     _git("worktree", "add", "-q", str(wt), "-b", "feature/x", cwd=canon)
     assert not (wt / rel).exists()  # the failure precondition the fix addresses
 
-    # merged.md's CANON_ROOT derivation, run FROM the worktree cwd.
+    # merged.md's CANON_ROOT derivation, run FROM the worktree cwd. Mirrors the
+    # skill: --git-common-dir may be relative (git < 2.31 lacks
+    # --path-format=absolute), so resolve to absolute with cd/pwd - version-independent.
     derive = (
-        'GCD="$(git rev-parse --path-format=absolute --git-common-dir)"; '
+        'GCD="$(git rev-parse --git-common-dir)"; '
+        'case "$GCD" in /*) ;; *) GCD="$(cd "$GCD" && pwd)" ;; esac; '
         'printf %s "$(dirname "$GCD")"'
     )
     canon_root = subprocess.run(

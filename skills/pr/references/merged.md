@@ -163,7 +163,11 @@ fi
 # lane-local file. cd'ing into CANON_ROOT strips the override and joins onto the
 # real vault, so the belt-and-braces sees the SAME file Step 6 writes.
 _RR="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-_GCD="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+# --git-common-dir may be relative (bare `.git` / `../..`); resolve to absolute
+# via cd/pwd rather than the git>=2.31-only --path-format=absolute, so this works
+# on every git version. Empty (not a git dir) falls back to the worktree root.
+_GCD="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$_GCD" ]; then case "$_GCD" in /*) ;; *) _GCD="$(cd "$_GCD" 2>/dev/null && pwd)" ;; esac; fi
 _CR="${_GCD:+$(dirname "$_GCD")}"
 [[ -n "$_CR" ]] || _CR="$_RR"
 _PLREL="$( (cd "$_CR" && fno config get config.post_merge.parking_lot_path) 2>/dev/null || echo "")"
@@ -188,10 +192,14 @@ REPO_ROOT="$(git rev-parse --show-toplevel)" || { echo "post-merge: not in a git
 # deletes (x-071c). Reading config from CANON_ROOT strips the local override (the
 # canonical checkout has no config.local.toml layer to apply) and joining onto
 # CANON_ROOT hits the real vault. In a non-worktree checkout CANON_ROOT ==
-# REPO_ROOT and behavior is byte-identical to before. --path-format=absolute is
-# required: without it --git-common-dir can return a relative path on some git
-# versions.
-GCD="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+# REPO_ROOT and behavior is byte-identical to before. `--git-common-dir` can
+# return a RELATIVE path (a bare `.git` from a plain checkout, or `../..`-style
+# from a worktree); `--path-format=absolute` is git >= 2.31 only, so resolve to
+# absolute with cd/pwd instead - that works on every git version. If it fails to
+# resolve, fall back to REPO_ROOT (a very old git in a plain checkout, where
+# CANON_ROOT == REPO_ROOT anyway).
+GCD="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$GCD" ]; then case "$GCD" in /*) ;; *) GCD="$(cd "$GCD" 2>/dev/null && pwd)" ;; esac; fi
 CANON_ROOT="${GCD:+$(dirname "$GCD")}"
 [[ -n "$CANON_ROOT" ]] || CANON_ROOT="$REPO_ROOT"
 
