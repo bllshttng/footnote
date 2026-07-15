@@ -419,9 +419,7 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     if by_full:
         return _one_or_ambiguous(by_full, "full_session_id", token)
 
-    by_short = [
-        e for e in entries if getattr(e, "short_id", None) and e.short_id == token
-    ]
+    by_short = [e for e in entries if getattr(e, "short_id", None) == token]
     if by_short:
         return _one_or_ambiguous(by_short, "short_id", token)
 
@@ -655,12 +653,13 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         # and warns once, never silently prefers the legacy value.
         legacy_short = row.pop("claude_short_id", None)
         if legacy_short:
-            if not row.get("short_id"):
+            existing_short = row.get("short_id")
+            if not existing_short:
                 row["short_id"] = legacy_short
-            elif row["short_id"] != legacy_short:
+            elif existing_short != legacy_short:
                 print(
                     f"fno agents: warning: registry row {row.get('name')!r} "
-                    f"carries short_id={row['short_id']!r} and legacy "
+                    f"carries short_id={existing_short!r} and legacy "
                     f"claude_short_id={legacy_short!r}; keeping short_id",
                     file=sys.stderr,
                 )

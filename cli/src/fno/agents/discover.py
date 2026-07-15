@@ -306,12 +306,13 @@ def _discover_from_registry(
             # Canonical harness_session_id leads (x-ec59): a row whose only
             # identity is the canonical field (a heal-backfilled bg row) resolves
             # here, where before it fell through to durable-only forever.
+            short_val = getattr(e, "short_id", "") or None
             sid = (
                 getattr(e, "harness_session_id", None)
                 or getattr(e, "claude_session_uuid", None)
-                or (getattr(e, "short_id", "") or None)
+                or short_val
             )
-            short = (getattr(e, "short_id", "") or None) or (sid[:8] if sid else None)
+            short = short_val or (sid[:8] if sid else None)
         else:
             sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)
             short = sid[:8] if sid else None
