@@ -104,14 +104,70 @@ def test_pane_guard_fails_closed_on_unknown_trigger():
 
 
 def test_config_overlay_precedence():
-    """config.dispatch overlays the built-in but loses to an explicit flag."""
+    """config.dispatch overlays the built-in but loses to an explicit flag.
+
+    The config command template is canonical claude slash syntax, normalized
+    per-harness at resolve (x-f0e2): `/think` becomes `$fno:think` on codex."""
     cfg = {"harness": "codex", "substrate": "", "command": "/think {id}"}
     out = resolve_dispatch(node_id="x-9", dispatch_cfg=cfg)
     assert out["harness"] == "codex"
-    assert out["command"] == "/think x-9"
+    assert out["command"] == "$fno:think x-9"
     # explicit flag beats config
     out2 = resolve_dispatch(harness="claude", node_id="x-9", dispatch_cfg=cfg)
     assert out2["harness"] == "claude"
+
+
+def test_config_command_normalized_per_harness():
+    """x-f0e2: a slash-leading config template is normalized on the chosen
+    harness, exactly like the builtin rung - config stops being literal."""
+    cfg = {"command": "/target no-merge {id}"}
+    # codex: leading /verb -> $fno:verb
+    assert resolve_dispatch(harness="codex", node_id="x-1234", dispatch_cfg=cfg)[
+        "command"
+    ] == "$fno:target no-merge x-1234"
+    # claude: byte-identical to today (slash surface normalizes to itself)
+    assert resolve_dispatch(harness="claude", node_id="x-1234", dispatch_cfg=cfg)[
+        "command"
+    ] == "/target no-merge x-1234"
+    # prose harness: the builtin implementation brief, not a literal slash string
+    assert resolve_dispatch(harness="opencode", node_id="x-1234", dispatch_cfg=cfg)[
+        "command"
+    ].startswith("Implement footnote backlog node x-1234")
+
+
+def test_explicit_command_normalized_per_harness():
+    """AC2-HP: the explicit `command=` rung normalizes too (x-0676 --reconcile
+    passes an explicit template)."""
+    out = resolve_dispatch(command="/target no-merge {id}", harness="codex", node_id="x-1")
+    assert out["command"] == "$fno:target no-merge x-1"
+
+
+def test_config_slash_non_target_on_prose_is_loud():
+    """AC1-ERR: a slash non-`/target` config template on a prose harness raises,
+    naming the verb and the harness - never a silent literal prompt."""
+    with pytest.raises(DispatchResolveError, match="think.*gemini|gemini.*think"):
+        resolve_dispatch(
+            harness="gemini", node_id="x-1", dispatch_cfg={"command": "/think {id}"}
+        )
+
+
+def test_config_non_slash_prose_template_untouched():
+    """AC1-EDGE: a non-slash prose template is never rewritten - byte-identical
+    on every harness (the startswith('/') gate is the opt-out)."""
+    cfg = {"command": "implement node {id} and open a PR"}
+    for h in ("opencode", "gemini", "codex", "claude"):
+        assert resolve_dispatch(harness=h, node_id="x-9", dispatch_cfg=cfg)[
+            "command"
+        ] == "implement node x-9 and open a PR"
+
+
+def test_config_already_native_template_not_double_prefixed():
+    """AC2-EDGE: an already-codex-native `$fno:` template is not slash-leading,
+    so it passes through unchanged - normalization is idempotent."""
+    out = resolve_dispatch(
+        harness="codex", node_id="x-9", dispatch_cfg={"command": "$fno:target {id}"}
+    )
+    assert out["command"] == "$fno:target x-9"
 
 
 def test_substrate_default_table():
