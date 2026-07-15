@@ -563,6 +563,10 @@ struct View {
     /// (x-84d7) Generation token, bumped per open/refresh so a read landing after
     /// the modal closed or refreshed again is discarded.
     conn_gen: u64,
+    /// (x-84d7) A single-flight mutation verb wanted by a keypress; the run loop
+    /// spawns it at loop top (the sender lives there, out of the stdin handler)
+    /// and clears this. `ConnectionsView::acting` is the concurrency guard.
+    conn_action: Option<Vec<String>>,
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -960,6 +964,7 @@ impl View {
             conn_want: false,
             conn_inflight: false,
             conn_gen: 0,
+            conn_action: None,
         }
     }
 
@@ -988,6 +993,17 @@ impl View {
             cv.gen = self.conn_gen;
             cv.state = crate::connections_view::ModalState::Loading;
             cv.notice = None;
+        }
+        self.conn_want = true;
+    }
+
+    /// (x-84d7) Re-read after a mutation: keep the current lists + the result
+    /// notice visible (no Loading blank) while the fresh data folds in. This is
+    /// the read-after-write that keeps the modal from trusting optimistic state.
+    fn rearm_connections_read(&mut self) {
+        self.conn_gen = self.conn_gen.wrapping_add(1);
+        if let Some(cv) = self.connections.as_mut() {
+            cv.gen = self.conn_gen;
         }
         self.conn_want = true;
     }
@@ -3720,6 +3736,14 @@ async fn attach_and_run(
         crate::connections_view::ReadOutcome,
     )>();
 
+    // x-84d7: a Connections single-flight mutation verb reports its result here,
+    // gen-tagged like the read, so a result for a closed/superseded modal is
+    // dropped and a live one surfaces the notice + triggers the read-after-write.
+    let (conn_act_tx, mut conn_act_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        u64,
+        crate::connections_view::ActionResult,
+    )>();
+
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
     // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
@@ -3769,6 +3793,17 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let outcome = crate::connections_view::load_all().await;
                 let _ = tx.send((gen, outcome));
+            });
+        }
+        // x-84d7: run a wanted single-flight mutation off the UI loop. The modal's
+        // `acting` flag (set by the reducer) is the concurrency guard, so no extra
+        // inflight bool is needed here; the result reports on conn_act_rx.
+        if let Some(argv) = view.conn_action.take() {
+            let tx = conn_act_tx.clone();
+            let gen = view.conn_gen;
+            tokio::spawn(async move {
+                let result = crate::connections_view::run_verb(argv).await;
+                let _ = tx.send((gen, result));
             });
         }
         // Redraw-after-event; expiry of the transient notice needs a timer.
@@ -4002,6 +4037,20 @@ async fn attach_and_run(
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));
                         }
+                    }
+                }
+            }
+            Some((gen, result)) = conn_act_rx.recv() => {
+                // x-84d7: a mutation finished. Under the gen guard, surface its
+                // notice and re-read so the modal shows current truth (never
+                // optimistic local state). A stale/closed-modal result is dropped.
+                if gen == view.conn_gen && view.connections.is_some() {
+                    if let Some(cv) = view.connections.as_mut() {
+                        cv.apply_action_result(result.ok, result.msg);
+                    }
+                    view.rearm_connections_read();
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
                     }
                 }
             }
@@ -5278,6 +5327,11 @@ async fn connections_keys(
             }
             ConnIntent::Close => view.close_connections(),
             ConnIntent::Refresh => view.refresh_connections(),
+            ConnIntent::Run(argv) => {
+                // The reducer already armed `acting`; stash the argv for the run
+                // loop to spawn at loop top (single-flight, sender in scope there).
+                view.conn_action = Some(argv);
+            }
         }
     }
     Ok(StdinFlow::Continue)

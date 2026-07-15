@@ -100,6 +100,17 @@ pub enum ConnIntent {
     Close,
     /// R: re-run the reads (spawn a fresh fold).
     Refresh,
+    /// Run a single-flight `fno <argv>` mutation, then re-read. The reducer only
+    /// yields this when not already acting (single-flight, Locked Decision 5).
+    Run(Vec<String>),
+}
+
+/// A pending destructive action awaiting the operator's one-key confirm. `label`
+/// is shown in the footer prompt; `argv` is what Enter runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingConfirm {
+    pub label: String,
+    pub argv: Vec<String>,
 }
 
 /// The Connections modal state. Owned by `View::connections` while open.
@@ -118,6 +129,9 @@ pub struct ConnectionsView {
     pub acting: bool,
     /// Footer notice (error tail / transient message), cleared on next action.
     pub notice: Option<String>,
+    /// A pending remove confirm (Enter runs, any other key cancels). While
+    /// `Some`, keys route to the confirm (AC1-ERR / destructive-guard).
+    pub confirm: Option<PendingConfirm>,
     /// Generation token, bumped per open/refresh so a read landing after a newer
     /// refresh (or a close) is discarded.
     pub gen: u64,
@@ -135,8 +149,23 @@ impl ConnectionsView {
             combo_sel: 0,
             acting: false,
             notice: None,
+            confirm: None,
             gen: 0,
         }
+    }
+
+    /// The account the Accounts-tab cursor is on, if any.
+    pub fn selected_account(&self) -> Option<&Account> {
+        self.accounts.get(self.acct_sel)
+    }
+
+    /// Apply a mutation's result: clear the single-flight guard and surface the
+    /// outcome as a footer notice. The caller arms the re-read separately so the
+    /// modal always shows current truth after a mutation (Locked Decision 5).
+    pub fn apply_action_result(&mut self, ok: bool, msg: String) {
+        self.acting = false;
+        self.notice = Some(msg);
+        let _ = ok; // both branches surface a notice; ok only shapes the text
     }
 
     /// Apply a read fold under the caller's gen guard already checked. Clears the
@@ -168,6 +197,18 @@ impl ConnectionsView {
     /// Task 1.2 handles navigation + refresh + close; later tasks extend the
     /// intent set (actions, wizard, order commit).
     pub fn on_key(&mut self, key: u8) -> ConnIntent {
+        // A pending confirm captures all keys: Enter commits, anything else
+        // cancels (no destructive action without an explicit confirm).
+        if let Some(pending) = self.confirm.take() {
+            if key == b'\r' || key == b'\n' {
+                self.acting = true;
+                self.notice = None;
+                return ConnIntent::Run(pending.argv);
+            }
+            self.notice = Some("cancelled".to_string());
+            return ConnIntent::Redraw;
+        }
+
         // A degraded modal disables everything but refresh + close (AC2-ERR).
         let degraded = matches!(self.state, ModalState::Degraded(_));
         match key {
@@ -183,12 +224,50 @@ impl ConnectionsView {
             b'R' => ConnIntent::Refresh,
             b'j' if !degraded => self.move_sel(1),
             b'k' if !degraded => self.move_sel(-1),
+            b'u' if !degraded && self.tab == Tab::Accounts => self.act_use(),
+            b'd' if !degraded && self.tab == Tab::Accounts => self.act_remove(),
             _ => {
                 // No zero-feedback keypress: an unhandled key rings the bell so
                 // the operator always gets feedback (AC1-UI).
                 ConnIntent::Bell
             }
         }
+    }
+
+    /// `u`: set the selected account active. Single-flight guarded.
+    fn act_use(&mut self) -> ConnIntent {
+        if self.acting {
+            self.notice = Some("busy - one action at a time".to_string());
+            return ConnIntent::Redraw;
+        }
+        let Some(acct) = self.selected_account() else {
+            return ConnIntent::Bell;
+        };
+        if acct.active {
+            self.notice = Some(format!("{} is already active", acct.id));
+            return ConnIntent::Redraw;
+        }
+        let id = acct.id.clone();
+        self.acting = true;
+        self.notice = None;
+        ConnIntent::Run(vec!["providers".into(), "use".into(), id])
+    }
+
+    /// `d`: stage a remove confirm for the selected account.
+    fn act_remove(&mut self) -> ConnIntent {
+        if self.acting {
+            self.notice = Some("busy - one action at a time".to_string());
+            return ConnIntent::Redraw;
+        }
+        let Some(acct) = self.selected_account() else {
+            return ConnIntent::Bell;
+        };
+        let id = acct.id.clone();
+        self.confirm = Some(PendingConfirm {
+            label: format!("remove account {id}? (Enter=yes, any key=no)"),
+            argv: vec!["providers".into(), "remove".into(), id],
+        });
+        ConnIntent::Redraw
     }
 
     fn move_sel(&mut self, delta: isize) -> ConnIntent {
@@ -226,7 +305,13 @@ impl ConnectionsView {
             },
         }
         out.push(String::new());
-        out.push(self.footer());
+        if let Some(confirm) = &self.confirm {
+            out.push(format!("? {}", confirm.label));
+        } else if self.acting {
+            out.push("running…".to_string());
+        } else {
+            out.push(self.footer());
+        }
         if let Some(notice) = &self.notice {
             out.push(format!("! {notice}"));
         }
@@ -288,7 +373,9 @@ impl ConnectionsView {
 
     fn footer(&self) -> String {
         match self.tab {
-            Tab::Accounts => "Tab: order   j/k: move   R: refresh   Esc: close".to_string(),
+            Tab::Accounts => {
+                "Tab: order  j/k: move  u: use  d: remove  R: refresh  Esc: close".to_string()
+            }
             Tab::Order => "Tab: accounts   j/k: move   R: refresh   Esc: close".to_string(),
         }
     }
@@ -366,6 +453,65 @@ async fn read_json(args: &[&str]) -> Result<Vec<u8>, String> {
         return Err(format!("exit {}", output.status.code().unwrap_or(-1)));
     }
     Ok(output.stdout)
+}
+
+/// The result of a single-flight mutation verb: a human message and whether it
+/// succeeded. A failure carries the stderr tail so the modal can surface WHY
+/// (AC1-ERR) rather than a bare "failed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionResult {
+    pub ok: bool,
+    pub msg: String,
+}
+
+/// Run a single-flight `fno <argv>` mutation to completion. Never a read - this
+/// is the write path. On non-zero exit the message is the trimmed stderr tail so
+/// the modal surfaces the real reason. Longer timeout than a read: a `register`
+/// can hit an interactive Keychain access prompt (Domain Pitfalls), so a slow
+/// verb yields a named timeout error, never a hung modal.
+pub async fn run_verb(argv: Vec<String>) -> ActionResult {
+    let fut = tokio::process::Command::new(fno_bin())
+        .args(&argv)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = match tokio::time::timeout(Duration::from_secs(30), fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return ActionResult {
+                ok: false,
+                msg: format!("{}: spawn failed: {e}", argv.join(" ")),
+            }
+        }
+        Err(_) => {
+            return ActionResult {
+                ok: false,
+                msg: format!("{}: timed out (try the verb in a terminal)", argv.join(" ")),
+            }
+        }
+    };
+    if output.status.success() {
+        return ActionResult {
+            ok: true,
+            msg: format!("{} ok", argv.join(" ")),
+        };
+    }
+    let tail = stderr_tail(&output.stderr);
+    ActionResult {
+        ok: false,
+        msg: format!("{} failed: {tail}", argv.join(" ")),
+    }
+}
+
+/// The last non-empty line of stderr, trimmed - the operator-facing reason.
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("(no error output)")
+        .to_string()
 }
 
 /// Resolve the `fno` binary: `$FNO_BIN`, else bare `fno` on PATH.
@@ -525,5 +671,82 @@ mod tests {
             combos: sample_combos(),
         });
         assert_eq!(v.acct_sel, 0);
+    }
+
+    // AC2-HP: `u` on a non-active account runs `providers use <id>`.
+    #[test]
+    fn use_key_runs_use_verb_for_inactive_account() {
+        let mut v = ready_view();
+        v.acct_sel = 1; // ccr, not active
+        let intent = v.on_key(b'u');
+        assert_eq!(
+            intent,
+            ConnIntent::Run(vec!["providers".into(), "use".into(), "ccr".into()])
+        );
+        assert!(v.acting); // single-flight guard armed
+    }
+
+    #[test]
+    fn use_key_on_active_account_is_a_noop_notice() {
+        let mut v = ready_view();
+        v.acct_sel = 0; // ccm is active
+        assert_eq!(v.on_key(b'u'), ConnIntent::Redraw);
+        assert!(!v.acting);
+        assert!(v.notice.as_deref().unwrap().contains("already active"));
+    }
+
+    // single-flight: a second action while acting is a no-op notice, not a spawn.
+    #[test]
+    fn second_action_while_acting_is_blocked() {
+        let mut v = ready_view();
+        v.acct_sel = 1;
+        assert!(matches!(v.on_key(b'u'), ConnIntent::Run(_)));
+        assert!(v.acting);
+        let intent = v.on_key(b'u');
+        assert_eq!(intent, ConnIntent::Redraw);
+        assert!(v.notice.as_deref().unwrap().contains("busy"));
+    }
+
+    // AC1-ERR path: remove stages a confirm; Enter runs remove, other key cancels.
+    #[test]
+    fn remove_requires_confirm_then_runs() {
+        let mut v = ready_view();
+        v.acct_sel = 1; // ccr
+        assert_eq!(v.on_key(b'd'), ConnIntent::Redraw);
+        assert!(v.confirm.is_some());
+        assert!(v.render().join("\n").contains("remove account ccr?"));
+        let intent = v.on_key(b'\r');
+        assert_eq!(
+            intent,
+            ConnIntent::Run(vec!["providers".into(), "remove".into(), "ccr".into()])
+        );
+        assert!(v.confirm.is_none());
+    }
+
+    #[test]
+    fn remove_confirm_any_other_key_cancels() {
+        let mut v = ready_view();
+        v.acct_sel = 1;
+        v.on_key(b'd');
+        assert!(v.confirm.is_some());
+        assert_eq!(v.on_key(b'x'), ConnIntent::Redraw); // not Enter -> cancel
+        assert!(v.confirm.is_none());
+        assert!(v.notice.as_deref().unwrap().contains("cancelled"));
+    }
+
+    #[test]
+    fn action_result_clears_acting_and_sets_notice() {
+        let mut v = ready_view();
+        v.acting = true;
+        v.apply_action_result(false, "providers use ccr failed: boom".into());
+        assert!(!v.acting);
+        assert!(v.notice.as_deref().unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn stderr_tail_picks_last_nonempty_line() {
+        assert_eq!(stderr_tail(b"warn\nerror: bad id\n\n"), "error: bad id");
+        assert_eq!(stderr_tail(b""), "(no error output)");
+        assert_eq!(stderr_tail(b"   \n  \n"), "(no error output)");
     }
 }
