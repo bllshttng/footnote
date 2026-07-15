@@ -696,9 +696,14 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         # harness value, so AgentEntry's required `provider` is always populated
         # (AC1-EDGE). Then the shared rule syncs harness_session_id <-> the legacy
         # per-harness key.
-        if not row.get("harness") and row.get("provider"):
+        # Heal on invalid, not just absent: a truthy-but-corrupt token (whitespace
+        # or uppercase) in one field is replaced from the valid sibling, so the
+        # `self.harness or self.provider` resolution never lands on a corrupt
+        # harness (which would silently resolve session_id to None). The gate
+        # above guarantees at least one field is a valid token.
+        if not _is_identity_token(row.get("harness")) and _is_identity_token(row.get("provider")):
             row = {**row, "harness": row["provider"]}
-        elif not row.get("provider") and row.get("harness"):
+        elif not _is_identity_token(row.get("provider")) and _is_identity_token(row.get("harness")):
             row = {**row, "provider": row["harness"]}
         row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
         # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on

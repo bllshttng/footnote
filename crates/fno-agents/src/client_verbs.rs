@@ -494,22 +494,22 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let mut out = rows.clone();
     for row in &mut out {
         if let Some(obj) = row.as_object_mut() {
-            // Lockstep alias fill (x-8dfc): a provider-less row (post-v10 writer
-            // shape) reads with provider treated as its harness value, mirroring
-            // Python `load_registry`. harness -> provider here; provider ->
-            // harness is done by `RegistryEntry::backfill_harness_aliases`.
-            let has_provider = obj
-                .get("provider")
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.is_empty());
-            if !has_provider {
-                if let Some(h) = obj
-                    .get("harness")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                {
+            // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
+            // the two identity fields are the same token in the skew window, so
+            // heal whichever is missing OR corrupt (shape-checked, not truthy)
+            // from the valid sibling. Both directions, because resume reads
+            // through this same healed value -- a truthy-corrupt harness would
+            // otherwise resolve session_id to None. The gate above guarantees at
+            // least one field is a valid token.
+            let provider_valid = is_identity_token(obj.get("provider").and_then(Value::as_str));
+            let harness_valid = is_identity_token(obj.get("harness").and_then(Value::as_str));
+            if !provider_valid && harness_valid {
+                if let Some(h) = obj.get("harness").and_then(Value::as_str).map(str::to_string) {
                     obj.insert("provider".into(), Value::String(h));
+                }
+            } else if !harness_valid && provider_valid {
+                if let Some(p) = obj.get("provider").and_then(Value::as_str).map(str::to_string) {
+                    obj.insert("harness".into(), Value::String(p));
                 }
             }
             let legacy = obj
@@ -3100,6 +3100,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+
+        // Heal: a truthy-but-corrupt harness (whitespace) is replaced from the
+        // valid provider, so resume (which reads through this) never keys on a
+        // corrupt harness.
+        fs::write(
+            &reg,
+            r#"{"schema_version":9,"agents":[{"name":"heal","provider":"claude","harness":"c x","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
+        let rows = load_registry_entries(&reg).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["harness"], "claude");
 
         // AC1-ERR: an empty-identity row (empty provider, no harness) still
         // bricks -- the corruption guard survives the relaxation.
