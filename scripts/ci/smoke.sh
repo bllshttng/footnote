@@ -61,9 +61,9 @@ uv build'
 bash tests/lib/test_infer_has_ui.sh
 bash tests/lib/test_resolve_plan_executor.sh'
     step "config global-precedence harness (ab-5d6c3d47)" "." 'bash tests/lib/test_config_global_precedence.sh'
-    step "cost-accuracy harness (ab-c0f92987)" "." 'python3 tests/lib/test_cost_tracker_pricing.py
-python3 tests/metrics/test_session_cost_dedup.py
-python3 tests/metrics/test_backfill_cost_recompute.py
+    step "cost-accuracy harness (ab-c0f92987)" "." 'uv run --project cli python tests/lib/test_cost_tracker_pricing.py
+uv run --project cli python tests/metrics/test_session_cost_dedup.py
+uv run --project cli python tests/metrics/test_backfill_cost_recompute.py
 bash tests/lib/test_cost_tracker_sh_parity.sh'
     step "loop-check shim + immutable manifest harness (ab-d0337fbc)" "." 'bash tests/hooks/test_loop_check_shim.sh
 bash tests/hooks/test_manifest_immutable.sh
