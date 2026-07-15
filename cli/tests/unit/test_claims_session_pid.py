@@ -156,3 +156,94 @@ def test_env_override_non_positive_ignored():
             with patch("psutil.Process", return_value=child):
                 # 0 is rejected -> walk runs -> finds the claude ancestor.
                 assert resolve_session_pid(from_pid=10) == 20
+
+
+# --- non-claude harness resolution (x-5e58) -----------------------------------
+
+
+def _resolve_from(child, from_pid):
+    """Run resolve_session_pid over a fake chain with FNO_SESSION_PID unset."""
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("FNO_SESSION_PID", None)
+        with patch("psutil.Process", return_value=child):
+            return resolve_session_pid(from_pid=from_pid)
+
+
+@pytest.mark.parametrize("token", ["codex", "opencode", "agy"])
+def test_native_binary_harness_resolves_by_basename(token):
+    """Native-binary harnesses have their name as the exe basename."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, token, f"/opt/homebrew/bin/{token}"),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_node_shim_gemini_resolves_via_cmdline_symlink():
+    """gemini is a node shim: name()==node, exe()==node, cmdline()[1]==bin/gemini."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "node", "/usr/bin/node", ["node", "/Users/x/.gemini/bin/gemini"]),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_node_shim_gemini_resolves_via_cmdline_resolved_script():
+    """The resolved-script argv shape (gemini.js) matches via the stem rule."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "node", "/usr/bin/node", ["node", "/Users/x/lib/gemini-cli/gemini.js"]),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_substring_trap_legacy_does_not_match_agy():
+    """`agy` is a substring of `legacy`; segment-exact matching must not match it."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "tool", "/opt/legacy/bin/tool", ["/opt/legacy/bin/tool", "--run"]),
+    )
+    assert _resolve_from(child, 10) is None
+
+
+def test_substring_trap_codex_framework_does_not_match_codex():
+    """The ChatGPT app's `Codex Framework.framework` segments are not `codex`."""
+    exe = (
+        "/Applications/ChatGPT.app/Contents/Frameworks/"
+        "Codex Framework.framework/Versions/A/helper"
+    )
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "helper", exe, [exe]),
+    )
+    assert _resolve_from(child, 10) is None
+
+
+def test_nearest_harness_wins_across_mixed_chain():
+    """A claude worker nested under codex anchors the NEAREST harness (claude)."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "claude", "/Users/x/.local/bin/claude"),   # nearest
+        (30, "codex", "/opt/homebrew/bin/codex"),        # outer
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_cmdline_access_denied_degrades_to_other_getters():
+    """cmdline() raising AccessDenied still lets name()/exe() resolve the harness."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        (20, "codex", "/opt/homebrew/bin/codex", psutil.AccessDenied(20)),
+    )
+    assert _resolve_from(child, 10) == 20
+
+
+def test_cmdline_zombie_on_only_source_continues_walk():
+    """A node-shim ancestor whose cmdline() zombies yields no match; walk continues."""
+    child = _chain(
+        (10, "bash", "/bin/bash"),
+        # name/exe say only "node"; its one identifying source (cmdline) zombies.
+        (20, "node", "/usr/bin/node", psutil.ZombieProcess(20)),
+        (30, "codex", "/opt/homebrew/bin/codex"),
+    )
+    assert _resolve_from(child, 10) == 30
