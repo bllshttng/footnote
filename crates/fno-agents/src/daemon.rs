@@ -2787,12 +2787,33 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
+/// Resolve a lifecycle token (name | 8-hex short | full session id) to the
+/// canonical registry name via the shared resolver (x-1b1e), so the daemon
+/// `stop`/`rm` handlers accept all three address forms like their Python
+/// counterparts (`_canonical_agent_name`) instead of matching on name alone.
+/// Falls back to the raw token on any miss (unknown/ambiguous/serialize error)
+/// so the caller's familiar `agent {name} not found` path still fires.
+fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
+    let Ok(Value::Array(rows)) = serde_json::to_value(&registry.entries) else {
+        return token.to_string();
+    };
+    match crate::client_verbs::find_agent_entry(&rows, token) {
+        Ok(e) => e
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(token)
+            .to_string(),
+        Err(_) => token.to_string(),
+    }
+}
+
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     let name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let name = canonical_name_in(&registry, &name);
     let entry = match registry.find(&name) {
         Some(e) => e.clone(),
         None => {
@@ -3038,6 +3059,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let name = canonical_name_in(&registry, &name);
     let entry = match registry.find(&name) {
         Some(e) => e.clone(),
         None => {
@@ -4406,6 +4428,31 @@ mod tests {
             "no agent_inconsistent event for claude shellout rows"
         );
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn canonical_name_in_resolves_all_three_address_forms() {
+        // x-1b1e regression: the daemon stop/rm handlers must accept name |
+        // 8-hex short | full session id (parity with Python `_canonical_agent_name`),
+        // not just the name. A miss falls back to the raw token so the familiar
+        // `agent {name} not found` still fires.
+        let full = "aabbccdd-1111-2222-3333-444455556666";
+        let mut row = rentry("billing", AgentStatus::Live, None);
+        row.short_id = "a1b2c3d4".into();
+        row.harness_session_id = Some(full.into());
+        let reg = crate::state::Registry {
+            schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
+            entries: vec![row],
+        };
+        assert_eq!(canonical_name_in(&reg, "billing"), "billing"); // by name
+        assert_eq!(canonical_name_in(&reg, "a1b2c3d4"), "billing"); // by stored short
+        assert_eq!(canonical_name_in(&reg, full), "billing"); // by full session id
+        assert_eq!(
+            canonical_name_in(&reg, "AABBCCDD-1111-2222-3333-444455556666"),
+            "billing"
+        ); // case-insensitive
+           // Unknown token -> unchanged, so the caller's not-found path fires.
+        assert_eq!(canonical_name_in(&reg, "nope"), "nope");
     }
 
     #[test]

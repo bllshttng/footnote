@@ -841,7 +841,7 @@ const ACCEPTED_FORMS_MSG: &str = "accepted forms: name, 8-hex short id, or full 
 /// A resolution failure. Verbs map these to their own exit codes (resume/logs
 /// 13, attach 2) and never see a panic.
 #[derive(Debug)]
-enum ResolveError {
+pub(crate) enum ResolveError {
     /// The token matched nothing; carries the token (empty when blank input).
     NotFound(String),
     /// Two or more distinct rows matched the same tier; carries the candidate list.
@@ -927,7 +927,10 @@ fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, 
 /// Precedence: exact name, exact full session id (case-insensitive), exact
 /// stored short_id (shape-agnostic), derived 8-hex prefix. Name wins first so a
 /// hex-shaped name is byte-stable. Mirrors Python `resolve_agent`.
-fn find_agent_entry<'a>(rows: &'a [Value], token: &str) -> Result<&'a Value, ResolveError> {
+pub(crate) fn find_agent_entry<'a>(
+    rows: &'a [Value],
+    token: &str,
+) -> Result<&'a Value, ResolveError> {
     let token = token.trim();
     if token.is_empty() {
         return Err(ResolveError::NotFound(String::new()));
