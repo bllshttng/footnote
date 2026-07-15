@@ -186,7 +186,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.dispatch.* (harness-capability map overlay; `fno dispatch resolve`) ---
     "dispatch.harness": Meta("advanced", "Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.", default_source="default"),
     "dispatch.substrate": Meta("advanced", "Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).", default_source="default"),
-    "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}; empty = '/target no-merge {id}'.", default_source="default"),
+    "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}; empty = '/target no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve (a leading /verb becomes $fno:verb on codex, a prose brief on gemini/opencode); a non-slash template passes through literally.", default_source="default"),
     "dispatch.allowed_verbs": Meta("advanced", "Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).", default_source="default"),
     "dispatch.auto_merge": Meta("advanced", "Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false.", default_source="default"),
     # --- config.auto_continue.* ---
