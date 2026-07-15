@@ -591,6 +591,25 @@ def stamp_active_slot(cli: str, record_id: str, root: Path | None = None) -> Non
     _atomic_write_private(_active_stamp_path(cli, root), record_id)
 
 
+def _slot_taint_path(cli: str, root: Path) -> Path:
+    return _active_stamp_path(cli, root).with_suffix(".tainted")
+
+
+def slot_tainted(cli: str, root: Path) -> bool:
+    """True when the stamp was written under live pins: a pinned session may
+    have overwritten the slot since, so the slot content is not trustworthy
+    as the stamped account's (skip capture-before-overwrite)."""
+    return _slot_taint_path(cli, root).exists()
+
+
+def _set_slot_taint(cli: str, root: Path, tainted: bool) -> None:
+    path = _slot_taint_path(cli, root)
+    if tainted:
+        _atomic_write_private(path, "1")
+    else:
+        path.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Switch (materialize with both guards)
 # ---------------------------------------------------------------------------
@@ -602,6 +621,8 @@ class SwitchResult:
     slot_changed: bool = True
     verification: str = "structural"
     reason: Optional[str] = None
+    # pids of live sessions the switch proceeded under (pin_policy="warn")
+    pinned_by: tuple[int, ...] = ()
 
 
 def _rollback_materialized_slot(cli: str, rollback_blob: Optional[str]) -> tuple[str, bool]:
@@ -650,14 +671,16 @@ def switch(
     by_id: dict[str, ProviderRecord],
     root: Path | None = None,
     emit_fn: Optional[Callable[..., None]] = None,
+    pin_policy: str = "warn",
 ) -> SwitchResult:
-    """Materialize ``target`` into the slot with capture-before-overwrite + the
-    live-pin gate, serialized by a cross-process mutex. Rolls the slot back and
-    raises on a failed post-materialize verification.
+    """Materialize ``target`` into the slot (capture-before-overwrite), serialized
+    by a cross-process mutex. Rolls back and raises on failed verification.
 
-    Raises ``SwitchDeferred`` when the slot is pinned or the mutex is held,
-    ``KeychainError``/``ManagedStoreError`` on a failed write with a receipt.
+    pin_policy: "warn" (default) proceeds under live claude pins, reporting them
+    on the result; "defer" raises SwitchDeferred. Codex always defers.
     """
+    if pin_policy not in ("warn", "defer"):
+        raise ValueError(f"invalid pin_policy: {pin_policy!r} (expected 'warn' or 'defer')")
     root = root or store_root()
     root.mkdir(parents=True, exist_ok=True)
     lock = filelock.FileLock(str(_switch_lock_path(root)), timeout=10)
@@ -666,7 +689,9 @@ def switch(
     except filelock.Timeout as exc:
         raise SwitchDeferred("another switch is in progress (mutex held); try again") from exc
     try:
-        return _switch_locked(target, by_id=by_id, root=root, emit_fn=emit_fn)
+        return _switch_locked(
+            target, by_id=by_id, root=root, emit_fn=emit_fn, pin_policy=pin_policy
+        )
     finally:
         lock.release()
 
@@ -677,6 +702,7 @@ def _switch_locked(
     by_id: dict[str, ProviderRecord],
     root: Path,
     emit_fn: Optional[Callable[..., None]],
+    pin_policy: str = "warn",
 ) -> SwitchResult:
     stored = _blob_path(target.id, root)
     try:
@@ -701,22 +727,27 @@ def _switch_locked(
             reason="slot-already-active" if target.cli == "codex" else None,
         )
 
-    # Live-pin gate INSIDE the critical section (a session starting between
-    # check and write is caught: the mutex is held across both). Per-CLI: claude
-    # keys off CLAUDE_CONFIG_DIR, codex off CODEX_HOME (both never rewrite the
-    # slot under a live session on it).
+    # Pin gate inside the critical section (mutex held across check + write).
+    # claude "warn" proceeds — the same rewrite a manual /login performs;
+    # codex always defers (its TOCTOU re-scan assumes an unpinned slot).
     pins = pinning_sessions_for(target.cli)
+    pinned_by: tuple[int, ...] = ()
     if pins:
-        names = ", ".join(f"pid {p.pid}" for p in pins)
-        raise SwitchDeferred(
-            f"slot is pinned by a live {target.cli} session ({names}); stop it or retry",
-            sessions=pins,
-        )
+        if pin_policy == "defer" or target.cli == "codex":
+            names = ", ".join(f"pid {p.pid}" for p in pins)
+            raise SwitchDeferred(
+                f"slot is pinned by a live {target.cli} session ({names}); stop it or retry",
+                sessions=pins,
+            )
+        pinned_by = tuple(p.pid for p in pins)
 
     # Capture-before-overwrite: the slot currently holds the outgoing account's
     # (possibly rotated) creds. Re-snapshot them before we overwrite the slot.
+    # A tainted stamp (written under live pins) means the slot may hold a
+    # DIFFERENT account's creds by now: skip capture rather than poison the
+    # stamped account's snapshot with them.
     rollback_blob: Optional[str] = _read_slot_blob(target.cli)
-    if outgoing_id and outgoing_id in by_id:
+    if outgoing_id and outgoing_id in by_id and not slot_tainted(target.cli, root):
         try:
             snapshot_current(by_id[outgoing_id], root)
         except KeychainError:
@@ -802,6 +833,7 @@ def _switch_locked(
     # self-correcting on the next successful switch; journaling is not worth it
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.cli, target.id, root)
+    _set_slot_taint(target.cli, root, bool(pinned_by))
     if emit_fn is not None:
         event = {
             "provider": target.id,
@@ -820,4 +852,5 @@ def _switch_locked(
         active=target.id,
         verification=verification,
         reason=verification_reason,
+        pinned_by=pinned_by,
     )

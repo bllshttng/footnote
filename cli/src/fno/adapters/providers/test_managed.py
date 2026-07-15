@@ -168,8 +168,11 @@ class TestSwitch:
 
 
 class TestSwitchGuards:
-    def test_live_pin_refuses_and_leaves_slot_untouched(self, fake_slot, tmp_path, monkeypatch):
-        """AC1-ERR: a pinned slot defers, names the session, and mutates nothing."""
+    def test_live_pin_defer_policy_refuses_and_leaves_slot_untouched(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """pin_policy="defer" (the recovery path): a pinned slot defers, names the
+        session, and mutates nothing."""
         by_id = _register_two(fake_slot, tmp_path)
         monkeypatch.setattr(
             managed, "pinning_sessions",
@@ -178,10 +181,60 @@ class TestSwitchGuards:
         before = fake_slot["claude"]
         stored_b = (tmp_path / "work-b" / "blob").read_text()
         with pytest.raises(managed.SwitchDeferred) as exc:
-            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path, pin_policy="defer")
         assert "4242" in str(exc.value)
         assert fake_slot["claude"] == before  # slot untouched
         assert (tmp_path / "work-b" / "blob").read_text() == stored_b  # store untouched
+
+    def test_live_pin_default_warns_and_proceeds(self, fake_slot, tmp_path, monkeypatch):
+        """Default policy: a pinned claude slot switches anyway (the same rewrite a
+        manual /login performs) and reports the pinning pids on the result."""
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(4242, "claude")],
+        )
+        result = managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert result.active == "work-a"
+        assert result.pinned_by == (4242,)
+        assert fake_slot["claude"] == (tmp_path / "work-a" / "blob").read_text()
+        assert managed.active_slot_id("claude", tmp_path) == "work-a"
+
+    def test_unpinned_switch_reports_no_pins(self, fake_slot, tmp_path):
+        by_id = _register_two(fake_slot, tmp_path)
+        result = managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert result.pinned_by == ()
+        assert not managed.slot_tainted("claude", tmp_path)
+
+    def test_invalid_pin_policy_rejected(self, fake_slot, tmp_path):
+        by_id = _register_two(fake_slot, tmp_path)
+        with pytest.raises(ValueError, match="invalid pin_policy"):
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path, pin_policy="deferr")
+
+    def test_pinned_switch_taints_stamp_and_skips_next_capture(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """A warn-under-pin switch leaves an untrustworthy stamp: a pinned session
+        may overwrite the slot afterward, so the NEXT switch must not capture the
+        slot blob into the stamped account's snapshot (poisoning it)."""
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(4242, "claude")],
+        )
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert managed.slot_tainted("claude", tmp_path)
+
+        # A pinned work-b session refreshes and overwrites the slot out-of-band.
+        fake_slot["claude"] = _blob("B-rotated")
+        snapshot_a = (tmp_path / "work-a" / "blob").read_text()
+
+        # Pin-free switch back to work-b: capture must be skipped (work-a's
+        # snapshot untouched by the foreign blob) and the taint cleared.
+        monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
+        managed.switch(by_id["work-b"], by_id=by_id, root=tmp_path)
+        assert (tmp_path / "work-a" / "blob").read_text() == snapshot_a
+        assert not managed.slot_tainted("claude", tmp_path)
 
     def test_missing_snapshot_refuses(self, fake_slot, tmp_path):
         """Boundary: never materialize an account with no stored snapshot."""
@@ -1148,7 +1201,7 @@ class TestCliSurface:
         assert "switch interrupted: codex login verification interrupted" in response.output
         assert "slot is in an indeterminate state" in response.output
 
-    def test_use_managed_live_pin_defers(self, tmp_path, monkeypatch):
+    def test_use_managed_live_pin_proceeds_with_warning(self, tmp_path, monkeypatch):
         slot = _cli_slot(monkeypatch)
         env = {"HOME": str(tmp_path), "PWD": str(tmp_path)}
         slot["claude"] = _blob("A0")
@@ -1160,5 +1213,6 @@ class TestCliSurface:
             lambda config_dir=None: [managed.PinningSession(99, "claude")],
         )
         r = runner.invoke(providers_app, ["use", "work-a"], env=env, catch_exceptions=False)
-        assert r.exit_code == 2
-        assert "deferred" in r.output and "99" in r.output
+        assert r.exit_code == 0
+        assert "Materialized managed account 'work-a'" in r.output
+        assert "warning: swapped under 1 live claude session(s)" in r.output
