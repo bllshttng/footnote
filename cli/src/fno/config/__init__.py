@@ -1115,6 +1115,11 @@ class DispatchBlock(BaseModel):
     # its posture from this key; an explicit --allow-merge/--no-merge flag wins.
     # Layer-separate from config.auto_merge.* (the worker-side review gate).
     auto_merge: bool = False
+    # x-0676: on provider exhaustion, defer (today's floor) or fail over to the
+    # next healthy provider in the active combo. Default "defer" = byte-identical
+    # to today (no combo read). An unknown value degrades to "defer" (a typo never
+    # silently enables failover).
+    on_exhaustion: str = "defer"
 
     @field_validator("auto_merge", mode="before")
     @classmethod
@@ -1125,6 +1130,14 @@ class DispatchBlock(BaseModel):
         bool would read as True) resolves False. Mirrors the _coerce_* idiom on
         AgentsBlock: never raise, always degrade toward safety."""
         return v if isinstance(v, bool) else False
+
+    @field_validator("on_exhaustion", mode="before")
+    @classmethod
+    def _coerce_on_exhaustion(cls, v: object) -> object:
+        """Only the two literals are honored; anything else degrades to "defer".
+        Same degrade-toward-safety stance as _coerce_auto_merge: a typo can never
+        enable failover."""
+        return v if v in ("defer", "failover") else "defer"
 
 
 class AgentsBlock(BaseModel):
