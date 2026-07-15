@@ -1028,11 +1028,12 @@ def dispatch_post_merge_ritual(
 
     ``source_session_id`` (the merged node's originating session) arms the
     warm route: a live inject of the ritual into that session, tried under
-    the same lock/marker, so exactly one of {warm inject, cold spawn} runs
-    per merge. ``source_harness`` (claude|codex|gemini) selects which live
-    vehicle reaches it, so a codex/gemini-shipped node routes warm to its own
-    panel instead of always cold-spawning a claude worker. ``warm_inject`` is a
-    test seam.
+    the same lock/marker, so at most one of {warm inject, cold spawn} runs
+    per merge -- a queued-but-unconfirmed inject counts as warm too (the
+    keystrokes already landed). ``source_harness`` (claude|codex|gemini)
+    selects which live vehicle reaches it, so a codex/gemini-shipped node
+    routes warm to its own panel instead of always cold-spawning a claude
+    worker. ``warm_inject`` is a test seam.
     """
     if not auto_run:
         return PostMergeDispatchResult("disabled", pr_number)
@@ -1127,9 +1128,9 @@ def dispatch_post_merge_ritual(
             return PostMergeDispatchResult("already-dispatched", pr_number, detail="marker-exists")
 
         # Warm route first: the node's originating session still holds the
-        # context a cold worker re-derives. Any miss (no id, dead session,
-        # busy-queue timeout, inject error) degrades to the cold path below --
-        # the fallback floor is exactly the pre-warm behavior.
+        # context a cold worker re-derives. A genuine miss (no id, dead
+        # session, inject error) degrades to the cold path below; a queued-
+        # but-unconfirmed inject is handled separately below (not a miss).
         cold_reason = "no-live-source-session"
         try:
             from fno.post_merge_route import inject_pr_merged, resolve_warm_session
@@ -1142,6 +1143,15 @@ def dispatch_post_merge_ritual(
                     _persist_marker()
                     return PostMergeDispatchResult(
                         "routed-warm", pr_number, short_id=warm_sid[:8], detail=reason
+                    )
+                if reason == "queue-timeout":
+                    # op:'reply' already typed the keystrokes into the
+                    # recipient's PTY (see mail_inject.rs); just unconfirmed
+                    # because it was busy. Cold-spawning would duplicate that
+                    # work, so stop here -- no marker (unconfirmed), no
+                    # extra notify (the paste is the delivery).
+                    return PostMergeDispatchResult(
+                        "routed-warm", pr_number, short_id=warm_sid[:8], detail="queued"
                     )
                 cold_reason = reason
         except Exception as exc:  # noqa: BLE001 - warm routing must never break dispatch
