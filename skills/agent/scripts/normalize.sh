@@ -295,19 +295,9 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
 fi
 set +f
 
-# x-4391: resolve merge posture when no explicit flag/word set it. Rung 2 =
-# config.dispatch.auto_merge; rung 3 = builtin no-merge. `fno config get` prints
-# a Python bool (`True`/`False`), so lowercase before the exact-`true` compare.
-# fno absent, a stale binary rejecting the unmodeled key, or any error degrades
-# to no-merge (matches this file's provider-fallback degrade; never grant merge
-# on a failed read).
-if [[ -z "$ALLOW_MERGE" ]]; then
-  ALLOW_MERGE=0
-  if command -v fno >/dev/null 2>&1; then
-    _am="$(fno config get dispatch.auto_merge 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
-    [[ "$_am" == "true" ]] && ALLOW_MERGE=1
-  fi
-fi
+# x-4391: merge posture is resolved AFTER cross-project cwd resolution (section
+# 2c below) so a `-P/--project` spawn reads the TARGET project's config, not the
+# caller's (codex P2). See the resolution block just after RESOLVED_CWD.
 
 # ---- 2. node detection + resolution-tier classification ----------------------
 # A backlog node id is exactly `ab-` + 8 lowercase hex (tier 1, exact). Three
@@ -499,6 +489,22 @@ if [[ -n "$PROJECT" ]]; then
       emit_error "$_emsg"
       ;;
   esac
+fi
+
+# x-4391: resolve merge posture when no explicit flag/word set it. Rung 2 =
+# config.dispatch.auto_merge; rung 3 = builtin no-merge. Read from the TARGET
+# project's cwd when a -P/--project cross-project spawn resolved one (RESOLVED_CWD),
+# so a caller repo's opt-in never leaks to a project that opted out, and vice
+# versa (codex P2). `fno config get` prints a Python bool (`True`/`False`) and has
+# no cwd flag, so cd in a subshell then lowercase before the exact-`true` compare.
+# fno absent, a stale binary rejecting the key, or any error degrades to no-merge
+# (matches this file's provider-fallback degrade; never grant merge on a failed read).
+if [[ -z "$ALLOW_MERGE" ]]; then
+  ALLOW_MERGE=0
+  if command -v fno >/dev/null 2>&1; then
+    _am="$( ( [[ -n "$RESOLVED_CWD" ]] && cd "$RESOLVED_CWD" 2>/dev/null; fno config get dispatch.auto_merge 2>/dev/null ) | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
+    [[ "$_am" == "true" ]] && ALLOW_MERGE=1
+  fi
 fi
 
 # ---- 3. agent-name derivation ------------------------------------------------

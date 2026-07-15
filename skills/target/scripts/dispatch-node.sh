@@ -118,15 +118,23 @@ if [[ -z "$PERMISSION_MODE" ]]; then
   PERMISSION_MODE="$(fno config get agents.spawn_permission_mode 2>/dev/null | tr -d '[:space:]' || true)"
 fi
 
-# x-4391: resolve merge posture when no explicit flag was given. Rung 2 =
-# config.dispatch.auto_merge; rung 3 = builtin no-merge. `fno config get` prints
-# a Python bool (`True`/`False`), so lowercase before the exact-`true` compare;
-# any error / non-true output (stale fno rejecting the unmodeled key, absent
-# config) degrades to no-merge (Locked Decision 6: never grant merge on error).
-if [[ -z "$ALLOW_MERGE" ]]; then
-  _am="$(fno config get dispatch.auto_merge 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
-  if [[ "$_am" == "true" ]]; then ALLOW_MERGE=1; else ALLOW_MERGE=0; fi
-fi
+# x-4391: merge posture is resolved PER NODE (in the loop) so a batch spanning
+# projects reads each node's own config.dispatch.auto_merge from that node's cwd
+# (codex P2). The global $ALLOW_MERGE tri-state here carries ONLY an explicit
+# --allow-merge/--no-merge flag (applies to every node); "" = no flag = resolve
+# config per node below. resolve_node_posture prints 1 (allow) or 0 (no-merge)
+# for a given node cwd: an explicit flag wins; else config.dispatch.auto_merge
+# read from THAT cwd. `fno config get` prints a Python bool (`True`/`False`) and
+# has no cwd flag, so cd in a subshell then lowercase before the exact-`true`
+# compare; any error / non-true output (stale fno, absent config, gone cwd)
+# degrades to no-merge (Locked Decision 6: never grant merge on error).
+resolve_node_posture() {
+  local node_cfg_cwd="$1"
+  if [[ -n "$ALLOW_MERGE" ]]; then printf '%s' "$ALLOW_MERGE"; return; fi
+  local am
+  am="$( ( [[ -n "$node_cfg_cwd" ]] && cd "$node_cfg_cwd" 2>/dev/null; fno config get dispatch.auto_merge 2>/dev/null ) | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
+  [[ "$am" == "true" ]] && printf '1' || printf '0'
+}
 
 # x-4391: remove a single standalone `no-merge` token from a /target-family
 # command under allow posture. The resolver builtin (_AUTONOMOUS_COMMAND) and
@@ -460,6 +468,11 @@ for id in "${NODES[@]}"; do
       continue ;;
   esac
 
+  # x-4391: per-node merge posture, read from THIS node's project cwd so a batch
+  # spanning repos honors each project's config.dispatch.auto_merge (codex P2). An
+  # explicit flag (in $ALLOW_MERGE) wins for every node; else config-per-node.
+  node_allow_merge="$(resolve_node_posture "$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)")"
+
   # ---- Build the worker command + resolve the launch cwd ----
   # Command precedence, single source = `fno dispatch resolve`:
   #   node dispatch_verb / dispatch_brief (US3, x-f78d)  >  per-harness builtin (x-567d)
@@ -503,9 +516,9 @@ for id in "${NODES[@]}"; do
       rest="${tgt_cmd#"$tgt_prefix"}"
       inject=""
       [[ -n "$FLAGS" ]] && inject="$FLAGS "
-      if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* && " $rest " != *" no-merge "* ]]; then
+      if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" no-merge "* && " $rest " != *" no-merge "* ]]; then
         inject="${inject}no-merge "
-      elif [[ "$ALLOW_MERGE" -eq 1 ]]; then
+      elif [[ "$node_allow_merge" -eq 1 ]]; then
         # allow posture: strip a resolver-/template-baked no-merge from rest. A
         # no-merge in --flags is per-run explicit (rung 1) and rides in $inject,
         # untouched. strip on the bare rest, then re-add the prefix.
@@ -519,7 +532,7 @@ for id in "${NODES[@]}"; do
     # (Locked Decision 4; --allow-merge opts out). Byte-identical to before.
     tgt_cmd="/target"
     [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
-    if [[ "$ALLOW_MERGE" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
+    if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
       tgt_cmd="$tgt_cmd no-merge"
     fi
     tgt_cmd="$tgt_cmd $id"
@@ -530,7 +543,7 @@ for id in "${NODES[@]}"; do
     # x-4391: the builtin template bakes no-merge (_AUTONOMOUS_COMMAND); under
     # allow posture strip it from a /target-family command (a prose brief is
     # guarded out by strip_no_merge's prefix check).
-    [[ "$ALLOW_MERGE" -eq 1 ]] && tgt_cmd="$(strip_no_merge "$tgt_cmd")"
+    [[ "$node_allow_merge" -eq 1 ]] && tgt_cmd="$(strip_no_merge "$tgt_cmd")"
   else
     fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "failed $id reason=\"resolver returned no command for harness '$DISPATCH_PROVIDER'; update fno or set config.dispatch.command\""

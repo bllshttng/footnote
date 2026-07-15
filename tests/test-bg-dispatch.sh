@@ -156,6 +156,11 @@ case "$sub $verb" in
     key="${3:-}"
     if [[ "$key" == "dispatch.auto_merge" ]]; then
       [[ -f "$S/cfg_auto_merge_err" ]] && { echo "unknown config key 'dispatch.auto_merge'" >&2; exit 1; }
+      # x-4391 per-node (codex P2): `fno config get` reads the CURRENT cwd. The
+      # launcher cd's into each node's project cwd before the read, so a node
+      # carrying its own .fno/auto_merge (written by the test) simulates a
+      # cross-project posture; the global cfg_auto_merge state is the fallback.
+      [[ -f "$PWD/.fno/auto_merge" ]] && { cat "$PWD/.fno/auto_merge"; exit 0; }
       cat "$S/cfg_auto_merge" 2>/dev/null || echo False   # prints a Python bool
       exit 0
     fi
@@ -270,6 +275,29 @@ eval "$(sed -n '/^strip_no_merge() {/,/^}/p' "$DISPATCH")"
   && pass "x-4391 AC1-EDGE: codex \$fno:target token stripped" || fail "AC1-EDGE codex"
 [[ "$(strip_no_merge '/think x-1')" == '/think x-1' ]] \
   && pass "x-4391 AC1-EDGE: non-/target command untouched" || fail "AC1-EDGE non-target"
+
+# AC2-EDGE (codex P2): per-node posture reads THIS node's project cwd, not the
+# dispatcher's. Node B's project opts in via its own .fno/auto_merge while the
+# global default stays no-merge -> B dispatches allow (from B's config).
+reset_mock
+projB="$TMP/projB"; mkdir -p "$projB/.fno"; echo True > "$projB/.fno/auto_merge"
+set_status ab-bbbb2222 ready; set_claim ab-bbbb2222 free; set_resolved_cwd ab-bbbb2222 "$projB"
+out="$(bash "$DISPATCH" ab-bbbb2222 2>&1)"
+if grep -q '/target ab-bbbb2222' "$MOCKSTATE/ask.log" && ! grep -q 'no-merge' "$MOCKSTATE/ask.log"; then
+  pass "x-4391 AC2-EDGE: per-node posture reads the node's OWN project cwd"
+else
+  fail "x-4391 per-node cwd routing: $(cat "$MOCKSTATE/ask.log")"
+fi
+
+# The dispatcher's own cwd opting in must NOT leak to a node whose project has no
+# opt-in: with the global default false and no per-node config, B stays no-merge.
+reset_mock
+projC="$TMP/projC"; mkdir -p "$projC/.fno"   # no auto_merge file -> project default
+set_status ab-bbbb2222 ready; set_claim ab-bbbb2222 free; set_resolved_cwd ab-bbbb2222 "$projC"
+out="$(bash "$DISPATCH" ab-bbbb2222 2>&1)"
+grep -q '/target no-merge ab-bbbb2222' "$MOCKSTATE/ask.log" \
+  && pass "x-4391 AC2-EDGE: no cross-project posture leak (node project opts out)" \
+  || fail "x-4391 posture leak: $(cat "$MOCKSTATE/ask.log")"
 
 # ---- AC5-ERR: dispatch failure surfaces, node stays ready, exit 1, no fallback ----
 reset_mock; set_status ab-aaaa1111 ready; : > "$MOCKSTATE/ask.fail"
