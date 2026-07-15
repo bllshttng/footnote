@@ -92,3 +92,33 @@ def test_resolution_failure_falls_back_to_caller(monkeypatch, capsys):
     got = _resolve_dispatch_workdir(None, fresh=False, here=False)
     assert got == Path("/worktree").resolve()
     assert "dispatching from canonical main" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Cross-layer parity (x-85fe US4)
+#
+# The precedence table below is the executable statement of the three-surface
+# invariant: the Python resolver here and the Rust `effective_worker_cwd` unit
+# tests (crates/fno-agents/src/bin/client.rs `effective_cwd_*`) assert the SAME
+# rows. Inputs are (explicit_cwd, here, fresh) with a fixed canonical=/canonical
+# and caller=/worktree; the Rust mirror uses /canon and /wt. Keep the two in
+# lockstep - a one-surface change that breaks a row fails this table.
+# ---------------------------------------------------------------------------
+
+# (explicit, here, fresh) -> expected root (None expected => canonical)
+_PRECEDENCE_TABLE = [
+    (None, False, False, "/canonical"),  # default -> canonical
+    (None, False, True, "/canonical"),   # --fresh no-op alias -> canonical
+    (None, True, False, "/worktree"),    # --here -> caller
+    (None, True, True, "/worktree"),     # --here wins over --fresh alias
+    ("/explicit", False, False, "/explicit"),  # --cwd wins
+    ("/explicit", True, True, "/explicit"),    # --cwd beats every flag
+]
+
+
+@pytest.mark.parametrize("explicit,here,fresh,expected", _PRECEDENCE_TABLE)
+def test_cross_layer_precedence_parity(monkeypatch, explicit, here, fresh, expected):
+    monkeypatch.setattr(os, "getcwd", lambda: "/worktree")
+    monkeypatch.setenv("FNO_REPO_ROOT", "/canonical")
+    got = _resolve_dispatch_workdir(explicit, fresh=fresh, here=here)
+    assert got == Path(expected).resolve()

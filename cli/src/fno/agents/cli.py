@@ -362,15 +362,18 @@ def cmd_spawn(
         False,
         "--fresh",
         help=(
-            "Resolve the worker cwd to the canonical (main) repo root regardless "
-            "of caller cwd. Opt-in; an explicit --cwd still wins."
+            "Accepted no-op alias: the worker cwd already defaults to the "
+            "canonical (main) repo root (x-85fe). Kept for dispatcher compat."
         ),
     ),
     here: bool = typer.Option(
         False,
         "--here",
         "--in-place",
-        help="Opt out of --fresh: keep the worker in the caller's cwd.",
+        help=(
+            "Keep the worker in the caller's cwd instead of the canonical-root "
+            "default. The explicit opt-in for extending WIP right here."
+        ),
     ),
     role: str | None = typer.Option(
         None,
@@ -1076,15 +1079,18 @@ def cmd_ask(
         False,
         "--fresh",
         help=(
-            "Resolve the worker cwd to the canonical (main) repo root regardless "
-            "of caller cwd. Opt-in; an explicit --cwd still wins."
+            "Accepted no-op alias: the worker cwd already defaults to the "
+            "canonical (main) repo root (x-85fe). Kept for dispatcher compat."
         ),
     ),
     here: bool = typer.Option(
         False,
         "--here",
         "--in-place",
-        help="Opt out of --fresh: keep the worker in the caller's cwd.",
+        help=(
+            "Keep the worker in the caller's cwd instead of the canonical-root "
+            "default (WIP-scoped ask). The explicit opt-in."
+        ),
     ),
 ) -> None:
     """Send a message to a registered agent (follow-up only).

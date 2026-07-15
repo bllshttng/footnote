@@ -170,8 +170,14 @@ see below):
   roles stay primary). Model routing ONLY - it does not affect pane/layout.
 - **`-t`/`--timeout <secs>`** (optional): per-spawn timeout, passed to `fno agents
   spawn --timeout` (CLI default 600).
-- **`--fresh` / `--here`** (optional): `--fresh` resolves the worker cwd to the
-  canonical main root; `--here`/`--in-place` opts out and keeps the caller cwd.
+- **`--here` / `--fresh`** (optional): a spawn with NO cwd source defaults to the
+  canonical main root (x-85fe), so the same command behaves identically wherever
+  the launcher stands. `--here`/`--in-place` is the explicit opt-in to keep the
+  caller's cwd (extend my WIP right here); `--fresh` is an accepted no-op alias
+  (the default is already canonical). The move is never silent: a redirect note
+  names the canonical dir and the spawn receipt carries the effective `cwd` when
+  it differs from the caller. A code payload still auto-isolates to a fresh
+  worktree regardless (that lands as an explicit `--cwd`, which wins).
 - **Tier-3 harness passthrough** (all optional, x-b6e2): forwarded straight to
   `fno agents spawn`, opaque to the skill; the CLI maps or fails closed per
   provider. `--add-dir <dir>` grants the worker extra write access (claude/codex/
