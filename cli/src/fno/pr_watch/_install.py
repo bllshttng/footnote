@@ -196,6 +196,12 @@ def _run_launchctl(*args: str) -> int:
 # worse than no fix. 10s is generous for a local launchctl round-trip.
 _LAUNCHCTL_TIMEOUT_S = 10.0
 
+# `launchctl bootout` is asynchronous: it returns before launchd finishes
+# removing the service from the domain, so an immediate bootstrap can race the
+# still-present label and fail (rc=5). Retry the bootstrap a few times with a
+# short backoff to survive that settle window.
+_BOOTSTRAP_RETRIES = 4
+
 
 def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) -> tuple[int, bool]:
     """Run launchctl with a timeout. Returns ``(returncode, timed_out)``.
@@ -225,6 +231,7 @@ def bounce(
     label: str = _LABEL,
     uid: Optional[int] = None,
     run: Optional[Callable[..., tuple[int, bool]]] = None,
+    sleep: Callable[[float], None] = time.sleep,
     timeout_s: float = _LAUNCHCTL_TIMEOUT_S,
 ) -> tuple[str, int]:
     """bootout -> bootstrap -> kickstart to cure a wedged launchd job.
@@ -250,11 +257,20 @@ def bounce(
     if timed:
         return (f"`launchctl bootout {target}` timed out after {timeout_s}s", 1)
 
-    # 2. bootstrap the plist back into the GUI domain.
-    rc, timed = run("bootstrap", domain, str(plist_path), timeout_s=timeout_s)
-    if timed:
-        return (f"`launchctl bootstrap {domain}` timed out after {timeout_s}s", 1)
-    if rc != 0:
+    # 2. bootstrap the plist back into the GUI domain. bootout (above) is
+    #    asynchronous, so a bootstrap fired immediately after can lose to the
+    #    still-settling label (rc=5). Retry with a short backoff so the refresh
+    #    survives that window instead of reporting a spurious failure.
+    rc = -1
+    for attempt in range(_BOOTSTRAP_RETRIES):
+        rc, timed = run("bootstrap", domain, str(plist_path), timeout_s=timeout_s)
+        if timed:
+            return (f"`launchctl bootstrap {domain}` timed out after {timeout_s}s", 1)
+        if rc == 0:
+            break
+        if attempt + 1 < _BOOTSTRAP_RETRIES:
+            sleep(0.25 * (attempt + 1))
+    else:
         return (f"`launchctl bootstrap {domain} {plist_path}` failed (rc={rc})", 1)
 
     # 3. kickstart -k restarts if running; forces the first run so a fresh tick
