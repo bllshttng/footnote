@@ -16,6 +16,7 @@ socket); these tests pin the Python contract:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -561,6 +562,11 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    # x-85fe: pin canonical == caller so this node-less spawn does NOT move to
+    # the canonical root (AC1-EDGE no-op) -- the receipt/redirect note would
+    # otherwise drift when run from a linked worktree. This test checks the pane
+    # receipt shape, not the cwd move.
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
 
     runner = CliRunner()
     result = runner.invoke(agents_cli.agents_app, ["spawn", "peer", "--provider", "claude"])

@@ -556,11 +556,16 @@ def cmd_spawn(
     )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
-    # x-85fe: the effective launch dir surfaces in the receipt whenever it
-    # differs from the caller (the default now moves a node-less spawn to
-    # canonical), so the move is legible in the receipt too, not only the
-    # stderr note. None (worker stays put) keeps the receipt byte-identical.
-    _moved_cwd = str(workdir) if workdir != Path(os.getcwd()).resolve() else None
+    # x-85fe: the effective launch dir surfaces in the receipt on the DEFAULT
+    # move (a node-less spawn now lands on canonical), coupled with the stderr
+    # redirect note. An explicit --cwd (incl. -P/node-resolved) is the caller's
+    # own choice and never surfaces -- gate on `not cwd` so the receipt stays
+    # byte-identical for explicit-cwd and stay-put spawns (AC1-EDGE).
+    _moved_cwd = (
+        str(workdir)
+        if not cwd and workdir != Path(os.getcwd()).resolve()
+        else None
+    )
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a

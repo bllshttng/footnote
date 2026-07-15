@@ -4,11 +4,21 @@ fan-out, with the effective substrate, and the receipt stays byte-identical.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.agents import spawn_gate
+
+
+@pytest.fixture(autouse=True)
+def _canonical_is_caller(monkeypatch):
+    # x-85fe: pin canonical == caller so a node-less spawn does NOT move to the
+    # canonical root (the AC1-EDGE no-op). These tests exercise gate wiring and
+    # receipt shape, not the cwd move; without this, a run from a linked worktree
+    # resolves canonical to the main checkout and the receipt/redirect note drift.
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
 
 
 @pytest.fixture

@@ -10,6 +10,7 @@ dispatch is stubbed and the autonomous dispatchers' subprocess is mocked.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -160,6 +161,10 @@ def test_mutual_exclusion_yolo_and_permission_mode(runner, monkeypatch):
 def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
     """The explicit flag threads to dispatch_spawn_pane on the pane substrate."""
     received = _stub_pane_path(monkeypatch)
+    # x-85fe: pin canonical == caller so this node-less spawn stays put (AC1-EDGE
+    # no-op); otherwise a run from a linked worktree adds the redirect note as a
+    # second output line and json.loads(result.output) breaks.
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
@@ -352,7 +357,6 @@ def test_think_worker_reads_config_default(monkeypatch):
 
 # --- bash surface: /agent spawn (spawn.sh) ----------------------------------
 
-import os  # noqa: E402
 import shutil  # noqa: E402
 import stat  # noqa: E402
 import subprocess as _sp  # noqa: E402
