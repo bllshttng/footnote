@@ -624,11 +624,19 @@ impl RegistryEntry {
     /// finished ask to `exited` by process-liveness alone, never consulting
     /// session-file reachability for status. [plan ab-70faa65b, Locked Decision #1]
     pub fn is_one_shot_ask(&self) -> bool {
+        // v9 (x-1b1e) moved the claude jobId from `claude_short_id` into
+        // `short_id`, so a claude shellout (`ask`/`--bg`) row now carries a
+        // non-empty short_id and the empty-short_id proxy no longer catches it.
+        // Mirror recover()'s provider+host_mode guard: a non-interactive claude
+        // row has no daemon PTY, so its surviving session file is a resumability
+        // artifact, not "running" -- without this it would fall through to the
+        // reachability probe and be kept falsely `live` forever.
+        let is_claude_shellout = self.provider == "claude" && !self.is_interactive();
         // A mux-hosted row (4a-G2) also has an empty short_id and may lack a
         // pid (the pane-child lookup is best-effort), but it is a LIVE hosted
         // agent, never a finished ask - without this exclusion the reconcile
         // sweep would flip it to Exited unprobed (codex P1, PR #142).
-        self.short_id.is_empty() && self.pid.is_none() && self.mux.is_none()
+        (self.short_id.is_empty() || is_claude_shellout) && self.pid.is_none() && self.mux.is_none()
     }
 }
 
@@ -1266,6 +1274,44 @@ mod tests {
             pane_id: 4,
         });
         assert!(!e.is_one_shot_ask(), "a mux ref is a live hosting handle");
+    }
+
+    #[test]
+    fn state_v9_claude_shellout_row_is_a_one_shot_ask() {
+        // x-1b1e regression: v9 moved the claude jobId into short_id, so a
+        // finished claude `ask`/`--bg` row now carries a NON-empty short_id.
+        // The empty-short_id proxy no longer catches it; without the provider+
+        // host_mode guard reconcile would fall through to the reachability probe
+        // and keep the row falsely `live` off its surviving (resumability-only)
+        // session file -- the exact defect recover() already had to fix.
+        let mut ask = sample_entry("cc-ask");
+        ask.provider = "claude".into();
+        ask.short_id = "7c5dcf5d".into(); // v9: jobId lives here now
+        ask.host_mode = None; // exec (shellout), not interactive
+        ask.pid = None;
+        ask.mux = None;
+        assert!(
+            ask.is_one_shot_ask(),
+            "a v9 claude shellout row (non-empty short_id, exec, no pid) is a one-shot ask"
+        );
+
+        // An interactive claude stream worker DOES have a daemon PTY: probe it,
+        // never settle it by liveness-alone.
+        let mut worker = ask.clone();
+        worker.host_mode = Some(HOST_MODE_INTERACTIVE.into());
+        assert!(
+            !worker.is_one_shot_ask(),
+            "an interactive claude worker is PTY-managed, not a one-shot ask"
+        );
+
+        // An adopted row carries an external pid -> excluded by the pid guard.
+        let mut adopted = ask.clone();
+        adopted.host_mode = Some(HOST_MODE_ATTACHED.into());
+        adopted.pid = Some(4242);
+        assert!(
+            !adopted.is_one_shot_ask(),
+            "an adopted row (external pid) is not a one-shot ask"
+        );
     }
 
     #[test]
