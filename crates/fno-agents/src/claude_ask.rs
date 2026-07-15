@@ -2136,7 +2136,18 @@ fn followup(
     from_name: &str,
     timeout: Option<Duration>,
 ) -> AskOutcome {
-    let short_id = match entry.transport_short() {
+    // An INTERACTIVE stream-json claude row carries the daemon worker/socket id
+    // in short_id, NOT a claude --bg jobId (v9, x-1b1e). `ask` followup's
+    // locate_session expects a jobId, so never route a worker id as one: treat an
+    // interactive row as having no jobId and refuse (pre-v9 these had
+    // claude_short_id=None and refused identically). Only a claude shellout
+    // (--bg/ask, host_mode exec) or adopted row's short_id is the jobId.
+    let job_id = if entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE {
+        None
+    } else {
+        entry.transport_short()
+    };
+    let short_id = match job_id {
         Some(s) => s.to_string(),
         _ => {
             return AskOutcome::err(

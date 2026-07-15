@@ -623,3 +623,31 @@ fn followup_missing_short_id_exit_12() {
     assert_eq!(out.exit_code, 12);
     assert!(out.stderr.contains("no short id"), "{}", out.stderr);
 }
+
+#[test]
+fn followup_interactive_claude_row_refuses_worker_short() {
+    // x-1b1e (codex review P2): an interactive stream-json claude row carries the
+    // daemon WORKER id in short_id, not a --bg jobId. `ask` followup must NOT
+    // route that worker id to a jobId-expecting locate_session; it refuses (exit
+    // 12), same as a row with no jobId at all.
+    let home = AgentsHome::at(tmpdir("interactive-home"));
+    let ch = ClaudeHome::at(tmpdir("interactive-claude"));
+    let cwd = tmpdir("interactive-cwd");
+    let body = r#"{"schema_version":3,"agents":[{"name":"host1","provider":"claude","cwd":"/tmp","status":"live","short_id":"wk-host1","host_mode":"interactive","created_at":"2026-05-27T00:00:00Z","log_path":null}]}"#;
+    fs::create_dir_all(home.registry_json().parent().unwrap()).unwrap();
+    fs::write(home.registry_json(), body).unwrap();
+
+    let out = dispatch_claude_ask(
+        &home,
+        &ch,
+        "host1",
+        "ping",
+        "abilities",
+        &cwd,
+        false,
+        Some(Duration::from_secs(2)),
+        &[],
+    );
+    assert_eq!(out.exit_code, 12, "{}", out.stderr);
+    assert!(out.stderr.contains("no short id"), "{}", out.stderr);
+}

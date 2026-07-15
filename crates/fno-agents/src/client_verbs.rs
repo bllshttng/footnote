@@ -1774,7 +1774,14 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
 
     if args.follow {
         // Stream subsequent lines via the agent.logs daemon RPC (Locked Decision #5).
-        return crate::logs_client::follow(home, &args.name).await;
+        // The daemon looks up log_path by exact registry `name`, so carry the
+        // RESOLVED row's canonical name (x-1b1e: args.name may be a short/session
+        // id) rather than the raw token, or the follow attach silently misses.
+        let resolved_name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(args.name.as_str());
+        return crate::logs_client::follow(home, resolved_name).await;
     }
     0
 }
