@@ -245,7 +245,15 @@ case "/$PARKING_LOT_REL/" in
 esac
 
 PARKING_LOT_PATH="$CANON_ROOT/$PARKING_LOT_REL"
-PROJECT="$( (cd "$CANON_ROOT" && fno config get config.project.id) 2>/dev/null || echo "")"   # best-effort; canonical base id (not a lane's ephemeral id); backlog idea auto-detects when empty
+# PROJECT is read from the CURRENT cwd, NOT CANON_ROOT: in a parallel-mode lane
+# worktree this is the lane's ephemeral project.id (still worktree-local; x-071c
+# kept project.id in the allowlist). Step 3b runs `fno backlog advance --project
+# "$PROJECT"`, and the lane id is load-bearing there - it makes nested
+# auto-continue find no same-project `next`, so the top-level dispatcher stays
+# the sole `max_lanes` authority. Anchoring this on CANON_ROOT would let each
+# merged lane chain a successor outside the dispatcher and blow the lane cap.
+# Only the parking-lot PATH anchors on canonical; node attribution stays per-lane.
+PROJECT="$(fno config get config.project.id 2>/dev/null || echo "")"   # best-effort; backlog idea auto-detects when empty
 ```
 
 An empty `$PARKING_LOT_REL` here means the key is genuinely unset (the read
