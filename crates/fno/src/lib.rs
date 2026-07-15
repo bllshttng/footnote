@@ -7,6 +7,7 @@ pub mod backlog_view;
 pub mod bootstrap;
 pub mod client;
 pub mod clipboard;
+pub mod connections_view;
 pub mod digest_overlay;
 pub mod keys;
 pub mod mouse;

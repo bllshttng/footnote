@@ -328,6 +328,26 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     return {}
 
 
+def load_active_combo(repo_root: Path | None = None) -> str | None:
+    """Read config.providers.active_combo (project-local wins over global).
+
+    Same candidate walk + precedence as load_combos, so the value returned
+    here matches what combos_use/combos_remove write. Returns None when no
+    active_combo is set anywhere.
+    """
+    if repo_root is None:
+        repo_root = Path(os.environ.get("PWD", os.getcwd()))
+
+    for path in (repo_root / ".fno" / "config.toml", _global_settings_path()):
+        block = _extract_providers_block(_read_parsed(path))
+        if block is None:
+            continue
+        ac = block.get("active_combo")
+        if ac:
+            return ac  # project-local wins; do not consult global
+    return None
+
+
 def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
     """Read config.providers.quota from project-local or global settings.
 

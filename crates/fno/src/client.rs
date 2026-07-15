@@ -547,6 +547,28 @@ struct View {
     /// (x-c376) Monotonic `PeekAgent` request counter, bumped per open/move so a
     /// body landing after a newer request is dropped by seq (AC1-FR).
     peek_seq: u64,
+    /// (x-84d7) The Connections modal (MENU -> connections): a stateful overlay
+    /// listing provider accounts + combos, driving the `fno providers` CLI.
+    /// `Some` while open; stdin diverts to [`connections_keys`]. Its reads run
+    /// off the UI loop via the `conn_*` triad below (the needs-fold idiom).
+    connections: Option<crate::connections_view::ConnectionsView>,
+    /// Pending escape bytes in connections mode (arrow folding, split-arrow safe).
+    conn_esc: Vec<u8>,
+    /// (x-84d7) A connections read (list/combos fold) is wanted; the run loop
+    /// spawns it at loop top and clears this, keeping the sender out of the deep
+    /// stdin handler (the needs_want idiom).
+    conn_want: bool,
+    /// (x-84d7) A connections read is in flight; bounds concurrent folds to one.
+    conn_inflight: bool,
+    /// (x-84d7) Generation token, bumped per open/refresh so a read landing after
+    /// the modal closed or refreshed again is discarded.
+    conn_gen: u64,
+    /// (x-84d7) A mutation/login verb wanted by a keypress; the run loop spawns
+    /// it at loop top (the sender lives there, out of the stdin handler) and
+    /// clears this. `(argv, child-env, is_login)`: `is_login` runs `fno mux pane
+    /// run` (opens the login pane, keeps the pending notice), else a single-flight
+    /// mutation guarded by `ConnectionsView::acting`.
+    conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -848,6 +870,7 @@ struct AuxPopup {
 enum AuxAction {
     OpenKeybinds,
     OpenSettings,
+    OpenConnections,
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
@@ -870,6 +893,7 @@ fn build_sideline_menu(anchor: Anchor) -> AuxPopup {
                 PopupRow::Rule,
                 entry("⌨", "keybinds"),
                 entry("⚙", "settings"),
+                entry("⇄", "connections"),
                 entry("⏏", "detach"),
             ],
             anchor,
@@ -877,6 +901,7 @@ fn build_sideline_menu(anchor: Anchor) -> AuxPopup {
         actions: vec![
             AuxAction::OpenKeybinds,
             AuxAction::OpenSettings,
+            AuxAction::OpenConnections,
             AuxAction::Detach,
         ],
     }
@@ -936,7 +961,58 @@ impl View {
             peek: None,
             peek_esc: Vec::new(),
             peek_seq: 0,
+            connections: None,
+            conn_esc: Vec::new(),
+            conn_want: false,
+            conn_inflight: false,
+            conn_gen: 0,
+            conn_action: None,
         }
+    }
+
+    /// (x-84d7) Open the Connections modal in its loading state and arm the first
+    /// read. Bumps the gen so any in-flight read from a prior open is discarded.
+    fn open_connections(&mut self) {
+        self.conn_gen = self.conn_gen.wrapping_add(1);
+        let mut cv = crate::connections_view::ConnectionsView::new();
+        cv.gen = self.conn_gen;
+        self.connections = Some(cv);
+        self.conn_esc.clear();
+        self.conn_want = true; // the run loop spawns the fold at loop top
+    }
+
+    /// (x-84d7) Close the modal and bump the gen so a late read is dropped.
+    fn close_connections(&mut self) {
+        self.connections = None;
+        self.conn_esc.clear();
+        self.conn_gen = self.conn_gen.wrapping_add(1);
+    }
+
+    /// (x-84d7) Arm a fresh read (R refresh) under a new gen.
+    fn refresh_connections(&mut self) {
+        self.conn_gen = self.conn_gen.wrapping_add(1);
+        if let Some(cv) = self.connections.as_mut() {
+            cv.gen = self.conn_gen;
+            cv.state = crate::connections_view::ModalState::Loading;
+            cv.notice = None;
+            // NB: do NOT clear `acting` here. A manual R during an in-flight
+            // mutation must keep the single-flight guard up until the subprocess
+            // actually exits, or a second use/register/update could overlap the
+            // first and race two config/credential writes. The action-result arm
+            // clears `acting` unconditionally on completion, so R can't wedge it.
+        }
+        self.conn_want = true;
+    }
+
+    /// (x-84d7) Re-read after a mutation: keep the current lists + the result
+    /// notice visible (no Loading blank) while the fresh data folds in. This is
+    /// the read-after-write that keeps the modal from trusting optimistic state.
+    fn rearm_connections_read(&mut self) {
+        self.conn_gen = self.conn_gen.wrapping_add(1);
+        if let Some(cv) = self.connections.as_mut() {
+            cv.gen = self.conn_gen;
+        }
+        self.conn_want = true;
     }
 
     /// The unified needs-me queue (x-feec), worst-first: the live badge leg
@@ -2210,6 +2286,10 @@ impl View {
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
             draw_lines_overlay(&mut cells, rows, cols, &lines);
+        } else if let Some(conn) = &self.connections {
+            // x-84d7 Connections modal: accounts + combos lists on the shared
+            // inverse-video chrome. Drawn from the modal's own render (pure).
+            draw_lines_overlay(&mut cells, rows, cols, &conn.render());
         } else if let Some(peek) = &self.peek {
             // x-c376 peek overlay: the peeked agent row (re-read LIVE from the
             // layout, navigator-style) header + transcript, on the shared
@@ -2240,6 +2320,7 @@ impl View {
             && self.attach_place.is_none()
             && self.nav.is_none()
             && self.peek.is_none()
+            && self.connections.is_none()
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
@@ -3653,6 +3734,22 @@ async fn attach_and_run(
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::needs_overlay::FoldItem>>)>(
         );
 
+    // x-84d7: the Connections modal's read fold runs off the UI loop and reports
+    // back here, tagged with the generation it was kicked under, so a slow `fno`
+    // never blocks the modal and a result landing after a close/refresh is
+    // discarded. Carries a full ReadOutcome (Ok lists, or a named degrade).
+    let (conn_tx, mut conn_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::connections_view::ReadOutcome)>();
+
+    // x-84d7: a Connections single-flight mutation verb reports its result here,
+    // gen-tagged like the read, so a result for a closed/superseded modal is
+    // dropped and a live one surfaces the notice + triggers the read-after-write.
+    let (conn_act_tx, mut conn_act_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        u64,
+        crate::connections_view::ActionResult,
+        bool, // is_login: keep the pending notice on success, no acting flip
+    )>();
+
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
     // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
@@ -3690,6 +3787,29 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let result = crate::needs_overlay::fold_now(&since).await;
                 let _ = tx.send((gen, result));
+            });
+        }
+        // x-84d7: kick a wanted Connections read off the UI loop, at most one in
+        // flight, tagged with the current gen so a stale result is dropped.
+        if view.conn_want && !view.conn_inflight {
+            view.conn_want = false;
+            view.conn_inflight = true;
+            let tx = conn_tx.clone();
+            let gen = view.conn_gen;
+            tokio::spawn(async move {
+                let outcome = crate::connections_view::load_all().await;
+                let _ = tx.send((gen, outcome));
+            });
+        }
+        // x-84d7: run a wanted single-flight mutation off the UI loop. The modal's
+        // `acting` flag (set by the reducer) is the concurrency guard, so no extra
+        // inflight bool is needed here; the result reports on conn_act_rx.
+        if let Some((argv, env, is_login)) = view.conn_action.take() {
+            let tx = conn_act_tx.clone();
+            let gen = view.conn_gen;
+            tokio::spawn(async move {
+                let result = crate::connections_view::run_verb_env(argv, env).await;
+                let _ = tx.send((gen, result, is_login));
             });
         }
         // Redraw-after-event; expiry of the transient notice needs a timer.
@@ -3912,6 +4032,48 @@ async fn attach_and_run(
                     view.needs_want = true;
                 }
             }
+            Some((gen, outcome)) = conn_rx.recv() => {
+                // x-84d7: apply a Connections read under the gen guard. A result
+                // for a closed/superseded modal is discarded; a live match seeds
+                // the lists (or the degraded banner) and repaints.
+                view.conn_inflight = false;
+                if gen == view.conn_gen {
+                    if let Some(cv) = view.connections.as_mut() {
+                        cv.apply_read(outcome);
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    }
+                }
+            }
+            Some((gen, result, is_login)) = conn_act_rx.recv() => {
+                // x-84d7: a mutation/login verb finished. Clear the single-flight
+                // guard UNCONDITIONALLY (the subprocess has exited, whatever the
+                // modal's read-gen), so a manual R during the mutation can never
+                // wedge `acting` on nor let a second write overlap this one. The
+                // notice + re-read are still gen-guarded: a stale/closed result
+                // shows nothing (never optimistic state).
+                if let Some(cv) = view.connections.as_mut() {
+                    cv.acting = false;
+                }
+                if gen == view.conn_gen && view.connections.is_some() {
+                    if let Some(cv) = view.connections.as_mut() {
+                        if is_login {
+                            // The login pane spawn: on failure name it; on success
+                            // keep the reducer's "login pane opened - press r" notice.
+                            if !result.ok {
+                                cv.notice = Some(result.msg);
+                            }
+                        } else {
+                            cv.notice = Some(result.msg);
+                        }
+                    }
+                    view.rearm_connections_read();
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
+            }
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
                     view.term = (rows, cols);
@@ -4109,6 +4271,12 @@ async fn handle_stdin(
     if view.aux.is_some() {
         // x-8ccf US4/US5: the MENU popup / settings modal consumes keys.
         return aux_keys(view, &passthrough, sock_w).await;
+    }
+    if view.connections.is_some() {
+        // x-84d7: the Connections modal consumes all keys while open (Tab
+        // switches tabs, j/k move, R refreshes, Esc closes) - never leaks to a
+        // pane. Routed here (top-level modal, like the MENU it opened from).
+        return connections_keys(view, &passthrough, sock_w).await;
     }
     if view.confirm.is_some() {
         return confirm_keys(view, &passthrough, sock_w).await;
@@ -4931,6 +5099,12 @@ async fn execute_aux_action(
             view.open_keys_modal();
         }
         AuxAction::OpenSettings => view.aux = Some(view.build_settings_modal()),
+        AuxAction::OpenConnections => {
+            // x-84d7: close the MENU and open the Connections modal in its
+            // loading state; arm the first read (the run loop spawns it).
+            view.aux = None;
+            view.open_connections();
+        }
         AuxAction::Detach => {
             view.aux = None;
             return Ok(DispatchFlow::Detach);
@@ -5143,6 +5317,55 @@ async fn fetch_peek(
 /// swallowed - no key in peek mode ever reaches a pane (the leader-layer
 /// invariant). The catalog is re-read per key so a scrape tick that removed the
 /// peeked row re-anchors or closes (never a panic on a dropped index).
+/// (x-84d7) Route keys to the Connections modal. Pure state changes run through
+/// the modal's own reducer ([`ConnectionsView::on_key`]); the intents that touch
+/// the world (close, refresh) are executed here. The run loop redraws after this
+/// returns `Continue`, so a `Redraw` intent needs no explicit paint.
+async fn connections_keys(
+    view: &mut View,
+    bytes: &[u8],
+    _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    use crate::connections_view::ConnIntent;
+    let mut esc = std::mem::take(&mut view.conn_esc);
+    let keys = fold_selector_keys(&mut esc, bytes);
+    view.conn_esc = esc;
+    for &k in &keys {
+        // Closed mid-chunk: swallow the rest, never forward to a pane.
+        if view.connections.is_none() {
+            break;
+        }
+        let intent = view
+            .connections
+            .as_mut()
+            .map(|cv| cv.on_key(k))
+            .unwrap_or(ConnIntent::Bell);
+        match intent {
+            ConnIntent::Redraw => {}
+            ConnIntent::Bell => {
+                let _ = raw_out(b"\x07");
+            }
+            ConnIntent::Close => view.close_connections(),
+            ConnIntent::Refresh => view.refresh_connections(),
+            ConnIntent::Run(argv) => {
+                // The reducer already armed `acting`; stash the argv for the run
+                // loop to spawn at loop top (single-flight, sender in scope there).
+                view.conn_action = Some((argv, Vec::new(), false));
+            }
+            ConnIntent::RunEnv { argv, env } => {
+                view.conn_action = Some((argv, env, false));
+            }
+            ConnIntent::SpawnLogin(argv) => {
+                // Opens the login pane via `fno mux pane run`; the reducer already
+                // recorded the pending row + notice. Marked is_login so a success
+                // keeps that notice.
+                view.conn_action = Some((argv, Vec::new(), true));
+            }
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
 async fn peek_keys(
     view: &mut View,
     bytes: &[u8],

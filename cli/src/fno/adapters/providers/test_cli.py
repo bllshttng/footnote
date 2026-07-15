@@ -869,3 +869,210 @@ class TestCombosUse:
         )
         assert result.exit_code != 0
         assert "ghost" in result.output
+
+
+# ---------------------------------------------------------------------------
+# x-84d7 task 1.1: providers list -J emitter (Connections UI read plane)
+# ---------------------------------------------------------------------------
+
+class TestListJson:
+    def test_list_json_empty_is_array(self, tmp_path: Path):
+        """AC1-EDGE groundwork: empty config emits [] on -J (parseable, no prose)."""
+        import json as json_mod
+
+        result = _invoke(["list", "-J"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        assert json_mod.loads(result.output) == []
+
+    def test_list_json_rows_carry_ui_fields(self, tmp_path: Path):
+        """AC1-HP: -J emits one row per record with id/cli/auth/priority/active/headroom."""
+        import json as json_mod
+
+        settings_path = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings_path, _two_record_config(active="claude-primary"))
+        result = _invoke(["list", "-J"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        rows = json_mod.loads(result.output)
+        by_id = {r["id"]: r for r in rows}
+        assert set(by_id) == {"claude-primary", "gemini-backup"}
+        cp = by_id["claude-primary"]
+        assert cp["cli"] == "claude"
+        assert cp["auth"] == "oauth_dir"
+        assert cp["priority"] == 10
+        assert cp["active"] is True
+        assert "headroom" in cp        # 'unknown' allowed; the key must exist
+        assert "snapshot" in cp        # None for non-managed; key present
+        assert by_id["gemini-backup"]["active"] is False
+
+
+class TestCombosListActiveField:
+    def test_combos_list_json_marks_active(self, combos_cli_env: Path):
+        """AC1-HP: combos list -J rows gain an 'active' bool from settings.active_combo."""
+        import json as json_mod
+
+        _invoke(
+            ["combos", "add", "alpha", "--providers", "claude-primary"],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        _invoke(
+            ["combos", "add", "beta", "--providers", "gemini-backup"],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        _invoke(
+            ["combos", "use", "beta"],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        result = _invoke(
+            ["combos", "list", "-J"], cwd=combos_cli_env, home=combos_cli_env,
+        )
+        assert result.exit_code == 0, result.output
+        rows = json_mod.loads(result.output)
+        active_map = {r["name"]: r["active"] for r in rows}
+        assert active_map == {"alpha": False, "beta": True}
+        # Existing fields unchanged.
+        beta = next(r for r in rows if r["name"] == "beta")
+        assert beta["members"] == ["gemini-backup"]
+        assert "strategy" in beta and "sticky_limit" in beta
+
+
+# ---------------------------------------------------------------------------
+# x-84d7 task 1.1: atomic `combos update` verb (kills the remove+add hazard)
+# ---------------------------------------------------------------------------
+
+class TestCombosUpdate:
+    def test_update_replaces_members_atomically(self, combos_cli_env: Path):
+        """AC4-HP groundwork: exactly one update call commits the new order."""
+        _invoke(
+            [
+                "combos", "add", "main",
+                "--providers", "claude-primary,gemini-backup",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        result = _invoke(
+            [
+                "combos", "update", "main",
+                "--providers", "gemini-backup,claude-primary",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        assert result.exit_code == 0, result.output
+        data = tomllib.loads(
+            (combos_cli_env / ".fno" / "config.toml").read_text()
+        )
+        assert data["providers"]["combos"]["main"]["providers"] == [
+            "gemini-backup", "claude-primary",
+        ]
+
+    def test_update_unknown_member_rejected_without_mutation(
+        self, combos_cli_env: Path
+    ):
+        """AC2-EDGE groundwork: unknown member id rejected; config unchanged."""
+        _invoke(
+            ["combos", "add", "main", "--providers", "claude-primary"],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        before = (combos_cli_env / ".fno" / "config.toml").read_text()
+        result = _invoke(
+            ["combos", "update", "main", "--providers", "claude-primary,ghost"],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        assert result.exit_code != 0
+        assert "ghost" in result.output
+        after = (combos_cli_env / ".fno" / "config.toml").read_text()
+        assert before == after
+
+    def test_update_unknown_combo_fails(self, combos_cli_env: Path):
+        """Updating a combo that does not exist is a refusal, not a create."""
+        result = _invoke(
+            ["combos", "update", "ghost", "--providers", "claude-primary"],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        assert result.exit_code != 0
+        assert "ghost" in result.output
+
+    def test_update_preserves_strategy_when_omitted(self, combos_cli_env: Path):
+        """A pure reorder must NOT silently rewrite round_robin -> fallback."""
+        _invoke(
+            [
+                "combos", "add", "main",
+                "--strategy", "round_robin",
+                "--sticky", "3",
+                "--providers", "claude-primary,gemini-backup",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        # Reorder only: no --strategy/--sticky.
+        result = _invoke(
+            [
+                "combos", "update", "main",
+                "--providers", "gemini-backup,claude-primary",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        assert result.exit_code == 0, result.output
+        combo = tomllib.loads(
+            (combos_cli_env / ".fno" / "config.toml").read_text()
+        )["providers"]["combos"]["main"]
+        assert combo["strategy"] == "round_robin"  # preserved
+        assert combo["sticky_limit"] == 3           # preserved
+        assert combo["providers"] == ["gemini-backup", "claude-primary"]
+
+    def test_update_can_change_strategy(self, combos_cli_env: Path):
+        """--strategy on update replaces the stored strategy."""
+        _invoke(
+            [
+                "combos", "add", "main",
+                "--strategy", "fallback",
+                "--providers", "claude-primary,gemini-backup",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        result = _invoke(
+            [
+                "combos", "update", "main",
+                "--strategy", "round_robin",
+                "--sticky", "2",
+                "--providers", "claude-primary,gemini-backup",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        assert result.exit_code == 0, result.output
+        data = tomllib.loads(
+            (combos_cli_env / ".fno" / "config.toml").read_text()
+        )
+        combo = data["providers"]["combos"]["main"]
+        assert combo["strategy"] == "round_robin"
+        assert combo["sticky_limit"] == 2
+
+    def test_update_resets_round_robin_cursor(self, combos_cli_env: Path):
+        """Reordering members invalidates the stored cursor (hash change)."""
+        from fno.adapters.providers.rotation import compute_providers_hash
+        from fno.adapters.providers.runtime_state import (
+            advance_cursor,
+            read_cursor,
+        )
+
+        _invoke(
+            [
+                "combos", "add", "main",
+                "--strategy", "round_robin",
+                "--providers", "claude-primary,gemini-backup",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        old_hash = compute_providers_hash(("claude-primary", "gemini-backup"))
+        advance_cursor(
+            "main", sticky_limit=1, providers_hash=old_hash, providers_count=2,
+        )
+        assert read_cursor("main", old_hash) is not None
+
+        _invoke(
+            [
+                "combos", "update", "main",
+                "--providers", "gemini-backup,claude-primary",
+            ],
+            cwd=combos_cli_env, home=combos_cli_env,
+        )
+        new_hash = compute_providers_hash(("gemini-backup", "claude-primary"))
+        assert read_cursor("main", new_hash) is None

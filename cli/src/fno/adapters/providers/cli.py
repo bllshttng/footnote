@@ -71,26 +71,54 @@ def _load(scope: str = "global") -> "fno.adapters.providers.model.ProvidersConfi
 # ---------------------------------------------------------------------------
 
 @cli.command("list")
-def list_providers() -> None:
+def list_providers(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON array of record rows (Connections UI)."
+    ),
+) -> None:
     """List all configured providers, marking the active one with *."""
     config = _load()
+    slot_active: dict[str, Optional[str]] = {}  # per-CLI slot occupant, read once
+
+    def _is_active(record: ProviderRecord) -> bool:
+        # For managed accounts the meaningful "active" is which one is
+        # materialized in that CLI's slot; fall back to routing-active otherwise.
+        if record.auth == "managed":
+            if record.cli not in slot_active:
+                slot_active[record.cli] = managed.active_slot_id(record.cli)
+            return record.id == slot_active[record.cli]
+        return record.id == config.active
+
+    if json_output:
+        import json as _json
+
+        rows = [
+            {
+                "id": record.id,
+                "name": record.name,
+                "cli": record.cli,
+                "auth": record.auth,
+                "priority": record.priority,
+                "active": _is_active(record),
+                "headroom": _headroom_label(record.id),
+                "snapshot": (
+                    managed.snapshot_age_label(record.id)
+                    if record.auth == "managed"
+                    else None
+                ),
+            }
+            for record in config.records
+        ]
+        typer.echo(_json.dumps(rows))
+        return
+
     if not config.records:
         typer.echo(
             "No providers configured. Run `fno providers add` to add one."
         )
         return
-    slot_active: dict[str, Optional[str]] = {}  # per-CLI slot occupant, read once
     for record in config.records:
-        # For managed accounts the meaningful "active" is which one is
-        # materialized in that CLI's slot; fall back to routing-active otherwise.
-        if record.auth == "managed" and record.cli not in slot_active:
-            slot_active[record.cli] = managed.active_slot_id(record.cli)
-        is_active = (
-            record.id == slot_active[record.cli]
-            if record.auth == "managed"
-            else record.id == config.active
-        )
-        marker = "*" if is_active else " "
+        marker = "*" if _is_active(record) else " "
         headroom_col = _headroom_label(record.id)
         line = (
             f"{marker} {record.id}  [{record.cli}] {record.auth}  "
@@ -890,7 +918,7 @@ def combos_list(
     """List all configured combos with cursor + member-count info."""
     import json as json_mod
 
-    from fno.adapters.providers.loader import load_combos
+    from fno.adapters.providers.loader import load_active_combo, load_combos
     from fno.adapters.providers.rotation import compute_providers_hash
     from fno.adapters.providers.runtime_state import read_cursor
 
@@ -909,6 +937,7 @@ def combos_list(
             )
         return
 
+    active_combo = load_active_combo(repo_root=repo_root)
     rows = []
     for name, combo in combos.items():
         providers_hash = compute_providers_hash(combo.providers)
@@ -918,6 +947,7 @@ def combos_list(
             "strategy": combo.strategy,
             "sticky_limit": combo.sticky_limit,
             "members": list(combo.providers),
+            "active": name == active_combo,
             "cursor_index": cursor.cursor_index if cursor else None,
             "consecutive_use_count": cursor.consecutive_use_count if cursor else None,
         })
@@ -1066,3 +1096,95 @@ def combos_use(
         raise typer.Exit(1)
 
     typer.echo(f"Active combo set to {name!r} (scope={scope}).")
+
+
+@combos_cli.command("update")
+def combos_update(
+    name: str = typer.Argument(..., help="Existing combo to update (must exist)"),
+    strategy: Optional[str] = typer.Option(
+        None, "--strategy", help="Rotation strategy: fallback | round_robin (unset = keep current)"
+    ),
+    sticky_limit: Optional[int] = typer.Option(
+        None, "--sticky", help="round_robin calls per provider (unset = keep current)"
+    ),
+    providers_csv: str = typer.Option(
+        ..., "--providers", help="Comma-separated provider IDs (the new ordered members)"
+    ),
+    scope: str = typer.Option("project", "--scope", help="project | global"),
+) -> None:
+    """Atomically replace an existing combo's members/strategy in one write.
+
+    The atomic alternative to remove+add: a crash mid-pair could strand the
+    config with no combo. Validates each member exists and refuses an unknown
+    combo. Reordering members changes compute_providers_hash, so the stored
+    round-robin cursor is invalidated (read_cursor returns None on the new hash)
+    without any explicit reset here.
+
+    ``--strategy``/``--sticky`` default to the combo's CURRENT values when
+    omitted, so a pure reorder (the UI's common case) never silently rewrites a
+    round_robin combo to fallback/1.
+    """
+    from fno.adapters.providers.loader import atomic_mutate_settings
+    from fno.adapters.providers.rotation import Combo
+
+    providers_list = [p.strip() for p in providers_csv.split(",") if p.strip()]
+    if not providers_list:
+        typer.echo("error: --providers must list at least one provider id", err=True)
+        raise typer.Exit(1)
+
+    config = _load()
+    unknown = [p for p in providers_list if p not in config.by_id]
+    if unknown:
+        typer.echo(
+            f"error: combo {name!r} references unknown provider id(s) "
+            f"{unknown!r} (not in config.providers.records)",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    target = _combos_settings_path(scope)
+    applied: dict[str, object] = {}
+
+    def mutator(data: dict) -> dict:
+        providers_section = data.setdefault("providers", {})
+        combos_section = providers_section.setdefault("combos", {})
+        existing = combos_section.get(name)
+        if existing is None:
+            raise ValueError(
+                f"combo {name!r} not found in {scope} settings; "
+                "use `combos add` to create it"
+            )
+        # Inherit the current strategy/sticky when the flag is omitted, so a
+        # reorder preserves round_robin/sticky instead of defaulting them away.
+        eff_strategy = strategy if strategy is not None else existing.get("strategy", "fallback")
+        eff_sticky = (
+            sticky_limit if sticky_limit is not None else existing.get("sticky_limit", 1)
+        )
+        # Validate the resolved combo (raises ValueError, aborting the write).
+        Combo(
+            name=name,
+            strategy=eff_strategy,  # type: ignore[arg-type]
+            sticky_limit=eff_sticky,
+            providers=tuple(providers_list),
+        )
+        combos_section[name] = {
+            "strategy": eff_strategy,
+            "sticky_limit": eff_sticky,
+            "providers": providers_list,
+        }
+        applied.update(strategy=eff_strategy, sticky_limit=eff_sticky)
+        return data
+
+    try:
+        atomic_mutate_settings(mutator, settings_path=target)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    except OSError as exc:
+        typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"Combo {name!r} updated (strategy={applied['strategy']}, "
+        f"sticky={applied['sticky_limit']}, providers={providers_list}, scope={scope})."
+    )
