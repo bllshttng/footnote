@@ -591,6 +591,25 @@ def stamp_active_slot(cli: str, record_id: str, root: Path | None = None) -> Non
     _atomic_write_private(_active_stamp_path(cli, root), record_id)
 
 
+def _slot_taint_path(cli: str, root: Path) -> Path:
+    return _active_stamp_path(cli, root).with_suffix(".tainted")
+
+
+def slot_tainted(cli: str, root: Path) -> bool:
+    """True when the stamp was written under live pins: a pinned session may
+    have overwritten the slot since, so the slot content is not trustworthy
+    as the stamped account's (skip capture-before-overwrite)."""
+    return _slot_taint_path(cli, root).exists()
+
+
+def _set_slot_taint(cli: str, root: Path, tainted: bool) -> None:
+    path = _slot_taint_path(cli, root)
+    if tainted:
+        _atomic_write_private(path, "1")
+    else:
+        path.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Switch (materialize with both guards)
 # ---------------------------------------------------------------------------
@@ -660,6 +679,8 @@ def switch(
     pin_policy: "warn" (default) proceeds under live claude pins, reporting them
     on the result; "defer" raises SwitchDeferred. Codex always defers.
     """
+    if pin_policy not in ("warn", "defer"):
+        raise ValueError(f"invalid pin_policy: {pin_policy!r} (expected 'warn' or 'defer')")
     root = root or store_root()
     root.mkdir(parents=True, exist_ok=True)
     lock = filelock.FileLock(str(_switch_lock_path(root)), timeout=10)
@@ -722,8 +743,11 @@ def _switch_locked(
 
     # Capture-before-overwrite: the slot currently holds the outgoing account's
     # (possibly rotated) creds. Re-snapshot them before we overwrite the slot.
+    # A tainted stamp (written under live pins) means the slot may hold a
+    # DIFFERENT account's creds by now: skip capture rather than poison the
+    # stamped account's snapshot with them.
     rollback_blob: Optional[str] = _read_slot_blob(target.cli)
-    if outgoing_id and outgoing_id in by_id:
+    if outgoing_id and outgoing_id in by_id and not slot_tainted(target.cli, root):
         try:
             snapshot_current(by_id[outgoing_id], root)
         except KeychainError:
@@ -809,6 +833,7 @@ def _switch_locked(
     # self-correcting on the next successful switch; journaling is not worth it
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.cli, target.id, root)
+    _set_slot_taint(target.cli, root, bool(pinned_by))
     if emit_fn is not None:
         event = {
             "provider": target.id,

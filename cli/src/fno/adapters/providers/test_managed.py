@@ -204,6 +204,37 @@ class TestSwitchGuards:
         by_id = _register_two(fake_slot, tmp_path)
         result = managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
         assert result.pinned_by == ()
+        assert not managed.slot_tainted("claude", tmp_path)
+
+    def test_invalid_pin_policy_rejected(self, fake_slot, tmp_path):
+        by_id = _register_two(fake_slot, tmp_path)
+        with pytest.raises(ValueError, match="invalid pin_policy"):
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path, pin_policy="deferr")
+
+    def test_pinned_switch_taints_stamp_and_skips_next_capture(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """A warn-under-pin switch leaves an untrustworthy stamp: a pinned session
+        may overwrite the slot afterward, so the NEXT switch must not capture the
+        slot blob into the stamped account's snapshot (poisoning it)."""
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(4242, "claude")],
+        )
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert managed.slot_tainted("claude", tmp_path)
+
+        # A pinned work-b session refreshes and overwrites the slot out-of-band.
+        fake_slot["claude"] = _blob("B-rotated")
+        snapshot_a = (tmp_path / "work-a" / "blob").read_text()
+
+        # Pin-free switch back to work-b: capture must be skipped (work-a's
+        # snapshot untouched by the foreign blob) and the taint cleared.
+        monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
+        managed.switch(by_id["work-b"], by_id=by_id, root=tmp_path)
+        assert (tmp_path / "work-a" / "blob").read_text() == snapshot_a
+        assert not managed.slot_tainted("claude", tmp_path)
 
     def test_missing_snapshot_refuses(self, fake_slot, tmp_path):
         """Boundary: never materialize an account with no stored snapshot."""
