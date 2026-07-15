@@ -160,7 +160,14 @@ pub enum ComboInputStep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddKind {
+    /// Managed claude account: shares the ONE `~/.claude` slot (managed.py). The
+    /// login runs in `~/.claude` and register snapshots that login into the
+    /// managed store; `use` swaps the Keychain token back into `~/.claude`. All
+    /// accounts reuse your one config (skills/hooks/plugins) - the default.
     Claude,
+    /// Isolated claude account: its OWN `CLAUDE_CONFIG_DIR` (a separate config
+    /// dir + Keychain item). Opt-in - most users want the shared slot above.
+    ClaudeIsolated,
     Codex,
     ApiKeyGlm,
 }
@@ -168,7 +175,7 @@ pub enum AddKind {
 impl AddKind {
     fn cli(self) -> &'static str {
         match self {
-            AddKind::Claude => "claude",
+            AddKind::Claude | AddKind::ClaudeIsolated => "claude",
             AddKind::Codex => "codex",
             // GLM is a claude-cli provider fronted by a base_url + api key.
             AddKind::ApiKeyGlm => "claude",
@@ -176,14 +183,16 @@ impl AddKind {
     }
     fn label(self) -> &'static str {
         match self {
-            AddKind::Claude => "claude (oauth login)",
+            AddKind::Claude => "claude (shared ~/.claude)",
+            AddKind::ClaudeIsolated => "claude (isolated config dir)",
             AddKind::Codex => "codex (oauth login)",
             AddKind::ApiKeyGlm => "api-key: GLM/z.ai",
         }
     }
     fn next(self) -> AddKind {
         match self {
-            AddKind::Claude => AddKind::Codex,
+            AddKind::Claude => AddKind::ClaudeIsolated,
+            AddKind::ClaudeIsolated => AddKind::Codex,
             AddKind::Codex => AddKind::ApiKeyGlm,
             AddKind::ApiKeyGlm => AddKind::Claude,
         }
@@ -764,13 +773,15 @@ impl ConnectionsView {
                     ConnIntent::Redraw
                 }
                 b'\r' | b'\n' => match w.kind {
-                    AddKind::Claude => {
-                        // Prefill the conventional per-account config dir.
+                    // Shared managed slot: no dir - login runs in ~/.claude and
+                    // register snapshots it (the token-swap model). dir stays "".
+                    AddKind::Claude | AddKind::Codex => self.finish_login(),
+                    // Isolated: prefill a per-account config dir, then collect it.
+                    AddKind::ClaudeIsolated => {
                         w.dir = format!("~/.claude-{}", w.id);
                         w.step = WizardStep::Dir;
                         ConnIntent::Redraw
                     }
-                    AddKind::Codex => self.finish_login(),
                     AddKind::ApiKeyGlm => {
                         w.step = WizardStep::ApiKey;
                         ConnIntent::Redraw
@@ -818,14 +829,21 @@ impl ConnectionsView {
     }
 
     /// Close the wizard, add a session-local pending row, and spawn the login
-    /// pane (claude: `claude /login` under CLAUDE_CONFIG_DIR; codex: `codex
-    /// login`) via the `fno mux pane run` PaneRun front door.
+    /// pane via the `fno mux pane run` PaneRun front door. An empty `dir` (the
+    /// default managed claude + codex) logs into the SHARED slot (no
+    /// CLAUDE_CONFIG_DIR override, so ~/.claude and its skills/hooks are reused
+    /// and register snapshots that login); a non-empty `dir` (isolated claude)
+    /// logs into its own CLAUDE_CONFIG_DIR.
     fn finish_login(&mut self) -> ConnIntent {
         let w = self.wizard.take().expect("wizard present");
-        // Expand `~/` NOW so both the login spawn and the later register use an
-        // absolute CLAUDE_CONFIG_DIR (env/exec never expand `~`).
         let cli = w.kind.cli().to_string();
-        let dir = expand_tilde(&w.dir, std::env::var_os("HOME").as_deref());
+        // Expand `~/` NOW so the spawn + later register use an absolute dir
+        // (env/exec never expand `~`). Empty stays empty (shared slot).
+        let dir = if w.dir.is_empty() {
+            String::new()
+        } else {
+            expand_tilde(&w.dir, std::env::var_os("HOME").as_deref())
+        };
         self.pending.push(PendingLogin {
             id: w.id.clone(),
             cli: cli.clone(),
@@ -836,12 +854,17 @@ impl ConnectionsView {
             w.id
         ));
         let inner: Vec<String> = if cli == "claude" {
-            vec![
-                "env".into(),
-                format!("CLAUDE_CONFIG_DIR={dir}"),
-                "claude".into(),
-                "/login".into(),
-            ]
+            if dir.is_empty() {
+                // Shared ~/.claude slot: no CLAUDE_CONFIG_DIR override.
+                vec!["claude".into(), "/login".into()]
+            } else {
+                vec![
+                    "env".into(),
+                    format!("CLAUDE_CONFIG_DIR={dir}"),
+                    "claude".into(),
+                    "/login".into(),
+                ]
+            }
         } else {
             vec!["codex".into(), "login".into()]
         };
@@ -1451,19 +1474,45 @@ mod tests {
         }
     }
 
-    // AC3-HP: a -> id/cli/dir -> spawns the login pane; row shows pending login.
+    // AC3-HP (default): the managed claude account shares ~/.claude - login runs
+    // in the shared slot (NO CLAUDE_CONFIG_DIR override, no dir step, no
+    // per-account dir), so all accounts reuse one config (the token-swap model).
     #[test]
-    fn login_wizard_claude_spawns_pane_and_marks_pending() {
+    fn login_wizard_claude_shared_spawns_plain_login_no_dir() {
         let mut v = ready_view();
         assert_eq!(v.on_key(b'a'), ConnIntent::Redraw);
         assert!(v.wizard.is_some());
         type_str(&mut v, "ccm2");
-        assert_eq!(v.on_key(b'\r'), ConnIntent::Redraw); // id -> kind (default claude)
-        let intent = v.on_key(b'\r'); // kind=claude -> dir step (prefilled)
+        assert_eq!(v.on_key(b'\r'), ConnIntent::Redraw); // id -> kind (default = shared claude)
+        let intent = v.on_key(b'\r'); // kind=Claude(shared) -> spawn directly (no dir step)
+        match intent {
+            // No `env CLAUDE_CONFIG_DIR=...`: login runs in the shared ~/.claude.
+            ConnIntent::SpawnLogin(argv) => {
+                assert_eq!(argv, vec!["mux", "pane", "run", "claude", "/login"]);
+                assert!(!argv.iter().any(|a| a.contains("CLAUDE_CONFIG_DIR")));
+            }
+            other => panic!("expected SpawnLogin, got {other:?}"),
+        }
+        assert!(v.wizard.is_none());
+        assert_eq!(v.pending.len(), 1);
+        assert!(v.pending[0].dir.is_empty()); // shared slot -> register snapshots ~/.claude
+        let out = v.render().join("\n");
+        assert!(out.contains("ccm2  [claude] …login pending"));
+    }
+
+    // The opt-in isolated path: an explicit own CLAUDE_CONFIG_DIR (a separate
+    // config dir), tilde-expanded before the spawn.
+    #[test]
+    fn login_wizard_claude_isolated_uses_own_dir() {
+        let mut v = ready_view();
+        v.on_key(b'a');
+        type_str(&mut v, "ccm2");
+        v.on_key(b'\r'); // id -> kind
+        v.on_key(b'\t'); // Claude(shared) -> ClaudeIsolated
+        let intent = v.on_key(b'\r'); // -> dir step (prefilled)
         assert_eq!(intent, ConnIntent::Redraw);
         assert_eq!(v.wizard.as_ref().unwrap().dir, "~/.claude-ccm2");
-        let intent = v.on_key(b'\r'); // commit dir -> spawn login
-                                      // The dir is tilde-expanded before the spawn (env/exec never expand ~).
+        let intent = v.on_key(b'\r'); // commit dir -> spawn
         let expected_dir = expand_tilde("~/.claude-ccm2", std::env::var_os("HOME").as_deref());
         match intent {
             ConnIntent::SpawnLogin(argv) => {
@@ -1471,20 +1520,14 @@ mod tests {
                 assert_eq!(argv[4], format!("CLAUDE_CONFIG_DIR={expected_dir}"));
                 assert!(
                     !argv[4].contains('~'),
-                    "tilde must be expanded, got {}",
+                    "tilde must be expanded: {}",
                     argv[4]
                 );
                 assert_eq!(argv[5..], ["claude", "/login"]);
             }
             other => panic!("expected SpawnLogin, got {other:?}"),
         }
-        assert!(v.wizard.is_none());
-        // Pending row rendered, and register targets it with the config-dir env.
-        assert_eq!(v.pending.len(), 1);
-        // The stored pending dir is expanded too (register reuses it).
         assert_eq!(v.pending[0].dir, expected_dir);
-        let out = v.render().join("\n");
-        assert!(out.contains("ccm2  [claude] …login pending"));
     }
 
     #[test]
@@ -1493,7 +1536,8 @@ mod tests {
         v.on_key(b'a');
         type_str(&mut v, "cdx");
         v.on_key(b'\r'); // id -> kind
-        v.on_key(b'\t'); // claude -> codex
+        v.on_key(b'\t'); // Claude -> ClaudeIsolated
+        v.on_key(b'\t'); // ClaudeIsolated -> Codex
         let intent = v.on_key(b'\r'); // codex has no dir step -> spawn
         assert_eq!(
             intent,
@@ -1558,8 +1602,9 @@ mod tests {
         v.on_key(b'a');
         type_str(&mut v, "glm2");
         v.on_key(b'\r'); // id -> kind
-        v.on_key(b'\t'); // claude -> codex
-        v.on_key(b'\t'); // codex -> api-key glm
+        v.on_key(b'\t'); // Claude -> ClaudeIsolated
+        v.on_key(b'\t'); // ClaudeIsolated -> Codex
+        v.on_key(b'\t'); // Codex -> api-key glm
         v.on_key(b'\r'); // -> api key step
         type_str(&mut v, "sk-abc");
         let intent = v.on_key(b'\r');
