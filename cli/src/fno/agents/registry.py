@@ -320,8 +320,11 @@ _ACCEPTED_FORMS = "accepted forms: name, 8-hex short id, or full session id"
 class AgentResolutionError(RuntimeError):
     """No entry, an ambiguous token, or an unreadable registry.
 
-    Carries ``exit_code`` (2, matching the verbs' name-not-found code) so a
-    caller can ``raise typer.Exit(exc.exit_code)`` without reclassifying.
+    ``exit_code`` defaults to 2 (the lifecycle name-not-found convention) for a
+    caller that maps the error straight through (``raise typer.Exit(exc.exit_code)``,
+    e.g. ``watch``). Verbs with their own convention still override it — resume
+    reports 13, trace/stop/rm map through their existing not-found path — so this
+    default is the fallback, not a universal choke point.
     """
 
     def __init__(self, message: str, *, exit_code: int = 2) -> None:

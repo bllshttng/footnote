@@ -609,11 +609,11 @@ fn trace_logic(args: &TraceArgs, events_path: &Path, registry_path: &Path) -> Tr
     if let Some(token) = &args.name {
         if !args.all_agents {
             match load_registry_entries(registry_path) {
-                Err(_) => {
+                Err(exc) => {
                     return TraceResult {
                         exit_code: 12,
                         output: String::new(),
-                        stderr: "fno agents trace: registry load failed\n".to_string(),
+                        stderr: format!("fno agents trace: registry load failed: {exc}\n"),
                     };
                 }
                 Ok(rows) => match find_agent_entry(&rows, token) {
@@ -856,7 +856,10 @@ impl ResolveError {
                 format!("empty agent token; {ACCEPTED_FORMS_MSG}")
             }
             ResolveError::NotFound(tok) => {
-                format!("no agent matching {}; {ACCEPTED_FORMS_MSG}", py_repr_str(tok))
+                format!(
+                    "no agent matching {}; {ACCEPTED_FORMS_MSG}",
+                    py_repr_str(tok)
+                )
             }
             ResolveError::Ambiguous(msg) => msg.clone(),
         }
@@ -890,7 +893,8 @@ fn derived_short(entry: &Value) -> Option<String> {
 /// Return the single matched row, or an ambiguity error. Dedups by `name` (the
 /// PK), so the SAME row matching a tier via multiple rules is not ambiguous.
 fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, ResolveError> {
-    let mut by_name: std::collections::BTreeMap<&str, &'a Value> = std::collections::BTreeMap::new();
+    let mut by_name: std::collections::BTreeMap<&str, &'a Value> =
+        std::collections::BTreeMap::new();
     for e in hits {
         let n = e.get("name").and_then(Value::as_str).unwrap_or("?");
         by_name.entry(n).or_insert(e);
@@ -1009,10 +1013,7 @@ fn claude_resume_argv(
     entry: &Value,
     name: &str,
 ) -> Result<(Vec<String>, Option<String>), i32> {
-    let short_id = entry
-        .get("short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     let uuid = entry
         .get("claude_session_uuid")
         .and_then(Value::as_str)
@@ -1085,10 +1086,7 @@ fn acquire_resume_session_claim(uuid: &str, root: Option<&Path>) -> Result<(), (
 /// point at - never print an unusable command). Probes reality (locate_session +
 /// socket), never the registry `status` field, matching the resume smart verb.
 fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
-    let short_id = entry
-        .get("short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     let uuid = entry
         .get("claude_session_uuid")
         .and_then(Value::as_str)
@@ -1518,10 +1516,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         return 2;
     }
 
-    let short_id = entry
-        .get("short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     if short_id.is_empty() {
         eprintln!(
             "registry entry {} has no short id on file; cannot attach.",
@@ -1812,10 +1807,7 @@ fn run_logs_claude(entry: &Value, args: &LogsArgs) -> i32 {
             "WARN: JSON output for Claude logs not implemented in US3; falling back to raw passthrough"
         );
     }
-    let short_id = entry
-        .get("short_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     if short_id.is_empty() {
         let created = entry
             .get("created_at")
@@ -2288,7 +2280,12 @@ mod tests {
     fn find_agent_entry_resolves_all_three_forms() {
         // AC1-HP: name, full uuid (case-insensitive), and 8-hex short all hit one row.
         let rows = vec![claude_row("billing", "7c5dcf5d", RESOLVE_UUID)];
-        for tok in ["billing", RESOLVE_UUID, &RESOLVE_UUID.to_uppercase(), "7c5dcf5d"] {
+        for tok in [
+            "billing",
+            RESOLVE_UUID,
+            &RESOLVE_UUID.to_uppercase(),
+            "7c5dcf5d",
+        ] {
             let e = find_agent_entry(&rows, tok).expect("resolves");
             assert_eq!(e["name"], "billing");
         }
@@ -2304,18 +2301,31 @@ mod tests {
             "short_id": "billingf", "codex_session_id": uuid, "harness_session_id": uuid,
         });
         let rows = vec![row];
-        assert_eq!(find_agent_entry(&rows, "billingf").unwrap()["name"], "reviewer");
-        assert_eq!(find_agent_entry(&rows, "a1b2c3d4").unwrap()["name"], "reviewer");
+        assert_eq!(
+            find_agent_entry(&rows, "billingf").unwrap()["name"],
+            "reviewer"
+        );
+        assert_eq!(
+            find_agent_entry(&rows, "a1b2c3d4").unwrap()["name"],
+            "reviewer"
+        );
     }
 
     #[test]
     fn find_agent_entry_name_precedence_over_hex() {
         // AC1-EDGE: a hex-shaped name wins over a different row's short_id.
         let rows = vec![
-            claude_row("deadbeef", "aaaa0000", "aaaa0000-0000-0000-0000-000000000000"),
+            claude_row(
+                "deadbeef",
+                "aaaa0000",
+                "aaaa0000-0000-0000-0000-000000000000",
+            ),
             claude_row("other", "deadbeef", "deadbeef-1111-1111-1111-111111111111"),
         ];
-        assert_eq!(find_agent_entry(&rows, "deadbeef").unwrap()["name"], "deadbeef");
+        assert_eq!(
+            find_agent_entry(&rows, "deadbeef").unwrap()["name"],
+            "deadbeef"
+        );
     }
 
     #[test]
@@ -2588,7 +2598,7 @@ mod tests {
         let ch = ClaudeHome::at(home.path());
         let entry = serde_json::json!({
             "name": "w", "provider": "claude",
-            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
         });
         assert_eq!(
             claude_resume_argv(&ch, &entry, "w").unwrap(),
@@ -2600,7 +2610,7 @@ mod tests {
 
         // uuid absent -> refuse (Err 13), never `claude --resume ""`.
         let entry_no_uuid = serde_json::json!({
-            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
         });
         assert_eq!(claude_resume_argv(&ch, &entry_no_uuid, "w"), Err(13));
 
@@ -2666,7 +2676,7 @@ mod tests {
         // Dead row + uuid -> pointer naming both revival commands.
         let entry = serde_json::json!({
             "name": "w", "provider": "claude",
-            "claude_short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
         });
         let msg = claude_attach_pointer(&ch_dead, &entry, "w").expect("dead row -> pointer");
         assert!(msg.contains("fno agents resume w"));
@@ -2674,7 +2684,7 @@ mod tests {
 
         // No uuid -> no pointer (never print an unusable command).
         let no_uuid = serde_json::json!({
-            "name": "w", "provider": "claude", "claude_short_id": "7c5dcf5d",
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
         });
         assert_eq!(claude_attach_pointer(&ch_dead, &no_uuid, "w"), None);
 
@@ -2897,10 +2907,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v9 is the future-drift case a pre-bump reader would have on v8.
+        // v10 is the future-drift case a pre-bump reader would have on v9.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":9,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":10,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown provider -> Err (aider: a real CLI we deliberately do not

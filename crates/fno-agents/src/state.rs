@@ -1369,7 +1369,7 @@ mod tests {
         // v9: the legacy claude_short_id backfills into short_id on load.
         assert_eq!(e.short_id, "abc123");
         assert_eq!(e.legacy_claude_short_id, None); // consumed by the backfill
-        // The other Rust-only field defaults to empty for Python-authored rows.
+                                                    // The other Rust-only field defaults to empty for Python-authored rows.
         assert_eq!(e.project_root, "");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1784,15 +1784,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v9, or - for an old daemon -
-        // a v8 it cannot interpret), while v1..=v8 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v10, or - for an old daemon -
+        // a v9 it cannot interpret), while v1..=v9 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":9,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":10,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 9);
+                assert_eq!(found, 10);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

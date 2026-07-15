@@ -31,7 +31,7 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// Seed registry.json with a single entry (any provider).
 fn seed_registry(home: &AgentsHome, name: &str, provider: &str) {
     let session_field = if provider == "claude" {
-        r#","claude_short_id":"deadbeef""#.to_string()
+        r#","short_id":"deadbeef""#.to_string()
     } else if provider == "codex" {
         r#","codex_session_id":"sess-codex-001""#.to_string()
     } else {

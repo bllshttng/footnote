@@ -168,13 +168,19 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
 
     // Steps 2-5: per registry entry, reconcile its state.json.
     for entry in &registry.entries {
-        // A row with no short_id is a non-PTY (shellout, e.g. Python-authored
-        // `claude`) agent: it has no per-agent state dir, so there is nothing to
-        // reconcile. Skip it rather than probe `state_json("")` -- which would
-        // collide across every such row on one path and emit a spurious
-        // `agent_inconsistent` per row (Gemini medium, PR #364). The orphan-PID
-        // reap below already skips these (their `pid` is `None`).
-        if entry.short_id.is_empty() {
+        // Skip rows with no fno-managed per-agent state dir -- probing
+        // `state_json` for one would emit a spurious `agent_inconsistent`
+        // (Gemini medium, PR #364). Two shapes qualify:
+        //   1. empty short_id: a codex/gemini shellout row (no worker key).
+        //   2. a claude shellout (`ask`/`--bg`) or adopted row. Since v9 (x-1b1e)
+        //      these carry the claude jobId in `short_id` (was `claude_short_id`),
+        //      so the empty-short_id proxy no longer catches them; the only claude
+        //      lane the daemon PTY-manages (and writes a state.json for) is the
+        //      interactive stream-json worker, so a non-interactive claude row is
+        //      a shellout/adopted row with no state dir.
+        let is_claude_shellout = entry.provider == "claude"
+            && entry.host_mode_or_default() != crate::state::HOST_MODE_INTERACTIVE;
+        if entry.short_id.is_empty() || is_claude_shellout {
             continue;
         }
         let state_path = home.state_json(&entry.short_id);
@@ -4363,6 +4369,42 @@ mod tests {
             .iter()
             .any(|e| e["type"] == "agent_inconsistent"
                 && e["data"]["reason"] == "missing_state_json"));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_skips_claude_shellout_rows_no_spurious_inconsistent() {
+        // x-1b1e regression: v9 gives a claude `--bg`/`ask` row a non-empty
+        // short_id (the jobId), and an adopted row keeps its external pid. Neither
+        // has an fno state.json (their process is claude's, not a daemon PTY), so
+        // recover() must NOT probe state_json(jobId) and emit a spurious
+        // agent_inconsistent -- the empty-short_id proxy no longer catches them.
+        let home = tmp_home("recover-claude-shellout");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            // bg/ask: host_mode exec (None), pid None.
+            let mut bg = bg_claude_row("bg-ask", "7c5dcf5d");
+            bg.host_mode = None;
+            r.entries.push(bg);
+            // adopted: host_mode attached, external pid set.
+            let mut adopted = bg_claude_row("cc-adopt", "deadbeef");
+            adopted.host_mode = Some(crate::state::HOST_MODE_ATTACHED.into());
+            adopted.pid = Some(4242);
+            r.entries.push(adopted);
+        })
+        .unwrap();
+        // No state.json written for either row.
+        let report = recover(&home, &emitter);
+        assert!(
+            report.inconsistent.is_empty(),
+            "claude shellout/adopted rows must not be flagged inconsistent: {:?}",
+            report.inconsistent
+        );
+        let events = read_events(&home);
+        assert!(
+            !events.iter().any(|e| e["type"] == "agent_inconsistent"),
+            "no agent_inconsistent event for claude shellout rows"
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

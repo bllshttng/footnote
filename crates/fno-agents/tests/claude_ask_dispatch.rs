@@ -202,12 +202,12 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     let short_id = receipt["short_id"].as_str().unwrap();
     assert_eq!(short_id, "7c5dcf5d");
 
-    // Registry row is Python-readable: claude_short_id present, Rust-only keys
-    // (short_id/project_root) skipped when empty. Parse to be format-agnostic.
+    // Registry row is Python-readable: the claude jobId lives in short_id (v9),
+    // project_root skipped when empty. Parse to be format-agnostic.
     let reg = fs::read_to_string(home.registry_json()).unwrap();
     let v: serde_json::Value = serde_json::from_str(&reg).unwrap();
     let row = &v["agents"][0];
-    assert_eq!(row["claude_short_id"], "7c5dcf5d");
+    assert_eq!(row["short_id"], "7c5dcf5d");
     assert_eq!(row["provider"], "claude");
     assert_eq!(row["status"], "live");
     assert!(
@@ -215,11 +215,8 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         "leaked rust-only key: {}",
         reg
     );
-    assert!(
-        row.get("short_id").is_none(),
-        "leaked rust-only key: {}",
-        reg
-    );
+    // v9: short_id now legitimately carries the claude jobId (asserted above),
+    // so it is present, not skipped -- the old "short_id is none" check is gone.
 
     // agent_ask_done emitted.
     let events = fs::read_to_string(home.events_jsonl()).unwrap();
@@ -607,7 +604,7 @@ fn followup_missing_short_id_exit_12() {
     let home = AgentsHome::at(tmpdir("noid-home"));
     let ch = ClaudeHome::at(tmpdir("noid-claude"));
     let cwd = tmpdir("noid-cwd");
-    // registry entry without claude_short_id
+    // registry entry with no short id on file
     let body = r#"{"schema_version":3,"agents":[{"name":"alice","provider":"claude","cwd":"/tmp","status":"live","created_at":"2026-05-27T00:00:00Z","log_path":null}]}"#;
     fs::create_dir_all(home.registry_json().parent().unwrap()).unwrap();
     fs::write(home.registry_json(), body).unwrap();
@@ -624,5 +621,5 @@ fn followup_missing_short_id_exit_12() {
         &[],
     );
     assert_eq!(out.exit_code, 12);
-    assert!(out.stderr.contains("no claude_short_id"), "{}", out.stderr);
+    assert!(out.stderr.contains("no short id"), "{}", out.stderr);
 }
