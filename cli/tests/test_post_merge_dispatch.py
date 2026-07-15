@@ -469,19 +469,33 @@ def test_warm_inject_failure_falls_back_cold(tmp_path, monkeypatch):
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW2").exists()
 
 
-def test_warm_queue_timeout_falls_back_cold(tmp_path, monkeypatch):
-    """US4: a busy session queues the inject; past the confirm budget the
-    route cold-dispatches."""
+def test_warm_queue_timeout_no_cold_spawn_marks(tmp_path, monkeypatch):
+    """A queued (unconfirmed) inject already typed in -- no cold spawn, no
+    extra notify. Marker IS written (same trust-the-hand-off as cold spawn),
+    so a later call sees marker-exists instead of re-dispatching."""
     _patch_resolver(monkeypatch, "sess-busy")
     warm = _WarmInject(delivered=False, reason="queue-timeout")
     spawn = _Spawn()
+    notify = _Notify()
     res = dispatch_post_merge_ritual(
         7, dedup_key="shaW3", auto_run=True, canonical_root=tmp_path,
         spawn=spawn, source_session_id="sess-busy", warm_inject=warm,
+        notify_origin=notify,
     )
-    assert res.outcome == "dispatched"
-    assert res.detail == "cold: queue-timeout"
-    assert len(spawn.calls) == 1
+    assert res.outcome == "routed-warm"
+    assert res.detail == "queued"
+    assert spawn.calls == []
+    assert notify.calls == []
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW3").exists()
+
+    # A later call (e.g. the origin session now gone) sees marker-exists,
+    # never a redundant cold-spawn.
+    second = dispatch_post_merge_ritual(
+        7, dedup_key="shaW3", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id=None,
+    )
+    assert second.outcome == "already-dispatched"
+    assert spawn.calls == []
 
 
 def test_no_source_session_takes_cold_path(tmp_path):
@@ -659,7 +673,6 @@ def test_default_notifier_addresses_origin_session_durably(monkeypatch):
     assert seen["provider"] == "claude"
     assert seen["from_name"] == "fno"
     assert "PR #42 merged" in seen["message"]
-
 
 def test_origin_mail_failure_keeps_marker_and_dispatch(tmp_path, monkeypatch):
     """AC2-ERR: a mail failure never breaks the dispatch or withholds the marker."""
