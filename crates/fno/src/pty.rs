@@ -598,7 +598,11 @@ mod tests {
              [ -r \"$ZDOTDIR/aliases.zsh\" ] && source \"$ZDOTDIR/aliases.zsh\"\n",
         )
         .unwrap();
-        fs::write(home.join(".config/zsh/aliases.zsh"), "alias fno_marker='ok'\n").unwrap();
+        fs::write(
+            home.join(".config/zsh/aliases.zsh"),
+            "alias fno_marker='ok'\n",
+        )
+        .unwrap();
 
         let out = std::process::Command::new("zsh")
             .arg("-ic")
@@ -613,13 +617,19 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
 
         // AC1-HP: the alias loaded (the :- default fired) and ZDOTDIR ended at the user default.
-        assert!(stdout.contains("fno_marker=ok"), "alias missing (ZDOTDIR clobbered): {stdout}");
+        assert!(
+            stdout.contains("fno_marker=ok"),
+            "alias missing (ZDOTDIR clobbered): {stdout}"
+        );
         assert!(
             stdout.contains(&format!("ZD={}/.config/zsh", home.display())),
             "ZDOTDIR not the user default: {stdout}"
         );
         // AC2-HP: OSC 133 hooks installed - the snippet ran last, not skipped by the fix.
-        assert!(stdout.contains("PRECMD_OK"), "OSC 133 precmd hook missing: {stdout}");
+        assert!(
+            stdout.contains("PRECMD_OK"),
+            "OSC 133 precmd hook missing: {stdout}"
+        );
     }
 
     #[test]
@@ -648,8 +658,14 @@ mod tests {
         let _ = fs::remove_dir_all(&hop);
         let _ = fs::remove_dir_all(&home);
 
-        assert!(stdout.contains("PRECMD_OK"), "OSC 133 hook missing on bare shell: {stdout}");
-        assert!(stderr.is_empty(), "temp rc printed an error on the no-user-rc path: {stderr}");
+        assert!(
+            stdout.contains("PRECMD_OK"),
+            "OSC 133 hook missing on bare shell: {stdout}"
+        );
+        assert!(
+            stderr.is_empty(),
+            "temp rc printed an error on the no-user-rc path: {stderr}"
+        );
     }
 
     #[tokio::test]
