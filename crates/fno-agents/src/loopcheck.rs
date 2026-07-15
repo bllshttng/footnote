@@ -3561,6 +3561,94 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     }
                 }
 
+                // ── Watching idle-allow (x-e2c8) ─────────────────────────────
+                // A verified async wait (CI pending or awaiting a bot review,
+                // head pushed, zero unaddressed findings) plus an agent-armed
+                // <watching> tag idles NON-terminally: the harness re-invokes the
+                // model when the agent's watcher task exits, so re-blocking every
+                // ~90s tick until then is pure no-op overhead. done() and every
+                // terminal above already ran (a terminal always beats an idle),
+                // and this sits BEFORE the NoProgress backstop so a long watched
+                // wait degrades to budget/claim-expiry, never a spurious kill.
+                if let Intent::Watching {
+                    ref reason,
+                    ref timeout,
+                    ..
+                } = intent
+                {
+                    // Substrate gate: a `fno-agents loop run` child EXITS on
+                    // allow (the runtime would synth a NoProgress park or burn a
+                    // re-dispatch), so only park-on-allow substrates idle.
+                    // FNO_DRIVER_LIB is the same discriminator terminal_stop.rs
+                    // uses; do not invent a new marker (AC1-EDGE).
+                    let blocker = if std::env::var("FNO_DRIVER_LIB").is_ok() {
+                        None
+                    } else {
+                        async_wait_class(&pr_info, &head_sha, open_findings.is_empty())
+                    };
+                    if let Some(blocker) = blocker {
+                        // Extend the node claim to cover the watch window BEFORE
+                        // idling, or the idle opens a dispatcher-stampede gap.
+                        // Renewal MUST pass an explicit --ttl (a default refresh
+                        // shrinks the lease to 1min) and MUST return Ok(true)
+                        // (holder match); anything else blocks (AC3-ERR).
+                        let window_ms = watch_window_ms(timeout.as_deref());
+                        let renewed = match (
+                            scan_manifest_field(&manifest_content, "target_claim_key"),
+                            scan_manifest_field(&manifest_content, "target_claim_holder"),
+                        ) {
+                            (Some(key), Some(holder)) => matches!(
+                                crate::claims::renew(&key, &holder, window_ms, None),
+                                Ok(true)
+                            ),
+                            _ => false,
+                        };
+                        if renewed {
+                            emit(
+                                "loop_check_watch_idle",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "pr": pr_info.number,
+                                    "blocker": blocker,
+                                    "declared_timeout": timeout.clone().unwrap_or_default(),
+                                    "reason": reason,
+                                    "lease_ms": window_ms
+                                }),
+                            );
+                            emit(
+                                "loop_check",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "fingerprint": fingerprint,
+                                    "fires": this_fire,
+                                    "consecutive_unchanged": consecutive_after,
+                                    "decision": "allow",
+                                    "intent": "watching",
+                                    "intent_source": intent_source,
+                                    "pr_state": pr_info.state.as_str(),
+                                    "ci": pr_info.ci_conclusion.render(),
+                                    "reviewed": pr_info.reviewed,
+                                    "review_skipped": pr_info.review_skipped,
+                                    "fp_read_failed": fp_read_failed
+                                }),
+                            );
+                            let msg = format!(
+                                "watching: idling until watcher fires (PR #{}, {blocker} pending)",
+                                pr_info.number
+                            );
+                            return (
+                                0,
+                                allow_output("allow", None, &msg, this_fire, Some(fingerprint)),
+                            );
+                        }
+                        // renewal failed / holder mismatch -> fall through to the
+                        // block below (AC3-ERR): never idle without a lease.
+                    }
+                    // not async-wait class, or a loop-run child -> fall through:
+                    // build_block_reason names the real blocker (AC1-ERR CI red,
+                    // AC2-ERR head mismatch / finding).
+                }
+
                 if backstop_tripped && (!pr_open || !ci_ok || !pr_info.reviewed) {
                     // Backstop tripped + done() false -> NoProgress
                     emit(
@@ -3735,6 +3823,44 @@ fn run_done(
         head_sha,
         events_path,
     )
+}
+
+/// Slack added beyond the declared watch window so the claim lease outlives the
+/// agent's watcher (x-e2c8): a watcher that fires right at its timeout must not
+/// race claim expiry.
+const WATCH_SLACK_MS: i64 = 12 * 60_000;
+
+/// Lease window for an idle watch: the declared timeout clamped to [5m, 2h]
+/// (never trust the tag for an unbounded hold) plus slack. Defaults to 30m when
+/// the tag omits or mangles `timeout`, giving the ~40m default lease.
+fn watch_window_ms(timeout: Option<&str>) -> i64 {
+    let declared = timeout
+        .and_then(crate::claims::parse_ttl_ms)
+        .unwrap_or(30 * 60_000);
+    declared.clamp(5 * 60_000, 2 * 3_600_000) + WATCH_SLACK_MS
+}
+
+/// Whether the PR is in the async-wait class a `<watching>` tag may idle on
+/// (x-e2c8): PR open, local HEAD pushed, no unaddressed findings (inline OR
+/// operator), and the sole remaining blocker is CI still pending or an
+/// outstanding bot review. Returns the blocker label, or None if anything else
+/// blocks. External truth only - the tag is a request, this is the authority.
+fn async_wait_class(pr: &PrInfo, local_head: &str, open_findings_empty: bool) -> Option<&'static str> {
+    let head_shipped = !pr.head_oid.is_empty() && pr.head_oid == local_head;
+    if pr.state != PrState::Open
+        || !head_shipped
+        || !pr.unaddressed_findings.is_empty()
+        || !open_findings_empty
+    {
+        return None;
+    }
+    if pr.ci_has_pending {
+        return Some("ci");
+    }
+    if pr.ci_conclusion.is_ok() && !pr.reviewed && !pr.review_skipped {
+        return Some("review");
+    }
+    None
 }
 
 fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
@@ -4344,6 +4470,108 @@ mod tests {
             "pending CI must not read as red; got: {reason}"
         );
         assert!(!reason.contains("failed"), "got: {reason}");
+    }
+
+    // ── Watching idle-allow classification (x-e2c8) ───────────────────────
+    /// An open PR whose head matches local HEAD, CI still pending, no findings.
+    fn watch_pr() -> PrInfo {
+        PrInfo {
+            state: PrState::Open,
+            number: 404,
+            head_oid: "abc".to_string(),
+            ci_conclusion: CiConclusion::Pending,
+            failing_checks: vec![],
+            ci_has_pending: true,
+            mergeable: "UNKNOWN".to_string(),
+            latest_review_ts: "none".to_string(),
+            reviewed: false,
+            missing_bots: vec![],
+            usage_limited: vec![],
+            unaddressed_findings: vec![],
+            review_skipped: false,
+        }
+    }
+
+    #[test]
+    fn watch_idle_classifies_pending_ci() {
+        assert_eq!(async_wait_class(&watch_pr(), "abc", true), Some("ci"));
+    }
+
+    #[test]
+    fn watch_idle_classifies_awaiting_review() {
+        // CI green, no pending checks, but a required bot has not reviewed.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            review_skipped: false,
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+    }
+
+    #[test]
+    fn watch_idle_rejects_head_mismatch() {
+        // AC2-ERR: unpushed work (PR head != local HEAD) is never async-wait.
+        assert_eq!(async_wait_class(&watch_pr(), "def", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_ci_red() {
+        // AC1-ERR: settled-red CI (no pending) blocks, never idles.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Failure(Some("unit".into())),
+            ci_has_pending: false,
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_unaddressed_finding() {
+        // AC2-ERR: an unaddressed blocking inline finding is not async-wait.
+        let pr = PrInfo {
+            unaddressed_findings: vec![Finding {
+                id: 1,
+                author: "codex".into(),
+                path: "a.rs".into(),
+                line: 1,
+                created_at: "none".into(),
+                severity: "P1",
+            }],
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_open_operator_finding() {
+        // An open operator review_finding for the node also blocks idling.
+        assert_eq!(async_wait_class(&watch_pr(), "abc", false), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_non_open_pr() {
+        // A merged/closed PR is not an async wait (green+merged is DonePRGreen).
+        let pr = PrInfo {
+            state: PrState::Merged,
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_window_defaults_clamps_and_slacks() {
+        // Default (no tag timeout): 30m + 12m slack.
+        assert_eq!(watch_window_ms(None), 30 * 60_000 + WATCH_SLACK_MS);
+        // Honored within range.
+        assert_eq!(watch_window_ms(Some("30m")), 30 * 60_000 + WATCH_SLACK_MS);
+        // Below the 5m floor clamps up.
+        assert_eq!(watch_window_ms(Some("1m")), 5 * 60_000 + WATCH_SLACK_MS);
+        // Above the 2h ceiling clamps down.
+        assert_eq!(watch_window_ms(Some("5h")), 2 * 3_600_000 + WATCH_SLACK_MS);
+        // Garbage falls back to the default.
+        assert_eq!(watch_window_ms(Some("soon")), 30 * 60_000 + WATCH_SLACK_MS);
     }
 
     #[test]
