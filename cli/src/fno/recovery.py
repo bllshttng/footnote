@@ -656,7 +656,7 @@ def _materialize_managed_switch(record_id: str, repo_root: Optional[str] = None)
         record = config.by_id.get(record_id)
         if record is None or record.auth != "managed":
             return False
-        managed.switch(record, by_id=config.by_id, emit_fn=_emit)
+        managed.switch(record, by_id=config.by_id, emit_fn=_emit, pin_policy="defer")
         return True
     except Exception:  # noqa: BLE001 - a materialize miss must never crash the sweep; degrade to nudge
         return False

@@ -791,9 +791,11 @@ class TestMaterializeManagedSwitch:
                             lambda *a, **k: self._fake_config(True, rec))
         seen: dict = {}
         monkeypatch.setattr(managed_mod, "switch",
-                            lambda r, **k: seen.update(id=r.id, by_id=k.get("by_id")))
+                            lambda r, **k: seen.update(id=r.id, by_id=k.get("by_id"),
+                                                       pin_policy=k.get("pin_policy")))
         assert recovery._materialize_managed_switch("claude-secondary") is True
         assert seen["id"] == "claude-secondary"
+        assert seen["pin_policy"] == "defer"  # recovery must never swap under live pins
 
     def test_switch_deferred_returns_false(self, monkeypatch):
         from fno.adapters.providers import loader as loader_mod

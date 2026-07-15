@@ -674,6 +674,13 @@ def use_provider(
                 )
         else:
             typer.echo(f"Materialized managed account '{result.active}' into the slot (verified).")
+        if result.pinned_by:
+            typer.echo(
+                f"warning: swapped under {len(result.pinned_by)} live {record.cli} "
+                "session(s); they keep their in-memory auth, and a token refresh "
+                "from one may overwrite the slot",
+                err=True,
+            )
 
     from fno.adapters.providers.model import ProvidersConfig
     new_config = ProvidersConfig(records=config.records, active=provider_id)
