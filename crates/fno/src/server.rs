@@ -8701,6 +8701,25 @@ mod tests {
     /// prunes the client, breaking every later `Command::FocusPane` (no
     /// client view to act on).
     fn seen_test_core() -> (Core, u64, u64, u64, mpsc::Receiver<ServerMsg>) {
+        // attach() below runs a once-per-server restore_squads() ->
+        // squad_store::load(), which defaults to the real $HOME/.fno/squads.json.
+        // A dev box with a live store imports its squads here (an extra $HOME
+        // pane, a squad-id collision), making squad/row-count asserts pass on a
+        // fresh-home CI runner but fail locally. Point the store at a per-thread
+        // path that does not exist, so load() reads it as an empty store and
+        // restore is a no-op. We deliberately do NOT create the dir: a missing
+        // file already reads empty, and the store's own writer create_dir_all's
+        // its parent, so leaving nothing on disk means nothing to clean up.
+        // TEST_PATH is thread-local and one test == one thread, so it never
+        // leaks across tests and needs no teardown.
+        let scratch = std::env::temp_dir().join(format!(
+            "fno-seen-store-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch); // sweep any stale same-pid dir
+        crate::squad_store::set_test_path(&scratch);
+
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
         let p1 = core.spawn_pane(24, 40, "/tmp/seen").expect("pane 1");
