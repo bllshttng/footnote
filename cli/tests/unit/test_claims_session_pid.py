@@ -247,3 +247,22 @@ def test_cmdline_zombie_on_only_source_continues_walk():
         (30, "codex", "/opt/homebrew/bin/codex"),
     )
     assert _resolve_from(child, 10) == 30
+
+
+def test_claude_substring_never_matches_a_cmdline_wrapper_path():
+    """codex P1 (#419): a hook/wrapper `bash` whose argv carries a `.claude/`
+    install path must NOT match as claude (a substring test there would return the
+    transient shell pid); the walk continues to the real claude process. The
+    claude substring rule applies to name()/exe() only, never to argv."""
+    child = _chain(
+        (
+            10,
+            "bash",
+            "/bin/bash",
+            ["bash", "/Users/x/.claude/plugins/fno/hooks/helpers/init-target-state.sh"],
+        ),
+        (20, "2.1.177", "/Users/x/.local/share/claude/versions/2.1.177"),
+    )
+    # Without the guard this returns 10 (the wrapper shell); with it, the real
+    # claude ancestor (20).
+    assert _resolve_from(child, 10) == 20

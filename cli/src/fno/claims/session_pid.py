@@ -43,9 +43,10 @@ _SEGMENT_TOKENS = frozenset(t for t in _HARNESS_TOKENS if t != "claude")
 _PSUTIL_ERRORS = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
 
 
-def _candidate_strings(proc: psutil.Process) -> Iterator[str]:
-    """Yield identity strings for PROC: ``name()``, ``exe()``, and the first two
-    ``cmdline()`` entries. cmdline is what covers node-shim harnesses (gemini is
+def _candidate_strings(proc: psutil.Process) -> Iterator[tuple[str, bool]]:
+    """Yield ``(identity_string, is_cmdline)`` for PROC: ``name()``, ``exe()``
+    (``is_cmdline=False``), then the first two ``cmdline()`` entries
+    (``is_cmdline=True``). cmdline is what covers node-shim harnesses (gemini is
     ``node /.../bin/gemini`` behind a symlink, so name/exe say only ``node``).
     Each getter's psutil failure is skipped independently - a per-getter error is
     "no evidence", not a dead chain.
@@ -56,25 +57,34 @@ def _candidate_strings(proc: psutil.Process) -> Iterator[str]:
         except _PSUTIL_ERRORS:
             continue
         if value:
-            yield value
+            yield value, False
     try:
         argv = proc.cmdline()
     except _PSUTIL_ERRORS:
         argv = []
     for value in argv[:2]:
         if value:
-            yield value
+            yield value, True
 
 
 def _matches_harness(proc: psutil.Process) -> bool:
     """True iff PROC is a recognized harness session binary."""
-    for cand in _candidate_strings(proc):
+    for cand, is_cmdline in _candidate_strings(proc):
         low = cand.lower()
-        if "claude" in low:  # substring, claude only
+        # claude: substring match, but NEVER against a cmdline entry. argv carries
+        # full paths that often contain a `.claude/` install segment - a wrapper
+        # `bash ~/.claude/plugins/fno/hooks/.../init-target-state.sh` is an
+        # ancestor of `fno claim session-pid`, and a substring test there would
+        # match that transient shell and return its short-lived pid instead of the
+        # real long-lived claude process (codex P1, PR #419). name/exe of such a
+        # wrapper are just `bash`/`/bin/bash`, so the substring rule stays sound.
+        if not is_cmdline and "claude" in low:
             return True
         for seg in low.split("/"):
-            # Compare the segment and its extension-stripped stem, so both
-            # `bin/gemini` and `bundle/gemini.js` match `gemini`.
+            # Segment-exact tokens are safe on argv too: a path segment equals a
+            # token only when it IS the harness binary. Compare the segment and
+            # its extension-stripped stem, so both `bin/gemini` and
+            # `bundle/gemini.js` match `gemini`.
             if seg in _SEGMENT_TOKENS or seg.rsplit(".", 1)[0] in _SEGMENT_TOKENS:
                 return True
     return False
