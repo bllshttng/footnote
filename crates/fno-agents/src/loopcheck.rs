@@ -615,7 +615,19 @@ fn session_cost_from_ledger(ledger_path: &Path, session_id: &str) -> f64 {
 #[derive(Debug, PartialEq)]
 enum Intent {
     Promise,
-    Aborted { reason: String },
+    Aborted {
+        reason: String,
+    },
+    /// Agent-declared async watch (x-e2c8): it has armed a harness-tracked
+    /// watcher and wants the session to idle until that watcher fires rather
+    /// than re-blocking every stop tick. All attributes are advisory (used for
+    /// the event and the lease math), never load-bearing: external truth
+    /// decides whether idling is actually allowed.
+    Watching {
+        reason: String,
+        pr: Option<String>,
+        timeout: Option<String>,
+    },
     None,
 }
 
@@ -644,7 +656,10 @@ fn extract_assistant_text(val: &Value) -> String {
     String::new()
 }
 
-/// Detect intent with proper attribute extraction for aborted reason.
+/// Detect intent with proper attribute extraction. Precedence within one
+/// message: aborted > watching > promise (x-e2c8). aborted is the hardest stop;
+/// watching outranks promise so a session that both promises and asks to idle
+/// idles (its promise is re-evaluated on the next wake).
 fn detect_intent_from_text(text: &str) -> Intent {
     // Look for <aborted ...> tag
     if let Some(aborted_start) = text.find("<aborted") {
@@ -653,6 +668,16 @@ fn detect_intent_from_text(text: &str) -> Intent {
             let tag_text = &text[aborted_start..aborted_start + gt + 1];
             let reason = parse_xml_attr(tag_text, "reason").unwrap_or_default();
             return Intent::Aborted { reason };
+        }
+    }
+    if let Some(w_start) = text.find("<watching") {
+        if let Some(gt) = text[w_start..].find('>') {
+            let tag_text = &text[w_start..w_start + gt + 1];
+            return Intent::Watching {
+                reason: parse_xml_attr(tag_text, "reason").unwrap_or_default(),
+                pr: parse_xml_attr(tag_text, "pr"),
+                timeout: parse_xml_attr(tag_text, "timeout"),
+            };
         }
     }
     if text.contains("<promise>") {
@@ -716,6 +741,10 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
 
     let lines: Vec<&str> = content.lines().collect();
     let mut scanned: usize = 0;
+    // `watching` is honored ONLY from the single newest assistant entry
+    // (x-e2c8): a stale watch-request from earlier work must not idle a session
+    // that has since moved on. `promise`/`aborted` keep their bounded lookback.
+    let mut newest_entry = true;
     for line in lines.iter().rev() {
         let line = line.trim();
         if line.is_empty() {
@@ -743,8 +772,17 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
                     return Intent::None;
                 }
             }
+            // A watching tag below the newest entry is stale: skip it (counts
+            // as a scanned entry) and keep scanning for a promise/aborted.
+            Intent::Watching { .. } if !newest_entry => {
+                scanned += 1;
+                if scanned >= INTENT_LOOKBACK_ENTRIES {
+                    return Intent::None;
+                }
+            }
             tagged => return tagged,
         }
+        newest_entry = false;
     }
     Intent::None
 }
@@ -3525,6 +3563,97 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     }
                 }
 
+                // ── Watching idle-allow (x-e2c8) ─────────────────────────────
+                // A verified async wait (CI pending or awaiting a bot review,
+                // head pushed, zero unaddressed findings) plus an agent-armed
+                // <watching> tag idles NON-terminally: the harness re-invokes the
+                // model when the agent's watcher task exits, so re-blocking every
+                // ~90s tick until then is pure no-op overhead. done() and every
+                // terminal above already ran (a terminal always beats an idle),
+                // and this sits BEFORE the NoProgress backstop so a long watched
+                // wait degrades to budget/claim-expiry, never a spurious kill.
+                if let Intent::Watching {
+                    ref reason,
+                    ref timeout,
+                    ..
+                } = intent
+                {
+                    // Harness + substrate gate: only a Claude session self-wakes
+                    // on a background-task exit, and a `fno-agents loop run` child
+                    // (FNO_DRIVER_LIB, the same discriminator terminal_stop.rs
+                    // uses) exits on allow. codex/gemini keep today's block
+                    // behavior until their daemon-consumer waker ships (AC1-EDGE).
+                    let blocker = if harness_can_idle(
+                        author_harness.as_deref(),
+                        std::env::var("FNO_DRIVER_LIB").is_ok(),
+                    ) {
+                        async_wait_class(&pr_info, &head_sha, open_findings.is_empty())
+                    } else {
+                        None
+                    };
+                    if let Some(blocker) = blocker {
+                        // Extend the node claim to cover the watch window BEFORE
+                        // idling, or the idle opens a dispatcher-stampede gap.
+                        // Renewal MUST pass an explicit --ttl (a default refresh
+                        // shrinks the lease to 1min) and MUST return Ok(true)
+                        // (holder match); anything else blocks (AC3-ERR).
+                        let window_ms = watch_window_ms(timeout.as_deref());
+                        let renewed = match (
+                            scan_manifest_field(&manifest_content, "target_claim_key"),
+                            scan_manifest_field(&manifest_content, "target_claim_holder"),
+                        ) {
+                            (Some(key), Some(holder)) => matches!(
+                                crate::claims::renew(&key, &holder, window_ms, None),
+                                Ok(true)
+                            ),
+                            _ => false,
+                        };
+                        if renewed {
+                            emit(
+                                "loop_check_watch_idle",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "pr": pr_info.number,
+                                    "blocker": blocker,
+                                    "declared_timeout": timeout.clone().unwrap_or_default(),
+                                    "reason": reason,
+                                    "lease_ms": window_ms
+                                }),
+                            );
+                            emit(
+                                "loop_check",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "fingerprint": fingerprint,
+                                    "fires": this_fire,
+                                    "consecutive_unchanged": consecutive_after,
+                                    "decision": "allow",
+                                    "intent": "watching",
+                                    "intent_source": intent_source,
+                                    "pr_state": pr_info.state.as_str(),
+                                    "ci": pr_info.ci_conclusion.render(),
+                                    "reviewed": pr_info.reviewed,
+                                    "review_skipped": pr_info.review_skipped,
+                                    "fp_read_failed": fp_read_failed
+                                }),
+                            );
+                            let msg = format!(
+                                "watching: idling until watcher fires (PR #{}, {blocker} pending)",
+                                pr_info.number
+                            );
+                            return (
+                                0,
+                                allow_output("allow", None, &msg, this_fire, Some(fingerprint)),
+                            );
+                        }
+                        // renewal failed / holder mismatch -> fall through to the
+                        // block below (AC3-ERR): never idle without a lease.
+                    }
+                    // not async-wait class, or a loop-run child -> fall through:
+                    // build_block_reason names the real blocker (AC1-ERR CI red,
+                    // AC2-ERR head mismatch / finding).
+                }
+
                 if backstop_tripped && (!pr_open || !ci_ok || !pr_info.reviewed) {
                     // Backstop tripped + done() false -> NoProgress
                     emit(
@@ -3664,7 +3793,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, wait silently and do not reply or narrate until the state changes.",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `timeout 1800 gh pr checks <N> --watch`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
         &cwd,
         &session_id,
     );
@@ -3701,6 +3830,95 @@ fn run_done(
     )
 }
 
+/// Slack added beyond the declared watch window so the claim lease outlives the
+/// agent's watcher (x-e2c8): a watcher that fires right at its timeout must not
+/// race claim expiry.
+const WATCH_SLACK_MS: i64 = 12 * 60_000;
+
+/// Lease window for an idle watch: the declared timeout clamped to [5m, 2h]
+/// (never trust the tag for an unbounded hold) plus slack. Defaults to 30m when
+/// the tag omits or mangles `timeout`, giving the ~40m default lease.
+fn watch_window_ms(timeout: Option<&str>) -> i64 {
+    let declared = timeout
+        .and_then(crate::claims::parse_ttl_ms)
+        .unwrap_or(30 * 60_000);
+    declared.clamp(5 * 60_000, 2 * 3_600_000) + WATCH_SLACK_MS
+}
+
+/// Whether a session's harness + substrate can park-and-wake on a `<watching>`
+/// idle (x-e2c8). Only a Claude session's harness-tracked background/Monitor
+/// tasks re-invoke the model when they exit, so only Claude may idle. A
+/// `fno-agents loop run` child exits on allow (FNO_DRIVER_LIB set), and
+/// codex/gemini have no self-wake on background-task exit - their waker is the
+/// fno-agents daemon consuming the watch event, shipped as a separate
+/// live-verified follow-up - so all of those keep today's block behavior rather
+/// than idling with nothing to wake them (a dead watch). This is the design's
+/// "unroutable harness -> status quo, never a dead watch" degradation.
+fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
+    author_harness == Some("claude") && !is_loop_run_child
+}
+
+/// Whether the PR is in the async-wait class a `<watching>` tag may idle on
+/// (x-e2c8): PR open, local HEAD pushed, no unaddressed findings (inline OR
+/// operator), and the sole remaining blocker is CI still pending or an
+/// outstanding bot review. Returns the blocker label, or None if anything else
+/// blocks. External truth only - the tag is a request, this is the authority.
+fn async_wait_class(
+    pr: &PrInfo,
+    local_head: &str,
+    open_findings_empty: bool,
+) -> Option<&'static str> {
+    let head_shipped = !pr.head_oid.is_empty() && pr.head_oid == local_head;
+    if pr.state != PrState::Open
+        || !head_shipped
+        || !pr.unaddressed_findings.is_empty()
+        || !open_findings_empty
+    {
+        return None;
+    }
+    // CI still pending AND nothing has concluded red yet: idle on CI. If a
+    // check has ALREADY failed while others run, do NOT idle - the agent should
+    // start debugging the failure now rather than wait out the rest (gemini).
+    if pr.ci_has_pending && !matches!(pr.ci_conclusion, CiConclusion::Failure(_)) {
+        return Some("ci");
+    }
+    // Awaiting an EXTERNAL bot review: a real GitHub login WILL post it, so
+    // idling until it does is correct. `reviewed == false` with an EMPTY
+    // missing_bots is instead a LOCAL-attestation gate (config.review.reviewers,
+    // e.g. sigma) or an unaddressed finding - work the agent must DO, and no
+    // GitHub reviewer will ever appear to wake it, so idling would park the
+    // session forever. Require an outstanding bot (codex P1).
+    if pr.ci_conclusion.is_ok() && !pr.reviewed && !pr.review_skipped && !pr.missing_bots.is_empty()
+    {
+        return Some("review");
+    }
+    None
+}
+
+/// The arm-and-tag ritual (x-e2c8, US3) that converts an unwatched async wait
+/// into a single idle turn. Supersedes the old "wait silently" prose: waiting
+/// silently still costs a full model invocation every ~90s tick, whereas arming
+/// a harness-tracked watcher and emitting `<watching>` idles the session to ZERO
+/// invocations until the watcher fires. The `timeout N gh pr checks` shape is a
+/// template (gh's `--watch` exit varies by version); the design depends only on
+/// the task EXITING, never on its exit code.
+fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
+    // The watcher must WAIT on the actual blocker. `gh pr checks --watch` exits
+    // the instant CI has no pending checks, so on a review wait (CI already
+    // green) it returns immediately and the session just re-blocks - the review
+    // path needs a watcher that polls REVIEW state, not checks (codex P2).
+    let watcher = if blocker == "review" {
+        format!(
+            "background Bash `timeout 1800 bash -c 'n=$(gh pr view {pr_number} --json reviews --jq \".reviews|length\"); while [ \"$(gh pr view {pr_number} --json reviews --jq \".reviews|length\")\" -le \"$n\" ]; do sleep 60; done'` (wakes when a new review posts, or at the timeout)"
+        )
+    } else {
+        format!("background Bash `timeout 1800 gh pr checks {pr_number} --watch`")
+    };
+    format!(
+        " Arm a harness-tracked watcher with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
+    )
+}
+
 fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
     if !pr.state.is_open_or_merged() {
         return format!(
@@ -3731,8 +3949,9 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
         // into debugging a nonexistent failure on every quiet fire.
         if pr.ci_conclusion == CiConclusion::Pending {
             return format!(
-                "CI still running on PR #{}; wait for it to finish. Nothing to do here: wait silently and do not reply or narrate until this state changes.",
-                pr.number
+                "CI still running on PR #{}.{}",
+                pr.number,
+                arm_watch_hint(pr.number, "ci")
             );
         }
         let check_name = match &pr.ci_conclusion {
@@ -3745,11 +3964,13 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
     if !pr.reviewed {
         if !pr.missing_bots.is_empty() {
             // AC1-UI: name the specific missing bot(s), not a generic
-            // "not reviewed".
+            // "not reviewed". Awaiting a bot review is an async wait, so teach
+            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
             return format!(
-                "PR #{}: {} has not reviewed",
+                "PR #{}: {} has not reviewed.{}",
                 pr.number,
-                pr.missing_bots.join(", ")
+                pr.missing_bots.join(", "),
+                arm_watch_hint(pr.number, "review")
             );
         }
         if !pr.unaddressed_findings.is_empty() {
@@ -3765,7 +3986,11 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
                 pr.number, f.author, f.severity, f.path, f.line, more
             );
         }
-        return format!("PR #{} not yet reviewed by a bot reviewer", pr.number);
+        return format!(
+            "PR #{} not yet reviewed by a bot reviewer.{}",
+            pr.number,
+            arm_watch_hint(pr.number, "review")
+        );
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
@@ -4101,6 +4326,107 @@ mod tests {
     }
 
     #[test]
+    fn watching_intent_parses_all_attrs() {
+        let (intent, source) = detect_intent(
+            Some("waiting <watching reason=\"ci\" pr=\"404\" timeout=\"30m\">"),
+            Path::new("/nonexistent"),
+        );
+        assert_eq!(source, "payload");
+        assert_eq!(
+            intent,
+            Intent::Watching {
+                reason: "ci".into(),
+                pr: Some("404".into()),
+                timeout: Some("30m".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn watching_intent_malformed_attrs_default_to_absent() {
+        // A bare tag: attributes absent, not an error; lease math applies its
+        // own default window downstream.
+        let (intent, _) = detect_intent(Some("<watching>"), Path::new("/nonexistent"));
+        assert_eq!(
+            intent,
+            Intent::Watching {
+                reason: String::new(),
+                pr: None,
+                timeout: None,
+            }
+        );
+    }
+
+    #[test]
+    fn watching_intent_aborted_beats_watching() {
+        let (intent, _) = detect_intent(
+            Some("<watching reason=\"ci\" pr=\"1\"> <aborted reason=\"kill\">"),
+            Path::new("/nonexistent"),
+        );
+        assert!(matches!(intent, Intent::Aborted { ref reason } if reason == "kill"));
+    }
+
+    #[test]
+    fn watching_intent_beats_promise() {
+        let (intent, _) = detect_intent(
+            Some("<promise>done</promise> <watching reason=\"review\" pr=\"9\">"),
+            Path::new("/nonexistent"),
+        );
+        assert!(matches!(intent, Intent::Watching { .. }));
+    }
+
+    #[test]
+    fn watching_intent_newest_transcript_entry_honored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let line = serde_json::json!({
+            "message": {"role": "assistant", "content": "<watching reason=\"ci\" pr=\"7\">"}
+        });
+        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
+        assert!(matches!(detect_intent_full(&path), Intent::Watching { .. }));
+    }
+
+    #[test]
+    fn watching_intent_stale_transcript_not_honored() {
+        // AC3-EDGE: a watching tag 2 entries back with a tag-less newest entry
+        // must NOT resurrect as Watching (payload-or-newest-entry rule).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let mut content = String::new();
+        for text in [
+            "<watching reason=\"ci\" pr=\"3\">", // oldest
+            "still going",
+            "moving on to unrelated work", // newest
+        ] {
+            let line = serde_json::json!({"message": {"role": "assistant", "content": text}});
+            content.push_str(&serde_json::to_string(&line).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(detect_intent_full(&path), Intent::None);
+    }
+
+    #[test]
+    fn watching_intent_stale_watch_does_not_shadow_deeper_promise() {
+        // A stale watching in the newest-but-one entry is skipped, and a real
+        // promise deeper in the lookback window still wins.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let mut content = String::new();
+        for text in [
+            "<promise>MISSION COMPLETE: shipped</promise>", // oldest, real
+            "<watching reason=\"ci\" pr=\"3\">",            // stale (not newest)
+            "tag-less newest",                              // newest
+        ] {
+            let line = serde_json::json!({"message": {"role": "assistant", "content": text}});
+            content.push_str(&serde_json::to_string(&line).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(detect_intent_full(&path), Intent::Promise);
+    }
+
+    #[test]
     fn detect_intent_absent_payload_falls_back_to_transcript() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("t.jsonl");
@@ -4207,6 +4533,194 @@ mod tests {
             "pending CI must not read as red; got: {reason}"
         );
         assert!(!reason.contains("failed"), "got: {reason}");
+    }
+
+    #[test]
+    fn unwatched_async_nudge_ci_pending_teaches_arm_and_tag() {
+        // AC3-HP: the CI-pending block message must instruct arming a
+        // harness-tracked watcher with a timeout and emitting <watching>,
+        // replacing the old "wait silently" prose.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Pending,
+            ci_has_pending: true,
+            ..watch_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(reason.contains("<watching"), "got: {reason}");
+        assert!(reason.contains("timeout"), "got: {reason}");
+        assert!(reason.contains("gh pr checks"), "got: {reason}");
+        assert!(!reason.contains("wait silently"), "got: {reason}");
+    }
+
+    #[test]
+    fn unwatched_async_nudge_missing_review_teaches_arm_and_tag() {
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            missing_bots: vec!["chatgpt-codex-connector".into()],
+            ..watch_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
+        assert!(reason.contains("<watching"), "got: {reason}");
+    }
+
+    // ── Watching idle-allow classification (x-e2c8) ───────────────────────
+    /// An open PR whose head matches local HEAD, CI still pending, no findings.
+    fn watch_pr() -> PrInfo {
+        PrInfo {
+            state: PrState::Open,
+            number: 404,
+            head_oid: "abc".to_string(),
+            ci_conclusion: CiConclusion::Pending,
+            failing_checks: vec![],
+            ci_has_pending: true,
+            mergeable: "UNKNOWN".to_string(),
+            latest_review_ts: "none".to_string(),
+            reviewed: false,
+            missing_bots: vec![],
+            usage_limited: vec![],
+            unaddressed_findings: vec![],
+            review_skipped: false,
+        }
+    }
+
+    #[test]
+    fn watch_idle_classifies_pending_ci() {
+        assert_eq!(async_wait_class(&watch_pr(), "abc", true), Some("ci"));
+    }
+
+    #[test]
+    fn codex_watch_harness_gate_is_claude_only() {
+        // Only Claude self-wakes on a background-task exit, so only Claude idles.
+        assert!(harness_can_idle(Some("claude"), false));
+        // A loop-run child (FNO_DRIVER_LIB) exits on allow -> never idles.
+        assert!(!harness_can_idle(Some("claude"), true));
+        // codex/gemini have no self-wake; their daemon-consumer waker ships
+        // separately, so until then they keep today's block behavior.
+        assert!(!harness_can_idle(Some("codex"), false));
+        assert!(!harness_can_idle(Some("gemini"), false));
+        // Unknown harness (bare shell / daemon): conservative block.
+        assert!(!harness_can_idle(None, false));
+    }
+
+    #[test]
+    fn watch_idle_classifies_awaiting_review() {
+        // CI green, no pending checks, and a required GitHub bot has not reviewed.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            review_skipped: false,
+            missing_bots: vec!["chatgpt-codex-connector".into()],
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+    }
+
+    #[test]
+    fn watch_idle_rejects_ci_pending_with_a_failure() {
+        // gemini finding: a check has ALREADY concluded red while others run.
+        // The agent should debug now, not idle out the remaining pending checks.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Failure(Some("unit".into())),
+            ci_has_pending: true,
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_local_attestation_review_gate() {
+        // codex P1: reviewed=false with an EMPTY missing_bots is a local
+        // attestation (sigma) or unaddressed-finding gate - no GitHub reviewer
+        // will ever post to wake the session, so idling would park it forever.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            review_skipped: false,
+            missing_bots: vec![],
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn unwatched_async_nudge_review_uses_review_aware_watcher() {
+        // codex P2: the review-wait watcher must poll REVIEW state, not
+        // `gh pr checks --watch` (which exits instantly when CI is green).
+        let hint = arm_watch_hint(404, "review");
+        assert!(hint.contains("--json reviews"), "got: {hint}");
+        assert!(!hint.contains("gh pr checks"), "got: {hint}");
+        // The CI-wait watcher still uses checks --watch.
+        let ci_hint = arm_watch_hint(404, "ci");
+        assert!(ci_hint.contains("gh pr checks"), "got: {ci_hint}");
+    }
+
+    #[test]
+    fn watch_idle_rejects_head_mismatch() {
+        // AC2-ERR: unpushed work (PR head != local HEAD) is never async-wait.
+        assert_eq!(async_wait_class(&watch_pr(), "def", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_ci_red() {
+        // AC1-ERR: settled-red CI (no pending) blocks, never idles.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Failure(Some("unit".into())),
+            ci_has_pending: false,
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_unaddressed_finding() {
+        // AC2-ERR: an unaddressed blocking inline finding is not async-wait.
+        let pr = PrInfo {
+            unaddressed_findings: vec![Finding {
+                id: 1,
+                author: "codex".into(),
+                path: "a.rs".into(),
+                line: 1,
+                created_at: "none".into(),
+                severity: "P1",
+            }],
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_open_operator_finding() {
+        // An open operator review_finding for the node also blocks idling.
+        assert_eq!(async_wait_class(&watch_pr(), "abc", false), None);
+    }
+
+    #[test]
+    fn watch_idle_rejects_non_open_pr() {
+        // A merged/closed PR is not an async wait (green+merged is DonePRGreen).
+        let pr = PrInfo {
+            state: PrState::Merged,
+            ..watch_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    #[test]
+    fn watch_idle_window_defaults_clamps_and_slacks() {
+        // Default (no tag timeout): 30m + 12m slack.
+        assert_eq!(watch_window_ms(None), 30 * 60_000 + WATCH_SLACK_MS);
+        // Honored within range.
+        assert_eq!(watch_window_ms(Some("30m")), 30 * 60_000 + WATCH_SLACK_MS);
+        // Below the 5m floor clamps up.
+        assert_eq!(watch_window_ms(Some("1m")), 5 * 60_000 + WATCH_SLACK_MS);
+        // Above the 2h ceiling clamps down.
+        assert_eq!(watch_window_ms(Some("5h")), 2 * 3_600_000 + WATCH_SLACK_MS);
+        // Garbage falls back to the default.
+        assert_eq!(watch_window_ms(Some("soon")), 30 * 60_000 + WATCH_SLACK_MS);
     }
 
     #[test]
@@ -4636,6 +5150,29 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["termination_reason"].is_null());
         assert!(v["fingerprint"].is_null());
+    }
+
+    #[test]
+    fn watch_idle_event_is_non_terminal_allow() {
+        // AC1-HP invariant: the idle branch emits allow + null termination, so
+        // the stop-hook shim (which runs finalize only on a NON-null
+        // termination_reason) never invokes finalize / stamps the ledger /
+        // graduates a plan on an idle fire. This is the exact output shape the
+        // idle branch returns.
+        let json = allow_output(
+            "allow",
+            None,
+            "watching: idling until watcher fires (PR #404, ci pending)",
+            3,
+            Some("sha|OPEN|PENDING|none".to_string()),
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert!(
+            v["termination_reason"].is_null(),
+            "idle-allow MUST be non-terminal or finalize would run"
+        );
+        assert!(v["message"].as_str().unwrap().contains("watching"));
     }
 
     #[test]

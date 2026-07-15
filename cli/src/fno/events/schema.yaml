@@ -1582,8 +1582,8 @@ event_types:
           description: "The decision made this fire."
         intent:
           type: string
-          enum: [promise, aborted, backstop, none]
-          description: "Intent detected in the transcript."
+          enum: [promise, aborted, watching, backstop, none]
+          description: "Intent detected in the transcript. 'watching' = the agent declared an armed async watcher and the fire idled non-terminally (x-e2c8)."
         intent_source:
           type: string
           enum: [payload, transcript]
@@ -1645,6 +1645,33 @@ event_types:
         stderr_tail:
           type: string
           description: "Last few lines of gh stderr, or empty string if unavailable."
+    consumers: [operator]
+
+  - name: loop_check_watch_idle
+    description: "Emitted when a loop-check fire idles a session non-terminally on a verified async wait after the agent declared a <watching> tag (x-e2c8). The claim lease was extended to cover the watch window; the session parks until its harness-tracked watcher fires. On codex this event doubles as the daemon's watch registration."
+    sources: [hook]
+    data:
+      required: [session_id, pr, blocker, lease_ms]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        pr:
+          type: integer
+          description: "PR number the session is watching."
+        blocker:
+          type: string
+          enum: [ci, review]
+          description: "The async blocker being waited on: 'ci' (checks pending) or 'review' (a bot review outstanding)."
+        declared_timeout:
+          type: string
+          description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."
+        reason:
+          type: string
+          description: "Optional. The raw reason attribute from the <watching> tag."
+        lease_ms:
+          type: integer
+          description: "The claim-lease window (ms) the fire renewed to cover the watch: declared timeout clamped to [5m,2h] plus slack."
     consumers: [operator]
 
   - name: loop_advisory_mode

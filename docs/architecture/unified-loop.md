@@ -141,6 +141,7 @@ Envelope shape for all loop-runtime events:
 |---|---|---|
 | `loop_check` | hook | every stop-hook fire |
 | `termination` | hook | session allows exit (TerminationReason) |
+| `loop_check_watch_idle` | hook | a `<watching>` Claude session idles non-terminally on a verified async wait (CI pending / bot review outstanding); the fire returns `allow` with `termination_reason: null` and extends the claim lease, so the session parks until its harness-tracked watcher fires instead of re-blocking every tick. Claude-only: a `FNO_DRIVER_LIB` loop-run child exits on allow, and codex/gemini have no self-wake on background-task exit (their daemon-consumer waker ships separately), so both keep today's block behavior. |
 | `loop_check_gh_error` | hook | gh read fails during `done()` |
 | `loop_advisory_mode` | hook | advisory-mode session |
 | `loop_check_binary_missing` | hook | `fno-agents` binary not found |
