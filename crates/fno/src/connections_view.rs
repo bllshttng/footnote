@@ -140,6 +140,20 @@ pub enum WizardStep {
     ApiKey,
 }
 
+/// The `n` new-combo form (Order tab): a name then a comma-separated member list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComboInput {
+    pub step: ComboInputStep,
+    pub name: String,
+    pub members: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComboInputStep {
+    Name,
+    Members,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddKind {
     Claude,
@@ -217,6 +231,14 @@ pub struct ConnectionsView {
     /// A pending remove confirm (Enter runs, any other key cancels). While
     /// `Some`, keys route to the confirm (AC1-ERR / destructive-guard).
     pub confirm: Option<PendingConfirm>,
+    /// Member cursor within the selected combo's list (Order tab).
+    pub member_sel: usize,
+    /// Buffered member order for the selected combo while reordering (Order tab).
+    /// `None` = viewing committed order; `Some` = dirty, committed on Enter,
+    /// reverted on Esc / combo switch (AC2-FR: never a verb per keystroke).
+    pub dirty_order: Option<Vec<String>>,
+    /// The `n` new-combo input form (name -> providers csv), Order tab.
+    pub combo_input: Option<ComboInput>,
     /// The `a`dd wizard, `Some` while collecting inputs. Keys divert to it.
     pub wizard: Option<Wizard>,
     /// Session-local pending logins, rendered as synthetic Accounts rows after
@@ -240,10 +262,29 @@ impl ConnectionsView {
             acting: false,
             notice: None,
             confirm: None,
+            member_sel: 0,
+            dirty_order: None,
+            combo_input: None,
             wizard: None,
             pending: Vec::new(),
             gen: 0,
         }
+    }
+
+    /// The combo the Order-tab cursor is on, if any.
+    fn selected_combo(&self) -> Option<&ComboRow> {
+        self.combos.get(self.combo_sel)
+    }
+
+    /// The member order currently shown for the selected combo: the dirty buffer
+    /// if reordering, else the committed order.
+    fn shown_members(&self) -> Vec<String> {
+        if let Some(dirty) = &self.dirty_order {
+            return dirty.clone();
+        }
+        self.selected_combo()
+            .map(|c| c.members.clone())
+            .unwrap_or_default()
     }
 
     /// Total selectable Accounts rows: real records + session-local pending logins.
@@ -286,6 +327,8 @@ impl ConnectionsView {
                 self.accounts = accounts;
                 self.combos = combos;
                 self.state = ModalState::Ready;
+                // Fresh data is the committed truth; drop any stale reorder buffer.
+                self.dirty_order = None;
                 self.clamp_selection();
             }
             ReadOutcome::Degraded(reason) => {
@@ -302,6 +345,10 @@ impl ConnectionsView {
         if self.combo_sel >= self.combos.len() {
             self.combo_sel = self.combos.len().saturating_sub(1);
         }
+        let mlen = self.shown_members().len();
+        if self.member_sel >= mlen {
+            self.member_sel = mlen.saturating_sub(1);
+        }
     }
 
     /// Pure key reducer. Returns the intent for the async wrapper to execute.
@@ -311,6 +358,10 @@ impl ConnectionsView {
         // The add wizard, while open, captures all keys (typed input + toggles).
         if self.wizard.is_some() {
             return self.wizard_key(key);
+        }
+        // The new-combo form captures all keys while open.
+        if self.combo_input.is_some() {
+            return self.combo_input_key(key);
         }
         // A pending confirm captures all keys: Enter commits, anything else
         // cancels (no destructive action without an explicit confirm).
@@ -326,22 +377,40 @@ impl ConnectionsView {
 
         // A degraded modal disables everything but refresh + close (AC2-ERR).
         let degraded = matches!(self.state, ModalState::Degraded(_));
+        // Esc discards an uncommitted reorder before it closes the modal (AC2-FR).
+        if key == 0x1b {
+            if self.dirty_order.take().is_some() {
+                self.notice = Some("reorder discarded".to_string());
+                return ConnIntent::Redraw;
+            }
+            return ConnIntent::Close;
+        }
         match key {
-            0x1b => ConnIntent::Close, // Esc
             b'\t' => {
                 self.tab = match self.tab {
                     Tab::Accounts => Tab::Order,
                     Tab::Order => Tab::Accounts,
                 };
+                // Switching tabs abandons an uncommitted reorder (AC2-FR).
+                self.dirty_order = None;
                 self.notice = None;
                 ConnIntent::Redraw
             }
             b'R' => ConnIntent::Refresh,
-            b'j' if !degraded => self.move_sel(1),
-            b'k' if !degraded => self.move_sel(-1),
-            b'u' if !degraded && self.tab == Tab::Accounts => self.act_use(),
-            b'd' if !degraded && self.tab == Tab::Accounts => self.act_remove(),
-            b'a' if !degraded && self.tab == Tab::Accounts => {
+            _ if degraded => ConnIntent::Bell,
+            _ if self.tab == Tab::Accounts => self.accounts_key(key),
+            _ => self.order_key(key),
+        }
+    }
+
+    /// Accounts-tab keys (not degraded).
+    fn accounts_key(&mut self, key: u8) -> ConnIntent {
+        match key {
+            b'j' => self.move_sel(1),
+            b'k' => self.move_sel(-1),
+            b'u' => self.act_use(),
+            b'd' => self.act_remove(),
+            b'a' => {
                 self.wizard = Some(Wizard {
                     step: WizardStep::Id,
                     id: String::new(),
@@ -352,12 +421,209 @@ impl ConnectionsView {
                 self.notice = None;
                 ConnIntent::Redraw
             }
-            b'r' if !degraded && self.tab == Tab::Accounts => self.act_register(),
-            _ => {
-                // No zero-feedback keypress: an unhandled key rings the bell so
-                // the operator always gets feedback (AC1-UI).
-                ConnIntent::Bell
+            b'r' => self.act_register(),
+            _ => ConnIntent::Bell,
+        }
+    }
+
+    /// Order-tab keys (not degraded): j/k move the member cursor, h/l switch
+    /// combos, J/K reorder (buffered), Enter commits, space activates, d removes,
+    /// n creates.
+    fn order_key(&mut self, key: u8) -> ConnIntent {
+        match key {
+            b'h' | b'l' => {
+                // Switch the selected combo; abandon any uncommitted reorder.
+                let n = self.combos.len();
+                if n == 0 {
+                    return ConnIntent::Bell;
+                }
+                let delta: isize = if key == b'l' { 1 } else { -1 };
+                let next = (self.combo_sel as isize + delta).clamp(0, n as isize - 1) as usize;
+                if next == self.combo_sel {
+                    return ConnIntent::Bell;
+                }
+                self.combo_sel = next;
+                self.member_sel = 0;
+                self.dirty_order = None;
+                ConnIntent::Redraw
             }
+            b'j' | b'k' => {
+                let len = self.shown_members().len();
+                if len == 0 {
+                    return ConnIntent::Bell;
+                }
+                let delta: isize = if key == b'j' { 1 } else { -1 };
+                let next = (self.member_sel as isize + delta).clamp(0, len as isize - 1) as usize;
+                if next == self.member_sel {
+                    return ConnIntent::Bell;
+                }
+                self.member_sel = next;
+                ConnIntent::Redraw
+            }
+            b'J' | b'K' => self.reorder_member(if key == b'J' { 1 } else { -1 }),
+            b'\r' | b'\n' => self.commit_reorder(),
+            b' ' => self.act_activate_combo(),
+            b'd' => self.act_remove_combo(),
+            b'n' => {
+                self.combo_input = Some(ComboInput {
+                    step: ComboInputStep::Name,
+                    name: String::new(),
+                    members: String::new(),
+                });
+                self.notice = None;
+                ConnIntent::Redraw
+            }
+            _ => ConnIntent::Bell,
+        }
+    }
+
+    /// Buffer a member move at `member_sel` by `delta` (down=+1/up=-1). Seeds the
+    /// dirty buffer from the committed order on the first move; the member cursor
+    /// follows the moved member.
+    fn reorder_member(&mut self, delta: isize) -> ConnIntent {
+        let mut members = self.shown_members();
+        let len = members.len();
+        if len < 2 {
+            return ConnIntent::Bell;
+        }
+        let from = self.member_sel;
+        let to = from as isize + delta;
+        if to < 0 || to >= len as isize {
+            return ConnIntent::Bell; // at the edge
+        }
+        let to = to as usize;
+        members.swap(from, to);
+        self.member_sel = to;
+        self.dirty_order = Some(members);
+        ConnIntent::Redraw
+    }
+
+    /// Enter: commit a dirty reorder as one atomic `combos update` (AC4-HP). No
+    /// dirty buffer -> a bell (nothing to commit); this is not a zero-feedback
+    /// no-op (AC1-UI).
+    fn commit_reorder(&mut self) -> ConnIntent {
+        let Some(order) = self.dirty_order.take() else {
+            return ConnIntent::Bell;
+        };
+        let Some(name) = self.selected_combo().map(|c| c.name.clone()) else {
+            return ConnIntent::Bell;
+        };
+        if self.acting {
+            self.dirty_order = Some(order);
+            self.notice = Some("busy - one action at a time".to_string());
+            return ConnIntent::Redraw;
+        }
+        self.acting = true;
+        self.notice = None;
+        ConnIntent::Run(vec![
+            "providers".into(),
+            "combos".into(),
+            "update".into(),
+            name,
+            "--providers".into(),
+            order.join(","),
+        ])
+    }
+
+    /// space: set the selected combo active. Refused with a notice when it has a
+    /// dangling member (AC2-EDGE) - activating a broken combo is a footgun.
+    fn act_activate_combo(&mut self) -> ConnIntent {
+        if self.acting {
+            self.notice = Some("busy - one action at a time".to_string());
+            return ConnIntent::Redraw;
+        }
+        let known: std::collections::HashSet<&str> =
+            self.accounts.iter().map(|a| a.id.as_str()).collect();
+        let Some(combo) = self.selected_combo() else {
+            return ConnIntent::Bell;
+        };
+        if let Some(missing) = combo.members.iter().find(|m| !known.contains(m.as_str())) {
+            self.notice = Some(format!(
+                "combo {} has a dangling member {missing} - fix the order first",
+                combo.name
+            ));
+            return ConnIntent::Redraw;
+        }
+        let name = combo.name.clone();
+        self.acting = true;
+        self.notice = None;
+        ConnIntent::Run(vec!["providers".into(), "combos".into(), "use".into(), name])
+    }
+
+    /// d: remove the selected combo behind an Enter-confirm.
+    fn act_remove_combo(&mut self) -> ConnIntent {
+        if self.acting {
+            self.notice = Some("busy - one action at a time".to_string());
+            return ConnIntent::Redraw;
+        }
+        let Some(combo) = self.selected_combo() else {
+            return ConnIntent::Bell;
+        };
+        let name = combo.name.clone();
+        self.confirm = Some(PendingConfirm {
+            label: format!("remove combo {name}? (Enter=yes, any key=no)"),
+            argv: vec!["providers".into(), "combos".into(), "remove".into(), name],
+        });
+        ConnIntent::Redraw
+    }
+
+    /// Handle a key while the new-combo form is open (name -> members csv).
+    fn combo_input_key(&mut self, key: u8) -> ConnIntent {
+        if key == 0x1b {
+            self.combo_input = None;
+            self.notice = Some("new combo cancelled".to_string());
+            return ConnIntent::Redraw;
+        }
+        let Some(ci) = self.combo_input.as_mut() else {
+            return ConnIntent::Bell;
+        };
+        let field = match ci.step {
+            ComboInputStep::Name => &mut ci.name,
+            ComboInputStep::Members => &mut ci.members,
+        };
+        match key {
+            b'\r' | b'\n' => match ci.step {
+                ComboInputStep::Name => {
+                    if ci.name.is_empty() {
+                        self.notice = Some("combo name cannot be empty".into());
+                        return ConnIntent::Redraw;
+                    }
+                    ci.step = ComboInputStep::Members;
+                    ConnIntent::Redraw
+                }
+                ComboInputStep::Members => {
+                    if ci.members.trim().is_empty() {
+                        self.notice = Some("members cannot be empty".into());
+                        return ConnIntent::Redraw;
+                    }
+                    let ci = self.combo_input.take().expect("combo_input present");
+                    // Accept comma- or space-separated ids; normalize to CSV.
+                    let members: Vec<&str> = ci
+                        .members
+                        .split(|c: char| c == ',' || c.is_whitespace())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    self.acting = true;
+                    self.notice = None;
+                    ConnIntent::Run(vec![
+                        "providers".into(),
+                        "combos".into(),
+                        "add".into(),
+                        ci.name,
+                        "--providers".into(),
+                        members.join(","),
+                    ])
+                }
+            },
+            0x7f | 0x08 => {
+                field.pop();
+                ConnIntent::Redraw
+            }
+            c if c.is_ascii_graphic() => {
+                field.push(c as char);
+                ConnIntent::Redraw
+            }
+            _ => ConnIntent::Bell,
         }
     }
 
@@ -612,11 +878,18 @@ impl ConnectionsView {
                 out.push(format!("fno unreachable: {reason}"));
                 out.push("actions disabled - press R to retry".to_string());
             }
-            ModalState::Ready => match (&self.wizard, self.tab) {
-                (Some(w), _) => self.render_wizard(w, &mut out),
-                (None, Tab::Accounts) => self.render_accounts(&mut out),
-                (None, Tab::Order) => self.render_order(&mut out),
-            },
+            ModalState::Ready => {
+                if let Some(w) = &self.wizard {
+                    self.render_wizard(w, &mut out);
+                } else if let Some(ci) = &self.combo_input {
+                    self.render_combo_input(ci, &mut out);
+                } else {
+                    match self.tab {
+                        Tab::Accounts => self.render_accounts(&mut out),
+                        Tab::Order => self.render_order(&mut out),
+                    }
+                }
+            }
         }
         out.push(String::new());
         if let Some(confirm) = &self.confirm {
@@ -705,20 +978,50 @@ impl ConnectionsView {
             out.push("no combos - press n to add".to_string());
             return;
         }
+        let known: std::collections::HashSet<&str> =
+            self.accounts.iter().map(|a| a.id.as_str()).collect();
         for (i, c) in self.combos.iter().enumerate() {
-            let cursor = if i == self.combo_sel { ">" } else { " " };
+            let selected = i == self.combo_sel;
+            let cursor = if selected { ">" } else { " " };
             let badge = if c.active { "●" } else { " " };
             out.push(format!(
                 "{cursor}{badge} {name}  [{strategy}]",
                 name = c.name,
                 strategy = c.strategy,
             ));
-            if i == self.combo_sel {
-                for (m, member) in c.members.iter().enumerate() {
-                    out.push(format!("      {n}. {member}", n = m + 1));
+            if selected {
+                // The selected combo expands its members in (dirty-or-committed)
+                // order, with the member cursor and dangling flags.
+                let members = self.shown_members();
+                for (m, member) in members.iter().enumerate() {
+                    let mcur = if m == self.member_sel { "»" } else { " " };
+                    let dangling = if known.contains(member.as_str()) {
+                        ""
+                    } else {
+                        "  (dangling)"
+                    };
+                    out.push(format!("    {mcur} {n}. {member}{dangling}", n = m + 1));
+                }
+                if self.dirty_order.is_some() {
+                    out.push("      Enter: commit   Esc: discard".to_string());
                 }
             }
         }
+    }
+
+    /// Render the new-combo form (name -> members csv).
+    fn render_combo_input(&self, ci: &ComboInput, out: &mut Vec<String>) {
+        out.push("new combo".to_string());
+        let field = |active: bool, label: &str, val: &str| {
+            let caret = if active { "_" } else { "" };
+            format!("{} {label}: {val}{caret}", if active { ">" } else { " " })
+        };
+        out.push(field(ci.step == ComboInputStep::Name, "name", &ci.name));
+        if ci.step == ComboInputStep::Members {
+            out.push(field(true, "members (comma/space)", &ci.members));
+        }
+        out.push(String::new());
+        out.push("Enter: next   Esc: cancel".to_string());
     }
 
     fn footer(&self) -> String {
@@ -727,7 +1030,10 @@ impl ConnectionsView {
                 "Tab: order  j/k: move  u: use  d: remove  a: add  r: register  R: refresh  Esc: close"
                     .to_string()
             }
-            Tab::Order => "Tab: accounts   j/k: move   R: refresh   Esc: close".to_string(),
+            Tab::Order => {
+                "Tab: acct  h/l: combo  j/k: member  J/K: reorder  space: use  d: rm  n: new  Enter: commit"
+                    .to_string()
+            }
         }
     }
 }
@@ -1265,5 +1571,160 @@ mod tests {
         assert_eq!(v.on_key(0x1b), ConnIntent::Redraw);
         assert!(v.wizard.is_none());
         assert!(v.pending.is_empty());
+    }
+
+    // ── Task 1.5: Order tab (reorder / activate / remove / new) ─────────────
+
+    fn order_view() -> ConnectionsView {
+        let mut v = ready_view();
+        v.on_key(b'\t'); // -> Order
+        v
+    }
+
+    // AC4-HP: J/K buffer locally; Enter commits exactly one combos update.
+    #[test]
+    fn reorder_buffers_then_commits_one_update() {
+        let mut v = order_view();
+        // members: [ccm, ccr, glm]; cursor on member 0 (ccm). Move it down twice.
+        assert_eq!(v.member_sel, 0);
+        assert_eq!(v.on_key(b'J'), ConnIntent::Redraw); // ccm <-> ccr
+        assert_eq!(v.on_key(b'J'), ConnIntent::Redraw); // ccm <-> glm
+        assert_eq!(v.dirty_order, Some(vec!["ccr".into(), "glm".into(), "ccm".into()]));
+        // Dirty hint shows; Enter commits one update call with the new order.
+        assert!(v.render().join("\n").contains("Enter: commit"));
+        let intent = v.on_key(b'\r');
+        assert_eq!(
+            intent,
+            ConnIntent::Run(vec![
+                "providers".into(),
+                "combos".into(),
+                "update".into(),
+                "main".into(),
+                "--providers".into(),
+                "ccr,glm,ccm".into(),
+            ])
+        );
+        assert!(v.dirty_order.is_none());
+        assert!(v.acting);
+    }
+
+    // AC2-FR: Esc on a dirty reorder reverts, no verb runs.
+    #[test]
+    fn esc_discards_dirty_reorder_before_closing() {
+        let mut v = order_view();
+        v.on_key(b'J'); // dirty
+        assert!(v.dirty_order.is_some());
+        assert_eq!(v.on_key(0x1b), ConnIntent::Redraw); // discards, does NOT close
+        assert!(v.dirty_order.is_none());
+        // A second Esc (nothing dirty) closes.
+        assert_eq!(v.on_key(0x1b), ConnIntent::Close);
+    }
+
+    #[test]
+    fn tab_switch_abandons_dirty_reorder() {
+        let mut v = order_view();
+        v.on_key(b'J');
+        assert!(v.dirty_order.is_some());
+        v.on_key(b'\t'); // -> Accounts, abandons reorder
+        assert!(v.dirty_order.is_none());
+    }
+
+    #[test]
+    fn commit_with_no_dirty_is_a_bell() {
+        let mut v = order_view();
+        assert_eq!(v.on_key(b'\r'), ConnIntent::Bell);
+    }
+
+    // space activates the selected combo (combos use).
+    #[test]
+    fn space_activates_combo() {
+        let mut v = order_view();
+        let intent = v.on_key(b' ');
+        assert_eq!(
+            intent,
+            ConnIntent::Run(vec![
+                "providers".into(),
+                "combos".into(),
+                "use".into(),
+                "main".into()
+            ])
+        );
+    }
+
+    // AC2-EDGE: a dangling member flags the combo and refuses activate.
+    #[test]
+    fn dangling_member_flagged_and_activate_refused() {
+        let mut v = ConnectionsView::new();
+        let combos = parse_combos(
+            br#"[{"name":"main","strategy":"fallback","members":["ccm","gone"],"active":false}]"#,
+        )
+        .unwrap();
+        v.apply_read(ReadOutcome::Ok {
+            accounts: vec![sample_accounts()[0].clone()], // only ccm exists
+            combos,
+        });
+        v.on_key(b'\t'); // -> Order
+        assert!(v.render().join("\n").contains("gone  (dangling)"));
+        assert_eq!(v.on_key(b' '), ConnIntent::Redraw); // activate refused
+        assert!(v.notice.as_deref().unwrap().contains("dangling member gone"));
+    }
+
+    #[test]
+    fn remove_combo_confirms_then_runs() {
+        let mut v = order_view();
+        assert_eq!(v.on_key(b'd'), ConnIntent::Redraw);
+        assert!(v.confirm.is_some());
+        let intent = v.on_key(b'\r');
+        assert_eq!(
+            intent,
+            ConnIntent::Run(vec![
+                "providers".into(),
+                "combos".into(),
+                "remove".into(),
+                "main".into()
+            ])
+        );
+    }
+
+    #[test]
+    fn new_combo_form_builds_add_verb() {
+        let mut v = order_view();
+        assert_eq!(v.on_key(b'n'), ConnIntent::Redraw);
+        assert!(v.combo_input.is_some());
+        type_str(&mut v, "backup");
+        v.on_key(b'\r'); // name -> members
+        type_str(&mut v, "ccr, glm");
+        let intent = v.on_key(b'\r');
+        assert_eq!(
+            intent,
+            ConnIntent::Run(vec![
+                "providers".into(),
+                "combos".into(),
+                "add".into(),
+                "backup".into(),
+                "--providers".into(),
+                "ccr,glm".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn h_l_switch_combo_and_reset_member_cursor() {
+        let mut v = ConnectionsView::new();
+        let combos = parse_combos(
+            br#"[{"name":"a","strategy":"fallback","members":["ccm","ccr"],"active":false},
+                {"name":"b","strategy":"fallback","members":["glm"],"active":true}]"#,
+        )
+        .unwrap();
+        v.apply_read(ReadOutcome::Ok {
+            accounts: sample_accounts(),
+            combos,
+        });
+        v.on_key(b'\t'); // Order
+        v.on_key(b'j'); // member_sel -> 1 on combo a
+        assert_eq!(v.member_sel, 1);
+        assert_eq!(v.on_key(b'l'), ConnIntent::Redraw); // -> combo b
+        assert_eq!(v.combo_sel, 1);
+        assert_eq!(v.member_sel, 0); // reset
     }
 }
