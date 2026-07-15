@@ -1419,3 +1419,46 @@ def test_select_failover_no_active_combo_defers(monkeypatch):
         lambda *a, **k: DispatchTarget(provider_id="ccm", source="active_provider"),
     )
     assert adv._select_exhaustion_failover(None, "ccm") is None
+
+
+def test_failover_spawn_failure_releases_reservation(iso, monkeypatch):
+    """AC1-FR: a failover-selected spawn that fails releases dispatch:<id> (node
+    stays re-dispatchable) and emits the failover receipt + advance_failed (the
+    receipt is not a competing decision; the single DECISION event is failed)."""
+    _force_exhausted(monkeypatch, "ccm")
+    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", None))
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+
+    def boom(node_id, node_cwd, node_slug=None, **kwargs):
+        raise adv.SpawnError("daemon unreachable")
+
+    monkeypatch.setattr(adv, "_spawn_worker", boom)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.node_id == NODE["id"]
+    key = f"dispatch:{NODE['id']}"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    evs = _events(iso)
+    assert [e["type"] for e in evs] == ["dispatch_failover", "advance_failed"]
+
+
+def test_failover_racing_advances_dedup(iso, monkeypatch):
+    """AC4-EDGE (concurrency): with failover active, a second advance for the same
+    node still dedups via the dispatch:<id> O_EXCL reservation - it does not
+    double-dispatch or double-fail-over."""
+    _force_exhausted(monkeypatch, "ccm")
+    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", None))
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    calls = []
+    monkeypatch.setattr(
+        adv, "_spawn_worker",
+        lambda node_id, node_cwd, node_slug=None, **kwargs: calls.append(node_id) or "sid",
+    )
+
+    first = adv.advance(project="fno", events_path=iso)
+    second = adv.advance(project="fno", events_path=iso)
+
+    assert first.decision == "dispatched"
+    assert second.decision == "skipped" and second.reason == "already-claimed"
+    assert calls == [NODE["id"]]  # spawned exactly once despite failover on both ticks
