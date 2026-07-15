@@ -121,11 +121,13 @@ autonomous/headless modes.
 # SAME string to release. A shared-constant holder would read as an idempotent
 # re-acquire and silently defeat the mutex - keep it session-keyed.
 #
-# `fno claim session-pid` exits 0 with EMPTY stdout when no claude ancestor
-# exists (codex/gemini/plain-shell), so guard on EMPTINESS, not exit code - an
-# empty suffix would collapse both racing runners to the SAME holder and
-# silently defeat the mutex in exactly the autonomous modes this protects. `$$`
-# is process-unique, so distinct runners still get distinct holders.
+# `fno claim session-pid` now resolves the durable pid of any harness session
+# (claude/codex/gemini/opencode/agy), so on those it returns the harness pid;
+# it exits 0 with EMPTY stdout only for plain-shell (no harness ancestor). Guard
+# on EMPTINESS, not exit code - an empty suffix would collapse both racing
+# runners to the SAME holder and silently defeat the mutex in exactly the
+# autonomous modes this protects. `$$` is process-unique, so the plain-shell
+# fallback still gives distinct runners distinct holders.
 _SID="${CLAUDE_CODE_SESSION_ID:-}"
 [[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null || true)"
 [[ -n "$_SID" ]] || _SID="$$"
@@ -133,9 +135,10 @@ HOLDER="postmerge:pr-${PR}:${_SID}"
 
 # `reconcile:` routes to the GLOBAL claims root (~/.fno/claims), so the two
 # racing runners - which run from different cwds - see each other's claim.
-# --ttl 15m: the ritual is many short-lived bash calls with no durable PID to
-# anchor PID-liveness to; 15m bounds a run that finishes in 1-3 min and
-# self-frees on crash.
+# --ttl 15m: the default acquire resolution anchors this claim to the durable
+# harness session pid (claude/codex/gemini/opencode/agy), so on a harness the
+# claim reads live for the whole run; the TTL is the backstop for plain-shell
+# (no durable pid) and for a crash. 15m bounds a run that finishes in 1-3 min.
 if fno claim acquire reconcile:pr-${PR} --holder "$HOLDER" --ttl 15m; then
   :   # won the race - we own the ritual
 else

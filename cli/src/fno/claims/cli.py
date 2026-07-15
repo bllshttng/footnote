@@ -114,9 +114,10 @@ def acquire(
     # ponytail: an omitted --pid used to anchor to the TRANSIENT acquiring process
     # (a one-shot `fno claim acquire` from a shell dies ~1s later, so the claim went
     # instantly STALE -- the footgun). Default instead to the durable session
-    # (nearest claude ancestor) when one exists; degrade to the prior os.getpid()
-    # default when not (standalone use, no agent session). Reuses the exact walk
-    # init-target-state.sh already runs via `fno claim session-pid`.
+    # (nearest harness ancestor: claude/codex/gemini/opencode/agy) when one
+    # exists; degrade to the prior os.getpid() default when not (standalone use,
+    # plain-shell, no agent session). Reuses the exact walk init-target-state.sh
+    # already runs via `fno claim session-pid`.
     if pid is None:
         try:
             from .session_pid import resolve_session_pid
@@ -261,10 +262,11 @@ def session_pid(
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Resolve the durable session pid (nearest ``claude`` ancestor) for the
-    hybrid liveness pid-arm. Prints the pid on stdout, or nothing when
-    uncapturable (the caller degrades to TTL-only liveness). Always exit 0 -
-    a missing pid is a safe degrade, not an error (ab-cc5553f2)."""
+    """Resolve the durable session pid (nearest harness ancestor:
+    claude/codex/gemini/opencode/agy) for the hybrid liveness pid-arm. Prints the
+    pid on stdout, or nothing when uncapturable (plain-shell / no harness
+    ancestor; the caller degrades to TTL-only liveness). Always exit 0 - a
+    missing pid is a safe degrade, not an error (ab-cc5553f2)."""
     from .session_pid import resolve_session_pid
 
     pid = resolve_session_pid(from_pid=from_pid)
@@ -369,8 +371,9 @@ def worktree_guard_cmd(
     ident = resolve_harness_identity()
     # Harness-level holder: every same-harness session shares it, so any
     # sibling's write idempotent-re-acquires and refreshes liveness (pid + TTL).
-    # A session-scoped holder would let a TTL-only owner (codex) expire while a
-    # sibling is still active, then a foreign harness could take the worktree.
+    # A session-scoped holder would let a TTL-only owner (plain-shell, the only
+    # remaining harness with no durable pid to anchor) expire while a sibling is
+    # still active, then a foreign harness could take the worktree.
     holder = f"worktree-owner:{ident.harness or 'unknown'}"
     override = os.environ.get("FNO_WORKTREE_OK", "").strip() not in ("", "0", "false", "False")
 
