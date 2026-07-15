@@ -37,6 +37,15 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$REPO_ROOT"
 
+# fno requires Python >=3.11, but a system `python3` may be an older build (macOS
+# Xcode ships 3.9) that can't import fno (typing.TypeAlias / `str | None`) and
+# silently breaks steps. Put the project venv's interpreter+tools first on PATH
+# so every step's `python3`/`fno`/`pytest` resolves to the pinned 3.11+ env. The
+# venv is created by the first step (`uv sync`); the entry is inert until then,
+# and the only pre-sync python3 use is the yaml prereq, which the system 3.9
+# satisfies. `PATH=""` degrade tests override this locally, so they still pass.
+PATH="$REPO_ROOT/cli/.venv/bin:$PATH"; export PATH
+
 # Failed-step record lives in whatever checkout runs the script. For preflight
 # that is the preflight worktree, never the invoking worktree.
 # SMOKE_FAILURE_RECORD overrides the location (test seam).
