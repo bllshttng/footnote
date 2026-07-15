@@ -1346,9 +1346,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     };
 
-    let provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
+    // Identity is one axis (x-8dfc): resume keys on harness (provider fallback
+    // for a not-yet-backfilled row), and the exit-13 errors name the harness,
+    // matching Python resume_cli. harness == provider on every current row.
+    let harness = entry
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| entry.get("provider").and_then(Value::as_str))
+        .unwrap_or("");
     let cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
-    let session_id = session_id_field(provider)
+    let session_id = session_id_field(harness)
         .and_then(|f| entry.get(f))
         .and_then(Value::as_str)
         .unwrap_or("");
@@ -1364,30 +1372,30 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     // claude gets the liveness-probed smart fork (US1/US2, x-9844): a live
     // (incl. idle) supervisor -> attach; a dead/absent one -> `claude --resume
-    // <uuid>`. Other providers keep their settled-session resume CLI, checked
-    // BEFORE session_id so an unknown provider surfaces "not supported" rather
+    // <uuid>`. Other harnesses keep their settled-session resume CLI, checked
+    // BEFORE session_id so an unknown harness surfaces "not supported" rather
     // than a misleading "no session_id".
-    let (argv, claim_uuid) = if provider == "claude" {
+    let (argv, claim_uuid) = if harness == "claude" {
         match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
             Ok(plan) => plan,
             Err(code) => return code,
         }
     } else {
-        let v = match build_resume_argv(provider, session_id) {
+        let v = match build_resume_argv(harness, session_id) {
             Some(v) => v,
             None => {
                 eprintln!(
-                    "fno agents resume: provider {} resume not supported by this fno version.",
-                    py_repr_str(provider)
+                    "fno agents resume: harness {} resume not supported by this fno version.",
+                    py_repr_str(harness)
                 );
                 return 13;
             }
         };
         if session_id.is_empty() {
             eprintln!(
-                "fno agents resume: agent {} has no recorded session_id for provider {}.",
+                "fno agents resume: agent {} has no recorded session_id for harness {}.",
                 py_repr_str(&name),
-                py_repr_str(provider)
+                py_repr_str(harness)
             );
             return 13;
         }
@@ -1440,7 +1448,9 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         "agent_resumed",
         &[
             ("name", Value::String(name.clone())),
-            ("provider", Value::String(provider.to_string())),
+            // Event field key stays "provider" (schema parity with Python's
+            // emit); the value is the resolved harness (== provider) (x-8dfc).
+            ("provider", Value::String(harness.to_string())),
             ("session_id", Value::String(session_id.to_string())),
             ("cwd", Value::String(cwd.to_string())),
         ],
