@@ -269,6 +269,7 @@ def bg_create(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    account_env: Optional[Mapping[str, str]] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -344,6 +345,15 @@ def bg_create(
         spawn_env.pop("ANTHROPIC_API_KEY", None)
         spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         spawn_env.update(route)
+
+    # Per-spawn account overlay (x-d012). Applied LAST so an explicit --account
+    # beats a stale CLAUDE_CONFIG_DIR inherited from the parent shell. --account
+    # combined with --route/--role is refused at the CLI (contradictory: one
+    # bills a claude account, the other routes to a different provider), so the
+    # route block above is never populated on an --account spawn - the two never
+    # co-occur here.
+    if account_env:
+        spawn_env.update(account_env)
 
     start = time.monotonic()
     try:

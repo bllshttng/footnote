@@ -1329,6 +1329,7 @@ def _claude_create_path(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    account_env: Optional[Mapping[str, str]] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1388,6 +1389,7 @@ def _claude_create_path(
             agent=agent,
             tools=tools,
             deny_tools=deny_tools,
+            account_env=account_env,
         )
     except claude_mod.ProviderSubprocessError as exc:
         events.emit(
@@ -1875,6 +1877,7 @@ def dispatch_spawn(
     deny_tools: Optional[str] = None,
     headless: bool = False,
     resume_session_id: Optional[str] = None,
+    account_env: Optional[Mapping[str, str]] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -2058,6 +2061,7 @@ def dispatch_spawn(
                         agent=agent,
                         tools=tools,
                         deny_tools=deny_tools,
+                        account_env=account_env,
                     )
                     return SpawnResult(
                         kind="created",

@@ -457,6 +457,27 @@ async fn run(args: Vec<String>) -> i32 {
             );
             return 127;
         }
+        // x-d012: an --account spawn on ANY substrate resolves its four-lane env
+        // overlay in Python (fno.agents.account_env); re-exec the Python CLI here
+        // rather than the native Rust bg spawn below, so the resolver + refusals
+        // live in exactly one place (pane already re-exec'd above). Without this
+        // the flag silently vanishes on the Rust-intercepted bg/headless path -
+        // the known "two path gates for a new provider field" drift class.
+        // FNO_AGENTS_RUNTIME=python stops the Python front door bouncing back.
+        if params.get("account").and_then(|v| v.as_str()).is_some() {
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new("fno")
+                .arg("agents")
+                .args(&args[..])
+                .env("FNO_AGENTS_RUNTIME", "python")
+                .exec();
+            eprintln!(
+                "fno-agents: --account resolution runs in the Python CLI, but \
+                 exec of 'fno agents spawn' failed: {err}. Run `fno agents \
+                 spawn ...` directly."
+            );
+            return 127;
+        }
         if let Some(code) = maybe_run_spawn(&home, &params, &agent_name) {
             return code;
         }
@@ -1408,6 +1429,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--agent",
         "--tools",
         "--deny-tools",
+        "--account",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -1578,6 +1600,14 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--deny-tools" => {
                 params.insert("deny_tools".into(), str_arg(&mut it, "--deny-tools")?);
+            }
+            "--account" => {
+                // x-d012 per-spawn account selection. Parsed here so the spawn
+                // arm is not blocked by an unknown-flag error; the four-lane
+                // overlay resolution lives in Python (fno.agents.account_env), so
+                // an account spawn re-execs the Python CLI on EVERY substrate (see
+                // the spawn intercept) rather than duplicating the resolver here.
+                params.insert("account".into(), str_arg(&mut it, "--account")?);
             }
             "--substrate" => {
                 // The session-substrate selector (x-2c27): pane (owned-PTY,
@@ -2929,6 +2959,27 @@ mod tests {
         )
         .expect("--permission-mode= must parse");
         assert_eq!(eq["permission_mode"], "plan");
+    }
+
+    // x-d012: --account parses into params (space + equals form) so the spawn
+    // arm can route an account spawn to the Python resolver instead of erroring
+    // as an unknown flag.
+    #[test]
+    fn spawn_forwards_account_flag() {
+        let (_m, space) = build_request(
+            "spawn",
+            &[
+                "wk".to_string(),
+                "--account".to_string(),
+                "readyrule".to_string(),
+            ],
+        )
+        .expect("--account must parse");
+        assert_eq!(space["account"], "readyrule");
+        let (_m2, eq) =
+            build_request("spawn", &["wk".to_string(), "--account=makers".to_string()])
+                .expect("--account= must parse");
+        assert_eq!(eq["account"], "makers");
     }
 
     // x-b6e2 (US1): the Tier-3 passthrough flags land in params under their
