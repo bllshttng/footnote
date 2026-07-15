@@ -422,6 +422,7 @@ def _spawn_worker(
     harness: Optional[str] = None,
     verb: Optional[str] = None,
     brief: Optional[str] = None,
+    extra_env: Optional[dict] = None,
     permission_mode: Optional[str] = None,
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
@@ -527,8 +528,12 @@ def _spawn_worker(
     cmd += [agent_name, target_cmd]
 
     # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
-    # command line), mirroring dispatch-node.sh's `export TARGET_BRIEF`.
-    run_env = {**os.environ, **spawn_env} if spawn_env else None
+    # command line), mirroring dispatch-node.sh's `export TARGET_BRIEF`. A failover
+    # account's env (dispatch_env: CLAUDE_CONFIG_DIR / base_url / api key) rides
+    # here too, so `--provider <harness>` selects the CLI while extra_env selects
+    # the account (x-0676; --provider never carries a record id).
+    merged_env = {**spawn_env, **(extra_env or {})}
+    run_env = {**os.environ, **merged_env} if merged_env else None
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=run_env
     )
@@ -540,7 +545,15 @@ def _spawn_worker(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
-    # Receipt is one compact JSON line on clean stdout: {"name", "short_id", ...}.
+    # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
+    # spawn lands a DETACHED thread and returns a compact JSON receipt with a
+    # short_id we require as launch proof: {"name", "short_id", ...}. A `headless`
+    # one-shot (a codex/others failover) already ran to completion on exit 0 - no
+    # detached thread, no short_id - so the clean exit IS the proof and we skip
+    # the requirement (else the parse below would raise SpawnError, release the
+    # reservation, and redispatch a node whose headless worker already ran).
+    if substrate != "bg":
+        return "headless"
     # Keep scanning past a line that merely MENTIONS short_id but is not the JSON
     # receipt (banner/log noise) - only stop once a short_id is actually parsed.
     short_id = ""
@@ -950,17 +963,23 @@ def _emit(kind: str, data: dict, events_path: Path) -> None:
 
 def _select_exhaustion_failover(
     node_cwd: Optional[str], exhausted_provider: str
-) -> Optional[tuple[str, Optional[str]]]:
+) -> Optional[tuple[str, str, dict]]:
     """x-0676: pick the next non-exhausted provider from the active combo when
     ``config.dispatch.on_exhaustion == "failover"``.
 
-    Returns ``(record_id, harness)`` for the selected provider, or ``None`` for the
-    defer floor: not configured for failover, no active COMBO to walk (a bare
-    active-provider is not a combo), the whole combo exhausted, or ANY read error.
-    Failover never guesses a provider - every non-clean path degrades to defer.
+    Returns ``(record_id, harness, account_env)`` for the selected provider, or
+    ``None`` for the defer floor: not configured for failover, no active COMBO to
+    walk (a bare active-provider is not a combo), the whole combo exhausted, an
+    unresolvable harness, an unstageable account, or ANY read error. Failover never
+    guesses - every non-clean path degrades to defer.
 
-    ``harness`` is the record's ``cli`` (``None`` when unresolvable, so the resolver
-    falls back to claude); a cross-harness failover (claude->codex) rides here.
+    The three parts stage a spawn correctly (a combo member is a provider RECORD
+    id, NOT a harness): ``harness`` (the record's ``cli``) becomes ``--provider``
+    (validated against the harness set, so a record id must never go there) and
+    drives the resolver's substrate; ``account_env`` (``dispatch_env`` of the
+    record: ``CLAUDE_CONFIG_DIR`` / ``base_url`` / api key) selects the ACCOUNT via
+    the spawn subprocess env. A cross-harness failover (claude->codex) rides the
+    ``harness`` change.
     """
     try:
         from fno.config import load_settings, load_settings_for_repo
@@ -971,6 +990,7 @@ def _select_exhaustion_failover(
     except Exception:  # noqa: BLE001 - unreadable config -> defer floor
         return None
     try:
+        from fno.adapters.providers.dispatch import dispatch_env
         from fno.adapters.providers.loader import load_combos, load_providers
         from fno.adapters.providers.rotation import next_healthy_provider
         from fno.sigma_dispatch import resolve_dispatch_target
@@ -992,8 +1012,15 @@ def _select_exhaustion_failover(
         if pid is None:
             return None
         rec = load_providers().by_id.get(pid)
-        harness = (getattr(rec, "cli", "") or "").strip() or None
-        return (pid, harness)
+        harness = (getattr(rec, "cli", "") or "").strip()
+        if not harness:
+            return None  # a record with no cli cannot pick a --provider
+        # Stage the account env; an unstaged/unresolvable account -> defer (never
+        # spawn onto a broken account).
+        account_env = dispatch_env(
+            pid, repo_root=Path(node_cwd) if node_cwd else None
+        )
+        return (pid, harness, account_env)
     except Exception:  # noqa: BLE001 - never dispatch onto an unresolved provider
         return None
 
@@ -1088,8 +1115,9 @@ def advance(
     #     defers. The node stays in ready (skip mutates nothing); the next tick
     #     after the reset dispatches it. Never fatal - a defer read failure just
     #     proceeds to dispatch.
-    failover_provider: Optional[str] = None
+    failover_record: Optional[str] = None
     failover_harness: Optional[str] = None
+    failover_env: Optional[dict] = None
     failover_from: Optional[str] = None
     try:
         from fno.adapters.providers.loader import load_providers
@@ -1128,7 +1156,7 @@ def advance(
                 provider=decision.provider_id,
                 retry_at=decision.retry_at,
             )
-        failover_provider, failover_harness = selected
+        failover_record, failover_harness, failover_env = selected
         failover_from = decision.provider_id
 
     # 5. Reserve dispatch:<id> (O_EXCL dedup + boot-window bridge token).
@@ -1154,20 +1182,23 @@ def advance(
     #    stays re-dispatchable (a later reconcile retries - AC2-FR). The release
     #    is non-raising (_safe_release) so the decision event below always lands.
     try:
-        if failover_provider is not None:
+        if failover_record is not None:
             # x-0676: the pre-spawn failover receipt (from -> to), paired with the
-            # advance_dispatched below - not a competing decision.
+            # advance_dispatched below - not a competing decision. `to` is the
+            # record id; --provider gets the harness, the account env selects it.
             _emit(
                 EVENT_FAILOVER,
                 {
                     "node_id": node_id,
                     "from": failover_from or "",
-                    "to": failover_provider,
+                    "to": failover_record,
                     "harness_to": failover_harness or "",
                 },
                 ev_path,
             )
-            eff_provider = failover_provider
+            # --provider is the HARNESS (a record id would be rejected by the spawn
+            # front door's known-provider gate); the account rides extra_env.
+            eff_provider = failover_harness
         else:
             eff_provider = provider if provider is not None else node.get("provider")
         short_id = _spawn_worker(
@@ -1175,6 +1206,7 @@ def advance(
             model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
             provider=eff_provider,
             harness=failover_harness,
+            extra_env=failover_env,
             verb=node.get("dispatch_verb"),
             brief=node.get("dispatch_brief"),
         )

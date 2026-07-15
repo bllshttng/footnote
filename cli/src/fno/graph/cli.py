@@ -2198,6 +2198,11 @@ def cmd_next(
             # sees the annotation (else it silently falls back to the default).
             "model": e.get("model"),
             "model_tier": e.get("model_tier"),
+            # x-0676: the per-node dispatch overrides must ride in the next-JSON so
+            # `advance`'s resolver routing (US1) actually fires for real graph nodes
+            # (which come from this summary), not only for tests that inject them.
+            "dispatch_verb": e.get("dispatch_verb"),
+            "dispatch_brief": e.get("dispatch_brief"),
             "mission_id": e.get("mission_id"),
             "mission_wave": e.get("mission_wave"),
             "mission_slug": e.get("mission_slug"),

@@ -486,6 +486,49 @@ def test_spawn_worker_verb_normalizes_codex_headless(monkeypatch):
     assert cmd[-1] == "$fno:think ab-2222aaaa"
 
 
+def test_spawn_worker_headless_no_short_id_returns_sentinel(monkeypatch):
+    """P1#1: a headless (codex) spawn is a one-shot with NO short_id receipt; a
+    clean exit 0 IS the launch proof, so _spawn_worker returns "headless" rather
+    than raising SpawnError (which would release the reservation and redispatch a
+    worker that already ran)."""
+
+    def fake_run(cmd, **kw):
+        # A headless one-shot streams the model reply, not a JSON short_id receipt.
+        return _FakeProc(0, "the model reply text, no json receipt here")
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    sid = adv._spawn_worker(
+        "ab-2222aaaa", "/w", harness="codex", provider="codex", verb="/target"
+    )
+    assert sid == "headless"
+
+
+def test_spawn_worker_bg_still_requires_short_id(monkeypatch):
+    """The bg (claude) path still fails loud with no short_id receipt - only the
+    headless one-shot is exempt."""
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        lambda cmd, **kw: _FakeProc(0, "no receipt on the claude bg lane"),
+    )
+    with pytest.raises(adv.SpawnError):
+        adv._spawn_worker("ab-2222aaaa", "/w")  # default -> claude/bg
+
+
+def test_spawn_worker_extra_env_reaches_subprocess(monkeypatch):
+    """P1#2: extra_env (the failover account env, e.g. CLAUDE_CONFIG_DIR) is merged
+    into the spawn subprocess env so --provider <harness> selects the CLI while the
+    env selects the account."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker("ab-2222aaaa", "/w", extra_env={"CLAUDE_CONFIG_DIR": "/acct/x"})
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/acct/x"
+
+
 def test_spawn_worker_auto_merge_drops_no_merge(monkeypatch):
     """AC4-EDGE / x-4391: config.dispatch.auto_merge=true routes the /target verb
     path so the command drops the no-merge token (never re-baked into a verb).
@@ -1290,7 +1333,11 @@ def test_failover_dispatches_next_provider(iso, monkeypatch):
     """AC3-HP: on_exhaustion=failover + exhausted provider -> dispatch on the next
     healthy combo provider, emit dispatch_failover ccm->ccr, do NOT defer."""
     _force_exhausted(monkeypatch, "ccm")
-    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", None))
+    # (record_id, harness, account_env): a claude account failover ccm -> ccr.
+    monkeypatch.setattr(
+        adv, "_select_exhaustion_failover",
+        lambda cwd, exhausted: ("ccr", "claude", {"CLAUDE_CONFIG_DIR": "/acct/ccr"}),
+    )
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
     captured = {}
 
@@ -1303,18 +1350,25 @@ def test_failover_dispatches_next_provider(iso, monkeypatch):
     res = adv.advance(project="fno", events_path=iso)
 
     assert res.decision == "dispatched"
-    assert captured["provider"] == "ccr"  # spawned on the failover provider
+    # --provider is the HARNESS (never the record id); the account rides extra_env.
+    assert captured["provider"] == "claude"
+    assert captured["extra_env"] == {"CLAUDE_CONFIG_DIR": "/acct/ccr"}
     evs = _events(iso)
     assert [e["type"] for e in evs] == ["dispatch_failover", "advance_dispatched"]
     fo = evs[0]["data"]
+    # The receipt's `to` is the RECORD id, not the harness.
     assert fo["from"] == "ccm" and fo["to"] == "ccr" and fo["node_id"] == NODE["id"]
 
 
 def test_failover_cross_harness_threads_harness(iso, monkeypatch):
-    """AC3-HP (cross-harness): a codex failover threads harness=codex to the spawn
-    and records harness_to on the receipt."""
+    """AC3-HP (cross-harness): a codex failover passes --provider=codex (the harness,
+    not the record id), threads harness=codex to the resolver, and records the record
+    id + harness_to on the receipt."""
     _force_exhausted(monkeypatch, "ccm")
-    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("codex-acct", "codex"))
+    monkeypatch.setattr(
+        adv, "_select_exhaustion_failover",
+        lambda cwd, exhausted: ("codex-acct", "codex", {"CODEX_HOME": "/acct/codex"}),
+    )
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
     captured = {}
 
@@ -1327,9 +1381,10 @@ def test_failover_cross_harness_threads_harness(iso, monkeypatch):
     res = adv.advance(project="fno", events_path=iso)
 
     assert res.decision == "dispatched"
-    assert captured["provider"] == "codex-acct" and captured["harness"] == "codex"
+    assert captured["provider"] == "codex" and captured["harness"] == "codex"
+    assert captured["extra_env"] == {"CODEX_HOME": "/acct/codex"}
     evs = _events(iso)
-    assert evs[0]["data"]["harness_to"] == "codex"
+    assert evs[0]["data"]["to"] == "codex-acct" and evs[0]["data"]["harness_to"] == "codex"
 
 
 def test_failover_none_defers(iso, monkeypatch):
@@ -1377,7 +1432,8 @@ def test_select_failover_not_configured_defers(monkeypatch):
 
 def test_select_failover_configured_picks_provider_and_cli(monkeypatch):
     """_select_exhaustion_failover: failover + a combo with a healthy provider ->
-    (record_id, cli); the record's cli becomes the harness."""
+    (record_id, cli, account_env); the record's cli becomes the harness and its
+    dispatch_env becomes the spawn account env."""
     from fno.adapters.providers.rotation import Combo
     from fno.config import SettingsModel
     from fno.sigma_dispatch import DispatchTarget
@@ -1400,7 +1456,46 @@ def test_select_failover_configured_picks_provider_and_cli(monkeypatch):
         "fno.adapters.providers.loader.load_providers",
         lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(cli="codex")}),
     )
-    assert adv._select_exhaustion_failover(None, "ccm") == ("ccr", "codex")
+    monkeypatch.setattr(
+        "fno.adapters.providers.dispatch.dispatch_env",
+        lambda pid, repo_root=None: {"CODEX_HOME": "/acct/ccr"},
+    )
+    assert adv._select_exhaustion_failover(None, "ccm") == (
+        "ccr", "codex", {"CODEX_HOME": "/acct/ccr"},
+    )
+
+
+def test_select_failover_unstaged_account_defers(monkeypatch):
+    """_select_exhaustion_failover: dispatch_env raising (account not staged) ->
+    None (defer; never spawn onto a broken account)."""
+    from fno.adapters.providers.rotation import Combo
+    from fno.config import SettingsModel
+    from fno.sigma_dispatch import DispatchTarget
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
+    )
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: DispatchTarget(combo_name="combo1"),
+    )
+    combo = Combo(name="combo1", providers=("ccm", "ccr"))
+    monkeypatch.setattr("fno.adapters.providers.loader.load_combos", lambda *a, **k: {"combo1": combo})
+    monkeypatch.setattr(
+        "fno.adapters.providers.rotation.next_healthy_provider",
+        lambda combo, exclude=(): "ccr",
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(cli="claude")}),
+    )
+
+    def boom(pid, repo_root=None):
+        raise RuntimeError("account not staged")
+
+    monkeypatch.setattr("fno.adapters.providers.dispatch.dispatch_env", boom)
+    assert adv._select_exhaustion_failover(None, "ccm") is None
 
 
 def test_select_failover_no_active_combo_defers(monkeypatch):
@@ -1425,7 +1520,7 @@ def test_failover_spawn_failure_releases_reservation(iso, monkeypatch):
     stays re-dispatchable) and emits the failover receipt + advance_failed (the
     receipt is not a competing decision; the single DECISION event is failed)."""
     _force_exhausted(monkeypatch, "ccm")
-    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", None))
+    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", "claude", {}))
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
 
     def boom(node_id, node_cwd, node_slug=None, **kwargs):
@@ -1447,7 +1542,7 @@ def test_failover_racing_advances_dedup(iso, monkeypatch):
     node still dedups via the dispatch:<id> O_EXCL reservation - it does not
     double-dispatch or double-fail-over."""
     _force_exhausted(monkeypatch, "ccm")
-    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", None))
+    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", "claude", {}))
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
     calls = []
     monkeypatch.setattr(
