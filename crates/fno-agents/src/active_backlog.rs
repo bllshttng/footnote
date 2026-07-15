@@ -903,7 +903,9 @@ async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown
         // Failure otherwise swallowed (next tick retries; at-least-once cursor
         // semantics). The kill must NOT be silent - the one line below is required.
         if output_with_cap(cmd, TICK_CHILD_CAP).await {
-            eprintln!("fanout tick for {project} exceeded {TICK_CHILD_CAP:?}; killed, retrying next tick");
+            eprintln!(
+                "fanout tick for {project} exceeded {TICK_CHILD_CAP:?}; killed, retrying next tick"
+            );
         }
         sleep_interruptible(interval, &shutdown).await;
     }
