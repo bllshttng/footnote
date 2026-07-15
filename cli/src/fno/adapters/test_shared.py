@@ -10,6 +10,25 @@ import pytest
 from fno.adapters._shared import create_worktree
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_worktree_config(tmp_path_factory, monkeypatch):
+    """Isolate global settings so this repo's own config.paths.worktrees_base
+    can't leak into these default-path-shape assertions. FNO_CONFIG
+    short-circuits the loader to an empty file, so only defaults + HOME apply;
+    project.id still resolves from each test's repo .fno/settings.yaml (read
+    directly, not via load_settings)."""
+    iso = tmp_path_factory.mktemp("iso") / "config.toml"
+    iso.write_text("")
+    monkeypatch.setenv("FNO_CONFIG", str(iso))
+    from fno import config as _config
+    from fno import paths as _paths
+    _config.load_settings.cache_clear()
+    _paths._settings.cache_clear()
+    yield
+    _config.load_settings.cache_clear()
+    _paths._settings.cache_clear()
+
+
 def _expected_path(tmp_path: Path, name: str, *, project_id: str = "fno") -> Path:
     """Helper: the canonical worktree path under a fake HOME."""
     return tmp_path / ".fno" / "worktrees" / f"{project_id}-{name}"

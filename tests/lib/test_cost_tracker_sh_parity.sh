@@ -26,9 +26,13 @@ source "$COST_TRACKER_SH"
 
 check_parity() {
     local model="$1" in_t="$2" out_t="$3" cr="${4:-0}" cc="${5:-0}"
-    local shell_out python_out
+    local shell_out python_out runner
     shell_out=$(estimate_cost "$model" "$in_t" "$out_t" "$cr" "$cc")
-    python_out=$(python3 -m fno.cost.cost_tracker estimate "$model" "$in_t" "$out_t" "$cr" "$cc")
+    # Compare against the SAME runner estimate_cost resolves (fno needs >=3.11
+    # plus its deps; bare python3 may be an older system build without them).
+    runner=$(_cost_runner)
+    # shellcheck disable=SC2086  # $runner is a deliberate multi-word prefix
+    python_out=$($runner -m fno.cost.cost_tracker estimate "$model" "$in_t" "$out_t" "$cr" "$cc")
     if [[ "$shell_out" == "$python_out" ]]; then
         pass "parity $model $in_t/$out_t/$cr/$cc -> $shell_out"
     else

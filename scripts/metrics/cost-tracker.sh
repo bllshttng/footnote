@@ -25,6 +25,19 @@ if [[ -f "${_COST_PKG_SRC}/fno/cost/cost_tracker.py" ]]; then
     export PYTHONPATH="${_COST_PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
+# Echo the command PREFIX that runs the `estimate` CLI under an interpreter that
+# satisfies fno (>=3.11 AND its full dependency set). Both live in the project
+# venv, which `uv run` guarantees; bare `python3` may be an old system build
+# (e.g. macOS Xcode 3.9) that can't even import fno (fno.events uses 3.10+
+# typing.TypeAlias) and would silently zero every estimate. --no-sync uses the
+# existing venv without a network round-trip. Echoes nothing (rc 1) when uv is
+# unavailable, so estimate_cost degrades cleanly - and an empty PATH (no uv)
+# degrades exactly as a python3-less host used to.
+_cost_runner() {
+    command -v uv &>/dev/null || return 1
+    echo "uv run --no-sync --project ${_COST_PKG_SRC%/src} python"
+}
+
 # Estimate cost in USD from model name and token counts
 # Args: model input_tokens output_tokens [cache_read_tokens] [cache_create_tokens]
 # Returns: decimal USD amount (4 decimal places)
@@ -41,8 +54,9 @@ estimate_cost() {
     if ! [[ "$cache_read_tokens" =~ ^[0-9]+$ ]]; then cache_read_tokens=0; fi
     if ! [[ "$cache_create_tokens" =~ ^[0-9]+$ ]]; then cache_create_tokens=0; fi
 
-    if ! command -v python3 &>/dev/null; then
-        echo "WARNING: python3 not installed - cost estimation disabled" >&2
+    local runner
+    if ! runner=$(_cost_runner); then
+        echo "WARNING: uv not available - cost estimation disabled" >&2
         echo "0"
         return 1
     fi
@@ -50,8 +64,9 @@ estimate_cost() {
     # fallback warning and any Python traceback are the diagnostics an
     # operator needs; swallowing them here would make a fallback-priced
     # number indistinguishable from a table-priced one.
+    # shellcheck disable=SC2086  # $runner is a deliberate multi-word prefix
     local result
-    if ! result=$(python3 -m fno.cost.cost_tracker estimate "$model" \
+    if ! result=$($runner -m fno.cost.cost_tracker estimate "$model" \
         "$input_tokens" "$output_tokens" \
         "$cache_read_tokens" "$cache_create_tokens"); then
         echo "WARNING: cost estimation failed (see fno.cost.cost_tracker)" >&2

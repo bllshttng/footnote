@@ -1707,10 +1707,28 @@ class TestWarmMergeRouting:
         entry = WatermarkStore(path=store_path).get("owner/repo#1")
         assert entry["merge_dispatched"] is True
 
+    def test_ritual_claim_live_advances_watermark(self, tmp_path):
+        """US4 (x-616b): the guard saw a LIVE reconcile:pr-<n> claim - the ritual
+        is already executing (the reconcile that invoked us, or an attended run).
+        Detail is ritual-claim-live, not lock-contention, so the daemon advances
+        its watermark and fires nothing, exactly like marker-exists."""
+        from fno.pr_watch._state import WatermarkStore
+
+        deps, store_path, _calls = self._run_merge_tick(
+            tmp_path, "already-dispatched", ritual_detail="ritual-claim-live"
+        )
+        assert deps["fired"] == []
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatched"] == []
+        skips = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
+        assert skips and skips[0]["data"]["reason"] == "already-dispatched"
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["merge_dispatched"] is True  # advanced -> next tick stops re-deciding
+
     def test_lock_contention_does_not_advance_watermark(self, tmp_path):
         """A concurrent holder is in-flight, NOT done: the daemon must NOT advance
         its watermark, so the next tick retries if that holder later fails before
-        writing the marker (else the ritual is silently dropped)."""
+        writing the marker (else the ritual is silently dropped). The guard's
+        SUSPECT path (crashed attended ritual) emits this same detail (x-616b)."""
         from fno.pr_watch._state import WatermarkStore
 
         deps, store_path, _calls = self._run_merge_tick(

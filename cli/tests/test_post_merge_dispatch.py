@@ -674,3 +674,110 @@ def test_origin_mail_failure_keeps_marker_and_dispatch(tmp_path, monkeypatch):
     assert res.outcome == "dispatched"
     assert len(notify.calls) == 1
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaN4").exists()
+
+
+# --- x-616b: re-entrancy guard (reconcile:pr-<n> ritual claim) ------------
+#
+# The guard reads the ritual's own Step-0.5 mutex from the GLOBAL claims root
+# (via claims_root_for), NOT the repo-local canonical the marker/single-flight
+# lock use. These tests place the claim ONLY in the global root ($FNO_CLAIMS_ROOT
+# = tmp_path/"global"), distinct from canonical_root=tmp_path, so a guard that
+# read root=canonical would miss it and (wrongly) spawn - that is the regression
+# AC5-EDGE pins.
+
+_RITUAL_TTL_MS = 15 * 60 * 1000
+
+
+def _arm_ritual_claim(monkeypatch, tmp_path, pr_number, *, pid):
+    """Acquire reconcile:pr-<n> the way the skill's `fno claim acquire` does:
+    through claims_root_for(key) under a redirected global root."""
+    import os
+
+    from fno import claims
+    from fno.claims.io import claims_root_for
+
+    global_root = tmp_path / "global"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(global_root))
+    key = f"reconcile:pr-{pr_number}"
+    claims.acquire_claim(
+        key, f"postmerge:pr-{pr_number}:test", ttl_ms=_RITUAL_TTL_MS,
+        pid=pid, root=claims_root_for(key),
+    )
+    return global_root
+
+
+def test_ritual_claim_live_skips_and_persists_marker(tmp_path, monkeypatch):
+    """AC1-HP + AC5-EDGE + AC6-EDGE: a LIVE ritual claim (this pytest pid) means
+    /fno:pr merged is already running. Dispatch skips with ritual-claim-live,
+    never spawns, and writes the marker so a later tick reads marker-exists.
+    The claim lives only in the global root -> a guard on root=canonical fails."""
+    import os
+
+    _arm_ritual_claim(monkeypatch, tmp_path, 401, pid=os.getpid())
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        401, dedup_key="sha401", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res.outcome == "already-dispatched"
+    assert res.detail == "ritual-claim-live"
+    assert spawn.calls == []
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "sha401").exists()
+
+    # A subsequent tick short-circuits on the persisted marker, not the claim.
+    res2 = dispatch_post_merge_ritual(
+        401, dedup_key="sha401", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res2.outcome == "already-dispatched"
+    assert res2.detail == "marker-exists"
+    assert spawn.calls == []
+
+
+def test_ritual_claim_suspect_is_lock_contention_no_marker(tmp_path, monkeypatch):
+    """AC4-FR: a SUSPECT claim (TTL unexpired, holder pid dead - crashed attended
+    ritual) skips as lock-contention, writes NO marker, never spawns. No marker
+    means pr_watch does not advance its watermark, so a tick after TTL expiry
+    dispatches a recovery worker."""
+    dead_pid = 2**31 - 1  # not a live process on this host -> suspect
+    _arm_ritual_claim(monkeypatch, tmp_path, 402, pid=dead_pid)
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        402, dedup_key="sha402", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res.outcome == "already-dispatched"
+    assert res.detail == "lock-contention"
+    assert spawn.calls == []
+    assert not (tmp_path / ".fno" / "post-merge-dispatched" / "sha402").exists()
+
+
+def test_ritual_claim_free_falls_through_to_spawn(tmp_path, monkeypatch):
+    """AC2-HP: no ritual claim -> the guard falls through and the cold path
+    dispatches exactly as before the change (isolated global root)."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    spawn = _Spawn(short_id="cold")
+    res = dispatch_post_merge_ritual(
+        403, dedup_key="sha403", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res.outcome == "dispatched"
+    assert res.short_id == "cold"
+    assert spawn.calls == [(403, str(tmp_path))]
+
+
+def test_ritual_guard_failopen_when_root_resolution_raises(tmp_path, monkeypatch):
+    """Gemini review (PR #410): claim_status never raises, but claims_root_for ->
+    Path.home() can (RuntimeError, no HOME + no $FNO_CLAIMS_ROOT). The guard must
+    fail open - a raising lookup falls through to the normal cold dispatch, never
+    crashing this strictly-non-fatal function."""
+    import fno.graph._reconcile as rec
+
+    def _boom(_key):
+        raise RuntimeError("no home dir")
+
+    monkeypatch.setattr(rec, "claims_root_for", _boom, raising=False)
+    # claims_root_for is imported inside the function; patch the source module too.
+    monkeypatch.setattr("fno.claims.io.claims_root_for", _boom)
+    spawn = _Spawn(short_id="failopen")
+    res = dispatch_post_merge_ritual(
+        404, dedup_key="sha404", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res.outcome == "dispatched"
+    assert spawn.calls == [(404, str(tmp_path))]

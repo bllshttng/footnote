@@ -1060,6 +1060,51 @@ def dispatch_post_merge_ritual(
 
     from fno import claims
 
+    def _persist_marker() -> None:
+        # Persist the cross-session marker ONLY after a successful hand-off, so
+        # a crash before this point leaves no marker (the sync stays recoverable
+        # via a direct primitive call / manual ritual).
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch(exist_ok=True)
+        except OSError:
+            pass  # best-effort; a missing marker only re-dispatches (idempotent ritual)
+
+    # Re-entrancy guard (x-616b): a live holder of the ritual's own Step-0.5
+    # mutex means `/fno:pr merged <n>` is already running for this PR somewhere -
+    # often the very session whose Step-2 reconcile invoked us. Read it via
+    # claims_root_for (the same GLOBAL root the skill's `fno claim acquire
+    # reconcile:pr-<n>` resolves to); reusing root=canonical here would silently
+    # miss the skill's claim and the bug would survive the fix.
+    from fno.claims.io import claims_root_for
+
+    ritual_key = f"reconcile:pr-{pr_number}"
+    try:
+        # claim_status never raises, but claims_root_for -> Path.home() can
+        # (RuntimeError with no HOME and no $FNO_CLAIMS_ROOT); fail-open like the
+        # rest of this strictly-non-fatal function -> a None state falls through.
+        ritual_state = claims.claim_status(ritual_key, root=claims_root_for(ritual_key)).get("state")
+    except Exception:  # noqa: BLE001 - the guard must never break dispatch
+        ritual_state = None
+    if ritual_state == "live":
+        # Strictly stronger evidence of hand-off than a spawn: the runner is not
+        # merely spawned, it is executing. Write the marker so later pr_watch
+        # ticks short-circuit on marker-exists instead of cold-firing a no-op.
+        _persist_marker()
+        return PostMergeDispatchResult(
+            "already-dispatched", pr_number, detail="ritual-claim-live"
+        )
+    if ritual_state == "suspect":
+        # TTL unexpired but holder pid dead: a crashed attended ritual. Reuse
+        # pr_watch's lock-contention retry branch (no marker) so the watermark
+        # does NOT advance; once the TTL expires the state degrades to stale and
+        # the next tick dispatches a recovery worker.
+        return PostMergeDispatchResult(
+            "already-dispatched", pr_number, detail="lock-contention"
+        )
+    # free | stale | corrupted -> proceed unchanged (fail-open; the worker's own
+    # Step 0.5 acquire remains the mutation authority).
+
     lock_key = f"post-merge-ritual:{key}"
     holder = f"reconcile-dispatch:{pr_number}"
     try:
@@ -1076,16 +1121,6 @@ def dispatch_post_merge_ritual(
         # (pr-watch) does NOT treat this as a completed hand-off and stop
         # retrying - unlike marker-exists, which is a genuine completed dedup.
         return PostMergeDispatchResult("already-dispatched", pr_number, detail="lock-contention")
-
-    def _persist_marker() -> None:
-        # Persist the cross-session marker ONLY after a successful hand-off, so
-        # a crash before this point leaves no marker (the sync stays recoverable
-        # via a direct primitive call / manual ritual).
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.touch(exist_ok=True)
-        except OSError:
-            pass  # best-effort; a missing marker only re-dispatches (idempotent ritual)
 
     try:
         if marker.exists():  # re-check under the lock (double-checked)
