@@ -504,11 +504,19 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
             let provider_valid = is_identity_token(obj.get("provider").and_then(Value::as_str));
             let harness_valid = is_identity_token(obj.get("harness").and_then(Value::as_str));
             if !provider_valid && harness_valid {
-                if let Some(h) = obj.get("harness").and_then(Value::as_str).map(str::to_string) {
+                if let Some(h) = obj
+                    .get("harness")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
                     obj.insert("provider".into(), Value::String(h));
                 }
             } else if !harness_valid && provider_valid {
-                if let Some(p) = obj.get("provider").and_then(Value::as_str).map(str::to_string) {
+                if let Some(p) = obj
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
                     obj.insert("harness".into(), Value::String(p));
                 }
             }
