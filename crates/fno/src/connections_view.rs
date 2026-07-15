@@ -998,7 +998,18 @@ impl ConnectionsView {
             let caret = if active { "_" } else { "" };
             format!("{} {label}: {val}{caret}", if active { ">" } else { " " })
         };
-        out.push(field(w.step == WizardStep::Id, "id", &w.id));
+        // x-e9c3: "id" read as an opaque identifier; "name" + a format hint
+        // makes the lowercase/hyphen constraint (valid_account_id) visible
+        // while typing instead of only surfacing on a rejected submit.
+        let id_hint = if w.step == WizardStep::Id {
+            "  (lowercase, a-z0-9-)"
+        } else {
+            ""
+        };
+        out.push(format!(
+            "{}{id_hint}",
+            field(w.step == WizardStep::Id, "name", &w.id)
+        ));
         if w.step != WizardStep::Id {
             let kind_line = format!(
                 "{} kind: {}  (Tab/Space to change)",
