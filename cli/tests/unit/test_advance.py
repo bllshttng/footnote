@@ -1257,3 +1257,165 @@ def test_spawn_worker_auto_merge_read_failure_no_merge(monkeypatch):
     monkeypatch.setattr(_config, "load_settings_for_repo", _boom)
     adv._spawn_worker("ab-2222aaaa", "/work/dir")
     assert captured["cmd"][-1] == "/target no-merge ab-2222aaaa"
+
+
+# ---------------------------------------------------------------------------
+# x-0676: config.dispatch.on_exhaustion = "failover" (US3)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace
+
+
+class _Decision:
+    """Minimal stand-in for evaluate_quota_defer's return (provider_id, retry_at)."""
+
+    def __init__(self, provider_id, retry_at=123.0):
+        self.provider_id = provider_id
+        self.retry_at = retry_at
+
+
+def _force_exhausted(monkeypatch, provider_id="ccm"):
+    """Make the quota block see `provider_id` exhausted (NODE has no provider pin,
+    so provider_id resolves via load_providers().active)."""
+    monkeypatch.setattr(
+        "fno.adapters.providers.runtime_state.evaluate_quota_defer",
+        lambda pid, priority=None: _Decision(provider_id),
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda *a, **k: SimpleNamespace(active=provider_id, by_id={}),
+    )
+
+
+def test_failover_dispatches_next_provider(iso, monkeypatch):
+    """AC3-HP: on_exhaustion=failover + exhausted provider -> dispatch on the next
+    healthy combo provider, emit dispatch_failover ccm->ccr, do NOT defer."""
+    _force_exhausted(monkeypatch, "ccm")
+    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("ccr", None))
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    captured = {}
+
+    def fake_spawn(node_id, node_cwd, node_slug=None, **kwargs):
+        captured.update(kwargs)
+        return "sid"
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "dispatched"
+    assert captured["provider"] == "ccr"  # spawned on the failover provider
+    evs = _events(iso)
+    assert [e["type"] for e in evs] == ["dispatch_failover", "advance_dispatched"]
+    fo = evs[0]["data"]
+    assert fo["from"] == "ccm" and fo["to"] == "ccr" and fo["node_id"] == NODE["id"]
+
+
+def test_failover_cross_harness_threads_harness(iso, monkeypatch):
+    """AC3-HP (cross-harness): a codex failover threads harness=codex to the spawn
+    and records harness_to on the receipt."""
+    _force_exhausted(monkeypatch, "ccm")
+    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: ("codex-acct", "codex"))
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    captured = {}
+
+    def fake_spawn(node_id, node_cwd, node_slug=None, **kwargs):
+        captured.update(kwargs)
+        return "sid"
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "dispatched"
+    assert captured["provider"] == "codex-acct" and captured["harness"] == "codex"
+    evs = _events(iso)
+    assert evs[0]["data"]["harness_to"] == "codex"
+
+
+def test_failover_none_defers(iso, monkeypatch):
+    """AC1-EDGE: failover selection returns None (whole-combo exhausted) -> defer
+    exactly as today (quota-deferred skip), and no dispatch_failover event."""
+    _force_exhausted(monkeypatch, "ccm")
+    monkeypatch.setattr(adv, "_select_exhaustion_failover", lambda cwd, exhausted: None)
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn on defer"))
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "skipped" and res.reason == "quota-deferred"
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "advance_skipped"
+
+
+def test_failover_provider_pin_bypasses(iso, monkeypatch):
+    """AC4-EDGE: an explicit provider pin bypasses failover rotation entirely -
+    it defers as today, never consulting the combo selector."""
+    _force_exhausted(monkeypatch, "ccm")
+    monkeypatch.setattr(
+        adv, "_select_exhaustion_failover",
+        lambda cwd, exhausted: pytest.fail("a provider pin must bypass failover"),
+    )
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+
+    res = adv.advance(project="fno", provider="ccm", events_path=iso)
+
+    assert res.decision == "skipped" and res.reason == "quota-deferred"
+
+
+def test_select_failover_not_configured_defers(monkeypatch):
+    """_select_exhaustion_failover: on_exhaustion != failover -> None (no combo read)."""
+    from fno.config import SettingsModel
+
+    monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: SettingsModel())
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: pytest.fail("defer must not read the active combo"),
+    )
+    assert adv._select_exhaustion_failover(None, "ccm") is None
+
+
+def test_select_failover_configured_picks_provider_and_cli(monkeypatch):
+    """_select_exhaustion_failover: failover + a combo with a healthy provider ->
+    (record_id, cli); the record's cli becomes the harness."""
+    from fno.adapters.providers.rotation import Combo
+    from fno.config import SettingsModel
+    from fno.sigma_dispatch import DispatchTarget
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
+    )
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: DispatchTarget(combo_name="combo1"),
+    )
+    combo = Combo(name="combo1", providers=("ccm", "ccr"))
+    monkeypatch.setattr("fno.adapters.providers.loader.load_combos", lambda *a, **k: {"combo1": combo})
+    monkeypatch.setattr(
+        "fno.adapters.providers.rotation.next_healthy_provider",
+        lambda combo, exclude=(): "ccr",
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(cli="codex")}),
+    )
+    assert adv._select_exhaustion_failover(None, "ccm") == ("ccr", "codex")
+
+
+def test_select_failover_no_active_combo_defers(monkeypatch):
+    """_select_exhaustion_failover: failover configured but the active target is a
+    bare provider (no combo) -> None (nothing to walk)."""
+    from fno.config import SettingsModel
+    from fno.sigma_dispatch import DispatchTarget
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
+    )
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: DispatchTarget(provider_id="ccm", source="active_provider"),
+    )
+    assert adv._select_exhaustion_failover(None, "ccm") is None

@@ -934,3 +934,65 @@ class TestDispatchWithComboQuota:
         out = dispatch_with_combo("fb", fn)
         assert isinstance(out, CallOutcome)
         assert seen == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# next_healthy_provider (x-0676 exhaustion-failover primitive)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace
+
+from fno.adapters.providers.rotation import Combo, next_healthy_provider
+from fno.adapters.providers.runtime_state import Headroom, HeadroomState
+
+_QUOTA = SimpleNamespace(probe_ttl_seconds=300.0, defer_threshold_pct=90.0)
+
+
+def _patch_headroom(monkeypatch, states):
+    """Patch headroom() to return the mapped HeadroomState per id (default OK)."""
+
+    def fake(pid, *, now=None, ttl_seconds=300.0, threshold_pct=90.0):
+        return Headroom(states.get(pid, HeadroomState.OK), None)
+
+    monkeypatch.setattr("fno.adapters.providers.runtime_state.headroom", fake)
+
+
+def test_next_healthy_skips_exhausted_returns_first_ok(monkeypatch):
+    _patch_headroom(monkeypatch, {"ccm": HeadroomState.EXHAUSTED, "ccr": HeadroomState.OK})
+    combo = Combo(name="c", providers=("ccm", "ccr", "glm"))
+    assert next_healthy_provider(combo, quota=_QUOTA) == "ccr"
+
+
+def test_next_healthy_low_counts_as_healthy(monkeypatch):
+    _patch_headroom(monkeypatch, {"ccm": HeadroomState.EXHAUSTED, "ccr": HeadroomState.LOW})
+    combo = Combo(name="c", providers=("ccm", "ccr"))
+    assert next_healthy_provider(combo, quota=_QUOTA) == "ccr"
+
+
+def test_next_healthy_unknown_counts_as_healthy(monkeypatch):
+    # UNKNOWN never counts as exhausted (fail-open, x-6bcf): a GLM/gemini record
+    # with no headroom signal is a valid failover TARGET.
+    _patch_headroom(monkeypatch, {"ccm": HeadroomState.EXHAUSTED, "glm": HeadroomState.UNKNOWN})
+    combo = Combo(name="c", providers=("ccm", "glm"))
+    assert next_healthy_provider(combo, quota=_QUOTA) == "glm"
+
+
+def test_next_healthy_exclude_skips_known_exhausted(monkeypatch):
+    # ccm reads OK but is the known-exhausted one -> excluded, pick ccr.
+    _patch_headroom(monkeypatch, {})
+    combo = Combo(name="c", providers=("ccm", "ccr"))
+    assert next_healthy_provider(combo, exclude={"ccm"}, quota=_QUOTA) == "ccr"
+
+
+def test_next_healthy_all_exhausted_returns_none(monkeypatch):
+    _patch_headroom(monkeypatch, {"ccm": HeadroomState.EXHAUSTED, "ccr": HeadroomState.EXHAUSTED})
+    combo = Combo(name="c", providers=("ccm", "ccr"))
+    assert next_healthy_provider(combo, quota=_QUOTA) is None
+
+
+def test_next_healthy_single_provider_exhausted_returns_none(monkeypatch):
+    # AC4-EDGE: a single-provider combo whose only member is exhausted -> None
+    # (the caller defers; nothing to fail over TO).
+    _patch_headroom(monkeypatch, {"ccm": HeadroomState.EXHAUSTED})
+    combo = Combo(name="c", providers=("ccm",))
+    assert next_healthy_provider(combo, quota=_QUOTA) is None

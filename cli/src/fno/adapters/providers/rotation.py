@@ -20,7 +20,7 @@ import dataclasses
 import hashlib
 import logging
 import time
-from typing import Any, Callable, Literal, Union
+from typing import Any, Callable, Collection, Literal, Union
 
 from fno.adapters.providers.error_taxonomy import classify_error
 from fno.adapters.providers.model import ProviderConfigError
@@ -158,6 +158,46 @@ def get_rotated_providers(combo: Combo) -> list[str]:
         providers_count=len(combo.providers),
     )
     return _rotate_at(combo.providers, cursor.cursor_index)
+
+
+def next_healthy_provider(
+    combo: Combo,
+    *,
+    exclude: Collection[str] = (),
+    quota: Any = None,
+) -> str | None:
+    """First combo member whose live headroom is not EXHAUSTED, in combo order.
+
+    The x-0676 exhaustion-failover primitive. Reuses the SAME live ``headroom()``
+    read as the x-5d3e dispatch ordering (never a stale snapshot), skipping any id
+    in ``exclude`` (the already-known-exhausted provider) and any member reading
+    EXHAUSTED. OK / LOW / UNKNOWN all count as healthy TARGETS - fail-open, since
+    UNKNOWN never means exhausted (x-6bcf), so a GLM/gemini record with no headroom
+    signal is a valid failover destination. Returns ``None`` when every member is
+    excluded or exhausted (the caller defers - defer is the floor).
+
+    Walks ``combo.providers`` in the operator's configured priority order, NOT the
+    round-robin cursor: exhaustion failover wants primary-then-secondary, a
+    different concern from ``dispatch_with_combo``'s load-balancing rotation (and it
+    stays pure - no cursor side effect).
+    """
+    from fno.adapters.providers.loader import load_quota_config
+    from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+    if quota is None:
+        quota = load_quota_config()
+    excluded = set(exclude)
+    for pid in combo.providers:
+        if pid in excluded:
+            continue
+        st = headroom(
+            pid,
+            ttl_seconds=quota.probe_ttl_seconds,
+            threshold_pct=quota.defer_threshold_pct,
+        ).state
+        if st is not HeadroomState.EXHAUSTED:
+            return pid
+    return None
 
 
 def dispatch_with_combo(
