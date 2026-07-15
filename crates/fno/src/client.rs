@@ -995,6 +995,10 @@ impl View {
             cv.gen = self.conn_gen;
             cv.state = crate::connections_view::ModalState::Loading;
             cv.notice = None;
+            // A manual refresh supersedes any in-flight mutation: its result now
+            // carries a stale gen and will be dropped, so clear the single-flight
+            // guard here or the modal would wedge on "busy" forever.
+            cv.acting = false;
         }
         self.conn_want = true;
     }
