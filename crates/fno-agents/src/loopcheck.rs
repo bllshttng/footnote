@@ -3576,15 +3576,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     ..
                 } = intent
                 {
-                    // Substrate gate: a `fno-agents loop run` child EXITS on
-                    // allow (the runtime would synth a NoProgress park or burn a
-                    // re-dispatch), so only park-on-allow substrates idle.
-                    // FNO_DRIVER_LIB is the same discriminator terminal_stop.rs
-                    // uses; do not invent a new marker (AC1-EDGE).
-                    let blocker = if std::env::var("FNO_DRIVER_LIB").is_ok() {
-                        None
-                    } else {
+                    // Harness + substrate gate: only a Claude session self-wakes
+                    // on a background-task exit, and a `fno-agents loop run` child
+                    // (FNO_DRIVER_LIB, the same discriminator terminal_stop.rs
+                    // uses) exits on allow. codex/gemini keep today's block
+                    // behavior until their daemon-consumer waker ships (AC1-EDGE).
+                    let blocker = if harness_can_idle(
+                        author_harness.as_deref(),
+                        std::env::var("FNO_DRIVER_LIB").is_ok(),
+                    ) {
                         async_wait_class(&pr_info, &head_sha, open_findings.is_empty())
+                    } else {
+                        None
                     };
                     if let Some(blocker) = blocker {
                         // Extend the node claim to cover the watch window BEFORE
@@ -3838,6 +3841,19 @@ fn watch_window_ms(timeout: Option<&str>) -> i64 {
         .and_then(crate::claims::parse_ttl_ms)
         .unwrap_or(30 * 60_000);
     declared.clamp(5 * 60_000, 2 * 3_600_000) + WATCH_SLACK_MS
+}
+
+/// Whether a session's harness + substrate can park-and-wake on a `<watching>`
+/// idle (x-e2c8). Only a Claude session's harness-tracked background/Monitor
+/// tasks re-invoke the model when they exit, so only Claude may idle. A
+/// `fno-agents loop run` child exits on allow (FNO_DRIVER_LIB set), and
+/// codex/gemini have no self-wake on background-task exit - their waker is the
+/// fno-agents daemon consuming the watch event, shipped as a separate
+/// live-verified follow-up - so all of those keep today's block behavior rather
+/// than idling with nothing to wake them (a dead watch). This is the design's
+/// "unroutable harness -> status quo, never a dead watch" degradation.
+fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
+    author_harness == Some("claude") && !is_loop_run_child
 }
 
 /// Whether the PR is in the async-wait class a `<watching>` tag may idle on
@@ -4546,6 +4562,20 @@ mod tests {
     #[test]
     fn watch_idle_classifies_pending_ci() {
         assert_eq!(async_wait_class(&watch_pr(), "abc", true), Some("ci"));
+    }
+
+    #[test]
+    fn codex_watch_harness_gate_is_claude_only() {
+        // Only Claude self-wakes on a background-task exit, so only Claude idles.
+        assert!(harness_can_idle(Some("claude"), false));
+        // A loop-run child (FNO_DRIVER_LIB) exits on allow -> never idles.
+        assert!(!harness_can_idle(Some("claude"), true));
+        // codex/gemini have no self-wake; their daemon-consumer waker ships
+        // separately, so until then they keep today's block behavior.
+        assert!(!harness_can_idle(Some("codex"), false));
+        assert!(!harness_can_idle(Some("gemini"), false));
+        // Unknown harness (bare shell / daemon): conservative block.
+        assert!(!harness_can_idle(None, false));
     }
 
     #[test]
