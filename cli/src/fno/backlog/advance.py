@@ -416,82 +416,119 @@ def _spawn_worker(
     reconcile_manifest: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    harness: Optional[str] = None,
+    verb: Optional[str] = None,
+    brief: Optional[str] = None,
     permission_mode: Optional[str] = None,
 ) -> str:
-    """Dispatch a fire-and-forget detached ``claude --bg`` ``/target`` worker.
+    """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
-    Mirrors the current skills/target/scripts/dispatch-node.sh: it spawns with
-    ``--substrate bg`` (the detached ``claude --bg`` thread that self-isolates
-    into a worktree), NOT the post-x-3ab8 default ``pane`` substrate, which is an
-    owned-PTY pane that would STALL a fire-and-forget dispatch at the placement
-    prompt (x-2c27 fixed this everywhere; this 4th surface was missed). The merge
-    posture (``no-merge``, unless ``config.dispatch.auto_merge`` is set for the
-    node's project) rides as a command token (NOT an env var; the shipped sibling
-    proves this is the reliable channel), the agent is named
-    ``target-<full-node-id>-<slug>`` (see ``_worker_agent_name``), and the cwd
+    Routes the substrate + the per-harness-normalized command through the shared
+    resolver (``fno.agents.harness_map.resolve_dispatch``) instead of hardcoding
+    ``--substrate bg`` + a ``/target`` f-string (x-0676). ``harness`` (the selected
+    provider record's ``cli``; ``None`` = config/``claude``) picks the substrate:
+    ``bg`` for claude (the detached ``claude --bg`` thread that self-isolates into a
+    worktree, never the pane default that would STALL a fire-and-forget dispatch,
+    x-2c27), ``headless`` for codex/others. A node's ``dispatch_verb``/
+    ``dispatch_brief`` (``verb``/``brief``) route the verb path (``/think {id}``,
+    brief on ``TARGET_BRIEF`` env); with no verb the builtin ``/target`` is used.
+
+    Merge posture (x-4391) stays a launcher decision, never baked into a node verb:
+    the default builtin bakes ``no-merge``; ``config.dispatch.auto_merge`` routes the
+    ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
+    ``/target [no-merge] --reconcile <manifest> {id}`` template. The agent is named
+    ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
     resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
 
-    When ``reconcile_manifest`` is set (G4), the command becomes
-    ``/target [no-merge] --reconcile <manifest> <id>`` and the agent name carries
-    the ``reconcile`` prefix.
-
     Returns the spawn receipt's short_id. Raises SpawnAlreadyRunning on a
-    name-collision (a peer beat us in the boot window) and SpawnError otherwise.
+    name-collision (a peer beat us in the boot window), DispatchResolveError on an
+    unresolvable harness/substrate/verb (caught non-fatally by the caller), and
+    SpawnError otherwise.
     """
     is_reconcile = bool(reconcile_manifest)
     agent_name = _worker_agent_name(
         node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
     )
-    # provider defaults to claude (the bg substrate is claude-only); a per-node or
-    # dispatch-time provider pin overrides it and fails loud downstream if the
-    # substrate cannot host it, rather than being silently dropped.
+    # --provider selects the account/record (or a bare kind like "claude"); a
+    # per-node or dispatch-time pin overrides the claude default. Layer-separate
+    # from `harness` (the record's cli, which drives the resolver's substrate).
     prov = (provider or "").strip() or "claude"
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", prov, "--substrate", "bg"]
+
+    # x-4391: merge posture from config.dispatch.auto_merge, read with the node_cwd
+    # precedence so a cross-project dispatch reads the DEPENDENT node's config
+    # (AC2-EDGE), never the merged repo's. advance takes no per-run flag, so config
+    # is the sole non-builtin rung; any read failure -> no-merge (Locked Decision
+    # 6). The same settings object feeds the resolver (config.dispatch.*) and the
+    # permission-mode read below, so all three config reads are node-consistent.
+    allow_merge = False
+    settings_obj = None
+    try:
+        from fno.config import load_settings, load_settings_for_repo
+
+        settings_obj = (
+            load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
+        )
+        allow_merge = bool(settings_obj.dispatch.auto_merge)
+    except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
+        allow_merge = False
+        settings_obj = None
+
+    # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
+    # verb path (never a merge); with no verb, auto_merge routes the /target verb
+    # path (omits no-merge, byte-identical to x-4391's token drop on claude) while
+    # the default bakes no-merge via the builtin; reconcile stays explicit. A
+    # DispatchResolveError propagates to the caller's non-fatal spawn-failure path.
+    from fno.agents import harness_map
+
+    node_verb = (verb or "").strip() or None
+    resolve_kwargs: dict = {
+        "harness": (harness or None),
+        "node_id": node_id,
+        "brief": (brief or None),
+        "trigger": "autonomous",
+        "settings": settings_obj,
+    }
+    if is_reconcile:
+        _nm = "" if allow_merge else "no-merge "
+        resolve_kwargs["command"] = (
+            f"/target {_nm}--reconcile {reconcile_manifest} {{id}}"
+        )
+    elif node_verb:
+        resolve_kwargs["verb"] = node_verb
+    elif allow_merge:
+        resolve_kwargs["verb"] = "/target"
+    resolved = harness_map.resolve_dispatch(**resolve_kwargs)
+    substrate = resolved["substrate"]
+    target_cmd = resolved["command"]
+    spawn_env = resolved.get("env") or {}
+
+    cmd = [
+        *_subprocess_util.fno_py_cmd(),
+        "agents", "spawn", "--provider", prov, "--substrate", substrate,
+    ]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
         cmd += ["--fresh"]
-    # x-571f: a per-node model pin rides as a spawn flag (US1 honors it on the
-    # claude/bg arm). Empty/None = provider default, byte-identical to today.
+    # x-571f: a per-node model pin rides as a spawn flag. Empty/None = provider
+    # default, byte-identical to today.
     if model:
         cmd += ["--model", model]
     # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
     # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
     mode = (permission_mode or "").strip()
-    if not mode:
-        try:
-            from fno.config import load_settings, load_settings_for_repo
-
-            settings = (
-                load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
-            )
-            mode = (settings.agents.spawn_permission_mode or "").strip()
-        except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
-            mode = ""
+    if not mode and settings_obj is not None:
+        mode = (settings_obj.agents.spawn_permission_mode or "").strip()
     if mode:
         cmd += ["--permission-mode", mode]
-    # x-4391: merge posture from config.dispatch.auto_merge. Per-project, read via
-    # the SAME node_cwd precedence as the permission-mode block above, so a
-    # cross-project dispatch reads the DEPENDENT node's config (AC2-EDGE), never
-    # the merged repo's. advance takes no per-run flag, so config is the sole
-    # non-builtin rung; any read failure -> no-merge (Locked Decision 6).
-    allow_merge = False
-    try:
-        from fno.config import load_settings, load_settings_for_repo
-
-        _s = load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
-        allow_merge = bool(_s.dispatch.auto_merge)
-    except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
-        allow_merge = False
-    _nm = "" if allow_merge else "no-merge "
-    target_cmd = (
-        f"/target {_nm}--reconcile {reconcile_manifest} {node_id}"
-        if is_reconcile
-        else f"/target {_nm}{node_id}"
-    )
     cmd += [agent_name, target_cmd]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
+    # command line), mirroring dispatch-node.sh's `export TARGET_BRIEF`.
+    run_env = {**os.environ, **spawn_env} if spawn_env else None
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=600, env=run_env
+    )
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
@@ -793,6 +830,8 @@ def dispatch_lanes(
                 node_id, str(worktree), slug,
                 model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
                 provider=eff_provider,
+                verb=node.get("dispatch_verb"),
+                brief=node.get("dispatch_brief"),
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
@@ -1046,6 +1085,8 @@ def advance(
             node_id, node_cwd, node.get("slug") or node.get("title"),
             model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
             provider=eff_provider,
+            verb=node.get("dispatch_verb"),
+            brief=node.get("dispatch_brief"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -1281,6 +1322,8 @@ def _dispatch_one_dependent(
             node_id, root, dep.get("slug"),
             model=_route_resolve.node_model(dep, explicit=model, provider=eff_provider),
             provider=eff_provider,
+            verb=dep.get("dispatch_verb"),
+            brief=dep.get("dispatch_brief"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)

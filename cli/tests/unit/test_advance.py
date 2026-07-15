@@ -151,7 +151,7 @@ def test_dispatch_reservation_held(iso, monkeypatch):
 def test_dispatched_happy_path_and_claim_survives(iso, monkeypatch):
     """AC1-HP + AC1-CLAIM: dispatch + reservation stays LIVE after advance returns."""
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None, provider=None: "deadbeef")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs: "deadbeef")
 
     res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
 
@@ -170,7 +170,7 @@ def test_idempotent_same_merge_twice(iso, monkeypatch):
     """AC1-FR: a second advance for the same node does not double-dispatch."""
     calls = []
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None, provider=None: calls.append(node_id) or "sid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs: calls.append(node_id) or "sid")
 
     first = adv.advance(project="fno", events_path=iso)
     second = adv.advance(project="fno", events_path=iso)
@@ -182,7 +182,7 @@ def test_idempotent_same_merge_twice(iso, monkeypatch):
 
 def test_spawn_failure_releases_reservation(iso, monkeypatch):
     """AC1-ERR / AC2-FR: a spawn failure releases dispatch:<id> + emits failed."""
-    def boom(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def boom(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         raise adv.SpawnError("daemon unreachable")
 
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -200,7 +200,7 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
 
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
     """A name-collision (peer beat us) -> already-claimed, reservation released."""
-    def collide(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def collide(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         raise adv.SpawnAlreadyRunning("tgt-... already exists")
 
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -219,7 +219,7 @@ def test_failed_then_retry_dispatches(iso, monkeypatch):
     'the reservation is free')."""
     n = {"calls": 0}
 
-    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         n["calls"] += 1
         if n["calls"] == 1:
             raise adv.SpawnError("transient daemon blip")
@@ -249,7 +249,7 @@ def test_advance_threads_node_pins_to_spawn(iso, monkeypatch):
     """A node's own model/provider annotation reaches the dispatched worker."""
     captured = {}
 
-    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         captured.update(model=model, provider=provider)
         return "sid"
 
@@ -280,7 +280,7 @@ def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
     advance spawn (no snapshot -> the deterministic static table)."""
     captured = {}
 
-    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         captured.update(model=model)
         return "sid"
 
@@ -300,7 +300,7 @@ def test_advance_cli_pin_overrides_node(iso, monkeypatch):
     """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
     captured = {}
 
-    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         captured.update(model=model, provider=provider)
         return "sid"
 
@@ -317,7 +317,7 @@ def test_release_raises_still_emits_and_never_raises(iso, monkeypatch):
     path, advance still emits exactly one decision event and does not raise."""
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
 
-    def boom_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def boom_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         raise adv.SpawnError("spawn boom")
 
     monkeypatch.setattr(adv, "_spawn_worker", boom_spawn)
@@ -427,6 +427,115 @@ def test_spawn_worker_argv_fresh_when_no_cwd(monkeypatch):
     cmd = captured["cmd"]
     assert "--fresh" in cmd and "--cwd" not in cmd
     assert cmd[-1] == "/target no-merge ab-2222aaaa"
+
+
+def test_spawn_worker_default_substrate_bg(monkeypatch):
+    """AC1-HP: the claude default resolves substrate=bg (byte-identical to the
+    old hardcoded --substrate bg), now via the resolver."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker("ab-2222aaaa", "/w")
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--substrate") + 1] == "bg"
+
+
+def test_spawn_worker_verb_routes_command_and_brief_env(monkeypatch):
+    """AC2-HP: a node dispatch_verb takes the verb path (`/think {id}`, no no-merge)
+    and the brief rides TARGET_BRIEF env, never the command line."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["env"] = kw.get("env")
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker(
+        "ab-2222aaaa", "/w", verb="/think", brief="explore the retry design"
+    )
+    cmd = captured["cmd"]
+    assert cmd[-1] == "/think ab-2222aaaa"  # verb path: no no-merge token
+    assert captured["env"]["TARGET_BRIEF"] == "explore the retry design"
+    # The brief never leaks onto the command line.
+    assert "explore the retry design" not in cmd[-1]
+
+
+def test_spawn_worker_verb_normalizes_codex_headless(monkeypatch):
+    """AC2-HP: on a codex harness the verb normalizes to $fno:<verb> and the
+    resolver picks substrate=headless (the bg-on-codex block the hardcoded
+    --substrate bg used to cause is exactly what this unblocks)."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker(
+        "ab-2222aaaa", "/w", harness="codex", provider="codex-acct", verb="/think"
+    )
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--substrate") + 1] == "headless"
+    assert cmd[cmd.index("--provider") + 1] == "codex-acct"
+    assert cmd[-1] == "$fno:think ab-2222aaaa"
+
+
+def test_spawn_worker_auto_merge_drops_no_merge(monkeypatch):
+    """AC4-EDGE / x-4391: config.dispatch.auto_merge=true routes the /target verb
+    path so the command drops the no-merge token (never re-baked into a verb).
+    Guards PR #412 through the resolver."""
+    from fno.config import SettingsModel
+
+    merged = SettingsModel(dispatch={"auto_merge": True})
+    monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: merged)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker("ab-2222aaaa", None)  # node_cwd=None -> load_settings()
+    assert captured["cmd"][-1] == "/target ab-2222aaaa"  # no no-merge
+
+
+def test_spawn_worker_unknown_harness_raises_resolve_error(monkeypatch):
+    """AC1-ERR (unit): an unresolvable harness raises DispatchResolveError and
+    never spawns; the caller catches it non-fatally."""
+    from fno.agents.harness_map import DispatchResolveError
+
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        lambda *a, **k: pytest.fail("must not spawn on a resolve error"),
+    )
+    with pytest.raises(DispatchResolveError):
+        adv._spawn_worker("ab-2222aaaa", "/w", harness="bogus")
+
+
+def test_advance_resolver_error_is_non_fatal(iso, monkeypatch):
+    """AC1-ERR: a DispatchResolveError from the resolver is caught by advance -
+    it emits failed, releases the reservation, and the host op completes (no
+    crash, no wedge)."""
+    from fno.agents.harness_map import DispatchResolveError
+
+    def boom(node_id, node_cwd, node_slug=None, **kwargs):
+        raise DispatchResolveError("unknown harness 'bogus'")
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", boom)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.node_id == NODE["id"]
+    key = f"dispatch:{NODE['id']}"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
 
 
 def test_worker_agent_name_carries_verb_id_and_slug():
@@ -619,7 +728,7 @@ def test_dependents_cross_project_dispatch(iso, monkeypatch):
     _map_project(monkeypatch, {"web": "/mapped/web"})
     captured = {}
 
-    def fake_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def fake_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         captured["args"] = (node_id, node_cwd, node_slug)
         return "depsid01"
 
@@ -705,7 +814,7 @@ def test_dependents_idempotent_double_call(iso, monkeypatch):
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {"web": "/mapped/web"})
     calls = []
-    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None, provider=None: calls.append(nid) or "sid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None, provider=None, **kwargs: calls.append(nid) or "sid")
 
     first = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -756,7 +865,7 @@ def test_dependents_same_project_dispatch(iso, monkeypatch):
     _map_project(monkeypatch, {"fno": "/mapped/fno"})
     captured = {}
 
-    def fake_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+    def fake_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         captured["args"] = (node_id, node_cwd, node_slug)
         return "samesid1"
 
@@ -783,7 +892,7 @@ def test_dependents_same_project_falls_back_to_recorded_cwd(iso, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         adv, "_spawn_worker",
-        lambda nid, cwd, slug=None, model=None, provider=None: captured.update(cwd=cwd) or "sid",
+        lambda nid, cwd, slug=None, model=None, provider=None, **kwargs: captured.update(cwd=cwd) or "sid",
     )
 
     results = adv.advance_dependents(
@@ -839,7 +948,7 @@ def test_dependents_dispatch_independent_of_next_selection(iso, monkeypatch):
         adv, "_next_node",
         lambda project: pytest.fail("advance_dependents must not select via `next`"),
     )
-    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None, provider=None: "edgesid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None, provider=None, **kwargs: "edgesid")
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
