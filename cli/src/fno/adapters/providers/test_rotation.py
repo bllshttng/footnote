@@ -6,9 +6,13 @@ Plan B of provider-rotation 9router port (ab-0e5a921e). Run:
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+
+from fno.adapters.providers.rotation import Combo, next_healthy_provider
+from fno.adapters.providers.runtime_state import Headroom, HeadroomState
 
 
 def _write_settings(path: Path, content: dict) -> None:
@@ -939,11 +943,6 @@ class TestDispatchWithComboQuota:
 # ---------------------------------------------------------------------------
 # next_healthy_provider (x-0676 exhaustion-failover primitive)
 # ---------------------------------------------------------------------------
-
-from types import SimpleNamespace
-
-from fno.adapters.providers.rotation import Combo, next_healthy_provider
-from fno.adapters.providers.runtime_state import Headroom, HeadroomState
 
 _QUOTA = SimpleNamespace(probe_ttl_seconds=300.0, defer_threshold_pct=90.0)
 

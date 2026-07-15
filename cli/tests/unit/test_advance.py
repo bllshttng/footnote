@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1262,8 +1263,6 @@ def test_spawn_worker_auto_merge_read_failure_no_merge(monkeypatch):
 # ---------------------------------------------------------------------------
 # x-0676: config.dispatch.on_exhaustion = "failover" (US3)
 # ---------------------------------------------------------------------------
-
-from types import SimpleNamespace
 
 
 class _Decision:
