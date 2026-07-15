@@ -615,7 +615,9 @@ fn session_cost_from_ledger(ledger_path: &Path, session_id: &str) -> f64 {
 #[derive(Debug, PartialEq)]
 enum Intent {
     Promise,
-    Aborted { reason: String },
+    Aborted {
+        reason: String,
+    },
     /// Agent-declared async watch (x-e2c8): it has armed a harness-tracked
     /// watcher and wants the session to idle until that watcher fires rather
     /// than re-blocking every stop tick. All attributes are advisory (used for
@@ -3861,7 +3863,11 @@ fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bo
 /// operator), and the sole remaining blocker is CI still pending or an
 /// outstanding bot review. Returns the blocker label, or None if anything else
 /// blocks. External truth only - the tag is a request, this is the authority.
-fn async_wait_class(pr: &PrInfo, local_head: &str, open_findings_empty: bool) -> Option<&'static str> {
+fn async_wait_class(
+    pr: &PrInfo,
+    local_head: &str,
+    open_findings_empty: bool,
+) -> Option<&'static str> {
     let head_shipped = !pr.head_oid.is_empty() && pr.head_oid == local_head;
     if pr.state != PrState::Open
         || !head_shipped
