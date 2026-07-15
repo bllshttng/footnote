@@ -4034,6 +4034,19 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
         Some(s) => s.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `mcp_channel_id`"),
     };
+    // Optional `envelope`: present-but-not-an-object is a client error, rejected
+    // BEFORE any registry or sidecar work. Absent -> legacy confirm-only response.
+    let envelope = match req.params.get("envelope") {
+        None => None,
+        Some(v @ Value::Object(_)) => Some(v.clone()),
+        Some(_) => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "`envelope` must be a JSON object",
+            )
+        }
+    };
     let registry = state::load_registry(&ctx.home.registry_json()).unwrap_or_default();
     let found = registry
         .entries
@@ -4046,9 +4059,63 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
             "channel id not registered (channel server should re-register)",
         );
     }
-    // Routing the poke to the CC session's child pipe is the channel server's
-    // job; the daemon confirms the route exists.
-    Response::ok(req.id, json!({"routed": true}))
+    let envelope = match envelope {
+        Some(e) => e,
+        None => {
+            // Confirm-only: the route exists; delivery is the channel server's job.
+            return Response::ok(req.id, json!({"routed": true}));
+        }
+    };
+    // Deliver via the Python sidecar (`fno mcp send`), inheriting its lazy-start
+    // + socket discovery instead of reimplementing it in Rust. `delivered: true`
+    // only when the sidecar accepted the envelope; on failure `reason` is
+    // MANDATORY so a caller can tell route-exists from delivered.
+    match deliver_envelope(&channel_id, &envelope) {
+        Ok(()) => Response::ok(req.id, json!({"routed": true, "delivered": true})),
+        Err(reason) => Response::ok(
+            req.id,
+            json!({"routed": true, "delivered": false, "reason": reason}),
+        ),
+    }
+}
+
+/// Shell `fno mcp send --session <id>` with `envelope` on stdin (never argv - it
+/// can be large). Returns `Err(reason)` on any failure (spawn or non-zero exit),
+/// with the stderr tail as the reason.
+fn deliver_envelope(channel_id: &str, envelope: &Value) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = crate::loop_megawalk::abi_cmd("fno")
+        .args(["mcp", "send", "--session", channel_id])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn `fno mcp send` failed: {e}"))?;
+    // Write + close stdin (drop => EOF) so the child's `stdin.read()` completes.
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "child stdin unavailable".to_string())?;
+        let bytes = serde_json::to_vec(envelope).map_err(|e| format!("serialize envelope: {e}"))?;
+        stdin
+            .write_all(&bytes)
+            .map_err(|e| format!("write envelope to `fno mcp send`: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait for `fno mcp send`: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let tail = stderr.trim().rsplit('\n').next().unwrap_or("").trim();
+    Err(if tail.is_empty() {
+        format!("`fno mcp send` exited {}", out.status)
+    } else {
+        tail.to_string()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -6273,6 +6340,70 @@ done
             let resp = handle_report(&ctx, &Request::new(1, "agent.report", params.clone()));
             assert!(resp.is_err(), "expected InvalidParams for {params}");
         }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A non-object `envelope` is rejected with InvalidParams BEFORE any registry
+    /// or sidecar work (channel need not even exist).
+    #[test]
+    fn push_to_channel_rejects_non_object_envelope() {
+        let home = tmp_home("push-badenv");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_push_to_channel(
+            &ctx,
+            &Request::new(
+                1,
+                "channel.push_to_channel",
+                json!({"mcp_channel_id": "c1", "envelope": "not-an-object"}),
+            ),
+        );
+        assert!(resp.is_err(), "non-object envelope must be InvalidParams");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// An envelope to an unregistered channel -> ChannelUnknown; the sidecar is
+    /// never invoked.
+    #[test]
+    fn push_to_channel_unknown_channel_errors() {
+        let home = tmp_home("push-unknown");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_push_to_channel(
+            &ctx,
+            &Request::new(
+                1,
+                "channel.push_to_channel",
+                json!({"mcp_channel_id": "nope", "envelope": {"a": 1}}),
+            ),
+        );
+        assert!(resp.is_err(), "unknown channel must error");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// No envelope against a registered channel -> legacy `{"routed": true}`
+    /// exactly (confirm-only, unchanged; no `delivered` key).
+    #[test]
+    fn push_to_channel_no_envelope_is_confirm_only() {
+        let home = tmp_home("push-confirm");
+        seed_stream_row(&home, "worker-c", "chA");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].mcp_channel_id = Some("c1".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_push_to_channel(
+            &ctx,
+            &Request::new(
+                1,
+                "channel.push_to_channel",
+                json!({"mcp_channel_id": "c1"}),
+            ),
+        );
+        let result = resp.result().unwrap();
+        assert_eq!(result["routed"], true);
+        assert!(
+            result.get("delivered").is_none(),
+            "confirm-only must not claim delivery"
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 }

@@ -411,3 +411,126 @@ class TestSidecarChannelDelivery:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+
+class TestMcpSendCli:
+    """`fno mcp send` verb: stdin envelope -> send_to_channel, exit codes,
+    and the Typer single-command collapse guard."""
+
+    def test_send_invokes_send_to_channel_with_stdin_envelope(self, monkeypatch) -> None:
+        from typer.testing import CliRunner
+
+        import fno.mcp.client as client_mod
+        from fno.mcp.cli import mcp_app
+
+        captured: dict = {}
+
+        def _fake_send(session_id, envelope, **_kw):
+            captured["session_id"] = session_id
+            captured["envelope"] = envelope
+
+        monkeypatch.setattr(client_mod, "send_to_channel", _fake_send)
+        result = CliRunner().invoke(
+            mcp_app, ["send", "--session", "sess-x"], input='{"a": 1}'
+        )
+        assert result.exit_code == 0, result.output
+        assert captured == {"session_id": "sess-x", "envelope": {"a": 1}}
+
+    def test_malformed_envelope_exits_2_without_calling_sidecar(self, monkeypatch) -> None:
+        from typer.testing import CliRunner
+
+        import fno.mcp.client as client_mod
+        from fno.mcp.cli import mcp_app
+
+        called = {"n": 0}
+        monkeypatch.setattr(
+            client_mod, "send_to_channel",
+            lambda *a, **k: called.__setitem__("n", called["n"] + 1),
+        )
+        result = CliRunner().invoke(
+            mcp_app, ["send", "--session", "s"], input="not json"
+        )
+        assert result.exit_code == 2, result.output
+        assert called["n"] == 0
+
+    def test_non_object_envelope_exits_2(self, monkeypatch) -> None:
+        from typer.testing import CliRunner
+
+        import fno.mcp.client as client_mod
+        from fno.mcp.cli import mcp_app
+
+        monkeypatch.setattr(client_mod, "send_to_channel", lambda *a, **k: None)
+        result = CliRunner().invoke(
+            mcp_app, ["send", "--session", "s"], input="[1, 2, 3]"
+        )
+        assert result.exit_code == 2, result.output
+
+    def test_delivery_error_exits_1(self, monkeypatch) -> None:
+        from typer.testing import CliRunner
+
+        import fno.mcp.client as client_mod
+        from fno.mcp.cli import mcp_app
+
+        def _boom(*a, **k):
+            raise client_mod.MCPSidecarError("channel_not_registered")
+
+        monkeypatch.setattr(client_mod, "send_to_channel", _boom)
+        result = CliRunner().invoke(
+            mcp_app, ["send", "--session", "s"], input='{"a": 1}'
+        )
+        assert result.exit_code == 1, result.output
+
+    def test_send_is_a_real_subcommand_not_collapsed(self) -> None:
+        """Typer collapses a lone command into the callback; the no-op
+        callback keeps `send` a real subcommand (`fno mcp send`)."""
+        from typer.testing import CliRunner
+
+        from fno.mcp.cli import mcp_app
+
+        result = CliRunner().invoke(mcp_app, ["--help"])
+        assert result.exit_code == 0
+        assert "Commands" in result.output
+        assert "send" in result.output
+
+    def test_send_verb_delivers_to_registered_channel(
+        self, short_home: Path, monkeypatch
+    ) -> None:
+        """End-to-end: `fno mcp send` hands a stdin envelope across the
+        socket to a channel registered on the real sidecar."""
+        from typer.testing import CliRunner
+
+        from fno.mcp.cli import mcp_app
+
+        # Point the verb's default socket resolution at the spawned sidecar.
+        home = short_home.resolve()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        monkeypatch.delenv("FNO_CONFIG_DIR", raising=False)
+        monkeypatch.chdir(home)
+
+        deliverer = TestSidecarChannelDelivery()
+        proc, sock_path = _spawn_sidecar(short_home)
+        conn_a = None
+        try:
+            assert _wait_for_socket(sock_path, timeout=5.0)
+            conn_a = deliverer._register(sock_path, "sess-cli")
+
+            result = CliRunner().invoke(
+                mcp_app,
+                ["send", "--session", "sess-cli"],
+                input=json.dumps({"op": "deliver-me", "params": {"meta": {"k": "v"}}}),
+            )
+            assert result.exit_code == 0, result.output
+
+            frame = _read_one_frame(conn_a)
+            assert frame["op"] == "deliver"
+            assert frame["envelope"]["params"]["meta"] == {"k": "v"}
+        finally:
+            if conn_a is not None:
+                conn_a.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
