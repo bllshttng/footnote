@@ -24,6 +24,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from fno import paths
+
 
 @contextmanager
 def plan_doc_lock(path: Path, timeout: float = 2.0) -> Iterator[None]:
@@ -34,7 +36,7 @@ def plan_doc_lock(path: Path, timeout: float = 2.0) -> Iterator[None]:
     it). The lock is held only for one whole-file rewrite, so contention past the
     timeout is not expected in practice.
     """
-    lock_dir = Path.home() / ".fno" / "locks"
+    lock_dir = paths.locks_dir()  # ~/.fno/locks; config-free so bare-python _stamp works
     lock_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()
     lock_path = lock_dir / f"plan-{digest}.lock"

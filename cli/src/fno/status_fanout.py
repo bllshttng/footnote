@@ -33,6 +33,7 @@ import typer
 
 from fno import paths
 from fno.config import StatusFanoutConfig, StatusSinkConfig
+from fno.plan._stamp import _atomic_write as _atomic_write_plan
 from fno.plan.locking import plan_doc_lock
 
 # Dispatch outcomes. A dispatch attempt classifies its result so the tick knows
@@ -653,9 +654,10 @@ def _append_plan_progress(plan_path: str, text: str, project_root: Path) -> None
                 new = content.rstrip("\n") + "\n" + line + "\n"
             else:
                 new = content.rstrip("\n") + "\n\n## Progress\n\n" + line + "\n"
-            tmp = p.with_suffix(p.suffix + ".tmp")
-            tmp.write_text(new, encoding="utf-8")
-            os.replace(tmp, p)  # atomic: a torn read never sees a half-written doc
+            # Reuse the stamp side's atomic writer: tmp + os.replace, but it also
+            # preserves the plan's existing mode (so a private 0600 vault note is
+            # not loosened to the umask default) and unlinks the tmp on failure.
+            _atomic_write_plan(p, new)
     except (TimeoutError, OSError):
         return
 

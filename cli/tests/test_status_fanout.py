@@ -1154,6 +1154,30 @@ def test_plan_doc_lock_serializes_concurrent_stamp_and_append(tmp_path):
     assert "- T1 progress" in final     # append survived (neither clobbered the other)
 
 
+def test_append_plan_progress_preserves_file_mode(tmp_path):
+    # Review finding (codex P2): the atomic tmp+replace must carry the plan's
+    # original mode, else a private 0600 vault note is loosened to the umask
+    # default. Reusing _stamp._atomic_write preserves it.
+    import os as _os
+    import stat as _stat
+    from fno import status_fanout as sf
+
+    p = tmp_path / "plan.md"; p.write_text("# Plan\n")
+    _os.chmod(p, 0o600)
+    sf._append_plan_progress(str(p), "T1", tmp_path)
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600  # not widened by the replace
+    assert "- T1" in p.read_text()
+
+
+def test_append_plan_progress_leaves_no_orphan_tmp(tmp_path):
+    # Review finding (gemini): no ``.tmp`` sidecar left after a normal append.
+    from fno import status_fanout as sf
+
+    p = tmp_path / "plan.md"; p.write_text("# Plan\n")
+    sf._append_plan_progress(str(p), "T1", tmp_path)
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 def test_append_plan_progress_skips_silently_on_lock_timeout(tmp_path, monkeypatch):
     import contextlib
     from fno import status_fanout as sf
