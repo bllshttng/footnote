@@ -1079,7 +1079,13 @@ def dispatch_post_merge_ritual(
     from fno.claims.io import claims_root_for
 
     ritual_key = f"reconcile:pr-{pr_number}"
-    ritual_state = claims.claim_status(ritual_key, root=claims_root_for(ritual_key)).get("state")
+    try:
+        # claim_status never raises, but claims_root_for -> Path.home() can
+        # (RuntimeError with no HOME and no $FNO_CLAIMS_ROOT); fail-open like the
+        # rest of this strictly-non-fatal function -> a None state falls through.
+        ritual_state = claims.claim_status(ritual_key, root=claims_root_for(ritual_key)).get("state")
+    except Exception:  # noqa: BLE001 - the guard must never break dispatch
+        ritual_state = None
     if ritual_state == "live":
         # Strictly stronger evidence of hand-off than a spawn: the runner is not
         # merely spawned, it is executing. Write the marker so later pr_watch

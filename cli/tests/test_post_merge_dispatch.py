@@ -760,3 +760,24 @@ def test_ritual_claim_free_falls_through_to_spawn(tmp_path, monkeypatch):
     assert res.outcome == "dispatched"
     assert res.short_id == "cold"
     assert spawn.calls == [(403, str(tmp_path))]
+
+
+def test_ritual_guard_failopen_when_root_resolution_raises(tmp_path, monkeypatch):
+    """Gemini review (PR #410): claim_status never raises, but claims_root_for ->
+    Path.home() can (RuntimeError, no HOME + no $FNO_CLAIMS_ROOT). The guard must
+    fail open - a raising lookup falls through to the normal cold dispatch, never
+    crashing this strictly-non-fatal function."""
+    import fno.graph._reconcile as rec
+
+    def _boom(_key):
+        raise RuntimeError("no home dir")
+
+    monkeypatch.setattr(rec, "claims_root_for", _boom, raising=False)
+    # claims_root_for is imported inside the function; patch the source module too.
+    monkeypatch.setattr("fno.claims.io.claims_root_for", _boom)
+    spawn = _Spawn(short_id="failopen")
+    res = dispatch_post_merge_ritual(
+        404, dedup_key="sha404", auto_run=True, canonical_root=tmp_path, spawn=spawn
+    )
+    assert res.outcome == "dispatched"
+    assert spawn.calls == [(404, str(tmp_path))]
