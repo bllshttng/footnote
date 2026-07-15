@@ -273,14 +273,14 @@ def _discover_from_registry(
     """Registered fno-agent sessions, resolvable by canonical handle (US2, x-605c).
 
     A spawned worker registered under a name (e.g. ``x-d899-us8-build``) also
-    answers to its ``<provider>-<short8>`` handle, because its provider session id
-    is surfaced as a discover row. The provider -> id mapping is
-    ``PROVIDER_SESSION_ID_FIELDS`` (the single source of truth also read by the
+    answers to its ``<harness>-<short8>`` handle, because its harness session id
+    is surfaced as a discover row. The harness -> id mapping is
+    ``HARNESS_SESSION_ID_FIELDS`` (the single source of truth also read by the
     resume path), so a new harness needs a field there, not a resolver edit. For
     claude the row carries the FULL session uuid when known so it dedups against
     the roster/disk rows for the same session; ``short_id`` stays the 8-hex jobId
     the inject verb addresses."""
-    from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS, load_registry
+    from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
 
     exclude = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
@@ -290,15 +290,20 @@ def _discover_from_registry(
     except Exception:  # noqa: BLE001 — a torn/version-drifted registry contributes no rows
         return rows
     for e in entries:
-        provider = getattr(e, "provider", None)
-        if provider not in PROVIDER_SESSION_ID_FIELDS:
+        # Identity is one axis (x-8dfc): gate LIVE discovery on the row's
+        # harness (provider fallback). A known-harness row keeps resolving; an
+        # alien harness stays excluded here (no live transport exists for it)
+        # while remaining durably mail-routable -- the live/durable split the
+        # relay peer table depends on, preserved, not widened.
+        harness = getattr(e, "harness", None) or getattr(e, "provider", None)
+        if harness not in HARNESS_SESSION_ID_FIELDS:
             continue
         # A dead/orphaned row must never resolve as a live recipient: mail would
         # queue to a handle nobody drains, and doctor's dead-letter check (which
         # reads this discovery) would count it live and miss the strand.
         if getattr(e, "status", None) in _DEAD_REGISTRY_STATUSES:
             continue
-        if provider == "claude":
+        if harness == "claude":
             # session_id keeps the full uuid for dedup/canonical identity, but
             # short_id MUST be the authoritative jobId -- the stored short and
             # the uuid's first 8 hex can differ, and the jobId is what
@@ -326,7 +331,7 @@ def _discover_from_registry(
                 "pid": 0,
                 "cwd": getattr(e, "cwd", "") or "",
                 "status": None,
-                "agent": provider,
+                "agent": harness,
             }
         )
     return rows

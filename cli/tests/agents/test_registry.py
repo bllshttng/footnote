@@ -291,11 +291,18 @@ def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatc
     assert f"schema_version={SCHEMA_VERSION}" in str(exc_info.value)
 
 
-def test_ac4_err_unknown_provider_in_row_rejected(tmp_path: Path, monkeypatch) -> None:
-    """A row with a provider outside KNOWN_PROVIDERS is rejected as version drift."""
+def test_x8dfc_unknown_provider_loads_undispatchable(tmp_path: Path, monkeypatch) -> None:
+    """x-8dfc: a provider outside the dispatch roster no longer bricks the read.
+
+    Pre-x-8dfc a typo'd provider raised RegistryVersionError, bricking the
+    whole shared read. Now identity is a shape check: the row loads as an
+    undispatchable identity row (mail-routable), and capability is refused
+    later at the spawn/ask seam, not at load.
+    """
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.registry import RegistryVersionError, load_registry
+    from fno.agents.dispatch import _check_known_provider
+    from fno.agents.registry import load_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,8 +326,12 @@ def test_ac4_err_unknown_provider_in_row_rejected(tmp_path: Path, monkeypatch) -
         ),
         encoding="utf-8",
     )
-    with pytest.raises(RegistryVersionError, match="calude"):
-        load_registry(path=registry_path)
+    entries = load_registry(path=registry_path)
+    assert len(entries) == 1
+    assert entries[0].provider == "calude"
+    # ...but it is NOT dispatchable: the spawn/ask seam still refuses it.
+    with pytest.raises(ValueError, match="calude"):
+        _check_known_provider("calude")
 
 
 def test_load_registry_tolerates_agy_provider(tmp_path: Path, monkeypatch) -> None:
@@ -987,8 +998,12 @@ def test_us2_first_write_upgrades_on_disk_to_current(tmp_path: Path, monkeypatch
     assert raw["agents"][0]["mcp_channel_id"] is None
 
 
-def test_us2_v1_unknown_provider_still_rejected(tmp_path: Path, monkeypatch) -> None:
-    """v1 synthesis MUST NOT swallow content validation: a bad provider still raises."""
+def test_us2_v1_corrupt_identity_still_rejected(tmp_path: Path, monkeypatch) -> None:
+    """v1 synthesis MUST NOT swallow content validation: a structurally corrupt
+    row still raises. Post-x-8dfc the identity check is a shape check (an alien
+    provider now loads, tested in test_load_gate_x8dfc), so the surviving guard
+    is corruption -- an empty identity with no harness -- which must still raise
+    even under v1 synthesis."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import RegistryVersionError, load_registry
 
@@ -1001,7 +1016,7 @@ def test_us2_v1_unknown_provider_still_rejected(tmp_path: Path, monkeypatch) -> 
                 "agents": [
                     {
                         "name": "bad",
-                        "provider": "calude",  # typo
+                        "provider": "",  # corrupt: empty identity, no harness
                         "cwd": "/tmp",
                         "log_path": "/tmp/b.log",
                         "claude_short_id": None,
@@ -1014,7 +1029,7 @@ def test_us2_v1_unknown_provider_still_rejected(tmp_path: Path, monkeypatch) -> 
         ),
         encoding="utf-8",
     )
-    with pytest.raises(RegistryVersionError, match="calude"):
+    with pytest.raises(RegistryVersionError, match="no valid identity"):
         load_registry(path=registry_path)
 
 
@@ -1176,17 +1191,19 @@ def test_session_id_property_matches_resume_cli_session_id_for() -> None:
         assert entry.session_id == _session_id_for(entry) == value, provider
 
 
-def test_provider_session_id_fields_covers_known_providers() -> None:
-    """Every known provider must have a resume-target field mapping.
+def test_harness_session_id_fields_covers_known_providers() -> None:
+    """Every dispatchable harness must have a resume-target field mapping.
 
     Guards against adding a provider to KNOWN_PROVIDERS without teaching
     session_id / _session_id_for how to resolve its resume id (which
-    would silently return None for the new provider).
+    would silently return None for the new harness). Keyed on
+    HARNESS_SESSION_ID_FIELDS now (x-8dfc); the old PROVIDER_SESSION_ID_FIELDS
+    name is a free alias, so the dispatchable set still round-trips.
     """
     from fno.agents.providers import KNOWN_PROVIDERS
-    from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS
+    from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
-    assert set(PROVIDER_SESSION_ID_FIELDS) == set(KNOWN_PROVIDERS)
+    assert set(HARNESS_SESSION_ID_FIELDS) == set(KNOWN_PROVIDERS)
 
 
 # ---------------------------------------------------------------------------

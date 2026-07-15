@@ -345,11 +345,20 @@ fn read_jsonl(path: &Path) -> (Vec<(String, Value)>, usize) {
     (records, malformed)
 }
 
-/// Providers + statuses the Python registry loader accepts (registry.py
-/// `KNOWN_PROVIDERS` / `KNOWN_STATUSES`). A row outside these makes
-/// `load_registry` raise `RegistryVersionError`. The roster is the shared
-/// [`crate::provider::KNOWN_PROVIDERS`] (x-51f6 US1: one source of truth).
-use crate::provider::KNOWN_PROVIDERS;
+/// A well-shaped registry identity token (provider or harness): non-empty,
+/// all-lowercase, whitespace-free. The relaxed load-gate corruption guard
+/// (x-8dfc) mirroring Python `registry._is_identity_token` -- it replaced the
+/// `KNOWN_PROVIDERS` enumeration so one alien harness never bricks the shared
+/// read (it degrades to durable routing, x-ec59 posture); dispatch capability
+/// is gated separately at the spawn/ask seam (`bin/client.rs`).
+fn is_identity_token(v: Option<&str>) -> bool {
+    matches!(
+        v,
+        Some(s) if !s.is_empty()
+            && s == s.to_lowercase()
+            && !s.chars().any(|c| c.is_whitespace())
+    )
+}
 /// Valid registry statuses. `registry.status` is a projection of
 /// `state.status` (LD10), so it can be ANY [`crate::AgentStatus`] variant —
 /// the daemon writes `live` on spawn and `exited` on child exit (the latter
@@ -440,19 +449,37 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
         let row = row
             .as_object()
             .ok_or_else(|| format!("registry row {i} is not a JSON object"))?;
-        match row.get("provider").and_then(Value::as_str) {
-            Some(p) if KNOWN_PROVIDERS.contains(&p) => {}
-            other => return Err(format!("registry row {i} has provider={other:?}")),
+        // Identity is one axis (x-8dfc): tolerate ANY well-shaped identity
+        // token (provider OR harness) so a single alien-harness row never
+        // bricks the shared read; capability is gated at the spawn seam. The
+        // corruption guard survives as the shape check.
+        let provider = row.get("provider").and_then(Value::as_str);
+        let harness = row.get("harness").and_then(Value::as_str);
+        if !(is_identity_token(provider) || is_identity_token(harness)) {
+            return Err(format!(
+                "registry row {i} has no valid identity token (provider={provider:?}, harness={harness:?})"
+            ));
+        }
+        // Divergence is loud, not fatal (x-8dfc), mirroring Python: a writer bug
+        // stamping provider != harness surfaces in the skew window; harness wins.
+        if is_identity_token(provider) && is_identity_token(harness) && provider != harness {
+            let name = row.get("name").and_then(Value::as_str).unwrap_or("?");
+            eprintln!(
+                "fno agents: warning: registry row {name:?} has provider={provider:?} and harness={harness:?} (diverged); harness wins for identity"
+            );
         }
         let status = row.get("status").and_then(Value::as_str).unwrap_or("live");
         if !KNOWN_STATUSES.contains(&status) {
             return Err(format!("registry row {i} has status={status:?}"));
         }
         // Required-field presence, mirroring Python `AgentEntry(**row)` (codex P2):
-        // a row missing a no-default field (name/provider/cwd/log_path) raises
+        // a row missing a no-default field (name/cwd/log_path) raises
         // TypeError -> RegistryVersionError, not a later "agent not found" / "no
-        // cwd". Presence only (a null value is a value), matching the dataclass.
-        for required in ["name", "provider", "cwd", "log_path"] {
+        // cwd". `provider` left OFF this list (x-8dfc): a provider-less post-v10
+        // row backfills provider <- harness below, so identity is enforced by the
+        // shape check above, not by provider presence. Presence only (a null
+        // value is a value), matching the dataclass.
+        for required in ["name", "cwd", "log_path"] {
             if !row.contains_key(required) {
                 return Err(format!(
                     "registry row {i} missing required field '{required}'"
@@ -467,6 +494,32 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let mut out = rows.clone();
     for row in &mut out {
         if let Some(obj) = row.as_object_mut() {
+            // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
+            // the two identity fields are the same token in the skew window, so
+            // heal whichever is missing OR corrupt (shape-checked, not truthy)
+            // from the valid sibling. Both directions, because resume reads
+            // through this same healed value -- a truthy-corrupt harness would
+            // otherwise resolve session_id to None. The gate above guarantees at
+            // least one field is a valid token.
+            let provider_valid = is_identity_token(obj.get("provider").and_then(Value::as_str));
+            let harness_valid = is_identity_token(obj.get("harness").and_then(Value::as_str));
+            if !provider_valid && harness_valid {
+                if let Some(h) = obj
+                    .get("harness")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    obj.insert("provider".into(), Value::String(h));
+                }
+            } else if !harness_valid && provider_valid {
+                if let Some(p) = obj
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    obj.insert("harness".into(), Value::String(p));
+                }
+            }
             let legacy = obj
                 .remove("claude_short_id")
                 .and_then(|v| v.as_str().map(str::to_string))
@@ -1301,9 +1354,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     };
 
-    let provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
+    // Identity is one axis (x-8dfc): resume keys on harness (provider fallback
+    // for a not-yet-backfilled row), and the exit-13 errors name the harness,
+    // matching Python resume_cli. harness == provider on every current row.
+    let harness = entry
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| entry.get("provider").and_then(Value::as_str))
+        .unwrap_or("");
     let cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
-    let session_id = session_id_field(provider)
+    let session_id = session_id_field(harness)
         .and_then(|f| entry.get(f))
         .and_then(Value::as_str)
         .unwrap_or("");
@@ -1319,30 +1380,30 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     // claude gets the liveness-probed smart fork (US1/US2, x-9844): a live
     // (incl. idle) supervisor -> attach; a dead/absent one -> `claude --resume
-    // <uuid>`. Other providers keep their settled-session resume CLI, checked
-    // BEFORE session_id so an unknown provider surfaces "not supported" rather
+    // <uuid>`. Other harnesses keep their settled-session resume CLI, checked
+    // BEFORE session_id so an unknown harness surfaces "not supported" rather
     // than a misleading "no session_id".
-    let (argv, claim_uuid) = if provider == "claude" {
+    let (argv, claim_uuid) = if harness == "claude" {
         match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
             Ok(plan) => plan,
             Err(code) => return code,
         }
     } else {
-        let v = match build_resume_argv(provider, session_id) {
+        let v = match build_resume_argv(harness, session_id) {
             Some(v) => v,
             None => {
                 eprintln!(
-                    "fno agents resume: provider {} resume not supported by this fno version.",
-                    py_repr_str(provider)
+                    "fno agents resume: harness {} resume not supported by this fno version.",
+                    py_repr_str(harness)
                 );
                 return 13;
             }
         };
         if session_id.is_empty() {
             eprintln!(
-                "fno agents resume: agent {} has no recorded session_id for provider {}.",
+                "fno agents resume: agent {} has no recorded session_id for harness {}.",
                 py_repr_str(&name),
-                py_repr_str(provider)
+                py_repr_str(harness)
             );
             return 13;
         }
@@ -1395,7 +1456,9 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         "agent_resumed",
         &[
             ("name", Value::String(name.clone())),
-            ("provider", Value::String(provider.to_string())),
+            // Event field key stays "provider" (schema parity with Python's
+            // emit); the value is the resolved harness (== provider) (x-8dfc).
+            ("provider", Value::String(harness.to_string())),
             ("session_id", Value::String(session_id.to_string())),
             ("cwd", Value::String(cwd.to_string())),
         ],
@@ -2923,11 +2986,20 @@ mod tests {
         fs::write(&reg, r#"{"schema_version":10,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // Unknown provider -> Err (aider: a real CLI we deliberately do not
-        // host; opencode joined the roster at x-51f6 so it no longer fits).
+        // x-8dfc: an unknown provider no longer bricks the read -- it loads as
+        // an undispatchable identity row (aider: a real CLI we deliberately do
+        // not host). Capability is refused later at the spawn seam, not here.
         fs::write(
             &reg,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"aider","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+
+        // Corrupt identity (empty provider AND no harness) still bricks (AC1-ERR).
+        fs::write(
+            &reg,
+            r#"{"schema_version":3,"agents":[{"name":"x","provider":"","cwd":"/x","log_path":"/l","status":"live"}]}"#,
         )
         .unwrap();
         assert!(load_registry_entries(&reg).is_err());
@@ -2984,6 +3056,86 @@ mod tests {
 
         // Invalid UTF-8 -> Err (strict decode, codex P2).
         fs::write(&reg, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(load_registry_entries(&reg).is_err());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// x-8dfc load-gate relaxation, the Rust half of the cross-language parity
+    /// (AC1-FR): this reader accepts the same alien-harness fixture Python's
+    /// `test_load_gate` accepts, and refuses the same corrupt fixture -- both
+    /// directions pinned. Also covers AC1-EDGE (provider-less post-v10 shape)
+    /// and AC2-ERR (divergence loads).
+    #[test]
+    fn load_registry_gate_shape_check_x8dfc() {
+        let dir = std::env::temp_dir().join(format!(
+            "abi-cv-reg8dfc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+
+        // AC2-HP: an alien harness row (provider == harness == "newharness")
+        // loads instead of bricking. Same fixture the Python parity test uses.
+        fs::write(
+            &reg,
+            r#"{"schema_version":9,"agents":[{"name":"nh","provider":"newharness","harness":"newharness","harness_session_id":"deadbeefcafef00d","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
+        let rows = load_registry_entries(&reg).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["provider"], "newharness");
+
+        // AC1-EDGE: a provider-less row (post-v10 writer shape, harness only)
+        // loads with provider backfilled from harness.
+        fs::write(
+            &reg,
+            r#"{"schema_version":9,"agents":[{"name":"pv","harness":"claude","harness_session_id":"aaaabbbbccccdddd","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
+        let rows = load_registry_entries(&reg).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["provider"], "claude");
+
+        // AC2-ERR: a diverged row (provider != harness) LOADS (warning only).
+        fs::write(
+            &reg,
+            r#"{"schema_version":9,"agents":[{"name":"dv","provider":"claude","harness":"codex","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+
+        // Heal: a truthy-but-corrupt harness (whitespace) is replaced from the
+        // valid provider, so resume (which reads through this) never keys on a
+        // corrupt harness.
+        fs::write(
+            &reg,
+            r#"{"schema_version":9,"agents":[{"name":"heal","provider":"claude","harness":"c x","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
+        let rows = load_registry_entries(&reg).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["harness"], "claude");
+
+        // AC1-ERR: an empty-identity row (empty provider, no harness) still
+        // bricks -- the corruption guard survives the relaxation.
+        fs::write(
+            &reg,
+            r#"{"schema_version":9,"agents":[{"name":"bad","provider":"","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
+        assert!(load_registry_entries(&reg).is_err());
+
+        // Whitespace-bearing identity is corruption, not an alien token.
+        fs::write(
+            &reg,
+            r#"{"schema_version":9,"agents":[{"name":"ws","provider":"a b","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+        )
+        .unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         fs::remove_dir_all(&dir).ok();

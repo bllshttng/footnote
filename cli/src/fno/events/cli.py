@@ -136,7 +136,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
     if explicit:
         return explicit
     try:
-        from fno.agents.registry import PROVIDER_SESSION_ID_FIELDS, load_registry
+        from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
         from fno.harness_identity import canonical_handle, resolve_harness_identity
 
         ident = resolve_harness_identity()
@@ -145,11 +145,11 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         # Match this session's row by STORED IDENTITY, not by name==handle: a
         # spawned row usually carries a caller-provided display name (e.g.
         # tgt-<node>-<harness>-gN), so a handle-equality check would miss it and
-        # the push would silently skip (codex P1). The per-provider session field
+        # the push would silently skip (codex P1). The per-harness session field
         # may hold the full id or its first-8 (claude stores the short), so both
         # variants are accepted; a canonically-named row still matches too.
         my_handle = canonical_handle(ident.harness, ident.session_id)
-        session_field = PROVIDER_SESSION_ID_FIELDS.get(ident.harness)
+        session_field = HARNESS_SESSION_ID_FIELDS.get(ident.harness)
         sid_variants = {ident.session_id, ident.session_id[:8]}
         for entry in load_registry():
             same_session = (

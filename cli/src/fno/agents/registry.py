@@ -82,16 +82,23 @@ KNOWN_STATUSES = frozenset(
 # stays load_registry-readable from Python instead of bricking the registry.
 KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 
-# Single source of truth for "which stored field is a provider's resume
+# Single source of truth for "which stored field is a harness's resume
 # target". Consumed by both AgentEntry.session_id (real entries) and
 # resume_cli._session_id_for (duck-typed against test fakes), so the
-# provider -> field mapping lives in exactly one place and cannot drift
-# between the two. Adding a provider here updates both call sites at once.
-PROVIDER_SESSION_ID_FIELDS = {
+# harness -> field mapping lives in exactly one place and cannot drift
+# between the two. Keyed on the row's harness now (x-8dfc): identity is one
+# axis, and the mapping answers "which stored field is the resume target"
+# (claude attaches by short_id, codex resumes by codex_session_id, gemini by
+# gemini_session_id) -- a per-harness truth, not a dispatch capability.
+HARNESS_SESSION_ID_FIELDS = {
     "claude": "short_id",
     "codex": "codex_session_id",
     "gemini": "gemini_session_id",
 }
+# Deprecated alias kept for one release: test fixtures and out-of-tree callers
+# still import the old name. harness == provider on every current row, so the
+# alias is a free rename bridge until they migrate.
+PROVIDER_SESSION_ID_FIELDS = HARNESS_SESSION_ID_FIELDS
 
 from fno import paths
 from fno.harness_identity import canonical_handle, sync_harness_aliases
@@ -283,20 +290,22 @@ class AgentEntry:
 
     @property
     def session_id(self) -> Optional[str]:
-        """The provider-specific resume-target id.
+        """The harness-specific resume-target id.
 
         Resolves to whichever stored field the resume path consumes:
         ``short_id`` (``claude attach``), ``codex_session_id``
         (``codex resume <uuid>``), or ``gemini_session_id``. ``None`` for
-        unknown providers or when the id was never captured.
+        unknown harnesses or when the id was never captured.
 
-        The provider -> field mapping comes from the module-level
-        :data:`PROVIDER_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
-        also reads, so the two cannot drift. As a ``@property`` this is
-        excluded from ``asdict`` serialization and never becomes an
-        on-disk storage field.
+        The harness -> field mapping comes from the module-level
+        :data:`HARNESS_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
+        also reads, so the two cannot drift. Keyed on ``harness`` (x-8dfc,
+        identity is one axis) with ``provider`` as belt-and-braces fallback for
+        a not-yet-backfilled in-memory row (load always backfills). As a
+        ``@property`` this is excluded from ``asdict`` serialization and never
+        becomes an on-disk storage field.
         """
-        field_name = PROVIDER_SESSION_ID_FIELDS.get(self.provider)
+        field_name = HARNESS_SESSION_ID_FIELDS.get(self.harness or self.provider)
         # `short_id` is a str defaulting to "" (never None); normalize the
         # empty transport key to None so callers keep their `is None` checks.
         return (getattr(self, field_name) or None) if field_name else None
@@ -532,19 +541,38 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
         raise
 
 
+def _is_identity_token(value: object) -> bool:
+    """A well-shaped registry identity token (provider or harness): a
+    non-empty, all-lowercase, whitespace-free string.
+
+    The relaxed load-gate corruption guard (x-8dfc) that replaced the
+    KNOWN/READABLE_PROVIDERS enumeration: the read no longer bricks on an
+    alien harness (it degrades to durable routing, x-ec59 posture), and
+    dispatch capability is gated separately at the spawn/ask seam. This still
+    rejects genuine corruption -- empty, non-string, or whitespace-bearing
+    identity. Mirrors Rust ``client_verbs::is_identity_token``.
+    """
+    return (
+        isinstance(value, str)
+        and value != ""
+        and value == value.lower()
+        and not any(c.isspace() for c in value)
+    )
+
+
 def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     """Load the registry. Returns ``[]`` if the file does not exist.
 
     Every alien-shape failure mode raises ``RegistryVersionError`` so
     callers handle "this file looks wrong" through one exception type:
     invalid JSON, top-level not-a-dict, ``agents`` not-a-list, row
-    not-a-dict, ``schema_version`` mismatch, unknown provider in a row,
-    and unknown / missing AgentEntry fields all map to that one error.
+    not-a-dict, ``schema_version`` mismatch, an identity-less/corrupt-shape
+    row, and unknown / missing AgentEntry fields all map to that one error.
     A future fno adding fields without bumping the schema_version must
-    not silently corrupt the in-memory entry.
+    not silently corrupt the in-memory entry. Identity (provider/harness) is
+    a shape check, not an enumeration (x-8dfc): one alien harness never bricks
+    the shared read; dispatch capability is gated at the spawn/ask seam.
     """
-    from fno.agents.providers import READABLE_PROVIDERS
-
     target = _registry_path(path)
     if not target.exists():
         return []
@@ -601,11 +629,34 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                 f"(got {type(row).__name__})"
             )
         provider = row.get("provider")
-        if provider not in READABLE_PROVIDERS:
+        harness = row.get("harness")
+        # Identity is one axis (x-8dfc). The read tolerates ANY well-shaped
+        # identity token so a single alien-harness row never bricks the shared
+        # registry read (mail send, spawn-collision check, whoami all ride it);
+        # "can THIS fno DISPATCH the row?" is enforced later at the spawn/ask
+        # seam via KNOWN_PROVIDERS, not here. The corruption guard survives as a
+        # shape check: at least one of provider/harness must be a valid token.
+        if not (_is_identity_token(provider) or _is_identity_token(harness)):
             raise RegistryVersionError(
-                f"registry at {target} row {index} has provider={provider!r}; "
-                f"this fno reads {READABLE_PROVIDERS}. "
+                f"registry at {target} row {index} has no valid identity token "
+                f"(provider={provider!r}, harness={harness!r}); a row needs a "
+                "non-empty lowercase provider or harness. "
                 "Upgrade or downgrade fno to match."
+            )
+        # Divergence is loud, not fatal (x-8dfc): a writer bug stamping
+        # provider != harness surfaces in the skew window instead of silently
+        # after the v10 provider-field removal. harness wins for identity
+        # (the backfill below leaves both in place; session_id keys on harness).
+        if (
+            _is_identity_token(provider)
+            and _is_identity_token(harness)
+            and provider != harness
+        ):
+            print(
+                f"fno agents: warning: registry row {row.get('name')!r} has "
+                f"provider={provider!r} and harness={harness!r} (diverged); "
+                "harness wins for identity",
+                file=sys.stderr,
             )
         if needs_v1_synthesis:
             row = {**row, "status": "live", "last_message_at": None}
@@ -636,15 +687,24 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                 f"{sorted(KNOWN_STATUSES)}. "
                 "Upgrade or downgrade fno to match."
             )
-        # Harness identity back-fill (x-ec59): harness adopts provider when
-        # absent (provider is always present, checked above; harness is
-        # identity-only and NOT validated against KNOWN_PROVIDERS, so an alien
-        # harness degrades to durable routing rather than bricking the read),
-        # then the shared rule syncs harness_session_id <-> the legacy per-harness
-        # key. A legacy-only row gains canonical fields here; a canonical-only row
-        # (the class the bg-routing bug lives in) keeps resolving once its id lands.
-        if not row.get("harness") and row.get("provider"):
+        # Lockstep alias fill (x-ec59 + x-8dfc): provider and harness are the
+        # same identity in the skew window, so fill whichever is absent from the
+        # other. harness adopts provider (x-ec59: a legacy-only row gains the
+        # canonical field, and an alien harness degrades to durable routing
+        # rather than bricking). provider adopts harness (x-8dfc): a provider-less
+        # row -- the post-v10 writer shape -- reads with provider treated as its
+        # harness value, so AgentEntry's required `provider` is always populated
+        # (AC1-EDGE). Then the shared rule syncs harness_session_id <-> the legacy
+        # per-harness key.
+        # Heal on invalid, not just absent: a truthy-but-corrupt token (whitespace
+        # or uppercase) in one field is replaced from the valid sibling, so the
+        # `self.harness or self.provider` resolution never lands on a corrupt
+        # harness (which would silently resolve session_id to None). The gate
+        # above guarantees at least one field is a valid token.
+        if not _is_identity_token(row.get("harness")) and _is_identity_token(row.get("provider")):
             row = {**row, "harness": row["provider"]}
+        elif not _is_identity_token(row.get("provider")) and _is_identity_token(row.get("harness")):
+            row = {**row, "provider": row["harness"]}
         row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
         # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
         # READ only -- a legacy row's jobId moves into `short_id` (the unified
@@ -710,14 +770,17 @@ def register_existing_session(
     (``register_session.main``) fails open and emits a warning event
     (AC7-ERR), so a locked/unwritable registry never blocks session start.
     """
-    if provider not in PROVIDER_SESSION_ID_FIELDS:
+    # Re-keyed on the shared harness mapping (x-8dfc); the parameter is still
+    # the caller's provider (== harness on every current row), so the message
+    # names what was passed.
+    if provider not in HARNESS_SESSION_ID_FIELDS:
         raise ValueError(
             f"unknown provider for registration: {provider!r}; "
-            f"known: {sorted(PROVIDER_SESSION_ID_FIELDS)}"
+            f"known: {sorted(HARNESS_SESSION_ID_FIELDS)}"
         )
     if not session_id:
         raise ValueError("session_id must be non-empty")
-    session_field = PROVIDER_SESSION_ID_FIELDS[provider]
+    session_field = HARNESS_SESSION_ID_FIELDS[provider]
 
     # A hand-started session has NO live messaging transport (no daemon PTY,
     # no bg jobId/socket): a peer cannot inject into it. Registering it "live"

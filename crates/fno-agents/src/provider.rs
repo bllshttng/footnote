@@ -1047,12 +1047,18 @@ pub fn gemini_session_id_from_blob(blob: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// The provider roster: every provider name the Rust side accepts — the spawn
-/// gates in `bin/client.rs`, the registry-acceptance check in `client_verbs`,
-/// and [`for_name`] all ride THIS list (x-51f6 US1: one source of truth, no
-/// per-site `matches!` copies). Python's mirror is `READABLE_PROVIDERS` in
-/// `cli/src/fno/agents/providers/__init__.py`; a cli test asserts the two stay
-/// identical. Every name here MUST have a [`for_name`] arm (test-enforced).
+/// The provider roster: every provider name the Rust side can DISPATCH/host —
+/// the spawn gates in `bin/client.rs` and [`for_name`] ride THIS list (x-51f6
+/// US1: one source of truth, no per-site `matches!` copies).
+///
+/// NAMING SKEW (x-8dfc, Discretion 4 — commented, not lockstep-renamed, to keep
+/// the diff small): this 5-name list mirrors Python's `READABLE_PROVIDERS` (the
+/// spawn/pane read-tolerance roster), NOT Python's narrower 3-name
+/// `KNOWN_PROVIDERS` (its dispatch set). A cli test pins this == READABLE.
+/// It is NO LONGER a registry-LOAD gate: `client_verbs::load_registry_entries`
+/// now shape-checks identity, so an alien harness reads without bricking; this
+/// list gates only spawn/`for_name`. Every name here MUST have a [`for_name`]
+/// arm (test-enforced).
 pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "agy", "opencode"];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode").
