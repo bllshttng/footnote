@@ -1,11 +1,12 @@
 """Per-worktree config override via `.fno/config.local.toml` (x-cbce; x-8526).
 
 setup-worktree.sh symlinks `.fno/config.toml` from canonical into every
-worktree, which shares ALL config - including the collision-prone keys
-(post_merge.parking_lot_path, project.id). The local override is the one file
-kept per-worktree: it layers ONLY WORKTREE_LOCAL_KEYS on top of the shared
-config, ignoring anything else so a local file can never silently fork shared
-config.
+worktree, which shares ALL config. The local override is the one file kept
+per-worktree: it layers ONLY WORKTREE_LOCAL_KEYS on top of the shared config,
+ignoring anything else so a local file can never silently fork shared config.
+x-071c narrowed the allowlist to the single key `project.id`;
+`post_merge.parking_lot_path` was removed (the post-merge ritual now anchors on
+the canonical root instead), so a lane-local parking_lot_path is ignored.
 
 Post stage-3 the on-disk files are flat TOML (config.toml / config.local.toml),
 so keys carry no `config.` prefix. Tests anchor via FNO_CONFIG (a real
@@ -49,18 +50,25 @@ SHARED = (
 )
 
 
-def test_local_override_wins_for_allowlisted_keys(tmp_path, monkeypatch):
+def test_project_id_override_wins_parking_lot_ignored(tmp_path, monkeypatch, caplog):
+    """AC6-EDGE: project.id is the sole per-worktree key. A parking_lot_path
+    override in the local file is ignored (x-071c dropped it from the allowlist)
+    so the canonical value wins; project.id from the same file still overrides."""
     local = (
         "[post_merge]\n"
-        'parking_lot_path = "mine/parking-lot.md"\n'
+        'parking_lot_path = "mine/parking-lot.md"\n'  # no longer allowlisted -> ignored
         "[project]\n"
         'id = "my-worktree"\n'
     )
-    s = _load(tmp_path, monkeypatch, SHARED, local)
-    assert s.post_merge.parking_lot_path == "mine/parking-lot.md"
-    assert s.project.id == "my-worktree"
+    with caplog.at_level(logging.WARNING, logger="fno.config"):
+        s = _load(tmp_path, monkeypatch, SHARED, local)
+    assert s.project.id == "my-worktree"  # allowlisted -> wins
+    assert s.post_merge.parking_lot_path == "shared/parking-lot.md"  # ignored -> canonical
     # A shared key not in the local file is untouched.
     assert s.post_merge.enabled is True
+    warnings = [r for r in caplog.records if "config.local.toml" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert "post_merge.parking_lot_path" in warnings[0].getMessage()
 
 
 def test_absent_local_file_is_noop(tmp_path, monkeypatch):
@@ -70,16 +78,17 @@ def test_absent_local_file_is_noop(tmp_path, monkeypatch):
 
 
 def test_non_allowlisted_key_ignored_with_one_warning(tmp_path, monkeypatch, caplog):
-    # Local file mixes an allowlisted key with a non-allowlisted one. Only the
-    # allowlisted key applies; the other is dropped with a single warning.
+    # Local file mixes the allowlisted key (project.id) with a non-allowlisted
+    # one. Only the allowlisted key applies; the other is dropped with one warning.
     local = (
+        "[project]\n"
+        'id = "my-worktree"\n'
         "[post_merge]\n"
-        'parking_lot_path = "mine/parking-lot.md"\n'
         "enabled = false\n"  # NOT worktree-local -> ignored
     )
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         s = _load(tmp_path, monkeypatch, SHARED, local)
-    assert s.post_merge.parking_lot_path == "mine/parking-lot.md"
+    assert s.project.id == "my-worktree"
     # Non-allowlisted key kept its shared value.
     assert s.post_merge.enabled is True
     warnings = [r for r in caplog.records if "config.local.toml" in r.getMessage()]
@@ -88,12 +97,12 @@ def test_non_allowlisted_key_ignored_with_one_warning(tmp_path, monkeypatch, cap
 
 
 def test_symlinked_local_file_is_skipped(tmp_path, monkeypatch):
-    # A symlinked local file would re-share the collision-prone keys, defeating
+    # A symlinked local file would re-share the collision-prone key, defeating
     # the point -> skipped, shared value wins.
     d = _fno_dir(tmp_path)
     real = tmp_path / "elsewhere.toml"
     real.write_text(
-        '[post_merge]\nparking_lot_path = "symlinked/parking-lot.md"\n',
+        '[project]\nid = "symlinked-id"\n',
         encoding="utf-8",
     )
     (d / "config.local.toml").symlink_to(real)
@@ -104,7 +113,7 @@ def test_symlinked_local_file_is_skipped(tmp_path, monkeypatch):
 
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     s = config_mod.load_settings()
-    assert s.post_merge.parking_lot_path == "shared/parking-lot.md"
+    assert s.project.id == "shared-project"
 
 
 def test_worktree_local_override_filters_pure():
@@ -118,10 +127,8 @@ def test_worktree_local_override_filters_pure():
             "project": {"id": "y", "vision": "nope"},
         }
     )
-    assert out == {
-        "post_merge": {"parking_lot_path": "x"},
-        "project": {"id": "y"},
-    }
+    # x-071c: parking_lot_path is no longer allowlisted -> dropped with the rest.
+    assert out == {"project": {"id": "y"}}
 
 
 def test_production_anchor_via_repo_root(tmp_path, monkeypatch):
@@ -176,9 +183,9 @@ def test_non_string_key_in_local_does_not_crash(caplog):
     assert "1" in warnings[0].getMessage() and "3.14" in warnings[0].getMessage()
 
 
-def test_allowlist_is_exactly_the_two_collision_keys():
+def test_allowlist_is_exactly_project_id():
+    # x-071c narrowed the allowlist to the single collision key. post_merge.
+    # parking_lot_path was removed - the ritual anchors on the canonical root.
     from fno.config import WORKTREE_LOCAL_KEYS
 
-    assert WORKTREE_LOCAL_KEYS == frozenset(
-        {"post_merge.parking_lot_path", "project.id"}
-    )
+    assert WORKTREE_LOCAL_KEYS == frozenset({"project.id"})

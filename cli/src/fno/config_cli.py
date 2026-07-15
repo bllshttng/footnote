@@ -120,11 +120,11 @@ def _load_repo_post_merge(repo_root: Path):
 
     raw: dict = _read_flat(fno_dir / "config.toml", fno_dir / "settings.yaml")
 
-    # Per-worktree local override (x-cbce): layer the allowlisted keys
-    # (parking_lot_path, project.id) so this oracle agrees with load_settings()
-    # and `fno config get`. Repo-local only (the local file is never symlinked
-    # to canonical), which preserves the "a global parking_lot_path must not make
-    # every repo look ready" guard above - the override is still repo-scoped.
+    # Per-worktree local override (x-cbce): layer the allowlisted key (project.id
+    # since x-071c narrowed the allowlist) so this oracle agrees with
+    # load_settings() and `fno config get`. Repo-local only (the local file is
+    # never symlinked to canonical), which preserves the "a global
+    # parking_lot_path must not make every repo look ready" guard above.
     local_toml = fno_dir / "config.local.toml"
     local_yaml = fno_dir / "settings.local.yaml"
     local_path = local_toml if local_toml.is_file() else local_yaml

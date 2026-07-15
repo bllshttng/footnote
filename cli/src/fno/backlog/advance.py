@@ -531,16 +531,21 @@ def _spawn_worker(
 # background lane - one worktree off origin/main, one branch, one PR stream.
 #
 # The isolation is the whole point (why x-cbce is a hard dep). Every worktree
-# shares the canonical settings.yaml (symlinked by setup-worktree.sh), so its
-# `parking_lot_path` (`internal/fno/backlog/parking-lot.md`) resolves THROUGH
-# the `internal/` symlink to the SAME canonical file in every lane - concurrent
-# post-merge writeback would clobber. G3 seeds each lane a `.fno/settings.local.yaml`
-# (x-cbce's per-worktree override, allowlist {parking_lot_path, project.id})
-# pointing parking_lot_path at the lane's own `.fno/parking-lot.md` and giving
-# project.id a per-lane value (AC2-HP). The per-lane project.id also neuters the
-# lane's own nested auto-continue: its post-merge `advance(project=<lane-id>)`
-# finds no same-project `next`, so the top-level parallel dispatcher stays the
-# single lane authority instead of each lane fanning out past `max_lanes`.
+# shares the canonical config.toml (symlinked by setup-worktree.sh). G3 seeds
+# each lane a `.fno/config.local.toml` (x-cbce's per-worktree override, allowlist
+# {project.id}) giving project.id a per-lane value. The per-lane project.id
+# neuters the lane's own nested auto-continue: its post-merge
+# `advance(project=<lane-id>)` finds no same-project `next`, so the top-level
+# parallel dispatcher stays the single lane authority instead of each lane
+# fanning out past `max_lanes`.
+#
+# The parking lot is NOT lane-isolated (x-071c): the post-merge ritual resolves
+# `parking_lot_path` against the canonical root unconditionally and writes there.
+# It is a serial one-shot durable step whose write vehicles are already safe on
+# the shared canonical file (capture add file-locks; the narrative append is
+# per-PR single-flight under the reconcile mutex with O_APPEND), so a per-lane
+# redirect bought nothing and orphaned the prose into an untracked file that
+# archive-worktree.sh deletes.
 #
 # NOT here (deferred to G4): merge serialization (LD#9 - lanes must rebase +
 # merge one at a time), full failure isolation via _redispatch (x-370f), and the
@@ -643,13 +648,19 @@ def _seed_lane_local_settings(
 ) -> None:
     """Write the lane's `.fno/config.local.toml` per-worktree isolation seed.
 
-    Overrides ONLY x-cbce's allowlisted keys on top of the shared (symlinked)
-    config.toml: `parking_lot_path` -> the lane's own `.fno/parking-lot.md`
-    (a repo-relative path that resolves per-worktree, so two lanes never share
-    one file - AC2-HP), and `project.id` -> a per-lane value so the lane's
-    post-merge writeback / auto-continue is scoped to itself. Written
-    unconditionally: a lane worktree is machine-owned and the content is
-    deterministic, so a re-dispatch re-seeds identically (idempotent).
+    Overrides ONLY x-cbce's sole allowlisted key on top of the shared (symlinked)
+    config.toml: `project.id` -> a per-lane value so the lane's post-merge
+    auto-continue is scoped to itself. Written unconditionally: a lane worktree
+    is machine-owned and the content is deterministic, so a re-dispatch re-seeds
+    identically (idempotent).
+
+    Note: `post_merge.parking_lot_path` is NOT seeded (x-071c). The post-merge
+    ritual is a serial one-shot durable write whose vehicles are already safe on
+    the shared canonical file (capture add under a file lock; narrative append
+    under the per-PR reconcile mutex with O_APPEND), so a per-lane redirect only
+    orphaned the prose into an untracked `.fno/parking-lot.md` that
+    archive-worktree.sh deletes. The ritual now resolves the parking lot against
+    the canonical root unconditionally.
     """
     import tomli_w
 
@@ -657,31 +668,22 @@ def _seed_lane_local_settings(
     # A reused worktree may carry `.fno` as a WHOLE-DIR symlink to canonical (the
     # bg-worktree footgun `fno target start` already heals). Writing through it
     # would create/overwrite the CANONICAL config.local.toml, so every lane
-    # would then share one parking_lot_path/project.id - the exact collision this
-    # seed prevents. Unlink and recreate a real per-worktree dir first.
+    # would then share one project.id - the exact collision this seed prevents.
+    # Unlink and recreate a real per-worktree dir first.
     if fno_dir.is_symlink():
         fno_dir.unlink()
     fno_dir.mkdir(parents=True, exist_ok=True)
-    # parking_lot_path MUST be repo-relative: PostMergeBlock.validate_parking_lot_path
-    # rejects an absolute / '~' / '..' value, so an absolute path would fail the
-    # spawned worker's load_settings() and break the lane before it starts (codex
-    # P2). `.fno/parking-lot.md` still isolates per lane: it resolves against
-    # resolve_repo_root() (THIS worktree, not canonical) and `.fno` is a real
-    # per-worktree dir - NOT the shared `internal/` symlink the canonical default
-    # (`internal/fno/backlog/parking-lot.md`) rides. The isolation comes from
-    # per-worktree resolution, not a distinct string.
     # Flat config.local.toml (no `config:` wrapper); tomli_w escapes the id value.
     body = tomli_w.dumps(
         {
             "project": {"id": f"{base_project_id}-{node_id}"},
-            "post_merge": {"parking_lot_path": ".fno/parking-lot.md"},
         }
     )
     (fno_dir / "config.local.toml").write_text(
         "# Auto-seeded per-lane isolation (parallel mode, epic x-42d5 G3).\n"
-        "# Only x-cbce's per-worktree override allowlist {parking_lot_path,\n"
-        "# project.id}; overrides the shared config.toml so concurrent lanes\n"
-        "# never collide on post-merge writeback or node attribution.\n"
+        "# Only x-cbce's per-worktree override allowlist {project.id}; overrides\n"
+        "# the shared config.toml so concurrent lanes never collide on node\n"
+        "# attribution / nested auto-continue.\n"
         + body
     )
 

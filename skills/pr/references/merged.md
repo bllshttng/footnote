@@ -156,10 +156,23 @@ fi
 # nothing left to do - release our fresh claim and exit BEFORE any mutation.
 # Best-effort resolve here (Step 1 does the fail-loud version); an unresolvable
 # config/path just skips the shortcut and lets Step 1/Step 5 handle it.
+#
+# Resolve against the CANONICAL root, never the worktree (same reason as Step 1):
+# a lane worktree may carry a stale per-worktree parking_lot_path override and/or
+# a real `internal/` dir, either of which would point this marker check at a
+# lane-local file. cd'ing into CANON_ROOT strips the override and joins onto the
+# real vault, so the belt-and-braces sees the SAME file Step 6 writes.
 _RR="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-_PLREL="$(fno config get config.post_merge.parking_lot_path 2>/dev/null || echo "")"
-if [[ -n "$_RR" && -n "$_PLREL" ]] && \
-   bash "${CLAUDE_PLUGIN_ROOT:-$_RR}/skills/pr/scripts/inbox-has-pr.sh" "$_RR/$_PLREL" "$PR" 2>/dev/null; then
+# --git-common-dir may be relative (bare `.git` / `../..`); resolve to absolute
+# via cd/pwd rather than the git>=2.31-only --path-format=absolute, so this works
+# on every git version. Empty (not a git dir) falls back to the worktree root.
+_GCD="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$_GCD" ]; then case "$_GCD" in /*) ;; *) _GCD="$(cd "$_GCD" 2>/dev/null && pwd)" ;; esac; fi
+_CR="${_GCD:+$(dirname "$_GCD")}"
+[[ -n "$_CR" ]] || _CR="$_RR"
+_PLREL="$( (cd "$_CR" && fno config get config.post_merge.parking_lot_path) 2>/dev/null || echo "")"
+if [[ -n "$_CR" && -n "$_PLREL" ]] && \
+   bash "${CLAUDE_PLUGIN_ROOT:-$_CR}/skills/pr/scripts/inbox-has-pr.sh" "$_CR/$_PLREL" "$PR" 2>/dev/null; then
   echo "post-merge: PR #${PR} already recorded (marker present) - releasing claim and exiting."
   fno claim release reconcile:pr-${PR} --holder "$HOLDER" 2>/dev/null || true
   exit 0
@@ -171,17 +184,37 @@ fi
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel)" || { echo "post-merge: not in a git repo." >&2; exit 1; }
 
+# Anchor the ritual on the CANONICAL checkout, never the worktree it may run
+# from. A parallel-mode lane worktree can carry a per-worktree
+# `post_merge.parking_lot_path` override (a stale x-cbce seed) and/or a real
+# `internal/` dir instead of the canonical symlink; either would strand the
+# durable parking-lot write in a lane-local file that archive-worktree.sh
+# deletes (x-071c). Reading config from CANON_ROOT strips the local override (the
+# canonical checkout has no config.local.toml layer to apply) and joining onto
+# CANON_ROOT hits the real vault. In a non-worktree checkout CANON_ROOT ==
+# REPO_ROOT and behavior is byte-identical to before. `--git-common-dir` can
+# return a RELATIVE path (a bare `.git` from a plain checkout, or `../..`-style
+# from a worktree); `--path-format=absolute` is git >= 2.31 only, so resolve to
+# absolute with cd/pwd instead - that works on every git version. If it fails to
+# resolve, fall back to REPO_ROOT (a very old git in a plain checkout, where
+# CANON_ROOT == REPO_ROOT anyway).
+GCD="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$GCD" ]; then case "$GCD" in /*) ;; *) GCD="$(cd "$GCD" 2>/dev/null && pwd)" ;; esac; fi
+CANON_ROOT="${GCD:+$(dirname "$GCD")}"
+[[ -n "$CANON_ROOT" ]] || CANON_ROOT="$REPO_ROOT"
+
 # Read config WITHOUT masking a read failure as "unset". `fno config get`
 # prints an empty line for a known-but-unset key (clean exit 0); it exits
 # NON-ZERO only when fno is missing/too old or config.toml fails to
 # validate. Those are NOT "not opted in" - fail loud with the real reason
-# instead of misreporting them as an unset path.
+# instead of misreporting them as an unset path. Each read runs in a `cd
+# "$CANON_ROOT"` subshell so the override is stripped at resolution time.
 PM_ERR="$(mktemp)"
-if ! ENABLED="$(fno config get config.post_merge.enabled 2>"$PM_ERR")"; then
+if ! ENABLED="$( (cd "$CANON_ROOT" && fno config get config.post_merge.enabled) 2>"$PM_ERR")"; then
   echo "post-merge: 'fno config get config.post_merge.enabled' failed (fno missing/too old, or config.toml invalid):" >&2
   cat "$PM_ERR" >&2; rm -f "$PM_ERR"; exit 1
 fi
-if ! PARKING_LOT_REL="$(fno config get config.post_merge.parking_lot_path 2>"$PM_ERR")"; then
+if ! PARKING_LOT_REL="$( (cd "$CANON_ROOT" && fno config get config.post_merge.parking_lot_path) 2>"$PM_ERR")"; then
   echo "post-merge: 'fno config get config.post_merge.parking_lot_path' failed (fno missing/too old, or config.toml invalid):" >&2
   cat "$PM_ERR" >&2; rm -f "$PM_ERR"; exit 1
 fi
@@ -211,8 +244,25 @@ case "/$PARKING_LOT_REL/" in
   */../*) echo "post-merge: parking_lot_path must not contain a '..' segment; got: $PARKING_LOT_REL" >&2; exit 1 ;;
 esac
 
-PARKING_LOT_PATH="$REPO_ROOT/$PARKING_LOT_REL"
-PROJECT="$(fno config get config.project.id 2>/dev/null || echo "")"   # best-effort; backlog idea auto-detects when empty
+PARKING_LOT_PATH="$CANON_ROOT/$PARKING_LOT_REL"
+# Two project ids, because attribution and auto-continue want opposite things:
+#
+# PROJECT (canonical): the REAL project a follow-up node belongs to. `backlog
+# idea` files new nodes under it, so a follow-up filed from a parallel-mode lane
+# worktree lands in the shared backlog instead of orphaning under the lane's
+# ephemeral `<base>-<node>` project.id. Read from CANON_ROOT (the canonical
+# config has no lane override). In a non-lane checkout this equals the lane read.
+PROJECT="$( (cd "$CANON_ROOT" && fno config get config.project.id) 2>/dev/null || echo "")"   # canonical base id; backlog idea auto-detects when empty
+#
+# LANE_PROJECT (current cwd): in a parallel-mode lane worktree this is the lane's
+# ephemeral project.id (worktree-local; x-071c kept project.id in the allowlist).
+# It is load-bearing ONLY for Step 3b's `fno backlog advance --project`: the
+# ephemeral id makes nested auto-continue find no same-project `next`, so the
+# top-level dispatcher stays the sole `max_lanes` authority. Anchoring auto-
+# continue on the canonical id would let each merged lane chain a successor
+# outside the dispatcher and blow the lane cap. In a non-lane checkout
+# LANE_PROJECT == PROJECT, so behavior there is unchanged.
+LANE_PROJECT="$(fno config get config.project.id 2>/dev/null || echo "")"   # lane (worktree-local) id; auto-continue neuter only
 ```
 
 An empty `$PARKING_LOT_REL` here means the key is genuinely unset (the read
@@ -321,7 +371,7 @@ hand the merge event to the shared auto-continue verb so the next now-unblocked
 node auto-builds without a manual "kick off the next group?" prompt:
 
 ```bash
-fno backlog advance --closed "$NODE_ID" --project "$PROJECT" \
+fno backlog advance --closed "$NODE_ID" --project "$LANE_PROJECT" \
   || echo "post-merge: auto-continue advance returned non-zero (non-fatal) - record in report" >&2
 ```
 
@@ -333,7 +383,8 @@ for the same merge dispatches the successor at most once (AC1-FR). Pass
 `--closed "$NODE_ID"` only if a node id was resolved for this PR; otherwise drop
 the flag (advance reads `fno backlog next` regardless - the flag is just
 race-ordering provenance). `$NODE_ID` is optional; if the skill never resolved
-one, run `fno backlog advance --project "$PROJECT"`.
+one, run `fno backlog advance --project "$LANE_PROJECT"` (the lane id, so a lane's
+nested auto-continue stays neutered).
 
 The reconcile in Step 2 already fires advance for a node it closes; this
 explicit call covers the case where the node was already closed before
@@ -387,13 +438,20 @@ The merge lands inside the 3-day window where deferral returns actually happen,
 so this is the cheapest moment to decide the fate of the nodes W1's `/pr create`
 step filed from this PR's "Out of scope" section. Each such node carries
 `deferred from PR:` in its details and (when the ship session knew its node)
-`parent: $NODE_ID`. Collect them by provenance, scoped to this project:
+`parent: $NODE_ID`. Collect them by provenance:
 
 ```bash
-BORN_JSON="$(fno backlog find 'deferred from PR' --project "$PROJECT" -J 2>/dev/null || echo '[]')"
+BORN_JSON="$(fno backlog find 'deferred from PR' -J 2>/dev/null || echo '[]')"
 ```
 
-Do NOT add `-s idea`: a deferral-born node may have already been triaged or moved before the merge landed, and those are exactly the ones warm-window triage should still surface. Provenance + parent linkage is the scope.
+Do NOT scope this by `--project`: `/pr create` files each born node with
+`--parent "$NODE_ID"` but NO explicit project, so its project is whatever the
+ship session's cwd auto-detected - the canonical id from a normal worktree, but
+the ephemeral lane id from a parallel-mode lane. A `--project` narrowing would
+silently miss the lane-born nodes. Provenance + the `parent == "$NODE_ID"` filter
+below is the real (project-agnostic) scope. Do NOT add `-s idea` either: a
+deferral-born node may have already been triaged or moved before the merge
+landed, and those are exactly the ones warm-window triage should still surface.
 
 Keep only the rows that belong to THIS PR: `parent == "$NODE_ID"` when `$NODE_ID`
 is set, else those whose `details` name this PR's branch. If the filtered set is
@@ -522,7 +580,7 @@ via two paths - operator-run AND this slot - would double-apply):
   fno backlog idea "backfill: <concise title>" \
     --details "Enabled by PR #$PR. Precondition: <need>. Command: <description>." \
     --priority "<carve-out priority or p2>" \
-    --project "$PROJECT" --cwd "$REPO_ROOT" \
+    --project "$PROJECT" --cwd "$CANON_ROOT" \
     || { echo "post-merge: backfill backlog idea FAILED - record in report" >&2; }
   ```
 
@@ -583,6 +641,17 @@ _<pr title>, merged 2026-05-30. Written by /fno:pr merged._
 - [ ] a decision/sign-off only the maintainer can make #jc
 ```
 
+**Write the section with an append-only shell redirect, never an Edit-tool
+read-modify-write.** Compose the section in a temp file, then
+`cat "$TMP" >> "$PARKING_LOT_PATH"` (or `printf '%s' "$section" >> "$PARKING_LOT_PATH"`).
+O_APPEND is what makes the shared canonical file safe without a new lock:
+same-PR concurrency is already excluded by the Step 0.5 `reconcile:pr-<N>` mutex,
+and two rituals for *different* PRs each do one atomic append, so at worst their
+self-contained sections interleave in order - never a lost write. An Edit-tool
+read-modify-write, by contrast, reads a stale snapshot and clobbers a concurrent
+append; do not regress it to one. (bg sessions block heredocs, so use `printf`/`cat`,
+not `cat <<EOF`.)
+
 Keep the narrative to genuine context: a thing to watch, plus `#jc` items only
 the maintainer can do (a decision, a sign-off, a manual setup) - per your repo's
 maintainer-todo convention. Implementation work does NOT get `#jc`.
@@ -594,17 +663,19 @@ is visible to `fno backlog capture list --by-type` / `tidy` and is never re-file
 as a duplicate:
 
 ```bash
-fno backlog capture add "<concise title>" \
+( cd "$CANON_ROOT" && fno backlog capture add "<concise title>" \
   --source "PR#$PR" \
   --why "<one line: what the diff deferred>" \
   --where "<file/area, optional>" \
-  --priority p2 \
+  --priority p2 ) \
   || { echo "post-merge: inbox add FAILED for '<title>' - record in report" >&2; }
 ```
 
-`add` resolves the same capture-tier file the read commands use - it honors this
-repo's `config.post_merge.parking_lot_path` (the same file this narrative is written
-to) - so the typed item is reachable by `fno backlog capture list --by-type` /
+`capture add` has no `--cwd`, so run it in a `cd "$CANON_ROOT"` subshell (like the
+config reads): it resolves its target file from cwd, and only from CANON_ROOT does
+it strip any lane-local override and land in the same canonical file this
+narrative is written to. That keeps the typed item reachable by
+`fno backlog capture list --by-type` /
 `tidy` / `promote` / `dismiss`, not just written somewhere they cannot see. It
 runs a dedup pre-check: if an open item already covers the same (title + where)
 it returns the existing id and mints nothing (JSON `"deduped": true`), so a
@@ -621,7 +692,7 @@ fno backlog idea "<concise title>" \
   --details "<why; references PR #$PR>" \
   --priority p2 \
   --project "$PROJECT" \
-  --cwd "$REPO_ROOT" \
+  --cwd "$CANON_ROOT" \
   || { echo "post-merge: backlog idea FAILED for '<title>' - record in report" >&2; }
 ```
 
