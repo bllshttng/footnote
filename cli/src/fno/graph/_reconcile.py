@@ -1145,11 +1145,12 @@ def dispatch_post_merge_ritual(
                         "routed-warm", pr_number, short_id=warm_sid[:8], detail=reason
                     )
                 if reason == "queue-timeout":
-                    # op:'reply' already typed the keystrokes into the
-                    # recipient's PTY (see mail_inject.rs); just unconfirmed
-                    # because it was busy. Cold-spawning would duplicate that
-                    # work, so stop here -- no marker (unconfirmed), no
-                    # extra notify (the paste is the delivery).
+                    # op:'reply' already typed the keystrokes into the PTY;
+                    # just unconfirmed (recipient busy). Persist the marker
+                    # same as a cold spawn does -- trust the hand-off, same
+                    # as spawn() -- else nothing ever resolves this merge's
+                    # dedup and a later call cold-spawns a redundant worker.
+                    _persist_marker()
                     return PostMergeDispatchResult(
                         "routed-warm", pr_number, short_id=warm_sid[:8], detail="queued"
                     )

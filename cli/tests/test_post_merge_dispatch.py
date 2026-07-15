@@ -469,9 +469,10 @@ def test_warm_inject_failure_falls_back_cold(tmp_path, monkeypatch):
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW2").exists()
 
 
-def test_warm_queue_timeout_no_cold_spawn_no_notify(tmp_path, monkeypatch):
+def test_warm_queue_timeout_no_cold_spawn_marks(tmp_path, monkeypatch):
     """A queued (unconfirmed) inject already typed in -- no cold spawn, no
-    extra notify, no marker."""
+    extra notify. Marker IS written (same trust-the-hand-off as cold spawn),
+    so a later call sees marker-exists instead of re-dispatching."""
     _patch_resolver(monkeypatch, "sess-busy")
     warm = _WarmInject(delivered=False, reason="queue-timeout")
     spawn = _Spawn()
@@ -485,7 +486,16 @@ def test_warm_queue_timeout_no_cold_spawn_no_notify(tmp_path, monkeypatch):
     assert res.detail == "queued"
     assert spawn.calls == []
     assert notify.calls == []
-    assert not (tmp_path / ".fno" / "post-merge-dispatched" / "shaW3").exists()
+    assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW3").exists()
+
+    # A later call (e.g. the origin session now gone) sees marker-exists,
+    # never a redundant cold-spawn.
+    second = dispatch_post_merge_ritual(
+        7, dedup_key="shaW3", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id=None,
+    )
+    assert second.outcome == "already-dispatched"
+    assert spawn.calls == []
 
 
 def test_no_source_session_takes_cold_path(tmp_path):
