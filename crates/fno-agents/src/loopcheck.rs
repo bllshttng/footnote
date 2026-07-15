@@ -5055,6 +5055,29 @@ mod tests {
     }
 
     #[test]
+    fn watch_idle_event_is_non_terminal_allow() {
+        // AC1-HP invariant: the idle branch emits allow + null termination, so
+        // the stop-hook shim (which runs finalize only on a NON-null
+        // termination_reason) never invokes finalize / stamps the ledger /
+        // graduates a plan on an idle fire. This is the exact output shape the
+        // idle branch returns.
+        let json = allow_output(
+            "allow",
+            None,
+            "watching: idling until watcher fires (PR #404, ci pending)",
+            3,
+            Some("sha|OPEN|PENDING|none".to_string()),
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert!(
+            v["termination_reason"].is_null(),
+            "idle-allow MUST be non-terminal or finalize would run"
+        );
+        assert!(v["message"].as_str().unwrap().contains("watching"));
+    }
+
+    #[test]
     fn termination_reason_variant_names_byte_identical() {
         // Fix 6: all TerminationReason variants must serialize to the exact strings
         // the spec names - no rename attributes applied.
