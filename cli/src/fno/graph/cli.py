@@ -2408,7 +2408,7 @@ def cmd_dispatch_lanes(
 
     Selects distinct-domain ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
-    ``.fno/settings.local.yaml`` (x-cbce: own parking_lot_path + project.id), and
+    ``.fno/config.local.toml`` (x-cbce: own project.id), and
     spawns a detached ``/target no-merge`` worker rooted there. Prints one JSON
     receipt per lane (``status`` dispatched | skipped). ``max_lanes < 2`` spawns
     nothing (sequential: use ``fno backlog advance`` / ``next``).

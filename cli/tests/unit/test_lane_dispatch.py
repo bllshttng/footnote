@@ -1,9 +1,10 @@
 """Unit tests for parallel-mode lane dispatch (x-8b48, group 3).
 
 Covers `advance.dispatch_lanes` and its isolation helpers: one isolated worktree
-+ bg worker per selected lane, per-lane `.fno/config.local.toml` seeding with
-DISTINCT parking_lot_path + project.id (AC2-HP), and slot-release-on-failure so
-one lane's spawn failure never aborts the fleet (Failure Modes: Errors).
++ bg worker per selected lane, per-lane `.fno/config.local.toml` seeding with a
+DISTINCT project.id (x-071c narrowed the seed to this sole key), and
+slot-release-on-failure so one lane's spawn failure never aborts the fleet
+(Failure Modes: Errors).
 
 `select_lane_fill` runs for real against a monkeypatched `_ready_nodes` and an
 isolated `tmp_path` claims root, so the lane slots are genuinely held and the
@@ -76,7 +77,8 @@ def test_dispatch_spawns_one_isolated_worker_per_distinct_domain_lane(
 
 
 def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):
-    """AC2-HP: two lanes resolve parking_lot_path (+ project.id) to OWN values."""
+    """AC7-EDGE: the seed emits project.id ONLY (x-071c dropped parking_lot_path);
+    two lanes get distinct per-lane ids."""
     wt_a = tmp_path / "a"
     wt_b = tmp_path / "b"
     advance._seed_lane_local_settings(wt_a, "n-a", "fno")
@@ -85,27 +87,18 @@ def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):
     raw_a = tomllib.loads((wt_a / ".fno" / "config.local.toml").read_text())
     raw_b = tomllib.loads((wt_b / ".fno" / "config.local.toml").read_text())
 
+    # The seed must contain NO parking_lot_path (x-071c: the post-merge ritual
+    # anchors on the canonical root, so a per-lane redirect is gone).
+    assert "post_merge" not in raw_a
+    assert "post_merge" not in raw_b
+
     # x-cbce loader keeps ONLY the allowlist; a seeded key outside it would be
     # dropped here, so passing through the loader proves the seed is well-formed.
     ov_a = _worktree_local_override(raw_a)
     ov_b = _worktree_local_override(raw_b)
     assert set(_leaf_paths(ov_a)) == set(WORKTREE_LOCAL_KEYS)
 
-    park_a = ov_a["post_merge"]["parking_lot_path"]
-    park_b = ov_b["post_merge"]["parking_lot_path"]
-    # Repo-relative (same string) but resolves per-worktree: `.fno` is a real
-    # per-worktree dir, so each lane gets its OWN file - isolation from
-    # resolution, not a distinct string (AC2-HP), and the value must be
-    # repo-relative or the worker's load_settings() rejects it.
-    assert park_a == ".fno/parking-lot.md"
-    assert park_b == ".fno/parking-lot.md"
-    # The crux of the fix: the seeded value passes the parking_lot_path validator
-    # (an absolute value would raise here and break every lane worker).
-    from fno.config import PostMergeBlock
-
-    PostMergeBlock(parking_lot_path=park_a)  # must not raise
-
-    # project.id is per-lane too (neuters nested auto-continue).
+    # project.id is per-lane (neuters nested auto-continue).
     assert ov_a["project"]["id"] == "fno-n-a"
     assert ov_b["project"]["id"] == "fno-n-b"
 
@@ -190,7 +183,7 @@ def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monk
 
 def test_seed_heals_symlinked_fno_before_writing(tmp_path):
     """A reused worktree's whole-dir `.fno` symlink must not route the seed into
-    the canonical file (which would make every lane share one parking_lot_path)."""
+    the canonical file (which would make every lane share one project.id)."""
     canonical = tmp_path / "canonical"
     (canonical / ".fno").mkdir(parents=True)
     (canonical / ".fno" / "config.local.toml").write_text("canonical = 'sentinel'\n")
