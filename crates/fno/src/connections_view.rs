@@ -38,11 +38,6 @@ pub struct Account {
     /// Snapshot age label for managed accounts; None for oauth/api-key records.
     #[serde(default)]
     pub snapshot: Option<String>,
-    /// Session-local marker: a login pane was spawned for this id but register
-    /// has not yet finalized. Never persisted (Locked Decision 6). Not on the
-    /// wire - set client-side by the wizard.
-    #[serde(skip)]
-    pub pending_login: bool,
 }
 
 fn unknown_headroom() -> String {
@@ -103,6 +98,96 @@ pub enum ConnIntent {
     /// Run a single-flight `fno <argv>` mutation, then re-read. The reducer only
     /// yields this when not already acting (single-flight, Locked Decision 5).
     Run(Vec<String>),
+    /// Run a single-flight `fno <argv>` mutation with extra child env (register
+    /// needs `CLAUDE_CONFIG_DIR`), then re-read.
+    RunEnv {
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+    },
+    /// Spawn the interactive login pane via `fno mux pane run` (the documented
+    /// PaneRun front door - zero proto bump). Not single-flight/re-read: it opens
+    /// a pane and returns; the modal marks the id pending-login locally.
+    SpawnLogin(Vec<String>),
+}
+
+/// A session-local pending login: a wizard spawned its login pane but register
+/// has not finalized yet. Rendered as a synthetic Accounts row; never persisted
+/// (Locked Decision 6). `dir` is the claude config dir (empty for codex).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingLogin {
+    pub id: String,
+    pub cli: String,
+    pub dir: String,
+}
+
+/// The `a`dd wizard: collect an id, pick a cli/kind, and (claude) a config dir,
+/// then spawn a login pane or run the api-key add. One wizard at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wizard {
+    pub step: WizardStep,
+    pub id: String,
+    pub kind: AddKind,
+    pub dir: String,
+    /// api-key kind: the key value typed (base_url is the GLM preset).
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardStep {
+    Id,
+    Kind,
+    Dir,
+    ApiKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddKind {
+    Claude,
+    Codex,
+    ApiKeyGlm,
+}
+
+impl AddKind {
+    fn cli(self) -> &'static str {
+        match self {
+            AddKind::Claude => "claude",
+            AddKind::Codex => "codex",
+            // GLM is a claude-cli provider fronted by a base_url + api key.
+            AddKind::ApiKeyGlm => "claude",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            AddKind::Claude => "claude (oauth login)",
+            AddKind::Codex => "codex (oauth login)",
+            AddKind::ApiKeyGlm => "api-key: GLM/z.ai",
+        }
+    }
+    fn next(self) -> AddKind {
+        match self {
+            AddKind::Claude => AddKind::Codex,
+            AddKind::Codex => AddKind::ApiKeyGlm,
+            AddKind::ApiKeyGlm => AddKind::Claude,
+        }
+    }
+}
+
+/// The GLM/z.ai base_url preset (Claude's Discretion 4: preset-first is fine).
+const GLM_BASE_URL: &str = "https://api.z.ai/api/anthropic";
+
+/// Validate a new-account id BEFORE any subprocess: lowercase alphanumeric +
+/// hyphens, leading letter (the register verb's `_ID_PATTERN` contract).
+pub fn valid_account_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// A pending destructive action awaiting the operator's one-key confirm. `label`
@@ -132,6 +217,11 @@ pub struct ConnectionsView {
     /// A pending remove confirm (Enter runs, any other key cancels). While
     /// `Some`, keys route to the confirm (AC1-ERR / destructive-guard).
     pub confirm: Option<PendingConfirm>,
+    /// The `a`dd wizard, `Some` while collecting inputs. Keys divert to it.
+    pub wizard: Option<Wizard>,
+    /// Session-local pending logins, rendered as synthetic Accounts rows after
+    /// the real records. Never persisted; register is the durable step.
+    pub pending: Vec<PendingLogin>,
     /// Generation token, bumped per open/refresh so a read landing after a newer
     /// refresh (or a close) is discarded.
     pub gen: u64,
@@ -150,8 +240,23 @@ impl ConnectionsView {
             acting: false,
             notice: None,
             confirm: None,
+            wizard: None,
+            pending: Vec::new(),
             gen: 0,
         }
+    }
+
+    /// Total selectable Accounts rows: real records + session-local pending logins.
+    fn accounts_len(&self) -> usize {
+        self.accounts.len() + self.pending.len()
+    }
+
+    /// The pending login at Accounts-tab cursor `acct_sel`, if the cursor sits on
+    /// a synthetic pending row (past the real records).
+    pub fn selected_pending(&self) -> Option<&PendingLogin> {
+        self.acct_sel
+            .checked_sub(self.accounts.len())
+            .and_then(|i| self.pending.get(i))
     }
 
     /// The account the Accounts-tab cursor is on, if any.
@@ -173,6 +278,11 @@ impl ConnectionsView {
     pub fn apply_read(&mut self, outcome: ReadOutcome) {
         match outcome {
             ReadOutcome::Ok { accounts, combos } => {
+                // A pending login that now has a real record has been registered;
+                // drop its synthetic row (register is the durable step).
+                let real: std::collections::HashSet<&str> =
+                    accounts.iter().map(|a| a.id.as_str()).collect();
+                self.pending.retain(|p| !real.contains(p.id.as_str()));
                 self.accounts = accounts;
                 self.combos = combos;
                 self.state = ModalState::Ready;
@@ -185,8 +295,9 @@ impl ConnectionsView {
     }
 
     fn clamp_selection(&mut self) {
-        if self.acct_sel >= self.accounts.len() {
-            self.acct_sel = self.accounts.len().saturating_sub(1);
+        let alen = self.accounts_len();
+        if self.acct_sel >= alen {
+            self.acct_sel = alen.saturating_sub(1);
         }
         if self.combo_sel >= self.combos.len() {
             self.combo_sel = self.combos.len().saturating_sub(1);
@@ -197,6 +308,10 @@ impl ConnectionsView {
     /// Task 1.2 handles navigation + refresh + close; later tasks extend the
     /// intent set (actions, wizard, order commit).
     pub fn on_key(&mut self, key: u8) -> ConnIntent {
+        // The add wizard, while open, captures all keys (typed input + toggles).
+        if self.wizard.is_some() {
+            return self.wizard_key(key);
+        }
         // A pending confirm captures all keys: Enter commits, anything else
         // cancels (no destructive action without an explicit confirm).
         if let Some(pending) = self.confirm.take() {
@@ -226,6 +341,18 @@ impl ConnectionsView {
             b'k' if !degraded => self.move_sel(-1),
             b'u' if !degraded && self.tab == Tab::Accounts => self.act_use(),
             b'd' if !degraded && self.tab == Tab::Accounts => self.act_remove(),
+            b'a' if !degraded && self.tab == Tab::Accounts => {
+                self.wizard = Some(Wizard {
+                    step: WizardStep::Id,
+                    id: String::new(),
+                    kind: AddKind::Claude,
+                    dir: String::new(),
+                    api_key: String::new(),
+                });
+                self.notice = None;
+                ConnIntent::Redraw
+            }
+            b'r' if !degraded && self.tab == Tab::Accounts => self.act_register(),
             _ => {
                 // No zero-feedback keypress: an unhandled key rings the bell so
                 // the operator always gets feedback (AC1-UI).
@@ -270,9 +397,195 @@ impl ConnectionsView {
         ConnIntent::Redraw
     }
 
+    /// `r`: register (finalize a pending login, or refresh a managed record).
+    /// Single-flight; claude passes CLAUDE_CONFIG_DIR in the child env.
+    fn act_register(&mut self) -> ConnIntent {
+        if self.acting {
+            self.notice = Some("busy - one action at a time".to_string());
+            return ConnIntent::Redraw;
+        }
+        // A pending row: finalize its login into a managed record.
+        if let Some(p) = self.selected_pending().cloned() {
+            let argv = vec![
+                "providers".into(),
+                "register".into(),
+                p.id.clone(),
+                "--cli".into(),
+                p.cli.clone(),
+            ];
+            self.acting = true;
+            self.notice = None;
+            return if p.cli == "claude" && !p.dir.is_empty() {
+                ConnIntent::RunEnv {
+                    argv,
+                    env: vec![("CLAUDE_CONFIG_DIR".into(), p.dir.clone())],
+                }
+            } else {
+                ConnIntent::Run(argv)
+            };
+        }
+        // A real managed record: re-register (refresh the snapshot).
+        let Some(acct) = self.selected_account() else {
+            return ConnIntent::Bell;
+        };
+        if acct.auth != "managed" {
+            self.notice = Some(format!("{} is not a managed account", acct.id));
+            return ConnIntent::Redraw;
+        }
+        let argv = vec![
+            "providers".into(),
+            "register".into(),
+            acct.id.clone(),
+            "--cli".into(),
+            acct.cli.clone(),
+        ];
+        self.acting = true;
+        self.notice = None;
+        ConnIntent::Run(argv)
+    }
+
+    /// Handle a key while the add wizard is open. Text steps: printable appends,
+    /// Backspace pops, Enter advances, Esc cancels. The Kind step toggles.
+    fn wizard_key(&mut self, key: u8) -> ConnIntent {
+        if key == 0x1b {
+            self.wizard = None;
+            self.notice = Some("add cancelled".to_string());
+            return ConnIntent::Redraw;
+        }
+        let Some(w) = self.wizard.as_mut() else {
+            return ConnIntent::Bell;
+        };
+        match w.step {
+            WizardStep::Id => match key {
+                b'\r' | b'\n' => {
+                    if !valid_account_id(&w.id) {
+                        self.notice =
+                            Some("id must be lowercase letters/digits/-, leading letter".into());
+                        return ConnIntent::Redraw;
+                    }
+                    w.step = WizardStep::Kind;
+                    self.notice = None;
+                    ConnIntent::Redraw
+                }
+                0x7f | 0x08 => {
+                    w.id.pop();
+                    ConnIntent::Redraw
+                }
+                c if c.is_ascii_graphic() => {
+                    w.id.push(c as char);
+                    ConnIntent::Redraw
+                }
+                _ => ConnIntent::Bell,
+            },
+            WizardStep::Kind => match key {
+                b'\t' | b' ' => {
+                    w.kind = w.kind.next();
+                    ConnIntent::Redraw
+                }
+                b'\r' | b'\n' => match w.kind {
+                    AddKind::Claude => {
+                        // Prefill the conventional per-account config dir.
+                        w.dir = format!("~/.claude-{}", w.id);
+                        w.step = WizardStep::Dir;
+                        ConnIntent::Redraw
+                    }
+                    AddKind::Codex => self.finish_login(),
+                    AddKind::ApiKeyGlm => {
+                        w.step = WizardStep::ApiKey;
+                        ConnIntent::Redraw
+                    }
+                },
+                _ => ConnIntent::Bell,
+            },
+            WizardStep::Dir => match key {
+                b'\r' | b'\n' => {
+                    if w.dir.is_empty() {
+                        self.notice = Some("config dir cannot be empty".into());
+                        return ConnIntent::Redraw;
+                    }
+                    self.finish_login()
+                }
+                0x7f | 0x08 => {
+                    w.dir.pop();
+                    ConnIntent::Redraw
+                }
+                c if c.is_ascii_graphic() => {
+                    w.dir.push(c as char);
+                    ConnIntent::Redraw
+                }
+                _ => ConnIntent::Bell,
+            },
+            WizardStep::ApiKey => match key {
+                b'\r' | b'\n' => {
+                    if w.api_key.is_empty() {
+                        self.notice = Some("api key cannot be empty".into());
+                        return ConnIntent::Redraw;
+                    }
+                    self.finish_api_key()
+                }
+                0x7f | 0x08 => {
+                    w.api_key.pop();
+                    ConnIntent::Redraw
+                }
+                c if c.is_ascii_graphic() => {
+                    w.api_key.push(c as char);
+                    ConnIntent::Redraw
+                }
+                _ => ConnIntent::Bell,
+            },
+        }
+    }
+
+    /// Close the wizard, add a session-local pending row, and spawn the login
+    /// pane (claude: `claude /login` under CLAUDE_CONFIG_DIR; codex: `codex
+    /// login`) via the `fno mux pane run` PaneRun front door.
+    fn finish_login(&mut self) -> ConnIntent {
+        let w = self.wizard.take().expect("wizard present");
+        let (cli, dir) = (w.kind.cli().to_string(), w.dir.clone());
+        self.pending.push(PendingLogin {
+            id: w.id.clone(),
+            cli: cli.clone(),
+            dir: dir.clone(),
+        });
+        self.notice = Some(format!("login pane opened for {} - press r when done", w.id));
+        let inner: Vec<String> = if cli == "claude" {
+            vec![
+                "env".into(),
+                format!("CLAUDE_CONFIG_DIR={dir}"),
+                "claude".into(),
+                "/login".into(),
+            ]
+        } else {
+            vec!["codex".into(), "login".into()]
+        };
+        let mut argv = vec!["mux".into(), "pane".into(), "run".into()];
+        argv.extend(inner);
+        ConnIntent::SpawnLogin(argv)
+    }
+
+    /// Close the wizard and add the GLM api-key provider in one verb.
+    fn finish_api_key(&mut self) -> ConnIntent {
+        let w = self.wizard.take().expect("wizard present");
+        self.acting = true;
+        self.notice = None;
+        ConnIntent::Run(vec![
+            "providers".into(),
+            "add".into(),
+            w.id,
+            "--cli".into(),
+            "claude".into(),
+            "--auth".into(),
+            "api_key".into(),
+            "--env".into(),
+            format!("ANTHROPIC_BASE_URL={GLM_BASE_URL}"),
+            "--env".into(),
+            format!("ANTHROPIC_API_KEY={}", w.api_key),
+        ])
+    }
+
     fn move_sel(&mut self, delta: isize) -> ConnIntent {
         let (sel, len) = match self.tab {
-            Tab::Accounts => (&mut self.acct_sel, self.accounts.len()),
+            Tab::Accounts => (&mut self.acct_sel, self.accounts.len() + self.pending.len()),
             Tab::Order => (&mut self.combo_sel, self.combos.len()),
         };
         if len == 0 {
@@ -299,9 +612,10 @@ impl ConnectionsView {
                 out.push(format!("fno unreachable: {reason}"));
                 out.push("actions disabled - press R to retry".to_string());
             }
-            ModalState::Ready => match self.tab {
-                Tab::Accounts => self.render_accounts(&mut out),
-                Tab::Order => self.render_order(&mut out),
+            ModalState::Ready => match (&self.wizard, self.tab) {
+                (Some(w), _) => self.render_wizard(w, &mut out),
+                (None, Tab::Accounts) => self.render_accounts(&mut out),
+                (None, Tab::Order) => self.render_order(&mut out),
             },
         }
         out.push(String::new());
@@ -327,7 +641,7 @@ impl ConnectionsView {
     }
 
     fn render_accounts(&self, out: &mut Vec<String>) {
-        if self.accounts.is_empty() {
+        if self.accounts.is_empty() && self.pending.is_empty() {
             out.push("no accounts registered - press a to add".to_string());
             return;
         }
@@ -339,15 +653,51 @@ impl ConnectionsView {
                 .as_deref()
                 .map(|s| format!("  snap={s}"))
                 .unwrap_or_default();
-            let pending = if a.pending_login { "  …login pending" } else { "" };
             out.push(format!(
-                "{cursor}{badge} {id}  [{cli}] {auth}  {headroom}{snap}{pending}",
+                "{cursor}{badge} {id}  [{cli}] {auth}  {headroom}{snap}",
                 id = a.id,
                 cli = a.cli,
                 auth = a.auth,
                 headroom = a.headroom,
             ));
         }
+        // Session-local pending logins render after the real records; `r`
+        // registers the selected one into a managed account.
+        for (j, p) in self.pending.iter().enumerate() {
+            let idx = self.accounts.len() + j;
+            let cursor = if idx == self.acct_sel { ">" } else { " " };
+            out.push(format!(
+                "{cursor}  {id}  [{cli}] …login pending  (r: register)",
+                id = p.id,
+                cli = p.cli,
+            ));
+        }
+    }
+
+    /// Render the add-wizard input lines (replaces the list body while open).
+    fn render_wizard(&self, w: &Wizard, out: &mut Vec<String>) {
+        out.push("add account".to_string());
+        let field = |active: bool, label: &str, val: &str| {
+            let caret = if active { "_" } else { "" };
+            format!("{} {label}: {val}{caret}", if active { ">" } else { " " })
+        };
+        out.push(field(w.step == WizardStep::Id, "id", &w.id));
+        if w.step != WizardStep::Id {
+            let kind_line = format!(
+                "{} kind: {}  (Tab/Space to change)",
+                if w.step == WizardStep::Kind { ">" } else { " " },
+                w.kind.label(),
+            );
+            out.push(kind_line);
+        }
+        if w.step == WizardStep::Dir {
+            out.push(field(true, "config dir", &w.dir));
+        }
+        if w.step == WizardStep::ApiKey {
+            out.push(field(true, "api key", &w.api_key));
+        }
+        out.push(String::new());
+        out.push("Enter: next   Esc: cancel".to_string());
     }
 
     fn render_order(&self, out: &mut Vec<String>) {
@@ -374,7 +724,8 @@ impl ConnectionsView {
     fn footer(&self) -> String {
         match self.tab {
             Tab::Accounts => {
-                "Tab: order  j/k: move  u: use  d: remove  R: refresh  Esc: close".to_string()
+                "Tab: order  j/k: move  u: use  d: remove  a: add  r: register  R: refresh  Esc: close"
+                    .to_string()
             }
             Tab::Order => "Tab: accounts   j/k: move   R: refresh   Esc: close".to_string(),
         }
@@ -470,8 +821,18 @@ pub struct ActionResult {
 /// can hit an interactive Keychain access prompt (Domain Pitfalls), so a slow
 /// verb yields a named timeout error, never a hung modal.
 pub async fn run_verb(argv: Vec<String>) -> ActionResult {
-    let fut = tokio::process::Command::new(fno_bin())
-        .args(&argv)
+    run_verb_env(argv, Vec::new()).await
+}
+
+/// Like [`run_verb`] but sets extra child env vars (register needs
+/// `CLAUDE_CONFIG_DIR` to pick the account's config dir / Keychain item).
+pub async fn run_verb_env(argv: Vec<String>, env: Vec<(String, String)>) -> ActionResult {
+    let mut cmd = tokio::process::Command::new(fno_bin());
+    cmd.args(&argv);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    let fut = cmd
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
@@ -748,5 +1109,161 @@ mod tests {
         assert_eq!(stderr_tail(b"warn\nerror: bad id\n\n"), "error: bad id");
         assert_eq!(stderr_tail(b""), "(no error output)");
         assert_eq!(stderr_tail(b"   \n  \n"), "(no error output)");
+    }
+
+    // ── Task 1.4: login wizard + api-key add ────────────────────────────────
+
+    #[test]
+    fn account_id_validation_matches_register_contract() {
+        assert!(valid_account_id("ccm"));
+        assert!(valid_account_id("ccm-2"));
+        assert!(!valid_account_id("Ccm")); // uppercase
+        assert!(!valid_account_id("2cm")); // leading digit
+        assert!(!valid_account_id("cc_m")); // underscore
+        assert!(!valid_account_id("")); // empty
+    }
+
+    fn type_str(v: &mut ConnectionsView, s: &str) {
+        for b in s.bytes() {
+            v.on_key(b);
+        }
+    }
+
+    // AC3-HP: a -> id/cli/dir -> spawns the login pane; row shows pending login.
+    #[test]
+    fn login_wizard_claude_spawns_pane_and_marks_pending() {
+        let mut v = ready_view();
+        assert_eq!(v.on_key(b'a'), ConnIntent::Redraw);
+        assert!(v.wizard.is_some());
+        type_str(&mut v, "ccm2");
+        assert_eq!(v.on_key(b'\r'), ConnIntent::Redraw); // id -> kind (default claude)
+        let intent = v.on_key(b'\r'); // kind=claude -> dir step (prefilled)
+        assert_eq!(intent, ConnIntent::Redraw);
+        assert_eq!(v.wizard.as_ref().unwrap().dir, "~/.claude-ccm2");
+        let intent = v.on_key(b'\r'); // commit dir -> spawn login
+        match intent {
+            ConnIntent::SpawnLogin(argv) => {
+                assert_eq!(
+                    argv,
+                    vec![
+                        "mux", "pane", "run", "env", "CLAUDE_CONFIG_DIR=~/.claude-ccm2",
+                        "claude", "/login",
+                    ]
+                );
+            }
+            other => panic!("expected SpawnLogin, got {other:?}"),
+        }
+        assert!(v.wizard.is_none());
+        // Pending row rendered, and register targets it with the config-dir env.
+        assert_eq!(v.pending.len(), 1);
+        let out = v.render().join("\n");
+        assert!(out.contains("ccm2  [claude] …login pending"));
+    }
+
+    #[test]
+    fn login_wizard_codex_spawns_codex_login_no_dir_step() {
+        let mut v = ready_view();
+        v.on_key(b'a');
+        type_str(&mut v, "cdx");
+        v.on_key(b'\r'); // id -> kind
+        v.on_key(b'\t'); // claude -> codex
+        let intent = v.on_key(b'\r'); // codex has no dir step -> spawn
+        assert_eq!(
+            intent,
+            ConnIntent::SpawnLogin(vec![
+                "mux".into(),
+                "pane".into(),
+                "run".into(),
+                "codex".into(),
+                "login".into()
+            ])
+        );
+        assert_eq!(v.pending[0].cli, "codex");
+        assert!(v.pending[0].dir.is_empty());
+    }
+
+    #[test]
+    fn register_pending_row_uses_config_dir_env() {
+        let mut v = ready_view();
+        v.pending.push(PendingLogin {
+            id: "ccm2".into(),
+            cli: "claude".into(),
+            dir: "~/.claude-ccm2".into(),
+        });
+        // Move the cursor onto the pending row (past the 3 real accounts).
+        v.acct_sel = v.accounts.len(); // first pending
+        let intent = v.on_key(b'r');
+        assert_eq!(
+            intent,
+            ConnIntent::RunEnv {
+                argv: vec![
+                    "providers".into(),
+                    "register".into(),
+                    "ccm2".into(),
+                    "--cli".into(),
+                    "claude".into()
+                ],
+                env: vec![("CLAUDE_CONFIG_DIR".into(), "~/.claude-ccm2".into())],
+            }
+        );
+        assert!(v.acting);
+    }
+
+    #[test]
+    fn apply_read_prunes_registered_pending() {
+        let mut v = ready_view();
+        v.pending.push(PendingLogin {
+            id: "ccr".into(), // ccr already a real account in sample
+            cli: "claude".into(),
+            dir: String::new(),
+        });
+        v.apply_read(ReadOutcome::Ok {
+            accounts: sample_accounts(),
+            combos: sample_combos(),
+        });
+        // ccr became a real record -> its pending row drops.
+        assert!(v.pending.is_empty());
+    }
+
+    #[test]
+    fn api_key_wizard_builds_add_verb_with_glm_preset() {
+        let mut v = ready_view();
+        v.on_key(b'a');
+        type_str(&mut v, "glm2");
+        v.on_key(b'\r'); // id -> kind
+        v.on_key(b'\t'); // claude -> codex
+        v.on_key(b'\t'); // codex -> api-key glm
+        v.on_key(b'\r'); // -> api key step
+        type_str(&mut v, "sk-abc");
+        let intent = v.on_key(b'\r');
+        match intent {
+            ConnIntent::Run(argv) => {
+                assert_eq!(argv[0..2], ["providers", "add"]);
+                assert!(argv.contains(&"api_key".to_string()));
+                assert!(argv.iter().any(|a| a.contains("ANTHROPIC_BASE_URL=")));
+                assert!(argv.iter().any(|a| a == "ANTHROPIC_API_KEY=sk-abc"));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wizard_rejects_invalid_id_before_advancing() {
+        let mut v = ready_view();
+        v.on_key(b'a');
+        type_str(&mut v, "Bad");
+        assert_eq!(v.on_key(b'\r'), ConnIntent::Redraw); // stays on Id
+        assert_eq!(v.wizard.as_ref().unwrap().step, WizardStep::Id);
+        assert!(v.notice.as_deref().unwrap().contains("lowercase"));
+    }
+
+    #[test]
+    fn wizard_esc_cancels() {
+        let mut v = ready_view();
+        v.on_key(b'a');
+        type_str(&mut v, "x");
+        assert_eq!(v.on_key(0x1b), ConnIntent::Redraw);
+        assert!(v.wizard.is_none());
+        assert!(v.pending.is_empty());
     }
 }

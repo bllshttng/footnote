@@ -563,10 +563,12 @@ struct View {
     /// (x-84d7) Generation token, bumped per open/refresh so a read landing after
     /// the modal closed or refreshed again is discarded.
     conn_gen: u64,
-    /// (x-84d7) A single-flight mutation verb wanted by a keypress; the run loop
-    /// spawns it at loop top (the sender lives there, out of the stdin handler)
-    /// and clears this. `ConnectionsView::acting` is the concurrency guard.
-    conn_action: Option<Vec<String>>,
+    /// (x-84d7) A mutation/login verb wanted by a keypress; the run loop spawns
+    /// it at loop top (the sender lives there, out of the stdin handler) and
+    /// clears this. `(argv, child-env, is_login)`: `is_login` runs `fno mux pane
+    /// run` (opens the login pane, keeps the pending notice), else a single-flight
+    /// mutation guarded by `ConnectionsView::acting`.
+    conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -3742,6 +3744,7 @@ async fn attach_and_run(
     let (conn_act_tx, mut conn_act_rx) = tokio::sync::mpsc::unbounded_channel::<(
         u64,
         crate::connections_view::ActionResult,
+        bool, // is_login: keep the pending notice on success, no acting flip
     )>();
 
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
@@ -3798,12 +3801,12 @@ async fn attach_and_run(
         // x-84d7: run a wanted single-flight mutation off the UI loop. The modal's
         // `acting` flag (set by the reducer) is the concurrency guard, so no extra
         // inflight bool is needed here; the result reports on conn_act_rx.
-        if let Some(argv) = view.conn_action.take() {
+        if let Some((argv, env, is_login)) = view.conn_action.take() {
             let tx = conn_act_tx.clone();
             let gen = view.conn_gen;
             tokio::spawn(async move {
-                let result = crate::connections_view::run_verb(argv).await;
-                let _ = tx.send((gen, result));
+                let result = crate::connections_view::run_verb_env(argv, env).await;
+                let _ = tx.send((gen, result, is_login));
             });
         }
         // Redraw-after-event; expiry of the transient notice needs a timer.
@@ -4040,13 +4043,21 @@ async fn attach_and_run(
                     }
                 }
             }
-            Some((gen, result)) = conn_act_rx.recv() => {
-                // x-84d7: a mutation finished. Under the gen guard, surface its
-                // notice and re-read so the modal shows current truth (never
-                // optimistic local state). A stale/closed-modal result is dropped.
+            Some((gen, result, is_login)) = conn_act_rx.recv() => {
+                // x-84d7: a mutation/login verb finished. Under the gen guard,
+                // surface its notice and re-read so the modal shows current truth
+                // (never optimistic local state). A stale/closed result is dropped.
                 if gen == view.conn_gen && view.connections.is_some() {
                     if let Some(cv) = view.connections.as_mut() {
-                        cv.apply_action_result(result.ok, result.msg);
+                        if is_login {
+                            // The login pane spawn: on failure name it; on success
+                            // keep the reducer's "login pane opened - press r" notice.
+                            if !result.ok {
+                                cv.notice = Some(result.msg);
+                            }
+                        } else {
+                            cv.apply_action_result(result.ok, result.msg);
+                        }
                     }
                     view.rearm_connections_read();
                     if let Err(e) = compositor.draw(&view.compose()) {
@@ -5330,7 +5341,16 @@ async fn connections_keys(
             ConnIntent::Run(argv) => {
                 // The reducer already armed `acting`; stash the argv for the run
                 // loop to spawn at loop top (single-flight, sender in scope there).
-                view.conn_action = Some(argv);
+                view.conn_action = Some((argv, Vec::new(), false));
+            }
+            ConnIntent::RunEnv { argv, env } => {
+                view.conn_action = Some((argv, env, false));
+            }
+            ConnIntent::SpawnLogin(argv) => {
+                // Opens the login pane via `fno mux pane run`; the reducer already
+                // recorded the pending row + notice. Marked is_login so a success
+                // keeps that notice.
+                view.conn_action = Some((argv, Vec::new(), true));
             }
         }
     }
