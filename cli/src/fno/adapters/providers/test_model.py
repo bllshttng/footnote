@@ -573,3 +573,36 @@ class TestCostCapPerSession:
                 credentials_source=Path("~/.claude"),
                 cost_cap_usd_per_session=-5.0,
             )
+
+
+class TestAccountSpawnFields:
+    """x-d012: config_dir + token_ref for per-spawn account selection."""
+
+    def test_config_dir_expanded_and_absolute(self):
+        from fno.adapters.providers.model import ProviderRecord
+
+        record = ProviderRecord(
+            id="readyrule", name="ReadyRule", cli="claude", auth="managed",
+            config_dir=Path("~/.claude-alt"),
+        )
+        assert record.config_dir == Path.home() / ".claude-alt"
+        assert record.config_dir.is_absolute()
+
+    def test_config_dir_relative_rejected(self):
+        import pydantic
+        from fno.adapters.providers.model import ProviderRecord
+
+        with pytest.raises(pydantic.ValidationError, match="absolute"):
+            ProviderRecord(
+                id="readyrule", name="ReadyRule", cli="claude", auth="managed",
+                config_dir=Path("relative/dir"),
+            )
+
+    def test_config_dir_defaults_none(self):
+        from fno.adapters.providers.model import ProviderRecord
+
+        record = ProviderRecord(
+            id="x", name="X", cli="claude", auth="oauth_dir",
+            credentials_source=Path("~/.claude"),
+        )
+        assert record.config_dir is None

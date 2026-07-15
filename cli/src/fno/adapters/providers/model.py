@@ -73,6 +73,14 @@ class ProviderRecord(BaseModel):
     tags: list[str] = Field(default_factory=list)
     description: str | None = None
 
+    # Per-spawn account selection (x-d012). config_dir pins an explicit
+    # CLAUDE_CONFIG_DIR - a full second login in its own dir (e.g. ~/.claude-alt
+    # sharing projects/plugins/settings with ~/.claude via symlinks). This is
+    # the verified-correct mechanism that bills the right account; a read-only
+    # input to `spawn --account` that never participates in dispatch defaults or
+    # failover selection.
+    config_dir: Path | None = None
+
     # Rate card (added in failover spec phase 02). Optional; consumers
     # fall back to a hardcoded default rate card per CLI when None.
     pricing: Pricing | None = None
@@ -92,6 +100,25 @@ class ProviderRecord(BaseModel):
         if v is None:
             return v
         return v.expanduser()
+
+    @field_validator("config_dir", mode="after")
+    @classmethod
+    def _expand_config_dir(cls, v: Optional[Path]) -> Optional[Path]:
+        """Expand ~/ and require an absolute config_dir.
+
+        A relative config_dir would resolve against the spawning process's cwd,
+        which differs per worker - a silent mis-pin. Refuse it at register time
+        (Failure Modes: 'refusing at register time; absolute, expanded path
+        required')."""
+        if v is None:
+            return v
+        expanded = v.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError(
+                f"config_dir must be an absolute path (got {v!r}); "
+                "a relative dir resolves against the worker's cwd"
+            )
+        return expanded
 
     @model_validator(mode="after")
     def _check_auth_strategy(self) -> "ProviderRecord":
