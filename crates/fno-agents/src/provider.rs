@@ -1343,7 +1343,10 @@ mod tests {
     #[test]
     fn opencode_run_tail_prose_through_and_bare_verb() {
         // Prose passes through unchanged; a bare verb has no args tail.
-        assert_eq!(opencode_run_tail("build feature X"), vec!["build feature X"]);
+        assert_eq!(
+            opencode_run_tail("build feature X"),
+            vec!["build feature X"]
+        );
         assert_eq!(opencode_run_tail("/fno:pr"), vec!["--command", "fno:pr"]);
     }
 
