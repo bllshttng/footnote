@@ -285,6 +285,15 @@ COMPLETION.md so they surface to human reviewers rather than disappearing.
 There is no gate artifact to write and no `fno gate` call to make. The review happened;
 the six-agent panel output is the proof. The PR description carries the verdict forward.
 
+**When the approach is unsalvageable** - wrong architecture, a cascading design error,
+patch-on-patch accumulation where each fix spawns the next - the panel may emit the
+terminal `RECOMMEND RESTART` verdict instead of a fix-in-place blocking review. It is
+legal only with a why-fix-in-place-fails rationale and a lessons block; severity alone
+never triggers it. Contract: [report-template.md](report-template.md), "Terminal
+recommendation: RECOMMEND RESTART". Honor sequence:
+[skills/target/references/failure-recovery.md](../../target/references/failure-recovery.md),
+"Reviewer-ordered restart".
+
 ## Cross-Model Review Routing (optional)
 
 By default every panel agent runs on Claude (via `Task()`). An operator can route
