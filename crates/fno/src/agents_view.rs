@@ -734,8 +734,13 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
 ///    a synthesized external row (paneless, attachable via `attach_id`).
 /// 4. Sort by name (the determinism rule the change gate and layouts need).
 pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
-    use std::collections::HashSet;
-    let roster_ids: HashSet<&str> = roster.iter().map(|w| w.short_id.as_str()).collect();
+    use std::collections::{HashMap, HashSet};
+    // short_id -> source account, so an upgrade can adopt the roster row's
+    // structural account tag (x-c914), not just test membership.
+    let roster_by_id: HashMap<&str, Option<&str>> = roster
+        .iter()
+        .map(|w| (w.short_id.as_str(), w.account.as_deref()))
+        .collect();
 
     // Upgrade in place, then dedup the roster against the (borrowed) registry
     // ids - no per-tick String clones of the short ids (gemini review).
@@ -743,7 +748,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     for r in &mut out {
         if r.exited {
             if let Some(id) = r.attach_id.as_deref() {
-                if roster_ids.contains(id) {
+                if let Some(&acct) = roster_by_id.get(id) {
                     r.exited = false;
                     r.external = true;
                     // Drop any stale inside-leg/scrape verdict that a terminal
@@ -753,6 +758,11 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
                     r.badge = None;
                     r.reason = None;
                     r.answerable = None;
+                    // Structural roster-dir tag wins (Locked Decision 6): an
+                    // upgraded isolated-account row bills its roster account.
+                    if let Some(a) = acct {
+                        r.account = Some(a.to_string());
+                    }
                 }
             }
         }
@@ -1605,6 +1615,25 @@ config_dir = "~/.claude-alt"
             .expect("publishes the registry row");
         assert_eq!(rows.len(), 1, "no isolated rows for a missing roster");
         assert_eq!(rows[0].name, "home");
+    }
+
+    #[test]
+    fn upgraded_registry_row_adopts_roster_account(/* Locked Decision 6 */) {
+        // An exited registry row (account None) whose short_id is live in an
+        // ISOLATED roster is upgraded AND adopts that roster's account tag - the
+        // structural source is ground truth for an adopted isolated worker.
+        let reg = derive_rows(
+            &reg(r#"{"name":"adopted","cwd":"/w","status":"exited","provider":"claude","short_id":"ab12cd34"}"#),
+            NOW,
+        )
+        .unwrap();
+        assert!(reg[0].exited && reg[0].account.is_none());
+        let mut w = worker("ab12cd34", "adopted", "/w");
+        w.account = Some("readyrule".into());
+        let rows = merge_rows(reg, &[w]);
+        assert_eq!(rows.len(), 1, "no duplicate foreign row");
+        assert!(!rows[0].exited && rows[0].external);
+        assert_eq!(rows[0].account.as_deref(), Some("readyrule"));
     }
 
     #[test]
