@@ -208,3 +208,42 @@ def test_ac1fr_offline_full_uuid_handle_keeps_wire_to_short(
     rep = next(m for m in _bus_msgs() if m.in_reply_to == msg)
     assert rep.to == f"claude-{uuid}"  # durable floor still to the full handle
     assert 'to="9a063cd3"' in rep.body  # but the wire `to` attr is 8-hex
+
+
+# ---------------------------------------------------------------------------
+# Dead-letterbox: fail loud when the message lands only on the durable floor
+# (x-730d). The warning rides stderr; the durable enqueue keeps exit 0.
+# ---------------------------------------------------------------------------
+
+
+def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path):
+    # The recipient is rostered (resolves) but the live inject misses -> the
+    # message hits only the durable floor, so stderr carries the deferral line.
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
+
+    msg = _seed_name_lane_inbound(
+        to="claude-meeeeeee", from_="claude-9a063cd3", body="ping"
+    )
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    assert r.exit_code == 0, r.output
+    assert "has no live pane" in (r.stderr or "")
+    assert "queued (durable)" in r.stdout
+
+
+def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_path):
+    # The inject succeeds -> hosted delivery, no deferral warning on stderr.
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
+
+    msg = _seed_name_lane_inbound(
+        to="claude-meeeeeee", from_="claude-9a063cd3", body="ping"
+    )
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    assert r.exit_code == 0, r.output
+    assert "delivered (hosted)" in r.stdout
+    assert "no live pane" not in (r.stderr or "")

@@ -787,6 +787,24 @@ def _print_thread_summary(h: ThreadHandle) -> None:
 # send/inbox/ack and inbox unread/ack verbs (the one messaging namespace).
 
 
+def _warn_deferred(target: str, *, project: bool = False) -> None:
+    """Fail loud on a dead-letter miss: the envelope hit only the durable floor
+    with no live inject path, so the sender learns delivery deferred instead of
+    the message vanishing silently until the recipient's next SessionStart drain.
+    Warning only - the durable enqueue succeeded, so exit stays 0."""
+    if project:
+        msg = (
+            f"mail: project inbox {target} has no live drain; queued durably - "
+            "delivery waits for a drain"
+        )
+    else:
+        msg = (
+            f"mail: {target} has no live pane; queued durably - "
+            "delivery waits for its next SessionStart drain"
+        )
+    print(msg, file=sys.stderr)
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -851,6 +869,7 @@ def _name_lane_send(
     except (OSError, ValueError, RuntimeError) as exc2:
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
+    _warn_deferred(recipient)
     print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr}")
 
 
@@ -1125,11 +1144,13 @@ def cmd_send(
             # envelope is addressed to that peer (its at-least-once copy), NOT
             # the project. Report it as such so the line is not a peer/project
             # mismatch (codex P2) - the resolved peer's own drain picks it up.
+            _warn_deferred(result.recipient)
             print(
                 f"{result.msg_id} queued (durable) for {result.recipient} "
                 f"[project {to_project}]"
             )
         else:
+            _warn_deferred(to_project, project=True)
             print(f"{result.msg_id} queued (durable) for project {to_project}")
         return
 
@@ -1197,6 +1218,7 @@ def cmd_send(
     if result.delivery == "hosted":
         label = "delivered (hosted)"
     else:
+        _warn_deferred(name)
         label = "queued (durable)"
     print(f"{result.msg_id} {label}")
 
