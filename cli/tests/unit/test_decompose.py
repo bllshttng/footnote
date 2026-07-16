@@ -1469,6 +1469,32 @@ def test_ac2_edge_legacy_group_file_grandfathered(tmp_path, monkeypatch):
     assert not _canonical(child_after).exists()  # no canonical duplicate
 
 
+def test_redecompose_no_route_uses_persisted_child_cwd(tmp_path, monkeypatch):
+    """A child already routed to another repo, re-decomposed with NO explicit
+    route, scaffolds under its OWN persisted cwd - not the epic's - and mints no
+    duplicate in the epic project (the child node's cwd is the authoritative root)."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    web_root = tmp_path / "web"
+    web_root.mkdir()
+    g = doc.parent / "graph.json"
+    entries = read_entries()
+    child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
+                  project="web", cwd=str(web_root), plan_path=None)
+    entries.append(child)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+
+    one = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(one)])
+    assert result.exit_code == 0, result.output
+    child_after = _child(read_entries(), "1")
+    assert child_after["cwd"] == str(web_root)          # repo untouched (no route)
+    stub = _canonical(child_after)
+    assert stub.exists()
+    assert str(stub).startswith(str(web_root))          # under the child's own repo
+    assert not str(stub).startswith(str(tmp_path / "internal"))  # not the epic dir
+
+
 def test_ac3_edge_already_linked_child_not_rescaffolded(tmp_path, monkeypatch):
     """AC3-EDGE: a linked child (plan_path set) is skipped - no spurious stub is
     written beside its real plan, and the filled plan is never clobbered."""

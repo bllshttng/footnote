@@ -977,12 +977,19 @@ def cmd_decompose(
             # place, no rename, no canonical duplicate (Locked Decision 4).
             if Path(separate_plan_path(base_box[0], slug)).exists():
                 continue
-            # Route the stub into the CHILD project's plans dir: per-group cwd
-            # (from slug_route) | the epic's cwd | repo_root(). created_at sources
-            # the canonical filename's date, so a re-decompose on a later day
-            # recomputes the SAME path (idempotent - the bug this fixes).
-            route_cwd = slug_route[slug][1]
-            child_root = route_cwd or epic_cwd_box[0] or repo_root()
+            # Route the stub into the CHILD project's plans dir. The child node's
+            # own cwd is the authoritative per-child root: the mutator set it to
+            # the routed cwd (or inherited the epic's) at mint, so it already
+            # reflects a route made WITHOUT an explicit re-route - a routed child
+            # re-decomposed with no route keeps its own repo, not the epic's.
+            # created_at sources the filename date, so a later-day re-decompose
+            # recomputes the SAME path (idempotent). Fall back to the epic cwd
+            # then repo_root() only if the re-read lost the node.
+            child_root = (
+                (child.get("cwd") if child else None)
+                or epic_cwd_box[0]
+                or repo_root()
+            )
             canonical = Path(
                 canonical_child_plan_path(
                     slug, child_id, str(child_root),
