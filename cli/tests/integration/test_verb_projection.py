@@ -122,6 +122,26 @@ def test_supersede_repaints_both_nodes(tmp_graph, tmp_path):
     assert fields["priority"] == "p0"
 
 
+def test_update_parent_null_clears_doc_mirror(tmp_graph, tmp_path):
+    """Codex P2: de-orphaning (--parent null) clears stale parent/parent_slug."""
+    plan = _plan(
+        tmp_path,
+        _PLAN.replace("size: S", "size: S\nparent: x-epic\nparent_slug: the-epic"),
+    )
+    _seed(tmp_graph, [
+        {"id": "x-epic", "slug": "the-epic", "title": "Epic", "_status": "ready",
+         "domain": "code", "project": "fno", "type": "epic"},
+        _node(plan, parent="x-epic"),
+    ])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--parent", "null"])
+    assert res.exit_code == 0, res.output
+
+    _, fields, _ = read_plan_file(plan)
+    assert "parent" not in fields
+    assert "parent_slug" not in fields
+
+
 def test_missing_plan_file_never_fails_verb(tmp_graph, tmp_path):
     """AC1-ERR: a node whose plan_path points at a deleted file - the verb exits 0."""
     gone = tmp_path / "deleted.md"  # never created

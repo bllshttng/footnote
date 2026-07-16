@@ -32,6 +32,13 @@ MIRROR_KEYS: tuple[str, ...] = (
     "parent_slug",
 )
 
+# Mirror keys whose graph value can legitimately be cleared to None (a de-orphan
+# `--parent null`, a `--size null`). For these, an explicit None means "clear the
+# stale doc mirror", not "skip" - otherwise the doc keeps the old parent/size
+# after the graph dropped it. parent_slug is tied to parent: the converger sets
+# it to None whenever parent is null/dangling so it clears in lockstep.
+CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
+
 
 def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
     """Upsert the mirror fields from ``node`` into ``plan_path``'s frontmatter.
@@ -60,7 +67,12 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
             if not isinstance(value, list):
                 continue
         elif value is None:
-            # Never overwrite a real frontmatter value with a null scalar.
+            # A clearable key set to None means the graph dropped its value
+            # (de-orphan / --size null): remove the stale doc mirror if present.
+            # Any other None is a partial dict and must never clobber the doc.
+            if key in CLEARABLE_KEYS and key in fields:
+                del fields[key]
+                changed = True
             continue
         if fields.get(key) != value:
             fields[key] = value
@@ -109,7 +121,9 @@ def project_graph_nodes(
         return 0
     from fno.graph._intake import _find_node, repo_root
 
-    slug_by_id = {n.get("id"): n.get("slug") for n in entries}
+    slug_by_id = {
+        n.get("id"): n.get("slug") for n in entries if isinstance(n, dict)
+    }
     rewritten = 0
     for nid in ids:
         try:
@@ -133,19 +147,14 @@ def project_graph_nodes(
 def _with_parent_slug(
     node: dict[str, Any], slug_by_id: dict[Any, Any]
 ) -> dict[str, Any]:
-    """Return ``node`` (or a shallow copy) carrying ``parent_slug`` when resolvable.
+    """Return a shallow copy of ``node`` with ``parent_slug`` tied to ``parent``.
 
-    Never mutates the shared ``entries`` element. A null parent or a parent id
-    that resolves to no live node leaves ``parent_slug`` absent (the projector's
-    ``None``/missing-key guards then omit it), so a dangling ref mirrors the raw
-    ``parent`` id but never a wrong slug.
+    Never mutates the shared ``entries`` element. A resolvable parent sets the
+    slug; a null, absent, or dangling parent sets ``parent_slug`` to None so a
+    stale slug mirror CLEARS in lockstep with the parent (a dangling parent still
+    mirrors its raw id but never a wrong slug).
     """
     parent_id = node.get("parent")
-    if not parent_id:
-        return node
-    slug = slug_by_id.get(parent_id)
-    if not slug:
-        return node
     copy = dict(node)
-    copy["parent_slug"] = slug
+    copy["parent_slug"] = slug_by_id.get(parent_id) if parent_id else None
     return copy
