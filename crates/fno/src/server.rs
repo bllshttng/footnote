@@ -1456,14 +1456,18 @@ impl Core {
         }
     }
 
-    /// Place a spawned pane, reaping it on every post-spawn refusal.
+    /// Place a spawned pane. Returns `(squad, tab, split_fell_back)`: the bool
+    /// is `true` when a requested split was refused (tab at min-size) and the
+    /// pane landed as a NEW TAB in the same squad instead (x-9f75 AC3-FR) - the
+    /// caller emits the "tab full" notice. Only a vanished-squad race reaps and
+    /// errs now; a crowded tab never dead-ends.
     fn place_spawned_pane(
         &mut self,
         dest: Option<u64>,
         squad_key: &str,
         pid: u64,
         split: Option<Dir>,
-    ) -> Result<(u64, TabId), String> {
+    ) -> Result<(u64, TabId, bool), String> {
         let sid = match dest {
             Some(sid) => sid,
             None => {
@@ -1478,36 +1482,42 @@ impl Core {
                 self.next_squad_id += 1;
                 self.session
                     .add_squad(sid, vec![squad_key.to_string()], None, tab);
-                return Ok((sid, tid));
+                return Ok((sid, tid, false));
             }
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
             return Err("selected squad vanished".into());
         };
-        if split.is_none() || self.session.squads[si].tabs.is_empty() {
-            let tid = self.session.mint_tab_id();
-            let tab = Tab {
+        let new_tab = |this: &mut Self, si: usize| {
+            let tid = this.session.mint_tab_id();
+            this.session.squads[si].tabs.push(Tab {
                 name: None,
                 id: tid,
                 root: Node::Leaf(pid),
                 focus: pid,
-            };
-            self.session.squads[si].tabs.push(tab);
-            return Ok((sid, tid));
+            });
+            tid
+        };
+        if split.is_none() || self.session.squads[si].tabs.is_empty() {
+            return Ok((sid, new_tab(self, si), false));
         }
         let dir = split.expect("split present");
         let squad = &self.session.squads[si];
         let ti = squad.active_tab.min(squad.tabs.len() - 1);
         let tid = squad.tabs[ti].id;
         let vp = self.tab_rect(tid);
-        let tab = &mut self.session.squads[si].tabs[ti];
-        match tree::split_directional(tab, vp, dir, pid) {
-            Ok(()) => Ok((sid, tid)),
-            Err(e) => {
-                self.reap_pane(pid);
-                Err(e.to_string())
-            }
+        let split_ok = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            tree::split_directional(tab, vp, dir, pid).is_ok()
+        };
+        if split_ok {
+            Ok((sid, tid, false))
+        } else {
+            // Split refused (tab min-size): fall back to a new tab in the same
+            // squad rather than reaping and dead-ending. A fresh tab is a
+            // full-viewport leaf, so it always fits.
+            Ok((sid, new_tab(self, si), true))
         }
     }
 
@@ -3949,7 +3959,7 @@ impl Core {
                 // focus. A
                 // refusal reaps the pane and leaves the row watch-only (AC7);
                 // the mapping is recorded ONLY after placement succeeds.
-                let (sid, tid) =
+                let (sid, tid, fell_back) =
                     match self.place_spawned_pane(dest, &spawn_cwd, pid, placement.split) {
                         Ok(landing) => landing,
                         Err(e) => {
@@ -3959,6 +3969,9 @@ impl Core {
                     };
                 self.attached.insert(id, pid);
                 self.set_view(client_id, sid, tid);
+                if fell_back {
+                    self.notice(client_id, "tab full - opened as tab");
+                }
                 self.push_layout(true);
                 Flow::Continue
             }
@@ -6852,7 +6865,7 @@ mod tests {
         core.session
             .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
 
-        let (sid, _tid) = core.place_spawned_pane(Some(1), "/a", 2, None).unwrap();
+        let (sid, _tid, _) = core.place_spawned_pane(Some(1), "/a", 2, None).unwrap();
         assert_eq!(sid, 1);
         assert_eq!(
             core.session.squad(1).unwrap().tabs.len(),
@@ -6861,7 +6874,7 @@ mod tests {
         );
 
         let tabs_before = core.session.squad(1).unwrap().tabs.len();
-        let (_sid, tid) = core
+        let (_sid, tid, _) = core
             .place_spawned_pane(Some(1), "/a", 3, Some(Dir::Right))
             .unwrap();
         assert_eq!(
@@ -6890,7 +6903,7 @@ mod tests {
         // AC6-EDGE: no squad yet + a split request -> the squad is born from the
         // route with the pane as its lone first tab (split collapses).
         let mut core = empty_core();
-        let (sid, tid) = core
+        let (sid, tid, _) = core
             .place_spawned_pane(None, "/fresh", 9, Some(Dir::Left))
             .unwrap();
         let sq = core.session.squad(sid).unwrap();
@@ -6901,9 +6914,10 @@ mod tests {
     }
 
     #[test]
-    fn place_spawned_pane_reaps_on_min_size_refusal() {
-        // AC7: a split that would violate minimum size reaps the pane and leaves
-        // the prior tree byte-for-byte unchanged.
+    fn place_spawned_pane_min_size_refusal_falls_back_to_new_tab() {
+        // AC3-FR (x-9f75): a split that would violate minimum size no longer
+        // reaps - the pane lands as a new tab in the same squad, the crowded
+        // tab is untouched, and the caller is signaled to notice.
         let mut core = empty_core();
         core.session
             .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
@@ -6911,18 +6925,20 @@ mod tests {
         core.tab_areas.insert(5, (40, 8));
         let before = core.session.squad(1).unwrap().tabs[0].root.clone();
 
-        let err = core
+        let (_sid, tid, fell_back) = core
             .place_spawned_pane(Some(1), "/a", 3, Some(Dir::Right))
-            .unwrap_err();
-        assert!(!err.is_empty(), "the refusal names a reason");
+            .unwrap();
+        assert!(fell_back, "the split refusal signals a fallback");
         assert_eq!(
             core.session.squad(1).unwrap().tabs[0].root,
             before,
-            "a refused split leaves the tree untouched"
+            "the crowded tab is untouched"
         );
-        assert!(
-            !core.panes.contains_key(&3),
-            "the pre-spawned pane is reaped"
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(squad.tabs.len(), 2, "the pane landed as a new tab");
+        assert_eq!(
+            squad.tabs.iter().find(|t| t.id == tid).unwrap().root,
+            Node::Leaf(3)
         );
     }
 
@@ -7832,6 +7848,53 @@ mod tests {
         assert!(drain_notices(&mut rx)
             .iter()
             .any(|t| t.contains("not a detachable viewer")));
+    }
+
+    #[test]
+    fn attach_split_fallback_lands_new_tab_with_notice() {
+        // AC3-FR (x-9f75): a same-workspace row click sends AttachAgent with a
+        // Right split; when the tab is at min-size the split is refused and the
+        // pane lands as a NEW TAB in the same squad with a `tab full` notice -
+        // never a reap+dead-end.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        // Force a horizontal-split refusal on the split target tab: the viewing
+        // client's dims drive its area (tab_area prefers the client clamp), so
+        // shrink them below a two-pane horizontal minimum (2*MIN_COLS+divider).
+        for c in core.clients.iter_mut().filter(|c| c.id == client_id) {
+            c.dims = (24, 12);
+        }
+        // Align the split target (squad.active_tab) with the tab the client
+        // views, so the shrunk-client clamp governs that tab's area.
+        let sq = core.session.squad_mut(view.0).unwrap();
+        sq.active_tab = sq.tabs.iter().position(|t| t.id == view.1).unwrap();
+        core.agents = vec![bg_row("sib", "/tmp/seen", Some("deadbee2"))];
+        let squad_tabs_before = core.session.squad(view.0).unwrap().tabs.len();
+        let new_pid = core.next_pane_id;
+
+        core.command(
+            client_id,
+            Command::AttachAgent {
+                id: "deadbee2".into(),
+                placement: PanePlacement {
+                    target: PaneTarget::CurrentRoute,
+                    split: Some(Dir::Right),
+                    here: false,
+                },
+            },
+        );
+
+        assert_eq!(
+            core.session.squad(view.0).unwrap().tabs.len(),
+            squad_tabs_before + 1,
+            "the pane landed as a new tab"
+        );
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("tab full - opened as tab")));
+        core.reap_pane(new_pid);
     }
 
     #[test]
@@ -8770,24 +8833,35 @@ mod tests {
         let landed = core
             .place_spawned_pane(Some(7), "/repo/child", 2, Some(Dir::Left))
             .unwrap();
-        assert_eq!(landed, (7, 11));
+        assert_eq!(landed, (7, 11, false));
         let tab = &core.session.squad(7).unwrap().tabs[0];
         assert_eq!(tree::leaves(&tab.root), vec![2, 1]);
         assert_eq!(tab.focus, 2);
     }
 
     #[test]
-    fn pane_placement_refusal_preserves_tree_and_cleans_spawn_state() {
+    fn pane_placement_split_refusal_falls_back_to_new_tab() {
+        // AC3-FR (x-9f75): a split refused at min-size no longer reaps and
+        // dead-ends - the pane lands as a NEW TAB in the same squad, the
+        // original tab is untouched, and the caller is told to notice.
         let mut core = placement_core();
         core.tab_areas.insert(11, (24, 16));
         core.claim_eligible.insert(2);
         let before = core.session.squad(7).unwrap().tabs[0].clone();
-        let error = core
+        let (sid, tid, fell_back) = core
             .place_spawned_pane(Some(7), "/repo/child", 2, Some(Dir::Right))
-            .unwrap_err();
-        assert!(error.contains("smaller"), "{error}");
-        assert_eq!(core.session.squad(7).unwrap().tabs[0], before);
-        assert!(!core.claim_eligible.contains(&2));
+            .unwrap();
+        assert!(fell_back, "the caller must know to emit the tab-full notice");
+        assert_eq!(sid, 7);
+        let squad = core.session.squad(7).unwrap();
+        assert_eq!(squad.tabs.len(), 2, "a new tab was added");
+        assert_eq!(squad.tabs[0], before, "the crowded tab is untouched");
+        let landed = squad.tabs.iter().find(|t| t.id == tid).unwrap();
+        assert_eq!(landed.root, Node::Leaf(2), "pane landed as the new tab's leaf");
+        assert!(
+            core.claim_eligible.contains(&2),
+            "the pane is not reaped, so its claim eligibility survives"
+        );
     }
 
     #[test]

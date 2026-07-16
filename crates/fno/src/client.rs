@@ -1662,7 +1662,7 @@ impl View {
             // attaches; a non-attachable row says so. Resolved by [`agent_hit`],
             // shared with the navigator's goto so a click and a keyboard jump
             // never diverge on what an agent's action is (x-653d).
-            DisplayRow::Agent(a) => Some(agent_hit(a)),
+            DisplayRow::Agent(a) => Some(agent_hit(a, self.layout.active_squad)),
             // A work-queue card dispatches/focuses via [`View::card_hit`], the
             // same resolver the navigator uses (x-653d).
             DisplayRow::Card(c) => Some(self.card_hit(c)),
@@ -1781,7 +1781,7 @@ impl View {
                     // pane's tab on focus; the ordinal is display-only).
                     goto_squad: cross(s.id),
                     goto_tab: None,
-                    hit: agent_hit(a),
+                    hit: agent_hit(a, self.layout.active_squad),
                 });
             }
         }
@@ -1794,7 +1794,7 @@ impl View {
                 state: nav_agent_state(a),
                 goto_squad: None,
                 goto_tab: None,
-                hit: agent_hit(a),
+                hit: agent_hit(a, self.layout.active_squad),
             });
         }
         // Work-queue cards: goto opens the dispatch confirm / focuses the worker
@@ -3090,10 +3090,26 @@ enum ChromeHit {
 /// ([`View::row_action`]) and the navigator's goto ([`View::nav_rows`]) so the
 /// two inputs resolve the same entity identically (x-653d). Pure - the agent's
 /// own fields decide, so no `&self` needed.
-fn agent_hit(a: &AgentRow) -> ChromeHit {
+fn agent_hit(a: &AgentRow, active_squad: u64) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
         None => match &a.attach_id {
+            // Watch-only attachable row (x-9f75 row-kind default): a
+            // same-workspace sibling (its squad is the active one) splits the
+            // current tab so siblings sit side by side; a cross-workspace /
+            // orphan row keeps the new-tab-in-owner default (owner routing +
+            // view switch, today's behavior). Peek stays an explicit gesture,
+            // never a click default.
+            Some(id) if a.squad == Some(active_squad) => {
+                ChromeHit::Cmds(vec![Command::AttachAgent {
+                    id: id.clone(),
+                    placement: PanePlacement {
+                        target: PaneTarget::CurrentRoute,
+                        split: Some(Dir::Right),
+                        here: false,
+                    },
+                }])
+            }
             Some(id) => ChromeHit::Cmds(vec![Command::attach_agent(id)]),
             None => ChromeHit::Notice("agent has no pane here".into()),
         },
@@ -5515,7 +5531,7 @@ async fn peek_keys(
                 // (x-260a locked 3); a real hit closes peek AND the selector
                 // underneath. Right-arrow is already folded to `l`.
                 let hit = match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => Some(agent_hit(a)),
+                    Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
                     _ => None,
                 };
                 match hit {
@@ -6944,23 +6960,60 @@ mod tests {
             tombstone: false,
             tab: None,
         };
+        // A pane-hosted row focuses regardless of the active squad.
         assert!(
-            matches!(agent_hit(&hosted), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
+            matches!(agent_hit(&hosted, 2), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
         );
+        // A watch-only row whose squad is NOT the active one keeps the new-tab
+        // default (cross-workspace / owner-routed).
         let bg = AgentRow {
             pane_id: None,
             attach_id: Some("job1".into()),
             ..hosted.clone()
         };
         assert!(
-            matches!(agent_hit(&bg), ChromeHit::Cmds(c) if c == vec![Command::attach_agent("job1")])
+            matches!(agent_hit(&bg, 2), ChromeHit::Cmds(c) if c == vec![Command::attach_agent("job1")])
         );
         let orphan = AgentRow {
             pane_id: None,
             attach_id: None,
             ..hosted
         };
-        assert!(matches!(agent_hit(&orphan), ChromeHit::Notice(_)));
+        assert!(matches!(agent_hit(&orphan, 2), ChromeHit::Notice(_)));
+    }
+
+    #[test]
+    fn agent_hit_same_workspace_watch_only_splits_current_tab() {
+        // AC2-UI (x-9f75): a watch-only attachable row whose squad IS the active
+        // squad attaches as a Right split of the current tab (siblings sit side
+        // by side), not a new tab.
+        let row = AgentRow {
+            squad: Some(1),
+            name: "sib".into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: Some("job1".into()),
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        };
+        let ChromeHit::Cmds(c) = agent_hit(&row, 1) else {
+            panic!("expected Cmds for a same-workspace watch-only row");
+        };
+        match c.as_slice() {
+            [Command::AttachAgent { id, placement }] => {
+                assert_eq!(id, "job1");
+                assert_eq!(placement.split, Some(Dir::Right));
+                assert!(!placement.here);
+                assert!(matches!(placement.target, PaneTarget::CurrentRoute));
+            }
+            other => panic!("expected one AttachAgent, got {other:?}"),
+        }
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
