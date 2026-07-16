@@ -34,10 +34,12 @@ def test_agents_help_prints_usage(runner: CliRunner) -> None:
     result = runner.invoke(agents_app, ["--help"])
     assert result.exit_code == 0
     out = result.output.lower()
-    assert "ask" in out
+    # Advertised verbs (x-71b6 In-N-Out tiering); ask/ping are hidden now but
+    # still invocable (their own --help works).
     assert "list" in out
-    assert "logs" in out  # US3
-    assert "ping" in out
+    assert "logs" in out
+    assert "spawn" in out
+    assert "status" in out
 
 
 def test_agents_ask_help_is_documented(runner: CliRunner, monkeypatch) -> None:

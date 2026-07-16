@@ -45,8 +45,12 @@ def test_new_subcommand_help_renders(argv):
 
 
 def test_top_level_help_lists_new_subapps():
-    """AC4-UI: top-level --help includes the 3 new top-level entries."""
-    result = runner.invoke(app, ["--help"], env=_ENV)
+    """AC4-UI: phase/executor/notify are registered and reachable.
+
+    Under x-71b6 In-N-Out tiering they are hidden from the curated `--help`
+    menu but still listed by the full-surface door `fno help --all`.
+    """
+    result = runner.invoke(app, ["help", "--all"], env=_ENV)
     assert result.exit_code == 0
     for noun in ("phase", "executor", "notify"):
-        assert noun in result.output, f"missing {noun!r} in top-level --help output"
+        assert noun in result.output, f"missing {noun!r} in `fno help --all` output"

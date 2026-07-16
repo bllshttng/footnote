@@ -131,19 +131,24 @@ def test_validation_error_parity() -> None:
 # AC3-UI: help visibility
 # --------------------------------------------------------------------------
 
-def test_backlog_help_lists_capture_hides_inbox() -> None:
+def test_backlog_capture_hidden_but_invocable() -> None:
+    """x-71b6 tiering: `capture` (and its `inbox` alias) are hidden from the
+    advertised backlog menu, but `capture` stays fully invocable."""
+    # capture is invocable (its own --help works) even though hidden.
+    cap = runner.invoke(_backlog_cli(), ["capture", "--help"])
+    assert cap.exit_code == 0, cap.output
+
     res = runner.invoke(_backlog_cli(), ["--help"])
     assert res.exit_code == 0
-    assert "capture" in res.output
-    # `inbox` must not appear as a listed subcommand. It may appear inside
-    # prose (e.g. another command's help text), so anchor on the command
-    # column: a line starting with optional box-drawing + whitespace + the
-    # bare word.
-    listed = [
-        ln for ln in res.output.splitlines()
-        if re.match(r"^[\s|│]*inbox\s", ln)
-    ]
-    assert listed == [], f"alias leaked into help: {listed}"
+    # Neither the hidden sub-app nor its alias appears as a listed command row.
+    # (Either word may still occur inside another command's prose, so anchor on
+    # the command column: optional box-drawing + whitespace + the bare word.)
+    for verb in ("capture", "inbox"):
+        listed = [
+            ln for ln in res.output.splitlines()
+            if re.match(rf"^[\s|│]*{verb}\s", ln)
+        ]
+        assert listed == [], f"hidden {verb!r} leaked into help: {listed}"
 
 
 def test_alias_help_still_renders() -> None:

@@ -29,12 +29,16 @@ def _run_abi(*args: str) -> subprocess.CompletedProcess:
 
 
 def test_abi_top_level_lists_consolidation_verbs() -> None:
-    """`fno --help` exposes tokens, codemap, worktree, consolidation."""
-    result = _run_abi("--help")
+    """`fno help --all` exposes tokens, codemap, worktree, consolidation.
+
+    x-71b6 In-N-Out tiering hides these from the curated `fno --help`; the
+    full-surface door lists them (they remain invocable either way).
+    """
+    result = _run_abi("help", "--all")
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout + result.stderr
     for verb in ("tokens", "codemap", "worktree", "consolidation"):
-        assert verb in out, f"fno --help missing '{verb}': {out[-1000:]}"
+        assert verb in out, f"fno help --all missing '{verb}': {out[-1000:]}"
 
 
 def test_abi_tokens_help_renders() -> None:
