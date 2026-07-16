@@ -136,19 +136,30 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
 /// failure, a plain (non-git) dir, or a malformed HEAD degrades to `None`; the
 /// subline then shows the cwd tail alone (AC1-ERR).
 ///
-/// - `<cwd>/.git` a directory -> read `<cwd>/.git/HEAD`.
-/// - `<cwd>/.git` a file (a linked worktree) -> follow its `gitdir: <path>`
-///   pointer (relative pointers resolve against `cwd`), then read `<gitdir>/HEAD`
+/// Walks up from `cwd` to the first ancestor holding a `.git` (the repo
+/// boundary, exactly as git resolves it), so a pane started in a subdirectory
+/// (e.g. `<repo>/crates/fno`) still shows the branch rather than degrading to
+/// the tail (codex review). A `.git` that exists but is unreadable/malformed at
+/// that boundary yields `None` - it does not keep walking into a parent repo.
+///
+/// - `<dir>/.git` a directory -> read `<dir>/.git/HEAD`.
+/// - `<dir>/.git` a file (a linked worktree) -> follow its `gitdir: <path>`
+///   pointer (relative pointers resolve against `<dir>`), then read `<gitdir>/HEAD`
 ///   (AC3-EDGE).
 /// - HEAD `ref: refs/heads/<name>` -> `<name>`; a detached 40-hex sha -> its
 ///   first 8 chars; anything else -> `None`.
 pub fn resolve_branch(cwd: &Path) -> Option<String> {
-    let dot_git = cwd.join(".git");
+    // The first ancestor with a `.git` is the repo; stop there (walking past it
+    // would attribute a parent repo's branch).
+    let dir = cwd
+        .ancestors()
+        .find(|d| std::fs::symlink_metadata(d.join(".git")).is_ok())?;
+    let dot_git = dir.join(".git");
     let meta = std::fs::metadata(&dot_git).ok()?;
     let git_dir = if meta.is_dir() {
         dot_git
     } else {
-        // A worktree `.git` file: `gitdir: <path>` (possibly relative to cwd).
+        // A worktree `.git` file: `gitdir: <path>` (possibly relative to `dir`).
         let contents = std::fs::read_to_string(&dot_git).ok()?;
         // Tolerate leading whitespace / BOM before the `gitdir:` key (gemini review).
         let ptr = contents.trim_start().strip_prefix("gitdir:")?.trim();
@@ -156,7 +167,7 @@ pub fn resolve_branch(cwd: &Path) -> Option<String> {
         if ptr.is_absolute() {
             ptr.to_path_buf()
         } else {
-            cwd.join(ptr)
+            dir.join(ptr)
         }
     };
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
@@ -1833,6 +1844,19 @@ mod tests {
         std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/feature/x-cd67\n").unwrap();
         assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
         std::fs::remove_dir_all(&cwd).unwrap();
+    }
+
+    #[test]
+    fn resolve_branch_walks_up_to_repo_root_from_subdir() {
+        // codex review: a pane started in a subdirectory resolves the repo's
+        // branch by walking up to the nearest `.git`, not degrading to the tail.
+        let root = branch_tmp("subdir");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let sub = root.join("crates/fno");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(resolve_branch(&sub), Some("main".into()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
