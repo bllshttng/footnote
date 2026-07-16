@@ -382,3 +382,17 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "claude-9a063cd3"
     assert "hi bg worker" in payload[0]["body"]
+
+
+# ---------------------------------------------------------------------------
+# Dead-letterbox (x-730d): a project send with no live peer queues durably and
+# fails loud on stderr so the sender knows delivery deferred (exit stays 0).
+# ---------------------------------------------------------------------------
+
+def test_project_send_no_peer_warns_deferred(runner, mailbox):
+    res = runner.invoke(
+        app, ["mail", "send", "--to-project", "web", "--from-name", "etl", "quiet?"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "queued (durable) for project web" in res.stdout
+    assert "project inbox web has no live drain" in (res.stderr or "")
