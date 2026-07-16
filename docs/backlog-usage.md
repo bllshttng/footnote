@@ -174,6 +174,48 @@ fno backlog dispatch-lanes         # manually fire one lane-fill round
 fno backlog lanes                  # rollup: live lanes vs the cap, per-node status
 ```
 
+## Worktree isolation policy
+
+Every code payload launched from a repo main checkout is auto-isolated into a
+worktree by `fno worktree ensure`. `config.worktree.policy` opts a project out
+of that. Values (`never | harness-native | external`):
+
+- `never` - launch in place, no worktree. For a checkout whose working tree IS
+  the product (e.g. an Obsidian vault attached live, committing straight to
+  main). `ensure` prints the repo root and exits 0 (not a failure, so dispatch
+  lanes are never skipped).
+- `harness-native` (default) - the harness's own worktree location (claude ->
+  `<repo>/.claude/worktrees/<name>`). A harness with no native mechanism
+  degrades to `external`.
+- `external` - `<config.paths.worktrees_base>/<repo>/<name>` (the maintainer's
+  `~/conductor/workspaces` when that knob is set).
+
+Precedence (first match wins): a per-project entry's `worktree` key >
+`config.worktree.policy` > the `harness-native` default.
+
+```toml
+# global default
+[worktree]
+policy = "harness-native"
+
+# per-project override (matched by realpath of `path`, else `name`)
+[[work.workspaces.default.projects]]
+name = "c3po"
+path = "~/c3po"
+worktree = "never"
+```
+
+Fail-closed: a config that exists but fails to parse, or an out-of-enum value
+(`conductor` is a `worktrees_base`, not a mode), refuses creation rather than
+silently auto-isolating. `fno config doctor` flags an out-of-enum value and a
+per-project key mistyped within one edit of `worktree` (the `extra="ignore"`
+trap: a misspelled key silently means "default policy"). Read the resolved
+verdict without creating anything:
+
+```bash
+fno worktree policy --repo <path> [--harness claude]
+```
+
 ## Public roadmap
 
 A curated, leak-free view for advertising an OSS project's roadmap. Opt in
