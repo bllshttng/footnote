@@ -180,6 +180,37 @@ def test_ensure_policy_out_of_enum_refuses_naming_valid(main_repo: Path, tmp_pat
     assert "never" in res.stderr and "harness-native" in res.stderr and "external" in res.stderr
 
 
+def test_ensure_never_with_explicit_branch_refuses(main_repo: Path, tmp_path: Path) -> None:
+    """A never project + an explicit --branch (batch lane) is a contradiction:
+    an isolated branch cannot be created in place. Refuse (empty stdout) rather
+    than report success on the canonical branch."""
+    _write_config(
+        main_repo / ".fno",
+        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n',
+    )
+    res = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "b", "--branch", "feature/batch-x"],
+    )
+    assert res.exit_code != 0
+    assert res.stdout.strip() == ""
+
+
+def test_ensure_honors_fno_config(
+    main_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FNO_CONFIG, when set, is the sole config source: a `never` in it wins even
+    though the repo-local .fno has no policy (fail-closed parity with the loader)."""
+    cfg = tmp_path / "explicit.toml"
+    cfg.write_text(
+        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n'
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "f"])
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(main_repo.resolve())
+
+
 def test_ensure_malformed_workspaces_refuses(main_repo: Path, tmp_path: Path) -> None:
     """Fail-closed on gross map corruption: a `work.workspaces` present but the
     wrong type (a scalar, not a table) refuses rather than silently defaulting

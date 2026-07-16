@@ -195,9 +195,12 @@ def check_worktree_policy() -> list[str]:
     problems: list[str] = []
     seen_files: set[Path] = set()
     for path in paths:
-        if not path.is_file() or path.resolve() in seen_files:
+        if not path.is_file():
             continue
-        seen_files.add(path.resolve())
+        resolved = path.resolve()
+        if resolved in seen_files:
+            continue
+        seen_files.add(resolved)
         parsed, ok = _load_raw(path)
         if not ok:
             problems.append(f"{path} failed to parse; worktree policy cannot be validated")

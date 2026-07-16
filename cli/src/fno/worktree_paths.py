@@ -256,7 +256,7 @@ def _match_project_entry(
         )
     if "workspaces" not in work:
         return None
-    workspaces = work.get("workspaces")
+    workspaces = work["workspaces"]
     if not isinstance(workspaces, dict):
         raise WorktreePolicyError(
             "config `work.workspaces` is present but not a table; "
@@ -295,10 +295,19 @@ def resolve_worktree_policy(
     repo_root = repo_root.resolve()
     from fno.config_io import _deep_merge
 
-    repo_path = _repo_config_path(repo_root)
-    repo_cfg = (_flat_config_or_raise(repo_path) if repo_path else None) or {}
-    global_cfg = _flat_config_or_raise(_global_config_path()) or {}
-    merged = _deep_merge(dict(global_cfg), repo_cfg)
+    # FNO_CONFIG, when set, is the SOLE config candidate for the main loader; honor
+    # it here too or a `never`/invalid policy pointed at by FNO_CONFIG would be
+    # silently bypassed (fail-closed hole). A set-but-missing FNO_CONFIG means "no
+    # config" (defaults), matching the loader.
+    fno_config = os.environ.get("FNO_CONFIG")
+    if fno_config:
+        fc = Path(fno_config)
+        merged = (_flat_config_or_raise(fc) if fc.exists() else None) or {}
+    else:
+        repo_path = _repo_config_path(repo_root)
+        repo_cfg = (_flat_config_or_raise(repo_path) if repo_path else None) or {}
+        global_cfg = _flat_config_or_raise(_global_config_path()) or {}
+        merged = _deep_merge(dict(global_cfg), repo_cfg)
 
     try:
         project_id = resolve_project_id(repo_root)
@@ -308,13 +317,15 @@ def resolve_worktree_policy(
     raw_policy: object = None
     source = "default"
     entry = _match_project_entry(merged, repo_root, project_id)
-    if entry is not None and entry.get("worktree") is not None:
-        raw_policy = entry.get("worktree")
+    entry_policy = entry.get("worktree") if entry is not None else None
+    if entry_policy is not None:
+        raw_policy = entry_policy
         source = "per-project"
     else:
         wt = merged.get("worktree")
-        if isinstance(wt, dict) and wt.get("policy") is not None:
-            raw_policy = wt.get("policy")
+        wt_policy = wt.get("policy") if isinstance(wt, dict) else None
+        if wt_policy is not None:
+            raw_policy = wt_policy
             source = "global"
     if raw_policy is None:
         raw_policy = "harness-native"
@@ -338,13 +349,17 @@ def _worktrees_base_from(merged: dict) -> Path:
     """Repo-scoped worktrees base from the merged (repo>global) config.
 
     Reads the same config the policy resolves against, so the receipt and the
-    creation target never diverge on cwd. Falls back to the ambient default
-    (~/.fno/worktrees) when no override is set. ponytail: does not expand
-    ``{project}``-style templates (unused for a base dir); worktree_base()
-    carries the full template machinery for the default path.
+    creation target never diverge on cwd. The fallback is ALSO repo-scoped
+    (``<state_dir>/worktrees`` from the merged config, default ``~/.fno``): using
+    the ambient worktree_base() would load the process cwd's cached settings and
+    leak a dispatcher repo's paths.worktrees_base onto a foreign repo. ponytail:
+    does not expand ``{project}``-style templates (unused for a base dir).
     """
     paths_cfg = merged.get("paths")
     raw = paths_cfg.get("worktrees_base") if isinstance(paths_cfg, dict) else None
     if isinstance(raw, str) and raw:
         return Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
-    return worktree_base()
+    state = merged.get("state_dir")
+    if not (isinstance(state, str) and state):
+        state = "~/.fno/"
+    return (Path(os.path.expandvars(os.path.expanduser(state))) / "worktrees").resolve()

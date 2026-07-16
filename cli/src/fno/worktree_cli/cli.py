@@ -165,14 +165,29 @@ def _worktree_ensure(
     # Step 0: policy gate, before any worktree operation. A `never` project
     # (e.g. an Obsidian vault whose working tree IS the product) launches in
     # place; a parse error / out-of-enum value refuses (fail closed).
-    from fno.worktree_paths import WorktreePolicyError, resolve_worktree_policy
+    from fno.worktree_paths import resolve_worktree_policy
 
     try:
         pol = resolve_worktree_policy(top, harness)
-    except WorktreePolicyError as exc:
+    except Exception as exc:  # noqa: BLE001 - fail closed on ANY resolve error
+        # WorktreePolicyError is the expected refusal, but an unexpected OSError
+        # (config read/permission) must also refuse rather than traceback: empty
+        # stdout + non-zero => caller launches in prior cwd, never auto-isolates.
         typer.echo(f"worktree ensure: {exc}", err=True)
         return 1
     if pol.policy == "never":
+        # A caller that explicitly demanded a distinct branch (e.g. the batch
+        # lane's `--branch feature/batch-...`) cannot get one in place: launching
+        # on the current branch and reporting success would let it record the
+        # canonical checkout as its worktree and later push a branch that never
+        # existed. Refuse the contradiction (empty stdout -> caller falls back).
+        if branch is not None:
+            typer.echo(
+                f"worktree ensure: policy=never ({pol.project}) conflicts with "
+                f"--branch {branch}; cannot isolate a branch in place",
+                err=True,
+            )
+            return 1
         typer.echo(str(top))  # repo main-checkout path -> caller launches here
         typer.echo(
             f"worktree ensure: policy=never ({pol.project}); launching in place",
@@ -276,11 +291,11 @@ def policy(
     bash callers get the identical verdict with no second precedence impl. A
     parse error / out-of-enum value exits 1 with the reason on stderr.
     """
-    from fno.worktree_paths import WorktreePolicyError, resolve_worktree_policy
+    from fno.worktree_paths import resolve_worktree_policy
 
     try:
         pol = resolve_worktree_policy(Path(repo).resolve(), harness)
-    except WorktreePolicyError as exc:
+    except Exception as exc:  # noqa: BLE001 - report any resolve error, incl. OSError
         typer.echo(f"worktree policy: {exc}", err=True)
         raise typer.Exit(1)
     typer.echo(pol.policy)
