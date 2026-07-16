@@ -428,6 +428,29 @@ Successor name: tgt-${NODE_ID:3:8}-${_HARNESS}-g${CHILD_GEN}
 BRIEFEOF
 fi
 
+# Builder crumb trail (x-4852): the worktree-local events.jsonl is single-node,
+# so no node filter is needed. Summarize the tail for the delegation receipt and
+# append the last crumbs to the successor's brief so it picks up from the trail
+# instead of re-deriving. Best-effort: a missing/rotated/malformed log degrades
+# to "crumbs: none", never fatal.
+_CRUMB_SUMMARY="crumbs: none"
+if [ -f "$EVENTS_FILE" ] || [ -f "$EVENTS_FILE.1" ]; then
+  set +o pipefail
+  _CRUMBS="$( { [ -f "$EVENTS_FILE.1" ] && cat "$EVENTS_FILE.1"; [ -f "$EVENTS_FILE" ] && cat "$EVENTS_FILE"; } 2>/dev/null \
+    | jq -c 'select(.type=="builder_step")' 2>/dev/null || true)"
+  _CRUMB_N="$(printf '%s' "$_CRUMBS" | grep -c . || true)"
+  if [ "${_CRUMB_N:-0}" -gt 0 ]; then
+    _CRUMB_LAST="$(printf '%s\n' "$_CRUMBS" | tail -1 | jq -r '.data.outcome // "?"' 2>/dev/null || echo "?")"
+    _CRUMB_SUMMARY="crumbs: ${_CRUMB_N} attempts, last outcome=${_CRUMB_LAST}"
+    {
+      printf '\n## Builder crumb trail (last 5)\n\n'
+      printf '%s\n' "$_CRUMBS" | tail -5 \
+        | jq -r '"- tried \(.data.tried) - found \(.data.found // "?") - fix \(.data.fix // "?") -> \(.data.outcome)"' 2>/dev/null
+    } >> "$BRIEF_FILE" 2>/dev/null || true
+  fi
+  set -o pipefail
+fi
+
 # ---------------------------------------------------------------------------
 # Step 3: Reserve dispatch:<node> claim (bridge token)
 # ---------------------------------------------------------------------------
@@ -778,5 +801,9 @@ rm -f "$FNO_DIR/.handoff-armed-$SESSION_ID"
 # ---------------------------------------------------------------------------
 # Step 8 complete: print delegated line (step 9 is the calling LLM's job)
 # ---------------------------------------------------------------------------
+# Crumb-trail annotation (x-4852): operator-visible, printed BEFORE the strict
+# `delegated ...` decision line so the parser (which keys on that prefix) is
+# unaffected. The successor inherits the same worktree events.jsonl + the brief.
+echo "$_CRUMB_SUMMARY"
 echo "delegated $NODE_ID child=$CHILD_NAME session=$_CHILD_SESSION generation=$CHILD_GEN"
 exit 0
