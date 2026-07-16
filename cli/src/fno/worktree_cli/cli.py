@@ -63,8 +63,30 @@ def cleanup(
     prefix: Optional[str] = typer.Option(
         None, "--prefix", help="Restrict to worktrees whose branch starts with this prefix."
     ),
+    merged: bool = typer.Option(
+        False,
+        "--merged",
+        help="Reap worktrees whose branch tip already landed in origin/main "
+        "(clean + pushed + no live session). Dry-run by default; pass --apply to execute.",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="With --merged, actually archive (default is dry-run)."
+    ),
+    kill_orphans: bool = typer.Option(
+        False,
+        "--kill-orphans",
+        help="With --merged, SIGTERM ppid-1 orphan processes squatting in a "
+        "candidate worktree instead of skipping it. Live process trees are never killed.",
+    ),
 ) -> None:
-    """Remove stale worktrees with no active target session."""
+    """Remove stale worktrees with no active target session.
+
+    Two selection modes (mutually exclusive): --older-than (commit age) or
+    --merged (branch already merged into origin/main).
+    """
+    if merged and older_than:
+        typer.echo("worktree cleanup: --merged and --older-than are mutually exclusive", err=True)
+        raise typer.Exit(code=1)
     args = ["cleanup"]
     if older_than:
         args.extend(["--older-than", older_than])
@@ -72,6 +94,12 @@ def cleanup(
         args.append("--dry-run")
     if prefix:
         args.extend(["--prefix", prefix])
+    if merged:
+        args.append("--merged")
+    if apply:
+        args.append("--apply")
+    if kill_orphans:
+        args.append("--kill-orphans")
     raise typer.Exit(code=_run_lifecycle(*args))
 
 

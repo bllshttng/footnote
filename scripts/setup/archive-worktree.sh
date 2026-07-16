@@ -23,6 +23,7 @@
 #   2  strict check failed (use --force to override)
 #   3  user declined process-kill prompt
 #   4  git worktree remove failed
+#   5  salvage of local-only .fno state failed (worktree kept)
 
 set -euo pipefail
 
@@ -154,13 +155,16 @@ if [[ "$FORCE" -eq 0 ]]; then
     #   1. `git symbolic-ref refs/remotes/origin/HEAD`  ->  origin/<default>
     #   2. First remote's symbolic-ref HEAD             ->  <remote>/<default>
     #   3. Skip the check (warn) when nothing resolves
-    DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/||')"
+    # `|| true`: symbolic-ref exits non-zero when origin/HEAD is unset, and
+    # under set -euo pipefail pipefail would propagate that and abort the whole
+    # archive before the empty-DEFAULT_REF fallback below could handle it.
+    DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/||' || true)"
     if [[ -z "$DEFAULT_REF" ]]; then
       # Pipe-free first-line (no `| head` that could SIGPIPE under pipefail).
       FIRST_REMOTE="$(git -C "$TARGET" remote 2>/dev/null)"
       FIRST_REMOTE="${FIRST_REMOTE%%$'\n'*}"
       if [[ -n "$FIRST_REMOTE" ]]; then
-        DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||')"
+        DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||' || true)"
       fi
     fi
     if [[ -n "$DEFAULT_REF" ]] && git -C "$TARGET" rev-parse --verify --quiet "$DEFAULT_REF" >/dev/null; then
@@ -178,12 +182,25 @@ if [[ "$FORCE" -eq 0 ]]; then
   fi
 
   # 3. Live target session. target-state.md is the source of truth for
-  #    in-progress autonomous work; refuse if status: IN_PROGRESS.
+  #    in-progress autonomous work. Legacy manifests carried status:
+  #    IN_PROGRESS; the modern immutable manifest has no status field, so a
+  #    live owner_pid is the liveness signal (else this check was a silent
+  #    no-op for every current session).
   TARGET_STATE="$TARGET/.fno/target-state.md"
-  if [[ -f "$TARGET_STATE" ]] && grep -qE '^status:\s*IN_PROGRESS' "$TARGET_STATE"; then
-    echo "archive-worktree: target session IN_PROGRESS at $TARGET_STATE" >&2
-    echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
-    exit 2
+  if [[ -f "$TARGET_STATE" ]]; then
+    if grep -qE '^status:[[:space:]]*IN_PROGRESS' "$TARGET_STATE"; then
+      echo "archive-worktree: target session IN_PROGRESS at $TARGET_STATE" >&2
+      echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
+      exit 2
+    fi
+    # Pipeline-free + fail-open: a manifest without owner_pid must degrade to
+    # empty (not-live), never abort the script under set -euo pipefail.
+    OWNER_PID="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$TARGET_STATE" 2>/dev/null || true)"
+    if [[ -n "$OWNER_PID" ]] && kill -0 "$OWNER_PID" 2>/dev/null; then
+      echo "archive-worktree: live target session (owner_pid $OWNER_PID alive) at $TARGET_STATE" >&2
+      echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
+      exit 2
+    fi
   fi
 fi
 
@@ -203,8 +220,30 @@ fi
 # effectively literal.
 TARGET_RE="$(printf '%s' "$TARGET" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g')"
 PIDS_F="$(pgrep -f -- "$TARGET_RE" 2>/dev/null || true)"
-# Drop our own PID; we're running from inside this script.
-ALL_PIDS="$(printf '%s\n%s\n' "$PIDS" "$PIDS_F" | grep -v "^$$\$" | grep -v '^$' | sort -u || true)"
+# Exclude our OWN process group, not just $$. When this script is invoked with
+# TARGET as argv[1] (e.g. by the merged sweep), pgrep -f matches the script's
+# own forks - the command-substitution subshells and pgrep itself all carry
+# TARGET in their cmdline with a PID != $$ but sharing our PGID. A genuine
+# squatter always runs in a SEPARATE session/PGID, so filtering our PGID drops
+# every self-match while keeping real ones. Without this the script false-
+# matched itself, prompted on /dev/tty, and (headless) declined with exit 3.
+MY_PGID="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+ALL_PIDS=""
+while IFS= read -r pid; do
+  [[ -z "$pid" || "$pid" == "$$" ]] && continue
+  # Only LIVE pids can be squatters. pgrep -f matches this script's own
+  # transient forks (the command-substitution subshells carry TARGET as argv),
+  # which have already exited by the time we get here - ps returns nothing for
+  # them, so a PGID check alone can't drop them. Skip anything already gone.
+  kill -0 "$pid" 2>/dev/null || continue
+  # Belt-and-suspenders for a still-live self-fork: our own process group.
+  if [[ -n "$MY_PGID" ]]; then
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$pgid" == "$MY_PGID" ]] && continue
+  fi
+  ALL_PIDS+="$pid"$'\n'
+done < <(printf '%s\n%s\n' "$PIDS" "$PIDS_F" | grep -v '^$' | sort -u)
+ALL_PIDS="$(printf '%s' "$ALL_PIDS" | grep -v '^$' | sort -u || true)"
 
 if [[ -n "$ALL_PIDS" ]]; then
   echo "    Processes rooted in $TARGET:" >&2
@@ -245,6 +284,61 @@ if [[ -n "$ALL_PIDS" ]]; then
       kill -KILL "$pid" 2>/dev/null || true
     done <<< "$HOLDOUTS"
   fi
+fi
+
+# ---- Salvage local-only .fno state before removal (data-loss guard) ------
+# A worktree's .fno mixes symlinks (canonical state) with REAL local-only
+# files (artifacts/, scratchpad/, events.jsonl, target-state.md, *.log) that
+# `git worktree remove` would delete silently. Copy every real (non-symlink)
+# entry into the canonical .fno keyed by date+node BEFORE removal: directories
+# to <canon>/.fno/<name>/<date>-<node>/ so tools find salvaged runs in place,
+# loose files together under <canon>/.fno/salvage/<date>-<node>/. A copy
+# failure KEEPS the worktree (exit 5) - losing state to save disk is never the
+# trade. Skipped when .fno is a whole-dir symlink (all canonical already) or
+# absent. Every caller (this script, the merged sweep, the ritual prune,
+# manual use) inherits the guard.
+_salvage_node() {
+  local st="$TARGET/.fno/target-state.md" n=""
+  if [[ -f "$st" ]]; then
+    n="$(sed -nE '/^graph_node_id:[[:space:]]*/{s/^graph_node_id:[[:space:]]*//;p;q;}' "$st" 2>/dev/null | tr -d '"'"'"' ' || true)"
+  fi
+  [[ -z "$n" ]] && n="${BRANCH##*/}"
+  [[ -z "$n" || "$n" == "(detached)" ]] && n="$(basename "$TARGET")"
+  printf '%s' "$n"
+}
+
+salvage_fno() {
+  local src="$TARGET/.fno"
+  [[ -d "$src" && ! -L "$src" ]] || return 0
+  local canon_fno="$CANONICAL/.fno"
+  local node date entry base dest
+  node="$(_salvage_node)"
+  date="$(date +%Y%m%d)"
+  for entry in "$src"/* "$src"/.[!.]*; do
+    [[ -e "$entry" ]] || continue   # unmatched glob
+    [[ -L "$entry" ]] && continue    # canonical symlink -> already shared
+    base="$(basename "$entry")"
+    case "$base" in
+      *.lock|*.stamp|*-stamp) continue ;;
+    esac
+    if [[ -d "$entry" ]]; then
+      dest="$canon_fno/$base/${date}-${node}"
+      mkdir -p "$dest" 2>/dev/null \
+        && cp -R "$entry"/. "$dest"/ 2>/dev/null \
+        || { echo "archive-worktree: salvage failed: $entry -> $dest" >&2; return 5; }
+    else
+      dest="$canon_fno/salvage/${date}-${node}"
+      mkdir -p "$dest" 2>/dev/null \
+        && cp "$entry" "$dest/$base" 2>/dev/null \
+        || { echo "archive-worktree: salvage failed: $entry -> $dest/$base" >&2; return 5; }
+    fi
+  done
+  return 0
+}
+
+if ! salvage_fno; then
+  echo "archive-worktree: keeping worktree $TARGET (salvage failed, nothing removed)" >&2
+  exit 5
 fi
 
 # ---- Remove the worktree -------------------------------------------------
