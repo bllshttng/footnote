@@ -417,8 +417,15 @@ enum CoreMsg {
     },
     /// A fresh registry-derived agent row set from the off-loop reader task
     /// (4a-G2). Sent only when the set changed; the core stores it and
-    /// re-pushes layouts (rects unchanged, so no frame re-emit).
-    AgentRows(Vec<RegistryAgent>),
+    /// re-pushes layouts (rects unchanged, so no frame re-emit). `branches`
+    /// (x-cd67 US4) is the reader's off-loop cwd -> git-branch resolution for
+    /// the row cwds, joined into each row's `subline` at layout time; a cwd
+    /// with no resolvable branch is simply absent (the subline degrades to the
+    /// cwd tail).
+    AgentRows {
+        rows: Vec<RegistryAgent>,
+        branches: HashMap<String, String>,
+    },
     /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
     /// reader, claim-overlaid (x-54fa). Sent only when the set changed; the core
     /// stores it and re-pushes layouts so the sideline backlog lane tracks
@@ -765,6 +772,12 @@ struct Core {
     /// fact and squad assignment are joined at layout time, where the live
     /// pane set and the squad catalog live.
     agents: Vec<RegistryAgent>,
+    /// (x-cd67 US4) Latest cwd -> git-branch map from the off-loop reader,
+    /// joined into each agent row's `subline` at layout time. A cwd absent from
+    /// the map has no resolvable branch (non-git dir, unreadable HEAD); the
+    /// subline then degrades to the cwd tail. Display-only, so staleness across
+    /// a git checkout is cosmetic.
+    branch_by_cwd: HashMap<String, String>,
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
@@ -2705,6 +2718,14 @@ impl Core {
     /// append AFTER the pane rows, matched to a squad by cwd (exact or child) or
     /// the `squad: None` catch-all. The fact-badge lattice is unchanged: a dead
     /// pane forces `exited` over any live-TTL badge (fact beats report).
+    /// (x-cd67 US4) Compose a row's dim line-2 subline from the off-loop
+    /// branch map + the cwd's tail segment: `<branch> · <tail>`, either part
+    /// omitted if absent, both absent (an empty cwd) -> `None` (AC1-EDGE: no
+    /// sub-row is emitted). The client renders it verbatim and truncates.
+    fn compose_subline(&self, cwd: &str) -> Option<String> {
+        subline_from(self.branch_by_cwd.get(cwd).map(String::as_str), cwd)
+    }
+
     fn agent_rows(&self) -> Vec<AgentRow> {
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
@@ -2757,6 +2778,7 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
                                 tombstone: false,
+                                subline: self.compose_subline(&a.cwd),
                             }
                         }
                         None => {
@@ -2782,6 +2804,8 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
                                 tombstone: false,
+                                subline: self
+                                    .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
                             }
                         }
                     };
@@ -2818,6 +2842,7 @@ impl Core {
                         seen: self.seen.contains(pane),
                         cwd_base: None,
                         tombstone: false,
+                        subline: self.compose_subline(&a.cwd),
                     });
                 }
                 None => {
@@ -2856,6 +2881,7 @@ impl Core {
                         seen: false,
                         cwd_base,
                         tombstone: false,
+                        subline: self.compose_subline(&a.cwd),
                     });
                 }
             }
@@ -2889,6 +2915,8 @@ impl Core {
                     seen: false,
                     cwd_base: None,
                     tombstone: true,
+                    // A synthesized dead member has no cwd to derive a branch/tail.
+                    subline: None,
                 });
             }
         }
@@ -2951,6 +2979,7 @@ impl Core {
                 seen: false,
                 cwd_base,
                 tombstone: false,
+                subline: self.compose_subline(&r.cwd),
             });
         }
         out
@@ -5015,8 +5044,9 @@ impl Core {
                 let _ = reply.send(ServerMsg::Ok);
                 Flow::Continue
             }
-            CoreMsg::AgentRows(rows) => {
+            CoreMsg::AgentRows { rows, branches } => {
                 self.agents = rows;
+                self.branch_by_cwd = branches;
                 // Rects are unchanged; only the Layout's agent rows moved -
                 // push without re-emitting frames (AC1-UI: visible within one
                 // layout push; AC2-UI: the read happened off-loop).
@@ -5041,6 +5071,21 @@ impl Core {
                 reason: reason.to_string(),
             });
         }
+    }
+}
+
+/// (x-cd67 US4) Join a resolved branch and a cwd tail into a sideline subline.
+/// `<branch> · <tail>`; a missing branch leaves the tail alone, an empty cwd
+/// (no tail, no branch) yields `None` so no sub-row is emitted (AC1-EDGE).
+fn subline_from(branch: Option<&str>, cwd: &str) -> Option<String> {
+    // `Path::file_name` handles trailing slashes and platform separators (gemini
+    // review); an empty cwd yields no tail.
+    let tail = Path::new(cwd).file_name().and_then(|s| s.to_str());
+    match (branch, tail) {
+        (Some(b), Some(t)) => Some(format!("{b} · {t}")),
+        (Some(b), None) => Some(b.to_string()),
+        (None, Some(t)) => Some(t.to_string()),
+        (None, None) => None,
     }
 }
 
@@ -5185,6 +5230,7 @@ async fn serve(
         exit_tx,
         self_tx: core_tx.clone(),
         agents: Vec::new(),
+        branch_by_cwd: HashMap::new(),
         backlog: Vec::new(),
         backlog_holders: HashMap::new(),
         claim_eligible: HashSet::new(),
@@ -5271,7 +5317,33 @@ async fn serve(
                     move || roster_raw,
                     now,
                 ) {
-                    if core_tx.send(CoreMsg::AgentRows(rows)).await.is_err() {
+                    // (x-cd67 US4) Resolve the git branch per UNIQUE row cwd,
+                    // off the core loop, on the blocking pool - bounded file
+                    // reads only, per-cwd degradation on failure (AC1-FR). This
+                    // rides the same change-gated emit as the row set, so the
+                    // reads happen only when the set moved, never on idle ticks.
+                    let cwds: Vec<String> = {
+                        let mut seen = std::collections::HashSet::new();
+                        rows.iter()
+                            .map(|r| r.cwd.clone())
+                            .filter(|c| !c.is_empty() && seen.insert(c.clone()))
+                            .collect()
+                    };
+                    let branches = tokio::task::spawn_blocking(move || {
+                        cwds.into_iter()
+                            .filter_map(|c| {
+                                agents_view::resolve_branch(std::path::Path::new(&c))
+                                    .map(|b| (c, b))
+                            })
+                            .collect::<HashMap<String, String>>()
+                    })
+                    .await
+                    .unwrap_or_default();
+                    if core_tx
+                        .send(CoreMsg::AgentRows { rows, branches })
+                        .await
+                        .is_err()
+                    {
                         return; // core loop gone; the server is shutting down
                     }
                 }
@@ -8087,6 +8159,51 @@ mod tests {
     }
 
     #[test]
+    fn subline_from_joins_branch_and_tail_and_degrades() {
+        // Both present -> "branch · tail".
+        assert_eq!(
+            subline_from(Some("main"), "/code/footnote"),
+            Some("main · footnote".into())
+        );
+        // Branch unresolved -> tail alone (AC1-ERR degradation).
+        assert_eq!(
+            subline_from(None, "/code/footnote"),
+            Some("footnote".into())
+        );
+        // Trailing slash is trimmed before taking the tail.
+        assert_eq!(
+            subline_from(None, "/code/footnote/"),
+            Some("footnote".into())
+        );
+        // No cwd -> no subline (AC1-EDGE: no sub-row emitted).
+        assert_eq!(subline_from(None, ""), None);
+        assert_eq!(subline_from(Some("main"), ""), Some("main".into()));
+    }
+
+    #[test]
+    fn agent_rows_composes_subline_from_branch_map() {
+        // A paneless orphan row joins the off-loop branch map on its cwd; a cwd
+        // absent from the map degrades to the tail alone (US4 wire composition).
+        let mut core = empty_core();
+        core.agents = vec![
+            bg_row("worker", "/tmp/repos/footnote", Some("j1")),
+            bg_row("other", "/tmp/repos/regready", Some("j2")),
+        ];
+        core.branch_by_cwd = [("/tmp/repos/footnote".to_string(), "main".to_string())]
+            .into_iter()
+            .collect();
+        let rows = core.agent_rows();
+        let footnote = rows.iter().find(|r| r.name == "worker").unwrap();
+        assert_eq!(footnote.subline.as_deref(), Some("main · footnote"));
+        let regready = rows.iter().find(|r| r.name == "other").unwrap();
+        assert_eq!(
+            regready.subline.as_deref(),
+            Some("regready"),
+            "no branch in map -> tail only"
+        );
+    }
+
+    #[test]
     fn routed_backlog_joins_attach_then_hint_and_leaves_ready_alone() {
         // x-54fa Phase B publish-time join, minus the pane arm (a live pane
         // needs a real PTY; the pane join key - FNO_NODE provenance equality -
@@ -8791,6 +8908,7 @@ mod tests {
             exit_tx,
             self_tx,
             agents: Vec::new(),
+            branch_by_cwd: HashMap::new(),
             backlog: Vec::new(),
             backlog_holders: HashMap::new(),
             claim_eligible: HashSet::new(),

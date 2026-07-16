@@ -130,6 +130,60 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     Some(out)
 }
 
+/// (x-cd67 US4) The current git branch of `cwd`, for the sideline row subline.
+/// Bounded file reads only - NEVER shells `git` (the origin freeze class) and
+/// NEVER runs on the core loop (the reader task resolves it off-loop). Any read
+/// failure, a plain (non-git) dir, or a malformed HEAD degrades to `None`; the
+/// subline then shows the cwd tail alone (AC1-ERR).
+///
+/// Walks up from `cwd` to the first ancestor holding a `.git` (the repo
+/// boundary, exactly as git resolves it), so a pane started in a subdirectory
+/// (e.g. `<repo>/crates/fno`) still shows the branch rather than degrading to
+/// the tail (codex review). A `.git` that exists but is unreadable/malformed at
+/// that boundary yields `None` - it does not keep walking into a parent repo.
+///
+/// - `<dir>/.git` a directory -> read `<dir>/.git/HEAD`.
+/// - `<dir>/.git` a file (a linked worktree) -> follow its `gitdir: <path>`
+///   pointer (relative pointers resolve against `<dir>`), then read `<gitdir>/HEAD`
+///   (AC3-EDGE).
+/// - HEAD `ref: refs/heads/<name>` -> `<name>`; a detached 40-hex sha -> its
+///   first 8 chars; anything else -> `None`.
+pub fn resolve_branch(cwd: &Path) -> Option<String> {
+    // The first ancestor with a `.git` is the repo; stop there (walking past it
+    // would attribute a parent repo's branch).
+    let dir = cwd
+        .ancestors()
+        .find(|d| std::fs::symlink_metadata(d.join(".git")).is_ok())?;
+    let dot_git = dir.join(".git");
+    let meta = std::fs::metadata(&dot_git).ok()?;
+    let git_dir = if meta.is_dir() {
+        dot_git
+    } else {
+        // A worktree `.git` file: `gitdir: <path>` (possibly relative to `dir`).
+        let contents = std::fs::read_to_string(&dot_git).ok()?;
+        // Tolerate leading whitespace / BOM before the `gitdir:` key (gemini review).
+        let ptr = contents.trim_start().strip_prefix("gitdir:")?.trim();
+        let ptr = Path::new(ptr);
+        if ptr.is_absolute() {
+            ptr.to_path_buf()
+        } else {
+            dir.join(ptr)
+        }
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref:") {
+        return reference
+            .trim()
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    // Detached HEAD: a bare 40-hex sha -> short form. Anything else is malformed.
+    (head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head[..8].to_string())
+}
+
 /// The registry path, resolved exactly as fno-agents' `AgentsHome::from_env`
 /// does (`FNO_AGENTS_HOME` > `$HOME/.fno/agents` > `./.fno/agents`).
 pub fn registry_path() -> PathBuf {
@@ -1769,5 +1823,88 @@ mod tests {
             "nothing is deleted when the query is unavailable"
         );
         assert!(out.iter().all(|r| r.state == ExternalState::Unknown));
+    }
+
+    // ---- resolve_branch (x-cd67 US4) ----
+
+    fn branch_tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fno-branch-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn resolve_branch_reads_plain_checkout_head() {
+        let cwd = branch_tmp("plain");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(resolve_branch(&cwd), Some("main".into()));
+        // A slash-bearing branch keeps only its leaf name.
+        std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/feature/x-cd67\n").unwrap();
+        assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
+        std::fs::remove_dir_all(&cwd).unwrap();
+    }
+
+    #[test]
+    fn resolve_branch_walks_up_to_repo_root_from_subdir() {
+        // codex review: a pane started in a subdirectory resolves the repo's
+        // branch by walking up to the nearest `.git`, not degrading to the tail.
+        let root = branch_tmp("subdir");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let sub = root.join("crates/fno");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(resolve_branch(&sub), Some("main".into()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_branch_detached_head_shortens_sha() {
+        let cwd = branch_tmp("detached");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::write(
+            cwd.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_branch(&cwd), Some("01234567".into()));
+        std::fs::remove_dir_all(&cwd).unwrap();
+    }
+
+    #[test]
+    fn resolve_branch_follows_worktree_gitdir_redirect() {
+        // AC3-EDGE: a linked-worktree `.git` FILE points at the real gitdir.
+        let root = branch_tmp("wt");
+        let real_gitdir = root.join(".git/worktrees/x-cd67");
+        std::fs::create_dir_all(&real_gitdir).unwrap();
+        std::fs::write(real_gitdir.join("HEAD"), "ref: refs/heads/x-cd67\n").unwrap();
+        let cwd = root.join("checkout");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // A relative gitdir pointer resolves against cwd.
+        std::fs::write(cwd.join(".git"), "gitdir: ../.git/worktrees/x-cd67\n").unwrap();
+        assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
+        // Leading whitespace before the `gitdir:` key is tolerated (gemini review).
+        std::fs::write(cwd.join(".git"), "  \tgitdir: ../.git/worktrees/x-cd67\n").unwrap();
+        assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_branch_degrades_on_no_git_and_malformed_head() {
+        // AC1-ERR: a plain dir with no .git -> None (poll must not error).
+        let cwd = branch_tmp("nogit");
+        assert_eq!(resolve_branch(&cwd), None);
+        // A malformed HEAD (neither ref: nor 40-hex) -> None.
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::write(cwd.join(".git/HEAD"), "garbage not a ref\n").unwrap();
+        assert_eq!(resolve_branch(&cwd), None);
+        // A worktree pointer whose gitdir target vanished -> None (pruned wt).
+        std::fs::write(cwd.join(".git/HEAD.tmp"), "x").unwrap(); // noise
+        let dangling = branch_tmp("dangling");
+        std::fs::write(dangling.join(".git"), "gitdir: /nonexistent/gitdir\n").unwrap();
+        assert_eq!(resolve_branch(&dangling), None);
+        std::fs::remove_dir_all(&cwd).unwrap();
+        std::fs::remove_dir_all(&dangling).unwrap();
     }
 }
