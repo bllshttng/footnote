@@ -675,7 +675,9 @@ def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:
         _LOG.debug("dispatch_lanes: setup-worktree.sh failed for %s: %s", worktree, exc)
 
 
-def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
+def _ensure_lane_worktree(
+    node_id: str, *, canonical_root: Path, harness: str = "claude"
+) -> Path:
     """Idempotently isolate a lane worktree off origin/main; return its path.
 
     Delegates to `fno worktree ensure` (x-73ca): a git-only, idempotent verb
@@ -683,15 +685,16 @@ def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
     (base origin/main), or reuses it. Raises WorktreeEnsureError on failure (empty
     stdout / non-zero) so the caller releases the lane slot and skips this lane
     without touching the others (Failure Modes: Errors).
+
+    ``harness`` is the lane worker's dispatch harness (the node's provider,
+    defaulting to claude to match `_spawn_worker`'s `prov = eff_provider or
+    "claude"`): claude lands the lane harness-native at `<repo>/.claude/worktrees/`,
+    a non-claude harness at the external base. A `never` project returns the repo
+    root (guarded below) regardless of the harness.
     """
-    # advance dispatches a claude `/target` worker (_spawn_worker never passes a
-    # harness, so resolve_dispatch defaults to the claude substrate), so the lane
-    # is claude harness-native: forward --harness claude and ensure lands it at
-    # <repo>/.claude/worktrees/<node>. A `never` project still returns the repo
-    # root (guarded below), independent of the harness.
     proc = subprocess.run(
         [*_subprocess_util.fno_py_cmd(), "worktree", "ensure",
-         "--repo", str(canonical_root), "--name", node_id, "--harness", "claude"],
+         "--repo", str(canonical_root), "--name", node_id, "--harness", harness],
         capture_output=True,
         text=True,
         timeout=300,
@@ -867,12 +870,14 @@ def dispatch_lanes(
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
         try:
-            worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
+            eff_provider = provider if provider is not None else node.get("provider")
+            worktree = _ensure_lane_worktree(
+                node_id, canonical_root=canonical, harness=(eff_provider or "claude")
+            )
             # A never-policy lane runs in the canonical checkout in place; seeding
             # a per-lane config.local.toml there would write into canonical .fno.
             if worktree.resolve() != canonical.resolve():
                 _seed_lane_local_settings(worktree, node_id, base_pid)
-            eff_provider = provider if provider is not None else node.get("provider")
             short_id = _spawn_worker(
                 node_id, str(worktree), slug,
                 model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
