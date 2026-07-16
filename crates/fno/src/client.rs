@@ -777,6 +777,8 @@ impl AgentIdent {
 /// name) at execution time - a stale target becomes a Notice, not a wrong action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
+    /// Attach a bg (paneless) agent by repointing the focused pane (x-9f75).
+    OpenHere,
     /// Attach a bg (paneless) agent as a new tab.
     NewTab,
     /// Attach a bg agent as a directional split of the current tab.
@@ -825,6 +827,13 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry("■", "Stop"), &[MenuAction::Stop]);
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
+        // Open-here leads (repoint the focused viewer); the server's
+        // fail-closed notice is the feedback path when the focus isn't a
+        // detachable viewer (the client can't know viewer-ness).
+        add(
+            PopupRow::FullWidth("⊙ Open Here".into()),
+            &[MenuAction::OpenHere],
+        );
         add(
             PopupRow::FullWidth("▭ New Tab".into()),
             &[MenuAction::NewTab],
@@ -4928,6 +4937,18 @@ async fn execute_row_menu_action(
         }
     };
     match action {
+        MenuAction::OpenHere => {
+            let Some(id) = a.attach_id.clone() else {
+                view.set_notice("agent is no longer attachable".into());
+                return Ok(());
+            };
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::attach_agent_here(id)),
+            )
+            .await
+            .map_err(|e| format!("attach send failed: {e}"))?;
+        }
         MenuAction::NewTab | MenuAction::Split(_) => {
             let Some(id) = a.attach_id.clone() else {
                 view.set_notice("agent is no longer attachable".into());
@@ -8044,8 +8065,25 @@ mod tests {
         assert!(bg.actions.contains(&super::MenuAction::Split(Dir::Up)));
         assert!(bg.actions.contains(&super::MenuAction::Stop));
         assert!(!bg.actions.contains(&super::MenuAction::Focus));
+        // AC1-UI (x-9f75): Open Here is present and leads above New Tab.
+        let open_here = bg
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::OpenHere);
+        let new_tab = bg
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::NewTab);
+        assert!(
+            matches!((open_here, new_tab), (Some(o), Some(n)) if o < n),
+            "Open Here sits above New Tab"
+        );
         let pane = super::build_row_menu(&mk("p", Some(9), None, false), Anchor::Center);
         assert!(pane.actions.contains(&super::MenuAction::Focus));
+        assert!(
+            !pane.actions.contains(&super::MenuAction::OpenHere),
+            "a placed pane row offers no open-here"
+        );
         assert!(
             !pane
                 .actions
@@ -8082,6 +8120,41 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
                 assert_eq!(id, "c19cd2c3");
                 assert_eq!(placement.split, Some(Dir::Right));
+                assert!(matches!(
+                    placement.target,
+                    crate::proto::PaneTarget::CurrentRoute
+                ));
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_open_here_sends_here_placement() {
+        // AC1-UI (x-9f75): "Open Here" on a bg row sends AttachAgent with
+        // here:true and the default (CurrentRoute, no split) placement; the
+        // menu closes.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::OpenHere)
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "executing closes the menu");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert!(placement.here, "open-here sets here:true");
+                assert!(placement.split.is_none());
                 assert!(matches!(
                     placement.target,
                     crate::proto::PaneTarget::CurrentRoute
