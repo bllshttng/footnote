@@ -537,6 +537,31 @@ fn cmd_from_argv(argv: &[String]) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test override for the attach program (see [`attach_argv`]): points unit
+    /// tests at a benign binary so the attach spawn+swap path runs without claude.
+    static ATTACH_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The argv attaching bg session `id`: `claude attach <id>`. `id` is always a
+/// positional arg (never a shell string), so an 8-hex id can only name a
+/// session. Tests override the program via `set_attach_program` (x-9f75).
+fn attach_argv(id: &str) -> Vec<String> {
+    #[cfg(test)]
+    if let Some(mut argv) = ATTACH_PROGRAM.with(|p| p.borrow().clone()) {
+        argv.push(id.to_string());
+        return argv;
+    }
+    vec!["claude".to_string(), "attach".to_string(), id.to_string()]
+}
+
+#[cfg(test)]
+fn set_attach_program(argv: &[&str]) {
+    ATTACH_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
 /// A tab's display label (x-c150), from spawn-time facts only - no I/O, no
 /// subprocess on the layout path (squad.rs's origin-freeze discipline).
 /// Chain (Locked 1): explicit rename > `FNO_NODE` provenance > spawn-cwd
@@ -1429,14 +1454,16 @@ impl Core {
         }
     }
 
-    /// Place a spawned pane, reaping it on every post-spawn refusal.
+    /// Place a spawned pane -> `(squad, tab, split_fell_back)`. `split_fell_back` is `true` when a requested
+    /// split was refused at min-size and the pane landed as a new tab instead (x-9f75 AC3-FR; caller notices
+    /// "tab full"). Only a vanished-squad race errs; a crowded tab never dead-ends.
     fn place_spawned_pane(
         &mut self,
         dest: Option<u64>,
         squad_key: &str,
         pid: u64,
         split: Option<Dir>,
-    ) -> Result<(u64, TabId), String> {
+    ) -> Result<(u64, TabId, bool), String> {
         let sid = match dest {
             Some(sid) => sid,
             None => {
@@ -1451,36 +1478,41 @@ impl Core {
                 self.next_squad_id += 1;
                 self.session
                     .add_squad(sid, vec![squad_key.to_string()], None, tab);
-                return Ok((sid, tid));
+                return Ok((sid, tid, false));
             }
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
             return Err("selected squad vanished".into());
         };
-        if split.is_none() || self.session.squads[si].tabs.is_empty() {
-            let tid = self.session.mint_tab_id();
-            let tab = Tab {
+        let new_tab = |this: &mut Self, si: usize| {
+            let tid = this.session.mint_tab_id();
+            this.session.squads[si].tabs.push(Tab {
                 name: None,
                 id: tid,
                 root: Node::Leaf(pid),
                 focus: pid,
-            };
-            self.session.squads[si].tabs.push(tab);
-            return Ok((sid, tid));
+            });
+            tid
+        };
+        if split.is_none() || self.session.squads[si].tabs.is_empty() {
+            return Ok((sid, new_tab(self, si), false));
         }
         let dir = split.expect("split present");
         let squad = &self.session.squads[si];
         let ti = squad.active_tab.min(squad.tabs.len() - 1);
         let tid = squad.tabs[ti].id;
         let vp = self.tab_rect(tid);
-        let tab = &mut self.session.squads[si].tabs[ti];
-        match tree::split_directional(tab, vp, dir, pid) {
-            Ok(()) => Ok((sid, tid)),
-            Err(e) => {
-                self.reap_pane(pid);
-                Err(e.to_string())
-            }
+        let split_ok = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            tree::split_directional(tab, vp, dir, pid).is_ok()
+        };
+        if split_ok {
+            Ok((sid, tid, false))
+        } else {
+            // Split refused (tab min-size): fall back to a new tab rather than reaping and dead-ending.
+            // A fresh tab is a full-viewport leaf, so it always fits.
+            Ok((sid, new_tab(self, si), true))
         }
     }
 
@@ -1494,15 +1526,60 @@ impl Core {
         claim: bool,
         placement: PanePlacement,
     ) -> Result<u64, String> {
-        let current = self.session.find_by_cwd(&squad_key);
-        let dest = self.resolve_placement_target(&placement.target, current)?;
+        // Create-if-absent lives ONLY here on the script path (Locked 7, x-9f75): a `pane run --squad
+        // <name>` for a not-yet-existing squad mints one so lanes group by project; AttachAgent / UI targets
+        // stay fail-closed. Only an UNKNOWN name is creatable (blank / unknown id still error). Resolved
+        // pre-spawn so a bad target refuses with no pane.
+        let (dest, create_name): (Option<u64>, Option<String>) = match &placement.target {
+            PaneTarget::SquadName(name) => {
+                let n = name.trim();
+                if n.is_empty() {
+                    return Err("squad name cannot be blank".into());
+                }
+                match self.resolve_placement_target(&placement.target, None) {
+                    Ok(d) => (d, None),
+                    // Coupled to resolve_placement_target's error text: a name matching NO squad is
+                    // creatable; an ambiguous name (2+ matches) still errors - never silently pick one.
+                    Err(e) if e.starts_with("no such squad") => (None, Some(n.to_string())),
+                    Err(e) => return Err(e),
+                }
+            }
+            _ => {
+                let current = self.session.find_by_cwd(&squad_key);
+                (
+                    self.resolve_placement_target(&placement.target, current)?,
+                    None,
+                )
+            }
+        };
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
             // The claim itself is acquired per-burst via PaneClaim.
             self.claim_eligible.insert(pid);
         }
-        self.place_spawned_pane(dest, &squad_key, pid, placement.split)?;
+        if let Some(name) = create_name {
+            // Origins = the spawn's repo root, so same-project lanes converge here. persist_squad
+            // write-through is non-blocking (x-8f11): a failed write degrades restore, not the live session.
+            let sid = self.next_squad_id;
+            self.next_squad_id += 1;
+            let tid = self.session.mint_tab_id();
+            self.session.add_squad(
+                sid,
+                vec![squad_key.clone()],
+                Some(name),
+                Tab {
+                    name: None,
+                    id: tid,
+                    root: Node::Leaf(pid),
+                    focus: pid,
+                },
+            );
+            self.squad_members.insert(sid, Vec::new());
+            self.persist_squad(sid);
+        } else {
+            self.place_spawned_pane(dest, &squad_key, pid, placement.split)?;
+        }
         // Keep any attached client's view consistent; a script-only session
         // has no clients, so this is then a cheap no-op.
         self.push_layout(true);
@@ -3728,6 +3805,15 @@ impl Core {
                     self.notice(client_id, "no such agent");
                     return Flow::Continue;
                 }
+                // (x-9f75) Open-here is inherently "the focused pane of my current view", so a split or a
+                // non-CurrentRoute target contradicts it - refuse pre-spawn (AC2-ERR).
+                if placement.here
+                    && (placement.split.is_some()
+                        || !matches!(placement.target, PaneTarget::CurrentRoute))
+                {
+                    self.notice(client_id, "open-here takes no split or target");
+                    return Flow::Continue;
+                }
                 // (x-0090) Reconcile: an id already mapped to a LIVE pane focuses
                 // it instead of minting a duplicate tab (Locked 3; AC2-HP). A
                 // stale mapping (pane reaped between reap and here) is dropped and
@@ -3752,6 +3838,85 @@ impl Core {
                         }
                     }
                     self.attached.remove(&id);
+                }
+                // (x-9f75) Open-here: repoint the focused viewer pane at B (not a tab/split). Runs after
+                // reconcile (an already-paned target focuses, Locked 5 / AC1-EDGE), so B is fresh here.
+                if placement.here {
+                    // Displacement guard, pre-spawn: only an attach-VIEWER (a value in `attached`) is
+                    // displaceable - displacing a direct/shell pane would kill its live PTY child. Reading
+                    // the CURRENT focus (re-anchored after an exit) is what makes AC2-FR hold. (Locked 3, AC1-ERR)
+                    let Some(focus) = self.viewed_tab(view).map(|t| t.focus) else {
+                        self.notice(client_id, "no focused pane to open here");
+                        return Flow::Continue;
+                    };
+                    let displaced = self
+                        .attached
+                        .iter()
+                        .find(|(_, &p)| p == focus)
+                        .map(|(k, _)| k.clone());
+                    let Some(displaced_id) = displaced else {
+                        self.notice(
+                            client_id,
+                            "focused pane is not a detachable viewer - use split or new tab",
+                        );
+                        return Flow::Continue;
+                    };
+                    // Anchor the spawn at B's row cwd, else the viewed squad's cwd (same rule as a fresh attach).
+                    let row_cwd = self
+                        .agents
+                        .iter()
+                        .find(|a| {
+                            a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id)
+                        })
+                        .map(|a| a.cwd.clone())
+                        .unwrap_or_default();
+                    let spawn_cwd = if row_cwd.is_empty() {
+                        self.session
+                            .squad(view.0)
+                            .map(|s| s.canonical_cwd().to_string())
+                            .unwrap_or_default()
+                    } else {
+                        row_cwd
+                    };
+                    let (rows, cols) = self
+                        .clients
+                        .iter()
+                        .find(|c| c.id == client_id)
+                        .map(|c| c.dims)
+                        .unwrap_or((vp.rows, vp.cols));
+                    // Spawn-first (Locked 4): a spawn failure leaves the layout untouched (AC3-ERR).
+                    let argv = attach_argv(&id);
+                    let new_pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.notice(client_id, format!("attach failed: {e}"));
+                            return Flow::Continue;
+                        }
+                    };
+                    // Swap-second: replace_leaf repoints the focused leaf at the new viewer, moving focus with it.
+                    let Some(tab) = self.viewed_tab_mut(view) else {
+                        self.reap_pane(new_pid);
+                        self.notice(client_id, "view changed; open-here aborted");
+                        return Flow::Continue;
+                    };
+                    if !tree::replace_leaf(tab, focus, new_pid) {
+                        // Focus raced out of the tree (a pane exit): the new viewer has nowhere to land.
+                        self.reap_pane(new_pid);
+                        self.notice(client_id, "focused pane changed; open-here aborted");
+                        return Flow::Continue;
+                    }
+                    // Insert BEFORE the reap: reap_pane drops every mapping onto `focus`, so inserting first
+                    // clears A (it resurfaces watch-only) while B's mapping (new_pid != focus) survives.
+                    self.attached.insert(id, new_pid);
+                    // Reap-last (Locked 4): F's viewer dies but the displaced session keeps running detached
+                    // and resurfaces watch-only (x-7561 external-lifecycle - viewport moved, nothing killed).
+                    self.reap_pane(focus);
+                    self.notice(
+                        client_id,
+                        format!("opened here; {displaced_id} detached (watch-only)"),
+                    );
+                    self.push_layout(true);
+                    return Flow::Continue;
                 }
                 // The watch-only row's OWN cwd anchors the attach process
                 // (AC8-EDGE): squad target selection never rewrites it, so an
@@ -3802,7 +3967,7 @@ impl Core {
                 } else {
                     row_cwd
                 };
-                let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
+                let argv = attach_argv(&id);
                 let pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                     Ok(p) => p,
                     Err(e) => {
@@ -3815,7 +3980,7 @@ impl Core {
                 // focus. A
                 // refusal reaps the pane and leaves the row watch-only (AC7);
                 // the mapping is recorded ONLY after placement succeeds.
-                let (sid, tid) =
+                let (sid, tid, fell_back) =
                     match self.place_spawned_pane(dest, &spawn_cwd, pid, placement.split) {
                         Ok(landing) => landing,
                         Err(e) => {
@@ -3825,6 +3990,9 @@ impl Core {
                     };
                 self.attached.insert(id, pid);
                 self.set_view(client_id, sid, tid);
+                if fell_back {
+                    self.notice(client_id, "tab full - opened as tab");
+                }
                 self.push_layout(true);
                 Flow::Continue
             }
@@ -6718,7 +6886,7 @@ mod tests {
         core.session
             .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
 
-        let (sid, _tid) = core.place_spawned_pane(Some(1), "/a", 2, None).unwrap();
+        let (sid, _tid, _) = core.place_spawned_pane(Some(1), "/a", 2, None).unwrap();
         assert_eq!(sid, 1);
         assert_eq!(
             core.session.squad(1).unwrap().tabs.len(),
@@ -6727,7 +6895,7 @@ mod tests {
         );
 
         let tabs_before = core.session.squad(1).unwrap().tabs.len();
-        let (_sid, tid) = core
+        let (_sid, tid, _) = core
             .place_spawned_pane(Some(1), "/a", 3, Some(Dir::Right))
             .unwrap();
         assert_eq!(
@@ -6756,7 +6924,7 @@ mod tests {
         // AC6-EDGE: no squad yet + a split request -> the squad is born from the
         // route with the pane as its lone first tab (split collapses).
         let mut core = empty_core();
-        let (sid, tid) = core
+        let (sid, tid, _) = core
             .place_spawned_pane(None, "/fresh", 9, Some(Dir::Left))
             .unwrap();
         let sq = core.session.squad(sid).unwrap();
@@ -6767,9 +6935,9 @@ mod tests {
     }
 
     #[test]
-    fn place_spawned_pane_reaps_on_min_size_refusal() {
-        // AC7: a split that would violate minimum size reaps the pane and leaves
-        // the prior tree byte-for-byte unchanged.
+    fn place_spawned_pane_min_size_refusal_falls_back_to_new_tab() {
+        // AC3-FR (x-9f75): a split that would violate minimum size no longer reaps - the pane lands as a new
+        // tab in the same squad, the crowded tab is untouched, and the caller is signaled to notice.
         let mut core = empty_core();
         core.session
             .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
@@ -6777,18 +6945,20 @@ mod tests {
         core.tab_areas.insert(5, (40, 8));
         let before = core.session.squad(1).unwrap().tabs[0].root.clone();
 
-        let err = core
+        let (_sid, tid, fell_back) = core
             .place_spawned_pane(Some(1), "/a", 3, Some(Dir::Right))
-            .unwrap_err();
-        assert!(!err.is_empty(), "the refusal names a reason");
+            .unwrap();
+        assert!(fell_back, "the split refusal signals a fallback");
         assert_eq!(
             core.session.squad(1).unwrap().tabs[0].root,
             before,
-            "a refused split leaves the tree untouched"
+            "the crowded tab is untouched"
         );
-        assert!(
-            !core.panes.contains_key(&3),
-            "the pre-spawned pane is reaped"
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(squad.tabs.len(), 2, "the pane landed as a new tab");
+        assert_eq!(
+            squad.tabs.iter().find(|t| t.id == tid).unwrap().root,
+            Node::Leaf(3)
         );
     }
 
@@ -7471,6 +7641,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadName("ghost".into()),
                     split: None,
+                    here: false,
                 },
             },
         );
@@ -7486,6 +7657,262 @@ mod tests {
             }
         }
         assert!(saw, "the refusal names the missing squad");
+    }
+
+    // -- x-9f75 open-here (PanePlacement.here) ---------------------------
+
+    /// Collect every notice text still queued on `rx`.
+    fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Notice { text } = msg {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn open_here_swaps_focused_viewer_and_detaches_displaced() {
+        // AC1-HP: the focused viewer of session A is repointed at B - the tab's tree slot now hosts B's
+        // viewer, focus is the new pane, A's viewer is reaped (A resurfaces watch-only), and B is mapped.
+        set_attach_program(&["/bin/cat"]); // stand in for `claude attach`
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        // A occupies the focused pane; B is a watch-only row to open here.
+        core.attached.insert("deadbee1".into(), focus);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        let tab = core.viewed_tab(view).unwrap();
+        assert_eq!(tab.root, Node::Leaf(new_pid), "slot repointed at B");
+        assert_eq!(tab.focus, new_pid, "focus follows the swap");
+        assert!(!core.panes.contains_key(&focus), "A's viewer pane reaped");
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
+        assert!(
+            !core.attached.contains_key("deadbee1"),
+            "A's mapping swept - it resurfaces watch-only"
+        );
+        assert!(
+            drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("opened here")),
+            "notice names the displaced session"
+        );
+        core.reap_pane(new_pid); // don't leak the stand-in child
+    }
+
+    #[test]
+    fn open_here_refuses_non_viewer_focus_before_spawn() {
+        // AC1-ERR: the focused pane is a direct/shell pane (not in `attached`), so open-here refuses
+        // fail-closed with no spawn - killing its PTY child would kill real work.
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+        assert!(!core.attached.contains_key("deadbee2"), "nothing mapped");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("not a detachable viewer")));
+    }
+
+    #[test]
+    fn open_here_refuses_conflicting_placement_before_spawn() {
+        // AC2-ERR: `here` with a split or a non-CurrentRoute target is a
+        // contradiction - refused with no spawn.
+        for placement in [
+            PanePlacement {
+                here: true,
+                split: Some(Dir::Right),
+                ..Default::default()
+            },
+            PanePlacement {
+                here: true,
+                target: PaneTarget::SquadName("review".into()),
+                ..Default::default()
+            },
+        ] {
+            let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+            core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+            let panes_before = core.panes.len();
+            core.command(
+                client_id,
+                Command::AttachAgent {
+                    id: "deadbee2".into(),
+                    placement,
+                },
+            );
+            assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+            assert!(drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("open-here takes no split or target")));
+        }
+    }
+
+    #[test]
+    fn open_here_spawn_failure_leaves_layout_untouched() {
+        // AC3-ERR: the attach spawn fails - no pane is displaced, `attached` is
+        // unchanged, and the sender gets `attach failed`.
+        set_attach_program(&["/nonexistent/definitely-not-a-real-binary-xyz"]);
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        core.attached.insert("deadbee1".into(), focus);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let root_before = core.viewed_tab(view).unwrap().root.clone();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(
+            core.viewed_tab(view).unwrap().root,
+            root_before,
+            "nothing displaced on spawn failure"
+        );
+        assert!(core.panes.contains_key(&focus), "A's viewer still live");
+        assert_eq!(
+            core.attached.get("deadbee1"),
+            Some(&focus),
+            "A's mapping untouched"
+        );
+        assert!(!core.attached.contains_key("deadbee2"), "B never mapped");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("attach failed")));
+    }
+
+    #[test]
+    fn open_here_reconcile_focuses_existing_no_displacement() {
+        // AC1-EDGE: B already has a live pane. Reconcile focuses it (no spawn,
+        // no displacement of the current focus) - reconcile beats open-here.
+        let (mut core, client_id, p1, p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        // The focused pane is A's viewer; B is already paned at the OTHER pane.
+        let other = if focus == p1 { p2 } else { p1 };
+        core.attached.insert("deadbee1".into(), focus);
+        core.attached.insert("deadbee2".into(), other);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(core.panes.len(), panes_before, "reconcile spawns nothing");
+        assert!(core.panes.contains_key(&focus), "A's viewer not displaced");
+        assert_eq!(
+            core.attached.get("deadbee2"),
+            Some(&other),
+            "B still at its pane"
+        );
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("already attached")));
+    }
+
+    #[test]
+    fn open_here_double_click_focuses_no_second_displacement() {
+        // AC1-FR: open-here on B twice quickly - the first swaps, the second hits reconcile (B now paned)
+        // and focuses it. Exactly one viewer of B, no second displacement.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        core.attached.insert("deadbee1".into(), focus);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+        let panes_after_first = core.panes.len();
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(
+            core.panes.len(),
+            panes_after_first,
+            "the second open-here mints no pane"
+        );
+        assert_eq!(
+            core.attached.values().filter(|&&p| p == new_pid).count(),
+            1,
+            "exactly one viewer of B"
+        );
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid));
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn open_here_guard_reads_current_focus_not_client_identity() {
+        // AC2-FR: the displacement guard evaluates whatever pane is focused NOW (re-resolved server-side), so
+        // if focus moved to a non-viewer (e.g. the original viewer exited under the click) open-here refuses
+        // rather than blindly displacing an unintended pane. Here the focus is a non-viewer, a viewer elsewhere.
+        let (mut core, client_id, p1, p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        // A viewer exists, but on the OTHER (unfocused) pane; focus is a plain
+        // pane not in `attached`.
+        let other = if focus == p1 { p2 } else { p1 };
+        core.attached.insert("deadbee1".into(), other);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+        assert!(
+            core.panes.contains_key(&other),
+            "the elsewhere viewer is never touched"
+        );
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("not a detachable viewer")));
+    }
+
+    #[test]
+    fn attach_split_fallback_lands_new_tab_with_notice() {
+        // AC3-FR (x-9f75): a same-workspace row click sends AttachAgent with a Right split; at min-size the
+        // split is refused and the pane lands as a NEW TAB with a `tab full` notice - never a reap+dead-end.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        // Force a horizontal-split refusal on the split target tab: the viewing client's dims drive its area
+        // (tab_area prefers the client clamp), so shrink them below a two-pane horizontal minimum.
+        for c in core.clients.iter_mut().filter(|c| c.id == client_id) {
+            c.dims = (24, 12);
+        }
+        // Align the split target (squad.active_tab) with the tab the client
+        // views, so the shrunk-client clamp governs that tab's area.
+        let sq = core.session.squad_mut(view.0).unwrap();
+        sq.active_tab = sq.tabs.iter().position(|t| t.id == view.1).unwrap();
+        core.agents = vec![bg_row("sib", "/tmp/seen", Some("deadbee2"))];
+        let squad_tabs_before = core.session.squad(view.0).unwrap().tabs.len();
+        let new_pid = core.next_pane_id;
+
+        core.command(
+            client_id,
+            Command::AttachAgent {
+                id: "deadbee2".into(),
+                placement: PanePlacement {
+                    target: PaneTarget::CurrentRoute,
+                    split: Some(Dir::Right),
+                    here: false,
+                },
+            },
+        );
+
+        assert_eq!(
+            core.session.squad(view.0).unwrap().tabs.len(),
+            squad_tabs_before + 1,
+            "the pane landed as a new tab"
+        );
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("tab full - opened as tab")));
+        core.reap_pane(new_pid);
     }
 
     #[test]
@@ -8424,24 +8851,41 @@ mod tests {
         let landed = core
             .place_spawned_pane(Some(7), "/repo/child", 2, Some(Dir::Left))
             .unwrap();
-        assert_eq!(landed, (7, 11));
+        assert_eq!(landed, (7, 11, false));
         let tab = &core.session.squad(7).unwrap().tabs[0];
         assert_eq!(tree::leaves(&tab.root), vec![2, 1]);
         assert_eq!(tab.focus, 2);
     }
 
     #[test]
-    fn pane_placement_refusal_preserves_tree_and_cleans_spawn_state() {
+    fn pane_placement_split_refusal_falls_back_to_new_tab() {
+        // AC3-FR (x-9f75): a split refused at min-size no longer reaps and dead-ends - the pane lands as a
+        // NEW TAB in the same squad, the original tab is untouched, and the caller is told to notice.
         let mut core = placement_core();
         core.tab_areas.insert(11, (24, 16));
         core.claim_eligible.insert(2);
         let before = core.session.squad(7).unwrap().tabs[0].clone();
-        let error = core
+        let (sid, tid, fell_back) = core
             .place_spawned_pane(Some(7), "/repo/child", 2, Some(Dir::Right))
-            .unwrap_err();
-        assert!(error.contains("smaller"), "{error}");
-        assert_eq!(core.session.squad(7).unwrap().tabs[0], before);
-        assert!(!core.claim_eligible.contains(&2));
+            .unwrap();
+        assert!(
+            fell_back,
+            "the caller must know to emit the tab-full notice"
+        );
+        assert_eq!(sid, 7);
+        let squad = core.session.squad(7).unwrap();
+        assert_eq!(squad.tabs.len(), 2, "a new tab was added");
+        assert_eq!(squad.tabs[0], before, "the crowded tab is untouched");
+        let landed = squad.tabs.iter().find(|t| t.id == tid).unwrap();
+        assert_eq!(
+            landed.root,
+            Node::Leaf(2),
+            "pane landed as the new tab's leaf"
+        );
+        assert!(
+            core.claim_eligible.contains(&2),
+            "the pane is not reaped, so its claim eligibility survives"
+        );
     }
 
     #[test]
@@ -8479,6 +8923,7 @@ mod tests {
                 PanePlacement {
                     target: PaneTarget::SquadName("review".into()),
                     split: None,
+                    here: false,
                 },
             )
             .unwrap();
@@ -8496,6 +8941,124 @@ mod tests {
         assert_eq!(sid, 7);
 
         core.reap_pane(pid);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_pane_create_if_absent_mints_persisted_named_squad() {
+        // AC2-HP (x-9f75): a `pane run --squad <name>` naming no existing squad mints a persisted named squad
+        // (origins = the spawn's repo root) and lands the pane as its first tab. A second run with the same
+        // name joins it - no duplicate mint.
+        let _s = StoreScratch::new("run-create-if-absent");
+        let mut core = empty_core();
+        let run = |core: &mut Core| {
+            core.run_pane(
+                "/repo/proj".into(),
+                "/repo/proj".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadName("readyrule".into()),
+                    split: None,
+                    here: false,
+                },
+            )
+            .unwrap()
+        };
+        let pid = run(&mut core);
+        let (sid, _) = core.session.find_pane(pid).unwrap();
+        let sq = core.session.squad(sid).unwrap();
+        assert_eq!(sq.name.as_deref(), Some("readyrule"));
+        assert_eq!(sq.origins, vec!["/repo/proj".to_string()]);
+        assert_eq!(tree::leaves(&sq.tabs[0].root), vec![pid]);
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .any(|s| s.name == "readyrule"),
+            "the named squad is persisted (write-through)"
+        );
+
+        let pid2 = run(&mut core);
+        let (sid2, _) = core.session.find_pane(pid2).unwrap();
+        assert_eq!(sid2, sid, "the second run joins the existing named squad");
+        assert_eq!(
+            core.session
+                .squads
+                .iter()
+                .filter(|s| s.name.as_deref() == Some("readyrule"))
+                .count(),
+            1,
+            "no duplicate squad minted"
+        );
+
+        core.reap_pane(pid);
+        core.reap_pane(pid2);
+    }
+
+    #[test]
+    fn run_pane_create_if_absent_rejects_blank_name_before_spawn() {
+        // A blank/whitespace SquadName is still refused (never a minted squad),
+        // and no pane is spawned - fail-closed, mirroring resolve_placement.
+        let _s = StoreScratch::new("run-create-blank");
+        let mut core = empty_core();
+        let before = core.panes.len();
+        let err = core
+            .run_pane(
+                "/repo/proj".into(),
+                "/repo/proj".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadName("   ".into()),
+                    split: None,
+                    here: false,
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("blank"), "{err}");
+        assert_eq!(core.panes.len(), before, "no pane spawned on a blank name");
+        assert!(core.session.squads.is_empty(), "no squad minted");
+    }
+
+    #[test]
+    fn attach_new_tab_anchors_pane_in_row_cwd() {
+        // US5 contract (x-9f75): attaching a watch-only row spawns the pane in the ROW's own cwd, not the
+        // viewer's squad cwd. Asserting the existing behavior so it becomes contract, not accident (the
+        // interactive cwd chooser is a deferred follow-up; these defaults are the floor).
+        let root = std::env::temp_dir().join(format!("fno-row-cwd-{}", std::process::id()));
+        let row_cwd = root.join("agent-home");
+        std::fs::create_dir_all(&row_cwd).unwrap();
+        let marker = row_cwd.join("cwd.txt");
+        // The attach spawn writes its pwd then idles, standing in for the real
+        // `claude attach <id>` (the id rides as $0 for `sh -c`, harmless).
+        set_attach_program(&["/bin/sh", "-c", "pwd > cwd.txt; sleep 30"]);
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![bg_row(
+            "home-agent",
+            &row_cwd.to_string_lossy(),
+            Some("deadbee2"),
+        )];
+
+        core.command(client_id, Command::attach_agent("deadbee2"));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let reported = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(reported.trim()).unwrap(),
+            std::fs::canonicalize(&row_cwd).unwrap(),
+            "the attach pane is anchored in the row's own cwd"
+        );
+        if let Some(&pid) = core.attached.get("deadbee2") {
+            core.reap_pane(pid);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

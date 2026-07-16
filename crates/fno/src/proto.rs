@@ -162,7 +162,13 @@ use crate::tree::{Dir, Rect, TabId};
 /// row's lifecycle through `claude stop|rm <attach_id>` keyed by stable attach
 /// id, gated by a durable generation-checked compare-and-set in `squads.json`
 /// (`external_lifecycle` collection).
-pub const PROTO_VERSION: u32 = 30;
+///
+/// v31 (x-9f75): `PanePlacement.here` - open-here repoints the sender's focused
+/// (attach-viewer) pane at the target session instead of minting a tab or
+/// split. `#[serde(default)]` keeps a v30 placement (no `here`) parseable as
+/// `here: false` (today's semantics). Proto number coordinated with x-cd67 at
+/// land time (last to land rebases to the next free number).
+pub const PROTO_VERSION: u32 = 31;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -364,6 +370,11 @@ pub struct PanePlacement {
     pub target: PaneTarget,
     #[serde(default)]
     pub split: Option<Dir>,
+    /// (v31, x-9f75) Open-here: repoint the sender's focused pane at the target session rather than minting a
+    /// tab/split. Valid only with the default `target` (CurrentRoute) and no `split`; the server refuses a
+    /// conflicting combination. `#[serde(default)]` keeps v30 placements wire-tolerant.
+    #[serde(default)]
+    pub here: bool,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -809,6 +820,18 @@ impl Command {
         Self::AttachAgent {
             id: id.into(),
             placement: PanePlacement::default(),
+        }
+    }
+
+    /// (x-9f75) Open-here: attach `id` by repointing the sender's focused
+    /// viewer pane, rather than minting a tab/split.
+    pub fn attach_agent_here(id: impl Into<String>) -> Self {
+        Self::AttachAgent {
+            id: id.into(),
+            placement: PanePlacement {
+                here: true,
+                ..PanePlacement::default()
+            },
         }
     }
 }
@@ -1684,6 +1707,19 @@ mod tests {
     }
 
     #[test]
+    fn pane_placement_from_pre_here_json_defaults_here_false() {
+        // AC3-EDGE (x-9f75): a v30 PanePlacement omits `here`; a v31 reader must decode it as `false`
+        // (today's tab/split semantics), never fail - the same skew contract as every prior serde-default bump.
+        let v30 = r#"{"target":"CurrentRoute","split":null}"#;
+        let p: PanePlacement = serde_json::from_str(v30).unwrap();
+        assert!(!p.here, "missing here key => false");
+        // And a bare `{}` (all defaults) also decodes clean.
+        let empty: PanePlacement = serde_json::from_str("{}").unwrap();
+        assert!(!empty.here && empty.split.is_none());
+        assert!(matches!(empty.target, PaneTarget::CurrentRoute));
+    }
+
+    #[test]
     fn proto_v3_server_msgs_roundtrip() {
         // Every new/changed v3 server message survives the codec (mirrors the
         // Phase 1/2 roundtrip discipline): Layout carries `area`, TabMeta a
@@ -1894,6 +1930,7 @@ mod tests {
         let placement = PanePlacement {
             target: PaneTarget::SquadId(42),
             split: Some(Dir::Up),
+            here: false,
         };
         for msg in [
             ClientMsg::Control {

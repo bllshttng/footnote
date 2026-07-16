@@ -777,6 +777,8 @@ impl AgentIdent {
 /// name) at execution time - a stale target becomes a Notice, not a wrong action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
+    /// Attach a bg (paneless) agent by repointing the focused pane (x-9f75).
+    OpenHere,
     /// Attach a bg (paneless) agent as a new tab.
     NewTab,
     /// Attach a bg agent as a directional split of the current tab.
@@ -825,6 +827,12 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry("■", "Stop"), &[MenuAction::Stop]);
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
+        // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
+        // server's fail-closed notice is the feedback path when the focus isn't a detachable viewer.
+        add(
+            PopupRow::FullWidth("⊙ Open Here".into()),
+            &[MenuAction::OpenHere],
+        );
         add(
             PopupRow::FullWidth("▭ New Tab".into()),
             &[MenuAction::NewTab],
@@ -1653,7 +1661,7 @@ impl View {
             // attaches; a non-attachable row says so. Resolved by [`agent_hit`],
             // shared with the navigator's goto so a click and a keyboard jump
             // never diverge on what an agent's action is (x-653d).
-            DisplayRow::Agent(a) => Some(agent_hit(a)),
+            DisplayRow::Agent(a) => Some(agent_hit(a, self.layout.active_squad)),
             // A work-queue card dispatches/focuses via [`View::card_hit`], the
             // same resolver the navigator uses (x-653d).
             DisplayRow::Card(c) => Some(self.card_hit(c)),
@@ -1772,7 +1780,7 @@ impl View {
                     // pane's tab on focus; the ordinal is display-only).
                     goto_squad: cross(s.id),
                     goto_tab: None,
-                    hit: agent_hit(a),
+                    hit: agent_hit(a, self.layout.active_squad),
                 });
             }
         }
@@ -1785,7 +1793,7 @@ impl View {
                 state: nav_agent_state(a),
                 goto_squad: None,
                 goto_tab: None,
-                hit: agent_hit(a),
+                hit: agent_hit(a, self.layout.active_squad),
             });
         }
         // Work-queue cards: goto opens the dispatch confirm / focuses the worker
@@ -3081,10 +3089,23 @@ enum ChromeHit {
 /// ([`View::row_action`]) and the navigator's goto ([`View::nav_rows`]) so the
 /// two inputs resolve the same entity identically (x-653d). Pure - the agent's
 /// own fields decide, so no `&self` needed.
-fn agent_hit(a: &AgentRow) -> ChromeHit {
+fn agent_hit(a: &AgentRow, active_squad: u64) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
         None => match &a.attach_id {
+            // Watch-only attachable row (x-9f75 row-kind default): a same-workspace sibling (its squad is the
+            // active one) splits the current tab so siblings sit side by side; a cross-workspace / orphan row
+            // keeps the new-tab-in-owner default. Peek stays an explicit gesture, never a click default.
+            Some(id) if a.squad == Some(active_squad) => {
+                ChromeHit::Cmds(vec![Command::AttachAgent {
+                    id: id.clone(),
+                    placement: PanePlacement {
+                        target: PaneTarget::CurrentRoute,
+                        split: Some(Dir::Right),
+                        here: false,
+                    },
+                }])
+            }
             Some(id) => ChromeHit::Cmds(vec![Command::attach_agent(id)]),
             None => ChromeHit::Notice("agent has no pane here".into()),
         },
@@ -4928,6 +4949,15 @@ async fn execute_row_menu_action(
         }
     };
     match action {
+        MenuAction::OpenHere => {
+            let Some(id) = a.attach_id.clone() else {
+                view.set_notice("agent is no longer attachable".into());
+                return Ok(());
+            };
+            write_msg(sock_w, &ClientMsg::Command(Command::attach_agent_here(id)))
+                .await
+                .map_err(|e| format!("attach send failed: {e}"))?;
+        }
         MenuAction::NewTab | MenuAction::Split(_) => {
             let Some(id) = a.attach_id.clone() else {
                 view.set_notice("agent is no longer attachable".into());
@@ -4944,6 +4974,7 @@ async fn execute_row_menu_action(
                     placement: PanePlacement {
                         target: PaneTarget::CurrentRoute,
                         split,
+                        here: false,
                     },
                 }),
             )
@@ -5493,7 +5524,7 @@ async fn peek_keys(
                 // (x-260a locked 3); a real hit closes peek AND the selector
                 // underneath. Right-arrow is already folded to `l`.
                 let hit = match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => Some(agent_hit(a)),
+                    Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
                     _ => None,
                 };
                 match hit {
@@ -6000,6 +6031,7 @@ async fn attach_place_keys(
                 placement: PanePlacement {
                     target: PaneTarget::SquadId(picker.target),
                     split,
+                    here: false,
                 },
             }),
         )
@@ -6921,23 +6953,59 @@ mod tests {
             tombstone: false,
             tab: None,
         };
+        // A pane-hosted row focuses regardless of the active squad.
         assert!(
-            matches!(agent_hit(&hosted), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
+            matches!(agent_hit(&hosted, 2), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
         );
+        // A watch-only row whose squad is NOT the active one keeps the new-tab
+        // default (cross-workspace / owner-routed).
         let bg = AgentRow {
             pane_id: None,
             attach_id: Some("job1".into()),
             ..hosted.clone()
         };
         assert!(
-            matches!(agent_hit(&bg), ChromeHit::Cmds(c) if c == vec![Command::attach_agent("job1")])
+            matches!(agent_hit(&bg, 2), ChromeHit::Cmds(c) if c == vec![Command::attach_agent("job1")])
         );
         let orphan = AgentRow {
             pane_id: None,
             attach_id: None,
             ..hosted
         };
-        assert!(matches!(agent_hit(&orphan), ChromeHit::Notice(_)));
+        assert!(matches!(agent_hit(&orphan, 2), ChromeHit::Notice(_)));
+    }
+
+    #[test]
+    fn agent_hit_same_workspace_watch_only_splits_current_tab() {
+        // AC2-UI (x-9f75): a watch-only attachable row whose squad IS the active squad attaches as a Right
+        // split of the current tab (siblings sit side by side), not a new tab.
+        let row = AgentRow {
+            squad: Some(1),
+            name: "sib".into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: Some("job1".into()),
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            tab: None,
+        };
+        let ChromeHit::Cmds(c) = agent_hit(&row, 1) else {
+            panic!("expected Cmds for a same-workspace watch-only row");
+        };
+        match c.as_slice() {
+            [Command::AttachAgent { id, placement }] => {
+                assert_eq!(id, "job1");
+                assert_eq!(placement.split, Some(Dir::Right));
+                assert!(!placement.here);
+                assert!(matches!(placement.target, PaneTarget::CurrentRoute));
+            }
+            other => panic!("expected one AttachAgent, got {other:?}"),
+        }
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
@@ -8042,8 +8110,25 @@ mod tests {
         assert!(bg.actions.contains(&super::MenuAction::Split(Dir::Up)));
         assert!(bg.actions.contains(&super::MenuAction::Stop));
         assert!(!bg.actions.contains(&super::MenuAction::Focus));
+        // AC1-UI (x-9f75): Open Here is present and leads above New Tab.
+        let open_here = bg
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::OpenHere);
+        let new_tab = bg
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::NewTab);
+        assert!(
+            matches!((open_here, new_tab), (Some(o), Some(n)) if o < n),
+            "Open Here sits above New Tab"
+        );
         let pane = super::build_row_menu(&mk("p", Some(9), None, false), Anchor::Center);
         assert!(pane.actions.contains(&super::MenuAction::Focus));
+        assert!(
+            !pane.actions.contains(&super::MenuAction::OpenHere),
+            "a placed pane row offers no open-here"
+        );
         assert!(
             !pane
                 .actions
@@ -8080,6 +8165,40 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
                 assert_eq!(id, "c19cd2c3");
                 assert_eq!(placement.split, Some(Dir::Right));
+                assert!(matches!(
+                    placement.target,
+                    crate::proto::PaneTarget::CurrentRoute
+                ));
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_open_here_sends_here_placement() {
+        // AC1-UI (x-9f75): "Open Here" on a bg row sends AttachAgent with here:true and the default
+        // (CurrentRoute, no split) placement; the menu closes.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::OpenHere)
+            .unwrap();
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "executing closes the menu");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert!(placement.here, "open-here sets here:true");
+                assert!(placement.split.is_none());
                 assert!(matches!(
                     placement.target,
                     crate::proto::PaneTarget::CurrentRoute
@@ -9705,6 +9824,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadId(2),
                     split: Some(Dir::Left),
+                    here: false,
                 },
             })
         );
@@ -9739,6 +9859,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadId(1),
                     split: None,
+                    here: false,
                 },
             })
         );
