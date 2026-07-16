@@ -36,6 +36,11 @@ bash scripts/setup/archive-worktree.sh <name|path>
 
 It enforces strict pre-removal checks (clean working tree, no unpushed commits, no live target session), prompts before SIGTERM'ing any process rooted in the worktree path, runs `git worktree remove` + `git worktree prune`, and preserves the branch. Flags: `--force` (skip checks), `--yes` (skip process-kill prompt), `--delete-branch` (drop the branch with `git branch -D` after removal). The plain alternative is `git worktree remove <path>`; never use `rm -rf` (leaves dangling refs in `.git/worktrees/`).
 
+**"Prune after merge" is automated.**
+The post-merge ritual (`/fno:pr merged`, Step 4) archives the merged PR's own worktree via `archive-worktree.sh --yes` once the merge is proven.
+When the ritual runs *inside* that worktree it cannot remove its own cwd, so it defers to the standing sweep `fno worktree cleanup --merged --apply`, which reaps every already-landed worktree from canonical.
+You rarely prune by hand.
+
 ## Maintainer environment example: conductor workspaces
 
 This is one environment's concrete choice, NOT a default an OSS user inherits - set nothing and you get the harness-native `.claude/worktrees/` above. The maintainer sets `config.paths.worktrees_base: ~/conductor/workspaces` in their **global** `~/.fno/config.toml`, so every footnote worktree lands at `~/conductor/workspaces/<repo>/<name>` (e.g. `~/conductor/workspaces/footnote/<name>`). Why keep it there:
