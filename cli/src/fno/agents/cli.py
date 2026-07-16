@@ -33,6 +33,16 @@ agents_app = typer.Typer(
     cls=make_agents_group_cls(),
 )
 
+# `mcp` re-homed under `fno agents` (x-71b6): the MCP sidecar client is
+# agent-mesh machinery (mail live-inject), so it belongs beside the other
+# agents verbs, not at the top level. Registered hidden - it is plumbing, not a
+# human menu verb. The top-level `fno mcp` stays as a hidden alias for one
+# release (its sole cross-language caller, the Rust daemon's deliver_envelope,
+# keeps shelling `fno mcp send` until the alias is retired in a later pass).
+from fno.mcp.cli import mcp_app as _mcp_app  # noqa: E402
+
+agents_app.add_typer(_mcp_app, name="mcp", hidden=True)
+
 
 class AgentStatusFilter(str, enum.Enum):
     """Enum of registry status values accepted by ``list --status``.
