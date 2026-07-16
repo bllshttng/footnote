@@ -819,7 +819,7 @@ Ask: "Ready to create the implementation plan with `/blueprint`?"
 - **One round at a time** - batch related questions into a single round; never overwhelm, but never drip one question at a time either
 - **YAGNI ruthlessly** - Remove unnecessary features
 - **Test-first thinking** - Always ask "how would we verify this?"
-- **an AC a bug can pass is not an AC** - write every Then-clause so a wrong-but-passing implementation would fail it; pin an observable output and bound, never just "it succeeds"
+- **An AC a bug can pass is not an AC** - write every Then-clause so a wrong-but-passing implementation would fail it; pin an observable output and bound, never just "it succeeds"
 - **Every action needs feedback** - If a user does something and nothing visible happens, that's a design bug
 - **Multi-perspective challenge** - Stress-test from pessimist, impatient user, and silent failure angles
 - **State machines over checklists** - Enumerate states for interactive elements, don't just list happy paths
