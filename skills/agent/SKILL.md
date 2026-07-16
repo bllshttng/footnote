@@ -1,7 +1,7 @@
 ---
 name: agent
-description: "Natural-language remote control for the `fno agents` worker mesh. Describe the outcome you want - spawn or hand off work, open an interactive discussion, message or inspect workers, drive a session, or stop it - and this skill resolves and runs the provider- and substrate-specific CLI command. It normalizes arguments, applies confirmation policy, and reports genuine receipts. Use when: 'spawn a worker for ab-XXXX', 'hand off this doc to codex', 'discuss the retry design with gemini', 'show my running agents', 'drive the reviewer', 'stop the billing worker'."
-argument-hint: "<verb> [args]  |  [ask|handoff|discuss] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]"
+description: "Natural-language remote control for the `fno agents` worker mesh. Describe the outcome you want - spawn or hand off work, message or inspect workers, drive a session, or stop it - and this skill resolves and runs the provider- and substrate-specific CLI command. It normalizes arguments, applies confirmation policy, and reports genuine receipts. Use when: 'spawn a worker for ab-XXXX', 'seed a session with this prompt', 'hand off this doc to codex', 'show my running agents', 'drive the reviewer', 'stop the billing worker'."
+argument-hint: "<verb> [args]  |  [handoff] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]"
 metadata:
   internal: false
 requires:
@@ -34,18 +34,23 @@ dashless parsing also keep it reliable from remote or runner-less controls.
 ## Verb router
 
 The first whitespace token of the argument is the **verb**. An unrecognized
-leading token means the whole argument is a `spawn` task (this preserves the
-bare `/agents <task>` ergonomics the former dispatch front door had) - but see
-**bare-input announce** in the spawn flow: when bare input is NOT feature-shaped
-(a path, a question, a continue/handoff phrasing), the skill surfaces the
-`/target` build wrap and offers `handoff`/`discuss` before launching. The
-focused core:
+leading token means the whole argument is a `spawn` payload (this preserves the
+bare `/agents <task>` ergonomics the former dispatch front door had). `spawn`
+means start a session with what you pass, nothing more (x-cbb0): an explicit
+`/skill` command is dispatched per harness, a resolved backlog node id builds
+via `/target`, and any other free text is sent **verbatim as the session seed** -
+no `/target` wrap, no build inference. The focused core:
+
+> **Retired verbs (x-cbb0):** `ask`, `bare`, and `discuss` are gone. If the
+> leading token is one of them, do NOT silently seed `"ask ..."`/`"discuss ..."`;
+> surface the redirect - a one-shot Q&A is `spawn "<question>" headless`, a
+> conversational session is just `spawn "<seed>"` (the default) - then run the
+> intended form. (The `--ask`/`--discuss` normalize flags are hard errors.)
 
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
 | `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-2c27): default `pane` (owned-PTY drivable); trailing `bg` -> detached `claude --bg` thread; trailing `headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
 | `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
-| `discuss [seed]` | normalize `--discuss` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini interactive pane, verbatim seed, NO `/target`) | free (provider subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno mail send` (the addressed jsonl bus, sender-excluded) | free |
 | `watch <name>` | thin pass-through | `fno agents watch` | free |
 | `list` | thin pass-through | `fno agents list` | free |
@@ -65,27 +70,27 @@ Route on the verb, then run the matching section below.
 
 ---
 
-## `spawn` (default verb) - launch a background worker
+## `spawn` (default verb) - launch a worker or seed a session
 
-Build dispatch for all three providers. Strip a leading `spawn` verb if present;
-otherwise the whole argument is the spawn task.
+Start a session with what you pass (x-cbb0): a `/skill` passthrough, a node-id
+build, or a verbatim free-text seed. Strip a leading `spawn` verb if present;
+otherwise the whole argument is the spawn payload.
 
 ### Providers (all three are first-class)
 
-| Provider | Build dispatch | Worker | Receipt |
+| Provider | Dispatch | Worker | Receipt |
 |---|---|---|---|
 | `claude` | `fno agents spawn` (default `pane` owned-PTY; `bg` -> `claude --bg`; `headless` -> `claude -p`) | owned pane, or backgrounded `/target` thread (`bg`) | compact JSON `.short_id` (reply on `headless`) |
 | `codex` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `codex --exec` | daemon-managed PTY worker | pretty JSON `.short_id` |
 | `gemini` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `agy -p` | daemon-managed PTY worker | pretty JSON `.short_id` |
 
-All three create via `spawn` (Group 1 ab-8b3e4fe0: `ask` never creates - it
-messages EXISTING peers only). The substrate axis (x-2c27) selects the host:
+All three create via `spawn`. The substrate axis (x-2c27) selects the host:
 `pane` (default, owned-PTY drivable), `bg` (claude-only detached `claude --bg`
 thread), `headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). `bg` on a
-non-claude provider is a hard error pointing to `headless`. Ask-mode
-(one-shot Q&A) runs `spawn --once` for codex/gemini. A codex/gemini exec worker
-is a **single autonomous pass**, not the claude "refuse to stop until shipped"
-loop - do not imply loop-grade completion guarantees for them.
+non-claude provider is a hard error pointing to `headless`. A one-shot Q&A is the
+`headless` substrate (x-cbb0: it subsumes the retired `ask` verb). A codex/gemini
+exec worker is a **single autonomous pass**, not the claude "refuse to stop until
+shipped" loop - do not imply loop-grade completion guarantees for them.
 
 Every `spawn` captures (best-effort, non-blocking) the worker's full resume UUID
 into the registry, distinct from the 8-hex short-id, so a worker is a complete,
@@ -99,18 +104,21 @@ never corrupt it. The user types barewords or natural language; you map them to
 the structured fields. The canonical form:
 
 ```
-[ask] <task> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]
+<payload> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]
 ```
 
 The angle brackets are placeholder notation, not literal syntax. Infer the
 fields from the user's unquoted text (a free-form phrasing maps the same way -
 see below):
 
-- **task** (required): a backlog node id (`ab-XXXXXXXX`), a free-form feature
-  description, or an explicit slash command (`/target ...`, `/pr check 42`).
-- **`ask`** (alias `bare`, optional, LEADING verb after `spawn`): ask-mode -
-  send the prompt verbatim, no `/target` wrap. Strip it before normalizing
-  (pass `--ask`). "just ask" / "one-shot" / "quick question" map here.
+- **payload** (required): a backlog node id (`ab-XXXXXXXX`, builds via `/target`),
+  an explicit slash command (`/target ...`, `/pr check 42`, dispatched per
+  harness), or any other free text - sent **verbatim as the session seed** (a
+  live pane), no `/target` wrap. (x-cbb0: `spawn "fix the login bug"` seeds a
+  session; it does NOT build. To build free text, write `spawn /target <text>`
+  or pass a node id.)
+- **one-shot Q&A**: append the `headless` substrate (x-cbb0: it replaced the
+  `ask`/`bare` verb) - `spawn "<question>" headless` returns a single reply.
 - **provider** (optional, trailing bareword): any non-claude harness in the
   supported set - today `codex`, `gemini`, `agy`, `opencode`, with more coming.
   `spawn ab-X codex` -> provider `codex`; `spawn ab-X opencode` -> `opencode`.
@@ -195,29 +203,28 @@ Dashless is the only form you advertise; never instruct a user to type a dash.
 
 #### 1. NORMALIZE (deterministic helper)
 
-Run the normalizer with the spawn task text exactly as given (pass it as ONE
+Run the normalizer with the spawn payload text exactly as given (pass it as ONE
 argument). You may pass trailing posture barewords inside `--input` and let the
 helper extract them, or pass the fields you inferred from natural language as the
 internal flags below - the helper resolves both to identical fields, so either
-path is safe. ALWAYS pass `--ask` for an `ask`/`bare` (leading) verb, `--handoff`
-for a `handoff` verb, or `--discuss` for a `discuss` verb, so the verbatim
-prompt/path/seed skips posture parsing.
+path is safe. ALWAYS pass `--handoff` for a `handoff` verb, so the verbatim doc
+path skips posture parsing.
 
 ```bash
-bash "${SKILL_DIR}/scripts/normalize.sh" --input "<raw task [posture barewords]>" \
-  [--provider <p>] [-n <n>|--name <n>] [--model <m>] [--effort <e>] [-i] [--yolo] [--ask] [--handoff] [--discuss] \
+bash "${SKILL_DIR}/scripts/normalize.sh" --input "<raw payload [posture barewords]>" \
+  [--provider <p>] [-n <n>|--name <n>] [--model <m>] [--effort <e>] [-i] [--yolo] [--handoff] \
   [-m|--allow-merge] [-y|--yes] [-P <project>|--project <project>] [-f|--force]
 ```
 
 It strips smart quotes, parses the trailing dashless posture run, canonicalizes a
 token-initial em/en-dash to `--`,
-derives the agent name (`<verb>-<node-id>-<slug>` for a node, `<verb>-<slug>` for a feature),
+derives the agent name (`<verb>-<node-id>-<slug>` for a node, `<verb>-<slug>` for free text),
 resolves the provider (explicit -> `config.providers` via the shipped
 `resolve_dispatch_target` -> `claude`), detects the node id, resolves a
 `-P`/`--project` target to its work-map `resolved_cwd`, picks the payload
 mode, and assembles the provider-aware `message`. Read its `key=value` output
 line by line. Never `eval` it. Captured fields: `node`, `node_query`,
-`spawn_next`, `next_scope`, `shape_hint`, `name`, `provider`, `mode`, `yolo`,
+`spawn_next`, `next_scope`, `name`, `provider`, `mode`, `yolo`,
 `yes`, `allow_merge`, `project`, `resolved_cwd`, `payload_mode`, `message`.
 The model-adjacent fields are `model` and `effort`; omit either downstream when
 empty so provider defaults remain unchanged.
@@ -240,59 +247,37 @@ the real node.
 - If `status=error`, STOP. Report the `error=` line. Do NOT spawn.
 - Otherwise capture every field for RESOLVE/VALIDATE/CONFIRM/SPAWN.
 
-**Payload modes** (chosen deterministically by normalize):
+**Payload modes** (chosen deterministically by normalize; x-cbb0):
 
-- **build** (default): run the work, normalized per harness (x-a5e4). claude/agy
-  get `/target <text>` (+ `no-merge`); opencode gets `/fno:target <text>` (the
-  plugin palette + `run --command`); codex gets `$fno:target <text>` - all run the
-  real pipeline. gemini is deprecated (successor: agy) and refused, never a brief.
-- **ask** (`ask`/`bare` verb): a one-shot question. The prompt is sent verbatim.
+- **seed** (default for free text): sent VERBATIM as the session opening seed on
+  the default pane - no `/target` wrap, no `no-merge`, no build inference. This is
+  what `spawn "fix the login bug"` produces (it seeds a session; it does NOT
+  build). To build free text, pass an explicit `/target <text>` (passthrough) or a
+  node id.
+- **build** (a resolved node id): the ONE surviving implicit `/target`, config-
+  driven not shape-inferred - dispatch_verb resolution (node > config > builtin
+  `/target`). Normalized per harness (x-a5e4): claude/agy get `/target <id>` (+
+  `no-merge`); opencode `/fno:target <id>`; codex `$fno:target <id>` - all run the
+  real pipeline on the node. gemini is deprecated (successor: agy) and refused.
 - **handoff** (`--handoff`): a doc path becomes a continuation seed (read the doc,
   continue from where it left off, do NOT re-derive a plan) + a standing
   guardrail against autonomous outward/irreversible actions. Supports Claude,
   Codex, and Gemini; NO `/target`, NO `no-merge`. See the `handoff` section.
-- **discuss** (`--discuss`): a verbatim conversational seed -> a running,
-  provider-native interactive pane. Claude/Codex/Gemini, NO `/target`. See the
-  `discuss` section.
 - **passthrough** (leading `/`): the explicit command, normalized per harness for
   ANY footnote verb (x-a5e4) - `/verb` verbatim on claude/agy, `/fno:verb` on
   opencode, `$fno:verb` on codex (so `/agent spawn /blueprint -p codex` runs the
   real skill). gemini is deprecated and refused (route to claude/codex/opencode/agy).
 
-**`shape_hint`** (`path|question|continue|feature`): a deterministic read of what
-KIND of payload this is. Use it ONLY on the bare-input path (no explicit verb) -
-see **1a. ANNOUNCE** next. For an explicit `spawn`/`handoff`/`discuss`/`ask` verb,
-ignore it (the user already declared intent).
-
-#### 1a. ANNOUNCE (bare-input shape guard - attended only)
-
-When the raw input carried **no explicit leading verb** (it fell through to the
-default spawn task) AND `shape_hint != feature` AND the caller is **attended**,
-do not silently `/target`-wrap. Announce the wrap and offer the two alternatives,
-then act on the reply:
-
-```
-Treating this as a build (/target). This looks like a <shape_hint>, not a feature.
-Reply `handoff` to continue from it without re-deriving, or `discuss` to open a chat thread. Otherwise I proceed with the build.
-```
-
-- Reply `handoff` -> re-run NORMALIZE with `--handoff` and run the `handoff` flow.
-- Reply `discuss` -> re-run NORMALIZE with `--discuss` and run the `discuss` flow.
-- Any other reply, or no reply, or an **unattended/headless** caller -> proceed
-  with the normalized build (never block, never auto-reroute). REPORT still
-  echoes the exact `/target ... no-merge` command that ran.
-
-A genuine feature (`shape_hint=feature`) skips the announce entirely - no friction
-on the dominant path. The shape classifier is deterministic but coarse; a false
-positive costs one extra attended prompt and still defaults to build.
-
 #### 1b. RESOLVE (id-free entry modes -> a concrete ab-id) (ab-f82e8083)
 
-A backlog node id is an opaque `ab-{8hex}`. Four id-free ways to name the work
+A backlog node id is an opaque `ab-{8hex}`. Three id-free ways to name a NODE
 resolve to a concrete id here, in order. Resolve to ONE `ab-<id>`, then
 **re-run normalize** with `--input "<that ab-id>"` (carrying the same
-`--provider`/`--name`/posture flags) so `message`/`name`/`node` are rebuilt for
-the real node. Skip this whole step when `node` is already a concrete id.
+`--provider`/`--name`/posture flags) so `message`/`name`/`node` are rebuilt as a
+node build. Skip this whole step when `node` is already a concrete id. Free text
+that names no node is NOT resolved here (x-cbb0: it is a verbatim seed, never a
+fuzzy node search) - when `node`/`node_query`/`spawn_next` are all empty, take the
+`seed` payload straight to SPAWN.
 
 1. **`node` non-empty** (tier 1 exact id, or tier 3 a re-prefixed bare 8-hex) ->
    use it as-is.
@@ -301,23 +286,10 @@ the real node. Skip this whole step when `node` is already a concrete id.
    `null`/empty, report **"no ready node"** and launch nothing (AC3-ERR).
    Otherwise that id is the node.
 3. **`node_query` non-empty** (tier 2 slug candidate) -> `fno backlog get "$node_query" --field id`.
-   On exit 0 that is the node (exact slug -> ab-id). On a non-zero exit the slug
-   missed; fall through to describe-it below using `node_query` as the description.
-4. **describe-it (tier 4, free prose)** -> the only model-judged tier, and it
-   **ALWAYS confirms** regardless of `config.agents.confirm` posture (Locked
-   Decision 5: describe-it is carved out of the silent-launch lane). Run
-   `fno backlog find "<description>" -J` to get the candidate set, **rank by
-   meaning** over title+slug+details, then show the top match as
-   `slug (ab-id) - title` plus **2-3 alternatives**, and ask `[y/N]`:
-   - If the find errors (graph unreadable / lock) -> report the real error and
-     launch nothing (never fabricate a match).
-   - Zero candidates -> report **"no node matched '<description>'"**, launch
-     nothing (AC2-ERR).
-   - Two near-equal candidates -> present a **numbered list** and ask which (or
-     none); never auto-pick (AC2-EDGE).
-   - On **no** / none -> acknowledge **"launch cancelled"**, create no claim or
-     worker (AC2-FR).
-   - On **yes** -> that id is the node.
+   On exit 0 that is the node (exact slug -> ab-id): re-normalize with it for a
+   node build. On a non-zero exit the slug missed - do NOT fuzzy-search; the
+   token stays a verbatim `seed` (its `payload_mode`/`message` from normalize),
+   so proceed to SPAWN with the seed as-is.
 
 After resolving to an ab-id, re-normalize and continue. A resolution that names
 a node in another project will boot the worker in that node's `_resolved_cwd`
@@ -351,7 +323,7 @@ so even a delegated `next`/`all` is never a silent surprise.
   (`spawn.sh` re-checks atomically too: it treats a `live-claim` whose holder
   matches `--self` as a self-handoff and refuses any other.)
 
-A free-form / ask payload (`node` empty) skips the node checks.
+A free-text seed (`node` empty) skips the node checks.
 
 #### 3. CONFIRM (free lane: no confirm by default)
 
@@ -388,7 +360,6 @@ helper. The table it implements:
 | posture `always` (cautious opt-in) | confirm even the free lane |
 | `-y`/`--yes` passed | skip (accepted-and-ignored: the free lane already does not confirm) |
 | caveat present (codex/gemini **exec** / `yolo` / `merge`) | NOT a confirm - surfaces as a `warn` |
-| `ask` payload | never confirm (a one-shot question is not a billed build) |
 | unattended caller | skip |
 | config read fails / invalid | no confirm (auto) + one staleness warning line |
 
@@ -443,10 +414,10 @@ follows the work-map root:
 `~/conductor/workspaces/<repo>/<name>` on a fresh feature branch and launches the
 worker THERE - born isolated, location verdict `ok` from line one, no reliance on
 the worker self-creating a worktree. "Writes code" is keyed off `payload_mode`,
-not the message text: a `build` dispatch (claude `/target` wrap, opencode
-`/fno:target`, or codex `$fno:target`) and an explicit claude `/target`|`/do`|`/fix`
-passthrough all isolate; `ask`/`handoff`/`discuss` and a non-code claude slash
-command (`/think` writes a design doc) stay in repo root. An already-isolated
+not the message text: a node `build` dispatch (claude `/target <id>`, opencode
+`/fno:target <id>`, or codex `$fno:target <id>`) and an explicit claude
+`/target`|`/do`|`/fix` passthrough all isolate; a `seed`/`handoff` and a non-code
+claude slash command (`/think` writes a design doc) stay in repo root. An already-isolated
 worktree cwd is not re-isolated; any creation error fails safe to repo root. This
 is in `spawn.sh` (deterministic), so you do nothing here except relay the receipt
 - its `cwd="<worktree>"` field on the launched line surfaces the real launch dir.
@@ -483,13 +454,14 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
 - `result=launched ... mode=spawn ...` -> an autonomously seeded handoff worker
   launched through the provider's spawn lane. The default Rust substrate is a
   drivable pane; this is not a one-shot reply or a refuse-to-stop loop.
-- `result=launched ... mode=discuss ...` -> a seeded interactive discussion is
-  running in a provider-native pane. Give `fno agents grid <name>` / `drive
-  <name>` for live interaction and `fno mail send` for asynchronous follow-up.
+- `result=launched ... mode=seed ...` -> a verbatim free-text seed is running in
+  a provider-native pane (the opening turn was sent as-is). Give `fno agents grid
+  <name>` / `drive <name>` for live interaction and `fno mail send` for
+  asynchronous follow-up.
 - `result=launched ... mode=interactive ...` -> a drivable session **staged, NOT
   running yet**. Give `fno agents grid <name>` (or `fno agents drive <name>
   --mode interactive`). Note: no proactive push when it waits on input.
-- `result=replied ...` (a one-shot ask or explicit headless substrate) -> the one-shot returned its
+- `result=replied ...` (an explicit `headless` substrate one-shot) -> the one-shot returned its
   answer synchronously; the **reply follows the outcome line** and IS the
   deliverable. Relay it (preview ~15 lines; full reply in `fno agents logs <name>`).
 - `result=already-running ...` -> a worker already exists for this node/name; no
@@ -500,9 +472,8 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
 ### Receipt families (keyed by the verb spawn.sh ran)
 
 `spawn.sh` branches the receipt parse on the verb/mode it ran - never on
-sniffing output (Group 1 ab-8b3e4fe0 moved claude creation off `ask` onto
-`spawn`, so claude takes the JSON `.short_id` family below, not a bare 8-hex
-line):
+sniffing output (Group 1 ab-8b3e4fe0 put claude creation on `spawn`, so claude
+takes the JSON `.short_id` family below, not a bare 8-hex line):
 
 - **`spawn --once` / `--substrate headless`**: a **client-side one-shot**
   (`codex exec` / `gemini -p`). stdout is the model REPLY verbatim, not a
@@ -543,8 +514,8 @@ mostly-non-code continuation work that never produces a single green PR. So
 `/target`, no loop-grade "refuse to stop" guarantee) seeded to read the doc and
 continue from where it left off. The default substrate is the owned-PTY `pane`;
 the worker starts autonomously and can later be driven through the provider's
-supported pane tools. A handoff that is really a feature build still goes
-through `build`.
+supported pane tools. Work that is really a feature build belongs in a node id
+or an explicit `/target`, not `handoff`.
 
 It also injects a **standing guardrail**: the seed bars the worker from
 autonomously taking outward-facing or irreversible actions (emails, deploys,
@@ -587,37 +558,13 @@ outward actions.
 
 ---
 
-## `discuss [seed]` - open a provider-native interactive discussion
-
-`discuss` is a regular interactive Claude, Codex, or Gemini session seeded with
-the user's words verbatim. It launches on the default owned-PTY pane, appears in
-`fno agents list` / the grid, and remains drivable after the opening turn. No
-`/target`, no build framing, and no cost beyond the provider subscription. Use
-it when you want to talk, not build.
-
-The seed is the **opening turn**, sent verbatim. Continue live through `fno agents
-grid <name>` / `fno agents drive <name>` or send an asynchronous follow-up over
-the bus. v1 requires a non-empty seed; a bare `discuss` with nothing to say is a
-loud error rather than an idle thread.
-
-### Flow: NORMALIZE -> SPAWN -> REPORT (no confirm: free lane)
-
-1. **NORMALIZE.** Strip the leading `discuss` verb; pass the rest as the seed. Run
-   `normalize.sh --input "<seed>" --discuss` (carry provider/name/model posture
-   when supplied). Provider resolution is explicit -> configured -> Claude,
-   constrained to Claude/Codex/Gemini. It emits `payload_mode=discuss` and
-   `message` = the seed verbatim (a seed beginning with `/` remains chat text,
-   never a passthrough command). On `status=error`, STOP and report it.
-2. **SPAWN.** Run the genuine pane wire with the seed as the first turn:
-
-   ```bash
-   bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
-     --message "$message" --mode exec --payload-mode discuss [--cwd "<cwd>"]
-   ```
-
-3. **REPORT** the real `mode=discuss` receipt. Point at `fno agents grid <name>` /
-   `drive <name>` for live interaction, or `fno mail send <name> "<reply>"` for
-   an asynchronous follow-up.
+> **Retired verbs (x-cbb0):** `discuss` and `ask` no longer exist. A verbatim
+> conversational session is now the default free-text **seed** (`spawn "<seed>"`
+> opens a drivable pane with the words as its opening turn - what `discuss` did).
+> A one-shot question is the **`headless` substrate** (`spawn "<question>"
+> headless` returns a single reply - what `ask` did). `handoff` stays: its
+> guardrail preamble and continue-don't-re-derive contract are content, not
+> routing.
 
 ---
 
