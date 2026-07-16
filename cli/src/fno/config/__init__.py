@@ -1836,6 +1836,11 @@ class WorkspaceProjectEntry(BaseModel):
     type: Optional[str] = None
     stack: list[str] = Field(default_factory=list)
     package_manager: Optional[str] = None
+    # Per-project worktree-isolation policy override (never|harness-native|
+    # external). None => fall through to config.worktree.policy then the
+    # harness-native default. Validated against the enum at resolve time, not
+    # here, so an out-of-enum value refuses creation rather than bricking load.
+    worktree: Optional[str] = None
 
 
 class WorkspaceEntry(BaseModel):
@@ -2497,6 +2502,20 @@ class DevBlock(BaseModel):
     source: str = ""
 
 
+class WorktreeBlock(BaseModel):
+    """config.worktree.* - global worktree-isolation defaults.
+
+    ``extra="ignore"`` keeps the DEPRECATED ``use_conductor_canonical`` key
+    (read ad-hoc via read_config_flat elsewhere) valid here. ``policy`` is the
+    global default (never|harness-native|external); a per-project entry's
+    ``worktree`` key overrides it. Validated at resolve time, not here.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    policy: Optional[str] = None
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -2529,6 +2548,7 @@ class ConfigBlock(BaseModel):
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
     work: WorkBlock = Field(default_factory=WorkBlock)
+    worktree: WorktreeBlock = Field(default_factory=WorktreeBlock)
     model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
     mux: MuxBlock = Field(default_factory=MuxBlock)
     dev: DevBlock = Field(default_factory=DevBlock)
