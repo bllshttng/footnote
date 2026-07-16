@@ -99,13 +99,13 @@ out="$(run 'make the bg job run faster')"
 check_eq   'x-2c27 mid-task bg not consumed' "$(field "$out" substrate)" ''
 check_contains 'x-2c27 mid-task bg stays in message' "$(field "$out" message)" 'bg job run faster'
 
-# --- x-ffc3: a LEADING posture word + /command is refused, not /target-wrapped --
+# --- x-ffc3: a LEADING posture word + /command is refused, not buried in a seed -
 # Posture words (bg|headless) are TRAILING only. A leading one whose remainder is
 # a /command passthrough (the documented repro `bg /goal ...`) means the user
-# mis-ordered the substrate; left alone it falls through to the feature default
-# and is wrapped as a /target BUILD of the literal text. Refuse with the
-# corrective trailing form. Scoped to a /-led remainder so genuine feature prose
-# beginning with the word still builds (codex PR #106 P2).
+# mis-ordered the substrate; left alone it falls through to the seed default and
+# the /command is buried in a verbatim seed instead of dispatched. Refuse with
+# the corrective trailing form. Scoped to a /-led remainder so genuine feature
+# prose beginning with the word still seeds (codex PR #106 P2).
 out="$(run 'bg /goal x-ead3 residual')"
 check_eq       'x-ffc3 leading bg+/ -> error'     "$(field "$out" status)"  'error'
 check_contains 'x-ffc3 leading bg cites trailing form' "$(field "$out" error)" '/goal x-ead3 residual bg'
@@ -120,10 +120,10 @@ check_contains 'x-ffc3 leading BG hint uses lowercase bg' "$(field "$out" error)
 # codex PR #106 P2: a leading posture word in genuine FEATURE prose (no /command
 # remainder) is NOT refused - it builds, as it did before the guard.
 out="$(run 'headless browser screenshots')"
-check_eq       'x-ffc3 headless feature prose builds' "$(field "$out" status)" 'ok'
-check_contains 'x-ffc3 headless feature prose wrapped' "$(field "$out" message)" 'headless browser screenshots'
+check_eq       'x-ffc3 headless feature prose seeds' "$(field "$out" status)" 'ok'
+check_contains 'x-ffc3 headless feature prose verbatim' "$(field "$out" message)" 'headless browser screenshots'
 out="$(run 'bg worker cleanup')"
-check_eq       'x-ffc3 bg feature prose builds'    "$(field "$out" status)" 'ok'
+check_eq       'x-ffc3 bg feature prose seeds'    "$(field "$out" status)" 'ok'
 # AC1-EDGE: a trailing posture word is unchanged (the guard fires on LEADING only)
 out="$(run '/goal x-ead3 residual bg')"
 check_eq       'x-ffc3 trailing bg substrate'      "$(field "$out" substrate)" 'bg'
@@ -142,11 +142,15 @@ check_eq   'trailing merge binds' "$(field "$out" allow_merge)" '1'
 check_eq   'trailing merge node'  "$(field "$out" node)" 'ab-22222222'
 
 # --- provider bareword alone --------------------------------------------------
-# gemini is parsed as the provider, then its build lane is refused (deprecated,
-# x-de43): the refusal message naming gemini proves the bareword was detected.
+# A trailing gemini bareword is parsed as the provider and stripped from the
+# message. Free text is now a verbatim seed (x-cbb0), which needs no /target
+# skill surface, so gemini is NOT refused here - it seeds a gemini pane. (A node
+# build on gemini IS refused; see the x-de43 block below.)
 out="$(run 'add a login form gemini')"
-check_eq       'provider bareword gemini refused' "$(field "$out" status)" 'error'
-check_contains 'gemini bareword names gemini'     "$(field "$out" error)"  'gemini'
+check_eq           'gemini bareword -> provider gemini' "$(field "$out" provider)"     'gemini'
+check_eq           'gemini bareword seed ok'            "$(field "$out" status)"       'ok'
+check_eq           'gemini bareword seed mode'          "$(field "$out" payload_mode)" 'seed'
+check_not_contains 'gemini bareword stripped'          "$(field "$out" message)"      'gemini'
 
 # --- interactive/drive bareword ----------------------------------------------
 out="$(run 'ab-33333333 codex drive')"
@@ -186,10 +190,13 @@ _de43_stub="$(mktemp -d)"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
 run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
 
-# AC1-HP: opencode build renders the plugin-namespaced /fno:target (+ no-merge)
-out="$(run_nofno 'add a login form' --provider opencode)"
+# AC1-HP: an opencode node-id build renders the plugin-namespaced /fno:target
+# (+ no-merge). Free text no longer builds (x-cbb0) - only a resolved node id
+# wraps to a per-harness /target, so the build render is exercised via a node id.
+out="$(run_nofno 'ab-12345678' --provider opencode)"
 check_eq           'opencode build status'       "$(field "$out" status)"  'ok'
-check_contains     'opencode build /fno:target'  "$(field "$out" message)" '/fno:target add a login form'
+check_eq           'opencode build payload_mode' "$(field "$out" payload_mode)" 'build'
+check_contains     'opencode build /fno:target'  "$(field "$out" message)" '/fno:target ab-12345678'
 check_contains     'opencode build no-merge'     "$(field "$out" message)" 'no-merge'
 check_not_contains 'opencode build no prose'     "$(field "$out" message)" 'Implement'
 
@@ -208,8 +215,9 @@ out="$(run_nofno '/target ship it' --provider claude)"
 check_contains     'claude passthrough verbatim' "$(field "$out" message)" '/target ship it'
 check_not_contains 'claude no fno: prefix'       "$(field "$out" message)" '/fno:'
 
-# AC2-ERR: a deprecated gemini build AND passthrough refuse loudly, naming agy
-out="$(run_nofno 'add a login form' --provider gemini)"
+# AC2-ERR: a deprecated gemini node-id build AND passthrough refuse loudly,
+# naming agy (a node build needs the /target skill surface gemini lacks).
+out="$(run_nofno 'ab-12345678' --provider gemini)"
 check_eq       'gemini build refused'         "$(field "$out" status)" 'error'
 check_contains 'gemini build names agy'       "$(field "$out" error)"  'agy'
 out="$(run_nofno '/target ship it' --provider gemini)"
@@ -420,43 +428,48 @@ check_eq   'tier1 exact node_query'  "$(field "$out" node_query)" ''
 check_eq   'tier1 exact spawn_next'  "$(field "$out" spawn_next)" '0'
 
 # ===========================================================================
-# Dispatch intents: shape_hint + handoff/discuss verbs (2026-06-11)
+# Payload modes: seed (free text, verbatim) + handoff verb (x-cbb0)
 # ===========================================================================
+# spawn means start a session with what you pass, nothing more (x-cbb0). Free
+# text is a verbatim SEED, no longer implicitly /target-wrapped; the surviving
+# implicit /target is a resolved node id (build), config not shape inference.
 
-# --- shape_hint emitted on every run; feature is the default ------------------
+# --- free text is a verbatim SEED: no /target wrap, no no-merge ---------------
 out="$(run 'add a dark-mode toggle to settings')"
-check_eq       'shape feature default'      "$(field "$out" shape_hint)"   'feature'
-check_eq       'shape feature still builds'  "$(field "$out" payload_mode)" 'build'
-check_contains 'shape feature /target'       "$(msg_block "$out")"          '/target add a dark-mode toggle'
+check_eq           'seed status'           "$(field "$out" status)"       'ok'
+check_eq           'seed payload_mode'     "$(field "$out" payload_mode)" 'seed'
+check_eq           'seed message verbatim' "$(field "$out" message)"      'add a dark-mode toggle to settings'
+check_eq           'seed node empty'       "$(field "$out" node)"         ''
+check_not_contains 'seed no /target'       "$(field "$out" message)"      '/target'
+check_not_contains 'seed no no-merge'      "$(field "$out" message)"      'no-merge'
 
-# --- shape path: an absolute doc path -----------------------------------------
-out="$(run '/Users/me/notes/handoff.md')"
-check_eq 'shape path absolute' "$(field "$out" shape_hint)" 'path'
-out="$(run '~/notes.md')"
-check_eq 'shape path tilde'    "$(field "$out" shape_hint)" 'path'
-# relative path with an interior slash, no ~/./../ prefix (gemini HIGH, codex P2 #501)
-out="$(run 'docs/handoff.md')"
-check_eq 'shape path relative interior-slash' "$(field "$out" shape_hint)" 'path'
-out="$(run 'subfolder/file.txt')"
-check_eq 'shape path relative txt'            "$(field "$out" shape_hint)" 'path'
+# --- the deliberate semantics flip: "fix the X" seeds, does NOT build ---------
+out="$(run 'fix the login bug')"
+check_eq 'seed fix-verb mode'     "$(field "$out" payload_mode)" 'seed'
+check_eq 'seed fix-verb verbatim' "$(field "$out" message)"      'fix the login bug'
 
-# --- a slash COMMAND is not a path (no second slash, no extension) ------------
-out="$(run '/target add a thing')"
-check_eq 'slash command not path' "$(field "$out" shape_hint)" 'feature'
-out="$(run '/pr check 42')"
-check_eq 'pr command not path'    "$(field "$out" shape_hint)" 'feature'
+# --- a seed keeps trailing posture parsing (launch axes are orthogonal) -------
+out="$(run 'talk through the retry design codex')"
+check_eq           'seed trailing provider' "$(field "$out" provider)"     'codex'
+check_eq           'seed trailing mode'     "$(field "$out" payload_mode)" 'seed'
+check_not_contains 'seed provider stripped' "$(field "$out" message)"      'codex'
 
-# --- shape question -----------------------------------------------------------
+# --- a former "path"/"question"/"continue" phrasing is now just a seed ---------
+# (the deterministic shape classifier + the bare-input build-wrap announce it fed
+# are gone; there is no wrap to warn about, so these flow straight to a verbatim
+# seed like any other free text)
 out="$(run 'should we cache the provider lookup?')"
-check_eq 'shape question by ?'         "$(field "$out" shape_hint)" 'question'
-out="$(run 'what does normalize emit')"
-check_eq 'shape question by lead word' "$(field "$out" shape_hint)" 'question'
-
-# --- shape continue -----------------------------------------------------------
+check_eq 'question-shaped -> seed'   "$(field "$out" payload_mode)" 'seed'
 out="$(run 'continue the quarterly outreach work')"
-check_eq 'shape continue lead'   "$(field "$out" shape_hint)" 'continue'
-out="$(run 'pick up where the last session left off')"
-check_eq 'shape continue pickup' "$(field "$out" shape_hint)" 'continue'
+check_eq 'continue-shaped -> seed'   "$(field "$out" payload_mode)" 'seed'
+
+# --- a slash COMMAND is a passthrough, not a seed -----------------------------
+out="$(run '/pr check 42')"
+check_eq 'slash command is passthrough' "$(field "$out" payload_mode)" 'passthrough'
+
+# --- a resolved node-id is a build (the ONE surviving implicit /target) -------
+out="$(run 'ab-1234abcd')"
+check_eq 'node-id builds not seeds' "$(field "$out" payload_mode)" 'build'
 
 # --- handoff mode: doc path -> continuation seed, no /target ------------------
 out="$(run '/Users/me/handoff-2026.md' --handoff)"
@@ -508,16 +521,13 @@ out="$(run '/x/doc.md' --handoff --provider agy)"
 check_eq       'handoff explicit unsupported error' "$(field "$out" status)" 'error'
 check_contains 'handoff unsupported names allowlist' "$(field "$out" error)" 'claude, codex, gemini'
 
-# --- configured codex/gemini routing is honored for prose-shaped modes --------
+# --- configured codex/gemini routing is honored for a handoff ----------------
 _resolver_codex="$(mktemp)"
 printf '#!/usr/bin/env bash\necho codex\n' > "$_resolver_codex"
 chmod +x "$_resolver_codex"
 out="$(DISPATCH_PROVIDER_RESOLVER="$_resolver_codex" run '/tmp/doc.md' --handoff)"
 check_eq 'handoff config codex status'   "$(field "$out" status)"   'ok'
 check_eq 'handoff config codex provider' "$(field "$out" provider)" 'codex'
-out="$(DISPATCH_PROVIDER_RESOLVER="$_resolver_codex" run 'lets talk about the loop' --discuss)"
-check_eq 'discuss config codex status'   "$(field "$out" status)"   'ok'
-check_eq 'discuss config codex provider' "$(field "$out" provider)" 'codex'
 rm -f "$_resolver_codex"
 
 _resolver_unsupported="$(mktemp)"
@@ -528,34 +538,13 @@ check_eq 'handoff unsupported config status'   "$(field "$out" status)"   'ok'
 check_eq 'handoff unsupported config fallback' "$(field "$out" provider)" 'claude'
 rm -f "$_resolver_unsupported"
 
-# --- discuss mode: verbatim seed, no /target ---------------------------------
+# --- --discuss / --ask are retired flags -> unknown-argument error (x-cbb0) ---
+# discuss is subsumed by a verbatim seed; ask by the headless substrate. Both
+# flags now fail loud rather than silently no-op.
 out="$(run 'what is the architecture of the loop' --discuss)"
-check_eq           'discuss status'           "$(field "$out" status)"       'ok'
-check_eq           'discuss payload_mode'      "$(field "$out" payload_mode)" 'discuss'
-check_eq           'discuss message verbatim'  "$(field "$out" message)"      'what is the architecture of the loop'
-check_not_contains 'discuss no /target'        "$(field "$out" message)"      '/target'
-
-out="$(run 'what is the architecture of the loop' --discuss --provider codex)"
-check_eq 'discuss explicit codex status'   "$(field "$out" status)"   'ok'
-check_eq 'discuss explicit codex provider' "$(field "$out" provider)" 'codex'
-
-out="$(run 'compare the retry designs' --discuss --provider gemini)"
-check_eq 'discuss explicit gemini status'   "$(field "$out" status)"   'ok'
-check_eq 'discuss explicit gemini provider' "$(field "$out" provider)" 'gemini'
-
-# --- discuss seed starting with / stays verbatim (discuss beats passthrough) --
-out="$(run '/target what does it do' --discuss)"
-check_eq 'discuss beats passthrough'   "$(field "$out" payload_mode)" 'discuss'
-check_eq 'discuss slash seed verbatim' "$(field "$out" message)"      '/target what does it do'
-
-# --- discuss does not resolve a node-shaped seed -----------------------------
-out="$(run 'ab-12345678 looks broken' --discuss)"
-check_eq 'discuss node empty'       "$(field "$out" node)"       ''
-check_eq 'discuss node_query empty' "$(field "$out" node_query)" ''
-
-# --- discuss empty seed -> error (v1: discuss requires an opening message) ----
-out="$(run '' --discuss)"
-check_eq 'discuss empty seed error' "$(field "$out" status)" 'error'
+check_eq 'retired --discuss is error' "$(field "$out" status)" 'error'
+out="$(run 'quick question' --ask)"
+check_eq 'retired --ask is error'     "$(field "$out" status)" 'error'
 
 # ===========================================================================
 # Cross-project cwd resolution (-P/--project)  (cross-project-spawn)
@@ -575,13 +564,14 @@ _proj_res="$(mktemp)"
 } > "$_proj_res"
 chmod +x "$_proj_res"
 
-# --- free-text + -P resolves: project + resolved_cwd emitted, build unchanged --
+# --- free-text + -P resolves: project + resolved_cwd emitted; free text seeds --
 out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -P etl)"
 check_eq   'proj resolve status'        "$(field "$out" status)"       'ok'
 check_eq   'proj resolve project'       "$(field "$out" project)"      'etl'
 check_eq   'proj resolve cwd'           "$(field "$out" resolved_cwd)" "$HERE"
 check_eq   'proj resolve node empty'    "$(field "$out" node)"         ''
-check_contains 'proj resolve still builds' "$(msg_block "$out")"       '/target backend work'
+check_eq   'proj resolve free text seeds' "$(field "$out" payload_mode)" 'seed'
+check_eq   'proj resolve seed verbatim'   "$(field "$out" message)"      'backend work'
 
 # --- --project long form is identical to -P ----------------------------------
 out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' --project etl)"

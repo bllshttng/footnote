@@ -174,13 +174,13 @@ err7="$(cat "$TMP/err7")"
 has  "codex-build worktree'd" "$err7" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-codex-build"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-codex-build" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: build payload not worktree'd"; }
 
-# 8. ask payload (one-shot question, any provider) -> NOT code-writing, no worktree.
-out8="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-ask-demo" \
-  --provider codex --payload-mode ask --node "x-ask" \
+# 8. seed payload (verbatim free-text pane, x-cbb0) -> NOT code-writing, no worktree.
+out8="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-seed-demo" \
+  --provider codex --payload-mode seed \
   --message "what does the dispatch guard do?" --cwd "$REPO" 2>"$TMP/err8")"
 err8="$(cat "$TMP/err8")"
-no   "ask no worktree note" "$err8" "auto-worktree:"
-[[ -d "$TMP/conductor/workspaces/myrepo/spawn-ask-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: ask payload got a worktree"; } || PASS=$((PASS+1))
+no   "seed no worktree note" "$err8" "auto-worktree:"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-seed-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: seed payload got a worktree"; } || PASS=$((PASS+1))
 
 # 9. prose handoff continues an existing document; it is not a fresh feature
 #    build and must stay in the caller-selected cwd for relative-path fidelity.

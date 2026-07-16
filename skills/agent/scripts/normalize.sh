@@ -59,9 +59,7 @@ MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
 SUBSTRATE=""       # x-2c27: ""|bg|headless trailing-posture word (the spawn
                    # substrate axis). Empty = the default `pane` (owned-PTY).
 YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
-ASK_MODE=0         # 1 = `ask`/`bare` verb: send the prompt VERBATIM (no /target)
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
-DISCUSS_MODE=0     # 1 = `discuss` verb: payload is a verbatim conversational seed
 PROJECT=""         # cross-project target: a registry project name/short_name to
                    # resolve into a launch cwd (work.workspaces.*.projects)
 PROJECT_SET=0      # 1 = -P/--project was passed (empty value -> loud error, never
@@ -115,9 +113,7 @@ while [[ $# -gt 0 ]]; do
     -y|--yes)         YES=1; shift ;;
     -i|--interactive) MODE="interactive"; shift ;;
     --yolo)           YOLO=1; shift ;;
-    --ask)            ASK_MODE=1; shift ;;
     --handoff)        HANDOFF_MODE=1; shift ;;
-    --discuss)        DISCUSS_MODE=1; shift ;;
     -P|--project)     PROJECT="${2:-}"; PROJECT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     # -f here = override the node's own cwd with --project. NOT `fno agents spawn
     # -F/--force` (spawn-gate bypass: max_live + RAM floor). Different semantics;
@@ -159,11 +155,13 @@ msg="${msg%"${msg##*[![:space:]]}"}"
 # in the run is a dangling name keyword -> error (Boundaries). Barewords only
 # FILL a field the model did not already set via an explicit dash-flag, and are
 # idempotent with it (AC4-FR), so the NL parse and this parse agree (Concurrency
-# invariant). ask/bare is a LEADING verb the SKILL handles (passed as --ask), so
-# it is NOT consumed here - that avoids a trailing "the user's ask" false match;
-# a verbatim ask payload skips this scan entirely. handoff (a doc path) and
-# discuss (a verbatim chat seed) are verbatim too, so they skip it the same way.
-if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; then
+# invariant). handoff (a doc path) is a verbatim continuation seed, so it skips
+# this scan entirely - a node-shaped or posture-shaped token in the doc path
+# must never be consumed as posture. A free-text seed still runs the scan: the
+# posture words (provider/substrate/name/...) are session-launch axes orthogonal
+# to whether the payload builds or seeds, so `spawn "talk it over" codex` still
+# routes the seed to codex.
+if [[ "$HANDOFF_MODE" -eq 0 ]]; then
   set -f
   # Read the FULL message (every line) into the token array. A bare
   # `read -r -a <<<` stops at the first newline, so a multi-line task whose
@@ -241,43 +239,39 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
   # TRAILING only (consumed right-anchored above). A LEADING posture word whose
   # remainder is a /command passthrough (e.g. `bg /goal ...`) is the user meaning
   # the substrate but mis-ordering it; left alone it is not consumed, the payload
-  # then starts with the bareword (not '/'), and the feature default silently
-  # wraps it as a /target BUILD of the literal text. Refuse with the corrective
+  # then starts with the bareword (not '/'), so the /command it fronts is buried
+  # inside a verbatim seed instead of dispatched. Refuse with the corrective
   # trailing form instead.
   #   - Scoped to a /-led remainder: genuine feature prose that merely begins with
-  #     the word (`headless browser screenshots`, `bg worker cleanup`) still flows
-  #     to the normal build path - only a clear mis-ordered dispatch is refused
-  #     (PR #106 codex P2). This is the plan's preferred narrow trigger.
+  #     the word (`headless browser screenshots`, `bg worker cleanup`) still seeds
+  #     normally - only a clear mis-ordered dispatch is refused (PR #106 codex P2).
   #   - Exact-token, case-insensitive (matches the trailing parser's tr at l.150,
   #     so a mobile-auto-capitalized `BG` is caught; `bgcolor`/`background` are not).
-  #   - Inside the ask/handoff/discuss==0 block, so a verbatim payload beginning
-  #     with the literal word "bg" is exempt (its posture words are never parsed).
+  #   - Inside the HANDOFF==0 block, so a verbatim handoff doc path beginning with
+  #     the literal word "bg" is exempt (its posture words are never parsed).
   _first_lc="$(printf '%s' "${msg%%[[:space:]]*}" | tr '[:upper:]' '[:lower:]')"
   case "$_first_lc" in
     bg|headless)
       _rest="${msg#"${msg%%[[:space:]]*}"}"; _rest="${_rest#"${_rest%%[![:space:]]*}"}"  # trim
       if [[ "$_rest" == /* ]]; then
-        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_first_lc}'. (A leading '${_first_lc}' would otherwise be wrapped into a /target build of the literal text.)"
+        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_first_lc}'. (A leading '${_first_lc}' would otherwise bury the '${_rest%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
       fi
       ;;
   esac
 fi
 
 # ---- 1b. defensive flag-vocabulary scan (phone-mangled flag in prose) --------
-# If a known flag token survived in the BUILD task text (the LLM rescue layer
-# missed it, or the operator typed it inline), fail loud rather than let it fold
-# silently into the build brief. Whitespace-delimited, token-initial dash forms
+# If a known flag token survived in the task text (the LLM rescue layer missed
+# it, or the operator typed it inline), fail loud rather than let it fold
+# silently into the payload. Whitespace-delimited, token-initial dash forms
 # only: feature prose with unrelated dash tokens ("support -v verbose") and
 # glued tokens ("tooltip--yes") pass untouched. The scan canonicalizes a COPY of
 # each token's leading em/en-dash to `--`; the message keeps the original text
 # verbatim. `set -f` disables globbing so an unquoted `*` in the task text cannot
-# expand to filenames during the word-split. ASK payloads are exempt: a one-shot
-# question is sent verbatim - it has no build brief a flag could fold into, and a
-# flag token there is part of the question ("what does grep -i do").
-# (ab-27541df5 US1, Locked Decision 5)
-# handoff/discuss are verbatim like ask (a doc path / chat seed has no build
-# brief a flag could fold into), so they are exempt the same way.
-if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; then
+# expand to filenames during the word-split. (ab-27541df5 US1, Locked Decision 5)
+# handoff is exempt: a doc path is a verbatim continuation seed with no payload a
+# stray flag could corrupt, so a dash token in it is part of the path.
+if [[ "$HANDOFF_MODE" -eq 0 ]]; then
   set -f
   for scan_tok in $msg; do
     scan_cano="$scan_tok"
@@ -286,8 +280,8 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|--ask|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
-        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
+      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
+        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the task text."
         ;;
     esac
   done
@@ -320,9 +314,9 @@ SPAWN_NEXT=0
 NEXT_SCOPE=""
 first_tok="${msg%%[[:space:]]*}"
 msg_lc="$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')"
-if [[ "$HANDOFF_MODE" -eq 1 || "$DISCUSS_MODE" -eq 1 ]]; then
-  :   # handoff (a doc path) / discuss (a chat seed) carry no node id; a
-      # node-shaped token in the seed must NOT be resolved as a node.
+if [[ "$HANDOFF_MODE" -eq 1 ]]; then
+  :   # handoff (a doc path) carries no node id; a node-shaped token in the doc
+      # path must NOT be resolved as a node.
 elif [[ "$msg_lc" == "next" || "$msg_lc" == "next all" ]]; then
   SPAWN_NEXT=1
   [[ "$msg_lc" == "next all" ]] && NEXT_SCOPE="all" || NEXT_SCOPE="project"
@@ -340,45 +334,6 @@ elif printf '%s' "$msg" | grep -iqE '^[a-z0-9][a-z0-9-]*$'; then
   # slug (`Dashless-spawn`) is still classified as a candidate; the resolver
   # (`fno backlog get` -> resolve_node) matches slugs case-insensitively.
   NODE_QUERY="$msg"
-fi
-
-# ---- 2b. shape classification (for the SKILL's bare-input announce) ----------
-# A deterministic hint at what KIND of payload this is, emitted on every run.
-# The SKILL uses it ONLY on the no-explicit-verb path: when bare input is not
-# feature-shaped (a path, a question, a continue/handoff phrasing) it announces
-# the /target build wrap and offers `handoff`/`discuss` instead of silently
-# wrapping. Order: path > continue > question > feature (the default). grep -E is
-# used (not bash `=~`) to match the file's bash-3.2-safe style.
-shape_hint="feature"
-if printf '%s' "$first_tok" | grep -qE '^(~|\./|\.\./)'; then
-  shape_hint="path"                          # ~, ./ or ../ prefix
-elif printf '%s' "$first_tok" | grep -qE '^/.*/'; then
-  shape_hint="path"                          # leading / with an interior slash
-elif printf '%s' "$first_tok" | grep -qE '^/.+\.[A-Za-z0-9]+$'; then
-  shape_hint="path"                          # leading / single segment with ext
-elif printf '%s' "$first_tok" | grep -qE '^[^/]+/.+'; then
-  shape_hint="path"                          # relative path with an interior slash
-fi
-# A bare slash COMMAND (/target, /pr) has neither an interior slash nor an
-# extension, so it stays `feature` and never trips the path announce.
-_first_word="${msg_lc%%[[:space:]]*}"
-if [[ "$shape_hint" == "feature" ]]; then
-  case "$_first_word" in
-    continue|resume|pickup) shape_hint="continue" ;;
-  esac
-  case "$msg_lc" in
-    "pick up"*|"hand off"*|handoff*) shape_hint="continue" ;;
-  esac
-fi
-if [[ "$shape_hint" == "feature" ]]; then
-  case "$msg" in
-    *\?) shape_hint="question" ;;
-  esac
-  if [[ "$shape_hint" == "feature" ]]; then
-    case "$_first_word" in
-      what|why|how|should|can|does|is|are|when|who) shape_hint="question" ;;
-    esac
-  fi
 fi
 
 # ---- 2c. cross-project cwd resolution (-P/--project) -------------------------
@@ -512,9 +467,8 @@ fi
 # the thread title reads at a glance: <verb>-<full-node-id>-<slug> for a node
 # (e.g. spawn-ab-4040eee8-cargo-bootstrapper), <verb>-<slug> for a free-form
 # feature, falling back to a deterministic CRC short-id when the slug is empty.
-# The leading <verb> is the launching verb (spawn | handoff | discuss | ask),
-# never a fixed string, so a self-spawned worker is distinguishable from a
-# handoff/discuss thread.
+# The leading <verb> is the launching verb (spawn | handoff), never a fixed
+# string, so a self-spawned worker is distinguishable from a handoff thread.
 sanitize_name() {
   # lowercase, keep alnum + dash, collapse repeats, trim dashes, cap length.
   printf '%s' "$1" \
@@ -526,10 +480,7 @@ sanitize_name() {
 
 # Verb that launched this thread; used as the agent-name prefix.
 verb="spawn"
-if [[ "$HANDOFF_MODE" -eq 1 ]]; then verb="handoff"
-elif [[ "$DISCUSS_MODE" -eq 1 ]]; then verb="discuss"
-elif [[ "$ASK_MODE" -eq 1 ]]; then verb="ask"
-fi
+[[ "$HANDOFF_MODE" -eq 1 ]] && verb="handoff"
 
 # Resolve a node's title-derived slug for the readable name tail. Best-effort: an
 # unknown node / read failure yields an empty slug and the name degrades to
@@ -620,18 +571,17 @@ except Exception:
     pass' "$1" 2>/dev/null || true
 }
 
-if [[ "$HANDOFF_MODE" -eq 1 || "$DISCUSS_MODE" -eq 1 ]]; then
-  # Prose handoffs and discussions run on the verified first-class CLIs. Honor
-  # explicit -> config -> claude routing within that allowlist. A user's explicit
-  # unsupported choice is an error; unrelated configured providers fall back.
-  prose_mode="handoff"; [[ "$DISCUSS_MODE" -eq 1 ]] && prose_mode="discuss"
+if [[ "$HANDOFF_MODE" -eq 1 ]]; then
+  # A prose handoff runs on the verified first-class CLIs. Honor explicit ->
+  # config -> claude routing within that allowlist. A user's explicit unsupported
+  # choice is an error; unrelated configured providers fall back.
   if [[ -n "$PROVIDER" ]]; then
     if ! is_valid_provider "$PROVIDER"; then
       emit_error "invalid provider '$PROVIDER'; valid: ${VALID_PROVIDERS// /, }"
     fi
     case "$PROVIDER" in
       claude|codex|gemini) provider="$PROVIDER" ;;
-      *) emit_error "$prose_mode supports providers claude, codex, gemini; you passed --provider $PROVIDER" ;;
+      *) emit_error "handoff supports providers claude, codex, gemini; you passed --provider $PROVIDER" ;;
     esac
   else
     provider="$(resolve_from_config "$agent_name" | head -1 | tr -d '[:space:]' || true)"
@@ -665,29 +615,35 @@ if [[ "$YOLO" -eq 1 && "$provider" == "claude" ]]; then
 fi
 
 # ---- 5. payload mode + provider-aware message assembly -----------------------
-# Three modes (Locked Decision 8) replace the old slash-or-`/target` binary:
+# `spawn` means start a session with what you pass, nothing more (x-cbb0). Four
+# modes, no shape inference:
 #   passthrough: payload is an explicit slash command (leading `/`). Rendered
 #                per-harness: claude/agy verbatim, opencode `/fno:verb`, codex
 #                `$fno:verb`; a deprecated (refused) provider has no dispatch
 #                lane, so a passthrough to it is REFUSED naming agy. (AC4-ERR)
-#   ask:         the skill parsed an `ask`/`bare` verb (--ask). The prompt is sent
-#                VERBATIM - no `/target` wrap, no no-merge, no build brief. (AC4-HP)
-#   build:       default. PROVIDER-AWARE: claude gets `/target <text>`, opencode
-#                `/fno:target <text>`, codex `$fno:target <text>` (+ no-merge); a
-#                deprecated provider is refused naming agy - no prose brief.
-# An explicit `ask`/`bare` verb WINS over leading-`/` passthrough detection: a
-# question that happens to start with `/` (e.g. `ask "/target what does it do"`)
-# is still a verbatim prompt, not a slash command to forward.
+#   build:       a resolved backlog node id. The ONE surviving implicit `/target`,
+#                config-driven not shape-inferred: dispatch_verb resolution
+#                (node > config > builtin `/target`) - normalize uses the builtin
+#                rung, wrapping `/target <id>` PROVIDER-AWARE (opencode
+#                `/fno:target`, codex `$fno:target`) + no-merge.
+#   seed:        default for free text. Sent VERBATIM as the session opening seed
+#                on the default pane - no `/target` wrap, no no-merge, no build
+#                framing (what `--discuss` produced before the wrap was cut).
+#   handoff:     `--handoff`, a doc path -> continuation seed + guardrail.
+# passthrough (leading `/`) wins over the node-id build so an explicit `/target
+# ab-xxxx` renders as a passthrough, not a re-wrapped build.
 if [[ "$HANDOFF_MODE" -eq 1 ]]; then
   payload_mode="handoff"
-elif [[ "$DISCUSS_MODE" -eq 1 ]]; then
-  payload_mode="discuss"
-elif [[ "$ASK_MODE" -eq 1 ]]; then
-  payload_mode="ask"
 else
   case "$msg" in
     /*) payload_mode="passthrough" ;;
-    *)  payload_mode="build" ;;
+    *)
+      if [[ -n "$NODE" ]]; then
+        payload_mode="build"     # node-id dispatch (implicit /target, config rung)
+      else
+        payload_mode="seed"      # free text -> verbatim session seed
+      fi
+      ;;
   esac
 fi
 
@@ -745,7 +701,10 @@ case "$payload_mode" in
       *)           emit_error "$provider is deprecated (successor: agy) and has no dispatch lane; '$msg' cannot be dispatched there (route to a claude/codex/opencode/agy harness)" ;;
     esac
     ;;
-  ask)
+  seed)
+    # Free text sent VERBATIM as the session opening seed (default pane). No
+    # /target wrap, no build framing (what --discuss produced before x-cbb0). A
+    # seed beginning with `/` never reaches here - a leading `/` is passthrough.
     message="$msg"
     ;;
   handoff)
@@ -759,16 +718,12 @@ GUARDRAIL: Do not autonomously perform outward-facing or irreversible actions (s
 
 If the work includes code changes, land them as a pull request for review; do not merge."
     ;;
-  discuss)
-    # A provider-native interactive pane. The seed is the opening turn, sent
-    # VERBATIM (no /target or build framing).
-    message="$msg"
-    ;;
   build)
-    # PROVIDER-AWARE via the normalizer surface. claude/agy invoke the native
-    # `/target` skill; opencode invokes `/fno:target` (plugin palette); codex
-    # invokes `$fno:target` - all run the REAL pipeline. A refused (deprecated)
-    # provider has no skill surface, so refuse loudly naming agy - no prose brief.
+    # A resolved node id ($msg is the ab-id). PROVIDER-AWARE via the normalizer
+    # surface: claude/agy invoke the native `/target` skill; opencode invokes
+    # `/fno:target` (plugin palette); codex invokes `$fno:target` - all run the
+    # REAL pipeline on the node. A refused (deprecated) provider has no skill
+    # surface, so refuse loudly naming agy.
     surface="$(resolve_command_surface "$provider")"
     case "$surface" in
       slash)       message="/$(slash_prefix "$provider")target $msg" ;;
@@ -778,14 +733,14 @@ If the work includes code changes, land them as a pull request for review; do no
     ;;
 esac
 
-# no-merge default for any native `/target`-family message (build-wrapped OR an
+# no-merge default for any native `/target`-family message (node-id build OR an
 # explicit /target passthrough): a fire-and-forget worker should land a PR for
 # review, not auto-merge to main from a fat-fingered tap. --allow-merge or an
 # already-present no-merge opts out. Covers claude `/target`, opencode
 # `/fno:target`, and codex `$fno:target`; a refused provider never reaches here.
-# ONLY build/passthrough get this: a verbatim ask/discuss prompt or a handoff
-# continuation seed that happens to contain `/target` is NOT a build command
-# (sigma-review finding 4), so it must never be no-merge'd.
+# ONLY build/passthrough get this: a verbatim seed or a handoff continuation seed
+# that happens to contain `/target` is NOT a build command (sigma-review finding
+# 4), so it must never be no-merge'd.
 case "$payload_mode" in
   build|passthrough)
     # A native /target-family invocation (claude/agy `/target`, opencode
@@ -816,10 +771,6 @@ printf 'next_scope=%s\n' "$NEXT_SCOPE"
 # which the SKILL passes to `spawn.sh --cwd` and echoes in the REPORT receipt.
 printf 'project=%s\n' "$PROJECT_CANON"
 printf 'resolved_cwd=%s\n' "$RESOLVED_CWD"
-# shape_hint (path|question|continue|feature): the SKILL announces the /target
-# build wrap + offers handoff/discuss when this is not `feature` and no explicit
-# verb was typed (attended callers only). Emitted on every run.
-printf 'shape_hint=%s\n' "$shape_hint"
 printf 'name=%s\n' "$agent_name"
 printf 'provider=%s\n' "$provider"
 printf 'model=%s\n' "$MODEL"

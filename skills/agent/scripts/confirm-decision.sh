@@ -11,7 +11,7 @@
 #   --node <id>            backlog node id (empty = free-form feature)
 #   --provider <p>         claude | codex | gemini      (default claude)
 #   --mode <m>             exec | interactive           (default exec)
-#   --payload-mode <m>     build | ask | passthrough    (default build)
+#   --payload-mode <m>     build | seed | passthrough | handoff (default build)
 #   --yolo <0|1>           --yolo in effect             (default 0)
 #   --permission-mode <m>  effective harness permission mode (default empty).
 #                          bypassPermissions is a gate bypass -> caveat, so the
@@ -145,9 +145,7 @@ fi
 # / merge / exec-stall) NO LONGER force a confirm - they surface as warnings
 # alongside the genuine receipt (the receipt-echo invariant). chat (billed) and
 # stop (destructive) keep their own always-confirm gates; they do NOT route here.
-if [[ "$PAYLOAD_MODE" == "ask" ]]; then
-  CONFIRM=0; REASON="ask payload: a one-shot question is not a billed autonomous build"
-elif [[ "$YES" -eq 1 ]]; then
+if [[ "$YES" -eq 1 ]]; then
   CONFIRM=0; REASON="-y/--yes: accepted and ignored - the free lane already does not confirm"
 elif [[ "$posture" == "always" ]]; then
   CONFIRM=1; REASON="config.agents.confirm=always: cautious opt-in confirms even the free lane"
@@ -157,8 +155,8 @@ fi
 
 # A skip path that still carries a caveat must surface it (the receipt-echo
 # invariant moves the transparency the confirm provided to the warning). Never
-# for ask, never when already warning about a degrade.
-if [[ "$CONFIRM" -eq 0 && "$CAVEAT" -eq 1 && "$PAYLOAD_MODE" != "ask" && -z "$WARN" ]]; then
+# when already warning about a degrade.
+if [[ "$CONFIRM" -eq 0 && "$CAVEAT" -eq 1 && -z "$WARN" ]]; then
   WARN="launched without confirm but a caveat applies: $CAVEAT_TEXT"
 fi
 
