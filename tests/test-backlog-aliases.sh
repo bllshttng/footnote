@@ -66,9 +66,11 @@ verb_in_help() {
     grep -E "^[^A-Za-z]*${verb}([[:space:]]|$)" <<<"$help" >/dev/null
 }
 
-# --- Scenario 1: fno backlog --help lists canonical verbs -------------------
+# --- Scenario 1: fno backlog --help lists advertised verbs ------------------
+# x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
+# the advertised menu instead.
 out=$(run_abi backlog --help 2>&1)
-for verb in intake done next ready triage; do
+for verb in add done next find triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
     else
@@ -78,10 +80,10 @@ done
 
 # --- Scenario 2: fno graph --help identical verb surface --------------------
 graph_out=$(run_abi graph --help 2>&1)
-if verb_in_help "intake" "$graph_out"; then
-    pass "graph --help lists 'intake' (alias shares app)"
+if verb_in_help "find" "$graph_out"; then
+    pass "graph --help lists 'find' (alias shares app)"
 else
-    fail "graph --help missing 'intake' - alias not sharing the same Typer app?"
+    fail "graph --help missing 'find' - alias not sharing the same Typer app?"
 fi
 
 # --- Scenario 3: fno --help hides graph, shows backlog ----------------------

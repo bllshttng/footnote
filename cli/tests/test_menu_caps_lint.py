@@ -6,6 +6,7 @@ and passes again once the verb is hidden or the cap constant is raised.
 """
 from __future__ import annotations
 
+import click
 import typer
 from typer.testing import CliRunner
 
@@ -49,7 +50,7 @@ def test_menu_caps_passes_once_remedy_applied(monkeypatch):
     assert result.exit_code == 0, result.output
 
 
-def _make_group(n_visible: int, n_hidden: int) -> "typer.models.Any":  # type: ignore[name-defined]
+def _make_group(n_visible: int, n_hidden: int) -> click.Group:
     """A Click group with n_visible + n_hidden commands, for boundary tests."""
     import typer.main
 

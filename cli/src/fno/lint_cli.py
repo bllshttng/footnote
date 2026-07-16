@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import click
 import typer
 
 
@@ -21,14 +22,12 @@ MENU_CAP_TOP_LEVEL = 10
 MENU_CAP_SUB_APP = 12
 
 
-def _visible_command_names(group: "typer.models.Any") -> list[str]:  # type: ignore[name-defined]
+def _visible_command_names(group: click.Group) -> list[str]:
     """Non-hidden subcommand names of a Click group, no module imports.
 
     Lazy top-level entries resolve to hidden-aware stubs, so this reads the
     curated surface straight from the registry the same way `fno --help` does.
     """
-    import click
-
     ctx = click.Context(group)
     names: list[str] = []
     for name in group.list_commands(ctx):
@@ -193,7 +192,6 @@ def menu_caps() -> None:
     """
     import importlib
 
-    import click
     import typer.main
 
     from fno.cli import LAZY_SUBCOMMANDS, app as root_app
