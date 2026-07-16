@@ -128,34 +128,10 @@ def _edit_distance_le_1(a: str, b: str) -> bool:
     return True
 
 
-def check_worktree_policy() -> list[str]:
-    """Report a bad ``config.worktree.policy`` or a typo'd per-project key (x-168b).
-
-    Two silent footguns: an out-of-enum policy value refuses worktree creation
-    (fail-closed is correct, but the operator gets no doctor-time hint), and a
-    per-project key mistyped within one edit of ``worktree`` (e.g. ``worktre``)
-    is dropped by ``extra="ignore"`` -- the project silently gets the DEFAULT
-    policy when it wanted ``never``. Both are surfaced here, reading the same
-    global config file the resolver reads. Returns human-readable reasons.
-    """
-    try:
-        from fno.config import _global_settings_path
-        from fno.config_io import _load_raw, _unwrap_config_dict
-    except Exception:
-        return []
-
-    yaml_path = _global_settings_path()
-    toml_path = yaml_path.with_name("config.toml")
-    path = toml_path if toml_path.exists() else yaml_path
-    if not path.is_file():
-        return []
-    parsed, ok = _load_raw(path)
-    if not ok:
-        return [f"{path} failed to parse; worktree policy cannot be validated"]
-    data = _unwrap_config_dict(parsed)
+def _worktree_policy_problems_in(data: object) -> list[str]:
+    """Out-of-enum policy + typo'd per-project keys in one flat config dict."""
     if not isinstance(data, dict):
         return []
-
     problems: list[str] = []
     wt = data.get("worktree")
     policy = wt.get("policy") if isinstance(wt, dict) else None
@@ -164,7 +140,6 @@ def check_worktree_policy() -> list[str]:
             f"config.worktree.policy = {policy!r} is not one of "
             f"{' | '.join(_VALID_WORKTREE_POLICIES)}; worktree creation will refuse"
         )
-
     work = data.get("work")
     workspaces = work.get("workspaces") if isinstance(work, dict) else None
     if isinstance(workspaces, dict):
@@ -186,6 +161,50 @@ def check_worktree_policy() -> list[str]:
                             "'worktree'; it is IGNORED, so the project silently gets "
                             "the default policy"
                         )
+    return problems
+
+
+def check_worktree_policy() -> list[str]:
+    """Report a bad ``config.worktree.policy`` or a typo'd per-project key (x-168b).
+
+    Two silent footguns: an out-of-enum policy value refuses worktree creation
+    (fail-closed is correct, but the operator gets no doctor-time hint), and a
+    per-project key mistyped within one edit of ``worktree`` (e.g. ``worktre``)
+    is dropped by ``extra="ignore"`` -- the project silently gets the DEFAULT
+    policy when it wanted ``never``. Scans BOTH the global config AND the
+    invoking repo's ``.fno/config.toml`` (a per-project override, and its typo,
+    can live in either), deduping identical messages. Returns human-readable
+    reasons.
+    """
+    try:
+        from fno.config import _global_settings_path
+        from fno.config_io import _load_raw, _unwrap_config_dict
+    except Exception:
+        return []
+
+    yaml_path = _global_settings_path()
+    paths: list[Path] = [yaml_path.with_name("config.toml"), yaml_path]
+    try:
+        from fno.paths import resolve_repo_root
+
+        repo_fno = Path(resolve_repo_root()) / ".fno"
+        paths[:0] = [repo_fno / "config.toml", repo_fno / "settings.yaml"]
+    except Exception:
+        pass
+
+    problems: list[str] = []
+    seen_files: set[Path] = set()
+    for path in paths:
+        if not path.is_file() or path.resolve() in seen_files:
+            continue
+        seen_files.add(path.resolve())
+        parsed, ok = _load_raw(path)
+        if not ok:
+            problems.append(f"{path} failed to parse; worktree policy cannot be validated")
+            continue
+        for msg in _worktree_policy_problems_in(_unwrap_config_dict(parsed)):
+            if msg not in problems:
+                problems.append(msg)
     return problems
 
 

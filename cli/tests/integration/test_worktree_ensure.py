@@ -180,6 +180,17 @@ def test_ensure_policy_out_of_enum_refuses_naming_valid(main_repo: Path, tmp_pat
     assert "never" in res.stderr and "harness-native" in res.stderr and "external" in res.stderr
 
 
+def test_ensure_malformed_workspaces_refuses(main_repo: Path, tmp_path: Path) -> None:
+    """Fail-closed on gross map corruption: a `work.workspaces` present but the
+    wrong type (a scalar, not a table) refuses rather than silently defaulting
+    to auto-isolate a project whose `never` entry it can no longer read."""
+    _write_config(main_repo / ".fno", '[work]\nworkspaces = "not-a-table"\n')
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "m"])
+    assert res.exit_code != 0
+    assert res.stdout.strip() == ""
+    assert not _default_wt(tmp_path, main_repo, "m").exists()
+
+
 def test_ensure_project_absent_falls_to_default(main_repo: Path, tmp_path: Path) -> None:
     """AC1-EDGE: a repo absent from the workspaces map falls to the default
     (harness-native under claude): a worktree IS created."""

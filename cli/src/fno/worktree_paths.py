@@ -240,11 +240,28 @@ def _match_project_entry(
 
     Path match (realpath of entry.path == repo_root) wins over name match
     (entry.name == project_id).
+
+    Fail-closed on GROSS corruption: a ``work`` / ``work.workspaces`` that is
+    present but the wrong type means the whole map is unreadable, so we cannot
+    rule out a ``never`` for this repo -> raise. A single malformed entry inside
+    a well-formed map is TOLERATED (skipped, surfaced by `fno config doctor`)
+    so one bad sibling never refuses every project's isolation.
     """
     work = cfg.get("work")
-    workspaces = work.get("workspaces") if isinstance(work, dict) else None
-    if not isinstance(workspaces, dict):
+    if work is None:
         return None
+    if not isinstance(work, dict):
+        raise WorktreePolicyError(
+            "config `work` is present but not a table; cannot affirm worktree policy"
+        )
+    if "workspaces" not in work:
+        return None
+    workspaces = work.get("workspaces")
+    if not isinstance(workspaces, dict):
+        raise WorktreePolicyError(
+            "config `work.workspaces` is present but not a table; "
+            "cannot affirm per-project worktree policy"
+        )
     entries: list[dict] = []
     for ws in workspaces.values():
         projects = ws.get("projects") if isinstance(ws, dict) else None

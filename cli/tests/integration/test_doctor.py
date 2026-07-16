@@ -263,6 +263,40 @@ def test_check_worktree_policy_flags_typo_key(
     assert len(problems) == 1 and "worktre" in problems[0] and "vault" in problems[0]
 
 
+def test_check_worktree_policy_scans_repo_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo'd per-project key in the REPO-LOCAL .fno/config.toml is surfaced
+    (the override, and its typo, can live there, not only in global config)."""
+    import fno.paths as _paths
+    from fno.setup.doctor import check_worktree_policy
+
+    g = tmp_path / "global.yaml"
+    g.write_text("config:\n  obsidian:\n    enabled: false\n")  # clean global
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(g))
+
+    repo = tmp_path / "repo"
+    (repo / ".fno").mkdir(parents=True)
+    (repo / ".fno" / "config.toml").write_text(
+        "[[work.workspaces.default.projects]]\nname = \"repo\"\nworktre = \"never\"\n"
+    )
+
+    # Stub resolve_repo_root to point at our fake repo. It carries a .cache_clear
+    # so the local teardown fixture (which clears the real lru_cache) doesn't trip
+    # over a bare function replacement.
+    class _StubRepoRoot:
+        @staticmethod
+        def cache_clear() -> None:
+            return None
+
+        def __call__(self) -> Path:
+            return repo
+
+    monkeypatch.setattr(_paths, "resolve_repo_root", _StubRepoRoot())
+    problems = check_worktree_policy()
+    assert len(problems) == 1 and "worktre" in problems[0]
+
+
 def test_check_wip_caps_non_mapping_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """wip_caps as a scalar (not a mapping) is reported once."""
     from fno.setup.doctor import check_wip_caps
