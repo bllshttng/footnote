@@ -175,7 +175,7 @@ _ADVERTISED_SUBCOMMANDS = [
 # Distinctive names only: short verbs (pr/cost/state) are substrings of ordinary
 # help prose, so a raw substring leak-check on them is unreliable.
 _HIDDEN_SUBCOMMANDS = [
-    "evals", "providers", "carveout", "consolidation", "scoreboard", "stub-manifest",
+    "evals", "providers", "carveout", "scoreboard", "stub-manifest",
 ]
 
 

@@ -41,7 +41,6 @@ ALLOWLIST_PATHS=(
   internal/fno/reason/
   docs/CHANGELOG.md
   scripts/ci/check-no-stale-skill-refs.sh
-  cli/src/fno/consolidation/
   cli/tests/integration/test_consolidation_audit.py
   # CLI wrappers for demoted skills intentionally reference the old skill
   # names in docstrings and at their canonical scripts/<name>/ source paths;

@@ -240,3 +240,28 @@ def menu_caps() -> None:
             typer.echo(f"menu-caps: FAIL\n{f}", err=True)
         raise typer.Exit(1)
     typer.echo(f"menu-caps: ok (top-level {len(top_visible)}/{MENU_CAP_TOP_LEVEL})")
+
+
+@app.command("stale-skill-refs")
+def stale_skill_refs() -> None:
+    """Audit for stale references to cut, demoted, or merged skills.
+
+    Re-homed from the retired `fno consolidation audit` (x-71b6): a lint gate
+    wearing a command costume belongs under `fno lint`. Thin wrapper over the
+    source-of-truth bash gate scripts/ci/check-no-stale-skill-refs.sh; exit code
+    matches it (0 clean, 1 stale references, 2 script error).
+    """
+    from fno._subprocess_util import propagate_returncode
+    from fno.paths import resolve_repo_root
+
+    repo_root = Path(resolve_repo_root())
+    script = repo_root / "scripts" / "ci" / "check-no-stale-skill-refs.sh"
+    if not script.exists():
+        typer.echo(f"audit script not found at {script}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = subprocess.run(["bash", str(script)], cwd=repo_root)
+    except FileNotFoundError as exc:
+        typer.echo(f"failed to run audit script: {exc}", err=True)
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=propagate_returncode(result.returncode))

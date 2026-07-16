@@ -82,7 +82,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "notify":        ("fno.notify:notify_app",             "OS notification helper (in-package; macOS osascript / Linux notify-send)", {"hidden": True}),
     "paths":         ("fno.paths_cli:app",                 "Path resolution helpers", {"hidden": True}),
     "setup":         ("fno.setup_cli:app",                 "Interactive settings.yaml wizard"),
-    "consolidation": ("fno.consolidation:app",             "Consolidation utilities", {"hidden": True}),
     "tokens":        ("fno.tokens:app",                    "Token usage tracking", {"hidden": True}),
     "codemap":       ("fno.codemap_cli:app",               "Codebase map management", {"hidden": True}),
     "worktree":      ("fno.worktree_cli:app",              "Worktree management", {"hidden": True}),

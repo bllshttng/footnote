@@ -1,8 +1,9 @@
-"""Integration tests for `fno consolidation audit`.
+"""Integration tests for the stale-skill-reference audit gate.
 
-These exercise the bash audit script via the Python wrapper so we get the
-whole call path under test. They run the real script against a temporary
-worktree to avoid coupling to the main repo's current cleanup state.
+These exercise the bash audit script directly, plus the `fno lint
+stale-skill-refs` wrapper (re-homed from `fno consolidation audit`, x-71b6),
+so we get the whole call path under test. They run the real script against a
+temporary worktree to avoid coupling to the main repo's current cleanup state.
 """
 from __future__ import annotations
 
@@ -152,8 +153,12 @@ def test_audit_rejects_malformed_skill_name(tmp_path: Path) -> None:
     not (REPO_ROOT / "cli" / "pyproject.toml").exists(),
     reason="run from the cli workspace",
 )
-def test_abi_consolidation_audit_wrapper_matches_bash() -> None:
-    """`fno consolidation audit` exits with the same code as the bash script."""
+def test_abi_stale_skill_refs_wrapper_matches_bash() -> None:
+    """`fno lint stale-skill-refs` exits with the same code as the bash script.
+
+    Re-homed from `fno consolidation audit` (x-71b6): the audit is a lint gate,
+    so it now lives under `fno lint`.
+    """
     env = {**os.environ}
     cli_dir = REPO_ROOT / "cli"
     bash_proc = subprocess.run(
@@ -164,7 +169,7 @@ def test_abi_consolidation_audit_wrapper_matches_bash() -> None:
         env=env,
     )
     abi_proc = subprocess.run(
-        ["uv", "run", "fno-py", "consolidation", "audit"],
+        ["uv", "run", "fno-py", "lint", "stale-skill-refs"],
         cwd=cli_dir,
         capture_output=True,
         text=True,
