@@ -147,6 +147,16 @@ When marking a task BLOCKED, scan remaining waves for dependent tasks:
 - If a later wave's tasks depend on the blocked task's phase, mark them BLOCKED too
 - Reason: `"Upstream dependency [task-id] is BLOCKED"`
 
+**Revision-round crumb (builder trail, best-effort).** A retried task IS a revision round, so drop ONE `builder_step` into `.fno/events.jsonl` at the retry boundary - not on the clean first pass (`task_started` + `task_done` already cover that). Emit when a previously-FAILED task resolves: retried-to-green -> `worked`, still failing -> `failed`, BLOCKED after 3 attempts -> `abandoned`.
+
+```bash
+fno event emit --type builder_step \
+  -d '{"tried":"<what the first attempt did>","found":"<why it failed>","fix":"<what changed on retry>","outcome":"worked|failed|abandoned"}' \
+  || echo "warning: builder_step crumb not recorded (continuing)" >&2
+```
+
+Truncate `tried`/`found`/`fix` to ~500 chars each; `tried`/`outcome` required, `found`/`fix` optional. Degrade, never block.
+
 ## Partial Wave Failure (Detailed)
 
 When some tasks in a parallel wave fail:

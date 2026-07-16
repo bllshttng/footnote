@@ -128,8 +128,21 @@ Load `iteration-loop.md` and run this atomic loop:
 6. run the guard command if provided
 7. keep, revert, or rework
 8. log to `fix-results.tsv`
+9. emit ONE `builder_step` crumb (below)
 
 Maximum rework attempts per item: 2. After that, add it to the blocked list and continue.
+
+#### Per-iteration crumb (builder trail)
+
+After the keep/revert/rework decision, append one `builder_step` to `.fno/events.jsonl` so a resume or self-handoff successor picks up from the attempt trail instead of repeating a failed approach. One crumb per iteration, at the boundary - never per tool call. Map the loop's own result: kept -> `worked`, reverted -> `failed`, blocked-after-rework -> `abandoned`.
+
+```bash
+fno event emit --type builder_step \
+  -d '{"tried":"<the fix attempted>","found":"<what detection/guard showed>","fix":"<the change made>","outcome":"worked|failed|abandoned"}' \
+  || echo "warning: builder_step crumb not recorded (continuing)" >&2
+```
+
+Truncate `tried`/`found`/`fix` to ~500 chars each (a crumb is a pointer, not a transcript). `found`/`fix` are optional; `tried` and `outcome` are required. Degrade, never block: a failed emit prints exactly the one warning above and the loop continues - no retry.
 
 #### 4. Summary
 
