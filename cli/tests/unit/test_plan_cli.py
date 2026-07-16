@@ -190,6 +190,19 @@ def test_plan_doc_filename_honors_custom_template(monkeypatch):
     assert name == "2026-07-11-dark-mode-x-8af8.md"
 
 
+def test_plan_doc_path_threads_now_for_stable_date(tmp_path, monkeypatch):
+    import datetime
+
+    from fno import paths
+
+    # Anchor plans_content_dir to tmp_path so the assertion is on the filename.
+    monkeypatch.setattr(paths, "plans_content_dir", lambda project_root=None: tmp_path)
+    stamp = datetime.datetime(2026, 1, 2)
+    p = paths.plan_doc_path("dark-mode", "x-8af8", project_root=tmp_path, now=stamp)
+    # Date comes from `now`, not today - the whole re-decompose idempotency mechanism.
+    assert p.name == "20260102-dark-mode-x-8af8.md"
+
+
 def test_plans_filename_config_rejects_bad_template():
     import pytest
     from pydantic import ValidationError
