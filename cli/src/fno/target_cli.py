@@ -855,11 +855,16 @@ def start(
 
     # 1. Create/reuse the worktree off origin/main (x-73ca). ensure prints the
     #    worktree path on stdout and is idempotent (reuse) + refuses to nest.
-    ens = subprocess.run(
-        fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name],
-        capture_output=True,
-        text=True,
-    )
+    #    Forward the current session's harness so a claude cold-start lands
+    #    harness-native at <repo>/.claude/worktrees/<name>; a bare terminal with no
+    #    ambient marker omits it and ensure degrades to the external base.
+    from fno.harness_identity import resolve_harness_identity
+
+    harness = resolve_harness_identity().harness
+    ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
+    if harness:
+        ensure_cmd += ["--harness", harness]
+    ens = subprocess.run(ensure_cmd, capture_output=True, text=True)
     wt = ens.stdout.strip()
     if ens.returncode != 0 or not wt:
         typer.echo(
@@ -870,28 +875,37 @@ def start(
         raise typer.Exit(code=1)
     wt_path = Path(wt)
 
+    # policy=never: ensure returned the repo main checkout itself (launch in place,
+    # no worktree). Skip the worktree-only heal + setup-worktree.sh - both mutate
+    # the CANONICAL .fno (unlink a real symlink, re-link shared state), the exact
+    # corruption Locked Decision 4 forbids. Init still runs, in place.
+    in_place = wt_path.resolve() == repo_root.resolve()
+
     # 2. Heal .fno when it arrived as a whole-dir symlink (the memory-only fix,
     #    now in code), then link shared state via the canonical setup hook.
-    fno_dir = wt_path / ".fno"
     healed = False
-    if fno_dir.is_symlink():
-        fno_dir.unlink()
-        fno_dir.mkdir()
-        healed = True
-    from fno.worktree import _run_setup_worktree_hook
+    if not in_place:
+        fno_dir = wt_path / ".fno"
+        if fno_dir.is_symlink():
+            fno_dir.unlink()
+            fno_dir.mkdir()
+            healed = True
+        from fno.worktree import _run_setup_worktree_hook
 
-    rc, tail = _run_setup_worktree_hook(repo_root, wt_path)
-    if rc not in (0, -1):
-        # Non-fatal: the worktree is still usable; name it but do not abort.
-        typer.echo(
-            f"fno target start: setup-worktree.sh exited {rc} (non-fatal): {tail}",
-            err=True,
-        )
+        rc, tail = _run_setup_worktree_hook(repo_root, wt_path)
+        if rc not in (0, -1):
+            # Non-fatal: the worktree is still usable; name it but do not abort.
+            typer.echo(
+                f"fno target start: setup-worktree.sh exited {rc} (non-fatal): {tail}",
+                err=True,
+            )
+
+    base_label = "in-place" if in_place else "origin/main"
 
     # Idempotent re-run from canonical: a manifest already in the worktree means
     # init has run (write-once) - skip it, never double-claim or error.
     manifest = wt_path / ".fno" / "target-state.md"
-    fno_state = "healed" if healed else "ok"
+    fno_state = "in-place" if in_place else ("healed" if healed else "ok")
     if manifest.exists() and not manifest.is_symlink():
         # A manifest means init ran, so the claim is set - refuse if a DIFFERENT
         # live session owns it rather than presenting its worktree as usable.
@@ -900,7 +914,7 @@ def start(
             _print_foreign_holder_park(node, holder, wt_path)
             raise typer.Exit(code=1)
         typer.echo(
-            f"worktree={wt_path}  .fno={fno_state}  base=origin/main  "
+            f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
             f"node=already-claimed"
         )
         return
@@ -938,6 +952,6 @@ def start(
     #    auditable (x-d7a7); absent -> today's line, byte-identical.
     model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
-        f"worktree={wt_path}  .fno={fno_state}  base=origin/main  node=claimed{model_note}"
+        f"worktree={wt_path}  .fno={fno_state}  base={base_label}  node=claimed{model_note}"
     )
     typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
