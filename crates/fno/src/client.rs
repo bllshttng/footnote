@@ -827,9 +827,8 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry("■", "Stop"), &[MenuAction::Stop]);
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
-        // Open-here leads (repoint the focused viewer); the server's
-        // fail-closed notice is the feedback path when the focus isn't a
-        // detachable viewer (the client can't know viewer-ness).
+        // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
+        // server's fail-closed notice is the feedback path when the focus isn't a detachable viewer.
         add(
             PopupRow::FullWidth("⊙ Open Here".into()),
             &[MenuAction::OpenHere],
@@ -3094,12 +3093,9 @@ fn agent_hit(a: &AgentRow, active_squad: u64) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
         None => match &a.attach_id {
-            // Watch-only attachable row (x-9f75 row-kind default): a
-            // same-workspace sibling (its squad is the active one) splits the
-            // current tab so siblings sit side by side; a cross-workspace /
-            // orphan row keeps the new-tab-in-owner default (owner routing +
-            // view switch, today's behavior). Peek stays an explicit gesture,
-            // never a click default.
+            // Watch-only attachable row (x-9f75 row-kind default): a same-workspace sibling (its squad is the
+            // active one) splits the current tab so siblings sit side by side; a cross-workspace / orphan row
+            // keeps the new-tab-in-owner default. Peek stays an explicit gesture, never a click default.
             Some(id) if a.squad == Some(active_squad) => {
                 ChromeHit::Cmds(vec![Command::AttachAgent {
                     id: id.clone(),
@@ -6981,9 +6977,8 @@ mod tests {
 
     #[test]
     fn agent_hit_same_workspace_watch_only_splits_current_tab() {
-        // AC2-UI (x-9f75): a watch-only attachable row whose squad IS the active
-        // squad attaches as a Right split of the current tab (siblings sit side
-        // by side), not a new tab.
+        // AC2-UI (x-9f75): a watch-only attachable row whose squad IS the active squad attaches as a Right
+        // split of the current tab (siblings sit side by side), not a new tab.
         let row = AgentRow {
             squad: Some(1),
             name: "sib".into(),
@@ -8181,9 +8176,8 @@ mod tests {
 
     #[tokio::test]
     async fn row_menu_open_here_sends_here_placement() {
-        // AC1-UI (x-9f75): "Open Here" on a bg row sends AttachAgent with
-        // here:true and the default (CurrentRoute, no split) placement; the
-        // menu closes.
+        // AC1-UI (x-9f75): "Open Here" on a bg row sends AttachAgent with here:true and the default
+        // (CurrentRoute, no split) placement; the menu closes.
         let mut v = unified_rows_view();
         let idx = agent_row_at(&v, |a| a.name == "bg-claude");
         assert!(v.open_row_menu(idx, Anchor::Center));

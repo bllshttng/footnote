@@ -358,15 +358,10 @@ fn split_node(
 // replace_leaf (open-here, x-9f75)
 // ---------------------------------------------------------------------------
 
-/// Repoint the leaf hosting `old` at `new`, leaving the tree's geometry
-/// (branch structure, ratios) untouched - only the pane id at that one slot
-/// changes. Returns `true` if `old` was found and swapped; a `false` means the
-/// tree is unchanged. Focus follows the swap when `old` held it.
-///
-/// This is the open-here primitive: a viewport re-points at a different
-/// session's pane without a split or a new tab. Unlike [`split_directional`] it
-/// creates no `Branch`, so it cannot fail on min-size - a swap-in-place always
-/// fits wherever the displaced pane fit.
+/// Repoint the leaf hosting `old` at `new`, leaving geometry (branch structure, ratios) untouched - only the
+/// pane id at that slot changes; focus follows when `old` held it. Returns `false` (tree unchanged) if `old`
+/// is absent. The open-here primitive: unlike [`split_directional`] it creates no `Branch`, so a swap-in-place
+/// always fits and can never fail on min-size.
 pub fn replace_leaf(tab: &mut Tab, old: PaneId, new: PaneId) -> bool {
     if replace_leaf_node(&mut tab.root, old, new) {
         if tab.focus == old {

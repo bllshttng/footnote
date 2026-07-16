@@ -370,10 +370,9 @@ pub struct PanePlacement {
     pub target: PaneTarget,
     #[serde(default)]
     pub split: Option<Dir>,
-    /// (v31, x-9f75) Open-here: repoint the sender's focused pane at the target
-    /// session rather than minting a tab/split. Valid only with the default
-    /// `target` (CurrentRoute) and no `split`; the server refuses a conflicting
-    /// combination. `#[serde(default)]` keeps v30 placements wire-tolerant.
+    /// (v31, x-9f75) Open-here: repoint the sender's focused pane at the target session rather than minting a
+    /// tab/split. Valid only with the default `target` (CurrentRoute) and no `split`; the server refuses a
+    /// conflicting combination. `#[serde(default)]` keeps v30 placements wire-tolerant.
     #[serde(default)]
     pub here: bool,
 }
@@ -1709,10 +1708,8 @@ mod tests {
 
     #[test]
     fn pane_placement_from_pre_here_json_defaults_here_false() {
-        // AC3-EDGE (x-9f75): a v30 PanePlacement omits `here` entirely. A v31
-        // reader must decode it as `false` (today's tab/split semantics),
-        // never fail - the handshake skew window, same contract as every prior
-        // serde-default bump.
+        // AC3-EDGE (x-9f75): a v30 PanePlacement omits `here`; a v31 reader must decode it as `false`
+        // (today's tab/split semantics), never fail - the same skew contract as every prior serde-default bump.
         let v30 = r#"{"target":"CurrentRoute","split":null}"#;
         let p: PanePlacement = serde_json::from_str(v30).unwrap();
         assert!(!p.here, "missing here key => false");
