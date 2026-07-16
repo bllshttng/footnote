@@ -298,17 +298,14 @@ maybe_auto_worktree() {
   # so $wt is empty and we launch in the original CWD -- isolation is best-effort
   # and never blocks the spawn. (NOTE: ensure bases the branch on origin/main,
   # which also retires the stale-base phantom-deletion bug here.)
-  # Forward the RESOLVED harness (not the raw provider: glm resolves to the claude
-  # harness, ccm/ccr are claude accounts) so ensure's policy gate can land a claude
-  # payload harness-native at <repo>/.claude/worktrees/. A blank/unresolvable
-  # harness omits the flag -> ensure degrades harness-native to external, never
-  # guessing a location.
-  local harness
-  harness="$(fno dispatch resolve --harness "$PROVIDER" 2>/dev/null | sed -n 's/^harness=//p' | head -1)"
-  local ensure_args=(worktree ensure --repo "$top" --name "$NAME")
-  [[ -n "$harness" ]] && ensure_args+=(--harness "$harness")
+  # $PROVIDER is already a harness kind - VALID_PROVIDERS (claude|codex|gemini|agy|
+  # opencode, mirroring the Rust KNOWN_PROVIDERS) IS the harness set; glm/z.ai is a
+  # model route layered on --provider claude, and ccm/ccr are claude account config
+  # dirs, so neither reaches here as a bareword provider. Forward it directly as
+  # --harness: ensure lands a claude payload harness-native at <repo>/.claude/
+  # worktrees/, degrades any non-claude (or unexpected) harness to the external base.
   local wt
-  wt="$(fno "${ensure_args[@]}" 2>/dev/null)"
+  wt="$(fno worktree ensure --repo "$top" --name "$NAME" --harness "$PROVIDER" 2>/dev/null)"
   if [[ -n "$wt" ]]; then
     CWD="$wt"; AUTO_WT="$wt"
     # policy=never launches in place: ensure prints the repo main checkout itself.

@@ -42,12 +42,6 @@ case "$1 $2" in
   "agents list")         printf '{"agents":[]}\n'; exit 0 ;;
   "agents spawn"|"agents host") printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
   "claim release")       exit 0 ;;
-  "dispatch resolve")
-    # provider -> resolved harness (glm rides the claude harness); spawn.sh reads
-    # the `harness=` line to forward --harness to ensure.
-    prov=""; while [[ $# -gt 0 ]]; do [[ "$1" == "--harness" ]] && prov="${2:-}"; shift; done
-    case "$prov" in claude|glm) printf 'harness=claude\n' ;; "" ) : ;; *) printf 'harness=%s\n' "$prov" ;; esac
-    exit 0 ;;
   "worktree ensure")
     shift 2  # drop "worktree ensure"; parse "--repo R --name N [--harness H]"
     # Record the full arg vector so a test can assert --harness forwarding.
