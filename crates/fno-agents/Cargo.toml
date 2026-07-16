@@ -1,7 +1,7 @@
 [package]
 name = "fno-agents"
 # Keep in lockstep with crates/fno and cli (Python).
-version = "0.3.1"
+version = "0.3.0"
 edition = "2021"
 # MSRV: std's File::lock/lock_shared/try_lock/unlock stabilized in Rust 1.89
 # (ab-6aff100c), which let this crate drop the fs2 dependency for advisory
