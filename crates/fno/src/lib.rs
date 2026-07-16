@@ -5,6 +5,7 @@
 pub mod agents_view;
 pub mod backlog_view;
 pub mod bootstrap;
+pub mod chrome_bridge;
 pub mod client;
 pub mod clipboard;
 pub mod connections_view;
