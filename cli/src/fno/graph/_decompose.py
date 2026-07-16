@@ -150,6 +150,39 @@ def separate_plan_path(base: str, slug: str) -> str:
     return str(p.with_name(f"{stem}.group-{slug}.md"))
 
 
+def canonical_child_plan_path(
+    slug: str, child_id: str, child_root: str, created_at: Optional[str]
+) -> str:
+    """The canonical `fno plan path` for a group child's scaffold stub.
+
+    Returns the `plan_doc_path` shape (`<child-project plans dir>/YYYYMMDD-<slug>-<id>.md`)
+    routed into `child_root`'s plans dir. Pure recompute from durable node
+    fields, so the same child maps to the same path on every run - `created_at`
+    (not today) sources the date, which is what makes a re-decompose on a later
+    day idempotent. An unparseable/absent `created_at` degrades to today's date
+    with a stderr warning rather than crashing decompose (defensive: mint always
+    writes an ISO+00:00 string, so this is a hand-corruption path only).
+    """
+    import sys
+    from datetime import datetime
+
+    from fno.paths import plan_doc_path
+
+    now: Optional[datetime] = None
+    if created_at:
+        try:
+            now = datetime.fromisoformat(created_at)
+        except (TypeError, ValueError):
+            now = None
+    if now is None:
+        print(
+            f"warning: child {child_id} has unparseable created_at "
+            f"{created_at!r}; using today's date for its plan filename",
+            file=sys.stderr,
+        )
+    return str(plan_doc_path(slug, child_id, project_root=Path(child_root), now=now))
+
+
 # Stub markers the validator refuses to link/ready (x-edf7 US1). An unfilled
 # scaffold carries these; inline-fill (or the fan-out design pass) must replace
 # every one before the child is linked. Kept next to the scaffold that emits

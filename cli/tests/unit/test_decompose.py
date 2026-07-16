@@ -820,6 +820,34 @@ def _grp(slug="1", title="Group 1: foundation", waves="1-2"):
     return validate_groups([{"slug": slug, "title": title, "waves": waves}], None)[0]
 
 
+# canonical_child_plan_path (pure) --------------------------------------------
+
+
+def test_canonical_child_plan_path_shape_and_routing():
+    from fno.graph._decompose import canonical_child_plan_path
+
+    p = canonical_child_plan_path(
+        "etl-search", "x-abcd", "/repos/web", "2026-03-04T00:00:00+00:00"
+    )
+    # Filename is the `fno plan path` shape with the child's created_at date...
+    assert Path(p).name == "20260304-etl-search-x-abcd.md"
+    # ...routed under the CHILD root's plans dir, not the epic's.
+    assert p.startswith("/repos/web/")
+
+
+def test_canonical_child_plan_path_corrupt_created_at_degrades(capsys):
+    import datetime
+
+    from fno.graph._decompose import canonical_child_plan_path
+
+    # AC2-FR: an unparseable created_at falls back to today + a stderr warning,
+    # never raises.
+    p = canonical_child_plan_path("etl", "x-dead", "/repos/web", "not-a-date")
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    assert Path(p).name == f"{today}-etl-x-dead.md"
+    assert "created_at" in capsys.readouterr().err
+
+
 # scaffold_separate_plan shape (US1 stub-proof + US4 why) ----------------------
 
 
