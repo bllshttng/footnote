@@ -199,6 +199,9 @@ check_eq   'opencode passthrough status'  "$(field "$out" status)"  'ok'
 check_eq   'opencode passthrough /fno:'   "$(field "$out" message)" '/fno:blueprint quick doc.md'
 out="$(run_nofno '/zzz args' --provider opencode)"
 check_eq   'opencode arbitrary verb'      "$(field "$out" message)" '/fno:zzz args'
+# idempotent: an already-namespaced command (copied from the palette) is not double-prefixed
+out="$(run_nofno '/fno:blueprint quick doc.md' --provider opencode)"
+check_eq   'opencode passthrough idempotent' "$(field "$out" message)" '/fno:blueprint quick doc.md'
 
 # claude passthrough unchanged (empty prefix) - regression guard for parity
 out="$(run_nofno '/target ship it' --provider claude)"

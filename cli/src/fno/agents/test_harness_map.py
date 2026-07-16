@@ -204,6 +204,23 @@ def test_normalize_fallback_table_mirrors_harness_map():
     for prov in ("claude", "agy", "opencode", "codex", "gemini"):
         assert prov in shell_map, f"normalize.sh fallback omits {prov!r}"
 
+    # slash_prefix must mirror too, or opencode would render `/target` not
+    # `/fno:target`. The shell helper lists only non-empty prefixes explicitly
+    # (opencode); claude/agy fall to `*` -> "", matching harness_map's default.
+    mp = re.search(r"slash_prefix\(\).*?case \"\$1\" in(.*?)esac", norm.read_text(), re.S)
+    assert mp, "slash_prefix case block not found in normalize.sh"
+    shell_prefix: dict[str, str] = {}
+    for arm in re.finditer(r"([a-z|*]+)\)\s*printf '([a-z:-]*)'", mp.group(1)):
+        for prov in arm.group(1).split("|"):
+            if prov != "*":
+                shell_prefix[prov] = arm.group(2)
+    for prov in ("claude", "agy", "opencode"):
+        expected = capabilities(prov).get("slash_prefix", "")
+        assert shell_prefix.get(prov, "") == expected, (
+            f"normalize.sh slash_prefix maps {prov!r}->{shell_prefix.get(prov, '')!r} "
+            f"but harness_map says {expected!r}"
+        )
+
 
 def test_gemini_dispatch_is_refused_naming_agy():
     """AC2-ERR: a deprecated gemini harness has no dispatch lane; EVERY resolve

@@ -730,7 +730,17 @@ case "$payload_mode" in
     # no dispatch lane, so refuse loudly naming its successor (agy).
     surface="$(resolve_command_surface "$provider")"
     case "$surface" in
-      slash)       message="/$(slash_prefix "$provider")${msg#/}" ;;
+      slash)
+        # Prefix-swap, idempotent: a command already in the native namespaced
+        # form (`/fno:target`, e.g. copied from opencode's palette) must NOT be
+        # double-prefixed to `/fno:fno:target` (mirrors normalize_command).
+        _prefix="$(slash_prefix "$provider")"
+        if [[ -n "$_prefix" && "$msg" == "/$_prefix"* ]]; then
+          message="$msg"
+        else
+          message="/${_prefix}${msg#/}"
+        fi
+        ;;
       codex-skill) message="\$fno:${msg#/}" ;;
       *)           emit_error "$provider is deprecated (successor: agy) and has no dispatch lane; '$msg' cannot be dispatched there (route to a claude/codex/opencode/agy harness)" ;;
     esac
