@@ -312,9 +312,22 @@ def resolve_worktree_policy(
     if policy == "harness-native" and harness not in _NATIVE_WORKTREE_HARNESSES:
         policy = "external"
 
-    # ponytail: base reads the ambient settings (cwd + global) via the same
-    # worktree_base() the ensure path uses, so the receipt and the creation
-    # target never diverge. ensure is always called with --repo == cwd repo.
     return WorktreePolicy(
-        policy=policy, base=worktree_base(), project=project_id, source=source
+        policy=policy, base=_worktrees_base_from(merged), project=project_id, source=source
     )
+
+
+def _worktrees_base_from(merged: dict) -> Path:
+    """Repo-scoped worktrees base from the merged (repo>global) config.
+
+    Reads the same config the policy resolves against, so the receipt and the
+    creation target never diverge on cwd. Falls back to the ambient default
+    (~/.fno/worktrees) when no override is set. ponytail: does not expand
+    ``{project}``-style templates (unused for a base dir); worktree_base()
+    carries the full template machinery for the default path.
+    """
+    paths_cfg = merged.get("paths")
+    raw = paths_cfg.get("worktrees_base") if isinstance(paths_cfg, dict) else None
+    if isinstance(raw, str) and raw:
+        return Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+    return worktree_base()
