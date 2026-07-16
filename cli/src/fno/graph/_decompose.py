@@ -171,8 +171,10 @@ def canonical_child_plan_path(
     now: Optional[datetime] = None
     if created_at:
         try:
-            now = datetime.fromisoformat(created_at)
-        except (TypeError, ValueError):
+            # Normalize a trailing `Z` to `+00:00`: fromisoformat only accepts `Z`
+            # on Python >= 3.11, and other producers (store.py) write the `Z` form.
+            now = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except (TypeError, ValueError, AttributeError):
             now = None
     if now is None:
         print(
