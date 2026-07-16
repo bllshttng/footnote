@@ -136,7 +136,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `collision.severity_thresholds.high_ratio` | float | `0.5` | never | Collision scoring: high-severity shared-file ratio. |
 | `collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
 | `collision.severity_thresholds.medium_ratio` | float | `0.25` | never | Collision scoring: medium-severity shared-file ratio. |
-| `work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). |
+| `work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). A project entry may carry a `worktree` key (never|harness-native|external) overriding config.worktree.policy. |
+| `worktree.policy` | str (optional) | _(none)_ | advanced | Global worktree-isolation policy (never|harness-native|external); default harness-native. `never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project work.workspaces.<slug>.projects[].worktree key overrides it. |
 | `model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn. |
 | `model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in. |
 | `model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider/model', e.g. tidy: 'zai/glm-4.7'; legacy 'provider,model' comma form also accepted); manage via `fno route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg). |

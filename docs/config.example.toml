@@ -351,8 +351,12 @@ medium_count = 2
 medium_ratio = 0.25
 
 [work]
-# Workspace -> project topology map (config.work.workspaces.<slug>.projects[]).
+# Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). A project entry may carry a `worktree` key (never|harness-native|external) overriding config.worktree.policy.
 workspaces = {}
+
+[worktree]
+# Global worktree-isolation policy (never|harness-native|external); default harness-native. `never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project work.workspaces.<slug>.projects[].worktree key overrides it.
+# policy = <unset>   # optional; no default
 
 [model_routing]
 # Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.

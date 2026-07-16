@@ -297,8 +297,16 @@ FIELD_META: dict[str, Meta] = {
     "collision.severity_thresholds.medium_ratio": Meta("never", "Collision scoring: medium-severity shared-file ratio."),
     # --- config.work map ---
     "work.workspaces": Meta(
-        "advanced", "Workspace -> project topology map (config.work.workspaces.<slug>.projects[]).",
+        "advanced", "Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). "
+        "A project entry may carry a `worktree` key (never|harness-native|external) overriding config.worktree.policy.",
         default_source="auto-detect",
+    ),
+    # --- config.worktree.* ---
+    "worktree.policy": Meta(
+        "advanced",
+        "Global worktree-isolation policy (never|harness-native|external); default harness-native. "
+        "`never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project "
+        "work.workspaces.<slug>.projects[].worktree key overrides it.",
     ),
     # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
     "model_routing.enabled": Meta(
