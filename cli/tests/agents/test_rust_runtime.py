@@ -715,16 +715,32 @@ def test_python_mode_forces_python_for_ask(monkeypatch, tmp_path, provider) -> N
 # an installed binary (instead of a bare "No such command").
 # --------------------------------------------------------------------------- #
 
-def test_agents_help_lists_every_rust_only_verb() -> None:
-    """`fno agents --help` lists all Rust-only verbs with their descriptions."""
+def test_agents_help_advertises_status_hides_plumbing() -> None:
+    """x-71b6 tiering: `fno agents --help` advertises only `status` among the
+    Rust-only verbs; the runtime/channel plumbing is display-hidden but stays
+    fully resolvable (hiding changed display, never dispatch)."""
+    import click
+    import typer.main
+
+    from fno.agents.cli import agents_app
     from fno.cli import app
 
+    group = typer.main.get_command(agents_app)
+    ctx = click.Context(group)
+
+    for verb in rr.RUST_ONLY_VERB_HELP:
+        cmd = group.get_command(ctx, verb)
+        assert cmd is not None, f"Rust-only verb {verb!r} must stay resolvable when hidden"
+        expected_hidden = verb not in rr.RUST_ONLY_ADVERTISED
+        assert cmd.hidden is expected_hidden, (
+            f"{verb!r}: hidden={cmd.hidden}, expected {expected_hidden} "
+            f"(advertised set: {sorted(rr.RUST_ONLY_ADVERTISED)})"
+        )
+
+    # `status` is the one advertised Rust-only verb; it appears in the listing.
     result = CliRunner().invoke(app, ["agents", "--help"])
     assert result.exit_code == 0
-    for verb in rr.RUST_ONLY_VERB_HELP:
-        assert verb in result.output, f"`fno agents --help` is missing the Rust-only verb {verb!r}"
-    # A representative rust-only verb must be discoverable.
-    assert "trace" in result.output
+    assert "status" in result.output
 
 
 def test_rust_only_verb_help_covers_unregistered_verbs() -> None:

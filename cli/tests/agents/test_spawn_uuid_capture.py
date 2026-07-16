@@ -2,7 +2,7 @@
 
 Every ``/agents spawn claude`` worker must register with both its 8-hex
 jobId (in ``short_id``) AND a best-effort full ``claude_session_uuid``
-(the stream-json ``--resume`` target the live ``/agents chat`` lane keys on).
+(the stream-json ``--resume`` target the live switchboard lane keys on).
 
 Coverage:
   - ``resolve_session_uuid_at_spawn`` retry/backoff/never-raise unit logic.

@@ -157,31 +157,108 @@ def test_bad_module_path_fails_loud():
 # ---------------------------------------------------------------------------
 
 # Stable subcommands that must appear in `fno --help` after the refactor.
-_EXPECTED_SUBCOMMANDS = [
-    "backlog",
-    "evals",
-    "event",
-    "pr",
-    "paths",
-    "mail",
-    "agent",
-    "providers",
-    "review",
-    "cost",
+# The curated top-level menu (x-71b6 In-N-Out tiering). `fno --help` advertises
+# only these; everything else is hidden but invocable, listed by `fno help --all`.
+_ADVERTISED_SUBCOMMANDS = [
     "help",
+    "backlog",
+    "agents",
+    "config",
+    "setup",
+    "whoami",
+    "doctor",
+    "test",
+    "update",
+]
+
+# A sample of the hidden tier - present under `help --all`, absent from `--help`.
+# Distinctive names only: short verbs (pr/cost/state) are substrings of ordinary
+# help prose, so a raw substring leak-check on them is unreliable.
+_HIDDEN_SUBCOMMANDS = [
+    "evals", "providers", "carveout", "scoreboard", "stub-manifest",
 ]
 
 
-def test_abi_help_lists_all_subcommands():
-    """AC2-HP: fno --help lists all expected subcommands after the refactor."""
+def _strip_ansi(text: str) -> str:
+    import re
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def test_abi_help_lists_only_advertised_menu():
+    """AC1-HP: fno --help advertises the curated menu and hides the rest."""
     from fno.cli import app
     from typer.testing import CliRunner
 
     runner = CliRunner()
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, f"fno --help failed: {result.output}"
-    for cmd in _EXPECTED_SUBCOMMANDS:
-        assert cmd in result.output, f"Subcommand {cmd!r} missing from fno --help"
+    plain = _strip_ansi(result.output)
+    for cmd in _ADVERTISED_SUBCOMMANDS:
+        assert cmd in plain, f"advertised {cmd!r} missing from fno --help"
+    for cmd in _HIDDEN_SUBCOMMANDS:
+        assert cmd not in plain, f"hidden {cmd!r} leaked into fno --help"
+
+
+def test_help_all_lists_every_command_including_hidden():
+    """AC3-UI: `fno help --all` is the full-surface door - advertised + hidden."""
+    from fno.cli import app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["help", "--all"])
+    assert result.exit_code == 0, f"fno help --all failed: {result.output}"
+    # Names itself as the full (top-level) surface and points at the scoped door.
+    assert "full top-level surface" in result.output
+    assert "fno help <group> --all" in result.output
+    for cmd in _ADVERTISED_SUBCOMMANDS + _HIDDEN_SUBCOMMANDS:
+        assert cmd in result.output, f"{cmd!r} missing from fno help --all"
+
+
+def test_help_group_all_lists_hidden_subverbs():
+    """Codex P2: `fno help <group> --all` gives a discovery path for hidden
+    nested verbs (e.g. `fno agents ask`, `fno backlog ready`) that neither the
+    parent `--help` nor the top-level `help --all` surfaces."""
+    import re
+
+    from fno.cli import app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    for group, hidden_verb in (("agents", "ask"), ("backlog", "ready"), ("mail", "migrate-bus")):
+        result = runner.invoke(app, ["help", group, "--all"])
+        assert result.exit_code == 0, f"help {group} --all failed: {result.output}"
+        plain = _strip_ansi(result.output)
+        assert f"fno {group} full command surface" in plain
+        assert re.search(rf"^\s*{re.escape(hidden_verb)}\b", plain, re.MULTILINE), (
+            f"hidden verb {hidden_verb!r} missing from `fno help {group} --all`"
+        )
+
+
+def test_help_all_never_imports_command_modules(monkeypatch):
+    """AC3-UI: `help --all` renders from registry strings, so a broken command
+    module still yields a full listing and a 0 exit (no module import)."""
+    import builtins
+    from fno.cli import LAZY_SUBCOMMANDS, app
+    from typer.testing import CliRunner
+
+    # The set of command-implementation modules the registry points at. If
+    # help --all imported any of them to build its listing, this would break it.
+    command_modules = {
+        entry[0].split(":", 1)[0] for entry in LAZY_SUBCOMMANDS.values()
+    }
+    real_import = builtins.__import__
+
+    def _boom(name, *args, **kwargs):
+        if name in command_modules:
+            raise ImportError(f"simulated broken command module: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _boom)
+    runner = CliRunner()
+    result = runner.invoke(app, ["help", "--all"])
+    assert result.exit_code == 0, f"help --all should survive broken modules: {result.output}"
+    plain = _strip_ansi(result.output)
+    assert "evals" in plain and "backlog" in plain
 
 
 # ---------------------------------------------------------------------------

@@ -13,13 +13,13 @@ runner = CliRunner()
 
 
 def test_help_no_args_shows_root_help():
-    """AC-HP: `fno help` mirrors `fno --help`."""
+    """AC-HP: `fno help` mirrors `fno --help` (the advertised menu, x-71b6)."""
     result = runner.invoke(app, ["help"])
     assert result.exit_code == 0, result.output
-    # Output should mention some top-level subcommand names. ("gate" was
-    # deleted by the control-plane collapse wedge, ab-d0337fbc.)
-    assert "claim" in result.output
+    # Advertised top-level verbs appear; hidden ones (e.g. `claim`) do not -
+    # they live one `fno help --all` away.
     assert "backlog" in result.output
+    assert "agents" in result.output
 
 
 def test_help_root_matches_dashdash_help():
@@ -32,9 +32,15 @@ def test_help_root_matches_dashdash_help():
     via_dashdash = runner.invoke(app, ["--help"])
     assert via_help.exit_code == 0
     assert via_dashdash.exit_code == 0
-    for needle in ("claim", "backlog", "event", "pr"):
+    # Advertised verbs appear in both curated catalogs (x-71b6 tiering).
+    for needle in ("backlog", "agents", "config", "setup"):
         assert needle in via_help.output, f"missing {needle} in `fno help` output"
         assert needle in via_dashdash.output, f"missing {needle} in `fno --help` output"
+    # Hidden verbs are reachable only through the full-surface door.
+    via_all = runner.invoke(app, ["help", "--all"])
+    assert via_all.exit_code == 0
+    for needle in ("claim", "event", "pr"):
+        assert needle in via_all.output, f"missing {needle} in `fno help --all` output"
 
 
 def test_help_subcommand_forwards():

@@ -27,7 +27,6 @@ So "declutter the human `--help`" only touches the handful of *Python-registered
 | `status` | raw | Daemon liveness + per-agent state. |
 | `rm` / `restart` / `resume` / `attach` | raw | Registry / session admin. |
 | `top` | raw | Live agent-activity view. |
-| `chat` | yes | Costed live A↔B relay (always-confirm). |
 
 ### Machine-internal (the loop and hooks call these; a human rarely does)
 

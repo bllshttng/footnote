@@ -427,7 +427,7 @@ def bg_create(
 # ===========================================================================
 #
 # `claude --bg` registers a worker by its 8-hex jobId (`claude_short_id`), but
-# the stream-json `--resume` lane that the live `/agents chat` escalation rides
+# the stream-json `--resume` lane that the live switchboard relay rides
 # keys on the FULL session UUID -- the jobId is only a 32-bit prefix, not
 # collision-safe as a resume key. So at spawn we best-effort resolve the full
 # UUID and persist it alongside the short-id, making every spawned worker a

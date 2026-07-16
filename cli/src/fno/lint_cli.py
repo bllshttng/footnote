@@ -6,10 +6,35 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import click
 import typer
 
 
 app = typer.Typer(help="Repository lint checks", no_args_is_help=True)
+
+
+# x-71b6 In-N-Out menu ratchet: the advertised command surface stays small.
+# These are the two knobs a maintainer touches to widen the menu, on purpose,
+# in a one-line diff that shows up in review - the display-surface counterpart
+# of the control-plane LOC ratchet. New verbs default to hidden; promotion is a
+# deliberate act that must fit under these caps.
+MENU_CAP_TOP_LEVEL = 10
+MENU_CAP_SUB_APP = 12
+
+
+def _visible_command_names(group: click.Group) -> list[str]:
+    """Non-hidden subcommand names of a Click group, no module imports.
+
+    Lazy top-level entries resolve to hidden-aware stubs, so this reads the
+    curated surface straight from the registry the same way `fno --help` does.
+    """
+    ctx = click.Context(group)
+    names: list[str] = []
+    for name in group.list_commands(ctx):
+        cmd = group.get_command(ctx, name)
+        if cmd is not None and not cmd.hidden:
+            names.append(name)
+    return names
 
 
 def _repo_root() -> Path:
@@ -155,3 +180,98 @@ def shellout_drift(
     for line in report.lines:
         typer.echo(line, err=stream_err)
     raise typer.Exit(report.exit_code)
+
+
+@app.command("menu-caps")
+def menu_caps() -> None:
+    """Enforce the In-N-Out menu caps (x-71b6): <=10 advertised top-level verbs,
+    <=12 advertised verbs per sub-app. New verbs default to hidden; promoting one
+    past a cap fails here until it is hidden again or the cap constant is raised
+    in a deliberate one-line diff. Introspects the registry - no repo scripts, so
+    it runs from a bare install too.
+    """
+    import importlib
+
+    import typer.main
+
+    from fno.cli import LAZY_SUBCOMMANDS, app as root_app
+
+    root = typer.main.get_command(root_app)
+    top_visible = _visible_command_names(root)
+    failures: list[str] = []
+
+    if len(top_visible) > MENU_CAP_TOP_LEVEL:
+        over = ", ".join(top_visible[MENU_CAP_TOP_LEVEL:])
+        failures.append(
+            f"top-level menu advertises {len(top_visible)} commands "
+            f"(cap {MENU_CAP_TOP_LEVEL}); over the cap: {over}.\n"
+            f"  Remedy 1: mark it hidden - add {{\"hidden\": True}} to its "
+            f"LAZY_SUBCOMMANDS entry (or hidden=True on its @app.command).\n"
+            f"  Remedy 2: raise MENU_CAP_TOP_LEVEL (a deliberate one-line diff)."
+        )
+
+    # Every group sub-app is capped, INCLUDING hidden top-level ones: opening
+    # `fno mail --help` renders mail's own menu even though `mail` is hidden from
+    # the top-level surface, so that menu must stay curated too. Iterate the whole
+    # registry, not just the advertised entries. Dedupe by import target so an
+    # alias (e.g. `graph` -> `backlog`) is checked once.
+    seen_targets: set[str] = set()
+    for name, entry in LAZY_SUBCOMMANDS.items():
+        import_path = entry[0]
+        if import_path in seen_targets:
+            continue
+        seen_targets.add(import_path)
+        module_path, _, attr = import_path.rpartition(":")
+        try:
+            obj = getattr(importlib.import_module(module_path), attr, None)
+        except Exception as exc:  # noqa: BLE001 - a lint must degrade, not crash
+            typer.echo(f"menu-caps: skipped sub-app {name!r} (import failed: {exc})", err=True)
+            continue
+        if not isinstance(obj, typer.Typer):
+            continue  # single-command entry, not a group
+        sub_group = typer.main.get_command(obj)
+        # Duck-type, not isinstance(click.Group): Typer bundles a vendored click
+        # (typer._click), so a TyperGroup is NOT an instance of the top-level
+        # `click.Group` - an isinstance check here silently skips every sub-app.
+        if not hasattr(sub_group, "list_commands"):
+            continue
+        sub_visible = _visible_command_names(sub_group)
+        if len(sub_visible) > MENU_CAP_SUB_APP:
+            over = ", ".join(sub_visible[MENU_CAP_SUB_APP:])
+            failures.append(
+                f"sub-app `fno {name}` advertises {len(sub_visible)} verbs "
+                f"(cap {MENU_CAP_SUB_APP}); over the cap: {over}.\n"
+                f"  Remedy 1: mark it hidden - hidden=True on the @command / add_typer.\n"
+                f"  Remedy 2: raise MENU_CAP_SUB_APP (a deliberate one-line diff)."
+            )
+
+    if failures:
+        for f in failures:
+            typer.echo(f"menu-caps: FAIL\n{f}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"menu-caps: ok (top-level {len(top_visible)}/{MENU_CAP_TOP_LEVEL})")
+
+
+@app.command("stale-skill-refs")
+def stale_skill_refs() -> None:
+    """Audit for stale references to cut, demoted, or merged skills.
+
+    Re-homed from the retired `fno consolidation audit` (x-71b6): a lint gate
+    wearing a command costume belongs under `fno lint`. Thin wrapper over the
+    source-of-truth bash gate scripts/ci/check-no-stale-skill-refs.sh; exit code
+    matches it (0 clean, 1 stale references, 2 script error).
+    """
+    from fno._subprocess_util import propagate_returncode
+    from fno.paths import resolve_repo_root
+
+    repo_root = Path(resolve_repo_root())
+    script = repo_root / "scripts" / "ci" / "check-no-stale-skill-refs.sh"
+    if not script.exists():
+        typer.echo(f"audit script not found at {script}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = subprocess.run(["bash", str(script)], cwd=repo_root)
+    except FileNotFoundError as exc:
+        typer.echo(f"failed to run audit script: {exc}", err=True)
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=propagate_returncode(result.returncode))

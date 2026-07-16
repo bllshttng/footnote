@@ -22,7 +22,7 @@ agents_app = typer.Typer(
     name="agents",
     help=(
         "Cross-CLI agent lifecycle (claude / codex / gemini): "
-        "spawn / chat / watch / list / logs / stop. "
+        "spawn / watch / list / logs / stop. "
         "To message a peer, use `fno mail send <name>` (or the `/mail` skill)."
     ),
     no_args_is_help=True,
@@ -32,6 +32,16 @@ agents_app = typer.Typer(
     # forces the binary; =python forces this Python path. See rust_runtime.py.
     cls=make_agents_group_cls(),
 )
+
+# `mcp` re-homed under `fno agents` (x-71b6): the MCP sidecar client is
+# agent-mesh machinery (mail live-inject), so it belongs beside the other
+# agents verbs, not at the top level. Registered hidden - it is plumbing, not a
+# human menu verb. The top-level `fno mcp` stays as a hidden alias for one
+# release (its sole cross-language caller, the Rust daemon's deliver_envelope,
+# keeps shelling `fno mcp send` until the alias is retired in a later pass).
+from fno.mcp.cli import mcp_app as _mcp_app  # noqa: E402
+
+agents_app.add_typer(_mcp_app, name="mcp", hidden=True)
 
 
 class AgentStatusFilter(str, enum.Enum):
@@ -1077,7 +1087,7 @@ def cmd_spawn_guard(
     _emit("dispatchable", reservation_key=res_key, reservation_holder=holder)
 
 
-@agents_app.command("ask")
+@agents_app.command("ask", hidden=True)
 def cmd_ask(
     name: str | None = typer.Argument(None, help="Agent name. Omit when using --to-project."),
     message: str | None = typer.Argument(None, help="Message to send."),
@@ -1231,83 +1241,6 @@ def cmd_ask(
     # kind="create" is returned by the spawn verb's helper, not here.
     sys.stdout.write(result.reply or "")
     sys.stdout.flush()
-
-
-@agents_app.command("chat")
-def cmd_chat(
-    a: str = typer.Argument(..., help="First peer (the 'from' side of the seed)."),
-    b: str = typer.Argument(..., help="Second peer (the 'to' side of the seed)."),
-    seed: str = typer.Argument(..., help="Opening message that seeds the channel."),
-    cwd: str | None = typer.Option(
-        None, "--cwd", "-c", help="Working directory context for a fresh thread."
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the [y/N] confirm (the caveat is still shown)."
-    ),
-) -> None:
-    """Open a live stream-json channel between two claude peers (G3, ab-0b16d65c).
-
-    Adopts BOTH peers onto the stream-json lane and drives a bounded A<->B relay.
-    ALWAYS billed: every hop spends Agent SDK plan credit, so the exact command
-    and that caveat are shown before the gate regardless of confirm posture
-    (AC3-UI). v1 is claude<->claude only.
-
-    Stdout contract: one terminal-state line. Exit 0 when a channel ran; nonzero
-    on a refusal (a peer was a busy running loop) or a failure (unknown peer or a
-    dead adopt child).
-    """
-    import shlex
-
-    from fno.agents.dispatch import _CHAT_PLAN_CREDIT_CAVEAT, dispatch_chat
-
-    workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
-
-    # AC3-UI: ALWAYS echo the exact command + the plan-credit caveat, even on the
-    # auto-skip (--yes) path, so a billed launch is never invisible.
-    exact = f"fno agents chat {shlex.quote(a)} {shlex.quote(b)} {shlex.quote(seed)}"
-    print(f"$ {exact}", file=sys.stderr)
-    print(f"note: {_CHAT_PLAN_CREDIT_CAVEAT}.", file=sys.stderr)
-
-    no_confirm = yes or os.environ.get("FNO_CHAT_NO_CONFIRM")
-    if not no_confirm:
-        interactive = sys.stdin.isatty() and sys.stderr.isatty()
-        if not interactive:
-            print(
-                "chat needs a [y/N] confirm (billed) but there is no TTY; re-run "
-                "with --yes to launch. Nothing was adopted.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=3)
-        print("Open this billed live channel? [y/N] ", end="", file=sys.stderr, flush=True)
-        try:
-            answer = sys.stdin.readline().strip().lower()
-        except Exception:
-            answer = ""
-        if answer not in ("y", "yes"):
-            print("aborted; nothing adopted.", file=sys.stderr)
-            raise typer.Exit(code=3)
-
-    res = dispatch_chat(a, b, seed, cwd=workdir)
-
-    for n in res.notes:
-        print(f"note: {n}", file=sys.stderr)
-
-    if res.status == "ok":
-        adopted = ", ".join(res.adopted)
-        # res.adopted carries the stream-lane HOST names (the watch targets), in
-        # [host_a, host_b] order; observe B's host.
-        watch_target = res.adopted[-1] if res.adopted else b
-        print(
-            f"chat {a}<->{b}: {res.turns}/{res.ceiling} turns over [{adopted}] "
-            f"(observe: fno agents watch {watch_target})"
-        )
-        return
-    if res.status == "refused":
-        print(f"chat refused: {res.reason}", file=sys.stderr)
-        raise typer.Exit(code=1)
-    # failed
-    print(f"chat failed: {res.reason}", file=sys.stderr)
-    raise typer.Exit(code=1)
 
 
 @agents_app.command("list")
@@ -1493,7 +1426,7 @@ def cmd_logs(
         raise typer.Exit(code=result.exit_code)
 
 
-@agents_app.command("peek")
+@agents_app.command("peek", hidden=True)
 def cmd_peek(
     handle: str = typer.Argument(
         ...,
@@ -1538,7 +1471,7 @@ def cmd_peek(
         raise typer.Exit(code=rc)
 
 
-@agents_app.command("whoami")
+@agents_app.command("whoami", hidden=True)
 def cmd_whoami(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
 ) -> None:
@@ -1616,7 +1549,7 @@ def cmd_whoami(
         raise typer.Exit(code=result.exit_code)
 
 
-@agents_app.command("top")
+@agents_app.command("top", hidden=True)
 def cmd_top(
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit the same rows as JSON (script parity)."
@@ -1634,7 +1567,7 @@ def cmd_top(
     print(render_top(as_json=as_json))
 
 
-@agents_app.command("ping")
+@agents_app.command("ping", hidden=True)
 def cmd_ping() -> None:
     """Health check (placeholder).
 
@@ -1693,7 +1626,7 @@ def cmd_stop(
         raise typer.Exit(code=exc.exit_code) from exc
 
 
-@agents_app.command("rm")
+@agents_app.command("rm", hidden=True)
 def cmd_rm(
     name: str = typer.Argument(..., help="Agent name (from `fno agents list`)."),
     force: bool = typer.Option(
@@ -1724,7 +1657,7 @@ def cmd_rm(
         raise typer.Exit(code=exc.exit_code) from exc
 
 
-@agents_app.command("reconcile")
+@agents_app.command("reconcile", hidden=True)
 def cmd_reconcile(
     json_out: bool = typer.Option(
         False,
@@ -1856,7 +1789,7 @@ def cmd_attach(
 from fno.agents.trace_cli import cmd_trace as _cmd_trace  # noqa: E402
 from fno.agents.resume_cli import cmd_resume as _cmd_resume  # noqa: E402
 
-agents_app.command("trace")(_cmd_trace)
+agents_app.command("trace", hidden=True)(_cmd_trace)
 agents_app.command("resume")(_cmd_resume)
 
 
