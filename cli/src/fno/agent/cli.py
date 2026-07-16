@@ -20,6 +20,8 @@ paired-state hash invariance. Shared options on each command:
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from dataclasses import asdict, is_dataclass, replace
@@ -77,7 +79,9 @@ def _mail_unread_count(addresses: Iterable[Optional[str]]) -> int:
     counting only the handle would leave the other dead-letter lanes invisible.
     Each address is guarded independently so one unreadable lane never zeroes the
     others; whoami is the confused-agent recovery verb and must never gain a
-    failure mode."""
+    failure mode. stderr is swallowed for the scan: ``warn=False`` silences
+    ``iter_messages`` but not ``read_cursor``'s own corrupt-cursor warning, which
+    would otherwise leak into whoami's output."""
     total = 0
     seen: set[str] = set()
     for addr in addresses:
@@ -87,7 +91,8 @@ def _mail_unread_count(addresses: Iterable[Optional[str]]) -> int:
         try:
             from fno.bus.cursor import scan_unread
 
-            total += len(scan_unread(addr, warn=False))
+            with contextlib.redirect_stderr(io.StringIO()):
+                total += len(scan_unread(addr, warn=False))
         except Exception:
             continue
     return total

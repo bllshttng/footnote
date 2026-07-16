@@ -311,6 +311,27 @@ class TestWhoami:
         )
         assert payload["mail_unread"] == 3  # handle (1) + mesh name (2)
 
+    def test_mail_unread_corrupt_cursor_stays_silent(self, tmp_path, runner, monkeypatch):
+        """A corrupt cursor makes read_cursor warn on stderr; whoami must swallow
+        it - the recovery verb never gains noisy output."""
+        from fno.bus.cursor import cursor_path
+        from fno.inbox.store import write_new_thread
+
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
+        self._isolate_bus(tmp_path, monkeypatch)
+        write_new_thread(
+            recipient="claude-879d8d26", sender="etl", kind="send",
+            body="ping", to_kind="name",
+        )
+        cp = cursor_path("claude-879d8d26")
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        cp.write_text("{not json", encoding="utf-8")  # corrupt
+
+        project = _make_workspace(tmp_path, target=True)
+        result = _invoke(runner, project, monkeypatch, "whoami")
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "corrupt cursor" not in (result.stderr or "")
+
     def test_mail_unread_zero_silent(self, tmp_path, runner, monkeypatch):
         """No unread mail: no unread line, no JSON key, exit 0 as today."""
         _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
