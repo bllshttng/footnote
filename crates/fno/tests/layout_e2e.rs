@@ -119,7 +119,17 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
     c.resize(24, 16);
     c.wait_layout(10, "narrow layout", |l| l.area == (24, 16));
     let before = c.layout.clone().unwrap();
-    let error = run_pane(
+    let squad_tabs_before = before
+        .squads
+        .iter()
+        .find(|s| s.id == before.active_squad)
+        .unwrap()
+        .tabs
+        .len();
+    // x-9f75: a split refused at min-size no longer errors - it falls back to a
+    // NEW TAB in the same squad (best-effort placement, never a dead-end). The
+    // crowded tab keeps its panes; the squad gains a tab.
+    run_pane(
         &scratch,
         &cwd,
         PanePlacement {
@@ -128,8 +138,15 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             here: false,
         },
     )
-    .unwrap_err();
-    assert!(error.contains("smaller"), "{error}");
+    .unwrap();
+    c.wait_layout(10, "split fallback adds a tab", |l| {
+        l.squads
+            .iter()
+            .find(|s| s.id == l.active_squad)
+            .map(|s| s.tabs.len())
+            == Some(squad_tabs_before + 1)
+    });
+    // The viewed (crowded) tab's panes are untouched by the fallback.
     assert_eq!(c.layout.as_ref().unwrap().panes, before.panes);
 }
 
