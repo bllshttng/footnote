@@ -225,5 +225,29 @@ no   "never no real-worktree note" "$err11" "auto-worktree: $TMP/conductor"
 # (the worker still launches in the repo root via --cwd, same as a /think payload).
 no   "never no auto-worktree cwd field" "$out11" "cwd="
 
+# 12. an explicit /target passthrough on opencode/codex is per-harness namespaced
+#     (`/fno:target` / `$fno:target`), yet is still a code-writing verb and MUST
+#     isolate - a prefix-only /target check would let these no-location-gate
+#     workers edit the main checkout (gemini review, PR #444).
+out12="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-oc-pass" \
+  --provider opencode --payload-mode passthrough \
+  --message "/fno:target ship the thing" --cwd "$REPO" 2>"$TMP/err12")"
+err12="$(cat "$TMP/err12")"
+has  "opencode /fno:target passthrough worktree'd" "$err12" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-oc-pass"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-pass" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: opencode /fno:target passthrough not worktree'd"; }
+out13="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-cdx-pass" \
+  --provider codex --payload-mode passthrough \
+  --message '$fno:target ship the thing' --cwd "$REPO" 2>"$TMP/err13")"
+err13="$(cat "$TMP/err13")"
+has  "codex \$fno:target passthrough worktree'd" "$err13" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-cdx-pass"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-cdx-pass" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: codex \$fno:target passthrough not worktree'd"; }
+# a NON-code namespaced passthrough (/fno:think writes a design doc) stays in root
+out14="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-oc-think" \
+  --provider opencode --payload-mode passthrough \
+  --message "/fno:think about the design" --cwd "$REPO" 2>"$TMP/err14")"
+err14="$(cat "$TMP/err14")"
+no   "opencode /fno:think no worktree note" "$err14" "auto-worktree:"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-think" ]] && { FAIL=$((FAIL+1)); echo "FAIL: /fno:think got a worktree"; } || PASS=$((PASS+1))
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

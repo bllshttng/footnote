@@ -266,7 +266,10 @@ AUTO_WT=""
 # reaches here as `/fno:target ab-xxxx` / `$fno:target ab-xxxx`, not a literal
 # /target, and those workers have NO location gate, so a prefix-only check would
 # leave them editing a protected main checkout -- the exact harm this guards
-# against. seed (verbatim conversational pane) and handoff (a doc continuation)
+# against. The passthrough arm matches the SAME per-harness namespacing: an
+# explicit `/target`|`/do`|`/fix` reaches here verbatim on claude/agy but as
+# `/fno:target` (opencode) / `$fno:target` (codex), so all three renderings must
+# isolate. seed (verbatim conversational pane) and handoff (a doc continuation)
 # and a non-code claude slash command (/think writes a design doc) are NOT code
 # payloads.
 is_code_payload() {
@@ -275,6 +278,8 @@ is_code_payload() {
     passthrough)        # explicit slash command; isolate only code verbs
       case "$MESSAGE" in
         /target|/target\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
+        /fno:target|/fno:target\ *|/fno:do|/fno:do\ *|/fno:fix|/fno:fix\ *) return 0 ;;
+        '$fno:target'|'$fno:target '*|'$fno:do'|'$fno:do '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
         *) return 1 ;;
       esac ;;
     *) return 1 ;;      # seed | handoff
