@@ -1379,7 +1379,8 @@ mod tests {
         assert_eq!(tab.focus, 9);
         // Same rects, only the id at pane 2's slot changed.
         let after_layout = layout(&tab.root, VIEWPORT);
-        let rect_of = |ls: &[(PaneId, Rect)], id| ls.iter().find(|(p, _)| *p == id).map(|(_, r)| *r);
+        let rect_of =
+            |ls: &[(PaneId, Rect)], id| ls.iter().find(|(p, _)| *p == id).map(|(_, r)| *r);
         assert_eq!(rect_of(&before_layout, 2), rect_of(&after_layout, 9));
         assert_eq!(rect_of(&before_layout, 1), rect_of(&after_layout, 1));
         assert_eq!(rect_of(&before_layout, 3), rect_of(&after_layout, 3));

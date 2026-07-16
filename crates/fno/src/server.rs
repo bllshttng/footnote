@@ -1555,7 +1555,10 @@ impl Core {
             }
             _ => {
                 let current = self.session.find_by_cwd(&squad_key);
-                (self.resolve_placement_target(&placement.target, current)?, None)
+                (
+                    self.resolve_placement_target(&placement.target, current)?,
+                    None,
+                )
             }
         };
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
@@ -7727,7 +7730,9 @@ mod tests {
             "A's mapping swept - it resurfaces watch-only"
         );
         assert!(
-            drain_notices(&mut rx).iter().any(|t| t.contains("opened here")),
+            drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("opened here")),
             "notice names the displaced session"
         );
         core.reap_pane(new_pid); // don't leak the stand-in child
@@ -7833,7 +7838,11 @@ mod tests {
 
         assert_eq!(core.panes.len(), panes_before, "reconcile spawns nothing");
         assert!(core.panes.contains_key(&focus), "A's viewer not displaced");
-        assert_eq!(core.attached.get("deadbee2"), Some(&other), "B still at its pane");
+        assert_eq!(
+            core.attached.get("deadbee2"),
+            Some(&other),
+            "B still at its pane"
+        );
         assert!(drain_notices(&mut rx)
             .iter()
             .any(|t| t.contains("already attached")));
@@ -8900,13 +8909,20 @@ mod tests {
         let (sid, tid, fell_back) = core
             .place_spawned_pane(Some(7), "/repo/child", 2, Some(Dir::Right))
             .unwrap();
-        assert!(fell_back, "the caller must know to emit the tab-full notice");
+        assert!(
+            fell_back,
+            "the caller must know to emit the tab-full notice"
+        );
         assert_eq!(sid, 7);
         let squad = core.session.squad(7).unwrap();
         assert_eq!(squad.tabs.len(), 2, "a new tab was added");
         assert_eq!(squad.tabs[0], before, "the crowded tab is untouched");
         let landed = squad.tabs.iter().find(|t| t.id == tid).unwrap();
-        assert_eq!(landed.root, Node::Leaf(2), "pane landed as the new tab's leaf");
+        assert_eq!(
+            landed.root,
+            Node::Leaf(2),
+            "pane landed as the new tab's leaf"
+        );
         assert!(
             core.claim_eligible.contains(&2),
             "the pane is not reaped, so its claim eligibility survives"

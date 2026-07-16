@@ -4958,12 +4958,9 @@ async fn execute_row_menu_action(
                 view.set_notice("agent is no longer attachable".into());
                 return Ok(());
             };
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::attach_agent_here(id)),
-            )
-            .await
-            .map_err(|e| format!("attach send failed: {e}"))?;
+            write_msg(sock_w, &ClientMsg::Command(Command::attach_agent_here(id)))
+                .await
+                .map_err(|e| format!("attach send failed: {e}"))?;
         }
         MenuAction::NewTab | MenuAction::Split(_) => {
             let Some(id) = a.attach_id.clone() else {
