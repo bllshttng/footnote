@@ -487,9 +487,7 @@ impl ratatui::widgets::Widget for RowWidget<'_> {
             PopupRow::Grid(gcells) => {
                 let n = gcells.len().max(1) as u16;
                 let each = (self.width as u16 / n).max(1);
-                let cons: Vec<Constraint> = (0..gcells.len())
-                    .map(|_| Constraint::Length(each))
-                    .collect();
+                let cons = vec![Constraint::Length(each); gcells.len()];
                 let parts = Layout::horizontal(cons).split(area);
                 for (ci, gc) in gcells.iter().enumerate() {
                     if is_sel(ci) {

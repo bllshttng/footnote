@@ -59,7 +59,10 @@ fn blit(
         }
         let mut x = 0usize;
         while x < cols {
-            let bc = &buf[(x as u16, y as u16)];
+            // Buffer indexing is absolute (offset by buf.area origin). This
+            // bridge always renders into a (0,0)-origin Buffer, but honor the
+            // offset so the mapping stays correct if reused with another rect.
+            let bc = &buf[(buf.area.x + x as u16, buf.area.y + y as u16)];
             let sym = bc.symbol();
             // ratatui marks a wide glyph's continuation column with an empty
             // symbol; we synthesize the WIDE_SPACER from the lead cell's display
@@ -82,6 +85,21 @@ fn blit(
                 sym.chars().count() == 1,
                 "chrome_bridge: lossy grapheme mapping for {sym:?}"
             );
+            let wide = UnicodeWidthStr::width(sym) >= 2;
+            // A wide (CJK/emoji) glyph owns two columns: the lead cell carries
+            // the char, the next carries WIDE_SPACER so the compositor never
+            // overdraws its right half. If that spacer column would fall off the
+            // frame, drop the glyph WHOLE (blank the lead) - keep the boundary,
+            // never write a wide char with nowhere for its right half to live.
+            if wide && c0 + x + 1 >= frame_cols {
+                cells[fr * frame_cols + fc] = Cell {
+                    c: ' ',
+                    fg,
+                    bg,
+                    flags,
+                };
+                break;
+            }
             let ch = sym.chars().next().unwrap_or(' ');
             cells[fr * frame_cols + fc] = Cell {
                 c: ch,
@@ -89,20 +107,13 @@ fn blit(
                 bg,
                 flags,
             };
-            // A wide (CJK/emoji) glyph owns two columns: the lead cell carries
-            // the char, the next carries WIDE_SPACER so the compositor never
-            // overdraws its right half. Drop the glyph if the spacer would fall
-            // outside the frame (keep the boundary, never a torn half-glyph).
-            if UnicodeWidthStr::width(sym) >= 2 {
-                let fc1 = c0 + x + 1;
-                if fc1 < frame_cols {
-                    cells[fr * frame_cols + fc1] = Cell {
-                        c: ' ',
-                        fg,
-                        bg,
-                        flags: flags | cell_flags::WIDE_SPACER,
-                    };
-                }
+            if wide {
+                cells[fr * frame_cols + fc + 1] = Cell {
+                    c: ' ',
+                    fg,
+                    bg,
+                    flags: flags | cell_flags::WIDE_SPACER,
+                };
                 x += 2;
             } else {
                 x += 1;
@@ -286,9 +297,9 @@ mod tests {
     // AC2-ERR (boundary), two distinct clips:
     // (a) ratatui's layer: a wide glyph too big for the RECT is clipped by
     //     ratatui itself (rendered blank) - the bridge never sees a torn glyph.
-    // (b) the bridge's layer: a wide glyph that fits the rect but whose spacer
-    //     would fall off the FRAME keeps the lead char and drops the spacer,
-    //     never writing out of bounds and never panicking.
+    // (b) the bridge's layer: a wide glyph whose spacer column would fall off the
+    //     FRAME is dropped WHOLE (the lead is blanked), never left as a torn
+    //     half-glyph with nowhere for its right half to live.
     #[test]
     fn wide_glyph_at_boundary_never_tears() {
         // (a) 2-col rect, "a" then a wide glyph: the glyph needs cols 1..3 but
@@ -308,15 +319,21 @@ mod tests {
             "no spacer for a clipped glyph"
         );
 
-        // (b) frame is only 2 cols; rect starts at frame col 1, so the lead char
-        // lands on the last frame col and its spacer (frame col 2) is off-frame.
+        // (b) frame is only 2 cols; rect starts at frame col 1, so a wide glyph's
+        // lead would land on the last frame col with its spacer (col 2) off-frame.
+        // The glyph is dropped whole - the last col is blanked, not left torn.
         let (fr, fc) = (1usize, 2usize);
         let mut cells = frame(fr, fc, '#');
         render_chrome(Paragraph::new("中"), (1, 2), (0, 1), &mut cells, fr, fc);
         assert_eq!(
             at(&cells, fc, 0, 1).c,
-            '中',
-            "lead char kept on the last col"
+            ' ',
+            "wide glyph dropped at the frame edge, not left torn"
+        );
+        assert_eq!(
+            at(&cells, fc, 0, 1).flags & cell_flags::WIDE_SPACER,
+            0,
+            "a dropped glyph leaves no orphan spacer flag"
         );
         assert_eq!(cells.len(), fr * fc, "no out-of-bounds growth, no panic");
     }
