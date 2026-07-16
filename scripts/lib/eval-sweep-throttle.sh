@@ -7,11 +7,14 @@
 #
 # Unlike reconcile (15-min, user-facing render), this fires DAILY (86400s) and
 # renders nothing at session start - eval output is a background log/artifact,
-# not a reminder. Its own stamp (.fno/.eval-sweep-stamp) keeps the two cadences
-# independent. The window is claimed up-front so a burst of parallel sessions
-# fires the sweep once, and the whole run is detached (nohup) so it never blocks
-# session start. Best-effort throughout: a missing fno, missing corpus, or a
-# sweep/tick error never propagates to the calling hook.
+# not a reminder. The throttle stamp and singleton claim both resolve against
+# the CANONICAL repo root (not the session cwd), so one sweep fires per repo
+# per day regardless of how many worktrees start a session (x-dbdf). Its own
+# stamp (.fno/.eval-sweep-stamp) keeps the two cadences independent. The whole
+# run is detached (nohup), bounded per stage (timeout), and logged to
+# .fno/logs/eval-sweep.log so a wedge dies and is diagnosable instead of
+# accumulating as an orphan. Best-effort throughout: a missing fno, missing
+# corpus, or a sweep/tick error never propagates to the calling hook.
 #
 # Autonomy is untouched: the proposer stays at its config default `report`
 # (dry-run) level. This helper only lights the ignition; it never flips level.
@@ -24,6 +27,68 @@ source "$_EVAL_SWEEP_LIB_DIR/reconcile-throttle.sh" 2>/dev/null || return 0
 
 # Throttle window in seconds (default 24h). Overridable for tests.
 EVAL_SWEEP_THROTTLE_SECONDS="${EVAL_SWEEP_THROTTLE_SECONDS:-86400}"
+# Hard per-stage time bound (default 300s). A wedged sweep dies at this bound.
+EVAL_SWEEP_STAGE_TIMEOUT="${EVAL_SWEEP_STAGE_TIMEOUT:-300}"
+# Singleton claim TTL: self-frees a crashed run within this window.
+EVAL_SWEEP_CLAIM_TTL="${EVAL_SWEEP_CLAIM_TTL:-30m}"
+# Log truncated when it grows past this many bytes (keep the file small).
+EVAL_SWEEP_LOG_MAX_BYTES="${EVAL_SWEEP_LOG_MAX_BYTES:-1048576}"
+
+# _eval_sweep_canonical_root <dir>
+# The canonical checkout root for <dir>, so all worktrees of one repo share a
+# stamp and claim. Falls back to <dir> for a non-git/detached path.
+_eval_sweep_canonical_root() {
+    local dir="$1" common
+    common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || { echo "$dir"; return; }
+    [[ -n "$common" ]] || { echo "$dir"; return; }
+    dirname "$common"  # <root>/.git -> <root>
+}
+
+# _eval_sweep_bounded <seconds> <cmd...>
+# Run <cmd...> with a hard time bound, portably. Prefers coreutils
+# gtimeout/timeout; falls back to a bash watchdog that kills the command and
+# reaps its own sleep so no orphan `sleep` survives (Domain Pitfall).
+_eval_sweep_bounded() {
+    local secs="$1"; shift
+    if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+    if command -v timeout  >/dev/null 2>&1; then  timeout "$secs" "$@"; return $?; fi
+    "$@" & local cmd_pid=$!
+    ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) & local wd_pid=$!
+    wait "$cmd_pid" 2>/dev/null; local rc=$?
+    kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
+    return $rc
+}
+
+# _eval_sweep_trim_log <log>
+# Truncate the log if it has grown past the byte cap (keep it diagnosable, not
+# unbounded). Best-effort.
+_eval_sweep_trim_log() {
+    local log="$1" size
+    [[ -f "$log" ]] || return 0
+    size=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+    [[ -n "$size" ]] || return 0
+    (( size > EVAL_SWEEP_LOG_MAX_BYTES )) && : > "$log" 2>/dev/null
+    return 0
+}
+
+# _eval_sweep_run_stages <repo_root> <abi_cmd> <log> [<claim_key> <holder>]
+# The detached wrapper body: run each sweep/tick stage under a time bound,
+# appending to <log>, then release the singleton claim. Sweep MUST precede tick
+# per skill (tick consumes the run_complete the sweep emits); the wrapper bounds
+# stages individually and never reorders them. Always returns 0.
+_eval_sweep_run_stages() {
+    local repo_root="$1" abi_cmd="$2" log="$3" claim_key="${4:-}" holder="${5:-}"
+    cd "$repo_root" 2>/dev/null || return 0
+    mkdir -p "$(dirname "$log")" 2>/dev/null || true
+    _eval_sweep_trim_log "$log"
+    printf '=== eval-sweep run %s pid=%s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >> "$log" 2>/dev/null || true
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" observer sweep  --skill blueprint >> "$log" 2>&1 || true
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" observer sweep  --skill review    >> "$log" 2>&1 || true
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" skill-diff tick --skill blueprint >> "$log" 2>&1 || true
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" skill-diff tick --skill review    >> "$log" 2>&1 || true
+    [[ -n "$claim_key" ]] && "$abi_cmd" claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
+    return 0
+}
 
 # _eval_sweep_paused <abi_cmd>
 # True (0) when the loops kill switch is active, so the fire is skipped. The
@@ -40,16 +105,35 @@ _eval_sweep_paused() {
     esac
 }
 
+# _eval_sweep_try_claim <abi_cmd> <key> <holder>
+# Acquire the singleton claim. Prints one of: "acquired" (we hold it, launch),
+# "held" (a live sibling holds it, skip), "degraded" (claim layer down, launch
+# under stamp-only throttling - AC1-ERR). The holder is unique per fire so a
+# still-held claim from another run shows a foreign holder rather than an
+# idempotent re-acquire.
+_eval_sweep_try_claim() {
+    local abi_cmd="$1" key="$2" holder="$3" out rc
+    out="$("$abi_cmd" claim acquire "$key" --holder "$holder" --ttl "$EVAL_SWEEP_CLAIM_TTL" -J 2>/dev/null)"
+    rc=$?
+    if (( rc != 0 )); then echo "degraded"; return; fi
+    case "$out" in
+        *"\"holder\": \"$holder\""*) echo "acquired" ;;
+        *) echo "held" ;;
+    esac
+}
+
 # eval_sweep_maybe_fire <repo_root>
 #
 # Launches a backgrounded, detached observer sweep -> skill-diff tick for both
-# pilot skills iff the daily window has elapsed AND the loops are not paused.
-# Always returns 0.
+# pilot skills iff the daily window has elapsed, the loops are not paused, and
+# no sibling worktree holds the singleton claim. Always returns 0.
 eval_sweep_maybe_fire() {
     local repo_root="${1:-$PWD}"
+    local canonical
+    canonical="$(_eval_sweep_canonical_root "$repo_root")"
     # Only fire in an already-initialized project; never create .fno in a virgin dir.
-    [[ -d "$repo_root/.fno" ]] || return 0
-    local stamp="$repo_root/.fno/.eval-sweep-stamp"
+    [[ -d "$canonical/.fno" ]] || return 0
+    local stamp="$canonical/.fno/.eval-sweep-stamp"
 
     # Throttle: skip if the stamp is younger than the window. A missing stamp
     # (first-ever fire) is treated as "window elapsed" and fires once.
@@ -70,21 +154,28 @@ eval_sweep_maybe_fire() {
     # paused: an unpause should let the next session fire, not wait a full window.
     _eval_sweep_paused "$abi_cmd" && return 0
 
-    # Claim the throttle window BEFORE launching so a parallel caller starting in
-    # the same instant sees a fresh stamp and skips.
+    # Singleton claim closes the burst race the stamp alone cannot (two sessions
+    # starting in the same instant both saw an old stamp). Acquire BEFORE writing
+    # the stamp or launching, so exactly one of a simultaneous burst proceeds.
+    local slug claim_key holder claim_state
+    slug="$(basename "$canonical")"
+    claim_key="eval-sweep:$slug"
+    holder="eval-sweep:${HOSTNAME:-h}:$$:$(date +%s)"
+    claim_state="$(_eval_sweep_try_claim "$abi_cmd" "$claim_key" "$holder")"
+    [[ "$claim_state" == "held" ]] && return 0
+    # "acquired" -> release at wrapper end; "degraded" -> stamp-only, nothing to release.
+    [[ "$claim_state" == "acquired" ]] || { claim_key=""; holder=""; }
+
+    # Claim the throttle window (canonical stamp) so parallel callers see it fresh.
     : > "$stamp" 2>/dev/null || touch "$stamp" 2>/dev/null || true
 
-    # Detach fully. Sweep MUST precede tick per skill (tick consumes the
-    # run_complete the sweep emits); both-sweeps-then-both-ticks is fine as long
-    # as each skill's sweep runs before its tick. Every step is `|| true`
-    # best-effort so a non-zero sweep/tick never surfaces.
+    local log="$canonical/.fno/logs/eval-sweep.log"
+    # Detach fully. All stage logic lives in _eval_sweep_run_stages (bounded,
+    # logged, claim-releasing); the wrapper re-sources this lib to reach it.
     nohup bash -c '
-        cd "$1" 2>/dev/null || exit 0
-        "$2" observer sweep --skill blueprint >/dev/null 2>&1 || true
-        "$2" observer sweep --skill review    >/dev/null 2>&1 || true
-        "$2" skill-diff tick --skill blueprint >/dev/null 2>&1 || true
-        "$2" skill-diff tick --skill review    >/dev/null 2>&1 || true
-    ' _ "$repo_root" "$abi_cmd" >/dev/null 2>&1 &
+        source "$1/eval-sweep-throttle.sh" 2>/dev/null || exit 0
+        _eval_sweep_run_stages "$2" "$3" "$4" "$5" "$6"
+    ' _ "$_EVAL_SWEEP_LIB_DIR" "$repo_root" "$abi_cmd" "$log" "$claim_key" "$holder" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 
     return 0
