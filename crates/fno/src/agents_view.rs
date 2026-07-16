@@ -1002,11 +1002,10 @@ pub struct ReaderState {
     last_sent: Option<Vec<RegistryAgent>>,
 }
 
-/// (x-c914) One isolated account's roster cache: the same mtime-gate +
-/// last-good contract as the default roster, held per source dir.
+/// (x-c914) One isolated account's roster cache: the mtime stamp gate plus the
+/// already-parsed+tagged workers (re-parsed only when the stamp moves).
 #[derive(Default)]
 struct IsolatedRoster {
-    raw: Option<String>,
     stamp: Option<(std::time::SystemTime, u64)>,
     last_good: Option<Vec<RosterWorker>>,
 }
@@ -1118,33 +1117,31 @@ impl ReaderState {
         let mut all = roster;
         for r in isolated {
             let cache = self.isolated.entry(r.account.clone()).or_default();
+            // Parse + tag ONLY when the stamp moved; an unchanged tick reuses the
+            // cached tagged workers (gemini review: no re-parse of an unchanged
+            // roster per tick, N accounts x every second). A torn/garbage read
+            // keeps last-good (AC1-FR), a vanished file empties it (AC2-EDGE).
             if r.stamp != cache.stamp {
                 match (r.raw, r.stamp) {
                     (Some(raw), _) => {
-                        cache.raw = Some(raw);
+                        if let Some(mut ws) = parse_roster(&raw) {
+                            for w in &mut ws {
+                                w.account = Some(r.account.clone());
+                            }
+                            cache.last_good = Some(ws);
+                        } // else garbage bytes: keep last-good (AC1-FR)
                         cache.stamp = r.stamp;
                     }
                     (None, None) => {
-                        cache.raw = None;
+                        cache.last_good = None;
                         cache.stamp = None;
                     }
                     (None, Some(_)) => {} // raced/failed read: keep last-good, retry
                 }
             }
-            let workers = match &cache.raw {
-                Some(raw) => parse_roster(raw)
-                    .map(|mut ws| {
-                        for w in &mut ws {
-                            w.account = Some(r.account.clone());
-                        }
-                        ws
-                    })
-                    .or_else(|| cache.last_good.clone())
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            };
-            cache.last_good = Some(workers.clone());
-            all.extend(workers);
+            if let Some(workers) = &cache.last_good {
+                all.extend(workers.iter().cloned());
+            }
         }
 
         let rows = merge_rows(reg_rows, &all);
@@ -1702,6 +1699,40 @@ config_dir = "~/.claude-alt"
         assert_eq!(rows.len(), 1, "no duplicate foreign row");
         assert!(!rows[0].exited && rows[0].external);
         assert_eq!(rows[0].account.as_deref(), Some("readyrule"));
+    }
+
+    #[test]
+    fn isolated_idle_tick_reuses_cache_without_republish() {
+        // gemini review: an unchanged isolated roster is not re-parsed - the
+        // cached tagged workers are reused and the merged set stays identical,
+        // so an idle tick publishes nothing.
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"home","cwd":"/w","status":"live"}"#);
+        let alt = roster_json("cc33dd44", "alt-w", "/alt");
+        let first = st
+            .tick(
+                stamp(1),
+                || Some(reg),
+                None,
+                || None,
+                vec![iso("rr", stamp(1), Some(&alt))],
+                NOW,
+            )
+            .expect("first publish");
+        assert!(first.iter().any(|r| r.name == "alt-w"));
+        // Idle: same stamp, the server did not re-read (raw None). Cache reused.
+        let idle = st.tick(
+            stamp(1),
+            || None,
+            None,
+            || None,
+            vec![iso("rr", stamp(1), None)],
+            NOW,
+        );
+        assert!(
+            idle.is_none(),
+            "unchanged roster reuses cache, no republish"
+        );
     }
 
     #[test]
