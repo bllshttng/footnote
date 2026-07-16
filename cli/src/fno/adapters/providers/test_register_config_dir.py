@@ -51,3 +51,13 @@ def test_register_config_dir_relative_refused(tmp_path):
     result = _invoke(["register", "readyrule", "--config-dir", "rel/dir"], tmp_path)
     assert result.exit_code == 1
     assert "absolute" in result.output
+
+
+def test_use_refuses_config_dir_account(tmp_path):
+    cfg = tmp_path / "claude-alt"
+    cfg.mkdir()
+    (cfg / ".credentials.json").write_text("{}")
+    _invoke(["register", "readyrule", "--config-dir", str(cfg)], tmp_path)
+    result = _invoke(["use", "readyrule", "--scope", "global"], tmp_path)
+    assert result.exit_code == 1
+    assert "spawn-only" in result.output and "--account readyrule" in result.output

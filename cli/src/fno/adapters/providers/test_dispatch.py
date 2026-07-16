@@ -568,3 +568,15 @@ def test_dispatch_module_default_root_not_frozen_at_import(
             "This freezes the path at import time and prevents test monkeypatching. "
             "Remove the module-level binding and call _default_providers_root() lazily."
         )
+
+
+def test_dispatch_env_honors_config_dir(tmp_path: Path) -> None:
+    """x-d012: a record with config_dir returns CLAUDE_CONFIG_DIR regardless of
+    auth, so combo/failover never dispatches it on the ambient default account."""
+    record = ProviderRecord(
+        id="readyrule", name="ReadyRule", cli="claude", auth="managed",
+        config_dir=Path("/x/.claude-alt"),
+    )
+    repo_root = _write_settings(tmp_path, [record.model_dump(mode="json", exclude_none=True)])
+    env = dispatch_env(record.id, repo_root=repo_root)
+    assert env == {"CLAUDE_CONFIG_DIR": "/x/.claude-alt"}

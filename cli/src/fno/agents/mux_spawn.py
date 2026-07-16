@@ -481,8 +481,14 @@ def _mesh_env_wrapper(
     # beats a stale parent CLAUDE_CONFIG_DIR (env(1) assignments are
     # left-to-right, last wins). --account + --route/--role is refused at the
     # CLI (contradictory axes), so the role-route pairs above are never present
-    # on an --account spawn - the two never co-occur here.
+    # on an --account spawn - the two never co-occur here. SCRUB inherited auth
+    # vars (env -u) so an ambient ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN can't
+    # override the account's own login and bill the wrong account.
     if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        for _k in SCRUB_AUTH_VARS:
+            unset += ["-u", _k]
         pairs += [f"{k}={v}" for k, v in account_env.items()]
     return ["env", *unset, *pairs, *argv]
 

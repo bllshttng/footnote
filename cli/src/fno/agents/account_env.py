@@ -19,8 +19,12 @@ The lanes:
 
     lane 1  own-dir       auth: oauth_dir             {CLAUDE_CONFIG_DIR: <root>/<id>/.claude}
     lane 2  config-dir    record.config_dir set       {CLAUDE_CONFIG_DIR: <config_dir>}   (PRIMARY)
-    lane 3  managed, active                           {}   (rides the shared slot, bills correctly)
+    lane 3  managed, active                           {CLAUDE_CONFIG_DIR: ~/.claude}   (rides the shared slot)
     api_key  claude api_key record                    resolved env refs
+
+Every lane also scrubs inherited auth vars (SCRUB_AUTH_VARS) at the substrate
+apply site, so an ambient ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN can't
+override the pinned account and bill it wrong.
 
 Refusals (never a silent mis-pin/mis-bill): unknown id, non-claude record, a
 managed account that is not the active slot occupant (needs its own config_dir),
@@ -47,6 +51,19 @@ class AccountResolutionError(ValueError):
     """`--account` could not be resolved to a safe overlay; message is a receipt."""
 
 
+# Inherited auth vars that would override an account's own login and bill the
+# wrong account (a parent shell or routed worker may export any of them). Every
+# --account spawn scrubs these at the substrate apply site before layering the
+# overlay, so the pinned account's credential is the only live one (its overlay
+# re-sets any it needs). Public so the three substrate seams share one list.
+SCRUB_AUTH_VARS = (
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+
+
 @dataclass(frozen=True)
 class AccountOverlay:
     """The resolved env overlay for one `--account` spawn."""
@@ -57,18 +74,18 @@ class AccountOverlay:
 
 
 def _login_present(config_dir: Path) -> bool:
-    """True when ``config_dir`` holds a login specific to THIS dir.
+    """True when ``config_dir`` holds a login CREDENTIAL specific to THIS dir.
 
     Checks the darwin Keychain item SCOPED to config_dir (never the unscoped
     fallback - that belongs to whatever the default ~/.claude slot holds, so
     using it would pass preflight for any dir on a machine that has any login)
-    plus the on-disk ``.credentials.json`` / ``.claude.json`` under the dir. An
-    expired-but-present credential passes (preflight catches *missing*, not
-    *stale*).
+    and the on-disk ``.credentials.json`` (the actual auth secret elsewhere).
+    Deliberately does NOT accept ``.claude.json``: that is settings/account
+    metadata, present in a logged-OUT dir too, so treating it as a login would
+    let a credentialless dir spawn an auth-prompt zombie. An expired-but-present
+    credential passes (preflight catches *missing*, not *stale*).
     """
-    if (config_dir / ".credentials.json").exists() or (
-        config_dir / ".claude.json"
-    ).exists():
+    if (config_dir / ".credentials.json").exists():
         return True
     if sys.platform != "darwin":
         return False
@@ -136,7 +153,9 @@ def resolve_account_overlay(
                 f"account {account_id!r} config_dir {cfg} holds no claude login "
                 f"(run: CLAUDE_CONFIG_DIR={cfg} claude /login)"
             )
-        return AccountOverlay(account_id, {"CLAUDE_CONFIG_DIR": str(cfg)}, "config-dir")
+        return AccountOverlay(
+            account_id, {"CLAUDE_CONFIG_DIR": str(cfg)}, "config-dir"
+        )
 
     if record.auth == "oauth_dir":
         if not verify_staged(record, root=providers_root):
@@ -144,13 +163,27 @@ def resolve_account_overlay(
                 f"account {account_id!r} is not staged; run `fno providers "
                 "register`/stage before spawning against it"
             )
-        return AccountOverlay(account_id, _env_for_oauth(record, providers_root), "own-dir")
+        overlay = _env_for_oauth(record, providers_root)
+        # Preflight the STAGED dir for a login too: verify_staged only checks the
+        # symlink+target exist, so a staged-but-logged-out dir would otherwise
+        # spawn an auth-prompt zombie (the same check the config-dir lane runs).
+        staged = overlay.get("CLAUDE_CONFIG_DIR")
+        if staged and not _login_present(Path(staged)):
+            raise AccountResolutionError(
+                f"account {account_id!r} staged dir {staged} holds no claude login "
+                f"(run: CLAUDE_CONFIG_DIR={staged} claude /login)"
+            )
+        return AccountOverlay(account_id, overlay, "own-dir")
 
     if record.auth == "managed":
         from fno.adapters.providers.managed import active_slot_id
 
         active = active_slot_id("claude", providers_root)
-        if account_id == active or record.account_id == active:
+        # Compare the REQUESTED id against the active slot id only. record.account_id
+        # is configurable metadata (defaults to id); comparing it here would treat
+        # a non-active record whose account_id happens to equal the active id as
+        # active and bill the wrong account.
+        if account_id == active:
             # Lane 3: the account IS the active slot occupant; the worker rides
             # the shared ~/.claude slot (correct billing) and extends the
             # live-pin. Pin CLAUDE_CONFIG_DIR to the canonical slot rather than
@@ -159,7 +192,9 @@ def resolve_account_overlay(
             # leak through and silently bill the wrong account. Managed claude
             # accounts materialize into ~/.claude by definition.
             slot = str(Path.home() / ".claude")
-            return AccountOverlay(account_id, {"CLAUDE_CONFIG_DIR": slot}, "managed-active")
+            return AccountOverlay(
+                account_id, {"CLAUDE_CONFIG_DIR": slot}, "managed-active"
+            )
 
         # A managed account that is NOT the active slot occupant has no correct
         # env overlay: a setup-token injected via CLAUDE_CODE_OAUTH_TOKEN
@@ -178,6 +213,8 @@ def resolve_account_overlay(
         )
 
     # api_key claude record: resolve its env refs (e.g. a routed ANTHROPIC_*).
+    # Scrub the standard auth vars too, then apply - so an inherited token of a
+    # DIFFERENT kind than the record provides can't override the record's creds.
     try:
         overlay = _env_for_api_key(record)
     except ProviderUnavailableError as exc:

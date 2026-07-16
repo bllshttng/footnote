@@ -152,6 +152,13 @@ def dispatch_env(
 
     record = by_id[provider_id]
 
+    # A config-dir account (x-d012) lives in its OWN dir, not the shared managed
+    # slot. Honor it regardless of auth, else a managed record carrying config_dir
+    # would fall through to the `managed -> {}` arm below and dispatch on the
+    # ambient default account (silent mis-bill).
+    if record.config_dir is not None:
+        return {"CLAUDE_CONFIG_DIR": str(record.config_dir)}
+
     if record.auth == "oauth_dir":
         if not verify_staged(record, root=root):
             raise ProviderUnavailableError(

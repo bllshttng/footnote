@@ -420,3 +420,32 @@ def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) ->
     cwd.mkdir()
     claude_mod.headless_create(message="hi", cwd=cwd)
     assert captured["has_env"] is False
+
+
+def test_headless_create_scrubs_inherited_auth(tmp_path: Path, monkeypatch) -> None:
+    """x-d012: an --account spawn scrubs inherited ANTHROPIC_API_KEY /
+    CLAUDE_CODE_OAUTH_TOKEN so an ambient token can't override the account."""
+    from fno.agents.providers import claude as claude_mod
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-parent")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-parent")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(
+        message="hi", cwd=cwd, account_env={"CLAUDE_CONFIG_DIR": "/x/.claude-alt"}
+    )
+    env = captured["env"]
+    assert env["CLAUDE_CONFIG_DIR"] == "/x/.claude-alt"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env

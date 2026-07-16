@@ -710,6 +710,19 @@ def use_provider(
 
     record = config.by_id[provider_id]
 
+    # A config-dir account (x-d012) lives in its own dir; there is no shared-slot
+    # snapshot to materialize, so a daemon-wide `use` switch does not apply. Refuse
+    # cleanly instead of letting managed.switch fail with a cryptic no-snapshot
+    # error. Use it per-worker via `fno agents spawn --account <id>`.
+    if record.config_dir is not None:
+        typer.echo(
+            f"error: '{provider_id}' is a config-dir account (its own "
+            f"{record.config_dir}); it is spawn-only. Use it per-worker with "
+            f"`fno agents spawn --account {provider_id}`, not a daemon-wide switch.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     # Managed records materialize the account's credentials into the shared
     # slot (capture-before-overwrite + live-pin gate); oauth_dir/api_key records
     # only re-point active routing (spawns pick up the env), as before.

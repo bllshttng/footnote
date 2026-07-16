@@ -234,10 +234,15 @@ def headless_create(
     argv.append(message or "hello")
     # Per-spawn account overlay (x-d012): a one-shot `claude -p` inherits the
     # parent env, so without this an --account headless spawn would silently
-    # drop CLAUDE_CONFIG_DIR and bill the operator's current account.
+    # drop CLAUDE_CONFIG_DIR and bill the operator's current account. Scrub
+    # inherited auth vars first (an ambient token would override the account).
     spawn_env: Optional[dict[str, str]] = None
     if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
         spawn_env = dict(os.environ)
+        for _k in SCRUB_AUTH_VARS:
+            spawn_env.pop(_k, None)
         spawn_env.update(account_env)
     started = time.monotonic()
     try:
@@ -360,8 +365,14 @@ def bg_create(
     # combined with --route/--role is refused at the CLI (contradictory: one
     # bills a claude account, the other routes to a different provider), so the
     # route block above is never populated on an --account spawn - the two never
-    # co-occur here.
+    # co-occur here. SCRUB inherited auth vars first, else an ambient
+    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN would override the account's own
+    # login and bill the wrong account.
     if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        for _k in SCRUB_AUTH_VARS:
+            spawn_env.pop(_k, None)
         spawn_env.update(account_env)
 
     start = time.monotonic()

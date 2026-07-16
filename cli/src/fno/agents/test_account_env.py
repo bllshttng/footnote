@@ -77,6 +77,36 @@ def test_config_dir_no_login_refused(tmp_path: Path, providers_root: Path) -> No
         resolve_account_overlay("readyrule", repo_root=repo, providers_root=providers_root)
 
 
+def test_config_dir_claude_json_only_refused(tmp_path: Path, providers_root: Path) -> None:
+    """.claude.json is settings/metadata, present in a logged-OUT dir - it must
+    NOT count as a login (else a credentialless dir spawns an auth-prompt zombie)."""
+    cfg = tmp_path / "logged-out"
+    cfg.mkdir()
+    (cfg / ".claude.json").write_text("{}")  # metadata only, no .credentials.json
+    repo = _write_settings(
+        tmp_path,
+        [{"id": "readyrule", "name": "ReadyRule", "cli": "claude",
+          "auth": "managed", "config_dir": str(cfg)}],
+    )
+    with pytest.raises(AccountResolutionError, match="no claude login"):
+        resolve_account_overlay("readyrule", repo_root=repo, providers_root=providers_root)
+
+
+def test_nonactive_matching_account_id_not_treated_active(
+    tmp_path: Path, providers_root: Path
+) -> None:
+    """A non-active record whose account_id coincidentally equals the active
+    slot id must NOT be treated as active (that would bill the active account)."""
+    _stamp_active(providers_root, "makers")
+    repo = _write_settings(
+        tmp_path,
+        [{"id": "readyrule", "name": "R", "cli": "claude", "auth": "managed",
+          "account_id": "makers"}],  # metadata collides with the active slot id
+    )
+    with pytest.raises(AccountResolutionError, match="not the active"):
+        resolve_account_overlay("readyrule", repo_root=repo, providers_root=providers_root)
+
+
 # --- AC1-ERR: unknown / non-claude -----------------------------------------
 
 def test_unknown_id_refused_lists_claude_accounts(tmp_path: Path, providers_root: Path) -> None:
@@ -148,3 +178,19 @@ def test_config_dir_wins_over_managed_nonactive(
     ov = resolve_account_overlay("readyrule", repo_root=repo, providers_root=providers_root)
     assert ov.lane == "config-dir"
     assert ov.env == {"CLAUDE_CONFIG_DIR": str(cfg)}
+
+
+def test_mesh_env_wrapper_scrubs_and_pins(tmp_path: Path) -> None:
+    """The pane seam adds `env -u` for each scrubbed auth var and sets the
+    account's CLAUDE_CONFIG_DIR (x-d012 P1: no ambient-token override)."""
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
+    argv = _mesh_env_wrapper(
+        "w1", "claude", None, ["claude", "hi"],
+        account_env={"CLAUDE_CONFIG_DIR": "/x/.claude-alt"},
+    )
+    joined = " ".join(argv)
+    for var in SCRUB_AUTH_VARS:
+        assert f"-u {var}" in joined
+    assert "CLAUDE_CONFIG_DIR=/x/.claude-alt" in argv
