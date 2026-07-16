@@ -206,7 +206,17 @@ def _worktree_ensure(
         )
         return 1
 
-    wt = pol.base / top.name / name
+    # harness-native + claude lands at the harness's own gitignored location
+    # (<repo>/.claude/worktrees/<name>), fno-created / fno-reaped. The resolver
+    # keeps `harness-native` ONLY for a claude harness (else it already degraded
+    # to `external`), so this is the claude-native default flip; `external` (and
+    # any degraded harness-native) uses the config-driven base. The `harness ==
+    # "claude"` guard is defensive against a future native harness (codex Phase 2)
+    # whose location differs -- it must not route through `.claude/worktrees/`.
+    if pol.policy == "harness-native" and harness == "claude":
+        wt = top / ".claude" / "worktrees" / name
+    else:
+        wt = pol.base / top.name / name
 
     # Idempotent reuse: an existing registered worktree rooted at wt -> reuse.
     if wt.exists():

@@ -224,7 +224,7 @@ def test_ensure_malformed_workspaces_refuses(main_repo: Path, tmp_path: Path) ->
 
 def test_ensure_project_absent_falls_to_default(main_repo: Path, tmp_path: Path) -> None:
     """AC1-EDGE: a repo absent from the workspaces map falls to the default
-    (harness-native under claude): a worktree IS created."""
+    (harness-native under claude): a worktree IS created at the harness location."""
     _write_config(
         main_repo / ".fno",
         '[[work.workspaces.default.projects]]\npath = "/some/other/repo"\nworktree = "never"\n',
@@ -233,20 +233,79 @@ def test_ensure_project_absent_falls_to_default(main_repo: Path, tmp_path: Path)
         app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "d", "--harness", "claude"]
     )
     assert res.exit_code == 0, res.stderr
-    assert res.stdout.strip() == str(_default_wt(tmp_path, main_repo, "d"))
+    assert res.stdout.strip() == str(main_repo / ".claude" / "worktrees" / "d")
 
 
-def test_ensure_worktrees_base_set_lands_under_base(
+def test_ensure_external_worktrees_base_set_lands_under_base(
     main_repo: Path, tmp_path: Path
 ) -> None:
-    """A configured paths.worktrees_base lands the worktree at <base>/<repo>/<name>."""
+    """With `worktree.policy = external`, a configured paths.worktrees_base lands
+    the worktree at <base>/<repo>/<name> (the base only governs the external mode;
+    harness-native ignores it -- see the next test)."""
     base = tmp_path / "custom-bases"
-    _write_config(main_repo / ".fno", f'[paths]\nworktrees_base = "{base}"\n')
+    _write_config(
+        main_repo / ".fno",
+        f'[worktree]\npolicy = "external"\n[paths]\nworktrees_base = "{base}"\n',
+    )
     res = runner.invoke(
         app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "e", "--harness", "claude"]
     )
     assert res.exit_code == 0, res.stderr
     assert res.stdout.strip() == str(base / main_repo.name / "e")
+
+
+def test_ensure_harness_native_claude_lands_in_dot_claude(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC2-HP: a claude code payload with no policy config lands harness-native at
+    <repo>/.claude/worktrees/<name>, not under the ~/.fno base."""
+    res = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "hn", "--harness", "claude"]
+    )
+    assert res.exit_code == 0, res.stderr
+    wt = main_repo / ".claude" / "worktrees" / "hn"
+    assert res.stdout.strip() == str(wt)
+    assert wt.exists()
+    assert not _default_wt(tmp_path, main_repo, "hn").exists()
+
+
+def test_ensure_harness_native_ignores_worktrees_base(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """The default flip is absolute: harness-native + claude lands in
+    .claude/worktrees/ even when paths.worktrees_base is configured (the base is
+    honored only under the `external` policy)."""
+    base = tmp_path / "custom-bases"
+    _write_config(main_repo / ".fno", f'[paths]\nworktrees_base = "{base}"\n')
+    res = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "ib", "--harness", "claude"]
+    )
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(main_repo / ".claude" / "worktrees" / "ib")
+    assert not (base / main_repo.name / "ib").exists()
+
+
+def test_ensure_harness_native_reuse(main_repo: Path, tmp_path: Path) -> None:
+    """AC2-FR: a re-dispatch reuses the existing harness-native worktree (same
+    path, exit 0), never clobbering or duplicating it."""
+    args = ["worktree", "ensure", "--repo", str(main_repo), "--name", "ru", "--harness", "claude"]
+    first = runner.invoke(app, args)
+    assert first.exit_code == 0, first.stderr
+    wt = main_repo / ".claude" / "worktrees" / "ru"
+    assert first.stdout.strip() == str(wt)
+    second = runner.invoke(app, args)
+    assert second.exit_code == 0, second.stderr
+    assert second.stdout.strip() == str(wt)
+
+
+def test_ensure_no_harness_degrades_to_external(main_repo: Path, tmp_path: Path) -> None:
+    """AC5-FR: an omitted --harness never guesses a harness location -- the default
+    harness-native degrades to external and lands under the ~/.fno base, NOT in
+    .claude/worktrees/."""
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "nh"])
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(_default_wt(tmp_path, main_repo, "nh"))
+    assert not (main_repo / ".claude" / "worktrees" / "nh").exists()
 
 
 def test_policy_verb_reports_never_and_default(main_repo: Path, tmp_path: Path) -> None:
