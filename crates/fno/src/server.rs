@@ -1635,7 +1635,18 @@ impl Core {
             .unwrap_or(0);
         let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
         let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
-        live_ids_from(reg.as_deref(), roster.as_deref(), now)
+        let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
+        // (x-c914) An isolated-account worker in a persisted squad is live in
+        // ITS roster, not the default one; fold each so restore does not
+        // tombstone a live alt-account member.
+        for (_account, path) in agents_view::isolated_roster_paths() {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                for w in agents_view::parse_roster(&raw).into_iter().flatten() {
+                    live.insert(w.short_id);
+                }
+            }
+        }
+        live
     }
 
     /// Materialize the persisted named squads at the first real attach (US2).
@@ -5092,6 +5103,24 @@ async fn serve(
                 let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
                 let (roster_stamp, roster_raw) =
                     scan(roster_path.clone(), state.roster_stamp()).await;
+                // (x-c914) Each registered isolated account's roster.json, folded
+                // into the union tagged by account (managed accounts share
+                // ~/.claude and add no dir). The config re-read is tiny and
+                // gated on an attached viewer; each roster read is stamp-gated
+                // per dir by `isolated_stamp`, so only a changed dir re-reads.
+                let iso_paths =
+                    tokio::task::spawn_blocking(agents_view::isolated_roster_paths)
+                        .await
+                        .unwrap_or_default();
+                let mut isolated = Vec::with_capacity(iso_paths.len());
+                for (account, path) in iso_paths {
+                    let (stamp, raw) = scan(path, state.isolated_stamp(&account)).await;
+                    isolated.push(agents_view::IsolatedRead {
+                        account,
+                        stamp,
+                        raw,
+                    });
+                }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -5101,6 +5130,7 @@ async fn serve(
                     move || reg_raw,
                     roster_stamp,
                     move || roster_raw,
+                    isolated,
                     now,
                 ) {
                     if core_tx.send(CoreMsg::AgentRows(rows)).await.is_err() {
@@ -6303,6 +6333,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            account: None,
         }
     }
 
@@ -6333,6 +6364,7 @@ mod tests {
                 answerable: None,
                 attach_id: None,
                 external: false,
+                account: None,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -6346,6 +6378,7 @@ mod tests {
                 answerable: None,
                 attach_id: Some("c19cd2c3".into()),
                 external: false,
+                account: None,
             },
         ];
         let rows = core.agent_rows();
@@ -6416,6 +6449,7 @@ mod tests {
                 answerable: None,
                 attach_id: None,
                 external: false,
+                account: None,
             },
         ];
         let rows = core.agent_rows();
@@ -6451,6 +6485,7 @@ mod tests {
                 answerable: None,
                 attach_id: Some("ab12cd34".into()),
                 external: true,
+                account: None,
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
@@ -6463,6 +6498,7 @@ mod tests {
                 answerable: None,
                 attach_id: Some("ffffffff".into()),
                 external: true,
+                account: None,
             },
         ];
         assert!(
@@ -6509,6 +6545,7 @@ mod tests {
             answerable: None,
             attach_id: Some("ab12cd34".into()),
             external: true,
+            account: None,
         }];
         let rows = core.agent_rows();
         let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
@@ -7656,6 +7693,7 @@ mod tests {
             answerable: None,
             attach_id: attach.map(str::to_owned),
             external: false,
+            account: None,
         }
     }
 
