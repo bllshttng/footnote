@@ -611,9 +611,13 @@ check_eq   'slug+proj conflict status' "$(field "$out" status)" 'error'
 out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'some-slug' -P etl -f)"
 check_eq   'slug+proj force status' "$(field "$out" status)" 'ok'
 
-# --- a stray --project token in task prose fails loud (defensive flag scan) ----
+# --- a --project token in free-text PROSE is verbatim seed content (x-cbb0): a
+#     seed is exempt from the flag scan, so it does NOT error. A glued flag in a
+#     DISPATCHED command (node build / passthrough) still fails loud (asserted
+#     above via `ab-99999999 --model opus` etc.).
 out="$(run 'add a --project switch to the cli')"
-check_eq   'stray --project token errors' "$(field "$out" status)" 'error'
+check_eq   'stray --project in a seed is verbatim, not an error' "$(field "$out" status)" 'ok'
+check_eq   'stray --project seed mode'  "$(field "$out" payload_mode)" 'seed'
 
 # --- -P with an empty value fails loud (codex P2): never a silent caller-cwd hop -
 out="$(run 'backend work' -P '')"

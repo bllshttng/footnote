@@ -269,9 +269,15 @@ fi
 # each token's leading em/en-dash to `--`; the message keeps the original text
 # verbatim. `set -f` disables globbing so an unquoted `*` in the task text cannot
 # expand to filenames during the word-split. (ab-27541df5 US1, Locked Decision 5)
-# handoff is exempt: a doc path is a verbatim continuation seed with no payload a
-# stray flag could corrupt, so a dash token in it is part of the path.
-if [[ "$HANDOFF_MODE" -eq 0 ]]; then
+# The scan applies ONLY to a dispatched command - a passthrough (leading `/`) or
+# a node-id build - where a flag glued into the payload would corrupt the
+# /target-family command that runs. A free-text SEED (x-cbb0) is sent VERBATIM as
+# the session's opening turn, so a flag-shaped token in it ("what does grep -i
+# do") is conversational content, not a mangled dispatch flag - exempt, exactly as
+# the retired `ask` verb and `handoff` are. The node-id check mirrors the tier-1/
+# tier-3 detection below (inline here because node detection runs after this).
+_scan_ft="${msg%%[[:space:]]*}"
+if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft" | grep -qE '^(ab-[0-9a-f]{8}|[0-9a-f]{8})$'; }; then
   set -f
   for scan_tok in $msg; do
     scan_cano="$scan_tok"
