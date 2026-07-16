@@ -250,9 +250,9 @@ the real node.
 **Payload modes** (chosen deterministically by normalize):
 
 - **build** (default): run the work, normalized per harness (x-a5e4). claude/agy
-  get `/target <text>` (+ `no-merge`); codex gets `$fno:target <text>` (the plugin
-  skill, runs the real pipeline); gemini/opencode (no skill surface) get a prose
-  build BRIEF - never a literal slash command they'd run as a no-op.
+  get `/target <text>` (+ `no-merge`); opencode gets `/fno:target <text>` (the
+  plugin palette + `run --command`); codex gets `$fno:target <text>` - all run the
+  real pipeline. gemini is deprecated (successor: agy) and refused, never a brief.
 - **ask** (`ask`/`bare` verb): a one-shot question. The prompt is sent verbatim.
 - **handoff** (`--handoff`): a doc path becomes a continuation seed (read the doc,
   continue from where it left off, do NOT re-derive a plan) + a standing
@@ -262,10 +262,9 @@ the real node.
   provider-native interactive pane. Claude/Codex/Gemini, NO `/target`. See the
   `discuss` section.
 - **passthrough** (leading `/`): the explicit command, normalized per harness for
-  ANY footnote verb (x-a5e4) - `/verb` verbatim on claude/agy, `$fno:verb` on codex
-  (so `/agent spawn /blueprint -p codex` runs the real skill). gemini/opencode have
-  no slash/skill surface, so a slash passthrough there is refused (use a build
-  description or `ask`).
+  ANY footnote verb (x-a5e4) - `/verb` verbatim on claude/agy, `/fno:verb` on
+  opencode, `$fno:verb` on codex (so `/agent spawn /blueprint -p codex` runs the
+  real skill). gemini is deprecated and refused (route to claude/codex/opencode/agy).
 
 **`shape_hint`** (`path|question|continue|feature`): a deterministic read of what
 KIND of payload this is. Use it ONLY on the bare-input path (no explicit verb) -
@@ -451,8 +450,8 @@ follows the work-map root:
 `~/conductor/workspaces/<repo>/<name>` on a fresh feature branch and launches the
 worker THERE - born isolated, location verdict `ok` from line one, no reliance on
 the worker self-creating a worktree. "Writes code" is keyed off `payload_mode`,
-not the message text: a `build` dispatch (claude `/target` wrap OR a codex/gemini
-`Implement ...` prose brief) and an explicit claude `/target`|`/do`|`/fix`
+not the message text: a `build` dispatch (claude `/target` wrap, opencode
+`/fno:target`, or codex `$fno:target`) and an explicit claude `/target`|`/do`|`/fix`
 passthrough all isolate; `ask`/`handoff`/`discuss` and a non-code claude slash
 command (`/think` writes a design doc) stay in repo root. An already-isolated
 worktree cwd is not re-isolated; any creation error fails safe to repo root. This

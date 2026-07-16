@@ -677,10 +677,18 @@ def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -
 
 
 def plan_doc_path(
-    slug: str, node: str = "", project_root: Optional[Path] = None
+    slug: str,
+    node: str = "",
+    project_root: Optional[Path] = None,
+    now: Optional[object] = None,
 ) -> Path:
-    """The save path for a NEW plan/design doc: resolved plans dir + filename."""
-    return plans_content_dir(project_root) / plan_doc_filename(slug, node)
+    """The save path for a NEW plan/design doc: resolved plans dir + filename.
+
+    ``now`` (default today) sources the filename's date. Threading it lets a
+    recompute from a durable timestamp (e.g. a node's ``created_at``) mint the
+    same path on a later day instead of a fresh-dated duplicate.
+    """
+    return plans_content_dir(project_root) / plan_doc_filename(slug, node, now)
 
 
 def handoffs_dir(project_root: Optional[Path] = None) -> Path:

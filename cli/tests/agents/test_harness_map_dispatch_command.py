@@ -1,8 +1,9 @@
 """Per-harness dispatch_command resolution (x-567d).
 
 Each harness resolves to the right worker command: a native skill invocation
-where one is verified (claude ``/target``, codex ``$fno:target``, agy ``/target``)
-or the prose-brief lane (opencode/gemini, which have no footnote slash surface).
+where one is verified (claude/agy ``/target``, opencode ``/fno:target``, codex
+``$fno:target``). gemini is deprecated (successor: agy) and its dispatch lane is
+a loud refusal - no prose brief (x-de43).
 """
 from __future__ import annotations
 
@@ -30,22 +31,17 @@ def test_skill_invoking_harnesses_get_native_command(harness, expected_prefix):
     assert out["command"] == f"{expected_prefix}x-abcd"
 
 
-@pytest.mark.parametrize("harness", ["opencode", "gemini"])
-def test_prose_brief_harnesses_never_get_a_literal_slash_command(harness):
-    # opencode/gemini have no footnote slash surface: a literal `/target` would
-    # run verbatim and no-op. They get a prose brief that names the node.
-    out = resolve_dispatch(harness=harness, node_id="x-abcd")
-    assert not out["command"].startswith("/target")
-    assert not out["command"].startswith("$fno")
-    assert "x-abcd" in out["command"]
-    assert "merge" in out["command"].lower()  # brief tells the worker not to merge
+def test_opencode_gets_native_fno_slash_command():
+    # opencode's fno plugin expands `/fno:verb` (palette + `run --command`), so
+    # dispatch renders the native slash form, not a prose brief (x-de43).
+    out = resolve_dispatch(harness="opencode", node_id="x-abcd")
+    assert out["command"] == "/fno:target no-merge x-abcd"
 
 
-def test_prose_brief_substitutes_every_id_occurrence():
-    # The brief references {id} more than once; str.replace hits all of them.
-    out = resolve_dispatch(harness="opencode", node_id="x-9f9f")
-    assert "{id}" not in out["command"]
-    assert out["command"].count("x-9f9f") >= 2
+def test_gemini_dispatch_refused_naming_agy():
+    # gemini is deprecated (successor: agy); its dispatch lane is a loud refusal.
+    with pytest.raises(DispatchResolveError, match="agy"):
+        resolve_dispatch(harness="gemini", node_id="x-abcd")
 
 
 def test_config_command_overrides_the_per_harness_builtin():
@@ -96,12 +92,14 @@ def test_normalize_command_slash_and_codex(harness, expected):
     assert normalize_command("/target no-merge {id}", harness) == expected
 
 
-@pytest.mark.parametrize("harness", ["opencode", "gemini"])
-def test_normalize_command_prose_returns_the_brief(harness):
-    out = normalize_command("/target no-merge {id}", harness)
-    assert not out.startswith("/")
-    assert not out.startswith("$fno")
-    assert "{id}" in out  # the brief still names the node for substitution
+def test_normalize_command_opencode_namespaces():
+    # opencode: `/verb` -> `/fno:verb` (plugin palette + `run --command`).
+    assert normalize_command("/target no-merge {id}", "opencode") == "/fno:target no-merge {id}"
+
+
+def test_normalize_command_gemini_refused():
+    with pytest.raises(DispatchResolveError, match="agy"):
+        normalize_command("/target no-merge {id}", "gemini")
 
 
 @pytest.mark.parametrize(
@@ -119,14 +117,15 @@ def test_normalize_command_is_verb_agnostic_for_codex(verb_cmd, expected):
 
 def test_dispatch_command_builtin_matches_normalize():
     # The builtin is exactly the normalize of the canonical autonomous command.
-    for h in ("claude", "codex", "agy", "opencode", "gemini"):
+    # gemini excluded: it refuses (test_normalize_command_gemini_refused).
+    for h in ("claude", "codex", "agy", "opencode"):
         assert dispatch_command(h) == normalize_command("/target no-merge {id}", h)
 
 
 def test_command_surface_is_reported():
     assert resolve_dispatch(harness="codex")["command_surface"] == "codex-skill"
     assert resolve_dispatch(harness="claude")["command_surface"] == "slash"
-    assert resolve_dispatch(harness="opencode")["command_surface"] == "prose"
+    assert resolve_dispatch(harness="opencode")["command_surface"] == "slash"
 
 
 # --- the verb-path fix (the codex P1 the handoff names) --------------------- #
@@ -146,23 +145,22 @@ def test_verb_path_keeps_slash_for_slash_harnesses(harness):
     assert out["command"] == "/target x-abcd"
 
 
-def test_verb_path_falls_to_prose_for_prose_harness():
+def test_verb_path_normalizes_to_opencode_slash():
     out = resolve_dispatch(harness="opencode", node_id="x-abcd", verb="/target")
-    assert not out["command"].startswith("/")
-    assert not out["command"].startswith("$fno")
-    assert "x-abcd" in out["command"]
+    assert out["command"] == "/fno:target x-abcd"
 
 
-@pytest.mark.parametrize("harness", ["opencode", "gemini"])
-def test_non_target_verb_on_prose_harness_is_rejected(harness):
-    # /think has no verified prose translation - it must NOT silently become the
-    # /target implementation brief (codex review P1). Reject loudly.
-    with pytest.raises(DispatchResolveError, match="prose translation"):
-        resolve_dispatch(harness=harness, node_id="x-abcd", verb="/think")
+def test_opencode_renders_any_verb():
+    # opencode's single prefix-swap renders ANY verb, not just /target.
+    out = resolve_dispatch(harness="opencode", node_id="x-abcd", verb="/think")
+    assert out["command"] == "/fno:think x-abcd"
 
 
-def test_normalize_command_rejects_non_target_verb_on_prose():
-    with pytest.raises(DispatchResolveError):
-        normalize_command("/think {id}", "opencode")
-    # /target still translates (the implementation brief).
-    assert normalize_command("/target {id}", "opencode")
+def test_gemini_verb_path_refused():
+    with pytest.raises(DispatchResolveError, match="agy"):
+        resolve_dispatch(harness="gemini", node_id="x-abcd", verb="/target")
+
+
+def test_normalize_command_opencode_renders_any_verb():
+    assert normalize_command("/think {id}", "opencode") == "/fno:think {id}"
+    assert normalize_command("/blueprint quick x", "opencode") == "/fno:blueprint quick x"

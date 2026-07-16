@@ -1053,8 +1053,10 @@ is known):
    rm -f /tmp/groups-$$.json
    ```
    The verb creates one child node per group (`parent=$EPIC_ID`, its own
-   self-contained `<stem>.group-<slug>.md` plan, `blocked_by` resolved from
-   `blocked_by_groups`), prints the epic id and each child id with its wave
+   self-contained quick-plan scaffold at the canonical `fno plan path` name in
+   the child's own project plans dir - the path it prints as `scaffolded plan:`
+   / reports in the `--json` `scaffolded[]`), `blocked_by` resolved from
+   `blocked_by_groups`, prints the epic id and each child id with its wave
    range, and is idempotent: re-running `/blueprint group N` on an
    already-decomposed plan updates the same children in place (keyed on the
    group slug) rather than duplicating (US4). A bad spec leaves the
@@ -1074,7 +1076,9 @@ is known):
    births each child UNLINKED (`status: stub`, no `plan_path` -> derives `idea`),
    so nothing dispatches against an empty scaffold. You hold the epic in context
    right now - the warmest window there will ever be - so rewrite each unflagged
-   child's `<stem>.group-<slug>.md` scaffold into a real quick-plan, then link it:
+   child's scaffold (the path decompose reported as `scaffolded plan:` - a
+   canonical `YYYYMMDD-<slug>-<id>.md` in the child's own project plans dir) into
+   a real quick-plan, then link it:
 
    - Fill `## Why (from epic)` (the seeded intent + Locked Decisions, narrowed to
      what binds THIS child - transcribed, never a pointer back at the epic).
@@ -1102,7 +1106,9 @@ holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
 **Packaging: `separate` only.** Every child gets its own self-contained
 quick-plan file - `plan == PR == node` for children too. Decompose scaffolds a
 stub per child (`## Why (from epic)` + Context / Changes / Files to Modify /
-Verification, born `status: stub`) at `<stem>.group-<slug>.md`, and births the
+Verification, born `status: stub`) at the canonical `fno plan path` name in the
+child's own project plans dir (reported as `scaffolded plan:`; existing legacy
+`<stem>.group-<slug>.md` stubs are grandfathered in place), and births the
 child WITHOUT a `plan_path` - identity is the durable `group_slug` field, so the
 unlinked child is still found on re-decompose. Linking the filled plan (inline
 step 2, or the fan-out pass) is what makes it `ready`. It is the default (and

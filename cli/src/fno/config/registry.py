@@ -186,7 +186,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.dispatch.* (harness-capability map overlay; `fno dispatch resolve`) ---
     "dispatch.harness": Meta("advanced", "Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.", default_source="default"),
     "dispatch.substrate": Meta("advanced", "Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).", default_source="default"),
-    "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}; empty = '/target no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve (a leading /verb becomes $fno:verb on codex, a prose brief on gemini/opencode); a non-slash template passes through literally.", default_source="default"),
+    "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}; empty = '/target no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve (a leading /verb becomes $fno:verb on codex, /fno:verb on opencode, and is refused on the deprecated gemini); a non-slash template passes through literally.", default_source="default"),
     "dispatch.allowed_verbs": Meta("advanced", "Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).", default_source="default"),
     "dispatch.auto_merge": Meta("advanced", "Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false.", default_source="default"),
     "dispatch.on_exhaustion": Meta("advanced", "On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.", default_source="default"),
@@ -297,8 +297,16 @@ FIELD_META: dict[str, Meta] = {
     "collision.severity_thresholds.medium_ratio": Meta("never", "Collision scoring: medium-severity shared-file ratio."),
     # --- config.work map ---
     "work.workspaces": Meta(
-        "advanced", "Workspace -> project topology map (config.work.workspaces.<slug>.projects[]).",
+        "advanced", "Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). "
+        "A project entry may carry a `worktree` key (never|harness-native|external) overriding config.worktree.policy.",
         default_source="auto-detect",
+    ),
+    # --- config.worktree.* ---
+    "worktree.policy": Meta(
+        "advanced",
+        "Global worktree-isolation policy (never|harness-native|external); default harness-native. "
+        "`never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project "
+        "work.workspaces.<slug>.projects[].worktree key overrides it.",
     ),
     # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
     "model_routing.enabled": Meta(

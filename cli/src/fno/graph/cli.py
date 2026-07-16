@@ -648,6 +648,7 @@ def cmd_decompose(
     from fno.graph._intake import _find_node, _would_create_cycle
     from fno.graph._decompose import (
         DecomposeError,
+        canonical_child_plan_path,
         child_plan_path,
         classify_group_dep,
         extract_contract_versions,
@@ -762,6 +763,9 @@ def cmd_decompose(
             base_box[0] = os.path.join(live_epic.get("cwd") or os.getcwd(), base)
         else:
             base_box[0] = base
+        # Stash the epic's cwd (US4) so the post-lock scaffold step can resolve an
+        # inherited child's child_root outside the lock (mirrors base_box).
+        epic_cwd_box[0] = live_epic.get("cwd")
 
         # Read the epic doc's pinned interface-contract version(s). The doc is
         # the single source of truth: a `contract`-tier group is eligible only
@@ -910,6 +914,7 @@ def cmd_decompose(
     orphan_box: list[list[str]] = [[]]
     base_box: list = [None]
     verbatim_base_box: list = [None]
+    epic_cwd_box: list = [None]
     downgrade_box: list[list[str]] = [[]]
     try:
         locked_mutate_graph(_graph_path(), mutator)
@@ -921,11 +926,22 @@ def cmd_decompose(
     orphan_ids = orphan_box[0]
     downgrades = downgrade_box[0]
 
+    # Shared post-mutation graph re-read: 3c reads each child's created_at +
+    # plan_path from it, and fan-out 4a reuses it. One read, not two. A read
+    # failure degrades to an empty map (scaffold falls back to today's date, the
+    # fan-out step is a no-op) rather than wedging the already-committed mutation.
+    from fno.graph.store import read_graph as _read_graph
+    try:
+        by_id = {e.get("id"): e for e in _read_graph(_graph_path())}
+    except Exception:  # noqa: BLE001 - never wedge the report on a re-read failure
+        by_id = {}
+
     # 3c. Scaffold per-child quick-plan files (--plans separate). Runs OUTSIDE
-    #     the graph lock (mirrors the _set_expected_count doc write below). The
-    #     graph mutation already repointed each child's plan_path to its separate
-    #     file; here we materialize the stub on disk. Skip a file that already
-    #     exists so a builder's edits and idempotent re-runs are never clobbered.
+    #     the graph lock (mirrors the _set_expected_count doc write below), because
+    #     it reads settings (plans_content_dir walks .claude/settings) and settings
+    #     reads never happen under the lock. Each child is born at its CANONICAL
+    #     `fno plan path` name, routed into the CHILD project's plans dir - not the
+    #     epic's dir, not the legacy `.group-<slug>.md` name (x-d6a6).
     # US4: transcribe the epic's why (intent + Locked Decisions) once - every child
     # scaffold is born grounded, AND a fan-out seed carries it so the /think worker
     # stays grounded even when its origin transcript is unresolved. A missing
@@ -944,25 +960,59 @@ def cmd_decompose(
 
     scaffolded: list[str] = []
     if separate and base_box[0]:
+        from fno.graph._intake import repo_root
         source_doc = verbatim_base_box[0] or base_box[0]
+        id_by_slug = {r["slug"]: r["id"] for r in results}
         for grp in norm:
-            disk_path = Path(separate_plan_path(base_box[0], grp["slug"]))
-            if disk_path.exists():
+            slug = grp["slug"]
+            child_id = id_by_slug.get(slug)
+            if not child_id:
+                continue
+            child = by_id.get(child_id)
+            # Skip 1: already linked - never spawn a stub beside a filled plan
+            # (Locked Decision 6; also grandfathers a repointed legacy fragment).
+            if child and child.get("plan_path"):
+                continue
+            # Skip 2: a legacy `.group-<slug>.md` file exists - grandfather it in
+            # place, no rename, no canonical duplicate (Locked Decision 4).
+            if Path(separate_plan_path(base_box[0], slug)).exists():
+                continue
+            # Route the stub into the CHILD project's plans dir. The child node's
+            # own cwd is the authoritative per-child root: the mutator set it to
+            # the routed cwd (or inherited the epic's) at mint, so it already
+            # reflects a route made WITHOUT an explicit re-route - a routed child
+            # re-decomposed with no route keeps its own repo, not the epic's.
+            # created_at sources the filename date, so a later-day re-decompose
+            # recomputes the SAME path (idempotent). Fall back to the epic cwd
+            # then repo_root() only if the re-read lost the node.
+            child_root = (
+                (child.get("cwd") if child else None)
+                or epic_cwd_box[0]
+                or repo_root()
+            )
+            canonical = Path(
+                canonical_child_plan_path(
+                    slug, child_id, str(child_root),
+                    child.get("created_at") if child else None,
+                )
+            )
+            # Skip 3: canonical already on disk - idempotent re-run.
+            if canonical.exists():
                 continue
             try:
-                disk_path.parent.mkdir(parents=True, exist_ok=True)
-                disk_path.write_text(
+                canonical.parent.mkdir(parents=True, exist_ok=True)
+                canonical.write_text(
                     scaffold_separate_plan(
                         grp, epic_resolved_id, source_doc, why_digest=why_digest
                     ),
                     encoding="utf-8",
                 )
-                scaffolded.append(str(disk_path))
+                scaffolded.append(str(canonical))
             except OSError as e:
                 # Non-fatal: the graph is already the source of truth. Warn loudly
                 # so the missing stub is visible, never silently swallowed.
                 typer.echo(
-                    f"warning: could not scaffold separate plan {disk_path}: {e}",
+                    f"warning: could not scaffold separate plan {canonical}: {e}",
                     err=True,
                 )
 
@@ -987,14 +1037,13 @@ def cmd_decompose(
     spec_ids = [r["id"] for r in results]
     if spec_ids:
         try:
-            from fno.graph.store import read_graph
             from fno.provenance.spawn_think import (
                 RunState,
                 maybe_spawn_think,
                 on_node_born,
             )
 
-            by_id = {e.get("id"): e for e in read_graph(_graph_path())}
+            # Reuse the shared post-mutation re-read from 3c (by_id).
             born_rs = RunState()
             # Force the gate + spawn (over the default-OFF / attended-offer) for the
             # flagged fan-out only; reuses the exact env seams dispatch_conversational

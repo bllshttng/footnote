@@ -697,6 +697,12 @@ def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
             f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
         )
     worktree = Path(path)
+    # policy=never (x-168b): ensure printed the repo main-checkout path itself
+    # (launch in place, no worktree). Skip every worktree-only side effect - the
+    # `.fno` heal + setup-worktree.sh would corrupt the canonical checkout
+    # (Locked Decision 4: callers guard worktree-only work on path == repo root).
+    if worktree.resolve() == canonical_root.resolve():
+        return worktree
     # Heal a whole-dir `.fno` symlink (a REUSED worktree can carry one) BEFORE
     # setup-worktree.sh runs: setup links shared state into `.fno/*`, and through
     # the symlink those links would land in the CANONICAL checkout; the later
@@ -856,7 +862,10 @@ def dispatch_lanes(
         # failure path below.
         try:
             worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
-            _seed_lane_local_settings(worktree, node_id, base_pid)
+            # A never-policy lane runs in the canonical checkout in place; seeding
+            # a per-lane config.local.toml there would write into canonical .fno.
+            if worktree.resolve() != canonical.resolve():
+                _seed_lane_local_settings(worktree, node_id, base_pid)
             eff_provider = provider if provider is not None else node.get("provider")
             short_id = _spawn_worker(
                 node_id, str(worktree), slug,

@@ -1,15 +1,16 @@
 """Integration tests for `fno worktree ensure` (node x-73ca).
 
 The verb is a mechanism-only primitive: given a repo MAIN checkout and a name,
-it idempotently creates `~/conductor/workspaces/<repo>/<name>` (branched off
+it idempotently creates `<worktrees_base>/<repo>/<name>` (branched off
 origin/main, not the dispatcher's local HEAD) and prints the path on stdout.
 On any failure it exits non-zero and prints NOTHING on stdout, so a caller
 doing `wt=$(fno worktree ensure ...)` falls back to its prior cwd and the
 dispatch is never blocked.
 
-HOME is pinned to a per-test temp dir so the conductor worktree base lands in
-the sandbox. Real git repos are used because the gitdir/common-dir distinction
-(main checkout vs linked worktree) is a filesystem fact.
+HOME is pinned to a per-test temp dir so the default worktree base
+(`~/.fno/worktrees`) lands in the sandbox. Real git repos are used because the
+gitdir/common-dir distinction (main checkout vs linked worktree) is a
+filesystem fact.
 """
 from __future__ import annotations
 
@@ -47,14 +48,15 @@ def main_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return main
 
 
-def _conductor_wt(home: Path, repo: Path, name: str) -> Path:
-    return home / "conductor" / "workspaces" / repo.name / name
+def _default_wt(home: Path, repo: Path, name: str) -> Path:
+    """Default worktree location: ~/.fno/worktrees/<repo>/<name> (no config)."""
+    return home / ".fno" / "worktrees" / repo.name / name
 
 
 def test_ensure_creates_worktree_and_prints_path(main_repo: Path, tmp_path: Path) -> None:
     res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "agent-a"])
     assert res.exit_code == 0, res.stderr
-    wt = _conductor_wt(tmp_path, main_repo, "agent-a")
+    wt = _default_wt(tmp_path, main_repo, "agent-a")
     assert res.stdout.strip() == str(wt)
     assert wt.is_dir()
     # It is a real, registered worktree of the repo.
@@ -103,7 +105,7 @@ def test_ensure_idempotent_reuse(main_repo: Path, tmp_path: Path) -> None:
 
 def test_ensure_stray_dir_non_clobber(main_repo: Path, tmp_path: Path) -> None:
     """AC1-FR: a same-named NON-worktree dir is never clobbered; verb fails."""
-    stray = _conductor_wt(tmp_path, main_repo, "stray")
+    stray = _default_wt(tmp_path, main_repo, "stray")
     stray.mkdir(parents=True)
     sentinel = stray / "keep.txt"
     sentinel.write_text("do not delete\n")
@@ -131,3 +133,144 @@ def test_ensure_non_git_repo_falls_back(tmp_path: Path, monkeypatch: pytest.Monk
     res = runner.invoke(app, ["worktree", "ensure", "--repo", str(plain), "--name", "x"])
     assert res.exit_code != 0
     assert res.stdout.strip() == ""
+
+
+# --- policy gate (x-168b) ---------------------------------------------------
+
+
+def _write_config(fno_dir: Path, body: str) -> None:
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    (fno_dir / "config.toml").write_text(body)
+
+
+def test_ensure_policy_never_returns_repo_root(main_repo: Path, tmp_path: Path) -> None:
+    """AC1-HP: a per-project `never` policy launches in place: repo root on
+    stdout, exit 0, and NO worktree created anywhere."""
+    _write_config(
+        main_repo / ".fno",
+        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n',
+    )
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "n"])
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(main_repo.resolve())
+    assert not _default_wt(tmp_path, main_repo, "n").exists()
+
+
+def test_ensure_policy_broken_config_refuses(main_repo: Path, tmp_path: Path) -> None:
+    """AC1-ERR: a config.toml that exists but fails to parse refuses creation
+    (empty stdout, non-zero) -- fail closed, never auto-isolate on a misconfig."""
+    (main_repo / ".fno").mkdir(parents=True, exist_ok=True)
+    (main_repo / ".fno" / "config.toml").write_text("this = = broken toml\n")
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "b"])
+    assert res.exit_code != 0
+    assert res.stdout.strip() == ""
+    assert not _default_wt(tmp_path, main_repo, "b").exists()
+
+
+def test_ensure_policy_out_of_enum_refuses_naming_valid(main_repo: Path, tmp_path: Path) -> None:
+    """AC2-ERR: an out-of-enum value (`conductor` is a base, not a mode) refuses
+    and names the valid values on stderr."""
+    _write_config(
+        main_repo / ".fno",
+        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "conductor"\n',
+    )
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "c"])
+    assert res.exit_code != 0
+    assert res.stdout.strip() == ""
+    assert "never" in res.stderr and "harness-native" in res.stderr and "external" in res.stderr
+
+
+def test_ensure_never_with_explicit_branch_refuses(main_repo: Path, tmp_path: Path) -> None:
+    """A never project + an explicit --branch (batch lane) is a contradiction:
+    an isolated branch cannot be created in place. Refuse (empty stdout) rather
+    than report success on the canonical branch."""
+    _write_config(
+        main_repo / ".fno",
+        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n',
+    )
+    res = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "b", "--branch", "feature/batch-x"],
+    )
+    assert res.exit_code != 0
+    assert res.stdout.strip() == ""
+
+
+def test_ensure_honors_fno_config(
+    main_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FNO_CONFIG, when set, is the sole config source: a `never` in it wins even
+    though the repo-local .fno has no policy (fail-closed parity with the loader)."""
+    cfg = tmp_path / "explicit.toml"
+    cfg.write_text(
+        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n'
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "f"])
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(main_repo.resolve())
+
+
+def test_ensure_malformed_workspaces_refuses(main_repo: Path, tmp_path: Path) -> None:
+    """Fail-closed on gross map corruption: a `work.workspaces` present but the
+    wrong type (a scalar, not a table) refuses rather than silently defaulting
+    to auto-isolate a project whose `never` entry it can no longer read."""
+    _write_config(main_repo / ".fno", '[work]\nworkspaces = "not-a-table"\n')
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "m"])
+    assert res.exit_code != 0
+    assert res.stdout.strip() == ""
+    assert not _default_wt(tmp_path, main_repo, "m").exists()
+
+
+def test_ensure_project_absent_falls_to_default(main_repo: Path, tmp_path: Path) -> None:
+    """AC1-EDGE: a repo absent from the workspaces map falls to the default
+    (harness-native under claude): a worktree IS created."""
+    _write_config(
+        main_repo / ".fno",
+        '[[work.workspaces.default.projects]]\npath = "/some/other/repo"\nworktree = "never"\n',
+    )
+    res = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "d", "--harness", "claude"]
+    )
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(_default_wt(tmp_path, main_repo, "d"))
+
+
+def test_ensure_worktrees_base_set_lands_under_base(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """A configured paths.worktrees_base lands the worktree at <base>/<repo>/<name>."""
+    base = tmp_path / "custom-bases"
+    _write_config(main_repo / ".fno", f'[paths]\nworktrees_base = "{base}"\n')
+    res = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "e", "--harness", "claude"]
+    )
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(base / main_repo.name / "e")
+
+
+def test_policy_verb_reports_never_and_default(main_repo: Path, tmp_path: Path) -> None:
+    """The read-only `policy` verb shares the resolver: `never` prints bare
+    `never`; the default prints `harness-native` + a base line."""
+    _write_config(
+        main_repo / ".fno",
+        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n',
+    )
+    res = runner.invoke(app, ["worktree", "policy", "--repo", str(main_repo)])
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == "never"
+
+    # A fresh repo with no config -> default harness-native under claude.
+    other = tmp_path / "other"
+    other.mkdir()
+    _git("init", "-q", "-b", "main", cwd=other)
+    (other / "r").write_text("x")
+    _git("add", "r", cwd=other)
+    _git("commit", "-qm", "i", cwd=other)
+    res2 = runner.invoke(
+        app, ["worktree", "policy", "--repo", str(other), "--harness", "claude"]
+    )
+    assert res2.exit_code == 0, res2.stderr
+    lines = res2.stdout.strip().splitlines()
+    assert lines[0] == "harness-native"
+    assert lines[1].startswith("base=")

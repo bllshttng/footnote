@@ -365,6 +365,22 @@ for id in "${NODES[@]}"; do
     role_hint="--role build "
     [[ -n "$ROUTE" ]] && route_args=("--route" "$ROUTE")
   fi
+  # x-9f75: group pane workers by project - pass --squad <node.project> so
+  # same-project dispatches converge into one workspace (create-if-absent lives
+  # server-side in run_pane). --squad is pane-only (the CLI rejects it for
+  # bg/headless), so gate on the substrate; a bg worker is a detached thread
+  # with no tab to group. Best-effort: an empty project just omits the flag.
+  squad_args=()
+  squad_hint=""
+  if [[ "$DISPATCH_SUBSTRATE" == "pane" ]]; then
+    # `.project` is a Rust String (serialized "" when unset, not null), and jq's
+    # `//` treats "" as truthy, so filter empties explicitly before the fallback.
+    node_project="$(printf '%s' "$node_json" | jq -r '.project | select(. != "") // empty' 2>/dev/null)"
+    if [[ -n "$node_project" ]]; then
+      squad_args=("--squad" "$node_project")
+      squad_hint="--squad $node_project "
+    fi
+  fi
   # Receipt route= token, resolved PER NODE (not once before the loop) so a
   # `route set`/`unset` racing a bulk dispatch is stamped per worker, never
   # inferred from a stale run-start snapshot (codex P2; plan's per-worker
@@ -578,7 +594,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}$agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}$agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -635,7 +651,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
@@ -645,16 +661,16 @@ for id in "${NODES[@]}"; do
       # may not shell out to a repo-root script (shellout-drift gate).
       _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
       [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then

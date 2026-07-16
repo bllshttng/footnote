@@ -222,6 +222,81 @@ def test_check_wip_caps_flags_malformed(tmp_path: Path, monkeypatch: pytest.Monk
     assert "'now'" in joined and "'next'" in joined and "'later'" in joined
 
 
+def test_check_worktree_policy_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid policy + correctly-spelled per-project key reports nothing."""
+    from fno.setup.doctor import check_worktree_policy
+    f = tmp_path / "global.yaml"
+    f.write_text(
+        "config:\n  worktree:\n    policy: never\n"
+        "work:\n  workspaces:\n    default:\n      projects:\n"
+        "        - name: vault\n          worktree: never\n"
+    )
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(f))
+    assert check_worktree_policy() == []
+
+
+def test_check_worktree_policy_flags_out_of_enum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An out-of-enum global policy value is surfaced (it refuses creation)."""
+    from fno.setup.doctor import check_worktree_policy
+    f = tmp_path / "global.yaml"
+    f.write_text("config:\n  worktree:\n    policy: conductor\n")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(f))
+    problems = check_worktree_policy()
+    assert len(problems) == 1 and "conductor" in problems[0]
+
+
+def test_check_worktree_policy_flags_typo_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-project key one edit from 'worktree' is flagged as the silent typo
+    trap (extra='ignore' drops it, so the project gets the default policy)."""
+    from fno.setup.doctor import check_worktree_policy
+    f = tmp_path / "global.yaml"
+    f.write_text(
+        "work:\n  workspaces:\n    default:\n      projects:\n"
+        "        - name: vault\n          worktre: never\n"  # typo
+    )
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(f))
+    problems = check_worktree_policy()
+    assert len(problems) == 1 and "worktre" in problems[0] and "vault" in problems[0]
+
+
+def test_check_worktree_policy_scans_repo_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo'd per-project key in the REPO-LOCAL .fno/config.toml is surfaced
+    (the override, and its typo, can live there, not only in global config)."""
+    import fno.paths as _paths
+    from fno.setup.doctor import check_worktree_policy
+
+    g = tmp_path / "global.yaml"
+    g.write_text("config:\n  obsidian:\n    enabled: false\n")  # clean global
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(g))
+
+    repo = tmp_path / "repo"
+    (repo / ".fno").mkdir(parents=True)
+    (repo / ".fno" / "config.toml").write_text(
+        "[[work.workspaces.default.projects]]\nname = \"repo\"\nworktre = \"never\"\n"
+    )
+
+    # Stub resolve_repo_root to point at our fake repo. It carries a .cache_clear
+    # so the local teardown fixture (which clears the real lru_cache) doesn't trip
+    # over a bare function replacement.
+    class _StubRepoRoot:
+        @staticmethod
+        def cache_clear() -> None:
+            return None
+
+        def __call__(self) -> Path:
+            return repo
+
+    monkeypatch.setattr(_paths, "resolve_repo_root", _StubRepoRoot())
+    problems = check_worktree_policy()
+    assert len(problems) == 1 and "worktre" in problems[0]
+
+
 def test_check_wip_caps_non_mapping_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """wip_caps as a scalar (not a mapping) is reported once."""
     from fno.setup.doctor import check_wip_caps

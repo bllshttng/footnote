@@ -163,13 +163,22 @@ use crate::tree::{Dir, Rect, TabId};
 /// id, gated by a durable generation-checked compare-and-set in `squads.json`
 /// (`external_lifecycle` collection).
 ///
-/// v31 (x-c914): the account-scoped dispatch verbs carry the client's
+/// v31 (x-9f75): `PanePlacement.here` - open-here repoints the sender's focused
+/// (attach-viewer) pane at the target session instead of minting a tab or
+/// split. `#[serde(default)]` keeps a v30 placement (no `here`) parseable as
+/// `here: false` (today's semantics).
+///
+/// v32 (x-cd67): `AgentRow.subline` - the server-composed dim line-2 subline
+/// (`<branch> · <cwd-tail>`) for the sideline. `#[serde(default)]` keeps a v31
+/// reader parsing it as `None` (the pre-feature one-line row).
+///
+/// v33 (x-c914): the account-scoped dispatch verbs carry the client's
 /// session-local active account. `ClientMsg::DispatchNext { account }` and
 /// `Command::DispatchNode { node, account }` append `--account <id>` to the
 /// server's `fno dispatch one` shell so a mux-initiated spawn bills the chosen
 /// claude account; `None` = today's default (no flag). `AgentRow { account }`
 /// carries the birth/roster account for the sideline glyph.
-pub const PROTO_VERSION: u32 = 31;
+pub const PROTO_VERSION: u32 = 33;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -376,6 +385,11 @@ pub struct PanePlacement {
     pub target: PaneTarget,
     #[serde(default)]
     pub split: Option<Dir>,
+    /// (v31, x-9f75) Open-here: repoint the sender's focused pane at the target session rather than minting a
+    /// tab/split. Valid only with the default `target` (CurrentRoute) and no `split`; the server refuses a
+    /// conflicting combination. `#[serde(default)]` keeps v30 placements wire-tolerant.
+    #[serde(default)]
+    pub here: bool,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -538,10 +552,19 @@ pub struct AgentRow {
     /// v24 reader wire-tolerant (defaults false).
     #[serde(default)]
     pub tombstone: bool,
-    /// (v31, x-c914) The claude account this row bills, for the sideline
+    /// (v32, x-cd67) The server-composed dim subline for the row's line 2:
+    /// `<branch> · <cwd-tail>` (either part omitted if unknown, both absent ->
+    /// `None`). The server owns the formatting; the client renders it verbatim
+    /// under the name line and truncates to the panel width. `None` -> no
+    /// sub-row is emitted (no blank gap). `#[serde(default)]` keeps a v31 reader
+    /// wire-tolerant (a missing `subline` degrades to the pre-feature one-line
+    /// row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subline: Option<String>,
+    /// (v33, x-c914) The claude account this row bills, for the sideline
     /// account glyph: an isolated-account roster row's structural tag, or a
     /// mux-spawned pane's `FNO_ACCOUNT` birth account. `None` = the default
-    /// `~/.claude` account (no glyph). `#[serde(default)]` keeps a v30 reader
+    /// `~/.claude` account (no glyph). `#[serde(default)]` keeps a v32 reader
     /// wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -834,6 +857,18 @@ impl Command {
         Self::AttachAgent {
             id: id.into(),
             placement: PanePlacement::default(),
+        }
+    }
+
+    /// (x-9f75) Open-here: attach `id` by repointing the sender's focused
+    /// viewer pane, rather than minting a tab/split.
+    pub fn attach_agent_here(id: impl Into<String>) -> Self {
+        Self::AttachAgent {
+            id: id.into(),
+            placement: PanePlacement {
+                here: true,
+                ..PanePlacement::default()
+            },
         }
     }
 }
@@ -1694,6 +1729,17 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_from_pre_subline_json_defaults_subline_none() {
+        // AC2-EDGE (x-cd67): a pre-v32 AgentRow omits `subline` entirely
+        // (skip-when-None). A v32 reader must decode it as `None` and render
+        // the pre-feature one-line row, never fail - the skew window contract.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(older).unwrap();
+        assert_eq!(row.subline, None, "missing subline key => None");
+    }
+
+    #[test]
     fn backlog_card_from_pre_v18_json_defaults_route_fields_none() {
         // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
         // (skip-when-None). A v18 reader must decode it as all-None, never
@@ -1709,6 +1755,19 @@ mod tests {
         // wire minimal) sees exactly the pre-v18 shape.
         let out = serde_json::to_string(&card).unwrap();
         assert!(!out.contains("pane_id") && !out.contains("where_hint"));
+    }
+
+    #[test]
+    fn pane_placement_from_pre_here_json_defaults_here_false() {
+        // AC3-EDGE (x-9f75): a v30 PanePlacement omits `here`; a v31 reader must decode it as `false`
+        // (today's tab/split semantics), never fail - the same skew contract as every prior serde-default bump.
+        let v30 = r#"{"target":"CurrentRoute","split":null}"#;
+        let p: PanePlacement = serde_json::from_str(v30).unwrap();
+        assert!(!p.here, "missing here key => false");
+        // And a bare `{}` (all defaults) also decodes clean.
+        let empty: PanePlacement = serde_json::from_str("{}").unwrap();
+        assert!(!empty.here && empty.split.is_none());
+        assert!(matches!(empty.target, PaneTarget::CurrentRoute));
     }
 
     #[test]
@@ -1794,6 +1853,7 @@ mod tests {
                         cwd_base: None,
                         tombstone: false,
                         tab: None,
+                        subline: None,
                         account: None,
                     },
                     AgentRow {
@@ -1810,6 +1870,7 @@ mod tests {
                         cwd_base: None,
                         tombstone: false,
                         tab: None,
+                        subline: None,
                         account: None,
                     },
                 ],
@@ -1924,6 +1985,7 @@ mod tests {
         let placement = PanePlacement {
             target: PaneTarget::SquadId(42),
             split: Some(Dir::Up),
+            here: false,
         };
         for msg in [
             ClientMsg::Control {

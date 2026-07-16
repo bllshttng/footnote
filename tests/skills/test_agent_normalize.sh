@@ -40,6 +40,13 @@ STUB_GARBAGE="$TMP/stub-garbage.sh"; printf '#!/usr/bin/env bash\necho not-a-pro
 STUB_SLUG="$TMP/stub-slug.sh"; printf '#!/usr/bin/env bash\necho dashless-spawn\n' > "$STUB_SLUG"; chmod +x "$STUB_SLUG"
 export NODE_SLUG_RESOLVER="$STUB_EMPTY"
 
+# A dir with a FAILING `fno` on PATH forces normalize.sh's static command-surface
+# fallback (used when `fno dispatch resolve` is unreachable), so surface-dependent
+# assertions are deterministic regardless of the installed fno's freshness (x-de43:
+# a stale installed fno reports opencode=prose, a fresh one opencode=slash).
+FBIN="$TMP/failing-fno"; mkdir -p "$FBIN"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$FBIN/fno"; chmod +x "$FBIN/fno"
+
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 
 # Smart-quote bytes for assertions (bash 3.2 safe: printf octal, no \u).
@@ -101,8 +108,9 @@ OUT="$(bash "$NORM" --input "$(printf '   \t  ')")"
 [[ "$(field "$OUT" status)" == "error" ]] && pass "Boundary whitespace task -> error" || fail "Boundary whitespace: $OUT"
 
 # --- Locked #4: provider resolution explicit -> config -> claude ---
-# Explicit wins.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_CODEX" bash "$NORM" --input "ab-deadbeef" --provider gemini)"
+# Explicit wins. Use ask mode: gemini's (deprecated) build lane refuses before a
+# provider line is emitted, so ask mode isolates the provider-resolution assertion.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_CODEX" bash "$NORM" --ask --input "hi there" --provider gemini)"
 [[ "$(field "$OUT" provider)" == "gemini" ]] && pass "Locked#4 explicit provider wins" || fail "explicit provider: $OUT"
 # No explicit -> defer to resolver (codex).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_CODEX" bash "$NORM" --input "ab-deadbeef")"
@@ -164,7 +172,8 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
 # AC3-HP/UI: explicit --yolo for codex -> yolo=1 (skill renders it in CONFIRM/argv).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider codex --yolo)"
 [[ "$(field "$OUT" yolo)" == "1" ]] && pass "AC3-HP explicit --yolo (codex) -> yolo=1" || fail "codex yolo: $OUT"
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider gemini --yolo)"
+# ask mode: gemini build refuses (deprecated), so isolate the --yolo forwarding.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --ask --input "hi" --provider gemini --yolo)"
 [[ "$(field "$OUT" yolo)" == "1" ]] && pass "AC3-HP explicit --yolo (gemini) -> yolo=1" || fail "gemini yolo: $OUT"
 # AC3-ERR (x-d235): --yolo with claude MAPS to --permission-mode bypassPermissions
 # (claude has no --yolo flag; bypassPermissions is its full-auto/no-gates
@@ -227,13 +236,14 @@ else
   fail "codex passthrough normalize: $OUT"
 fi
 
-# A prose-surface provider (opencode) has NO slash/skill surface, so a slash
-# passthrough is still refused (a literal /goal would run verbatim as a no-op).
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider opencode --input "/goal ship it")"
-if [[ "$(field "$OUT" status)" == "error" ]] && printf '%s' "$OUT" | grep -qi "no slash/skill surface"; then
-  pass "passthrough: opencode /goal -> refused (no surface)"
+# opencode is a slash surface via its fno plugin: a passthrough `/verb` is
+# namespaced to `/fno:verb` (x-de43). FBIN forces the static fallback so the
+# surface is deterministic regardless of the installed fno's freshness.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" --provider opencode --input "/goal ship it")"
+if [[ "$(field "$OUT" status)" == "ok" ]] && [[ "$(field "$OUT" message)" == "/fno:goal ship it" ]]; then
+  pass "passthrough: opencode /goal -> /fno:goal (plugin palette surface)"
 else
-  fail "opencode passthrough refuse: $OUT"
+  fail "opencode passthrough namespace: $OUT"
 fi
 
 # AC4-EDGE: normalize does NOT strip a trailing provider word from the prompt;
@@ -265,25 +275,20 @@ else
   fail "agy build: $OUT"
 fi
 
-# A prose-surface provider (gemini/opencode) keeps the prose BRIEF, never a
-# literal /target it would run as a no-op.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider gemini --input "add CSV export to the dashboard")"
-MSG="$(field "$OUT" message)"
-if [[ "$MSG" == *"Implement the following"* ]] && [[ "$MSG" == *"add CSV export to the dashboard"* ]] \
-   && [[ "$MSG" == *"do not merge"* ]] && [[ "$MSG" != *"/target"* ]]; then
-  pass "build: gemini feature -> prose brief, never /target"
+# gemini is deprecated (successor: agy); its build lane refuses loudly, never a
+# prose brief (x-de43). FBIN forces the static fallback for determinism.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" --provider gemini --input "add CSV export to the dashboard")"
+if [[ "$(field "$OUT" status)" == "error" ]] && printf '%s' "$OUT" | grep -qi "agy"; then
+  pass "build: gemini -> refused naming agy, never a prose brief"
 else
-  fail "gemini feature brief: $OUT"
+  fail "gemini build refused: $OUT"
 fi
 
-# --allow-merge drops the do-not-merge from a prose brief (gemini/opencode).
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider gemini --input "add CSV export" --allow-merge)"
-MSG="$(field "$OUT" message)"
-if [[ "$MSG" == *"open a pull request"* ]] && [[ "$MSG" != *"do not merge"* ]]; then
-  pass "build: gemini brief + --allow-merge -> no do-not-merge instruction"
-else
-  fail "gemini brief allow-merge: $OUT"
-fi
+# --allow-merge does not resurrect a gemini brief: gemini is refused regardless.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" --provider gemini --input "add CSV export" --allow-merge)"
+[[ "$(field "$OUT" status)" == "error" ]] \
+  && pass "build: gemini + --allow-merge -> still refused (deprecated)" \
+  || fail "gemini allow-merge refused: $OUT"
 
 # claude build is unchanged: /target wrap + no-merge (payload_mode=build).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "ab-deadbeef")"

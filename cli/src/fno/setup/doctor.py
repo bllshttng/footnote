@@ -99,6 +99,118 @@ def check_wip_caps() -> list[str]:
     return problems
 
 
+_VALID_WORKTREE_POLICIES = ("never", "harness-native", "external")
+_KNOWN_PROJECT_KEYS = frozenset(
+    {"name", "path", "type", "stack", "package_manager", "worktree"}
+)
+
+
+def _edit_distance_le_1(a: str, b: str) -> bool:
+    """True if ``a`` and ``b`` differ by at most one insert/delete/substitute."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:  # one substitution
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    # one insert/delete: the shorter must be a subsequence missing one char
+    short, long = (a, b) if la < lb else (b, a)
+    i = j = edits = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+        else:
+            edits += 1
+            if edits > 1:
+                return False
+        j += 1
+    return True
+
+
+def _worktree_policy_problems_in(data: object) -> list[str]:
+    """Out-of-enum policy + typo'd per-project keys in one flat config dict."""
+    if not isinstance(data, dict):
+        return []
+    problems: list[str] = []
+    wt = data.get("worktree")
+    policy = wt.get("policy") if isinstance(wt, dict) else None
+    if policy is not None and policy not in _VALID_WORKTREE_POLICIES:
+        problems.append(
+            f"config.worktree.policy = {policy!r} is not one of "
+            f"{' | '.join(_VALID_WORKTREE_POLICIES)}; worktree creation will refuse"
+        )
+    work = data.get("work")
+    workspaces = work.get("workspaces") if isinstance(work, dict) else None
+    if isinstance(workspaces, dict):
+        for ws in workspaces.values():
+            projects = ws.get("projects") if isinstance(ws, dict) else None
+            if not isinstance(projects, list):
+                continue
+            for entry in projects:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("path") or "?"
+                for key in entry:
+                    if (
+                        key not in _KNOWN_PROJECT_KEYS
+                        and _edit_distance_le_1(str(key), "worktree")
+                    ):
+                        problems.append(
+                            f"project {name!r} has key {key!r}, likely a typo for "
+                            "'worktree'; it is IGNORED, so the project silently gets "
+                            "the default policy"
+                        )
+    return problems
+
+
+def check_worktree_policy() -> list[str]:
+    """Report a bad ``config.worktree.policy`` or a typo'd per-project key (x-168b).
+
+    Two silent footguns: an out-of-enum policy value refuses worktree creation
+    (fail-closed is correct, but the operator gets no doctor-time hint), and a
+    per-project key mistyped within one edit of ``worktree`` (e.g. ``worktre``)
+    is dropped by ``extra="ignore"`` -- the project silently gets the DEFAULT
+    policy when it wanted ``never``. Scans BOTH the global config AND the
+    invoking repo's ``.fno/config.toml`` (a per-project override, and its typo,
+    can live in either), deduping identical messages. Returns human-readable
+    reasons.
+    """
+    try:
+        from fno.config import _global_settings_path
+        from fno.config_io import _load_raw, _unwrap_config_dict
+    except Exception:
+        return []
+
+    yaml_path = _global_settings_path()
+    paths: list[Path] = [yaml_path.with_name("config.toml"), yaml_path]
+    try:
+        from fno.paths import resolve_repo_root
+
+        repo_fno = Path(resolve_repo_root()) / ".fno"
+        paths[:0] = [repo_fno / "config.toml", repo_fno / "settings.yaml"]
+    except Exception:
+        pass
+
+    problems: list[str] = []
+    seen_files: set[Path] = set()
+    for path in paths:
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved in seen_files:
+            continue
+        seen_files.add(resolved)
+        parsed, ok = _load_raw(path)
+        if not ok:
+            problems.append(f"{path} failed to parse; worktree policy cannot be validated")
+            continue
+        for msg in _worktree_policy_problems_in(_unwrap_config_dict(parsed)):
+            if msg not in problems:
+                problems.append(msg)
+    return problems
+
+
 def run_doctor() -> int:
     """Run the doctor diagnostic. Returns 0 if clean, non-zero on errors or suspicious paths."""
     import os
@@ -192,7 +304,14 @@ def run_doctor() -> int:
             print(f"  - {reason}")
         print("\nEach column expects a positive integer (e.g. `now: 20`).")
 
-    if errors or issues or cap_problems:
+    wt_problems = check_worktree_policy()
+    if wt_problems:
+        print(f"\n[doctor] {len(wt_problems)} worktree-policy issue(s):")
+        for reason in wt_problems:
+            print(f"  - {reason}")
+        print("\nValid policy values: never | harness-native | external.")
+
+    if errors or issues or cap_problems or wt_problems:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")
