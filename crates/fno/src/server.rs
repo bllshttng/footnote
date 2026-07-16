@@ -537,6 +537,33 @@ fn cmd_from_argv(argv: &[String]) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test override for the attach spawn program (see [`attach_argv`]). Points
+    /// unit tests at a benign binary instead of the real `claude` CLI so the
+    /// open-here / attach spawn+swap path is exercisable without spawning claude.
+    static ATTACH_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The argv that attaches bg session `id` into a fresh pane: `claude attach
+/// <id>` in production. `id` is always `claude attach`'s positional arg (never
+/// a shell string), so an 8-hex-validated id can only ever name a session.
+/// Tests override the program via `set_attach_program` (x-9f75).
+fn attach_argv(id: &str) -> Vec<String> {
+    #[cfg(test)]
+    if let Some(mut argv) = ATTACH_PROGRAM.with(|p| p.borrow().clone()) {
+        argv.push(id.to_string());
+        return argv;
+    }
+    vec!["claude".to_string(), "attach".to_string(), id.to_string()]
+}
+
+#[cfg(test)]
+fn set_attach_program(argv: &[&str]) {
+    ATTACH_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
 /// A tab's display label (x-c150), from spawn-time facts only - no I/O, no
 /// subprocess on the layout path (squad.rs's origin-freeze discipline).
 /// Chain (Locked 1): explicit rename > `FNO_NODE` provenance > spawn-cwd
@@ -3728,6 +3755,17 @@ impl Core {
                     self.notice(client_id, "no such agent");
                     return Flow::Continue;
                 }
+                // (x-9f75) Open-here conflict guard: open-here is inherently
+                // "the focused pane of my current view", so a split or a
+                // non-CurrentRoute target is a contradiction - refuse before
+                // any spawn (AC2-ERR).
+                if placement.here
+                    && (placement.split.is_some()
+                        || !matches!(placement.target, PaneTarget::CurrentRoute))
+                {
+                    self.notice(client_id, "open-here takes no split or target");
+                    return Flow::Continue;
+                }
                 // (x-0090) Reconcile: an id already mapped to a LIVE pane focuses
                 // it instead of minting a duplicate tab (Locked 3; AC2-HP). A
                 // stale mapping (pane reaped between reap and here) is dropped and
@@ -3752,6 +3790,102 @@ impl Core {
                         }
                     }
                     self.attached.remove(&id);
+                }
+                // (x-9f75) Open-here: repoint the sender's focused viewer pane
+                // at B instead of minting a tab/split. Runs AFTER reconcile (an
+                // already-paned target focuses, Locked 5 / AC1-EDGE) so only a
+                // fresh target reaches here.
+                if placement.here {
+                    // Displacement guard, BEFORE any spawn (Locked 3): the
+                    // focused pane must be an attach-VIEWER (a value in
+                    // `attached`). A direct agent or shell pane is never
+                    // displaced - killing its PTY child kills real work, so
+                    // fail closed (AC1-ERR). Reading the CURRENT focus here is
+                    // also what makes AC2-FR hold: whatever the focus is now
+                    // (it may have re-anchored after a pane exit) is what the
+                    // guard evaluates, never a stale client-side identity.
+                    let Some(focus) = self.viewed_tab(view).map(|t| t.focus) else {
+                        self.notice(client_id, "no focused pane to open here");
+                        return Flow::Continue;
+                    };
+                    let displaced = self
+                        .attached
+                        .iter()
+                        .find(|(_, &p)| p == focus)
+                        .map(|(k, _)| k.clone());
+                    let Some(displaced_id) = displaced else {
+                        self.notice(
+                            client_id,
+                            "focused pane is not a detachable viewer - use split or new tab",
+                        );
+                        return Flow::Continue;
+                    };
+                    // Anchor the spawn at B's own row cwd, falling back to the
+                    // viewed squad's canonical cwd (same rule as a fresh attach).
+                    let row_cwd = self
+                        .agents
+                        .iter()
+                        .find(|a| {
+                            a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id)
+                        })
+                        .map(|a| a.cwd.clone())
+                        .unwrap_or_default();
+                    let spawn_cwd = if row_cwd.is_empty() {
+                        self.session
+                            .squad(view.0)
+                            .map(|s| s.canonical_cwd().to_string())
+                            .unwrap_or_default()
+                    } else {
+                        row_cwd
+                    };
+                    let (rows, cols) = self
+                        .clients
+                        .iter()
+                        .find(|c| c.id == client_id)
+                        .map(|c| c.dims)
+                        .unwrap_or((vp.rows, vp.cols));
+                    // Spawn-first (Locked 4): a spawn failure leaves the layout
+                    // untouched - nothing displaced, nothing reaped (AC3-ERR).
+                    let argv = attach_argv(&id);
+                    let new_pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.notice(client_id, format!("attach failed: {e}"));
+                            return Flow::Continue;
+                        }
+                    };
+                    // Swap-second: repoint the focused leaf F -> new viewer;
+                    // focus follows the swap inside `replace_leaf`.
+                    let Some(tab) = self.viewed_tab_mut(view) else {
+                        self.reap_pane(new_pid);
+                        self.notice(client_id, "view changed; open-here aborted");
+                        return Flow::Continue;
+                    };
+                    if !tree::replace_leaf(tab, focus, new_pid) {
+                        // Focus is gone from the tree (a race with a pane exit):
+                        // the spawned viewer has nowhere to land. Reap it,
+                        // displace nothing.
+                        self.reap_pane(new_pid);
+                        self.notice(client_id, "focused pane changed; open-here aborted");
+                        return Flow::Continue;
+                    }
+                    // Record B's mapping BEFORE the reap: `reap_pane` drops every
+                    // mapping onto `focus` (clearing A so it resurfaces
+                    // watch-only), and new_pid != focus so B's fresh mapping
+                    // survives - the `attached` map stays consistent across the
+                    // swap (one pane per id, every value live).
+                    self.attached.insert(id, new_pid);
+                    // Reap-last (Locked 4): F's viewer process dies; the
+                    // DISPLACED session keeps running detached and resurfaces
+                    // watch-only on the next poll (x-7561 external-lifecycle
+                    // semantics - nothing killed, viewport moved).
+                    self.reap_pane(focus);
+                    self.notice(
+                        client_id,
+                        format!("opened here; {displaced_id} detached (watch-only)"),
+                    );
+                    self.push_layout(true);
+                    return Flow::Continue;
                 }
                 // The watch-only row's OWN cwd anchors the attach process
                 // (AC8-EDGE): squad target selection never rewrites it, so an
@@ -3802,7 +3936,7 @@ impl Core {
                 } else {
                     row_cwd
                 };
-                let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
+                let argv = attach_argv(&id);
                 let pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                     Ok(p) => p,
                     Err(e) => {
@@ -7471,6 +7605,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadName("ghost".into()),
                     split: None,
+                    here: false,
                 },
             },
         );
@@ -7486,6 +7621,217 @@ mod tests {
             }
         }
         assert!(saw, "the refusal names the missing squad");
+    }
+
+    // -- x-9f75 open-here (PanePlacement.here) ---------------------------
+
+    /// Collect every notice text still queued on `rx`.
+    fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Notice { text } = msg {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn open_here_swaps_focused_viewer_and_detaches_displaced() {
+        // AC1-HP: the focused viewer of session A is repointed at B - the tab's
+        // tree slot now hosts B's viewer, focus is the new pane, A's viewer is
+        // reaped (A resurfaces watch-only via the swept mapping), B is mapped.
+        set_attach_program(&["/bin/cat"]); // stand in for `claude attach`
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        // A occupies the focused pane; B is a watch-only row to open here.
+        core.attached.insert("deadbee1".into(), focus);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        let tab = core.viewed_tab(view).unwrap();
+        assert_eq!(tab.root, Node::Leaf(new_pid), "slot repointed at B");
+        assert_eq!(tab.focus, new_pid, "focus follows the swap");
+        assert!(!core.panes.contains_key(&focus), "A's viewer pane reaped");
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
+        assert!(
+            !core.attached.contains_key("deadbee1"),
+            "A's mapping swept - it resurfaces watch-only"
+        );
+        assert!(
+            drain_notices(&mut rx).iter().any(|t| t.contains("opened here")),
+            "notice names the displaced session"
+        );
+        core.reap_pane(new_pid); // don't leak the stand-in child
+    }
+
+    #[test]
+    fn open_here_refuses_non_viewer_focus_before_spawn() {
+        // AC1-ERR: the focused pane is a direct/shell pane (not in `attached`),
+        // so open-here refuses fail-closed with no spawn - killing its PTY
+        // child would kill real work.
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+        assert!(!core.attached.contains_key("deadbee2"), "nothing mapped");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("not a detachable viewer")));
+    }
+
+    #[test]
+    fn open_here_refuses_conflicting_placement_before_spawn() {
+        // AC2-ERR: `here` with a split or a non-CurrentRoute target is a
+        // contradiction - refused with no spawn.
+        for placement in [
+            PanePlacement {
+                here: true,
+                split: Some(Dir::Right),
+                ..Default::default()
+            },
+            PanePlacement {
+                here: true,
+                target: PaneTarget::SquadName("review".into()),
+                ..Default::default()
+            },
+        ] {
+            let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+            core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+            let panes_before = core.panes.len();
+            core.command(
+                client_id,
+                Command::AttachAgent {
+                    id: "deadbee2".into(),
+                    placement,
+                },
+            );
+            assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+            assert!(drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("open-here takes no split or target")));
+        }
+    }
+
+    #[test]
+    fn open_here_spawn_failure_leaves_layout_untouched() {
+        // AC3-ERR: the attach spawn fails - no pane is displaced, `attached` is
+        // unchanged, and the sender gets `attach failed`.
+        set_attach_program(&["/nonexistent/definitely-not-a-real-binary-xyz"]);
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        core.attached.insert("deadbee1".into(), focus);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let root_before = core.viewed_tab(view).unwrap().root.clone();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(
+            core.viewed_tab(view).unwrap().root,
+            root_before,
+            "nothing displaced on spawn failure"
+        );
+        assert!(core.panes.contains_key(&focus), "A's viewer still live");
+        assert_eq!(
+            core.attached.get("deadbee1"),
+            Some(&focus),
+            "A's mapping untouched"
+        );
+        assert!(!core.attached.contains_key("deadbee2"), "B never mapped");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("attach failed")));
+    }
+
+    #[test]
+    fn open_here_reconcile_focuses_existing_no_displacement() {
+        // AC1-EDGE: B already has a live pane. Reconcile focuses it (no spawn,
+        // no displacement of the current focus) - reconcile beats open-here.
+        let (mut core, client_id, p1, p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        // The focused pane is A's viewer; B is already paned at the OTHER pane.
+        let other = if focus == p1 { p2 } else { p1 };
+        core.attached.insert("deadbee1".into(), focus);
+        core.attached.insert("deadbee2".into(), other);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(core.panes.len(), panes_before, "reconcile spawns nothing");
+        assert!(core.panes.contains_key(&focus), "A's viewer not displaced");
+        assert_eq!(core.attached.get("deadbee2"), Some(&other), "B still at its pane");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("already attached")));
+    }
+
+    #[test]
+    fn open_here_double_click_focuses_no_second_displacement() {
+        // AC1-FR: open-here on B twice quickly - the first swaps, the second
+        // hits reconcile (B now paned) and focuses it. Exactly one viewer of B,
+        // no second displacement.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        core.attached.insert("deadbee1".into(), focus);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+        let panes_after_first = core.panes.len();
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(
+            core.panes.len(),
+            panes_after_first,
+            "the second open-here mints no pane"
+        );
+        assert_eq!(
+            core.attached.values().filter(|&&p| p == new_pid).count(),
+            1,
+            "exactly one viewer of B"
+        );
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid));
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn open_here_guard_reads_current_focus_not_client_identity() {
+        // AC2-FR: the displacement guard evaluates whatever pane is focused NOW
+        // (re-resolved server-side), so if focus has moved to a non-viewer
+        // (e.g. after the original viewer exited under the click), open-here
+        // refuses rather than blindly displacing an unintended pane. Here the
+        // focused pane is a non-viewer even though a viewer maps elsewhere.
+        let (mut core, client_id, p1, p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        // A viewer exists, but on the OTHER (unfocused) pane; focus is a plain
+        // pane not in `attached`.
+        let other = if focus == p1 { p2 } else { p1 };
+        core.attached.insert("deadbee1".into(), other);
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        let panes_before = core.panes.len();
+
+        core.command(client_id, Command::attach_agent_here("deadbee2"));
+
+        assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+        assert!(
+            core.panes.contains_key(&other),
+            "the elsewhere viewer is never touched"
+        );
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("not a detachable viewer")));
     }
 
     #[test]
@@ -8479,6 +8825,7 @@ mod tests {
                 PanePlacement {
                     target: PaneTarget::SquadName("review".into()),
                     split: None,
+                    here: false,
                 },
             )
             .unwrap();

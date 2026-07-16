@@ -100,6 +100,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         PanePlacement {
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Left),
+            here: false,
         },
     )
     .unwrap();
@@ -124,6 +125,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         PanePlacement {
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Right),
+            here: false,
         },
     )
     .unwrap_err();

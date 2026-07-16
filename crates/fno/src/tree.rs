@@ -355,6 +355,43 @@ fn split_node(
 }
 
 // ---------------------------------------------------------------------------
+// replace_leaf (open-here, x-9f75)
+// ---------------------------------------------------------------------------
+
+/// Repoint the leaf hosting `old` at `new`, leaving the tree's geometry
+/// (branch structure, ratios) untouched - only the pane id at that one slot
+/// changes. Returns `true` if `old` was found and swapped; a `false` means the
+/// tree is unchanged. Focus follows the swap when `old` held it.
+///
+/// This is the open-here primitive: a viewport re-points at a different
+/// session's pane without a split or a new tab. Unlike [`split_directional`] it
+/// creates no `Branch`, so it cannot fail on min-size - a swap-in-place always
+/// fits wherever the displaced pane fit.
+pub fn replace_leaf(tab: &mut Tab, old: PaneId, new: PaneId) -> bool {
+    if replace_leaf_node(&mut tab.root, old, new) {
+        if tab.focus == old {
+            tab.focus = new;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+fn replace_leaf_node(node: &mut Node, old: PaneId, new: PaneId) -> bool {
+    match node {
+        Node::Leaf(id) if *id == old => {
+            *id = new;
+            true
+        }
+        Node::Leaf(_) => false,
+        Node::Branch { children, .. } => children
+            .iter_mut()
+            .any(|(_, child)| replace_leaf_node(child, old, new)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // close
 // ---------------------------------------------------------------------------
 
@@ -1298,5 +1335,86 @@ mod tests {
         let before = tab.clone();
         assert!(!resize(&mut tab, VIEWPORT, Dir::Right, RESIZE_STEP));
         assert_eq!(tab, before);
+    }
+
+    // -- replace_leaf (open-here, x-9f75) --------------------------------
+
+    #[test]
+    fn tree_replace_leaf_lone_root_swaps_and_moves_focus() {
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Leaf(1),
+            focus: 1,
+        };
+        assert!(replace_leaf(&mut tab, 1, 9));
+        assert_eq!(tab.root, Node::Leaf(9));
+        assert_eq!(tab.focus, 9);
+    }
+
+    #[test]
+    fn tree_replace_leaf_nested_preserves_geometry() {
+        // A displaced pane deep in the tree is swapped in place: ratios,
+        // branch axes, and sibling ids are all untouched - only pane 2 flips.
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![
+                    (0.6, Node::Leaf(1)),
+                    (
+                        0.4,
+                        Node::Branch {
+                            axis: Axis::Vertical,
+                            children: vec![(0.5, Node::Leaf(2)), (0.5, Node::Leaf(3))],
+                        },
+                    ),
+                ],
+            },
+            focus: 2,
+        };
+        let before_layout = layout(&tab.root, VIEWPORT);
+        assert!(replace_leaf(&mut tab, 2, 9));
+        assert_eq!(tab.focus, 9);
+        // Same rects, only the id at pane 2's slot changed.
+        let after_layout = layout(&tab.root, VIEWPORT);
+        let rect_of = |ls: &[(PaneId, Rect)], id| ls.iter().find(|(p, _)| *p == id).map(|(_, r)| *r);
+        assert_eq!(rect_of(&before_layout, 2), rect_of(&after_layout, 9));
+        assert_eq!(rect_of(&before_layout, 1), rect_of(&after_layout, 1));
+        assert_eq!(rect_of(&before_layout, 3), rect_of(&after_layout, 3));
+        assert_eq!(rect_of(&after_layout, 2), None);
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_replace_leaf_absent_is_noop() {
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        let before = tab.clone();
+        assert!(!replace_leaf(&mut tab, 42, 9));
+        assert_eq!(tab, before);
+    }
+
+    #[test]
+    fn tree_replace_leaf_unfocused_keeps_focus() {
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        assert!(replace_leaf(&mut tab, 2, 9));
+        assert_eq!(tab.focus, 1);
     }
 }

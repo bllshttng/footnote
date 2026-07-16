@@ -1327,6 +1327,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                         .map(PaneTarget::SquadName)
                         .unwrap_or(PaneTarget::CurrentRoute),
                     split,
+                    here: false,
                 },
             },
         });
@@ -2516,6 +2517,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Left),
+                    ..
                 },
                 ref argv,
                 ..
@@ -2529,6 +2531,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Right),
+                    ..
                 },
                 ..
             } if name == "review"
@@ -2543,6 +2546,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Up),
+                    ..
                 },
                 ..
             } if name == "review"

@@ -4944,6 +4944,7 @@ async fn execute_row_menu_action(
                     placement: PanePlacement {
                         target: PaneTarget::CurrentRoute,
                         split,
+                        here: false,
                     },
                 }),
             )
@@ -6000,6 +6001,7 @@ async fn attach_place_keys(
                 placement: PanePlacement {
                     target: PaneTarget::SquadId(picker.target),
                     split,
+                    here: false,
                 },
             }),
         )
@@ -9705,6 +9707,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadId(2),
                     split: Some(Dir::Left),
+                    here: false,
                 },
             })
         );
@@ -9739,6 +9742,7 @@ mod tests {
                 placement: PanePlacement {
                     target: PaneTarget::SquadId(1),
                     split: None,
+                    here: false,
                 },
             })
         );
