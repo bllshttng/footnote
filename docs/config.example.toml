@@ -193,8 +193,8 @@ max_live = 3
 min_free_gb = 4.0
 # Worker CPU/IO priority: utility (background QoS, default) or off.
 worker_qos = "utility"
-# Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); an explicit flag wins, empty = unset. Provider-native, fail-closed at the spawn seam.
-spawn_permission_mode = ""
+# Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit "" (forward nothing) or "default" (prompt positively). Claude-native, fail-closed at the spawn seam.
+spawn_permission_mode = "bypassPermissions"
 
 [agents.a2a]
 # Allow agents to auto-open agent-to-agent threads.
