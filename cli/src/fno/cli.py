@@ -42,63 +42,70 @@ from fno._lazy_group import make_lazy_group_cls
 # without importing the module.  When you change a sub-app's help, update
 # the matching entry here too.
 
+# Tier discipline (x-71b6, "In-N-Out menu"): `fno --help` advertises a small
+# curated menu; everything else is hidden (invocable, just not listed). The
+# advertised set is `help`, `setup`, `backlog`, `agents`, `whoami`, `doctor`,
+# `test`, `config`, `update` (9). `help` / `cost` / `review` are eager inline
+# commands above; `cost` and `review` carry `hidden=True` on their decorators.
+# Everything hidden here is one `fno help --all` away. New verbs default to
+# hidden; promotion to the menu is a deliberate, lint-gated act (see fno lint).
 LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] = {
     # Sub-apps (Typer instances) -----------------------------------------
-    "state":         ("fno.state.cli:cli",                 "manage fno state files"),
-    "target":        ("fno.target_cli:target_app",         "Target session bootstrap (fno target init)"),
+    "state":         ("fno.state.cli:cli",                 "manage fno state files", {"hidden": True}),
+    "target":        ("fno.target_cli:target_app",         "Target session bootstrap (fno target init)", {"hidden": True}),
     "backlog":       ("fno.graph.cli:cli",                 "Feature graph management"),
     "graph":         ("fno.graph.cli:cli",                 "Feature graph management", {"hidden": True}),
-    "runtime":       ("fno.runtime.cli:cli",               "manage runtime workers and worktrees"),
-    "worker":        ("fno.worker.cli:cli",                "manage delivery worker phases"),
-    "event":         ("fno.events.cli:cli",                "emit and audit events"),
-    "log":           ("fno.log_cmd:app",                   "Append a progress entry to the per-worktree agent-progress.jsonl"),
-    "reality-check": ("fno.reality_check.cli:cli",         "check external reality"),
-    "providers":     ("fno.adapters.providers.cli:cli",    "Manage provider records and active selection."),
-    "mail":          ("fno.mail.cli:mail_app",             "Durable polled mailbox: send/unread/ack/reply/drain/status."),
-    "mcp":           ("fno.mcp.cli:mcp_app",               "MCP sidecar client verbs (send an envelope to a channel)."),
+    "runtime":       ("fno.runtime.cli:cli",               "manage runtime workers and worktrees", {"hidden": True}),
+    "worker":        ("fno.worker.cli:cli",                "manage delivery worker phases", {"hidden": True}),
+    "event":         ("fno.events.cli:cli",                "emit and audit events", {"hidden": True}),
+    "log":           ("fno.log_cmd:app",                   "Append a progress entry to the per-worktree agent-progress.jsonl", {"hidden": True}),
+    "reality-check": ("fno.reality_check.cli:cli",         "check external reality", {"hidden": True}),
+    "providers":     ("fno.adapters.providers.cli:cli",    "Manage provider records and active selection.", {"hidden": True}),
+    "mail":          ("fno.mail.cli:mail_app",             "Durable polled mailbox: send/unread/ack/reply/drain/status.", {"hidden": True}),
+    "mcp":           ("fno.mcp.cli:mcp_app",               "MCP sidecar client verbs (send an envelope to a channel).", {"hidden": True}),
     "agents":        ("fno.agents.cli:agents_app",          "Cross-CLI agent dispatch (claude / codex / gemini)."),
-    "wake":          ("fno.wake.cli:wake_app",             "Wake-signal admin commands"),
-    "plan":          ("fno.plan:plan_app",                 "Plan frontmatter stamping (in-package)"),
-    "pr":            ("fno.pr:pr_app",                     "PR utilities (wraps scripts/lib/pr-*.sh)"),
-    "stub-manifest": ("fno.stub_manifest:stub_manifest_app", "Stub-manifest for contract-tier dependents (emit/validate/check-pr)."),
-    "status-fanout": ("fno.status_fanout:status_fanout_app", "Sweep events.jsonl and route status events to configured sinks (tick)."),
-    "bundle":        ("fno.bundle:bundle_app",             "Skill bundle build + lint."),
-    "lint":          ("fno.lint_cli:app",                  "Repository lint checks"),
-    "claim":         ("fno.claims.cli:cli",                 "Work-claim coordination primitive"),
-    "carveout":      ("fno.carveout:carveout_app",          "Capture left-out work (deferred decisions, out-of-scope bugs) for retro-triage."),
-    "annotate":      ("fno.annotate:annotate_app",           "Record an operator review finding against a node (add/list/resolve); gates loop-check."),
-    "retro":         ("fno.retro.cli:retro_app",            "Consume retro-triage triggers; file left-out work as backlog nodes."),
-    "think":         ("fno.provenance.cli:think_app",        "Context /think dispatch (explicit conversational verb)."),
-    "phase":         ("fno.phase:phase_app",               "Phase utilities (kill-check via the fno-agents binary)"),
-    "executor":      ("fno.executor:executor_app",         "Executor resolution (locked-decision parser + surface inference)"),
+    "wake":          ("fno.wake.cli:wake_app",             "Wake-signal admin commands", {"hidden": True}),
+    "plan":          ("fno.plan:plan_app",                 "Plan frontmatter stamping (in-package)", {"hidden": True}),
+    "pr":            ("fno.pr:pr_app",                     "PR utilities (wraps scripts/lib/pr-*.sh)", {"hidden": True}),
+    "stub-manifest": ("fno.stub_manifest:stub_manifest_app", "Stub-manifest for contract-tier dependents (emit/validate/check-pr).", {"hidden": True}),
+    "status-fanout": ("fno.status_fanout:status_fanout_app", "Sweep events.jsonl and route status events to configured sinks (tick).", {"hidden": True}),
+    "bundle":        ("fno.bundle:bundle_app",             "Skill bundle build + lint.", {"hidden": True}),
+    "lint":          ("fno.lint_cli:app",                  "Repository lint checks", {"hidden": True}),
+    "claim":         ("fno.claims.cli:cli",                 "Work-claim coordination primitive", {"hidden": True}),
+    "carveout":      ("fno.carveout:carveout_app",          "Capture left-out work (deferred decisions, out-of-scope bugs) for retro-triage.", {"hidden": True}),
+    "annotate":      ("fno.annotate:annotate_app",           "Record an operator review finding against a node (add/list/resolve); gates loop-check.", {"hidden": True}),
+    "retro":         ("fno.retro.cli:retro_app",            "Consume retro-triage triggers; file left-out work as backlog nodes.", {"hidden": True}),
+    "think":         ("fno.provenance.cli:think_app",        "Context /think dispatch (explicit conversational verb).", {"hidden": True}),
+    "phase":         ("fno.phase:phase_app",               "Phase utilities (kill-check via the fno-agents binary)", {"hidden": True}),
+    "executor":      ("fno.executor:executor_app",         "Executor resolution (locked-decision parser + surface inference)", {"hidden": True}),
     "config":        ("fno.config_cli:app",                "Configuration management"),
-    "notify":        ("fno.notify:notify_app",             "OS notification helper (in-package; macOS osascript / Linux notify-send)"),
-    "paths":         ("fno.paths_cli:app",                 "Path resolution helpers"),
+    "notify":        ("fno.notify:notify_app",             "OS notification helper (in-package; macOS osascript / Linux notify-send)", {"hidden": True}),
+    "paths":         ("fno.paths_cli:app",                 "Path resolution helpers", {"hidden": True}),
     "setup":         ("fno.setup_cli:app",                 "Interactive settings.yaml wizard"),
-    "consolidation": ("fno.consolidation:app",             "Consolidation utilities"),
-    "tokens":        ("fno.tokens:app",                    "Token usage tracking"),
-    "codemap":       ("fno.codemap_cli:app",               "Codebase map management"),
-    "worktree":      ("fno.worktree_cli:app",              "Worktree management"),
-    "route":         ("fno.route_cli:route_app",           "Provider route lanes: ls / set / unset / env (GLM build lane)."),
-    "evals":         ("fno.evals.cli:evals_app",           "Golden-task efficacy evals (run / report / diff)"),
-    "observer":      ("fno.observer.cli:observer_app",      "Skill eval over a recorded corpus (sweep / replay)."),
-    "pr-watch":      ("fno.pr_watch.cli:cli",              "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes"),
-    "loops":         ("fno.loops:loops_app",                "Loop level config + pause-all kill switch (pause-all/resume-all/status/ls)"),
-    "skill-diff":    ("fno.skill_diff.cli:skill_diff_app",   "Skill-diff proposer: observer failure patterns -> cited SKILL.md diff -> PR (tick/reconcile)."),
+    "consolidation": ("fno.consolidation:app",             "Consolidation utilities", {"hidden": True}),
+    "tokens":        ("fno.tokens:app",                    "Token usage tracking", {"hidden": True}),
+    "codemap":       ("fno.codemap_cli:app",               "Codebase map management", {"hidden": True}),
+    "worktree":      ("fno.worktree_cli:app",              "Worktree management", {"hidden": True}),
+    "route":         ("fno.route_cli:route_app",           "Provider route lanes: ls / set / unset / env (GLM build lane).", {"hidden": True}),
+    "evals":         ("fno.evals.cli:evals_app",           "Golden-task efficacy evals (run / report / diff)", {"hidden": True}),
+    "observer":      ("fno.observer.cli:observer_app",      "Skill eval over a recorded corpus (sweep / replay).", {"hidden": True}),
+    "pr-watch":      ("fno.pr_watch.cli:cli",              "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes", {"hidden": True}),
+    "loops":         ("fno.loops:loops_app",                "Loop level config + pause-all kill switch (pause-all/resume-all/status/ls)", {"hidden": True}),
+    "skill-diff":    ("fno.skill_diff.cli:skill_diff_app",   "Skill-diff proposer: observer failure patterns -> cited SKILL.md diff -> PR (tick/reconcile).", {"hidden": True}),
     # Individual commands (plain functions wrapped as single-command apps) -
     "whoami":        ("fno.agent.cli:whoami_command",       "Operating-stack summary: project + fleet + walker + session + provider."),
-    "status":        ("fno.agent.cli:status_command",       "Session gate satisfaction + bounded events tail + inconsistencies."),
+    "status":        ("fno.agent.cli:status_command",       "Session gate satisfaction + bounded events tail + inconsistencies.", {"hidden": True}),
     "doctor":        ("fno.doctor:doctor_command",         "Diagnose installed-vs-source fno skew (network-free)."),
-    "done":          ("fno.done.cli:done_command",         "Mark a backlog node as done."),
-    "find":          ("fno.graph.cli:cmd_find",            "Fuzzy search across graph entries."),
-    "research":      ("fno.research:research_command",     "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl."),
-    "scoreboard":    ("fno.scoreboard.cli:scoreboard_command", "Read-only telemetry: stop-cause, spend, autonomy, survival, coverage."),
-    "new":           ("fno.graph.cli:cmd_new",             "Create a new graph entry without a plan file."),
+    "done":          ("fno.done.cli:done_command",         "Mark a backlog node as done.", {"hidden": True}),
+    "find":          ("fno.graph.cli:cmd_find",            "Fuzzy search across graph entries.", {"hidden": True}),
+    "research":      ("fno.research:research_command",     "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl.", {"hidden": True}),
+    "scoreboard":    ("fno.scoreboard.cli:scoreboard_command", "Read-only telemetry: stop-cause, spend, autonomy, survival, coverage.", {"hidden": True}),
+    "new":           ("fno.graph.cli:cmd_new",             "Create a new graph entry without a plan file.", {"hidden": True}),
     "test":          ("fno.test_cmd:test_command",         "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code."),
     "update":        ("fno.update:update_command",         "Reinstall fno from its source directory."),
     "upgrade":       ("fno.update:update_command",         "Reinstall fno from its source directory.", {"hidden": True}),
-    "restart":       ("fno.restart:restart_command",       "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds."),
-    "dispatch":      ("fno.dispatch:dispatch_app",         "Grab one ready node into a mux pane (mux leader+g shells `dispatch one`)."),
+    "restart":       ("fno.restart:restart_command",       "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds.", {"hidden": True}),
+    "dispatch":      ("fno.dispatch:dispatch_app",         "Grab one ready node into a mux pane (mux leader+g shells `dispatch one`).", {"hidden": True}),
 }
 
 
@@ -255,6 +262,36 @@ SHORTHAND_POINTER = (
     "Run `fno help shorthands` for the full legend."
 )
 
+# Short help for the eager inline commands (defined in this module, so listing
+# them never imports anything). `help --all` merges these with LAZY_SUBCOMMANDS.
+_EAGER_COMMAND_HELP: dict[str, str] = {
+    "help":   "Show help for the root command or any subcommand.",
+    "cost":   "Cost + usage metrics from session transcripts and ledger.json.",
+    "review": "Run the internal sigma-review panel on the current diff.",
+}
+
+
+def _render_full_menu() -> str:
+    """Render every top-level command (hidden ones included) for `fno help --all`.
+
+    Reads short-help strings straight from LAZY_SUBCOMMANDS + the eager map -
+    it never imports a command module, so a broken sub-app still lists here
+    (AC3-UI). The curated menu is `fno --help`; this is the full warehouse.
+    """
+    rows = dict(_EAGER_COMMAND_HELP)
+    for name, entry in LAZY_SUBCOMMANDS.items():
+        rows[name] = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
+    width = max(len(n) for n in rows)
+    lines = [
+        "fno full command surface - every command, including hidden.",
+        "The curated menu is `fno --help`; hidden verbs are invocable, just "
+        "not advertised.",
+        "",
+        "Commands:",
+    ]
+    lines.extend(f"  {name.ljust(width)}  {rows[name]}" for name in sorted(rows))
+    return "\n".join(lines)
+
 
 @app.command(
     name="help",
@@ -266,7 +303,8 @@ SHORTHAND_POINTER = (
         "  fno help                  show top-level help (same as `fno --help`)\n"
         "  fno help claim            show `fno claim` help\n"
         "  fno help claim acquire    show `fno claim acquire` help\n"
-        "  fno help shorthands       show the short-flag legend\n\n"
+        "  fno help shorthands       show the short-flag legend\n"
+        "  fno help --all            show every command, including hidden\n\n"
         "Equivalent to `fno <args> --help` but reads more naturally in "
         "canonical instructions (e.g. \"Run `fno help claim` if unsure\")."
     ),
@@ -274,6 +312,11 @@ SHORTHAND_POINTER = (
 def help_command(ctx: typer.Context) -> None:
     """Forward to `fno <args> --help` so subcommands' own help formatters run."""
     args = list(ctx.args)
+    if "--all" in args or "-A" in args:
+        # The full-surface door: list every command including hidden ones,
+        # rendered from the registry strings without importing any module.
+        typer.echo(_render_full_menu())
+        return
     if args == ["shorthands"]:
         # Help topic, not a command - print the legend instead of forwarding
         # to a (nonexistent) `fno shorthands --help`.
@@ -308,6 +351,7 @@ def help_command(ctx: typer.Context) -> None:
 
 @app.command(
     name="cost",
+    hidden=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
         "Cost + usage metrics from session transcripts and ledger.json "
@@ -348,6 +392,7 @@ def cost(ctx: typer.Context) -> None:
 
 
 @app.command(
+    hidden=True,
     help=(
         "Run the internal sigma-review panel on the current diff.\n\n"
         "Reads the diff from --diff path or `git diff HEAD~1` by default.\n"
