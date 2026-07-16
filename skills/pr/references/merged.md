@@ -492,33 +492,57 @@ continues the ritual.
 # archive script). The skill bash runs without pipefail so it is not fatal here,
 # but keep it drain-safe for defense-in-depth.
 CANONICAL_ROOT="$(git worktree list --porcelain | awk 'NR==1 {sub(/^worktree /, ""); print}')"
-BRANCH_NAME="$(gh pr view "$PR" --json headRefName --jq '.headRefName')"
+# One `gh pr view` for branch + repo. The repo guard (Locked #5) is belt-and-
+# braces: gh already resolves per-repo, but a hand-passed cross-repo PR number
+# must never match a local branch. Compare the PR's owner/repo (from its URL)
+# against this canonical's origin; a mismatch skips resolution entirely.
+PR_META="$(gh pr view "$PR" --json headRefName,url 2>/dev/null || true)"
+BRANCH_NAME=""; PR_NWO=""
+# `select(. != null and . != "")` not `// empty`: jq's `//` treats "" as truthy.
+if [[ -n "$PR_META" ]]; then
+  BRANCH_NAME="$(printf '%s' "$PR_META" | jq -r '.headRefName | select(. != null and . != "")' 2>/dev/null)"
+  PR_NWO="$(printf '%s' "$PR_META" | jq -r '.url | select(. != null and . != "")' 2>/dev/null | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/.*#\1#')"
+fi
+# origin -> owner/repo. Normalize all three remote forms (scp git@host:o/r,
+# ssh://git@host/o/r, https://host/o/r), else an ssh:// origin would leave the
+# scheme in ORIGIN_NWO and the guard would reject every same-repo PR as foreign.
+ORIGIN_NWO="$(git -C "$CANONICAL_ROOT" remote get-url origin 2>/dev/null | sed -E 's#^(git@[^:]+:|ssh://[^/]+/|https?://[^/]+/)##; s#\.git$##')"
 WORKTREE_PATH=""
 
-if [[ -n "$BRANCH_NAME" && "$BRANCH_NAME" != "null" ]]; then
-  while IFS= read -r wt_path; do
-    wt_branch="$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-    if [[ "$wt_branch" == "$BRANCH_NAME" && "$wt_path" != "$CANONICAL_ROOT" ]]; then
-      WORKTREE_PATH="$wt_path"
-      break
-    fi
-  done < <(git worktree list --porcelain | awk '/^worktree / {sub(/^worktree /, ""); print}' | tail -n +2)
-fi
-
-if [[ -z "$WORKTREE_PATH" ]]; then
-  echo "post-merge: no worktree found for branch $BRANCH_NAME - skipped (merged from canonical or already removed)."
-elif [[ "$(cd "$WORKTREE_PATH" 2>/dev/null && pwd)" == "$(pwd)" ]]; then
-  # Running inside the worktree being archived - skip and tell the operator.
-  echo "post-merge: session is running inside the feature worktree ($WORKTREE_PATH)."
-  echo "    Run this manually from canonical when done:"
-  echo "    bash scripts/setup/archive-worktree.sh $WORKTREE_PATH --yes"
-elif [[ ! -f "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" ]]; then
-  echo "post-merge: archive-worktree.sh not found at $CANONICAL_ROOT/scripts/setup/ - skipped."
+# Nested so every outcome (foreign-repo, no-match, inside, missing-script,
+# archived, kept) reports on exactly one line - never two, never silent.
+if [[ -z "$PR_META" ]]; then
+  echo "post-merge: could not fetch PR #$PR metadata (gh unavailable?) - worktree prune skipped."
+elif [[ -n "$PR_NWO" && -n "$ORIGIN_NWO" && "$PR_NWO" != "$ORIGIN_NWO" ]]; then
+  echo "post-merge: PR #$PR is $PR_NWO, not this repo ($ORIGIN_NWO) - worktree prune skipped."
 else
-  echo "post-merge: archiving worktree $WORKTREE_PATH ..."
-  if ! bash "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" "$WORKTREE_PATH" --yes 2>&1; then
-    echo "post-merge: worktree archive returned non-zero (checks failed or remove failed) - skipped (worktree left in place)."
-    echo "    To archive manually: bash scripts/setup/archive-worktree.sh $WORKTREE_PATH --yes"
+  if [[ -n "$BRANCH_NAME" && "$BRANCH_NAME" != "null" ]]; then
+    while IFS= read -r wt_path; do
+      wt_branch="$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+      if [[ "$wt_branch" == "$BRANCH_NAME" && "$wt_path" != "$CANONICAL_ROOT" ]]; then
+        WORKTREE_PATH="$wt_path"
+        break
+      fi
+    done < <(git worktree list --porcelain | awk '/^worktree / {sub(/^worktree /, ""); print}' | tail -n +2)
+  fi
+
+  if [[ -z "$WORKTREE_PATH" ]]; then
+    echo "post-merge: no worktree found for branch $BRANCH_NAME - skipped (merged from canonical or already removed)."
+  elif [[ "$(cd "$WORKTREE_PATH" 2>/dev/null && pwd)" == "$(pwd)" ]]; then
+    # Running inside the worktree to archive: removing our own cwd would break
+    # the session. Defer to the standing merged-worktree sweep, run FROM CANONICAL
+    # - the sweep skips its own cwd's worktree (worktree-lifecycle.sh MAIN_DIR),
+    # so run from inside this worktree it would skip the very one to reap. The
+    # merged-branch predicate makes it a sweep candidate; no marker is needed.
+    echo "post-merge: prune deferred: ritual is running inside $WORKTREE_PATH; run 'cd \"$CANONICAL_ROOT\" && fno worktree cleanup --merged --apply' from canonical to reap it."
+  elif [[ ! -f "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" ]]; then
+    echo "post-merge: archive-worktree.sh not found at $CANONICAL_ROOT/scripts/setup/ - skipped."
+  else
+    echo "post-merge: archiving worktree $WORKTREE_PATH ..."
+    if ! bash "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" "$WORKTREE_PATH" --yes 2>&1; then
+      echo "post-merge: worktree archive returned non-zero (checks failed or remove failed) - skipped (worktree left in place)."
+      echo "    To archive manually: bash scripts/setup/archive-worktree.sh $WORKTREE_PATH --yes"
+    fi
   fi
 fi
 ```
@@ -526,7 +550,8 @@ fi
 Guard rules:
 - **Never use `--force`**. Strict checks (clean tree, no unpushed commits, no live target session) stay ON so a partially-dirty worktree is never silently destroyed.
 - **Never archive the canonical checkout** - the script already refuses, but we also never pass the canonical root as the target.
-- **Session inside the worktree** - print the manual command and continue; do not attempt self-removal.
+- **Session inside the worktree** - never self-remove; print the deferral naming `cd <canonical> && fno worktree cleanup --merged --apply` (the sweep must run from canonical - it skips its own cwd's worktree) and continue.
+- **Foreign-repo PR** - a PR whose owner/repo is not this canonical's origin skips resolution; local worktrees are never considered.
 - **Missing archive script** - older checkouts may not have it; skip silently.
 - **Any exit non-zero from the script** - surface verbatim, mark step "skipped (checks failed)", and continue. This step never blocks the rest of the ritual.
 
