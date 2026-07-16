@@ -257,6 +257,14 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
 }
 
+#: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
+#: :data:`RUST_ONLY_VERB_HELP` verb is display-hidden - stop-hook / runtime
+#: plumbing (``loop-check``/``finalize``/``kill-check``/...) and daemon channel
+#: verbs a human never types - but stays invocable, listed by ``fno help --all``
+#: and each verb's own ``--help``. Membership is display-only; it never changes
+#: dispatch or the RUST_CLIENT_VERBS routing set.
+RUST_ONLY_ADVERTISED: frozenset[str] = frozenset({"status"})
+
 #: Verbs retired at G4 (x-f54c): the grid, the WebSocket ``drive`` surface, and
 #: the interactive daemon PTY hosting behind ``host``/``promote`` moved to the
 #: mux. They are NOT in :data:`RUST_CLIENT_VERBS` (no routable client verb) and
@@ -559,7 +567,9 @@ def route_to_rust(
     raise SystemExit(1)  # pragma: no cover
 
 
-def _make_rust_only_command(verb: str, help_text: str) -> "click.Command":
+def _make_rust_only_command(
+    verb: str, help_text: str, *, hidden: bool = False
+) -> "click.Command":
     """A placeholder Click command for a Rust-only verb, used for help + fallback.
 
     The happy path never runs this body: :meth:`_AgentsRuntimeGroup.make_context`
@@ -569,12 +579,17 @@ def _make_rust_only_command(verb: str, help_text: str) -> "click.Command":
     degrades to a legible message instead of a bare "No such command" when it is
     reached -- i.e. under ``FNO_AGENTS_RUNTIME=python`` (no Python implementation
     exists for these verbs) or in a checkout with no *installed* binary.
+
+    ``hidden`` (x-71b6 tiering) keeps the verb invocable but off the advertised
+    ``fno agents --help`` listing - the display-only counterpart of the Python
+    commands' ``@agents_app.command(..., hidden=True)``.
     """
     import click
 
     @click.command(
         name=verb,
         help=f"{help_text} (Rust runtime).",
+        hidden=hidden,
         # Don't choke on the verb's real flags before we print the message --
         # we never act on them here, but a bare "no such option" would bury it.
         context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
@@ -675,7 +690,11 @@ def make_agents_group_cls() -> type:
             if cmd is not None:
                 return cmd
             if name in RUST_ONLY_VERB_HELP:
-                return _make_rust_only_command(name, RUST_ONLY_VERB_HELP[name])
+                return _make_rust_only_command(
+                    name,
+                    RUST_ONLY_VERB_HELP[name],
+                    hidden=name not in RUST_ONLY_ADVERTISED,
+                )
             if name in RETIRED_VERB_POINTERS:
                 return _make_retired_command(name, RETIRED_VERB_POINTERS[name])
             return None

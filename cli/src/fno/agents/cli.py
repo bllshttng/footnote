@@ -1077,7 +1077,7 @@ def cmd_spawn_guard(
     _emit("dispatchable", reservation_key=res_key, reservation_holder=holder)
 
 
-@agents_app.command("ask")
+@agents_app.command("ask", hidden=True)
 def cmd_ask(
     name: str | None = typer.Argument(None, help="Agent name. Omit when using --to-project."),
     message: str | None = typer.Argument(None, help="Message to send."),
@@ -1233,7 +1233,7 @@ def cmd_ask(
     sys.stdout.flush()
 
 
-@agents_app.command("chat")
+@agents_app.command("chat", hidden=True)
 def cmd_chat(
     a: str = typer.Argument(..., help="First peer (the 'from' side of the seed)."),
     b: str = typer.Argument(..., help="Second peer (the 'to' side of the seed)."),
@@ -1493,7 +1493,7 @@ def cmd_logs(
         raise typer.Exit(code=result.exit_code)
 
 
-@agents_app.command("peek")
+@agents_app.command("peek", hidden=True)
 def cmd_peek(
     handle: str = typer.Argument(
         ...,
@@ -1538,7 +1538,7 @@ def cmd_peek(
         raise typer.Exit(code=rc)
 
 
-@agents_app.command("whoami")
+@agents_app.command("whoami", hidden=True)
 def cmd_whoami(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
 ) -> None:
@@ -1616,7 +1616,7 @@ def cmd_whoami(
         raise typer.Exit(code=result.exit_code)
 
 
-@agents_app.command("top")
+@agents_app.command("top", hidden=True)
 def cmd_top(
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit the same rows as JSON (script parity)."
@@ -1634,7 +1634,7 @@ def cmd_top(
     print(render_top(as_json=as_json))
 
 
-@agents_app.command("ping")
+@agents_app.command("ping", hidden=True)
 def cmd_ping() -> None:
     """Health check (placeholder).
 
@@ -1693,7 +1693,7 @@ def cmd_stop(
         raise typer.Exit(code=exc.exit_code) from exc
 
 
-@agents_app.command("rm")
+@agents_app.command("rm", hidden=True)
 def cmd_rm(
     name: str = typer.Argument(..., help="Agent name (from `fno agents list`)."),
     force: bool = typer.Option(
@@ -1724,7 +1724,7 @@ def cmd_rm(
         raise typer.Exit(code=exc.exit_code) from exc
 
 
-@agents_app.command("reconcile")
+@agents_app.command("reconcile", hidden=True)
 def cmd_reconcile(
     json_out: bool = typer.Option(
         False,
@@ -1856,7 +1856,7 @@ def cmd_attach(
 from fno.agents.trace_cli import cmd_trace as _cmd_trace  # noqa: E402
 from fno.agents.resume_cli import cmd_resume as _cmd_resume  # noqa: E402
 
-agents_app.command("trace")(_cmd_trace)
+agents_app.command("trace", hidden=True)(_cmd_trace)
 agents_app.command("resume")(_cmd_resume)
 
 

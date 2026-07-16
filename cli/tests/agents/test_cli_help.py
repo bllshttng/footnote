@@ -44,12 +44,16 @@ def _run(runner: CliRunner, *args: str) -> tuple[int, str]:
     return result.exit_code, _strip_ansi(result.stdout)
 
 
-def test_agents_help_lists_trace_and_resume(runner: CliRunner) -> None:
-    """Both new verbs must appear under ``Commands:`` in agents --help."""
+def test_agents_help_advertises_resume_hides_trace(runner: CliRunner) -> None:
+    """x-71b6 tiering: ``resume`` is advertised; ``trace`` is hidden from the
+    listing but still invocable (its own --help works, see below)."""
     code, out = _run(runner, "--help")
     assert code == 0
-    assert "trace" in out
     assert "resume" in out
+    # trace is display-hidden now; it must not appear as a listed command.
+    assert not re.search(r"^\s*trace\b", out, re.MULTILINE), (
+        "hidden verb 'trace' leaked into the advertised agents --help listing"
+    )
 
 
 def test_agents_trace_help_shows_locked_options(runner: CliRunner) -> None:
@@ -65,3 +69,35 @@ def test_agents_resume_help_shows_print_command(runner: CliRunner) -> None:
     code, out = _run(runner, "resume", "--help")
     assert code == 0
     assert "--print-command" in out
+
+
+# x-71b6: the advertised `fno agents` menu (the eight In-N-Out verbs).
+_ADVERTISED_AGENTS_VERBS = {
+    "spawn", "list", "logs", "watch", "attach", "stop", "resume", "status",
+}
+
+
+def test_agents_help_advertises_only_the_eight_menu_verbs(runner: CliRunner) -> None:
+    """AC1-HP: `fno agents --help` lists at most 12 verbs, and exactly the
+    advertised set (spawn/list/logs/watch/attach/stop/resume/status)."""
+    import click
+    import typer.main
+
+    group = typer.main.get_command(agents_app)
+    ctx = click.Context(group)
+    listed = [
+        name
+        for name in group.list_commands(ctx)
+        if not (cmd := group.get_command(ctx, name)) or not cmd.hidden
+    ]
+    assert set(listed) == _ADVERTISED_AGENTS_VERBS, (
+        f"advertised agents verbs drifted: {sorted(listed)}"
+    )
+    assert len(listed) <= 12
+
+
+@pytest.mark.parametrize("verb", ["ask", "whoami", "top", "ping", "rm", "reconcile", "trace"])
+def test_hidden_python_agents_verbs_stay_invocable(runner: CliRunner, verb: str) -> None:
+    """AC2-ERR: a display-hidden Python agents verb still runs its own --help."""
+    code, out = _run(runner, verb, "--help")
+    assert code == 0, f"hidden verb {verb!r} --help failed: {out}"
