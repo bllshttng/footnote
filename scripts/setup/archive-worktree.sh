@@ -231,6 +231,12 @@ MY_PGID="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
 ALL_PIDS=""
 while IFS= read -r pid; do
   [[ -z "$pid" || "$pid" == "$$" ]] && continue
+  # Only LIVE pids can be squatters. pgrep -f matches this script's own
+  # transient forks (the command-substitution subshells carry TARGET as argv),
+  # which have already exited by the time we get here - ps returns nothing for
+  # them, so a PGID check alone can't drop them. Skip anything already gone.
+  kill -0 "$pid" 2>/dev/null || continue
+  # Belt-and-suspenders for a still-live self-fork: our own process group.
   if [[ -n "$MY_PGID" ]]; then
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     [[ "$pgid" == "$MY_PGID" ]] && continue
