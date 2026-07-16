@@ -417,3 +417,85 @@ def migrate_keys(
         typer.echo(f"  ! {warn}", err=True)
     prefix = "" if apply else "[dry-run] "
     typer.echo(f"{prefix}{res.summary()}")
+
+
+def _plan_sync_watermark() -> Path:
+    """Watermark gating the sweep, a sibling of graph.json (the global graph the
+    sweep is driven by), so all sessions share one gate keyed to the one graph."""
+    from fno.paths import graph_json
+
+    return graph_json().parent / ".plan-sync-watermark"
+
+
+def _read_watermark(path: Path) -> Optional[float]:
+    try:
+        return float(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None  # missing/malformed -> treat as never swept
+
+
+@plan_app.command(
+    "sync",
+    help=(
+        "Converge every plan doc's graph->doc mirror fields (priority/type/"
+        "blocked_by/project/size/parent). Graph-driven: walks every node with a "
+        "plan_path. The bare form short-circuits on an unchanged graph (one stat "
+        "vs .plan-sync-watermark); --all forces a full walk to backfill new keys."
+    ),
+)
+def sync(
+    all_: bool = typer.Option(
+        False,
+        "--all",
+        "-A",
+        help="Force a full walk, bypassing the graph-mtime short-circuit.",
+    ),
+) -> None:
+    """Idempotent whole-vault mirror-field sweep (x-5d84)."""
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+    from fno.plan._project import project_graph_nodes
+
+    gpath = graph_json()
+    watermark = _plan_sync_watermark()
+    try:
+        graph_mtime: Optional[float] = gpath.stat().st_mtime
+    except OSError:
+        graph_mtime = None
+
+    # Locked Decision 3: gate on graph.json mtime, NEVER a doc mtime (a graph
+    # mutation never touches a doc's mtime, so a doc gate skips exactly the doc
+    # needing repaint). One stat + one small read, zero doc reads on a no-op.
+    if not all_ and graph_mtime is not None:
+        prev = _read_watermark(watermark)
+        if prev is not None and graph_mtime <= prev:
+            typer.echo("plan sync: graph unchanged since last sync; skipped")
+            return
+
+    # A transient graph read failure degrades to a 0-doc no-op and does NOT
+    # advance the watermark, so the next sweep re-converges (AC1-FR).
+    try:
+        entries = read_graph(gpath)
+    except Exception as e:  # noqa: BLE001
+        typer.echo(f"plan sync: graph unreadable ({e}); 0 docs repainted", err=True)
+        return
+
+    # Claim the sweep window before the per-doc walk (Concurrency): a burst of
+    # parallel sessions advances the watermark before walking, so redundant
+    # walks are at worst benign (identical graph-derived content, atomic write).
+    if graph_mtime is not None:
+        try:
+            watermark.parent.mkdir(parents=True, exist_ok=True)
+            watermark.write_text(f"{graph_mtime}\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    ids = [
+        e["id"]
+        for e in entries
+        if isinstance(e, dict) and e.get("id") and e.get("plan_path")
+    ]
+    repainted = project_graph_nodes(entries, ids)
+    typer.echo(
+        f"plan sync: {repainted} docs repainted, {len(ids) - repainted} unchanged"
+    )

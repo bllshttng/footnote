@@ -141,3 +141,58 @@ def test_status_no_write_for_gated_states(tmp_path):
         assert project_node_to_plan({"_status": gated}, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert fields["status"] == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Extended mirror keys: size, parent, parent_slug (x-5d84)
+# ---------------------------------------------------------------------------
+
+
+def test_projects_size_and_parent(tmp_path):
+    """AC3-HP: size + parent + parent_slug mirror when present on the node."""
+    plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: S"))
+    node = {"size": "M", "parent": "x-fd7f", "parent_slug": "epic-slug"}
+
+    assert project_node_to_plan(node, plan) is True
+    _, fields, _ = read_plan_file(plan)
+    assert fields["size"] == "M"
+    assert fields["parent"] == "x-fd7f"
+    assert fields["parent_slug"] == "epic-slug"
+
+
+def test_null_parent_writes_neither_key(tmp_path):
+    """A top-level node (parent None, parent_slug absent) writes neither key."""
+    plan = _write_plan(tmp_path)
+    node = {"parent": None, "size": "L"}
+
+    assert project_node_to_plan(node, plan) is True  # size changed
+    _, fields, _ = read_plan_file(plan)
+    assert "parent" not in fields
+    assert "parent_slug" not in fields
+    assert fields["size"] == "L"
+
+
+def test_cleared_nullable_mirror_removes_stale_frontmatter(tmp_path):
+    """A de-orphan / --size null clears the stale doc mirror, not leaves it."""
+    seeded = _PLAN.replace(
+        "size: M", "size: M\nparent: x-old\nparent_slug: old-epic"
+    )
+    plan = _write_plan(tmp_path, seeded)
+    # Graph dropped parent (and its slug) and cleared size to None.
+    node = {"parent": None, "parent_slug": None, "size": None}
+
+    assert project_node_to_plan(node, plan) is True
+    _, fields, _ = read_plan_file(plan)
+    assert "parent" not in fields
+    assert "parent_slug" not in fields
+    assert "size" not in fields
+
+
+def test_non_clearable_none_never_deletes(tmp_path):
+    """A None on a non-clearable key (priority) never deletes a real doc value."""
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: feature\npriority: p1"))
+    node = {"priority": None}
+
+    assert project_node_to_plan(node, plan) is False
+    _, fields, _ = read_plan_file(plan)
+    assert fields["priority"] == "p1"  # untouched

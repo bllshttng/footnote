@@ -1153,6 +1153,12 @@ def cmd_decompose(
         # condition that cannot cause early graduation - target can't stamp it
         # either). Proceed silently; the graph mutation already succeeded.
 
+    # Repaint the epic and every child this decompose CREATED so a decomposed
+    # epic's children carry correct blocked_by/parent mirrors from birth (US5).
+    # Scoped to created children (not already-linked ones): an existing child's
+    # hand-filled plan is left untouched here and its drift rides the sweep.
+    _project_plans_from_graph([epic_resolved_id, *created_ids])
+
 
 # -- intake --
 
@@ -1346,16 +1352,11 @@ def _intake_impl(
         )
         # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
         # this branch returns early, so the append-path projection never runs.
+        # Routed through the converger so parent_slug is injected consistently.
         try:
-            from fno.graph._intake import _find_node, repo_root
-            from fno.plan._project import project_node_to_plan
+            from fno.plan._project import project_graph_nodes
 
-            claimed = _find_node(read_graph(_graph_path()), claim_id)
-            if claimed and claimed.get("plan_path"):
-                p = Path(claimed["plan_path"])
-                if not p.is_absolute():
-                    p = Path(repo_root()) / p
-                project_node_to_plan(claimed, p)
+            project_graph_nodes(read_graph(_graph_path()), [claim_id])
         except Exception as e:  # noqa: BLE001 - additive; never wedge the claim
             sys.stderr.write(f"warning: post-claim plan projection failed: {e}\n")
         return
@@ -1392,18 +1393,12 @@ def _intake_impl(
 
     # Mirror the graph-authoritative navigation fields onto the plan doc the
     # node just linked. Non-fatal: a missing/unreadable plan never fails intake.
+    # Routed through the converger so parent_slug is injected consistently.
     if new_id_holder[0]:
         try:
-            from fno.graph._intake import _find_node, repo_root
-            from fno.plan._project import project_node_to_plan
+            from fno.plan._project import project_graph_nodes
 
-            landed = _find_node(read_graph(_graph_path()), new_id_holder[0])
-            pp = landed.get("plan_path") if landed else None
-            if landed and pp:
-                p = Path(pp)
-                if not p.is_absolute():
-                    p = Path(repo_root()) / p
-                project_node_to_plan(landed, p)
+            project_graph_nodes(read_graph(_graph_path()), [new_id_holder[0]])
         except Exception as e:  # noqa: BLE001 - additive; never wedge the intake
             sys.stderr.write(f"warning: post-intake plan projection failed: {e}\n")
 
@@ -1929,6 +1924,8 @@ def cmd_update(
         or type_ is not None
         or has_blocker_edit
         or plan_path is not None
+        or size is not None
+        or parent is not None
     ):
         _project_plans_from_graph(
             [projected_node[0]["id"], *cascade_closed_update]
@@ -3454,6 +3451,7 @@ def cmd_defer(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f'Deferred {task_id}: "{cleaned_reason}"')
+    _project_plans_from_graph([task_id])
 
 
 # -- queue / unqueue / queued --
@@ -4093,53 +4091,32 @@ def cmd_undefer(
     if not was_deferred_holder[0]:
         typer.echo(f"warning: {task_id} was not deferred", err=True)
     typer.echo(f"Undeferred {task_id}")
+    _project_plans_from_graph([task_id])
 
 
 # -- done --
 
 def _project_plans_from_graph(node_ids: list[str]) -> None:
-    """Project each named node's forward status onto its linked plan (x-f34f).
+    """Project each named node's mirror fields + forward status onto its plan.
 
     Re-reads the graph so every node carries its recomputed ``_status`` (a claim
     reads ``claimed`` -> ``in_progress``; a close reads ``done`` -> ``done`` +
-    ``done_at``), then runs the forward-only status projection. Covers
-    cascade-closed epic parents that ``_stamp_and_graduate_plan`` never stamps.
-    Best-effort per node: a missing or unreadable plan never fails the mutation.
+    ``done_at``), then delegates to the shared converger. Covers cascade-closed
+    epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
+    node: a missing or unreadable plan never fails the mutation.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
         return
     try:
-        from fno.graph._intake import _find_node, repo_root
         from fno.graph.store import read_graph
-        from fno.plan._project import project_node_to_plan
+        from fno.plan._project import project_graph_nodes
 
         entries = read_graph(_graph_path())
-    except Exception as e:  # noqa: BLE001 - additive; never wedge the close
-        sys.stderr.write(f"warning: post-close plan projection setup failed: {e}\n")
+    except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
+        sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
-    root: Optional[str] = None
-    for nid in ids:
-        try:
-            node = _find_node(entries, nid)
-            if not node or not node.get("plan_path"):
-                continue
-            p = Path(node["plan_path"])
-            if not p.is_absolute():
-                if root is None:
-                    root = repo_root()
-                p = Path(root) / p
-            # A close-time projection for a node whose plan file is absent is a
-            # silent no-op (the sweep is the catch-all); skip before
-            # project_node_to_plan so its missing-file warning stays off the
-            # machine-readable close output.
-            if not p.is_file():
-                continue
-            project_node_to_plan(node, p)
-        except Exception as e:  # noqa: BLE001 - per-node best-effort
-            sys.stderr.write(
-                f"warning: post-close plan projection failed for {nid}: {e}\n"
-            )
+    project_graph_nodes(entries, ids)
 
 
 def _apply_completion_fields(node: dict) -> None:
@@ -5950,6 +5927,7 @@ def cmd_rank(
         typer.echo(
             f"Ranked {result['id']} {result['action']} (rank={result['rank']}) in {result['lane']}"
         )
+    _project_plans_from_graph([result["id"]])
 
 
 # -- archive --
@@ -6615,3 +6593,4 @@ def cmd_supersede(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
+    _project_plans_from_graph([replaces, new_id])

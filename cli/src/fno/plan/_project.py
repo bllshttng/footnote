@@ -20,8 +20,24 @@ from fno.plan._stamp import read_plan_file, write_plan_file
 from fno.plan._status import project_plan_status
 
 # Graph-authoritative fields mirrored into frontmatter. `type` is usually
-# already present; the projection keeps it in sync with the node.
-MIRROR_KEYS: tuple[str, ...] = ("priority", "type", "blocked_by", "project")
+# already present; the projection keeps it in sync with the node. `parent_slug`
+# is not a native node field - the converger injects it (see project_graph_nodes).
+MIRROR_KEYS: tuple[str, ...] = (
+    "priority",
+    "type",
+    "blocked_by",
+    "project",
+    "size",
+    "parent",
+    "parent_slug",
+)
+
+# Mirror keys whose graph value can legitimately be cleared to None (a de-orphan
+# `--parent null`, a `--size null`). For these, an explicit None means "clear the
+# stale doc mirror", not "skip" - otherwise the doc keeps the old parent/size
+# after the graph dropped it. parent_slug is tied to parent: the converger sets
+# it to None whenever parent is null/dangling so it clears in lockstep.
+CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
 
 
 def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
@@ -51,7 +67,12 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
             if not isinstance(value, list):
                 continue
         elif value is None:
-            # Never overwrite a real frontmatter value with a null scalar.
+            # A clearable key set to None means the graph dropped its value
+            # (de-orphan / --size null): remove the stale doc mirror if present.
+            # Any other None is a partial dict and must never clobber the doc.
+            if key in CLEARABLE_KEYS and key in fields:
+                del fields[key]
+                changed = True
             continue
         if fields.get(key) != value:
             fields[key] = value
@@ -75,3 +96,65 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
     if changed:
         write_plan_file(target, fields, rest)
     return changed
+
+
+def project_graph_nodes(
+    entries: list[dict[str, Any]],
+    node_ids: list[str],
+    root: str | None = None,
+) -> int:
+    """Project each named node's mirror fields onto its linked plan.
+
+    The shared converger primitive behind both the instrumented mutating verbs
+    and the `fno plan sync` sweep: for each id, find the node in ``entries``,
+    resolve+absolutize its ``plan_path`` (against ``root``), skip absent files,
+    inject the parent's slug, and call ``project_node_to_plan``. Best-effort and
+    per-node isolated - one unreadable doc never aborts the batch. Returns the
+    count of docs rewritten.
+
+    ``entries`` is the already-read graph (this module never imports
+    ``graph.store`` - Locked Decision 1). ``root`` is resolved lazily only when a
+    relative ``plan_path`` is first seen.
+    """
+    ids = [i for i in dict.fromkeys(node_ids) if i]
+    if not ids:
+        return 0
+    from fno.graph._intake import _find_node, repo_root
+
+    slug_by_id = {
+        n.get("id"): n.get("slug") for n in entries if isinstance(n, dict)
+    }
+    rewritten = 0
+    for nid in ids:
+        try:
+            node = _find_node(entries, nid)
+            if not node or not node.get("plan_path"):
+                continue
+            p = Path(node["plan_path"])
+            if not p.is_absolute():
+                if root is None:
+                    root = repo_root()
+                p = Path(root) / p
+            if not p.is_file():
+                continue
+            if project_node_to_plan(_with_parent_slug(node, slug_by_id), p):
+                rewritten += 1
+        except Exception as e:  # noqa: BLE001 - per-node best-effort
+            sys.stderr.write(f"warning: plan projection failed for {nid}: {e}\n")
+    return rewritten
+
+
+def _with_parent_slug(
+    node: dict[str, Any], slug_by_id: dict[Any, Any]
+) -> dict[str, Any]:
+    """Return a shallow copy of ``node`` with ``parent_slug`` tied to ``parent``.
+
+    Never mutates the shared ``entries`` element. A resolvable parent sets the
+    slug; a null, absent, or dangling parent sets ``parent_slug`` to None so a
+    stale slug mirror CLEARS in lockstep with the parent (a dangling parent still
+    mirrors its raw id but never a wrong slug).
+    """
+    parent_id = node.get("parent")
+    copy = dict(node)
+    copy["parent_slug"] = slug_by_id.get(parent_id) if parent_id else None
+    return copy

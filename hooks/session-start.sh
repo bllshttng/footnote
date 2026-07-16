@@ -274,6 +274,10 @@ if command -v fno >/dev/null 2>&1; then
         mkdir -p .fno 2>/dev/null; printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
         ( fno plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
     fi
+    # Graph->doc mirror sweep: bare `plan sync` self-gates on graph.json mtime
+    # (one stat, cheap on no change), so no shell watermark; backgrounded + output
+    # discarded so it can never corrupt this hook's JSON.
+    ( fno plan sync >/dev/null 2>&1 & ) 2>/dev/null || true
 fi
 
 hydrate_state_provider_context
