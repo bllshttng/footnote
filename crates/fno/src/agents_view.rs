@@ -126,27 +126,73 @@ pub fn parse_isolated_dirs(
 }
 
 /// (x-c914) `roster.json` path for every isolated account, `(account_id,
-/// path)`. Reads the global fno config (`$FNO_CONFIG` else
-/// `~/.fno/config.toml`) and maps each isolated `config_dir` to
-/// `<config_dir>/daemon/roster.json`. Fail-open to `[]`: an unreadable config
+/// path)`, mapping each isolated `config_dir` to `<config_dir>/daemon/roster.json`.
+///
+/// Mirrors `load_providers`' record source precedence (codex P2) so an account
+/// the Connections modal can show is one this reader can also find: project-local
+/// `$PWD/.fno/config.toml` FIRST, then the global override
+/// (`$FNO_GLOBAL_SETTINGS_PATH` sibling `config.toml`) else `~/.fno/config.toml`.
+/// Project-local wins on an id collision. Fail-open to `[]`: an unreadable config
 /// just means no isolated dirs, so the union degrades to the default roster.
 pub fn isolated_roster_paths() -> Vec<(String, PathBuf)> {
-    let Some(cfg) = std::env::var_os("FNO_CONFIG")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
-        })
-    else {
-        return Vec::new();
-    };
-    let Ok(body) = std::fs::read_to_string(&cfg) else {
-        return Vec::new();
-    };
-    let home = std::env::var_os("HOME");
-    parse_isolated_dirs(&body, home.as_deref())
+    isolated_account_dirs()
         .into_iter()
         .map(|(id, dir)| (id, dir.join("daemon").join("roster.json")))
         .collect()
+}
+
+/// (x-c914) The isolated `config_dir` for one account, or `None` for a managed
+/// / unknown account. Used to route a cross-account `claude attach|stop|rm` to
+/// the right daemon via `CLAUDE_CONFIG_DIR` (codex P1) - a default-account row
+/// resolves to `None` and runs under the ambient `~/.claude` as before.
+pub fn account_config_dir(account_id: &str) -> Option<PathBuf> {
+    isolated_account_dirs()
+        .into_iter()
+        .find(|(id, _)| id == account_id)
+        .map(|(_, dir)| dir)
+}
+
+/// (x-c914) `(account_id, config_dir)` for every isolated account, resolved with
+/// `load_providers`' record precedence: project-local `$PWD/.fno/config.toml`
+/// first, then the global override (`$FNO_GLOBAL_SETTINGS_PATH` sibling
+/// `config.toml`) else `~/.fno/config.toml`; project-local wins on an id
+/// collision. Fail-open to `[]`.
+fn isolated_account_dirs() -> Vec<(String, PathBuf)> {
+    let home = std::env::var_os("HOME");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // project-local (loader's `repo_root` = $PWD else cwd)
+    if let Some(pwd) = std::env::var_os("PWD")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        candidates.push(pwd.join(".fno").join("config.toml"));
+    }
+    // global: $FNO_GLOBAL_SETTINGS_PATH sibling config.toml, else ~/.fno/config.toml
+    let global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH")
+        .filter(|v| !v.is_empty())
+        .map(|v| PathBuf::from(v).with_file_name("config.toml"))
+        .or_else(|| {
+            home.as_ref()
+                .map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
+        });
+    if let Some(g) = global {
+        candidates.push(g);
+    }
+
+    // First candidate wins per id (project-local over global), matching the loader.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for cfg in candidates {
+        let Ok(body) = std::fs::read_to_string(&cfg) else {
+            continue;
+        };
+        for (id, dir) in parse_isolated_dirs(&body, home.as_deref()) {
+            if seen.insert(id.clone()) {
+                out.push((id, dir));
+            }
+        }
+    }
+    out
 }
 
 /// Parse the claude daemon roster into the sideline's three-field workers.
@@ -803,25 +849,29 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     // ids - no per-tick String clones of the short ids (gemini review).
     let mut out = reg_rows;
     for r in &mut out {
+        let Some(id) = r.attach_id.as_deref() else {
+            continue;
+        };
+        let Some(&acct) = roster_by_id.get(id) else {
+            continue;
+        };
+        // Structural roster-dir tag wins (Locked Decision 6) for EVERY matching
+        // registry row, live or exited: a live `--account` bg worker whose row
+        // is deduped registry-wins must still carry its isolated-roster account
+        // (codex P1). The liveness upgrade below stays exited-only.
+        if let Some(a) = acct {
+            r.account = Some(a.to_string());
+        }
         if r.exited {
-            if let Some(id) = r.attach_id.as_deref() {
-                if let Some(&acct) = roster_by_id.get(id) {
-                    r.exited = false;
-                    r.external = true;
-                    // Drop any stale inside-leg/scrape verdict that a terminal
-                    // row happened to still carry: an upgraded row renders as a
-                    // plain live external row (plan merge step 2), matching the
-                    // synthesized-foreign shape below.
-                    r.badge = None;
-                    r.reason = None;
-                    r.answerable = None;
-                    // Structural roster-dir tag wins (Locked Decision 6): an
-                    // upgraded isolated-account row bills its roster account.
-                    if let Some(a) = acct {
-                        r.account = Some(a.to_string());
-                    }
-                }
-            }
+            r.exited = false;
+            r.external = true;
+            // Drop any stale inside-leg/scrape verdict that a terminal row
+            // happened to still carry: an upgraded row renders as a plain live
+            // external row (plan merge step 2), matching the synthesized-foreign
+            // shape below.
+            r.badge = None;
+            r.reason = None;
+            r.answerable = None;
         }
     }
 
@@ -1698,6 +1748,28 @@ config_dir = "~/.claude-alt"
         let rows = merge_rows(reg, &[w]);
         assert_eq!(rows.len(), 1, "no duplicate foreign row");
         assert!(!rows[0].exited && rows[0].external);
+        assert_eq!(rows[0].account.as_deref(), Some("readyrule"));
+    }
+
+    #[test]
+    fn live_registry_row_adopts_matching_roster_account(/* codex P1 */) {
+        // A LIVE (non-exited) registry row for a paneless --account bg worker is
+        // deduped registry-wins, but must still carry the isolated-roster
+        // account tag - not only the exited liveness-upgrade path.
+        let reg = derive_rows(
+            &reg(r#"{"name":"bg","cwd":"/w","status":"live","provider":"claude","short_id":"ab12cd34"}"#),
+            NOW,
+        )
+        .unwrap();
+        assert!(!reg[0].exited && reg[0].account.is_none());
+        let mut w = worker("ab12cd34", "bg", "/w");
+        w.account = Some("readyrule".into());
+        let rows = merge_rows(reg, &[w]);
+        assert_eq!(rows.len(), 1, "registry-wins dedup, no foreign twin");
+        assert!(
+            !rows[0].exited,
+            "a live row stays live (no spurious upgrade)"
+        );
         assert_eq!(rows[0].account.as_deref(), Some("readyrule"));
     }
 

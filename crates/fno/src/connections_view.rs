@@ -705,6 +705,14 @@ impl ConnectionsView {
         let Some(acct) = self.selected_account() else {
             return ConnIntent::Bell;
         };
+        // Only claude accounts are spawn-routable: mux dispatch always launches
+        // provider="claude", and `resolve_account_overlay` is claude-only, so a
+        // codex/gemini selection would reject every spawn until cleared (codex
+        // P2). Refuse it here with visible feedback instead.
+        if acct.cli != "claude" {
+            self.notice = Some(format!("{} is not a claude account", acct.id));
+            return ConnIntent::Redraw;
+        }
         let id = acct.id.clone();
         self.active_account = if self.active_account.as_deref() == Some(id.as_str()) {
             None // toggle off: back to the default account
@@ -1416,6 +1424,23 @@ mod tests {
         });
         assert!(v.render().join("\n").contains('$'));
         assert_eq!(v.active_account.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn set_active_refuses_a_non_claude_account(/* codex P2 */) {
+        // A codex/gemini account is not spawn-routable (mux dispatch is
+        // claude-only); selecting it must not mark it active.
+        let mut v = ConnectionsView::new();
+        v.apply_read(ReadOutcome::Ok {
+            accounts: parse_accounts(
+                br#"[{"id":"cdx","name":"CDX","cli":"codex","auth":"oauth_dir","priority":1,"active":false}]"#,
+            )
+            .unwrap(),
+            combos: vec![],
+        });
+        let intent = v.on_key(b's');
+        assert_eq!(intent, ConnIntent::Redraw, "visible feedback, no set");
+        assert!(v.active_account.is_none(), "non-claude account not routed");
     }
 
     #[test]

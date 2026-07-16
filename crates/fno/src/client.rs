@@ -2983,7 +2983,14 @@ impl View {
                     } else {
                         ' '
                     };
-                    let mut text = format!(" {mark}{glyph} {}", a.name);
+                    // (x-c914) The account glyph leads the truncatable text (right
+                    // after the fixed mark+glyph prefix) so a long agent name or a
+                    // narrow sideline never truncates the billing badge away (codex
+                    // P2). Absent for the default account.
+                    let mut text = match a.account.as_deref() {
+                        Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
+                        None => format!(" {mark}{glyph} {}", a.name),
+                    };
                     // (x-0090) A pane row names its tab with a `·N` ordinal; an
                     // orphan row names its repo with a ` (basename)` suffix. The
                     // two are mutually exclusive (a pane row has a tab, an orphan
@@ -2999,12 +3006,6 @@ impl View {
                         .filter(|_| !agent_has_subline(a))
                     {
                         text.push_str(&format!(" ({base})"));
-                    }
-                    // (x-c914) Account glyph: which claude account this row bills
-                    // (a mux-spawned pane's birth account, or an isolated-account
-                    // roster row's source). Absent for the default account.
-                    if let Some(acct) = a.account.as_deref() {
-                        text.push_str(&format!(" @{acct}"));
                     }
                     if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
                         text.push_str(": ");
