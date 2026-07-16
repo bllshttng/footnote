@@ -1570,8 +1570,13 @@ def test_failover_racing_advances_dedup(iso, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, substrate="bg"):
-    """Call _spawn_worker with settings + resolver + subprocess mocked; return argv."""
+def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, substrate="bg", harness=None):
+    """Call _spawn_worker with settings + resolver + subprocess mocked; return argv.
+
+    The gate keys off the RESOLVED harness, so the mocked resolver returns one:
+    `harness` overrides it (a claude account record resolves to harness=claude);
+    otherwise a codex/gemini provider maps to its own harness, else claude.
+    """
     captured: dict = {}
 
     def _fake_run(cmd, **_kw):
@@ -1580,6 +1585,7 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
 
     monkeypatch.setattr(adv.subprocess, "run", _fake_run)
 
+    resolved_harness = harness or (provider if provider in ("codex", "gemini") else "claude")
     fake_settings = SimpleNamespace(
         agents=SimpleNamespace(spawn_permission_mode=perm_config),
         dispatch=SimpleNamespace(auto_merge=False),
@@ -1587,7 +1593,12 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: fake_settings)
     monkeypatch.setattr(
         "fno.agents.harness_map.resolve_dispatch",
-        lambda **_kw: {"substrate": substrate, "command": "/target no-merge ab-2222aaaa", "env": {}},
+        lambda **_kw: {
+            "harness": resolved_harness,
+            "substrate": substrate,
+            "command": "/target no-merge ab-2222aaaa",
+            "env": {},
+        },
     )
 
     adv._spawn_worker("ab-2222aaaa", None, "next", provider=provider, permission_mode=permission_mode)
@@ -1602,6 +1613,14 @@ def _perm_of(cmd):
 def test_claude_leg_forwards_config_bypass(iso, monkeypatch):
     """AC1-HP: a claude autonomous leg (no provider pin) carries the bypass default."""
     cmd = _spawn_argv(monkeypatch, provider=None, perm_config="bypassPermissions")
+    assert _perm_of(cmd) == "bypassPermissions"
+
+
+def test_claude_account_record_still_forwards(iso, monkeypatch):
+    """A claude ACCOUNT record (e.g. ccm/ccr) resolves to harness=claude and must
+    still carry the bypass - the gate keys off the resolved harness, not the raw
+    provider string, so an account-pinned claude worker never hangs."""
+    cmd = _spawn_argv(monkeypatch, provider="ccm", harness="claude", perm_config="bypassPermissions")
     assert _perm_of(cmd) == "bypassPermissions"
 
 
