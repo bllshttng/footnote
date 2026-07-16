@@ -761,6 +761,7 @@ def test_set_expected_count_spawn_failure_is_failed_not_skipped(tmp_path, monkey
 from fno.graph._decompose import (  # noqa: E402
     STUB_MARKERS,
     DecomposeError,
+    canonical_child_plan_path,
     classify_group_dep,
     extract_contract_versions,
     extract_why_digest,
@@ -768,6 +769,16 @@ from fno.graph._decompose import (  # noqa: E402
     separate_plan_path,
     validate_groups,
 )
+
+
+def _canonical(child: dict) -> Path:
+    """The canonical scaffold path for a child node, computed the way the code does
+    (child_root == the child's own cwd: routed cwd or inherited epic cwd)."""
+    return Path(
+        canonical_child_plan_path(
+            child["group_slug"], child["id"], child["cwd"], child.get("created_at")
+        )
+    )
 
 _CONTRACT_BODY = (
     "## Interface Contract\n\n"
@@ -818,6 +829,34 @@ def test_extract_contract_versions_ignores_stray_outside_section():
 
 def _grp(slug="1", title="Group 1: foundation", waves="1-2"):
     return validate_groups([{"slug": slug, "title": title, "waves": waves}], None)[0]
+
+
+# canonical_child_plan_path (pure) --------------------------------------------
+
+
+def test_canonical_child_plan_path_shape_and_routing():
+    from fno.graph._decompose import canonical_child_plan_path
+
+    p = canonical_child_plan_path(
+        "etl-search", "x-abcd", "/repos/web", "2026-03-04T00:00:00+00:00"
+    )
+    # Filename is the `fno plan path` shape with the child's created_at date...
+    assert Path(p).name == "20260304-etl-search-x-abcd.md"
+    # ...routed under the CHILD root's plans dir, not the epic's.
+    assert p.startswith("/repos/web/")
+
+
+def test_canonical_child_plan_path_corrupt_created_at_degrades(capsys):
+    import datetime
+
+    from fno.graph._decompose import canonical_child_plan_path
+
+    # AC2-FR: an unparseable created_at falls back to today + a stderr warning,
+    # never raises.
+    p = canonical_child_plan_path("etl", "x-dead", "/repos/web", "not-a-date")
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    assert Path(p).name == f"{today}-etl-x-dead.md"
+    assert "created_at" in capsys.readouterr().err
 
 
 # scaffold_separate_plan shape (US1 stub-proof + US4 why) ----------------------
@@ -1242,8 +1281,12 @@ def test_plans_separate_scaffolds_files_and_repoints(tmp_path, monkeypatch):
         # x-edf7 US2: the scaffold FILE is still written, but the node is born
         # UNLINKED - plan_path stays None until inline-fill links the filled plan.
         assert c["plan_path"] is None
-        f = Path(separate_plan_path(str(doc), c["group_slug"]))
+        # x-d6a6: born at the canonical `fno plan path` name, not the legacy
+        # `.group-<slug>.md`. The legacy path is no longer written.
+        f = _canonical(c)
         assert f.exists(), f"scaffold not written: {f}"
+        assert f.name.endswith(f"-{c['group_slug']}-{c['id']}.md")
+        assert not Path(separate_plan_path(str(doc), c["group_slug"])).exists()
         body = f.read_text()
         assert "status: stub" in body       # born stub, never ready
         assert "kind: quick-plan" in body
@@ -1297,9 +1340,12 @@ def test_legacy_fragment_children_repointed_to_separate(tmp_path, monkeypatch):
     sep = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
     assert sorted(e["id"] for e in sep) == frag_ids   # same nodes, no dupes
     for c in sep:
+        # The plan_path is repointed to the .md form (metadata migration)...
         assert "#group-" not in c["plan_path"]
         assert c["plan_path"].endswith(".md")
-        assert Path(c["plan_path"]).exists()
+        # ...but x-d6a6 skip-if-linked means a linked child is NOT re-scaffolded:
+        # no stub is spuriously minted (no migration; Locked Decision 4/6).
+        assert not _canonical(c).exists()
 
 
 def test_plans_fragment_rejected_with_removed_message(graph_env):
@@ -1326,7 +1372,7 @@ def test_plans_separate_title_with_quotes_emits_valid_yaml(tmp_path, monkeypatch
                       "--groups", _groups_json(groups)])
     assert result.exit_code == 0, result.output
     child = next(e for e in read_entries() if e.get("parent") == "ab-epic0001")
-    body = Path(separate_plan_path(str(doc), child["group_slug"])).read_text()
+    body = _canonical(child).read_text()
     front = body.split("---\n", 2)[1]
     fm = yaml.safe_load(front)
     assert fm["title"] == 'Group "alpha": the \\ case'
@@ -1341,3 +1387,132 @@ def test_plans_invalid_value_rejected_atomically(graph_env):
     assert result.exit_code != 0
     assert "separate" in result.output.lower()
     assert read_entries() == before
+
+
+# -- x-d6a6: canonical child plan names + per-project routing at birth --------
+
+
+def test_ac1_hp_child_born_at_canonical_name_in_child_project_dir(tmp_path, monkeypatch):
+    """AC1-HP: a routed child's stub lands at the canonical `fno plan path` name in
+    the CHILD project's plans dir, and the node stays born-unlinked."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    web_root = tmp_path / "web"
+    web_root.mkdir()
+    _patch_workmap(monkeypatch, {"web": str(web_root)})
+    groups = [
+        {"slug": "backend", "title": "G backend", "waves": "1", "blocked_by_groups": []},
+        {"slug": "webui", "title": "G web", "waves": "2", "blocked_by_groups": ["backend"],
+         "project": "web"},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    children = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+
+    web_child = _child(children, "webui")
+    stub = _canonical(web_child)
+    assert stub.exists(), f"stub not written: {stub}"
+    # Routed under web's own plans dir, canonical name, still born-unlinked.
+    assert str(stub).startswith(str(web_root))
+    assert stub.name.endswith(f"-webui-{web_child['id']}.md")
+    assert web_child["plan_path"] is None
+    # The inherited backend child lands under the epic's root, not web's.
+    assert not str(_canonical(_child(children, "backend"))).startswith(str(web_root))
+
+
+def test_ac1_edge_redecompose_across_day_is_idempotent(tmp_path, monkeypatch):
+    """AC1-EDGE: the canonical filename's date comes from created_at, not today, so
+    a re-decompose on a later day recomputes the SAME path and skips the existing
+    stub instead of minting a fresh-dated duplicate."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    g = doc.parent / "graph.json"
+    entries = read_entries()
+    child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
+                  cwd=str(tmp_path), created_at="2026-01-01T00:00:00+00:00",
+                  plan_path=None)
+    entries.append(child)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+    # The stub an earlier decompose left, dated from created_at (not today).
+    stub = _canonical(child)
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text("# earlier stub\n", encoding="utf-8")
+    assert stub.name.startswith("20260101-")
+
+    one = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(one)])
+    assert result.exit_code == 0, result.output
+    # No today-dated duplicate: exactly the one existing stub, unchanged.
+    assert list(stub.parent.glob(f"*-1-{child['id']}.md")) == [stub]
+    assert stub.read_text() == "# earlier stub\n"
+
+
+def test_ac2_edge_legacy_group_file_grandfathered(tmp_path, monkeypatch):
+    """AC2-EDGE: a child whose legacy `.group-<slug>.md` stub exists on disk is
+    grandfathered - decompose leaves it in place and mints no canonical duplicate."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    g = doc.parent / "graph.json"
+    entries = read_entries()
+    child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
+                  cwd=str(tmp_path), plan_path=None)
+    entries.append(child)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+    legacy = Path(separate_plan_path(str(doc), "1"))
+    legacy.write_text("# legacy builder content - keep\n", encoding="utf-8")
+
+    one = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(one)])
+    assert result.exit_code == 0, result.output
+    child_after = _child(read_entries(), "1")
+    assert legacy.read_text() == "# legacy builder content - keep\n"  # untouched
+    assert not _canonical(child_after).exists()  # no canonical duplicate
+
+
+def test_redecompose_no_route_uses_persisted_child_cwd(tmp_path, monkeypatch):
+    """A child already routed to another repo, re-decomposed with NO explicit
+    route, scaffolds under its OWN persisted cwd - not the epic's - and mints no
+    duplicate in the epic project (the child node's cwd is the authoritative root)."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    web_root = tmp_path / "web"
+    web_root.mkdir()
+    g = doc.parent / "graph.json"
+    entries = read_entries()
+    child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
+                  project="web", cwd=str(web_root), plan_path=None)
+    entries.append(child)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+
+    one = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(one)])
+    assert result.exit_code == 0, result.output
+    child_after = _child(read_entries(), "1")
+    assert child_after["cwd"] == str(web_root)          # repo untouched (no route)
+    stub = _canonical(child_after)
+    assert stub.exists()
+    assert str(stub).startswith(str(web_root))          # under the child's own repo
+    assert not str(stub).startswith(str(tmp_path / "internal"))  # not the epic dir
+
+
+def test_ac3_edge_already_linked_child_not_rescaffolded(tmp_path, monkeypatch):
+    """AC3-EDGE: a linked child (plan_path set) is skipped - no spurious stub is
+    written beside its real plan, and the filled plan is never clobbered."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    g = doc.parent / "graph.json"
+    filled = tmp_path / "filled-plan.md"
+    filled.write_text("# real filled plan\n", encoding="utf-8")
+    entries = read_entries()
+    child = _node("ab-child001", parent="ab-epic0001", group_slug="1",
+                  cwd=str(tmp_path), plan_path=str(filled))
+    entries.append(child)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+
+    one = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(one)])
+    assert result.exit_code == 0, result.output
+    child_after = _child(read_entries(), "1")
+    assert child_after["plan_path"] == str(filled)      # unchanged
+    assert not _canonical(child_after).exists()          # no stub minted
+    assert filled.read_text() == "# real filled plan\n"  # not clobbered
