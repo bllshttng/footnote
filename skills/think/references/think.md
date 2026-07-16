@@ -760,10 +760,26 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
      fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
      is now a finding.
+   - **AC adequacy attack (new):** for each AC in the doc, try to name one
+     concrete implementation or input that satisfies the AC as written while
+     violating the design's intent - a wrong-but-passing implementation, a
+     degenerate input, a silent no-op. If you can name one, emit an `ac-bypass`
+     finding carrying the AC id, the named bug in one sentence, and a suggested
+     sharpened Then-clause that the named bug would fail. One `ac-bypass` finding
+     per AC maximum; none-case ("Not applicable") ACs and Failure Mode bullets
+     are out of scope, do not invent bugs for them. A rated critique ("this AC is
+     weak") is not a finding; only a named bug is - vague criteria, vague
+     critiques.
    - General quality: missing error states, contradictions between sections,
      vague implementation details.
-3. If issues found: fix them, re-dispatch reviewer (max 3 iterations)
-4. If approved (or 3 iterations reached): present to user
+3. If issues found: fix them, re-dispatch reviewer (max 3 iterations). Resolve an
+   `ac-bypass` finding by sharpening the named AC's Then-clause so the bug no
+   longer passes - never by deleting the AC below the type contract's required AC
+   set.
+4. If approved (or 3 iterations reached): present to user. Any `ac-bypass`
+   finding still unresolved at the 3-iteration cap is recorded under the doc's
+   `## Open Questions` (never silently dropped), and the presentation summary
+   lists one line per sharpened AC (id + named bug).
 
 > "Design doc written and reviewed (N iteration(s)). Please review and let me know if you want changes before we create the implementation plan."
 
@@ -803,6 +819,7 @@ Ask: "Ready to create the implementation plan with `/blueprint`?"
 - **One round at a time** - batch related questions into a single round; never overwhelm, but never drip one question at a time either
 - **YAGNI ruthlessly** - Remove unnecessary features
 - **Test-first thinking** - Always ask "how would we verify this?"
+- **an AC a bug can pass is not an AC** - write every Then-clause so a wrong-but-passing implementation would fail it; pin an observable output and bound, never just "it succeeds"
 - **Every action needs feedback** - If a user does something and nothing visible happens, that's a design bug
 - **Multi-perspective challenge** - Stress-test from pessimist, impatient user, and silent failure angles
 - **State machines over checklists** - Enumerate states for interactive elements, don't just list happy paths
