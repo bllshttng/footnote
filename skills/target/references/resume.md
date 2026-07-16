@@ -35,8 +35,11 @@ never fatal.
 
 ```bash
 EVENTS=".fno/events.jsonl"
+# Parse each line independently (`-R` + `fromjson?`): a malformed or non-object
+# line mid-file is skipped, not fatal - a bare `jq -c 'select(...)'` aborts the
+# whole stream at the first bad line and silently drops every crumb after it.
 CRUMBS="$( { [ -f "$EVENTS.1" ] && cat "$EVENTS.1"; [ -f "$EVENTS" ] && cat "$EVENTS"; } 2>/dev/null \
-  | jq -c 'select(.type=="builder_step")' 2>/dev/null )"
+  | jq -Rc 'fromjson? | select(.type? == "builder_step")' 2>/dev/null )"
 N="$(printf '%s' "$CRUMBS" | grep -c . || true)"
 if [ "${N:-0}" -gt 0 ]; then
   LAST="$(printf '%s\n' "$CRUMBS" | tail -1 | jq -r '.data.outcome // "?"' 2>/dev/null)"

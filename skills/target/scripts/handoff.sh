@@ -436,8 +436,11 @@ fi
 _CRUMB_SUMMARY="crumbs: none"
 if [ -f "$EVENTS_FILE" ] || [ -f "$EVENTS_FILE.1" ]; then
   set +o pipefail
+  # Per-line parse (`-R` + `fromjson?`): a malformed/non-object line mid-file is
+  # skipped, not fatal - `jq -c 'select(...)'` aborts at the first bad line and
+  # drops every crumb after it (the exact malformed-log case this must tolerate).
   _CRUMBS="$( { [ -f "$EVENTS_FILE.1" ] && cat "$EVENTS_FILE.1"; [ -f "$EVENTS_FILE" ] && cat "$EVENTS_FILE"; } 2>/dev/null \
-    | jq -c 'select(.type=="builder_step")' 2>/dev/null || true)"
+    | jq -Rc 'fromjson? | select(.type? == "builder_step")' 2>/dev/null || true)"
   _CRUMB_N="$(printf '%s' "$_CRUMBS" | grep -c . || true)"
   if [ "${_CRUMB_N:-0}" -gt 0 ]; then
     _CRUMB_LAST="$(printf '%s\n' "$_CRUMBS" | tail -1 | jq -r '.data.outcome // "?"' 2>/dev/null || echo "?")"
