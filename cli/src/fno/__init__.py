@@ -4,7 +4,7 @@ The ``run_loop`` / ``target`` Python API has been removed. Drive work via
 ``/target`` in a Claude Code session instead.
 """
 # Keep in lockstep with crates/fno and crates/fno-agents (Rust).
-__version__ = "0.3.1"
+__version__ = "0.2.1"
 
 __all__ = ["__version__"]
 
