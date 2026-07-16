@@ -56,5 +56,4 @@ Each agent runs its own loop and they coordinate over the bus, so you can put a 
 
 - [fno agents spawn](fno-agents-spawn.md) - every spawn flag (`--once`, `--fresh`, `--here`, `--cwd`), receipts, and exit codes
 - [fno agents ask follow-up](fno-agents-ask-followup.md) - the messaging half: `--from-name`, reply waits, lock behavior
-- [fno agents chat](fno-agents-chat.md) - a live two-way channel between two Claude agents
 - [Cross-project inbox](cross-project-inbox.md) - messaging between whole projects with `fno mail`

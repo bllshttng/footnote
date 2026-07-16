@@ -1418,7 +1418,7 @@ def _claude_create_path(
 
     # Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persist the
     # stream-json `--resume` target alongside the 8-hex short-id so the worker
-    # is adoptable by the live `/agents chat` lane. Runs after the receipt is
+    # is adoptable by the live stream-json switchboard lane. Runs after the receipt is
     # captured; a miss leaves the field None and never gates the launch.
     # x-9844 Fix 3: a revival preserves the resumed uuid (the identity being
     # continued) rather than re-resolving from the fresh short_id, so the
@@ -3565,7 +3565,7 @@ def _load_a2a_settings() -> tuple[bool, int]:
 
 def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     """Wrap a relay hop body in the peer's ``<fno_mail>`` envelope, or return it
-    raw when no context is supplied (the chat path) (node x-1f23). The stream-json
+    raw when no context is supplied (an unwrapped hop) (node x-1f23). The stream-json
     switchboard injects a whole turn, so this uses the paired multiline form, not
     the relay single-line PTY variant."""
     if ctx is None:
@@ -3596,7 +3596,7 @@ def _run_relay_loop(
     side that is not a live stream thread ends the relay.
 
     Returns the total number of turns driven (counting the caller's first hop),
-    so a synchronous driver (``/agents chat``) can report the terminal state.
+    so a synchronous driver can report the terminal state.
     Existing callers (:func:`_kickoff_background_relay`, the inline fallback)
     ignore the return, so this is additive.
 
@@ -3793,7 +3793,7 @@ def _switchboard_exchange(
     ``mail_ctxs`` (node x-1f23) maps each endpoint name to its ``<fno_mail>``
     sender context. When set (the mail-send path), every autonomous relay
     continuation is wrapped so later peer turns keep provenance, not just the
-    seed. ``fno agents chat`` passes None, so the chat path stays raw + unchanged.
+    seed. An unwrapped hop passes None, so the raw path stays unchanged.
 
     Returns ``True`` when the turn(s) were delivered via the switchboard, or
     ``None`` when B is not a live stream thread / the daemon is unreachable (the
@@ -3835,325 +3835,6 @@ def _switchboard_exchange(
     if ceiling > 1 and from_name != to_name and cur.strip():
         _kickoff_background_relay(to_name, from_name, cur, ceiling, mail_ctxs)
     return True
-
-
-# =====================================================================
-# Group 3 (ab-0b16d65c) — `/agents chat A B "seed"` live escalation lane
-# =====================================================================
-#
-# `chat` is a thin SYNCHRONOUS orchestrator over the shipped stream-json
-# switchboard substrate (epic ab-d3a1ae3e). It DRIVES, never reimplements:
-#
-#   adopt : `_daemon_rpc("agent.spawn", host_mode=interactive, resume_id=<uuid>)`
-#           routes to the daemon's `spawn_claude_stream_lane`, which owns the
-#           atomic `session:<uuid>` single-writer claim and releases it on the
-#           --resume child's death. Python never double-claims.
-#   drive : the first hop `_daemon_rpc("agent.switchboard", ...)` plus the
-#           bounded `_run_relay_loop` (run INLINE here, not the detached
-#           background relay `send` uses, so the terminal state is reportable).
-#
-# The single-writer REFUSAL (AC3-ERR) is a fast `session_is_live` pre-check on
-# the pre-adopt state; the daemon's atomic claim is the authoritative guard for
-# the concurrent-adopt race (AC3-FR). v1 is claude<->claude only.
-
-_CHAT_PLAN_CREDIT_CAVEAT = (
-    "chat opens a live stream-json channel: every hop spends Agent SDK plan "
-    "credit (isolated from your interactive subscription)"
-)
-
-
-@dataclass
-class DispatchChatResult:
-    """Return shape for :func:`dispatch_chat`.
-
-    ``status``  ``"ok"`` (a channel ran), ``"refused"`` (a peer was a busy
-                running loop, nothing adopted), or ``"failed"`` (unknown peer or
-                an adopt child died).
-    ``adopted`` the peer names put on the stream-json lane this call.
-    ``turns``   total switchboard turns driven (>=1 on ok), counting the seed hop.
-    ``ceiling`` the configured turn ceiling in effect.
-    ``reason``  set on refused/failed.
-    ``notes``   visible, non-fatal notes (fresh-pipe fallback, ceiling reached,
-                a stranded-then-unwound peer).
-    """
-
-    status: str  # "ok" | "refused" | "failed"
-    a: str
-    b: str
-    adopted: list = field(default_factory=list)
-    turns: int = 0
-    ceiling: int = 0
-    reason: Optional[str] = None
-    notes: list = field(default_factory=list)
-
-
-def _chat_busy_reason(entry: "AgentEntry") -> Optional[str]:
-    """Return a refusal reason if ``entry`` is a live RUNNING loop that must not
-    be adopted (double-writer), else None.
-
-    A session already on the stream lane (``host_mode == "interactive"``) is the
-    target lane itself and is re-usable; a live session NOT on that lane is a
-    running ``--bg`` /target loop whose transcript a `--resume` adopt would
-    duplicate. ``session_is_live`` is the same liveness probe the daemon's adopt
-    re-checks atomically (AC3-FR), so this pre-check only buys a fast, friendly
-    refusal for the common non-racing case.
-    """
-    short_id = getattr(entry, "short_id", "") or None
-    if not short_id:
-        return None
-    if getattr(entry, "host_mode", None) == "interactive":
-        return None  # already the stream lane; not a runaway loop
-    from fno.agents.providers import claude as claude_mod
-
-    try:
-        if claude_mod.session_is_live(short_id):
-            return (
-                f"{entry.name} is busy (running loop), cannot open a live "
-                f"channel; observe it with: fno agents watch {entry.name}"
-            )
-    except Exception:
-        # A liveness-probe failure is not proof of a busy loop; let the daemon's
-        # authoritative claim decide rather than refusing on a transient error.
-        return None
-    return None
-
-
-def _chat_host_name(peer_name: str) -> str:
-    """The stream-lane host name a peer is adopted under.
-
-    The daemon refuses adopting under a name already in the registry
-    (``AgentExists``, ``spawn_claude_stream_lane``), and a peer to chat with is
-    itself a registered row, so the adopt MUST use a fresh, distinct name. The
-    resumed transcript (keyed by the peer's full UUID) is the same conversation;
-    this is just the registry handle for the headless stream thread (and the
-    ``watch`` target).
-    """
-    return f"{peer_name}-chat"
-
-
-def _chat_unwind_adopt(host_name: str) -> bool:
-    """Best-effort un-adopt a stream-lane host when a later adopt aborts the
-    chat, so a partial chat does not strand a half-open billed channel. Stopping
-    the worker releases the daemon's single-writer claim.
-
-    Returns True ONLY when the daemon confirmed the stop (a dict result); False
-    when the daemon was unreachable / errored, so the caller can tell the user
-    the thread MAY still be a live billed channel rather than assert a teardown
-    that did not happen (the honesty invariant, on the teardown side). Never
-    raises — ``_daemon_rpc`` already swallows transport errors into ``None``.
-    """
-    res = _daemon_rpc("agent.stop", {"name": host_name})
-    return isinstance(res, dict)
-
-
-def _chat_adopt(
-    entry: "AgentEntry", cwd: "Path", *, existing_by_name: dict
-) -> tuple[bool, Optional[str], Optional[str], bool]:
-    """Adopt one settled peer onto the stream-json lane under a fresh host name.
-
-    Returns ``(adopted, host_name, note, reused)``. ``reused`` is True when an
-    already-live channel for this peer was reused rather than newly created, so
-    the caller can avoid tearing down a pre-existing session it did not create
-    (codex P2).
-
-    - A peer with no resolved full UUID CANNOT be live-escalated: claude has no
-      fresh stream host (the daemon's adopt requires ``--from <uuid>``), and we
-      never adopt a guessed UUID. So this returns ``(False, host, reason, False)``
-      with an actionable reason (re-spawn to capture the UUID, or use the async
-      bus) — a visible refusal, never a silent or guessed live thread.
-    - An already-live channel for this peer (a prior chat's host carrying the
-      same UUID) is reused idempotently, not re-adopted (the daemon would refuse
-      a same-UUID second adopt); ``reused`` is True.
-    - A ``None`` RPC result models the ``--resume`` child dying on startup or the
-      daemon refusing (``AgentExists`` on a stale host row); ``adopted`` is False.
-    """
-    uuid = getattr(entry, "claude_session_uuid", None)
-    host = _chat_host_name(entry.name)
-    if not uuid:
-        return (
-            False,
-            host,
-            f"no resolved session UUID for {entry.name}; cannot open a live "
-            f"channel (claude has no fresh stream host). Re-spawn to capture the "
-            f"UUID, or use `fno mail send {entry.name}` (the async bus).",
-            False,
-        )
-    prior = existing_by_name.get(host)
-    if (
-        prior is not None
-        and getattr(prior, "host_mode", None) == "interactive"
-        and getattr(prior, "claude_session_uuid", None) == uuid
-        # Only reuse a LIVE host; a dead row (released/crashed) falls through to a
-        # fresh spawn instead of handing back a dead switchboard target.
-        and getattr(prior, "status", None) == "live"
-    ):
-        return True, host, f"reusing the live channel {host}", True
-    res = _daemon_rpc(
-        "agent.spawn",
-        {
-            "name": host,
-            "provider": "claude",
-            "host_mode": "interactive",
-            "resume_id": uuid,
-            "cwd": str(getattr(entry, "cwd", None) or cwd),
-        },
-        connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
-        read_timeout=_SWITCHBOARD_READ_TIMEOUT,
-    )
-    if not isinstance(res, dict):
-        return False, host, None, False
-    return True, host, None, False
-
-
-def dispatch_chat(
-    a_name: str,
-    b_name: str,
-    seed: str,
-    *,
-    cwd: "Path",
-    root: Optional["Path"] = None,
-) -> DispatchChatResult:
-    """Open a live stream-json channel between claude peers ``a_name`` and
-    ``b_name`` seeded with ``seed`` (US3 / Tasks 4.1, 4.2).
-
-    Synchronous so the terminal state is reportable. Order:
-
-    1. Resolve both peers; an unknown name -> ``failed`` (nothing adopted).
-    2. Single-writer pre-check on the PRE-adopt state: a busy running loop ->
-       ``refused`` (AC3-ERR), nothing adopted.
-    3. Adopt A then B onto the stream lane under fresh host names; a peer with no
-       resolved UUID -> ``failed`` with an actionable reason (claude cannot
-       fresh-host and we never guess a UUID, AC3-EDGE); a dead --resume child ->
-       ``failed`` and best-effort unwind of the already-adopted side (AC3-FR).
-    4. Drive the seed B<-A and the bounded relay up to the turn ceiling
-       (``config.agents.a2a.auto`` False = a single mirrored hop); a reached
-       ceiling adds a visible note (AC3-EDGE).
-
-    ``result.adopted`` carries the stream-lane HOST names (the ``watch`` targets),
-    not the original peer names.
-
-    Confirmation (always-confirm + the plan-credit caveat, AC3-UI) is the
-    caller's (``cmd_chat``) responsibility, not this orchestrator's.
-    """
-    result = DispatchChatResult(status="ok", a=a_name, b=b_name)
-
-    # 0. A live channel needs two distinct endpoints. A self-chat would also
-    #    collapse the adopt-ordering below (both peers are the same row) and
-    #    drive the switchboard with a null `to` (gemini review).
-    if a_name == b_name:
-        result.status = "failed"
-        result.reason = "cannot chat an agent with itself; A and B must differ"
-        return result
-
-    # 1. Resolve both peers.
-    try:
-        entries = load_registry()
-    except (OSError, ValueError, RegistryVersionError) as exc:
-        result.status = "failed"
-        result.reason = f"registry read failed: {exc}"
-        return result
-    by_name = {e.name: e for e in entries}
-    a_entry = by_name.get(a_name)
-    b_entry = by_name.get(b_name)
-    for nm, ent in ((a_name, a_entry), (b_name, b_entry)):
-        if ent is None:
-            result.status = "failed"
-            result.reason = f"unknown agent {nm!r}; spawn it first"
-            return result
-    assert a_entry is not None and b_entry is not None  # for type-checkers
-
-    # v1: claude<->claude only.
-    for ent in (a_entry, b_entry):
-        if ent.provider != "claude":
-            result.status = "failed"
-            result.reason = (
-                f"{ent.name} is provider {ent.provider!r}; chat v1 is claude<->claude only"
-            )
-            return result
-
-    # 2. Single-writer pre-check (AC3-ERR) — refuse BEFORE adopting anything.
-    for ent in (a_entry, b_entry):
-        busy = _chat_busy_reason(ent)
-        if busy:
-            result.status = "refused"
-            result.reason = busy
-            return result
-
-    # 3. Adopt both peers under fresh host names. host_a / host_b are the live
-    #    stream-thread handles the switchboard drives and `watch` observes.
-    #    created_hosts tracks ONLY the hosts this call newly adopted, so an abort
-    #    unwinds those and never tears down a reused pre-existing channel (codex P2).
-    host_a: Optional[str] = None
-    host_b: Optional[str] = None
-    created_hosts: list = []
-    for idx, ent in enumerate((a_entry, b_entry)):
-        adopted, host, note, reused = _chat_adopt(ent, cwd, existing_by_name=by_name)
-        if note:
-            result.notes.append(note)
-        if not adopted:
-            result.status = "failed"
-            result.reason = note or (
-                f"adopt failed for {ent.name}: the --resume stream child did not "
-                f"come up (bad/expired UUID, gone cwd, daemon down, or a stale "
-                f"{host} host — `fno agents rm {host}` then retry)"
-            )
-            _chat_unwind(result, created_hosts)  # tear down only what WE created
-            return result
-        result.adopted.append(host)
-        if not reused:
-            created_hosts.append(host)
-        if idx == 0:
-            host_a = host
-        else:
-            host_b = host
-
-    # 4. Drive the seed + bounded relay synchronously between the host threads.
-    auto, ceiling = _load_a2a_settings()
-    result.ceiling = ceiling
-    sb = _daemon_rpc(
-        "agent.switchboard",
-        {"to": host_b, "from": host_a, "body": seed, "mirror": not auto},
-        connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
-        read_timeout=_SWITCHBOARD_READ_TIMEOUT,
-    )
-    if not isinstance(sb, dict) or sb.get("delivered") is not True:
-        result.status = "failed"
-        result.reason = (
-            f"the seed turn to {host_b} was not delivered on the stream lane "
-            f"({sb.get('reason') if isinstance(sb, dict) else 'daemon unreachable'})"
-        )
-        _chat_unwind(result, created_hosts)
-        return result
-    result.turns = 1
-    reply = sb.get("reply") or ""
-    if auto and ceiling > 1 and host_a != host_b and reply.strip():
-        # INLINE bounded relay (not the detached background relay `send` uses) so
-        # `turns` reflects the whole exchange. _run_relay_loop emits the visible
-        # "loop ceiling reached" itself.
-        total = _run_relay_loop(host_b, host_a, reply, ceiling)
-        result.turns = total
-        if total >= ceiling:
-            result.notes.append(f"loop ceiling reached ({ceiling} turns)")
-    return result
-
-
-def _chat_unwind(result: "DispatchChatResult", hosts: list) -> None:
-    """Best-effort tear down the hosts THIS chat newly created (never a reused
-    pre-existing channel, codex P2), recording an HONEST per-host note: a
-    confirmed stop vs an unconfirmed one the user must verify (the thread may
-    still be a live billed channel). Removes only the confirmed-torn-down hosts
-    from ``result.adopted``; reused hosts and unconfirmed ones stay listed."""
-    for host in list(hosts):
-        if _chat_unwind_adopt(host):
-            result.notes.append(f"unwound already-adopted {host}")
-            if host in result.adopted:
-                result.adopted.remove(host)
-        else:
-            result.notes.append(
-                f"could NOT confirm unwind of {host}; it may still be a live "
-                f"billed channel — verify with `fno agents list` and "
-                f"`fno agents stop {host}`"
-            )
 
 
 # Subprocess budget for the mail-inject verb. It polls the recipient transcript
@@ -4484,8 +4165,8 @@ def _deliver_live(
     # path below (B not a live stream thread, or daemon unreachable).
     # node x-1f23: provenance for the autonomous relay continuations. The sender's
     # ctx wraps A's turns; the recipient's ctx (from/to swapped) wraps B's. None
-    # when there is no mail envelope, leaving the relay raw (and the chat path,
-    # which never reaches _deliver_live, unaffected).
+    # when there is no mail envelope, leaving the relay raw (an unwrapped hop
+    # never reaches _deliver_live, unaffected).
     relay_ctxs = None
     if mail is not None:
         from fno.mail.envelope import harness_for_provider

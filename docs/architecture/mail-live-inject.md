@@ -86,4 +86,4 @@ The durable fallback stores the `<fno_mail>`-wrapped body, the SAME envelope the
 
 ## What did NOT change
 
-`fno agents chat` (the costed real-time bidirectional stream) is a distinct mode and is unchanged. The durable bus persistence and its drain-on-wake semantics are unchanged; only its role narrows to the offline pending-queue. Deprecating the bus's separate history store (now redundant with transcript-grep) is left for later.
+The shared stream-json switchboard substrate (the daemon's `agent.switchboard` relay) is unchanged. The durable bus persistence and its drain-on-wake semantics are unchanged; only its role narrows to the offline pending-queue. Deprecating the bus's separate history store (now redundant with transcript-grep) is left for later.

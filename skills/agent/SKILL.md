@@ -47,7 +47,6 @@ focused core:
 | `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
 | `discuss [seed]` | normalize `--discuss` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini interactive pane, verbatim seed, NO `/target`) | free (provider subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno mail send` (the addressed jsonl bus, sender-excluded) | free |
-| `chat A B "..."` | normalize + **always-confirm** + honest-receipt | `fno agents chat` (stream-json adopt + switchboard relay) | **Agent SDK plan credit / turn** |
 | `watch <name>` | thin pass-through | `fno agents watch` | free |
 | `list` | thin pass-through | `fno agents list` | free |
 | `whoami` | thin pass-through (read-only) | `fno agents whoami` | free |
@@ -61,12 +60,6 @@ capability matrix at `docs/harness-command-matrix.md` remains the per-provider
 truth. For the full surface map - which verbs are human-facing vs
 machine-internal vs exploratory channel infra - see
 [references/fno-agents-surface.md](references/fno-agents-surface.md).
-
-> `chat` is the only costed verb: it opens a live real-time channel and every
-> hop spends Agent SDK plan credit (isolated from your interactive subscription),
-> so it ALWAYS confirms. The default free claude<->claude channel is still the
-> addressed bus drained at loop boundaries (`send`), not a live tail - reach for
-> `chat` only when you want two workers conversing in real time right now.
 
 Route on the verb, then run the matching section below.
 
@@ -662,58 +655,6 @@ instantly.
      report a phantom delivery.
 
 `send` is free and never confirms (it is not a billed launch).
-
----
-
-## `chat A B "<seed>"` - live escalation (costed, always-confirm)
-
-The one billed verb. Where `send` drops an addressed message the peer drains at
-its next loop boundary, `chat` opens a **live real-time channel** between two
-claude workers: it adopts BOTH onto the shipped stream-json switchboard lane and
-drives a bounded A<->B relay right now. Every hop spends Agent SDK plan credit
-(isolated from your interactive subscription), so `chat` ALWAYS confirms - even
-when `config.agents.confirm` is off. v1 is **claude<->claude only**.
-
-This is a thin mouth over the shipped substrate (epic ab-d3a1ae3e). `chat`
-DRIVES the daemon (adopt + switchboard); it never reimplements the lane.
-
-1. Parse the two peer names (first two tokens after `chat`) and the seed (the
-   rest; strip smart quotes the same way normalize does for spawn). Refuse if
-   either name or the seed is empty - launch nothing.
-2. **CONFIRM (always).** Show the exact command and the plan-credit caveat, then
-   gate on `[y/N]` regardless of confirm posture. The `fno agents chat` command
-   echoes both before its own gate, so a plain pass-through is honest; pass
-   `-y/--yes` only when the user already confirmed.
-3. Run the genuine wire (do NOT reimplement adopt or the switchboard):
-
-   ```bash
-   fno agents chat "<A>" "<B>" "<seed>"        # confirms, then runs
-   fno agents chat "<A>" "<B>" "<seed>" --yes  # user already confirmed
-   ```
-
-   Each peer is adopted under a FRESH host name (`<peer>-chat`), because the
-   daemon refuses adopting under a name already in the registry and claude has no
-   fresh stream host - the resume keys on the peer's full session UUID, so the
-   adopted host IS the peer's conversation, resumed.
-
-4. **REPORT** the real terminal-state line `fno agents chat` prints:
-   - **ok:** `chat A<->B: <turns>/<ceiling> turns over [A-chat, B-chat] (observe: fno agents watch B-chat)`.
-     The channel is headless - follow it with `watch`, never a TUI.
-   - **refused** (exit 1): a peer is a busy running `--bg` loop - relay the
-     "<X> is busy (running loop)" reason; nothing was adopted.
-   - **failed** (exit 1): unknown peer, a peer with no resolved session UUID (it
-     cannot be live-escalated - re-spawn to capture the UUID, or use `send`), a
-     dead `--resume` adopt child, or an undelivered seed - relay the captured
-     reason; never report a phantom channel.
-   - Notes on stderr (`note: ...`): a reached turn ceiling ends the relay; an
-     aborted mid-adopt unwinds the already-adopted side and says so honestly (a
-     stop the daemon could not confirm is reported as "may still be live", never
-     asserted torn down).
-
-The relay is bounded by `config.agents.a2a.turn_ceiling` (default 6); with
-`config.agents.a2a.auto=false` it is a single mirrored hop with no autonomous
-relay. Observe a running channel with `watch`, since a stream-json thread is
-headless.
 
 ---
 

@@ -180,12 +180,6 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # `block` decision for the loop-boundary inbox nudge. Pure Python (reads the
     # bus via fno.agents.nudge); no Rust port.
     "nudge-peek",
-    # G3 (ab-0b16d65c): the `/agents chat` live escalation verb. A pure-Python
-    # SYNCHRONOUS orchestrator over the shipped daemon RPCs (agent.spawn adopt +
-    # agent.switchboard drive); there is NO `chat` verb on the Rust client, so it
-    # must never auto-route to the daemon (a 404 for installed users). Sibling of
-    # `send`: Python owns it.
-    "chat",
     # x-73cc: the shared bg-dispatch guard verb. Pure-Python orchestration of
     # `fno claim` (Guard 1 node-claim probe + Guard 2 dispatch:<id> reservation)
     # called by both dispatch-node.sh and spawn.sh. There is NO `spawn-guard` on
