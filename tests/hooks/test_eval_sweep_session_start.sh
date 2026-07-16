@@ -136,11 +136,11 @@ pass "US2: claim layer down degrades to stamp-only (AC1-ERR)"
 # US3: per-stage timeout + logging
 # =========================================================================== #
 
-# A fake abi whose `observer sweep` sleeps far past the bound; the wrapper must
+# A fake sweep binary whose `observer sweep` sleeps far past the bound; the wrapper must
 # kill it near the bound, not wait it out.
 SLOWBIN="$WORK/slow"
 mkdir -p "$SLOWBIN"
-cat > "$SLOWBIN/abi" <<'SLOW'
+cat > "$SLOWBIN/slowsweep" <<'SLOW'
 #!/usr/bin/env bash
 case "$1 $2" in
     "observer sweep") sleep 30 ;;
@@ -148,13 +148,13 @@ case "$1 $2" in
 esac
 exit 0
 SLOW
-chmod +x "$SLOWBIN/abi"
+chmod +x "$SLOWBIN/slowsweep"
 
 LOG="$WORK/repo/.fno/logs/eval-sweep.log"
 rm -f "$LOG"
 EVAL_SWEEP_STAGE_TIMEOUT=1
 start=$(date +%s)
-_eval_sweep_run_stages "$CANON" "$SLOWBIN/abi" "$LOG" "" ""
+_eval_sweep_run_stages "$CANON" "$SLOWBIN/slowsweep" "$LOG" "" ""
 elapsed=$(( $(date +%s) - start ))
 # Two slow `observer sweep` stages, each bounded to 1s, plus two instant ticks:
 # well under the unbounded 60s. Generous ceiling to avoid CI flake.
