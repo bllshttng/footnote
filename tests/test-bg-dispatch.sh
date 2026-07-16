@@ -136,14 +136,16 @@ case "$sub $verb" in
       case "$h" in
         claude|agy) cmd="/$bare {id}" ;;
         codex)      cmd="\$fno:$bare {id}" ;;
-        *)          cmd='Implement footnote backlog node {id} end-to-end. Do NOT merge.' ;;
+        opencode)   cmd="/fno:$bare {id}" ;;
+        *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
       esac
     else
-      # builtin (no verb): mirrors harness_map dispatch_command (x-567d).
+      # builtin (no verb): mirrors harness_map dispatch_command (x-567d, x-de43).
       case "$h" in
         claude|agy) cmd='/target no-merge {id}' ;;
         codex)      cmd='$fno:target no-merge {id}' ;;
-        *)          cmd='Implement footnote backlog node {id} end-to-end. Do NOT merge.' ;;
+        opencode)   cmd='/fno:target no-merge {id}' ;;
+        *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
       esac
     fi
     # The real resolver substitutes {id} when --node is given (per-node path).
@@ -613,16 +615,17 @@ echo "$out" | grep -q -- "--role build" \
   && fail "x-567d P1: non-claude spawn must NOT carry --role build: $out" \
   || pass "x-567d P1: non-claude spawn drops the claude-only --role/--route lane"
 
-# ---- x-567d P1: an opencode (no native footnote skill) worker gets a PROSE
-#      BRIEF, never a literal /target that would run verbatim and no-op ----
+# ---- x-de43: an opencode worker gets the native /fno:target invocation (its
+#      fno plugin expands the palette command), never a prose brief nor a bare
+#      /target that opencode would run verbatim as prose ----
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo "opencode/headless" > "$MOCKSTATE/resolve_pair"
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-if echo "$out" | grep -qF "Implement footnote backlog node ab-aaaa1111" \
-   && ! echo "$out" | grep -qF "'/target"; then
-  pass "x-567d P1: opencode worker gets a prose brief, not a literal /target"
+if echo "$out" | grep -qF "/fno:target no-merge ab-aaaa1111" \
+   && ! echo "$out" | grep -qF "Implement footnote backlog node"; then
+  pass "x-de43: opencode worker gets /fno:target (plugin palette), not a prose brief"
 else
-  fail "x-567d P1: opencode command should be a prose brief: $out"
+  fail "x-de43: opencode command should be /fno:target: $out"
 fi
 
 # ---- x-a5e4 codex review P1: a codex node with dispatch_verb=/target resolves

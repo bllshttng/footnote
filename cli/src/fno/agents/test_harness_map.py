@@ -129,10 +129,10 @@ def test_config_command_normalized_per_harness():
     assert resolve_dispatch(harness="claude", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
     ] == "/target no-merge x-1234"
-    # prose harness: the builtin implementation brief, not a literal slash string
+    # opencode: plugin-namespaced slash surface -> `/fno:target ...` (x-de43)
     assert resolve_dispatch(harness="opencode", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
-    ].startswith("Implement footnote backlog node x-1234")
+    ] == "/fno:target no-merge x-1234"
 
 
 def test_explicit_command_normalized_per_harness():
@@ -142,20 +142,101 @@ def test_explicit_command_normalized_per_harness():
     assert out["command"] == "$fno:target no-merge x-1"
 
 
-def test_config_slash_non_target_on_prose_is_loud():
-    """AC1-ERR: a slash non-`/target` config template on a prose harness raises,
-    naming the verb and the harness - never a silent literal prompt."""
-    with pytest.raises(DispatchResolveError, match="think.*gemini|gemini.*think"):
-        resolve_dispatch(
-            harness="gemini", node_id="x-1", dispatch_cfg={"command": "/think {id}"}
+def test_opencode_default_dispatch_renders_fno_slash():
+    """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
+    invocation `/fno:target ...` on the headless substrate - no prose brief."""
+    out = _resolve(harness="opencode", node_id="x-4d85")
+    assert out["command"] == "/fno:target no-merge x-4d85"
+    assert out["substrate"] == "headless"
+    assert out["command_surface"] == "slash"
+
+
+def test_opencode_arbitrary_verb_renders_fno_prefix():
+    """AC4-EDGE: the single prefix-swap rule renders ANY verb (no allowlist in the
+    render path) - `/blueprint quick <doc>` and an arbitrary `/zzz` both namespace."""
+    out = resolve_dispatch(
+        harness="opencode", node_id="x-9", dispatch_cfg={"command": "/blueprint quick {id}"}
+    )
+    assert out["command"] == "/fno:blueprint quick x-9"
+    out2 = resolve_dispatch(
+        harness="opencode", node_id="x-9", dispatch_cfg={"command": "/zzz args {id}"}
+    )
+    assert out2["command"] == "/fno:zzz args x-9"
+
+
+def test_normalize_fallback_table_mirrors_harness_map():
+    """Parity: normalize.sh's static command-surface fallback (used only when
+    `fno dispatch resolve` is unreachable) MUST mirror harness_map, the SoT - a
+    drift would dispatch the wrong spelling. Parses the shell case block and
+    compares each provider's surface to capabilities()."""
+    import re
+    from pathlib import Path
+
+    from fno.agents.harness_map import capabilities
+
+    root = Path(__file__).resolve()
+    norm = None
+    for _ in range(8):
+        cand = root / "skills/agent/scripts/normalize.sh"
+        if cand.exists():
+            norm = cand
+            break
+        root = root.parent
+    assert norm is not None, "normalize.sh not found from test location"
+
+    m = re.search(
+        r"resolve_command_surface\(\).*?case \"\$_prov\" in(.*?)esac",
+        norm.read_text(),
+        re.S,
+    )
+    assert m, "resolve_command_surface case block not found"
+    shell_map: dict[str, str] = {}
+    for arm in re.finditer(r"([a-z|*]+)\)\s*printf '([a-z-]+)'", m.group(1)):
+        for prov in arm.group(1).split("|"):
+            if prov != "*":
+                shell_map[prov] = arm.group(2)
+    assert shell_map, "no provider arms parsed from normalize.sh"
+    for prov, surface in shell_map.items():
+        assert capabilities(prov)["command_surface"] == surface, (
+            f"normalize.sh fallback maps {prov!r}->{surface!r} but harness_map "
+            f"says {capabilities(prov)['command_surface']!r}"
+        )
+    for prov in ("claude", "agy", "opencode", "codex", "gemini"):
+        assert prov in shell_map, f"normalize.sh fallback omits {prov!r}"
+
+    # slash_prefix must mirror too, or opencode would render `/target` not
+    # `/fno:target`. The shell helper lists only non-empty prefixes explicitly
+    # (opencode); claude/agy fall to `*` -> "", matching harness_map's default.
+    mp = re.search(r"slash_prefix\(\).*?case \"\$1\" in(.*?)esac", norm.read_text(), re.S)
+    assert mp, "slash_prefix case block not found in normalize.sh"
+    shell_prefix: dict[str, str] = {}
+    for arm in re.finditer(r"([a-z|*]+)\)\s*printf '([a-z:-]*)'", mp.group(1)):
+        for prov in arm.group(1).split("|"):
+            if prov != "*":
+                shell_prefix[prov] = arm.group(2)
+    for prov in ("claude", "agy", "opencode"):
+        expected = capabilities(prov).get("slash_prefix", "")
+        assert shell_prefix.get(prov, "") == expected, (
+            f"normalize.sh slash_prefix maps {prov!r}->{shell_prefix.get(prov, '')!r} "
+            f"but harness_map says {expected!r}"
         )
 
 
+def test_gemini_dispatch_is_refused_naming_agy():
+    """AC2-ERR: a deprecated gemini harness has no dispatch lane; EVERY resolve
+    refuses loudly and names the successor (agy) - default, slash template, and
+    even a non-slash prose template that would otherwise pass the seam."""
+    for cfg in (None, {"command": "/think {id}"}, {"command": "implement node {id}"}):
+        with pytest.raises(DispatchResolveError, match="agy"):
+            resolve_dispatch(harness="gemini", node_id="x-1", dispatch_cfg=cfg or {})
+
+
 def test_config_non_slash_prose_template_untouched():
-    """AC1-EDGE: a non-slash prose template is never rewritten - byte-identical
-    on every harness (the startswith('/') gate is the opt-out)."""
+    """AC1-EDGE: a non-slash template is never rewritten - byte-identical on every
+    slash/codex harness (the startswith('/') gate is the opt-out). gemini is
+    excluded: it refuses outright (test_gemini_dispatch_is_refused_naming_agy)."""
     cfg = {"command": "implement node {id} and open a PR"}
-    for h in ("opencode", "gemini", "codex", "claude"):
+    for h in ("opencode", "codex", "claude"):
         assert resolve_dispatch(harness=h, node_id="x-9", dispatch_cfg=cfg)[
             "command"
         ] == "implement node x-9 and open a PR"
@@ -167,7 +248,7 @@ def test_config_absolute_path_template_untouched():
     literally on every harness - never rewritten to `$fno:usr/...` on codex or
     rejected on a prose harness."""
     cfg = {"command": "/usr/bin/custom-script {id}"}
-    for h in ("opencode", "gemini", "codex", "claude"):
+    for h in ("opencode", "codex", "claude"):  # gemini refuses outright (x-de43)
         assert resolve_dispatch(harness=h, node_id="x-9", dispatch_cfg=cfg)[
             "command"
         ] == "/usr/bin/custom-script x-9"

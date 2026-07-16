@@ -127,7 +127,18 @@ Retired verbs print these pointers and exit non-zero, so scripts fail loud rathe
 - **claude** is the only provider with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, `chat`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
 - **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
 - **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
-- **opencode** is pane-hostable with a readiness detector and badge manifest, but fno does not probe or resume its session IDs this release, and its headless lane is not wired - live-only, via the pane.
+- **opencode** is pane-hostable with a readiness detector and badge manifest, but fno does not probe or resume its session IDs this release. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.
+
+## Dispatch command surface
+
+How an autonomous/`/agent spawn` dispatch of a footnote `/verb` is rendered per harness. The single source of truth is `fno.agents.harness_map` (`fno dispatch resolve`); `skills/agent/scripts/normalize.sh` mirrors it as a static fallback (a test asserts parity).
+
+| Harness | Rendered invocation | Notes |
+|---|---|---|
+| claude, agy | `/verb ...` | Native slash command (verbatim). |
+| opencode | `/fno:verb ...` | Plugin-namespaced palette + `opencode run --command`. |
+| codex | `$fno:verb ...` | `codex exec` expands the plugin skill. |
+| gemini | **refused** | Deprecated; the dispatch lane is a loud error naming its successor (agy). No prose build brief is generated. |
 
 ## See also
 

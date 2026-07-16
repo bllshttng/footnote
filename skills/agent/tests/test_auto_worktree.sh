@@ -156,9 +156,9 @@ err6="$(cat "$TMP/err6")"
 has  "subdir worktree'd" "$err6" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-subdir-demo"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-subdir-demo" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: subdir cwd not worktree'd"; }
 
-# 7. codex/gemini BUILD payload reaches spawn.sh as a PROSE brief (no /target
-#    prefix) but payload_mode=build -> still a code-writing worker, so it MUST be
-#    isolated. A message-prefix-only check would miss this (the Codex P1 fix), and
+# 7. A BUILD payload isolates regardless of its rendered message shape: worktree
+#    isolation keys on payload_mode=build (a code-writing worker), not on a
+#    /target prefix (the Codex P1 fix). A non-slash message still isolates, and
 #    these workers have no location gate to fail safe on.
 out7="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-codex-build" \
   --provider codex --payload-mode build --node "x-cdx" \
@@ -166,7 +166,7 @@ out7="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-codex-buil
   --cwd "$REPO" 2>"$TMP/err7")"
 err7="$(cat "$TMP/err7")"
 has  "codex-build worktree'd" "$err7" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-codex-build"
-[[ -d "$TMP/conductor/workspaces/myrepo/spawn-codex-build" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: codex build prose payload not worktree'd"; }
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-codex-build" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: build payload not worktree'd"; }
 
 # 8. ask payload (one-shot question, any provider) -> NOT code-writing, no worktree.
 out8="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-ask-demo" \

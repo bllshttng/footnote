@@ -666,15 +666,15 @@ fi
 
 # ---- 5. payload mode + provider-aware message assembly -----------------------
 # Three modes (Locked Decision 8) replace the old slash-or-`/target` binary:
-#   passthrough: payload is an explicit slash command (leading `/`). Forwarded
-#                verbatim. Meaningful for claude ONLY - codex/gemini have no slash
-#                commands, so a passthrough to them is REFUSED (never an inert
-#                string). (AC4-ERR)
+#   passthrough: payload is an explicit slash command (leading `/`). Rendered
+#                per-harness: claude/agy verbatim, opencode `/fno:verb`, codex
+#                `$fno:verb`; a deprecated (refused) provider has no dispatch
+#                lane, so a passthrough to it is REFUSED naming agy. (AC4-ERR)
 #   ask:         the skill parsed an `ask`/`bare` verb (--ask). The prompt is sent
 #                VERBATIM - no `/target` wrap, no no-merge, no build brief. (AC4-HP)
-#   build:       default. PROVIDER-AWARE: claude gets `/target <text>` (+ no-merge);
-#                codex/gemini get a build BRIEF in prose - never a literal `/target`,
-#                which they cannot interpret (Locked Decision 9).
+#   build:       default. PROVIDER-AWARE: claude gets `/target <text>`, opencode
+#                `/fno:target <text>`, codex `$fno:target <text>` (+ no-merge); a
+#                deprecated provider is refused naming agy - no prose brief.
 # An explicit `ask`/`bare` verb WINS over leading-`/` passthrough detection: a
 # question that happens to start with `/` (e.g. `ask "/target what does it do"`)
 # is still a verbatim prompt, not a slash command to forward.
@@ -700,23 +700,49 @@ resolve_command_surface() {
   local _prov="$1" _line
   _line="$(fno dispatch resolve --harness "$_prov" 2>/dev/null | sed -n 's/^command_surface=//p' | head -1)"
   if [[ -n "$_line" ]]; then printf '%s' "$_line"; return 0; fi
+  # Static mirror of fno.agents.harness_map (a python test asserts parity):
+  # opencode's fno plugin exposes `/fno:verb` (palette + `run --command`), so it
+  # is a slash surface; gemini is deprecated -> refused. Unknown -> refused too,
+  # never a silent prose no-op.
   case "$_prov" in
-    claude|agy) printf 'slash' ;;
-    codex)      printf 'codex-skill' ;;
-    *)          printf 'prose' ;;
+    claude|agy|opencode) printf 'slash' ;;
+    codex)               printf 'codex-skill' ;;
+    gemini)              printf 'refused' ;;
+    *)                   printf 'refused' ;;
+  esac
+}
+
+# The plugin-namespace prefix a slash-surface provider prepends to `/verb`
+# (mirrors harness_map's slash_prefix): opencode -> `fno:` (`/fno:target`);
+# claude/agy inject natively, so it is empty. Keep in sync with harness_map.
+slash_prefix() {
+  case "$1" in
+    opencode) printf 'fno:' ;;
+    *)        printf '' ;;
   esac
 }
 
 case "$payload_mode" in
   passthrough)
-    # A leading-`/` footnote command. claude/agy run it verbatim; codex swaps
-    # `/verb` -> `$fno:verb` (plugin skill); a prose-surface provider has no
-    # slash/skill surface, so refuse (a literal `/target` would run as a no-op).
+    # A leading-`/` footnote command. claude/agy run it verbatim; opencode
+    # namespaces it (`/verb` -> `/fno:verb`, plugin palette); codex swaps
+    # `/verb` -> `$fno:verb` (plugin skill); a refused (deprecated) provider has
+    # no dispatch lane, so refuse loudly naming its successor (agy).
     surface="$(resolve_command_surface "$provider")"
     case "$surface" in
-      slash)       message="$msg" ;;
+      slash)
+        # Prefix-swap, idempotent: a command already in the native namespaced
+        # form (`/fno:target`, e.g. copied from opencode's palette) must NOT be
+        # double-prefixed to `/fno:fno:target` (mirrors normalize_command).
+        _prefix="$(slash_prefix "$provider")"
+        if [[ -n "$_prefix" && "$msg" == "/$_prefix"* ]]; then
+          message="$msg"
+        else
+          message="/${_prefix}${msg#/}"
+        fi
+        ;;
       codex-skill) message="\$fno:${msg#/}" ;;
-      *)           emit_error "$provider has no slash/skill surface; '$msg' cannot be dispatched as a passthrough (use 'ask <prompt>' for a one-shot question, or a bare feature description for a build)" ;;
+      *)           emit_error "$provider is deprecated (successor: agy) and has no dispatch lane; '$msg' cannot be dispatched there (route to a claude/codex/opencode/agy harness)" ;;
     esac
     ;;
   ask)
@@ -740,47 +766,33 @@ If the work includes code changes, land them as a pull request for review; do no
     ;;
   build)
     # PROVIDER-AWARE via the normalizer surface. claude/agy invoke the native
-    # `/target` skill; codex invokes `$fno:target` (both run the REAL pipeline);
-    # a prose-surface provider (gemini/opencode) has no skill, so it gets a build
-    # BRIEF instead - never a literal `/target` it would run as a no-op.
+    # `/target` skill; opencode invokes `/fno:target` (plugin palette); codex
+    # invokes `$fno:target` - all run the REAL pipeline. A refused (deprecated)
+    # provider has no skill surface, so refuse loudly naming agy - no prose brief.
     surface="$(resolve_command_surface "$provider")"
     case "$surface" in
-      slash)       message="/target $msg" ;;
+      slash)       message="/$(slash_prefix "$provider")target $msg" ;;
       codex-skill) message="\$fno:target $msg" ;;
-      *)
-        # prose build BRIEF. The PR-review (no-merge) intent becomes an
-        # instruction; --allow-merge drops it. This is the analogue of claude's
-        # `/target ... no-merge` for a provider with no footnote skill surface.
-        if [[ "$ALLOW_MERGE" -eq 0 ]]; then
-          pr_clause="open a pull request for review; do not merge it"
-        else
-          pr_clause="open a pull request"
-        fi
-        if [[ -n "$NODE" ]]; then
-          message="Implement backlog node $NODE following the conventions in AGENTS.md (run \`fno backlog get $NODE\` for the spec). Commit your work and $pr_clause."
-        else
-          message="Implement the following, per the conventions in AGENTS.md, then commit and $pr_clause: $msg"
-        fi
-        ;;
+      *)           emit_error "$provider is deprecated (successor: agy) and has no build lane; route this build to a claude/codex/opencode/agy harness (no prose brief is generated)" ;;
     esac
     ;;
 esac
 
-# no-merge default for any claude `/target ...` message (build-wrapped OR an
+# no-merge default for any native `/target`-family message (build-wrapped OR an
 # explicit /target passthrough): a fire-and-forget worker should land a PR for
 # review, not auto-merge to main from a fat-fingered tap. --allow-merge or an
-# already-present no-merge opts out. codex/gemini briefs carry the equivalent
-# "do not merge" prose above instead, so this only ever touches the claude path.
+# already-present no-merge opts out. Covers claude `/target`, opencode
+# `/fno:target`, and codex `$fno:target`; a refused provider never reaches here.
 # ONLY build/passthrough get this: a verbatim ask/discuss prompt or a handoff
 # continuation seed that happens to contain `/target` is NOT a build command
 # (sigma-review finding 4), so it must never be no-merge'd.
 case "$payload_mode" in
   build|passthrough)
-    # A native /target-family invocation (claude/agy `/target`, codex
-    # `$fno:target`) is no-merge'd; a prose brief carries "do not merge" prose
-    # already. Single-quote the `$fno:` literal so it is not read as a variable.
+    # A native /target-family invocation (claude/agy `/target`, opencode
+    # `/fno:target`, codex `$fno:target`) is no-merge'd. Single-quote the `$fno:`
+    # literal so it is not read as a variable.
     case "$message" in
-      /target\ *|/target|'$fno:target '*|'$fno:target')
+      /target\ *|/target|/fno:target\ *|/fno:target|'$fno:target '*|'$fno:target')
         if [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" no-merge "* ]]; then
           message="$message no-merge"
         fi

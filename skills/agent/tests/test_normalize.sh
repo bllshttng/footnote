@@ -142,8 +142,11 @@ check_eq   'trailing merge binds' "$(field "$out" allow_merge)" '1'
 check_eq   'trailing merge node'  "$(field "$out" node)" 'ab-22222222'
 
 # --- provider bareword alone --------------------------------------------------
+# gemini is parsed as the provider, then its build lane is refused (deprecated,
+# x-de43): the refusal message naming gemini proves the bareword was detected.
 out="$(run 'add a login form gemini')"
-check_eq   'provider bareword gemini' "$(field "$out" provider)" 'gemini'
+check_eq       'provider bareword gemini refused' "$(field "$out" status)" 'error'
+check_contains 'gemini bareword names gemini'     "$(field "$out" error)"  'gemini'
 
 # --- interactive/drive bareword ----------------------------------------------
 out="$(run 'ab-33333333 codex drive')"
@@ -174,6 +177,46 @@ check_eq   'agy -> provider=agy'               "$(field "$out" provider)" 'agy'
 out="$(run 'ab-99999999 hermes')"
 check_eq   'hermes not a spawn provider'       "$(field "$out" provider)" 'claude'
 check_contains 'hermes stays in message'       "$(field "$out" message)" 'hermes'
+
+# --- x-de43: per-harness native invocation (opencode /fno:verb, gemini refused)
+# Force the STATIC fallback table (stub `fno` to exit 1) so the rendered surface
+# is asserted against the in-tree mirror, not the installed fno (which may lag
+# until redeployed). This is the mirror the parity python test also guards.
+_de43_stub="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
+run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
+
+# AC1-HP: opencode build renders the plugin-namespaced /fno:target (+ no-merge)
+out="$(run_nofno 'add a login form' --provider opencode)"
+check_eq           'opencode build status'       "$(field "$out" status)"  'ok'
+check_contains     'opencode build /fno:target'  "$(field "$out" message)" '/fno:target add a login form'
+check_contains     'opencode build no-merge'     "$(field "$out" message)" 'no-merge'
+check_not_contains 'opencode build no prose'     "$(field "$out" message)" 'Implement'
+
+# AC4-EDGE: passthrough renders ANY verb via the single prefix-swap (no allowlist)
+out="$(run_nofno '/blueprint quick doc.md' --provider opencode)"
+check_eq   'opencode passthrough status'  "$(field "$out" status)"  'ok'
+check_eq   'opencode passthrough /fno:'   "$(field "$out" message)" '/fno:blueprint quick doc.md'
+out="$(run_nofno '/zzz args' --provider opencode)"
+check_eq   'opencode arbitrary verb'      "$(field "$out" message)" '/fno:zzz args'
+# idempotent: an already-namespaced command (copied from the palette) is not double-prefixed
+out="$(run_nofno '/fno:blueprint quick doc.md' --provider opencode)"
+check_eq   'opencode passthrough idempotent' "$(field "$out" message)" '/fno:blueprint quick doc.md'
+
+# claude passthrough unchanged (empty prefix) - regression guard for parity
+out="$(run_nofno '/target ship it' --provider claude)"
+check_contains     'claude passthrough verbatim' "$(field "$out" message)" '/target ship it'
+check_not_contains 'claude no fno: prefix'       "$(field "$out" message)" '/fno:'
+
+# AC2-ERR: a deprecated gemini build AND passthrough refuse loudly, naming agy
+out="$(run_nofno 'add a login form' --provider gemini)"
+check_eq       'gemini build refused'         "$(field "$out" status)" 'error'
+check_contains 'gemini build names agy'       "$(field "$out" error)"  'agy'
+out="$(run_nofno '/target ship it' --provider gemini)"
+check_eq       'gemini passthrough refused'   "$(field "$out" status)" 'error'
+check_contains 'gemini passthrough names agy' "$(field "$out" error)"  'agy'
+
+rm -rf "$_de43_stub"
 
 # --- model <name> two-word posture -------------------------------------------
 out="$(run 'ab-99999999 model opus')"
