@@ -50,8 +50,9 @@ if [[ "${1:-}" == "claim" && "${2:-}" == "acquire" ]]; then
     if [[ -f "$f" ]]; then
         cur="$(cat "$f")"
         if [[ "$cur" != "$holder" ]]; then
+            # Mirror real fno: ClaimHeldByOther exits 1 (claims/cli.py).
             echo "claim '$key' held by $cur" >&2
-            exit 0
+            exit 1
         fi
     fi
     echo "$holder" > "$f"
@@ -164,12 +165,13 @@ pass "US3: a wedged stage is killed at the bound (elapsed ${elapsed}s)"
 grep -q '=== eval-sweep run ' "$LOG" || fail "run header missing from log"
 pass "US3: run appends a header to .fno/logs/eval-sweep.log"
 
-# Size guard: an oversized log is truncated on the next run.
+# Size guard: an oversized log is capped to the byte limit, keeping the recent
+# tail (not wiped) so the newest run stays diagnosable.
 EVAL_SWEEP_LOG_MAX_BYTES=100
 head -c 500 /dev/zero | tr '\0' 'x' > "$LOG"
 _eval_sweep_trim_log "$LOG"
 sz=$(wc -c < "$LOG" | tr -d ' ')
-(( sz == 0 )) || fail "size guard did not truncate oversized log (size=$sz)"
-pass "US3: size guard truncates a log past the byte cap"
+(( sz > 0 && sz <= EVAL_SWEEP_LOG_MAX_BYTES )) || fail "size guard: expected 0<size<=100, got $sz"
+pass "US3: size guard caps an oversized log to the byte limit, keeps the tail"
 
 log "all eval-sweep-ss tests passed"

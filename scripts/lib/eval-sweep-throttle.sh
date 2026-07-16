@@ -19,8 +19,10 @@
 # Autonomy is untouched: the proposer stays at its config default `report`
 # (dry-run) level. This helper only lights the ignition; it never flips level.
 
-# Reuse reconcile's helpers verbatim (_reconcile_mtime, _reconcile_resolve_abi)
-# by sourcing it - zero edits to reconcile's logic (Locked Decision 6).
+# Reuse reconcile's _reconcile_resolve_abi verbatim by sourcing it - zero edits
+# to reconcile's logic (Locked Decision 6). We do NOT reuse _reconcile_mtime: it
+# is BSD-first (stat -f %m) and returns non-numeric garbage under GNU coreutils,
+# so this file carries its own GNU-first _eval_sweep_mtime.
 _EVAL_SWEEP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/reconcile-throttle.sh
 source "$_EVAL_SWEEP_LIB_DIR/reconcile-throttle.sh" 2>/dev/null || return 0
@@ -33,6 +35,18 @@ EVAL_SWEEP_STAGE_TIMEOUT="${EVAL_SWEEP_STAGE_TIMEOUT:-300}"
 EVAL_SWEEP_CLAIM_TTL="${EVAL_SWEEP_CLAIM_TTL:-30m}"
 # Log truncated when it grows past this many bytes (keep the file small).
 EVAL_SWEEP_LOG_MAX_BYTES="${EVAL_SWEEP_LOG_MAX_BYTES:-1048576}"
+
+# _eval_sweep_mtime <path>
+# File mtime in epoch seconds. GNU (stat -c) FIRST so Linux never reaches BSD's
+# `stat -f %m`, which on GNU coreutils prints non-numeric output (not a clean
+# failure) and would crash the caller's arithmetic under `set -u`. Scrubbed to
+# digits so a non-numeric fallback can never break `$(( ))`.
+_eval_sweep_mtime() {
+    local m
+    m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0)
+    m=${m//[!0-9]/}
+    echo "${m:-0}"
+}
 
 # _eval_sweep_canonical_root <dir>
 # The canonical checkout root for <dir>, so all worktrees of one repo share a
@@ -57,21 +71,28 @@ _eval_sweep_bounded() {
     wait "$cmd_pid" 2>/dev/null; local rc=$?
     # Reap the watchdog's `sleep` child before its parent, then the subshell -
     # otherwise the sleep reparents to pid 1 and becomes the orphan we are here
-    # to prevent (Domain Pitfall).
+    # to prevent (Domain Pitfall). ponytail: pkill absent (minimal Alpine) leaves
+    # the sleep, but it self-exits at $secs - a bounded orphan, and this whole
+    # branch only runs when BOTH gtimeout and timeout are missing (rare).
     pkill -P "$wd_pid" 2>/dev/null
     kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
     return $rc
 }
 
 # _eval_sweep_trim_log <log>
-# Truncate the log if it has grown past the byte cap (keep it diagnosable, not
-# unbounded). Best-effort.
+# Cap the log at the byte limit, keeping the most RECENT half (the newest run is
+# the diagnosable one) rather than wiping it - a wipe at the threshold discards
+# exactly the history you would reach for. Best-effort.
 _eval_sweep_trim_log() {
     local log="$1" size
     [[ -f "$log" ]] || return 0
     size=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
     [[ -n "$size" ]] || return 0
-    (( size > EVAL_SWEEP_LOG_MAX_BYTES )) && : > "$log" 2>/dev/null
+    if (( size > EVAL_SWEEP_LOG_MAX_BYTES )); then
+        tail -c "$(( EVAL_SWEEP_LOG_MAX_BYTES / 2 ))" "$log" > "$log.tmp" 2>/dev/null \
+            && mv "$log.tmp" "$log" 2>/dev/null \
+            || rm -f "$log.tmp" 2>/dev/null
+    fi
     return 0
 }
 
@@ -110,19 +131,19 @@ _eval_sweep_paused() {
 }
 
 # _eval_sweep_try_claim <abi_cmd> <key> <holder>
-# Acquire the singleton claim. Prints one of: "acquired" (we hold it, launch),
-# "held" (a live sibling holds it, skip), "degraded" (claim layer down, launch
-# under stamp-only throttling - AC1-ERR). The holder is unique per fire so a
-# still-held claim from another run shows a foreign holder rather than an
-# idempotent re-acquire.
+# Acquire the singleton claim, classifying by `fno claim acquire`'s exit code
+# (claims/cli.py): 0 = acquired (we launch), 1 = ClaimHeldByOther (a live sibling
+# holds it, skip), any other = claim layer error (stale install / usage) so
+# degrade to stamp-only throttling and still fire (AC1-ERR). The holder is unique
+# per fire, so a still-held claim yields 1 rather than an idempotent re-acquire.
 _eval_sweep_try_claim() {
-    local abi_cmd="$1" key="$2" holder="$3" out rc
-    out="$("$abi_cmd" claim acquire "$key" --holder "$holder" --ttl "$EVAL_SWEEP_CLAIM_TTL" -J 2>/dev/null)"
+    local abi_cmd="$1" key="$2" holder="$3" rc
+    "$abi_cmd" claim acquire "$key" --holder "$holder" --ttl "$EVAL_SWEEP_CLAIM_TTL" >/dev/null 2>&1
     rc=$?
-    if (( rc != 0 )); then echo "degraded"; return; fi
-    case "$out" in
-        *"\"holder\": \"$holder\""*) echo "acquired" ;;
-        *) echo "held" ;;
+    case "$rc" in
+        0) echo "acquired" ;;
+        1) echo "held" ;;
+        *) echo "degraded" ;;
     esac
 }
 
@@ -144,7 +165,7 @@ eval_sweep_maybe_fire() {
     if [[ -f "$stamp" ]]; then
         local now age
         now=$(date +%s)
-        age=$(( now - $(_reconcile_mtime "$stamp") ))
+        age=$(( now - $(_eval_sweep_mtime "$stamp") ))
         if (( age < EVAL_SWEEP_THROTTLE_SECONDS )); then
             return 0
         fi
