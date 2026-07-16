@@ -83,7 +83,12 @@ fn blit(
                 "chrome_bridge: lossy grapheme mapping for {sym:?}"
             );
             let ch = sym.chars().next().unwrap_or(' ');
-            cells[fr * frame_cols + fc] = Cell { c: ch, fg, bg, flags };
+            cells[fr * frame_cols + fc] = Cell {
+                c: ch,
+                fg,
+                bg,
+                flags,
+            };
             // A wide (CJK/emoji) glyph owns two columns: the lead cell carries
             // the char, the next carries WIDE_SPACER so the compositor never
             // overdraws its right half. Drop the glyph if the spacer would fall
@@ -219,13 +224,20 @@ mod tests {
         for dims in [(0u16, 4u16), (3, 0)] {
             let mut cells = frame(fr, fc, '#');
             render_chrome(Paragraph::new("xx"), dims, (0, 0), &mut cells, fr, fc);
-            assert!(cells.iter().all(|c| c.c == '#'), "dims {dims:?} wrote cells");
+            assert!(
+                cells.iter().all(|c| c.c == '#'),
+                "dims {dims:?} wrote cells"
+            );
         }
         // A 1-col rect renders (one column) but never escapes it.
         let mut cells = frame(fr, fc, '#');
         render_chrome(Paragraph::new("xx"), (1, 1), (0, 0), &mut cells, fr, fc);
         assert_eq!(at(&cells, fc, 0, 0).c, 'x');
-        assert_eq!(at(&cells, fc, 0, 1).c, '#', "1-col rect stayed in its column");
+        assert_eq!(
+            at(&cells, fc, 0, 1).c,
+            '#',
+            "1-col rect stayed in its column"
+        );
     }
 
     // AC1-ERR: text longer than the rect truncates inside it (ratatui clips);
@@ -285,7 +297,11 @@ mod tests {
         let mut cells = frame(fr, fc, '#');
         render_chrome(Paragraph::new("a中"), (1, 2), (0, 0), &mut cells, fr, fc);
         assert_eq!(at(&cells, fc, 0, 0).c, 'a');
-        assert_eq!(at(&cells, fc, 0, 1).c, ' ', "wide glyph clipped by rect, blank");
+        assert_eq!(
+            at(&cells, fc, 0, 1).c,
+            ' ',
+            "wide glyph clipped by rect, blank"
+        );
         assert_eq!(
             at(&cells, fc, 0, 1).flags & cell_flags::WIDE_SPACER,
             0,
@@ -297,7 +313,11 @@ mod tests {
         let (fr, fc) = (1usize, 2usize);
         let mut cells = frame(fr, fc, '#');
         render_chrome(Paragraph::new("中"), (1, 2), (0, 1), &mut cells, fr, fc);
-        assert_eq!(at(&cells, fc, 0, 1).c, '中', "lead char kept on the last col");
+        assert_eq!(
+            at(&cells, fc, 0, 1).c,
+            '中',
+            "lead char kept on the last col"
+        );
         assert_eq!(cells.len(), fr * fc, "no out-of-bounds growth, no panic");
     }
 
@@ -309,8 +329,7 @@ mod tests {
         let mut cells = frame(fr, fc, ' ');
         let styled = Paragraph::new(Line::from(Span::styled(
             "reversed and bold",
-            Style::default()
-                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
         )));
         render_chrome(styled, (2, 20), (0, 0), &mut cells, fr, fc);
         assert!(

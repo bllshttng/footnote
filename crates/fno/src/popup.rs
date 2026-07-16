@@ -487,7 +487,9 @@ impl ratatui::widgets::Widget for RowWidget<'_> {
             PopupRow::Grid(gcells) => {
                 let n = gcells.len().max(1) as u16;
                 let each = (self.width as u16 / n).max(1);
-                let cons: Vec<Constraint> = (0..gcells.len()).map(|_| Constraint::Length(each)).collect();
+                let cons: Vec<Constraint> = (0..gcells.len())
+                    .map(|_| Constraint::Length(each))
+                    .collect();
                 let parts = Layout::horizontal(cons).split(area);
                 for (ci, gc) in gcells.iter().enumerate() {
                     if is_sel(ci) {
@@ -524,7 +526,14 @@ pub fn draw_via_bridge(cells: &mut [Cell], rows: usize, cols: usize, p: &Popup, 
             sel,
             width,
         };
-        crate::chrome_bridge::render_chrome(w, (1, width as u16), (sr, origin.1), cells, rows, cols);
+        crate::chrome_bridge::render_chrome(
+            w,
+            (1, width as u16),
+            (sr, origin.1),
+            cells,
+            rows,
+            cols,
+        );
     }
 }
 
@@ -772,7 +781,11 @@ mod tests {
     #[test]
     fn bridge_matches_legacy_across_selection() {
         let mut p = Popup::new(
-            vec![entry("a", "one", "x"), entry("b", "two", "yy"), entry("c", "three", "")],
+            vec![
+                entry("a", "one", "x"),
+                entry("b", "two", "yy"),
+                entry("c", "three", ""),
+            ],
             Anchor::Center,
         );
         let term = (24u16, 80u16);
