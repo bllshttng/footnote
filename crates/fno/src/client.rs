@@ -1582,16 +1582,20 @@ impl View {
     /// `None` = not a chrome cell (the caller falls through to [`hit_test`]), so
     /// clicking anywhere off the panel still reaches the pane underneath.
     fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
-        // Tab bar (top row): walk the same spans the renderer paints. Widths are
-        // usize to match the renderer (`draw_tab_bar` accumulates in usize).
-        if row < TAB_BAR_ROWS {
+        let panel_w = self.panel_w();
+        // Tab strip (row 0, scoped to the content columns since x-cd67 US1): it
+        // begins at `panel_w`, walking the same spans the renderer paints (with
+        // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
+        // belongs to the sideline's reclaimed row 0 and falls through below.
+        // `panel_w == 0` (no sideline) -> strip from col 0, unchanged.
+        if row < TAB_BAR_ROWS && col >= panel_w {
             let col = col as usize;
             if let Some((start, text)) = self.notice_overlay(self.term.1 as usize) {
                 if col >= start && col < start + text.chars().count() {
                     return None;
                 }
             }
-            let mut c = 0usize;
+            let mut c = panel_w as usize;
             for span in self.tab_bar_spans() {
                 let w = span.text.chars().count();
                 if col >= c && col < c + w {
@@ -1605,7 +1609,6 @@ impl View {
             return None;
         }
         // Sideline: the panel column minus its divider. Off/narrow => no panel.
-        let panel_w = self.panel_w();
         if panel_w == 0 || col >= panel_w - 1 {
             return None;
         }
@@ -1615,10 +1618,10 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        // Display row i is painted at TAB_BAR_ROWS + (i - sideline_offset)
-        // (draw_sideline), so invert with the offset - else a click on a scrolled
-        // row activates the wrong unscrolled row (codex P2). Mirrors sideline_row_at.
-        let i = (row - TAB_BAR_ROWS) as usize + self.sideline_offset;
+        // Display row i is painted at `i - sideline_offset` (draw_sideline, since
+        // the sideline owns row 0), so invert with the offset - else a click on a
+        // scrolled row activates the wrong row. Mirrors sideline_row_at.
+        let i = row as usize + self.sideline_offset;
         // x-8ccf US4: a click on the footer's `☰ menu` region opens the sideline
         // MENU popup; the rest of the footer row keeps its `+ new` create action.
         if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
@@ -1889,13 +1892,17 @@ impl View {
     /// (x-a496).
     fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
         let panel_w = self.panel_w();
-        if panel_w == 0 || col >= panel_w - 1 || row < TAB_BAR_ROWS {
+        // (x-cd67 US1) The sideline now owns row 0 (the strip moved right of the
+        // divider), so the `row < TAB_BAR_ROWS` exclusion is gone and display
+        // row `i` maps directly from `row` (no TAB_BAR_ROWS offset). A cell on
+        // the divider or in the strip's content columns still returns None.
+        if panel_w == 0 || col >= panel_w - 1 {
             return None;
         }
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        let i = (row - TAB_BAR_ROWS) as usize + self.sideline_offset;
+        let i = row as usize + self.sideline_offset;
         (i < self.display_rows().len()).then_some(i)
     }
 
@@ -2129,15 +2136,14 @@ impl View {
         anchored
     }
 
-    /// Sideline rows the cursor can occupy: below the tab bar and above the
-    /// bottom chrome row. `draw_bottom_row` repaints the last row over the
-    /// sideline when it is chrome, and [`sideline_row_at`] excludes it from
-    /// hit-testing, so it must not count as a scroll slot - else follow-cursor
-    /// scroll would park the last row under the status bar (invisible, unclickable).
+    /// Sideline rows the cursor can occupy: the full terminal height (the
+    /// sideline owns row 0 since x-cd67 US1) minus the bottom chrome row.
+    /// `draw_bottom_row` repaints the last row over the sideline when it is
+    /// chrome, and [`sideline_row_at`] excludes it from hit-testing, so it must
+    /// not count as a scroll slot - else follow-cursor scroll would park the
+    /// last row under the status bar (invisible, unclickable).
     fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize)
-            .saturating_sub(TAB_BAR_ROWS as usize)
-            .saturating_sub(self.bottom_row_is_chrome() as usize)
+        (self.term.0 as usize).saturating_sub(self.bottom_row_is_chrome() as usize)
     }
 
     /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
@@ -2725,7 +2731,12 @@ impl View {
     }
 
     fn draw_tab_bar(&self, cells: &mut [Cell], cols: usize) {
-        let mut c = 0usize;
+        // (x-cd67 US1) The strip is scoped to the content area: it begins at
+        // the content-column origin (`panel_w`) so the sideline column owns row
+        // 0 too and tabs read as owned by the active workspace rather than the
+        // reverse. `panel_w == 0` (no sideline) -> origin 0, byte-identical to
+        // the pre-scoping full-width strip.
+        let mut c = self.panel_w() as usize;
         'spans: for span in self.tab_bar_spans() {
             for ch in span.text.chars() {
                 if c >= cols {
@@ -2835,7 +2846,10 @@ impl View {
         // `i` stays the TRUE display index (so the selector/hover highlight and
         // hit-test still match); the painted row subtracts the scroll offset.
         for (i, drow) in self.display_rows().into_iter().enumerate().skip(off) {
-            let r = TAB_BAR_ROWS as usize + (i - off);
+            // (x-cd67 US1) The sideline owns the full column height including
+            // row 0; the tab strip moved right of the divider. Display row `i`
+            // paints at outer row `i - off` (was `TAB_BAR_ROWS + (i - off)`).
+            let r = i - off;
             if r >= rows {
                 break;
             }
@@ -3022,8 +3036,9 @@ impl View {
                 }
             }
         }
-        // The divider column, full height below the tab bar.
-        for r in TAB_BAR_ROWS as usize..rows {
+        // The divider column, now full terminal height (the sideline owns row
+        // 0 too; the strip sits right of the divider) - x-cd67 US1.
+        for r in 0..rows {
             cells[r * cols + (panel_w - 1)] = Cell {
                 c: '│',
                 fg: Color::Default,
@@ -6951,6 +6966,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
@@ -7118,14 +7134,16 @@ mod tests {
         assert!(frame.geometry_ok());
         let text = frame_text(&frame);
         let lines: Vec<&str> = text.lines().collect();
-        // Tab bar: active squad name + tabs with the active one bracketed.
-        assert!(lines[0].contains("footnote"), "{:?}", lines[0]);
+        // Tab strip (x-cd67 US1): scoped to the content columns on row 0, so
+        // line 0 carries both the sideline's squad-1 row (cols 0..27) and the
+        // strip (cols 28+) - the active squad name + bracketed active tab.
         assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
         // Sideline (x-0090 agents-first): tab rows left the sideline, so an
         // expanded squad with no agents shows only its name row; the next squad
-        // follows directly. Active squad carries the `*` glyph (x-2f99).
-        assert!(lines[1].contains("▾*footnote"), "{:?}", lines[1]);
-        assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
+        // follows directly. Active squad carries the `*` glyph (x-2f99). The
+        // sideline now owns row 0, so squad 1 leads line 0 and squad 2 line 1.
+        assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
+        assert!(lines[1].contains("▸ notes"), "{:?}", lines[1]);
         // Content row: pane a, the 1-cell divider, pane b - at the offsets
         // implied by (tab bar 1 row, panel 28 cols).
         let row1: Vec<char> = lines[1].chars().collect();
@@ -7285,8 +7303,9 @@ mod tests {
         view.on_hover(5, 30, t0);
         assert_eq!(view.hover_pending, None, "no settle target while disabled");
         assert_eq!(view.take_settled_hover(), None);
-        // Highlight still tracks the sideline.
-        view.on_hover(2, 5, t0);
+        // Highlight still tracks the sideline. (x-cd67 US1) squad 2 "notes"
+        // (display index 1) now sits at terminal row 1 (the sideline owns row 0).
+        view.on_hover(1, 5, t0);
         assert_eq!(view.hover_row, Some(1));
     }
 
@@ -7306,7 +7325,7 @@ mod tests {
         // the active squad/tab never change; moving off the panel clears it.
         let mut view = two_pane_view(); // rows: 0 footnote (active), 1 notes
         let before = view.layout.active_squad;
-        view.on_hover(2, 5, Instant::now()); // outer row 2 = notes row (index 1)
+        view.on_hover(1, 5, Instant::now()); // outer row 1 = notes row (index 1) - x-cd67 US1
         assert_eq!(view.hover_row, Some(1));
         assert_eq!(
             view.layout.active_squad, before,
@@ -7400,8 +7419,9 @@ mod tests {
             }],
         });
         // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
-        // Header, Card] -> the card is index 3, at outer row TAB_BAR_ROWS + 3 = 4.
-        match view.chrome_hit(4, 5) {
+        // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
+        // sideline owns row 0, so outer row == display index).
+        match view.chrome_hit(3, 5) {
             Some(ChromeHit::Confirm(a)) => {
                 assert!(
                     matches!(&a.action, ConfirmKind::Dispatch { node } if node == "x-a496"),
@@ -7450,13 +7470,13 @@ mod tests {
             ],
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-        // blocked, in-flight] -> the cards paint at outer rows 4, 5.
+        // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
         assert!(
-            matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
+            matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
             "blocked card -> notice, not confirm"
         );
         assert!(
-            matches!(view.chrome_hit(5, 5), Some(ChromeHit::Notice(_))),
+            matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
             "in-flight card -> notice, not confirm"
         );
     }
@@ -7505,17 +7525,17 @@ mod tests {
             ],
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-        // 4 cards] -> rows 4-7.
-        assert_eq!(cmds(view.chrome_hit(4, 5)), vec![Command::FocusPane(11)]);
+        // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
+        assert_eq!(cmds(view.chrome_hit(3, 5)), vec![Command::FocusPane(11)]);
         assert_eq!(
-            cmds(view.chrome_hit(5, 5)),
+            cmds(view.chrome_hit(4, 5)),
             vec![Command::attach_agent("deadbee2")]
         );
-        match view.chrome_hit(6, 5) {
+        match view.chrome_hit(5, 5) {
             Some(ChromeHit::Notice(msg)) => assert_eq!(msg, "in flight - worked by t:abc"),
             other => panic!("expected hint notice, got {}", chrome_hit_label(&other)),
         }
-        match view.chrome_hit(7, 5) {
+        match view.chrome_hit(6, 5) {
             Some(ChromeHit::Notice(msg)) => {
                 assert_eq!(msg, "card in flight - no session visible here")
             }
@@ -7547,12 +7567,42 @@ mod tests {
     #[test]
     fn chrome_hit_tab_bar_routes_tabs_and_new_tab() {
         let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
-                                    // " footnote "=0..9, " 1 "=10..12, "[2]"=13..15, " + "=16..18.
-        assert_eq!(cmds(view.chrome_hit(0, 11)), vec![Command::SelectTab(0)]);
-        assert_eq!(cmds(view.chrome_hit(0, 14)), vec![Command::SelectTab(1)]);
-        assert_eq!(cmds(view.chrome_hit(0, 17)), vec![Command::NewTab]);
+                                    // (x-cd67 US1) The strip is scoped to the content area (origin
+                                    // panel_w=28): " footnote "=28..37, " 1 "=38..40, "[2]"=41..43,
+                                    // " + "=44..46.
+        assert_eq!(cmds(view.chrome_hit(0, 39)), vec![Command::SelectTab(0)]);
+        assert_eq!(cmds(view.chrome_hit(0, 42)), vec![Command::SelectTab(1)]);
+        assert_eq!(cmds(view.chrome_hit(0, 45)), vec![Command::NewTab]);
         // The squad-name label is inert.
-        assert!(view.chrome_hit(0, 5).is_none());
+        assert!(view.chrome_hit(0, 33).is_none());
+    }
+
+    // (x-cd67 US1, AC1-HP) The tab strip is scoped to the content columns: its
+    // first painted cell is at column panel_w, and terminal row 0 in the sideline
+    // columns belongs to the sideline (squad 1), not the strip.
+    #[test]
+    fn tab_strip_scoped_to_content_area_row0_is_sideline() {
+        let view = two_pane_view();
+        let panel_w = view.panel_w() as usize;
+        assert_eq!(panel_w, 28);
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        // Left of the divider on row 0 is the sideline's squad-1 caret, not chrome.
+        assert_eq!(frame.cells[0].c, '▾', "row 0 col 0 is the squad-1 caret");
+        // The divider column runs full height, including row 0.
+        assert_eq!(frame.cells[panel_w - 1].c, '│', "divider at row 0");
+        // The strip's first span (the active squad name) begins at panel_w.
+        let strip: String = (panel_w..cols).map(|c| frame.cells[c].c).collect();
+        assert!(
+            strip.trim_start().starts_with("footnote"),
+            "strip begins at panel_w: {strip:?}"
+        );
+        // A row-0 click left of the divider toggles squad 1 (the active squad row),
+        // never a tab.
+        assert!(matches!(
+            view.chrome_hit(0, 2),
+            Some(ChromeHit::ToggleExpand(1))
+        ));
     }
 
     // A left click on an inactive sideline squad row switches to it; the
@@ -7561,13 +7611,14 @@ mod tests {
     #[test]
     fn chrome_hit_sideline_squad_rows() {
         // No agents/cards (x-0090, no tab rows): rows are [squad 1 (active,
-        // expanded), squad 2, footer].
+        // expanded), squad 2, footer]. (x-cd67 US1) The sideline owns row 0, so
+        // squad 1 sits at terminal row 0 and squad 2 at row 1 (was 1 and 2).
         let view = two_pane_view();
         assert!(matches!(
-            view.chrome_hit(1, 4),
+            view.chrome_hit(0, 4),
             Some(ChromeHit::ToggleExpand(1))
         ));
-        assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
+        assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::SelectSquad(2)]);
         // The divider column and the pane content beyond it are not chrome hits.
         assert!(view.chrome_hit(1, 27).is_none());
         assert!(view.chrome_hit(1, 40).is_none());
@@ -7579,14 +7630,15 @@ mod tests {
         // offset, so a click on a scrolled row activates the row painted there,
         // not the unscrolled row at the same terminal cell.
         // Rows (x-0090, no tab rows): [0 squad1(active), 1 squad2, 2 footer].
+        // (x-cd67 US1) The sideline owns row 0, so display index == terminal row.
         let mut v = two_pane_view();
-        // Unscrolled: terminal row 2 -> display index 1 -> squad2.
-        assert_eq!(cmds(v.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
-        // Scrolled by 1: terminal row 1 -> display index 1 -> squad2 (without the
+        // Unscrolled: terminal row 1 -> display index 1 -> squad2.
+        assert_eq!(cmds(v.chrome_hit(1, 4)), vec![Command::SelectSquad(2)]);
+        // Scrolled by 1: terminal row 0 -> display index 1 -> squad2 (without the
         // offset it would resolve to index 0, squad1's own name row).
         v.sideline_offset = 1;
         assert_eq!(
-            cmds(v.chrome_hit(1, 4)),
+            cmds(v.chrome_hit(0, 4)),
             vec![Command::SelectSquad(2)],
             "click resolves through the scroll offset"
         );
@@ -7715,8 +7767,9 @@ mod tests {
         );
         let text = frame_text(&view.compose());
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[1].contains("▾*empty"), "{:?}", lines[1]);
-        assert!(lines[2].contains("▸ notes"), "no tab rows in between");
+        // (x-cd67 US1) The sideline owns row 0: squad 1 leads line 0, squad 2 line 1.
+        assert!(lines[0].contains("▾*empty"), "{:?}", lines[0]);
+        assert!(lines[1].contains("▸ notes"), "no tab rows in between");
     }
 
     // AC2-UI: the status row names the active squad iff more than one squad
@@ -7757,6 +7810,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         // A watch-only bg row with a claude jobId: a click attaches it.
@@ -7773,6 +7827,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         // A watch-only row with no attach target: a click can only hint.
@@ -7789,24 +7844,25 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // Agents-first display order (x-0090; no tab rows). Display indices:
         // squad 1 (0), agent "worker" (1, expanded), squad 2 (2, collapsed),
         // "+ new workspace" footer (3), "~ elsewhere" header (4), orphan
-        // "bg-claude" (5), orphan "bg-other" (6). chrome_hit takes the TERMINAL
-        // row = display index + 1 (the tab bar).
-        assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::FocusPane(10)]);
+        // "bg-claude" (5), orphan "bg-other" (6). (x-cd67 US1) The sideline owns
+        // row 0, so the TERMINAL row == the display index.
+        assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::FocusPane(10)]);
         assert_eq!(
-            cmds(view.chrome_hit(6, 4)),
+            cmds(view.chrome_hit(5, 4)),
             vec![Command::attach_agent("c19cd2c3")]
         );
-        assert!(matches!(view.chrome_hit(7, 4), Some(ChromeHit::Notice(_))));
+        assert!(matches!(view.chrome_hit(6, 4), Some(ChromeHit::Notice(_))));
         // The "~ elsewhere" header row is inert.
-        assert!(view.chrome_hit(5, 4).is_none());
+        assert!(view.chrome_hit(4, 4).is_none());
         // The "+ new workspace" footer opens the create overlay.
-        assert!(matches!(view.chrome_hit(4, 4), Some(ChromeHit::OpenCreate)));
+        assert!(matches!(view.chrome_hit(3, 4), Some(ChromeHit::OpenCreate)));
     }
 
     // A click on the bottom row belongs to the status/which-key/search chrome
@@ -7828,6 +7884,7 @@ mod tests {
                 seen: false,
                 cwd_base: None,
                 tombstone: false,
+                subline: None,
                 tab: None,
             })
             .collect();
@@ -8102,6 +8159,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
@@ -8270,6 +8328,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
@@ -8314,7 +8373,8 @@ mod tests {
         let range = v
             .footer_menu_range(panel_w)
             .expect("a wide panel shows the menu button");
-        let trow = (TAB_BAR_ROWS as usize + footer - v.sideline_offset) as u16;
+        // (x-cd67 US1) The sideline owns row 0, so outer row == display index - offset.
+        let trow = (footer - v.sideline_offset) as u16;
         assert!(matches!(
             v.chrome_hit(trow, range.start as u16),
             Some(ChromeHit::OpenSidelineMenu { .. })
@@ -8527,6 +8587,7 @@ mod tests {
                     seen: false,
                     cwd_base: None,
                     tombstone: false,
+                    subline: None,
                     tab: None,
                 },
                 AgentRow {
@@ -8542,6 +8603,7 @@ mod tests {
                     seen: false,
                     cwd_base: None,
                     tombstone: false,
+                    subline: None,
                     tab: None,
                 },
                 AgentRow {
@@ -8557,6 +8619,7 @@ mod tests {
                     seen: false,
                     cwd_base: None,
                     tombstone: false,
+                    subline: None,
                     tab: None,
                 },
             ],
@@ -8568,29 +8631,30 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         // Agents-first row order (x-0090; no tab rows): footnote (auto-expanded,
         // x-2f99), its two agent rows, notes squad, the "+ new workspace"
-        // footer, the "~ elsewhere" header, the orphan row.
-        assert!(lines[1].contains("\u{25be}*footnote"), "{:?}", lines[1]);
+        // footer, the "~ elsewhere" header, the orphan row. (x-cd67 US1) The
+        // sideline owns row 0, so display index == frame line.
+        assert!(lines[0].contains("\u{25be}*footnote"), "{:?}", lines[0]);
         assert!(
-            lines[2].contains("\u{25b2} peer: perm prompt"),
+            lines[1].contains("\u{25b2} peer: perm prompt"),
             "{:?}",
-            lines[2]
+            lines[1]
         );
-        assert!(lines[3].contains("\u{2717} dead"), "{:?}", lines[3]);
-        assert!(lines[4].contains("\u{25b8} notes"), "{:?}", lines[4]);
-        assert!(lines[5].contains("+ new workspace"), "{:?}", lines[5]);
-        assert!(lines[6].contains("~ elsewhere"), "{:?}", lines[6]);
-        assert!(lines[7].contains("\u{25cf} bg-watch"), "{:?}", lines[7]);
+        assert!(lines[2].contains("\u{2717} dead"), "{:?}", lines[2]);
+        assert!(lines[3].contains("\u{25b8} notes"), "{:?}", lines[3]);
+        assert!(lines[4].contains("+ new workspace"), "{:?}", lines[4]);
+        assert!(lines[5].contains("~ elsewhere"), "{:?}", lines[5]);
+        assert!(lines[6].contains("\u{25cf} bg-watch"), "{:?}", lines[6]);
         // The exited row is DIM (fact beats badge, visually too). "dead" is
-        // display index 2 -> frame row 3 (tab bar + index).
+        // display index 2 -> frame row 2 (sideline owns row 0).
         let cols = frame.cols as usize;
-        let dead_cell = frame.cells[3 * cols + 2];
+        let dead_cell = frame.cells[2 * cols + 2];
         assert_eq!(dead_cell.flags & cell_flags::DIM, cell_flags::DIM);
         // The selector indexes display rows directly (x-260a): index 3 = the
         // notes squad row, after footnote and its two agent rows.
         let mut sel_view = view;
         sel_view.selector = Some(3);
         let sel_frame = sel_view.compose();
-        let notes_row = 4usize;
+        let notes_row = 3usize;
         let sel_cell = sel_frame.cells[notes_row * cols + 2];
         assert_eq!(
             sel_cell.flags & cell_flags::INVERSE,
@@ -8620,6 +8684,7 @@ mod tests {
                 seen: false,
                 cwd_base: None,
                 tombstone: false,
+                subline: None,
                 tab: None,
             }
         }
@@ -8729,6 +8794,7 @@ mod tests {
                     seen: false,
                     cwd_base: None,
                     tombstone: false,
+                    subline: None,
                     tab: None,
                 },
                 AgentRow {
@@ -8744,6 +8810,7 @@ mod tests {
                     seen: false,
                     cwd_base: None,
                     tombstone: false,
+                    subline: None,
                     tab: None,
                 },
                 AgentRow {
@@ -8759,6 +8826,7 @@ mod tests {
                     seen: false,
                     cwd_base: None,
                     tombstone: false,
+                    subline: None,
                     tab: None,
                 },
             ],
@@ -8832,21 +8900,22 @@ mod tests {
         let frame = view.compose();
         let text = frame_text(&frame);
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[1].contains("▾*footnote"), "{:?}", lines[1]);
+        // (x-cd67 US1) The sideline owns row 0, so display index == frame line.
+        assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
         assert!(
-            lines[2].contains("▸ notes"),
+            lines[1].contains("▸ notes"),
             "next squad follows directly, no tab rows: {:?}",
-            lines[2]
+            lines[1]
         );
         assert!(
             !lines.iter().any(|l| l.contains("*2")),
             "no active-tab row renders in the sideline"
         );
-        // The selector row (squad 2, display index 1 -> frame row 2) carries
+        // The selector row (squad 2, display index 1 -> frame row 1) carries
         // INVERSE.
         let cols = frame.cols as usize;
         assert!(
-            frame.cells[2 * cols].flags & cell_flags::INVERSE != 0,
+            frame.cells[cols].flags & cell_flags::INVERSE != 0,
             "selector cursor row must be highlighted"
         );
         // While the selector is open the terminal cursor hides.
@@ -9013,6 +9082,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         let card = |id: &str, state| BacklogCard {
@@ -9216,6 +9286,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         let loading = PeekView {
@@ -9441,6 +9512,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: true,
+            subline: None,
             tab: None,
         };
         let mut v = view_with_agents(vec![tomb]);
@@ -9477,6 +9549,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         }
     }
@@ -10050,6 +10123,7 @@ mod tests {
                 seen: false,
                 cwd_base: None,
                 tombstone: false,
+                subline: None,
                 tab: Some(1),
             },
             AgentRow {
@@ -10065,6 +10139,7 @@ mod tests {
                 seen: false,
                 cwd_base: None,
                 tombstone: false,
+                subline: None,
                 tab: None,
             },
         ];
@@ -10097,6 +10172,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         };
         let bare = row("zsh", 10, None);
@@ -10152,6 +10228,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         }];
         let composed = NavView {
@@ -10196,6 +10273,7 @@ mod tests {
                 seen: true,
                 cwd_base: None,
                 tombstone: false,
+                subline: None,
                 tab: None,
             },
             AgentRow {
@@ -10211,6 +10289,7 @@ mod tests {
                 seen: false,
                 cwd_base: None,
                 tombstone: false,
+                subline: None,
                 tab: None,
             },
         ];
@@ -10290,6 +10369,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         }];
         let idx = v
@@ -10486,7 +10566,9 @@ mod tests {
         let mut v = two_pane_view();
         let total = v.display_rows().len();
         assert!(total >= 2, "fixture needs >=2 sideline rows");
-        v.term = (total as u16, 100); // visible = total - 1: one row below the fold
+        // (x-cd67 US1) The sideline owns row 0, so a `total`-tall terminal now
+        // FITS the whole catalog; shrink by one to keep one row below the fold.
+        v.term = ((total - 1) as u16, 100); // visible = total - 1
         let visible = v.sideline_visible_rows();
         v.selector = Some(total - 1);
         v.clamp_sideline_offset();
@@ -10501,9 +10583,9 @@ mod tests {
         );
         assert!(v.panel_w() > 1, "fixture panel is visible");
         assert_eq!(
-            v.sideline_row_at(TAB_BAR_ROWS, 0),
+            v.sideline_row_at(0, 0),
             Some(v.sideline_offset),
-            "the top drawn row hit-tests to the scrolled index"
+            "the top drawn row (row 0) hit-tests to the scrolled index"
         );
     }
 
@@ -10561,9 +10643,11 @@ mod tests {
             v.bottom_row_is_chrome(),
             "status bar occupies the bottom row"
         );
+        // (x-cd67 US1) The sideline owns row 0, so the usable height no longer
+        // subtracts the tab-bar row - only the chrome bottom row.
         assert_eq!(
             v.sideline_visible_rows(),
-            v.term.0 as usize - TAB_BAR_ROWS as usize - 1,
+            v.term.0 as usize - 1,
             "chrome bottom row is not a scroll slot"
         );
         v.status_on = false;
@@ -10573,8 +10657,8 @@ mod tests {
         );
         assert_eq!(
             v.sideline_visible_rows(),
-            v.term.0 as usize - TAB_BAR_ROWS as usize,
-            "with no chrome the full height below the tab bar is usable"
+            v.term.0 as usize,
+            "with no chrome the full terminal height is usable"
         );
     }
 
@@ -10646,6 +10730,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -10799,6 +10884,7 @@ mod tests {
             seen: false,
             cwd_base: None,
             tombstone: false,
+            subline: None,
             tab: None,
         }
     }
