@@ -1153,10 +1153,11 @@ def cmd_decompose(
         # condition that cannot cause early graduation - target can't stamp it
         # either). Proceed silently; the graph mutation already succeeded.
 
-    # Repaint the epic and every child/orphan the decompose touched so a
-    # decomposed epic's children carry correct blocked_by/parent mirrors from
-    # birth (AC-HP #5). Best-effort per node.
-    _project_plans_from_graph([epic_resolved_id, *spec_ids, *orphan_ids])
+    # Repaint the epic and every child this decompose CREATED so a decomposed
+    # epic's children carry correct blocked_by/parent mirrors from birth (US5).
+    # Scoped to created children (not already-linked ones): an existing child's
+    # hand-filled plan is left untouched here and its drift rides the sweep.
+    _project_plans_from_graph([epic_resolved_id, *created_ids])
 
 
 # -- intake --
