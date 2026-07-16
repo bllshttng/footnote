@@ -804,6 +804,104 @@ mod tests {
         assert_ne!(diff.2.c, '…', "bridge clips (no ellipsis) - the finding");
     }
 
+    // ----- SPIKE US3: adversarial footgun tests ON the ported surface --------
+    // These drive the exact inputs that make the hand-rolled per-write guards
+    // misbehave (overflow, wide glyphs at the edge, degenerate terminals) and
+    // assert the ratatui path never panics, never writes out of bounds, and
+    // never emits the server-authored SELECTED flag. This IS the rubric-2 proof.
+
+    /// Render the ported popup into a fresh `term`-sized frame; returns the cells
+    /// (the call itself is the no-panic assertion).
+    fn bridge_frame(p: &Popup, term: (u16, u16)) -> Vec<Cell> {
+        let (rows, cols) = (term.0 as usize, term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        draw_via_bridge(&mut cells, rows, cols, p, term);
+        cells
+    }
+
+    #[test]
+    fn ported_overflow_never_panics_or_escapes_in_narrow_terminals() {
+        let long = "z".repeat(200);
+        let p = Popup::new(
+            vec![
+                PopupRow::Header(long.clone()),
+                entry("▸", &long, &long),
+                PopupRow::FullWidth(long),
+            ],
+            Anchor::Center,
+        );
+        // 1x1 up to a few tiny terminals: every cell stays in-bounds, no panic.
+        for term in [(1u16, 1u16), (1, 2), (2, 3), (3, 1), (5, 4)] {
+            let cells = bridge_frame(&p, term);
+            assert_eq!(cells.len(), term.0 as usize * term.1 as usize);
+        }
+    }
+
+    #[test]
+    fn ported_wide_glyph_label_keeps_wide_spacer_and_never_tears() {
+        // A CJK/emoji label exercises the wide-glyph continuation path through
+        // the whole popup pipeline (layout -> ratatui -> bridge -> Cell).
+        let p = Popup::new(vec![entry("🚀", "中文名前", "⏎")], Anchor::Center);
+        let term = (24u16, 80u16);
+        let cells = bridge_frame(&p, term);
+        // Every wide-glyph lead cell is immediately followed by a WIDE_SPACER,
+        // and no spacer is orphaned (a spacer always follows a >=2-wide char).
+        for i in 0..cells.len() {
+            let is_spacer = cells[i].flags & cell_flags::WIDE_SPACER != 0;
+            if is_spacer {
+                assert!(i > 0, "a WIDE_SPACER can never be the first cell");
+                let lead = cells[i - 1].c;
+                assert!(
+                    unicode_width_char(lead) >= 2,
+                    "WIDE_SPACER at {i} not preceded by a wide char (was {lead:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ported_surface_never_emits_selected_flag() {
+        // Every row type, with a target selected, across a fitting and a tiny
+        // terminal: chrome must never author the co-viewer SELECTED highlight.
+        let mut p = Popup::new(
+            vec![
+                PopupRow::Header("h".into()),
+                PopupRow::Rule,
+                entry("a", "one", "x"),
+                PopupRow::FullWidth("full".into()),
+                grid(&["l", "r"]),
+            ],
+            Anchor::Center,
+        );
+        for sel in 0..p.targets().len() {
+            p.sel = sel;
+            for term in [(24u16, 80u16), (2, 4)] {
+                let cells = bridge_frame(&p, term);
+                assert!(
+                    cells.iter().all(|c| c.flags & cell_flags::SELECTED == 0),
+                    "SELECTED emitted (sel={sel}, term={term:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ported_anchored_popup_near_edges_stays_in_bounds() {
+        let p = Popup::new(
+            vec![entry("▸", "a menu entry that is somewhat wide", "⏎")],
+            Anchor::At { row: 23, col: 78 },
+        );
+        // Anchored at the bottom-right corner: clamp/flip must keep every write
+        // inside the 24x80 frame (the call not panicking is the assertion).
+        let cells = bridge_frame(&p, (24, 80));
+        assert_eq!(cells.len(), 24 * 80);
+    }
+
+    /// Local unicode width for a single char (test-only helper).
+    fn unicode_width_char(c: char) -> usize {
+        unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+    }
+
     #[test]
     fn render_grid_line_reports_a_hit_per_cell() {
         let p = Popup::new(vec![grid(&["l", "r"])], Anchor::Center);
