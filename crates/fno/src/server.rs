@@ -503,6 +503,11 @@ struct PaneEntry {
     /// Basename of the spawned command ("claude", "htop"), parsed from the
     /// pane-run argv like [`node_from_argv`]. `None` for a shell pane.
     cmd: Option<String>,
+    /// (x-c914) The pane's birth claude account (`FNO_ACCOUNT`), parsed once at
+    /// spawn. `None` = the default account. Drives the sideline account glyph
+    /// for a mux-spawned pane; a durable pane fact (survives reattach), never
+    /// the registry schema (Locked Decision 5).
+    account: Option<String>,
 }
 
 /// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
@@ -515,13 +520,30 @@ struct PaneEntry {
 /// the actual command. So a real command that merely mentions `FNO_NODE=` in
 /// its own args (e.g. `grep FNO_NODE=x file`) is never mistaken for provenance.
 fn node_from_argv(argv: &[String]) -> Option<String> {
+    env_token_from_argv(argv, "FNO_NODE=")
+}
+
+/// (x-c914) The pane's `FNO_ACCOUNT` birth account, parsed from the same
+/// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
+/// spawn was routed with `--account`). `None` for a default-account or ad-hoc
+/// pane. This is the mux-spawned-pane source for the sideline account glyph
+/// (managed accounts share `~/.claude`, so the roster can't distinguish them -
+/// the pane's own birth env can).
+fn account_from_argv(argv: &[String]) -> Option<String> {
+    env_token_from_argv(argv, "FNO_ACCOUNT=")
+}
+
+/// Shared scan for a `NAME=` token in the leading `env(1)` assignment run of a
+/// pane-run argv (anchored to `env` so a command that merely mentions the token
+/// in its own args is never mistaken for provenance).
+fn env_token_from_argv(argv: &[String], prefix: &str) -> Option<String> {
     if argv.first().map(String::as_str) != Some("env") {
         return None;
     }
     argv.iter()
         .skip(1)
         .take_while(|a| a.contains('='))
-        .find_map(|a| a.strip_prefix("FNO_NODE="))
+        .find_map(|a| a.strip_prefix(prefix))
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
 }
@@ -1255,7 +1277,7 @@ impl Core {
         )
         .map_err(|e| e.to_string())?;
         // A shell pane carries no node provenance (no wrapper argv).
-        self.register_pane(id, pty, rows, cols, None, cwd.to_string(), None);
+        self.register_pane(id, pty, rows, cols, None, cwd.to_string(), None, None);
         Ok(id)
     }
 
@@ -1275,6 +1297,7 @@ impl Core {
         }
         let node = node_from_argv(argv);
         let cmd = cmd_from_argv(argv);
+        let account = account_from_argv(argv);
         let id = self.next_pane_id;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
@@ -1288,7 +1311,7 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
-        self.register_pane(id, pty, rows, cols, node, cwd.to_string(), cmd);
+        self.register_pane(id, pty, rows, cols, node, cwd.to_string(), cmd, account);
         Ok(id)
     }
 
@@ -1305,6 +1328,7 @@ impl Core {
         node: Option<String>,
         cwd: String,
         cmd: Option<String>,
+        account: Option<String>,
     ) {
         self.next_pane_id += 1;
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
@@ -1316,6 +1340,7 @@ impl Core {
                 node,
                 cwd,
                 cmd,
+                account,
             },
         );
         let (tx, _rx) = watch::channel(WaitTick::default());
@@ -2701,7 +2726,12 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
                                 tombstone: false,
-                                account: None,
+                                // Structural roster-dir tag wins (Locked
+                                // Decision 6); else this pane's birth account.
+                                account: a
+                                    .account
+                                    .clone()
+                                    .or_else(|| pane_entry.and_then(|e| e.account.clone())),
                             }
                         }
                         None => {
@@ -2727,7 +2757,7 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
                                 tombstone: false,
-                                account: None,
+                                account: e.and_then(|e| e.account.clone()),
                             }
                         }
                     };
@@ -2764,7 +2794,7 @@ impl Core {
                         seen: self.seen.contains(pane),
                         cwd_base: None,
                         tombstone: false,
-                        account: None,
+                        account: a.account.clone(),
                     });
                 }
                 None => {
@@ -2803,7 +2833,9 @@ impl Core {
                         seen: false,
                         cwd_base,
                         tombstone: false,
-                        account: None,
+                        // The structural roster-dir tag: an isolated-account
+                        // foreign row carries its source account here (piece 3).
+                        account: a.account.clone(),
                     });
                 }
             }
@@ -6090,6 +6122,20 @@ mod tests {
         );
         // No `env` wrapper at all -> never scanned, even with a bare token.
         assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
+    }
+
+    #[test]
+    fn account_from_argv_reads_the_fno_account_token() {
+        // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.
+        let from = |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            from(&["env", "FNO_NODE=x-1", "FNO_ACCOUNT=readyrule", "claude"]),
+            Some("readyrule".to_string())
+        );
+        // Default account (no token) / ad-hoc pane / empty value -> None.
+        assert_eq!(from(&["env", "FNO_NODE=x-1", "claude"]), None);
+        assert_eq!(from(&["claude"]), None);
+        assert_eq!(from(&["env", "FNO_ACCOUNT=", "claude"]), None);
     }
 
     #[test]

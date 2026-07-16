@@ -121,6 +121,9 @@ def test_account_threads_overlay_env(monkeypatch, tmp_path):
     v = dispatch._dispatch_one(session="s", node=None, project=None, account="rr")
     assert v["outcome"] == "launched"
     assert calls[0]["account_env"] == {"CLAUDE_CONFIG_DIR": "/home/u/.claude-alt"}
+    # The birth account is also stamped into the pane provenance (FNO_ACCOUNT)
+    # so the mux reads it back for the sideline glyph (x-c914 piece 2).
+    assert calls[0]["provenance"]["FNO_ACCOUNT"] == "rr"
 
 
 def test_no_account_is_byte_identical(monkeypatch, tmp_path):

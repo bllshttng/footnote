@@ -2946,6 +2946,12 @@ impl View {
                     } else if let Some(base) = a.cwd_base.as_deref() {
                         text.push_str(&format!(" ({base})"));
                     }
+                    // (x-c914) Account glyph: which claude account this row bills
+                    // (a mux-spawned pane's birth account, or an isolated-account
+                    // roster row's source). Absent for the default account.
+                    if let Some(acct) = a.account.as_deref() {
+                        text.push_str(&format!(" @{acct}"));
+                    }
                     if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
                         text.push_str(": ");
                         text.push_str(reason);
@@ -3516,7 +3522,13 @@ fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> 
     } else {
         nav_glyph(pane_state(a.badge, a.seen))
     };
-    let mut lines = vec![pad_to(&format!(" {glyph} {}", a.name), PEEK_OVERLAY_W)];
+    // (x-c914) The account glyph rides the peek header next to the name, same
+    // vocabulary as the selector row.
+    let header = match a.account.as_deref() {
+        Some(acct) => format!(" {glyph} {}  @{acct}", a.name),
+        None => format!(" {glyph} {}", a.name),
+    };
+    let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
         for wl in wrap_words(&sanitize_peek_line(reason), PEEK_OVERLAY_W - 3) {
             lines.push(pad_to(&format!("   {wl}"), PEEK_OVERLAY_W));
@@ -9204,6 +9216,19 @@ mod tests {
             out.contains("red") && out.contains('c'),
             "printable text kept"
         );
+    }
+
+    // x-c914 piece 2 (AC2-UI): the account glyph rides the peek header for a
+    // row that bills a non-default account; a default-account row shows none.
+    #[test]
+    fn peek_header_carries_account_glyph() {
+        let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
+        row.account = Some("readyrule".into());
+        let peek = PeekView { cursor: 0, seq: 1, body: None, name: "w".into() };
+        assert!(peek_overlay_lines(Some(&row), &peek)[0].contains("@readyrule"));
+
+        row.account = None; // default account -> no glyph
+        assert!(!peek_overlay_lines(Some(&row), &peek)[0].contains('@'));
     }
 
     // x-c376 AC3-HP / AC2-ERR: a digit on a blocked, pane-hosted peeked row sends

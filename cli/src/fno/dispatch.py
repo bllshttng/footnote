@@ -287,6 +287,14 @@ def _dispatch_one(
     #    - never a phantom lane holding the cap. On success dispatch:<id> is left
     #    to TTL-expire (bridges the boot window until the worker owns node:<id>).
     workdir = Path(cwd) if cwd else Path.cwd()
+    # (x-c914) Stamp the birth account into the pane provenance (FNO_ACCOUNT)
+    # when routed, so the mux server reads it back for the sideline account
+    # glyph - a managed account shares ~/.claude, so the roster can't
+    # distinguish it, but the pane's own env can (Locked Decision 5: pane env,
+    # not the registry schema).
+    provenance = resolve_provenance(node_id, slug)
+    if account:
+        provenance["FNO_ACCOUNT"] = account
     try:
         result = dispatch_spawn_pane(
             name=_worker_agent_name(node_id, slug),
@@ -294,7 +302,7 @@ def _dispatch_one(
             provider="claude",
             cwd=workdir,
             session=session,
-            provenance=resolve_provenance(node_id, slug),
+            provenance=provenance,
             account_env=account_env,
         )
     except Exception as exc:  # noqa: BLE001 - DispatchAskError or any spawn error
