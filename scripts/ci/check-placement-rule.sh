@@ -125,6 +125,7 @@ cli/src/fno/adapters/providers/test_staging.py
 cli/src/fno/adapters/test_claude_code.py
 cli/src/fno/adapters/test_init.py
 cli/src/fno/adapters/test_shared.py
+cli/src/fno/agents/account_env.py
 cli/src/fno/agents/cli.py
 cli/src/fno/agents/discover.py
 cli/src/fno/agents/dispatch.py
@@ -135,6 +136,7 @@ cli/src/fno/agents/read.py
 cli/src/fno/agents/registry.py
 cli/src/fno/agents/rust_runtime.py
 cli/src/fno/agents/spawn_gate.py
+cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
 cli/src/fno/backlog/advance.py
 cli/src/fno/claims/session_pid.py

@@ -388,6 +388,22 @@ def cmd_spawn(
             "the spawn - never a silent primary-model launch. claude only."
         ),
     ),
+    account: str | None = typer.Option(
+        None,
+        "--account",
+        help=(
+            "Pin this ONE worker to a registered claude account (x-d012) without "
+            "touching the daemon-wide active ~/.claude slot. Resolves a "
+            "ProviderRecord to an env overlay: an account with its own config_dir "
+            "(the verified-correct mechanism, bills right) sets CLAUDE_CONFIG_DIR; "
+            "a managed account rides the shared slot only when it IS the active "
+            "occupant. A managed non-active account is refused with a pointer to "
+            "config-dir registration (the setup-token env lane bills the wrong "
+            "account and is not used). Explicit operator intent only - never "
+            "inferred by failover/dispatch. claude only; fail-closed, nothing "
+            "spawned on refusal."
+        ),
+    ),
     model: str | None = typer.Option(
         None,
         "--model",
@@ -675,6 +691,24 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    # --account contradictions (x-d012), refused BEFORE route resolution so a
+    # keyless route never masks this receipt. --account bills a specific claude
+    # account; a non-claude provider, a --route, or an auto-routing --role sends
+    # the worker to a different provider - the route's ANTHROPIC_* would override
+    # the account's CLAUDE_CONFIG_DIR and silently mis-bill. Refuse all three.
+    if account is not None:
+        if provider != "claude":
+            print(f"--account is claude-only; got provider {provider!r}", file=sys.stderr)
+            raise typer.Exit(code=2)
+        if route is not None or role is not None:
+            other = "--route" if route is not None else "--role"
+            print(
+                f"--account cannot combine with {other}: --account bills a claude "
+                "account, provider routing sends the worker elsewhere. Pass one.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
     # Explicit --route override (x-b0b4). Resolve + FAIL CLOSED here, BEFORE the
     # gate, so a refusal spawns nothing, acquires no gate slot, and leaves the
     # node dispatchable. resolve_explicit_route bypasses the role table + guard
@@ -711,6 +745,17 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+
+    # Per-spawn account overlay (x-d012). Resolve + FAIL CLOSED here, BEFORE the
+    # gate, like --route: a refusal spawns nothing, takes no gate slot, and
+    # leaves the node dispatchable. Contradictions (non-claude provider, --route,
+    # --role) were already refused above, before route resolution.
+    account_env: dict[str, str] | None = None
+    if account is not None:
+        from fno.agents.account_env import resolve_account_overlay_or_exit
+
+        overlay = resolve_account_overlay_or_exit(account)
+        account_env = overlay.env if overlay else None
 
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
@@ -751,6 +796,7 @@ def cmd_spawn(
                     squad=squad,
                     split=split,
                     provenance=resolve_provenance(node, slug, plan),
+                    account_env=account_env,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
@@ -772,6 +818,10 @@ def cmd_spawn(
             # so the unset receipt is unchanged.
             if permission_mode is not None:
                 receipt_obj["permission_mode"] = permission_mode
+            # x-d012: name the pinned account so a mis-pin is visible at spawn
+            # time, not at billing time. Only when set (receipt byte-stable else).
+            if account is not None:
+                receipt_obj["account"] = account
             if _moved_cwd is not None:
                 receipt_obj["cwd"] = _moved_cwd
             receipt = json.dumps(receipt_obj)
@@ -802,6 +852,7 @@ def cmd_spawn(
                 deny_tools=deny_tools,
                 headless=substrate == "headless",
                 resume_session_id=resume,
+                account_env=account_env,
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
@@ -838,9 +889,14 @@ def cmd_spawn(
             if _moved_cwd is not None
             else ""
         )
+        # x-d012: name the pinned account. Only when set, so a non-account bg
+        # receipt stays byte-identical to the Rust client's (which never emits
+        # it - an --account spawn always re-execs into this Python path).
+        account_field = f", \"account\": {json.dumps(account)}" if account else ""
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
-            f'"provider": "{result.provider}", "status": "live"{perm_field}{cwd_field}}}'
+            f'"provider": "{result.provider}", "status": "live"'
+            f'{perm_field}{cwd_field}{account_field}}}'
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()

@@ -217,6 +217,7 @@ def headless_create(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    account_env: Optional[Mapping[str, str]] = None,
 ) -> ProviderResult:
     """Run a one-shot ``claude -p`` without creating a background session."""
     argv = ["claude", "-p"]
@@ -231,6 +232,18 @@ def headless_create(
     # x-b6e2: Tier-3 passthrough, same order as the Rust headless builder.
     argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     argv.append(message or "hello")
+    # Per-spawn account overlay (x-d012): a one-shot `claude -p` inherits the
+    # parent env, so without this an --account headless spawn would silently
+    # drop CLAUDE_CONFIG_DIR and bill the operator's current account. Scrub
+    # inherited auth vars first (an ambient token would override the account).
+    spawn_env: Optional[dict[str, str]] = None
+    if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        spawn_env = dict(os.environ)
+        for _k in SCRUB_AUTH_VARS:
+            spawn_env.pop(_k, None)
+        spawn_env.update(account_env)
     started = time.monotonic()
     try:
         result = _subprocess_run(
@@ -239,6 +252,7 @@ def headless_create(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **({"env": spawn_env} if spawn_env is not None else {}),
         )
     except subprocess.TimeoutExpired as exc:
         raise ProviderSubprocessError(124, f"claude -p timed out after {exc.timeout}s") from exc
@@ -269,6 +283,7 @@ def bg_create(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    account_env: Optional[Mapping[str, str]] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -344,6 +359,21 @@ def bg_create(
         spawn_env.pop("ANTHROPIC_API_KEY", None)
         spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         spawn_env.update(route)
+
+    # Per-spawn account overlay (x-d012). Applied LAST so an explicit --account
+    # beats a stale CLAUDE_CONFIG_DIR inherited from the parent shell. --account
+    # combined with --route/--role is refused at the CLI (contradictory: one
+    # bills a claude account, the other routes to a different provider), so the
+    # route block above is never populated on an --account spawn - the two never
+    # co-occur here. SCRUB inherited auth vars first, else an ambient
+    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN would override the account's own
+    # login and bill the wrong account.
+    if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        for _k in SCRUB_AUTH_VARS:
+            spawn_env.pop(_k, None)
+        spawn_env.update(account_env)
 
     start = time.monotonic()
     try:

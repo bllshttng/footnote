@@ -447,6 +447,7 @@ def _mesh_env_wrapper(
     role: Optional[str],
     argv: list[str],
     provenance: Optional[dict[str, str]] = None,
+    account_env: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """Prefix ``argv`` with ``env(1)`` carrying the mesh identity the daemon
     worker used to set on its PTY child (worker.rs), plus any role-routing env
@@ -476,6 +477,19 @@ def _mesh_env_wrapper(
             pairs += [f"{k}={v}" for k, v in route.items()]
     if provenance:
         pairs += [f"{k}={v}" for k, v in provenance.items() if v]
+    # Per-spawn account overlay (x-d012), applied LAST so an explicit --account
+    # beats a stale parent CLAUDE_CONFIG_DIR (env(1) assignments are
+    # left-to-right, last wins). --account + --route/--role is refused at the
+    # CLI (contradictory axes), so the role-route pairs above are never present
+    # on an --account spawn - the two never co-occur here. SCRUB inherited auth
+    # vars (env -u) so an ambient ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN can't
+    # override the account's own login and bill the wrong account.
+    if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        for _k in SCRUB_AUTH_VARS:
+            unset += ["-u", _k]
+        pairs += [f"{k}={v}" for k, v in account_env.items()]
     return ["env", *unset, *pairs, *argv]
 
 
@@ -581,6 +595,7 @@ def dispatch_spawn_pane(
     squad: Optional[str] = None,
     split: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
+    account_env: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
@@ -637,7 +652,9 @@ def dispatch_spawn_pane(
     # env(1) applies its assignments and then execs taskpolicy/nice -> provider.
     from fno.agents.spawn_gate import qos_wrap
 
-    wrapped = _mesh_env_wrapper(name, provider, role, qos_wrap(argv), provenance)
+    wrapped = _mesh_env_wrapper(
+        name, provider, role, qos_wrap(argv), provenance, account_env
+    )
 
     registry_path = paths.agents_registry_path()
 
