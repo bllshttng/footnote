@@ -447,6 +447,7 @@ def sync(
     all_: bool = typer.Option(
         False,
         "--all",
+        "-A",
         help="Force a full walk, bypassing the graph-mtime short-circuit.",
     ),
 ) -> None:
