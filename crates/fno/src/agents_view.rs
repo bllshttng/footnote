@@ -131,9 +131,12 @@ pub fn parse_isolated_dirs(
 /// `<config_dir>/daemon/roster.json`. Fail-open to `[]`: an unreadable config
 /// just means no isolated dirs, so the union degrades to the default roster.
 pub fn isolated_roster_paths() -> Vec<(String, PathBuf)> {
-    let Some(cfg) = std::env::var_os("FNO_CONFIG").map(PathBuf::from).or_else(|| {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
-    }) else {
+    let Some(cfg) = std::env::var_os("FNO_CONFIG")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
+        })
+    else {
         return Vec::new();
     };
     let Ok(body) = std::fs::read_to_string(&cfg) else {
@@ -1508,14 +1511,25 @@ mod tests {
         let roster =
             r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
         let rows = st
-            .tick(stamp(1), || None, stamp(2), || Some(roster), Vec::new(), NOW)
+            .tick(
+                stamp(1),
+                || None,
+                stamp(2),
+                || Some(roster),
+                Vec::new(),
+                NOW,
+            )
             .expect("roster-only change publishes");
         assert_eq!(rows.len(), 2);
     }
 
     // ---- Dual-dir roster union, tagged by account (x-c914 piece 3) ----
 
-    fn iso(account: &str, stamp: Option<(std::time::SystemTime, u64)>, raw: Option<&str>) -> IsolatedRead {
+    fn iso(
+        account: &str,
+        stamp: Option<(std::time::SystemTime, u64)>,
+        raw: Option<&str>,
+    ) -> IsolatedRead {
         IsolatedRead {
             account: account.into(),
             stamp,

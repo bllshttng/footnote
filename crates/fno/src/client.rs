@@ -9224,7 +9224,12 @@ mod tests {
     fn peek_header_carries_account_glyph() {
         let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
         row.account = Some("readyrule".into());
-        let peek = PeekView { cursor: 0, seq: 1, body: None, name: "w".into() };
+        let peek = PeekView {
+            cursor: 0,
+            seq: 1,
+            body: None,
+            name: "w".into(),
+        };
         assert!(peek_overlay_lines(Some(&row), &peek)[0].contains("@readyrule"));
 
         row.account = None; // default account -> no glyph

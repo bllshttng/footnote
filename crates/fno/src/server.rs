@@ -5156,10 +5156,9 @@ async fn serve(
                 // ~/.claude and add no dir). The config re-read is tiny and
                 // gated on an attached viewer; each roster read is stamp-gated
                 // per dir by `isolated_stamp`, so only a changed dir re-reads.
-                let iso_paths =
-                    tokio::task::spawn_blocking(agents_view::isolated_roster_paths)
-                        .await
-                        .unwrap_or_default();
+                let iso_paths = tokio::task::spawn_blocking(agents_view::isolated_roster_paths)
+                    .await
+                    .unwrap_or_default();
                 let mut isolated = Vec::with_capacity(iso_paths.len());
                 for (account, path) in iso_paths {
                     let (stamp, raw) = scan(path, state.isolated_stamp(&account)).await;
@@ -6127,7 +6126,8 @@ mod tests {
     #[test]
     fn account_from_argv_reads_the_fno_account_token() {
         // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.
-        let from = |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let from =
+            |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         assert_eq!(
             from(&["env", "FNO_NODE=x-1", "FNO_ACCOUNT=readyrule", "claude"]),
             Some("readyrule".to_string())
