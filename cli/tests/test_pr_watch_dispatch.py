@@ -253,6 +253,63 @@ class TestFireSkill:
         # `autonomous` is merged-only; check must not carry it.
         assert "autonomous" not in cmd_str
 
+    def test_runner_receives_bounded_timeout(self, tmp_path):
+        """x-97d8: fire_skill MUST pass a bounded timeout= to the runner so a
+        wedged headless claude cannot block the tick forever."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        captured = {}
+
+        def stub_runner(cmd, **kw):
+            captured.update(kw)
+            return _claude_ok_response()
+
+        fire_skill("check", 7, tmp_path, runner=stub_runner)
+        assert captured.get("timeout") is not None
+        assert captured["timeout"] > 0
+
+    def test_merged_timeout_exceeds_check_timeout(self, tmp_path):
+        """x-97d8: the post-merge ritual gets a larger budget than a check fire."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        seen = {}
+
+        def make_runner(verb):
+            def stub_runner(cmd, **kw):
+                seen[verb] = kw.get("timeout")
+                return _claude_ok_response()
+
+            return stub_runner
+
+        fire_skill("check", 1, tmp_path, runner=make_runner("check"))
+        fire_skill("merged", 1, tmp_path, runner=make_runner("merged"))
+        assert seen["merged"] > seen["check"]
+
+    def test_explicit_timeout_overrides_verb_default(self, tmp_path):
+        """x-97d8: a caller-supplied timeout_s wins over the per-verb default."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        captured = {}
+
+        def stub_runner(cmd, **kw):
+            captured.update(kw)
+            return _claude_ok_response()
+
+        fire_skill("check", 1, tmp_path, runner=stub_runner, timeout_s=12.0)
+        assert captured["timeout"] == 12.0
+
+    def test_runner_timeout_is_failure(self, tmp_path):
+        """x-97d8: a real TimeoutExpired now reaches the (previously dead)
+        handler and yields a clean failure, not a forever-block."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        def stub_runner(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 0))
+
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        assert result.ok is False
+        assert result.is_error is True
+
 
 # ---------------------------------------------------------------------------
 # tick() orchestrator tests
