@@ -730,6 +730,19 @@ def _is_linked_worktree(cwd: Path) -> bool:
     return _abs(gdir) != _abs(common)
 
 
+def _manifest_node_id(manifest: Path) -> Optional[str]:
+    """The manifest's claimed ``graph_node_id``, or None if absent/null/unreadable."""
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"^graph_node_id\s*:\s*(.+)$", text, re.MULTILINE)
+    if not m:
+        return None
+    val = m.group(1).strip().strip("\"'")
+    return None if (not val or val == "null") else val
+
+
 def _foreign_live_holder(node_id: str) -> Optional[dict]:
     """Claim info for ``node:<id>`` iff a DIFFERENT live/suspect session holds
     it, else None (free / dead / ours).
@@ -913,6 +926,21 @@ def start(
         if holder is not None:
             _print_foreign_holder_park(node, holder, wt_path)
             raise typer.Exit(code=1)
+        # In-place (policy=never) manifests live in the SHARED canonical .fno, so
+        # unlike a per-node worktree this one may belong to a DIFFERENT node - the
+        # fast-path's "manifest => THIS node's init ran" invariant does not hold.
+        # A node mismatch is another node's (stale/foreign) session; refuse rather
+        # than report already-claimed and let the caller run under its state.
+        if in_place:
+            mnode = _manifest_node_id(manifest)
+            if mnode is not None and mnode != node:
+                typer.echo(
+                    f"fno target start: {manifest} belongs to node {mnode}, not "
+                    f"{node}; refusing to run in place under another node's session. "
+                    f"Cancel it (fno target cancel) or isolate a worktree.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
         typer.echo(
             f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
             f"node=already-claimed"
