@@ -2693,6 +2693,27 @@ event_types:
           description: "The run's PR url, when one exists."
     consumers: [parent handle via mail bus, x-05da peek, third-party observers]
 
+  - name: builder_step
+    description: "An attempt-grained builder crumb inside a fix loop: tried X, found Y, fixed with Z, outcome. The high-signal subset between task_started and task_done - a successor session (or human) reads the tail to avoid repeating a failed approach. Advisory (never gate-bearing); a failed emit degrades warn-once and never blocks the build. Legacy-tolerant envelope (NOT the x-dbaf family): payload lives entirely in data (envelope keys frozen, x-0f7f)."
+    sources: [target, subagent]
+    data:
+      required: [tried, outcome]
+      properties:
+        tried:
+          type: string
+          description: "What the attempt did, truncated to ~500 chars by the emit instruction."
+        found:
+          type: string
+          description: "What broke / what the evaluator found (optional)."
+        fix:
+          type: string
+          description: "The change made in response (optional)."
+        outcome:
+          type: string
+          enum: [worked, failed, abandoned]
+          description: "Result of the attempt. Enum is documented for the emit instruction and the consumer's outcome match; only the two required fields are validator-enforced (advisory crumb)."
+    consumers: [target resume, self-handoff successor, postmortem]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:
