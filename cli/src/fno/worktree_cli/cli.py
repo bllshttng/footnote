@@ -228,6 +228,11 @@ def _worktree_ensure(
             and wt_top.returncode == 0
             and Path(wt_top.stdout.strip()).resolve() == wt.resolve()
         ):
+            typer.echo(
+                f"worktree ensure: policy={pol.policy} ({pol.project}); "
+                f"reusing worktree at {wt}",
+                err=True,
+            )
             typer.echo(str(wt))
             return 0
         # Exists but is NOT our worktree: never clobber a stray dir.
@@ -262,6 +267,13 @@ def _worktree_ensure(
     # (and forcing it to fail-on-bare-install would break the "best-effort,
     # never fail the ensure" contract). The in-repo skill callers
     # (dispatch-node.sh, spawn.sh, /do) run setup-worktree.sh after ensure.
+    # One stderr receipt naming the resolved mode + path (AC: every spawn names its
+    # location, incl. a harness-native->external degradation - the resolver already
+    # collapsed a non-native harness to `external`, so pol.policy is the true mode).
+    typer.echo(
+        f"worktree ensure: policy={pol.policy} ({pol.project}); worktree at {wt}",
+        err=True,
+    )
     typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt
     return 0
 

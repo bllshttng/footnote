@@ -298,6 +298,33 @@ def test_ensure_harness_native_reuse(main_repo: Path, tmp_path: Path) -> None:
     assert second.stdout.strip() == str(wt)
 
 
+def test_ensure_emits_stderr_receipt_naming_mode_and_path(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC: every spawn emits exactly one stderr receipt naming the resolved mode
+    and the worktree path - harness-native, external, and the reuse path alike
+    (the path itself stays the SOLE stdout line so callers still read it clean)."""
+    hn = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "r1", "--harness", "claude"]
+    )
+    assert hn.exit_code == 0, hn.stderr
+    assert "policy=harness-native" in hn.stderr
+    assert str(main_repo / ".claude" / "worktrees" / "r1") in hn.stderr
+    assert hn.stdout.strip() == str(main_repo / ".claude" / "worktrees" / "r1")
+
+    ext = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "r2"])
+    assert ext.exit_code == 0, ext.stderr
+    assert "policy=external" in ext.stderr
+    assert str(_default_wt(tmp_path, main_repo, "r2")) in ext.stderr
+
+    reuse = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "r1", "--harness", "claude"]
+    )
+    assert reuse.exit_code == 0, reuse.stderr
+    assert "reusing worktree at" in reuse.stderr
+    assert reuse.stdout.strip() == str(main_repo / ".claude" / "worktrees" / "r1")
+
+
 def test_ensure_no_harness_degrades_to_external(main_repo: Path, tmp_path: Path) -> None:
     """AC5-FR: an omitted --harness never guesses a harness location -- the default
     harness-native degrades to external and lands under the ~/.fno base, NOT in
