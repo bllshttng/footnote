@@ -223,15 +223,10 @@ impl Popup {
         }
     }
 
-    /// Lay the popup out against a `(rows, cols)` terminal: compute the block
-    /// width from its content, position it (centered or clamped/flipped anchor),
-    /// and render each row to a padded line with selection + hit-test spans.
-    pub fn render(&self, term: (u16, u16)) -> Rendered {
-        let (trows, tcols) = (term.0.max(1) as usize, term.1.max(1) as usize);
-        let sel = self.selected();
-        // Per-cell width for a grid row: the widest cell content + padding.
-        let grid_cell_w = self
-            .rows
+    /// The per-grid-cell width (widest glyph+label content + padding). Pure
+    /// measurement, shared by [`Popup::render`] and the spike bridge path.
+    fn grid_cell_w(&self) -> usize {
+        self.rows
             .iter()
             .flat_map(|r| match r {
                 PopupRow::Grid(cells) => cells
@@ -241,8 +236,15 @@ impl Popup {
                 _ => vec![],
             })
             .max()
-            .unwrap_or(0);
-        // Content width: the widest row before padding.
+            .unwrap_or(0)
+    }
+
+    /// The block width for a `tcols`-wide terminal: the widest row's content,
+    /// clamped to the cap. Pure measurement - NO padded lines built, no
+    /// pad/center/gap/ellipsis - so the bridge path can size itself without
+    /// running the legacy line builder (codex P2: don't double-render).
+    pub fn content_width(&self, tcols: usize) -> usize {
+        let grid_cell_w = self.grid_cell_w();
         let content_w = self
             .rows
             .iter()
@@ -257,7 +259,17 @@ impl Popup {
             })
             .max()
             .unwrap_or(0);
-        let width = content_w.clamp(1, WIDTH_CAP.min(tcols));
+        content_w.clamp(1, WIDTH_CAP.min(tcols))
+    }
+
+    /// Lay the popup out against a `(rows, cols)` terminal: compute the block
+    /// width from its content, position it (centered or clamped/flipped anchor),
+    /// and render each row to a padded line with selection + hit-test spans.
+    pub fn render(&self, term: (u16, u16)) -> Rendered {
+        let (trows, tcols) = (term.0.max(1) as usize, term.1.max(1) as usize);
+        let sel = self.selected();
+        let grid_cell_w = self.grid_cell_w();
+        let width = self.content_width(tcols);
 
         let mut target_idx = 0usize;
         let mut lines = Vec::with_capacity(self.rows.len());
@@ -502,16 +514,18 @@ impl ratatui::widgets::Widget for RowWidget<'_> {
     }
 }
 
-/// SPIKE path: render the popup via ratatui widgets + the chrome bridge. Reuses
-/// [`Popup::render`] ONLY for width + origin (content measurement + positioning,
-/// which ratatui layout needs too); the row cells are rebuilt through ratatui.
+/// SPIKE path: render the popup via ratatui widgets + the chrome bridge. Sizes
+/// itself from the pure `content_width` measurement + the `origin` positioner -
+/// it does NOT call `render()`, so the legacy pad/center/gap/ellipsis line
+/// builder never runs on this path (codex P2: no double-render, so the A/B
+/// latency and guard-site measurements attribute to the ratatui renderer alone).
 pub fn draw_via_bridge(cells: &mut [Cell], rows: usize, cols: usize, p: &Popup, term: (u16, u16)) {
-    let laid = p.render(term);
-    let (width, origin) = (laid.width, laid.origin);
-    let trows = term.0.max(1) as usize;
+    let (trows, tcols) = (term.0.max(1) as usize, term.1.max(1) as usize);
+    let width = p.content_width(tcols);
     let block_h = p.rows.len();
     let vis_h = block_h.min(trows);
     let scroll = p.scroll.min(block_h.saturating_sub(vis_h));
+    let origin = origin(p.anchor, width, vis_h, (trows, tcols));
     let sel = p.selected();
     for (i, ri) in (scroll..scroll + vis_h).enumerate() {
         let sr = origin.0 + i;
