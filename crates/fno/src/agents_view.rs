@@ -150,7 +150,8 @@ pub fn resolve_branch(cwd: &Path) -> Option<String> {
     } else {
         // A worktree `.git` file: `gitdir: <path>` (possibly relative to cwd).
         let contents = std::fs::read_to_string(&dot_git).ok()?;
-        let ptr = contents.strip_prefix("gitdir:")?.trim();
+        // Tolerate leading whitespace / BOM before the `gitdir:` key (gemini review).
+        let ptr = contents.trim_start().strip_prefix("gitdir:")?.trim();
         let ptr = Path::new(ptr);
         if ptr.is_absolute() {
             ptr.to_path_buf()
@@ -1858,6 +1859,9 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         // A relative gitdir pointer resolves against cwd.
         std::fs::write(cwd.join(".git"), "gitdir: ../.git/worktrees/x-cd67\n").unwrap();
+        assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
+        // Leading whitespace before the `gitdir:` key is tolerated (gemini review).
+        std::fs::write(cwd.join(".git"), "  \tgitdir: ../.git/worktrees/x-cd67\n").unwrap();
         assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
         std::fs::remove_dir_all(&root).unwrap();
     }

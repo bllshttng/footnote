@@ -5078,8 +5078,9 @@ impl Core {
 /// `<branch> · <tail>`; a missing branch leaves the tail alone, an empty cwd
 /// (no tail, no branch) yields `None` so no sub-row is emitted (AC1-EDGE).
 fn subline_from(branch: Option<&str>, cwd: &str) -> Option<String> {
-    let tail = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-    let tail = (!tail.is_empty()).then_some(tail);
+    // `Path::file_name` handles trailing slashes and platform separators (gemini
+    // review); an empty cwd yields no tail.
+    let tail = Path::new(cwd).file_name().and_then(|s| s.to_str());
     match (branch, tail) {
         (Some(b), Some(t)) => Some(format!("{b} · {t}")),
         (Some(b), None) => Some(b.to_string()),
