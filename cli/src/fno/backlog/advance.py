@@ -531,7 +531,15 @@ def _spawn_worker(
             mode = (settings_obj.agents.spawn_permission_mode or "").strip()
         except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
             mode = ""
-    if mode:
+    # CLAUDE-ONLY, mirroring dispatch-node.sh: the spawn seam exit-2 rejects a
+    # mapped --permission-mode for a non-claude harness on a non-pane substrate.
+    # Gate on the RESOLVED harness, not the raw `prov` string: `provider` may carry
+    # a claude ACCOUNT record (e.g. ccm/ccr) that resolves to harness=claude and
+    # MUST still get the flag, else the account-pinned worker keeps hanging - the
+    # exact bug this change fixes. A failover leg landing on codex/gemini gets its
+    # bypass from its own resolved caps, not this claude-native value. Silent skip
+    # (parity); the receipt omits permission_mode, so the posture stays inspectable.
+    if mode and resolved.get("harness") == "claude":
         cmd += ["--permission-mode", mode]
     cmd += [agent_name, target_cmd]
 

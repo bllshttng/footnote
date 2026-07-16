@@ -1556,3 +1556,96 @@ def test_failover_racing_advances_dedup(iso, monkeypatch):
     assert first.decision == "dispatched"
     assert second.decision == "skipped" and second.reason == "already-claimed"
     assert calls == [NODE["id"]]  # spawned exactly once despite failover on both ticks
+
+
+# ---------------------------------------------------------------------------
+# Autonomous permission-mode gate (_spawn_worker argv)
+#
+# US1 flips config.agents.spawn_permission_mode's default to "bypassPermissions".
+# US2 gates the --permission-mode forward on the resolved harness being claude,
+# so a failover leg landing on codex/gemini (which the spawn seam exit-2 rejects
+# for a mapped mode) never carries the claude-native flag. US3 is that failover
+# leg end-to-end at the unit level: no flag, no seam BadParameter, no
+# advance_failed retry loop.
+# ---------------------------------------------------------------------------
+
+
+def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, substrate="bg", harness=None):
+    """Call _spawn_worker with settings + resolver + subprocess mocked; return argv.
+
+    The gate keys off the RESOLVED harness, so the mocked resolver returns one:
+    `harness` overrides it (a claude account record resolves to harness=claude);
+    otherwise a codex/gemini provider maps to its own harness, else claude.
+    """
+    captured: dict = {}
+
+    def _fake_run(cmd, **_kw):
+        captured["cmd"] = cmd
+        return _FakeProc(returncode=0, stdout=_RECEIPT if substrate == "bg" else "")
+
+    monkeypatch.setattr(adv.subprocess, "run", _fake_run)
+
+    resolved_harness = harness or (provider if provider in ("codex", "gemini") else "claude")
+    fake_settings = SimpleNamespace(
+        agents=SimpleNamespace(spawn_permission_mode=perm_config),
+        dispatch=SimpleNamespace(auto_merge=False),
+    )
+    monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: fake_settings)
+    monkeypatch.setattr(
+        "fno.agents.harness_map.resolve_dispatch",
+        lambda **_kw: {
+            "harness": resolved_harness,
+            "substrate": substrate,
+            "command": "/target no-merge ab-2222aaaa",
+            "env": {},
+        },
+    )
+
+    adv._spawn_worker("ab-2222aaaa", None, "next", provider=provider, permission_mode=permission_mode)
+    return captured["cmd"]
+
+
+def _perm_of(cmd):
+    """Value after --permission-mode in argv, or None when the flag is absent."""
+    return cmd[cmd.index("--permission-mode") + 1] if "--permission-mode" in cmd else None
+
+
+def test_claude_leg_forwards_config_bypass(iso, monkeypatch):
+    """AC1-HP: a claude autonomous leg (no provider pin) carries the bypass default."""
+    cmd = _spawn_argv(monkeypatch, provider=None, perm_config="bypassPermissions")
+    assert _perm_of(cmd) == "bypassPermissions"
+
+
+def test_claude_account_record_still_forwards(iso, monkeypatch):
+    """A claude ACCOUNT record (e.g. ccm/ccr) resolves to harness=claude and must
+    still carry the bypass - the gate keys off the resolved harness, not the raw
+    provider string, so an account-pinned claude worker never hangs."""
+    cmd = _spawn_argv(monkeypatch, provider="ccm", harness="claude", perm_config="bypassPermissions")
+    assert _perm_of(cmd) == "bypassPermissions"
+
+
+def test_codex_leg_skips_config_default(iso, monkeypatch):
+    """AC2-HP / US3: a failover-to-codex leg drops the claude-native flag the seam
+    would exit-2 reject, and builds without raising (no advance_failed loop)."""
+    cmd = _spawn_argv(monkeypatch, provider="codex", perm_config="bypassPermissions", substrate="headless")
+    assert _perm_of(cmd) is None
+
+
+def test_codex_leg_skips_explicit_mode(iso, monkeypatch):
+    """The gate drops even an EXPLICIT permission_mode on a non-claude leg."""
+    cmd = _spawn_argv(
+        monkeypatch, provider="codex", perm_config="", permission_mode="bypassPermissions", substrate="headless"
+    )
+    assert _perm_of(cmd) is None
+
+
+def test_claude_leg_explicit_empty_opts_out(iso, monkeypatch):
+    """AC1-EDGE: an explicit "" forwards nothing (claude prompts normally)."""
+    cmd = _spawn_argv(monkeypatch, provider="claude", perm_config="")
+    assert _perm_of(cmd) is None
+
+
+def test_claude_leg_default_mode_positive(iso, monkeypatch):
+    """AC2-EDGE: "default" is forwarded verbatim (prompting, expressed positively)."""
+    cmd = _spawn_argv(monkeypatch, provider="claude", perm_config="default")
+    assert _perm_of(cmd) == "default"
