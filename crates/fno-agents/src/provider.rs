@@ -886,6 +886,30 @@ impl ProviderWithPty for AgyProvider {
 /// one-shot lane is wired in v1 (`spawn --substrate headless` refuses with a
 /// pointer to `pane`). opencode mints session ids (`--session`/`-s`), but v1
 /// does not probe or resume them (registry rows are live-only, like agy).
+/// Trailing argv for an `opencode run` dispatch: route a footnote slash command
+/// through `--command`, else pass a prose prompt as the message positional.
+///
+/// `opencode run <message>` treats a leading-slash string as PROSE - it does NOT
+/// expand the plugin command (verified against v1.14.50: `run "/fno:target ..."`
+/// starts a model turn on the literal text). The fno opencode plugin registers
+/// the footnote verbs, so a rendered `/fno:verb args` must ride `opencode run
+/// --command fno:verb <args>` to actually invoke the command (x-de43 / codex P1).
+/// A non-slash prompt (a plain `ask`/build message) passes through unchanged.
+pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
+    if let Some(rest) = message.strip_prefix('/') {
+        let mut parts = rest.splitn(2, ' ');
+        // `/fno:target no-merge x` -> --command fno:target, args "no-merge x".
+        if let Some(cmd) = parts.next().filter(|c| !c.is_empty()) {
+            let mut tail = vec!["--command".to_string(), cmd.to_string()];
+            if let Some(args) = parts.next().filter(|a| !a.is_empty()) {
+                tail.push(args.to_string());
+            }
+            return tail;
+        }
+    }
+    vec![message.to_string()]
+}
+
 pub struct OpencodeProvider;
 
 impl Provider for OpencodeProvider {
@@ -899,24 +923,26 @@ impl Provider for OpencodeProvider {
         // never-prompt lane so an unattended run cannot wedge on its first
         // approval. Confirmed vs opencode v1.14.50 `run --help` (x-567d); the
         // docs' `--auto` is stale.
-        vec![
+        let mut argv = vec![
             "opencode".into(),
             "run".into(),
             "--dangerously-skip-permissions".into(),
-            ctx.message.clone(),
-        ]
+        ];
+        argv.extend(opencode_run_tail(&ctx.message));
+        argv
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
         // opencode continues a session via `--session <id>` (run cmd).
-        vec![
+        let mut argv = vec![
             "opencode".into(),
             "run".into(),
             "--dangerously-skip-permissions".into(),
             "--session".into(),
             ctx.session_id.clone(),
-            ctx.message.clone(),
-        ]
+        ];
+        argv.extend(opencode_run_tail(&ctx.message));
+        argv
     }
 
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
@@ -1292,6 +1318,33 @@ mod tests {
                 "build feature X"
             ]
         );
+    }
+
+    #[test]
+    fn opencode_create_argv_routes_slash_command_via_command_flag() {
+        // A rendered footnote slash command rides `--command <verb>` (opencode
+        // expands the plugin command) with the rest as args - NOT a prose prompt
+        // that `run` would run verbatim (x-de43 / codex P1).
+        let mut ctx = create_ctx();
+        ctx.message = "/fno:target no-merge x-abcd".into();
+        assert_eq!(
+            OpencodeProvider.create_argv(&ctx),
+            vec![
+                "opencode",
+                "run",
+                "--dangerously-skip-permissions",
+                "--command",
+                "fno:target",
+                "no-merge x-abcd"
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_run_tail_prose_through_and_bare_verb() {
+        // Prose passes through unchanged; a bare verb has no args tail.
+        assert_eq!(opencode_run_tail("build feature X"), vec!["build feature X"]);
+        assert_eq!(opencode_run_tail("/fno:pr"), vec!["--command", "fno:pr"]);
     }
 
     #[test]

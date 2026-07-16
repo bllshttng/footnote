@@ -85,11 +85,14 @@ impl AskOutcome {
     }
 }
 
-/// `opencode run --dangerously-skip-permissions [--model <m>] <prompt>` — the
+/// `opencode run --dangerously-skip-permissions [--model <m>] <tail>` — the
 /// headless one-shot argv (matches `OpencodeProvider::create_argv`). The bypass
 /// flag auto-approves permissions so an unattended worker never wedges on an
 /// approval prompt; confirmed against opencode v1.14.50's `run --help` (the
-/// docs' `--auto` is stale — the shipped binary renamed it).
+/// docs' `--auto` is stale — the shipped binary renamed it). The trailing argv
+/// is built by `opencode_run_tail`: a footnote slash command rides `--command`
+/// (opencode expands the plugin command), a prose prompt stays the message
+/// positional (x-de43 / codex P1).
 fn build_opencode_argv(prompt: &str, model: Option<&str>) -> Vec<String> {
     let mut argv = vec![
         "opencode".to_string(),
@@ -100,7 +103,7 @@ fn build_opencode_argv(prompt: &str, model: Option<&str>) -> Vec<String> {
         argv.push("--model".to_string());
         argv.push(m.to_string());
     }
-    argv.push(prompt.to_string());
+    argv.extend(crate::provider::opencode_run_tail(prompt));
     argv
 }
 
@@ -285,7 +288,15 @@ pub fn dispatch_opencode_once(
     // spawn allows an empty initial message; default to "hello" (Python parity —
     // only the empty string, not whitespace).
     let effective_message = if message.is_empty() { "hello" } else { message };
-    let full_prompt = format!("[from: {}]\n\n{}", from_name, effective_message);
+    // A footnote slash command (`/fno:verb ...`) is a command dispatch, not a
+    // conversational message: send it WITHOUT the `[from:]` envelope so it rides
+    // `opencode run --command` (an envelope would demote it to prose no-op). A
+    // prose message keeps the courtesy envelope (x-de43).
+    let full_prompt = if effective_message.starts_with('/') {
+        effective_message.to_string()
+    } else {
+        format!("[from: {}]\n\n{}", from_name, effective_message)
+    };
     let argv = build_opencode_argv(&full_prompt, model);
     let log_path = derive_log_path(home, name);
     if let Some(parent) = log_path.parent() {
@@ -381,6 +392,23 @@ mod tests {
         assert_eq!(
             build_opencode_argv("do X", None),
             vec!["opencode", "run", "--dangerously-skip-permissions", "do X"]
+        );
+    }
+
+    #[test]
+    fn argv_routes_footnote_slash_command_via_command_flag() {
+        // A rendered `/fno:verb` rides `--command` so opencode expands the plugin
+        // command instead of running it as prose (x-de43 / codex P1).
+        assert_eq!(
+            build_opencode_argv("/fno:target no-merge x-abcd", None),
+            vec![
+                "opencode",
+                "run",
+                "--dangerously-skip-permissions",
+                "--command",
+                "fno:target",
+                "no-merge x-abcd"
+            ]
         );
     }
 
