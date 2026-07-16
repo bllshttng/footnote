@@ -650,6 +650,25 @@ def _base_project_id(canonical_root: Path) -> str:
     return canonical_root.name
 
 
+# The non-claude harness kinds (KNOWN_PROVIDERS minus claude). Any other provider
+# value - a claude ACCOUNT record (ccm/ccr), z.ai/glm, an empty/None - runs under
+# the claude harness, so it maps to claude for the worktree-native decision.
+_NON_CLAUDE_HARNESSES = frozenset({"codex", "gemini", "agy", "opencode"})
+
+
+def _lane_harness(eff_provider: Optional[str]) -> str:
+    """Resolve a lane's dispatch provider to its worktree harness.
+
+    The worktree-native decision only cares whether the worker runs under claude:
+    an explicit non-claude harness (codex/gemini/agy/opencode) keeps its own
+    harness (-> external base); everything else - claude, a claude account record
+    (ccm/ccr), an empty/None provider - resolves to claude (-> harness-native),
+    matching `_spawn_worker`'s `prov = eff_provider or "claude"` default so the
+    worktree lands where the worker actually runs.
+    """
+    return eff_provider if (eff_provider or "") in _NON_CLAUDE_HARNESSES else "claude"
+
+
 def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:
     """Link shared `.fno`/`internal`/`.claude` state into a fresh lane worktree.
 
@@ -872,7 +891,7 @@ def dispatch_lanes(
         try:
             eff_provider = provider if provider is not None else node.get("provider")
             worktree = _ensure_lane_worktree(
-                node_id, canonical_root=canonical, harness=(eff_provider or "claude")
+                node_id, canonical_root=canonical, harness=_lane_harness(eff_provider)
             )
             # A never-policy lane runs in the canonical checkout in place; seeding
             # a per-lane config.local.toml there would write into canonical .fno.

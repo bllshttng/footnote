@@ -55,6 +55,21 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     return calls
 
 
+def test_lane_harness_resolution():
+    """The lane worktree harness: an explicit non-claude harness keeps its own
+    (-> external base); claude, a claude account record (ccm/ccr), z.ai/glm, and
+    an empty/None provider all resolve to claude (-> harness-native)."""
+    assert advance._lane_harness(None) == "claude"
+    assert advance._lane_harness("") == "claude"
+    assert advance._lane_harness("claude") == "claude"
+    assert advance._lane_harness("ccm") == "claude"
+    assert advance._lane_harness("ccr") == "claude"
+    assert advance._lane_harness("glm") == "claude"
+    assert advance._lane_harness("codex") == "codex"
+    assert advance._lane_harness("gemini") == "gemini"
+    assert advance._lane_harness("opencode") == "opencode"
+
+
 def test_dispatch_spawns_one_isolated_worker_per_distinct_domain_lane(
     tmp_path, monkeypatch
 ):
