@@ -155,13 +155,16 @@ if [[ "$FORCE" -eq 0 ]]; then
     #   1. `git symbolic-ref refs/remotes/origin/HEAD`  ->  origin/<default>
     #   2. First remote's symbolic-ref HEAD             ->  <remote>/<default>
     #   3. Skip the check (warn) when nothing resolves
-    DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/||')"
+    # `|| true`: symbolic-ref exits non-zero when origin/HEAD is unset, and
+    # under set -euo pipefail pipefail would propagate that and abort the whole
+    # archive before the empty-DEFAULT_REF fallback below could handle it.
+    DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/||' || true)"
     if [[ -z "$DEFAULT_REF" ]]; then
       # Pipe-free first-line (no `| head` that could SIGPIPE under pipefail).
       FIRST_REMOTE="$(git -C "$TARGET" remote 2>/dev/null)"
       FIRST_REMOTE="${FIRST_REMOTE%%$'\n'*}"
       if [[ -n "$FIRST_REMOTE" ]]; then
-        DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||')"
+        DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||' || true)"
       fi
     fi
     if [[ -n "$DEFAULT_REF" ]] && git -C "$TARGET" rev-parse --verify --quiet "$DEFAULT_REF" >/dev/null; then
@@ -190,7 +193,9 @@ if [[ "$FORCE" -eq 0 ]]; then
       echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
       exit 2
     fi
-    OWNER_PID="$(grep -E '^owner_pid:[[:space:]]*[0-9]+' "$TARGET_STATE" 2>/dev/null | head -1 | sed -E 's/^owner_pid:[[:space:]]*//')"
+    # Pipeline-free + fail-open: a manifest without owner_pid must degrade to
+    # empty (not-live), never abort the script under set -euo pipefail.
+    OWNER_PID="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$TARGET_STATE" 2>/dev/null || true)"
     if [[ -n "$OWNER_PID" ]] && kill -0 "$OWNER_PID" 2>/dev/null; then
       echo "archive-worktree: live target session (owner_pid $OWNER_PID alive) at $TARGET_STATE" >&2
       echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
@@ -273,8 +278,7 @@ fi
 _salvage_node() {
   local st="$TARGET/.fno/target-state.md" n=""
   if [[ -f "$st" ]]; then
-    n="$(grep -E '^graph_node_id:[[:space:]]*' "$st" 2>/dev/null | head -1 \
-      | sed -E 's/^graph_node_id:[[:space:]]*//' | tr -d '"'"'"' ')"
+    n="$(sed -nE '/^graph_node_id:[[:space:]]*/{s/^graph_node_id:[[:space:]]*//;p;q;}' "$st" 2>/dev/null | tr -d '"'"'"' ' || true)"
   fi
   [[ -z "$n" ]] && n="${BRANCH##*/}"
   [[ -z "$n" || "$n" == "(detached)" ]] && n="$(basename "$TARGET")"

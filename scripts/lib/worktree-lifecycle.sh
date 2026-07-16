@@ -16,7 +16,8 @@ _wt_live() {
     [[ -f "$st" ]] || return 1
     grep -qE '^status:[[:space:]]*IN_PROGRESS' "$st" && return 0
     local pid
-    pid="$(grep -E '^owner_pid:[[:space:]]*[0-9]+' "$st" 2>/dev/null | head -1 | sed -E 's/^owner_pid:[[:space:]]*//')"
+    # Pipeline-free extraction so a no-match never SIGPIPEs an upstream grep.
+    pid="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$st" 2>/dev/null)"
     [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && return 0
     return 1
 }
@@ -120,10 +121,16 @@ case "${1:-status}" in
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
                 [[ "$wt" == "$MAIN_DIR" ]] && continue
-                N_TOTAL=$((N_TOTAL + 1))
 
                 branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
                 head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo '')"
+
+                # Honor --prefix scoping in merged mode too: a scoped sweep must
+                # never touch (or count) a branch outside its prefix.
+                if [[ -n "$PREFIX" && "$branch" != ${PREFIX}* ]]; then
+                    continue
+                fi
+                N_TOTAL=$((N_TOTAL + 1))
 
                 # 1. dirty (tracked only; no --ignored so the .fno symlink family is not "dirty")
                 if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
@@ -163,8 +170,10 @@ case "${1:-status}" in
                         printf '%-18s %-34s %s\n' "kept (live-session)" "$branch" "$wt"; N_LIVE=$((N_LIVE + 1)); continue
                     fi
                 fi
-                # Candidate. Dry-run (the default for --merged) reports only.
-                if [[ -z "$APPLY" ]]; then
+                # Candidate. Dry-run is the default for --merged, and an
+                # explicit --dry-run wins even if --apply was also passed
+                # (a safety wrapper appending --dry-run must never be ignored).
+                if [[ -z "$APPLY" || -n "$DRY_RUN" ]]; then
                     printf '%-18s %-34s %s\n' "would-archive" "$branch" "$wt"; N_REAP=$((N_REAP + 1)); continue
                 fi
                 if [[ ! -f "$ARCHIVE" ]]; then
@@ -187,8 +196,9 @@ case "${1:-status}" in
             if [[ "$N_TOTAL" -eq 0 ]]; then
                 echo "No non-canonical worktrees found."
             else
-                VERB="would archive"; [[ -n "$APPLY" ]] && VERB="archived"
-                SUFFIX=""; [[ -z "$APPLY" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
+                EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
+                VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
+                SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
                 printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed), %d failed%s\n' \
                     "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_FAIL" "$SUFFIX"
             fi

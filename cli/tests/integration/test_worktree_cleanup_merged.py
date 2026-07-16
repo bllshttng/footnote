@@ -94,10 +94,11 @@ def test_apply_reaps_merged_and_preserves_branch(repo: Path):
     wt = _add_merged(repo, "reapme")
 
     r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
 
-    assert r.returncode == 0, r.stderr
-    assert "archived" in r.stdout
-    assert not wt.exists(), "worktree dir should be gone"
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert not wt.exists(), "worktree dir should be gone" + diag
     branches = _git(repo, "branch", "--list", "feature/reapme").stdout
     assert "feature/reapme" in branches, "branch must be preserved"
 
@@ -167,9 +168,10 @@ def test_salvage_preserves_local_state(repo: Path):
     (fno / "config.toml").symlink_to(repo / ".fno" / "config.toml")
 
     r = _sweep(repo, "--apply")
-    assert r.returncode == 0, r.stderr
-    assert "archived" in r.stdout
-    assert not wt.exists()
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert not wt.exists(), diag
 
     canon_fno = repo / ".fno"
     # loose file -> salvage/<date>-<node>/events.jsonl
@@ -198,6 +200,31 @@ def test_salvage_failure_keeps_worktree(repo: Path):
         assert wt.exists(), "worktree must be kept when salvage fails"
     finally:
         os.chmod(canon_fno, 0o700)
+
+
+# ── --prefix scopes the merged sweep (never touches out-of-prefix branches) ─
+def test_prefix_scopes_merged(repo: Path):
+    keep = _add_merged(repo, "keepme")   # feature/keepme
+    drop = _add_merged(repo, "dropme")   # feature/dropme
+
+    r = _sweep(repo, "--apply", "--prefix", "feature/keep")
+
+    assert r.returncode == 0, r.stderr
+    assert not keep.exists(), "in-prefix merged worktree should be archived"
+    assert drop.exists(), "out-of-prefix worktree must be untouched"
+    assert "1 archived" in r.stdout  # only the prefixed one counted
+
+
+# ── an explicit --dry-run wins over --apply (safety wrappers) ───────────────
+def test_dry_run_overrides_apply(repo: Path):
+    wt = _add_merged(repo, "reapme")
+
+    r = _sweep(repo, "--apply", "--dry-run")
+
+    assert r.returncode == 0, r.stderr
+    assert "would-archive" in r.stdout
+    assert "dry-run" in r.stdout
+    assert wt.exists(), "--dry-run must veto --apply"
 
 
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────
