@@ -139,6 +139,8 @@ How an autonomous/`/agent spawn` dispatch of a footnote `/verb` is rendered per 
 | codex | `$fno:verb ...` | `codex exec` expands the plugin skill. |
 | gemini | **refused** | Deprecated; the dispatch lane is a loud error naming its successor (agy). No prose build brief is generated. |
 
+Only two spawn payloads render through this table: an **explicit `/verb` passthrough**, and a **resolved node-id build** (a node id -> `/target <id>`, the one surviving implicit `/target`, config-driven not shape-inferred). Any other free text is NOT wrapped - `spawn "<free text>"` sends it **verbatim as the session seed**, no `/target`, no per-harness render. To build free text, write `spawn /target <text>` or pass a node id. (The retired `ask`/`discuss` verbs are subsumed: a one-shot Q&A is the `headless` substrate; a conversational session is the default seed.)
+
 ## See also
 
 - [provider-rotation.md](provider-rotation.md) - provider records, failover, and the switchboard settings schema.

@@ -108,9 +108,9 @@ OUT="$(bash "$NORM" --input "$(printf '   \t  ')")"
 [[ "$(field "$OUT" status)" == "error" ]] && pass "Boundary whitespace task -> error" || fail "Boundary whitespace: $OUT"
 
 # --- Locked #4: provider resolution explicit -> config -> claude ---
-# Explicit wins. Use ask mode: gemini's (deprecated) build lane refuses before a
-# provider line is emitted, so ask mode isolates the provider-resolution assertion.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_CODEX" bash "$NORM" --ask --input "hi there" --provider gemini)"
+# Explicit wins. Use a free-text SEED (x-cbb0): a seed needs no /target skill
+# surface, so gemini is honored (not refused), isolating the provider assertion.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_CODEX" bash "$NORM" --input "hi there" --provider gemini)"
 [[ "$(field "$OUT" provider)" == "gemini" ]] && pass "Locked#4 explicit provider wins" || fail "explicit provider: $OUT"
 # No explicit -> defer to resolver (codex).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_CODEX" bash "$NORM" --input "ab-deadbeef")"
@@ -122,12 +122,14 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_GARBAGE" bash "$NORM" --input "ab-deadbeef")"
 [[ "$(field "$OUT" provider)" == "claude" ]] && pass "Locked#4 garbage resolver -> claude" || fail "garbage resolver: $OUT"
 
-# --- free-form -> empty node + spawn-<slug> + /target wrap ---
+# --- free-form -> empty node + spawn-<slug> + verbatim SEED (x-cbb0) ---
+# Free text no longer wraps in /target; it is the session seed, sent verbatim.
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "fix the flaky login redirect")"
 if [[ -z "$(field "$OUT" node)" ]] \
    && [[ "$(field "$OUT" name)" == spawn-fix-* ]] \
-   && [[ "$(field "$OUT" message)" == "/target fix the flaky login redirect no-merge" ]]; then
-  pass "free-form -> empty node + spawn-<slug> + /target message"
+   && [[ "$(field "$OUT" payload_mode)" == "seed" ]] \
+   && [[ "$(field "$OUT" message)" == "fix the flaky login redirect" ]]; then
+  pass "free-form -> empty node + spawn-<slug> + verbatim seed (no /target)"
 else
   fail "free-form: $OUT"
 fi
@@ -172,8 +174,9 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
 # AC3-HP/UI: explicit --yolo for codex -> yolo=1 (skill renders it in CONFIRM/argv).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider codex --yolo)"
 [[ "$(field "$OUT" yolo)" == "1" ]] && pass "AC3-HP explicit --yolo (codex) -> yolo=1" || fail "codex yolo: $OUT"
-# ask mode: gemini build refuses (deprecated), so isolate the --yolo forwarding.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --ask --input "hi" --provider gemini --yolo)"
+# a gemini SEED (x-cbb0: not refused, no /target skill surface needed) isolates
+# the --yolo forwarding without a node build refusal.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "hi" --provider gemini --yolo)"
 [[ "$(field "$OUT" yolo)" == "1" ]] && pass "AC3-HP explicit --yolo (gemini) -> yolo=1" || fail "gemini yolo: $OUT"
 # AC3-ERR (x-d235): --yolo with claude MAPS to --permission-mode bypassPermissions
 # (claude has no --yolo flag; bypassPermissions is its full-auto/no-gates
@@ -205,24 +208,25 @@ else
   fail "x-b6e2 tier-3 forward: $OUT"
 fi
 
-# --- US4: payload modes (build / ask / passthrough) + provider-aware messages ---
+# --- US4: payload modes (seed / build / passthrough) + provider-aware messages ---
 
-# AC4-HP: ask mode (--ask) -> prompt VERBATIM, no /target, no no-merge, no brief.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --ask \
+# AC4-HP: a free-text SEED (x-cbb0, the successor to the retired `ask` verb) ->
+# prompt VERBATIM, no /target, no no-merge, no brief.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex \
        --input "what is the time complexity of bubble sort")"
-if [[ "$(field "$OUT" payload_mode)" == "ask" ]] \
+if [[ "$(field "$OUT" payload_mode)" == "seed" ]] \
    && [[ "$(field "$OUT" message)" == "what is the time complexity of bubble sort" ]]; then
-  pass "AC4-HP ask mode -> prompt verbatim (no /target, no no-merge)"
+  pass "AC4-HP seed -> prompt verbatim (no /target, no no-merge)"
 else
   fail "AC4-HP ask verbatim: $OUT"
 fi
 
-# sigma-review finding 4: an explicit `ask` verb WINS over leading-/ passthrough.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --ask --input "/target what does this flag do")"
-if [[ "$(field "$OUT" payload_mode)" == "ask" ]] \
-   && [[ "$(field "$OUT" message)" == "/target what does this flag do" ]] \
+# A payload beginning with `/` is a PASSTHROUGH, not a seed (x-cbb0: there is no
+# longer an `ask`-beats-passthrough carve-out; a leading `/` always dispatches).
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "/goal what does this flag do")"
+if [[ "$(field "$OUT" payload_mode)" == "passthrough" ]] \
    && [[ "$(field "$OUT" status)" == "ok" ]]; then
-  pass "finding-4 ask verb beats leading-/ passthrough -> verbatim prompt, not refused"
+  pass "finding-4 leading-/ is passthrough, not a verbatim seed"
 else
   fail "finding-4 ask-with-slash: $OUT"
 fi
@@ -246,12 +250,12 @@ else
   fail "opencode passthrough namespace: $OUT"
 fi
 
-# AC4-EDGE: normalize does NOT strip a trailing provider word from the prompt;
-# the full text is the message (the trailing-word inference is skill-layer).
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --ask --input "explain how codex resume works")"
+# AC4-EDGE: a seed keeps a mid-text provider word (only a TRAILING posture word is
+# consumed); "codex" mid-prompt stays in the message and provider falls back.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "explain how codex resume works")"
 if [[ "$(field "$OUT" message)" == "explain how codex resume works" ]] \
    && [[ "$(field "$OUT" provider)" == "claude" ]]; then
-  pass "AC4-EDGE ask prompt kept whole; provider falls back (no in-prompt stripping)"
+  pass "AC4-EDGE seed keeps mid-text provider word; provider falls back"
 else
   fail "AC4-EDGE ask whole prompt: $OUT"
 fi
@@ -275,19 +279,20 @@ else
   fail "agy build: $OUT"
 fi
 
-# gemini is deprecated (successor: agy); its build lane refuses loudly, never a
-# prose brief (x-de43). FBIN forces the static fallback for determinism.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" --provider gemini --input "add CSV export to the dashboard")"
+# gemini is deprecated (successor: agy); its node-id BUILD lane refuses loudly,
+# never a prose brief (x-de43). Free text on gemini is a seed (not refused), so
+# the refusal is exercised via a node id. FBIN forces the static fallback.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" --provider gemini --input "ab-deadbeef")"
 if [[ "$(field "$OUT" status)" == "error" ]] && printf '%s' "$OUT" | grep -qi "agy"; then
-  pass "build: gemini -> refused naming agy, never a prose brief"
+  pass "build: gemini node -> refused naming agy, never a prose brief"
 else
   fail "gemini build refused: $OUT"
 fi
 
-# --allow-merge does not resurrect a gemini brief: gemini is refused regardless.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" --provider gemini --input "add CSV export" --allow-merge)"
+# --allow-merge does not resurrect a gemini build: a node build is refused regardless.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" --provider gemini --input "ab-deadbeef" --allow-merge)"
 [[ "$(field "$OUT" status)" == "error" ]] \
-  && pass "build: gemini + --allow-merge -> still refused (deprecated)" \
+  && pass "build: gemini node + --allow-merge -> still refused (deprecated)" \
   || fail "gemini allow-merge refused: $OUT"
 
 # claude build is unchanged: /target wrap + no-merge (payload_mode=build).
@@ -335,19 +340,21 @@ else
   fail "AC1-HP en-dash argv flag: $OUT"
 fi
 
-# AC1-ERR: a mangled flag surviving in the task TEXT fails loud, names the token,
-# suggests the shorthand. No spawn fields.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "fix the ${EMDASH}allow-merge handling")"
+# AC1-ERR: a mangled flag surviving in a DISPATCHED command (passthrough) fails
+# loud, names the token, suggests the shorthand. (A verbatim SEED is exempt - its
+# flag-shaped tokens are content - so the scan is exercised via a passthrough,
+# where a glued flag would corrupt the /target-family command that runs.)
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "/target fix the ${EMDASH}allow-merge handling")"
 if [[ "$(field "$OUT" status)" == "error" ]] \
    && printf '%s' "$OUT" | grep -q "${EMDASH}allow-merge" \
    && printf '%s' "$OUT" | grep -q -- "-m"; then
-  pass "AC1-ERR mangled flag in prose -> status=error, names token, suggests -m"
+  pass "AC1-ERR mangled flag in a passthrough -> status=error, names token, suggests -m"
 else
   fail "AC1-ERR mangled-flag prose: $OUT"
 fi
 
 # AC1-UI: the error message tells the operator how to re-send.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "${EMDASH}yes ship it")"
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "/target ${EMDASH}yes ship it")"
 if [[ "$(field "$OUT" status)" == "error" ]] \
    && printf '%s' "$OUT" | grep -qiE "re-send|separate"; then
   pass "AC1-UI error is actionable (re-send / separate hint)"
@@ -355,11 +362,13 @@ else
   fail "AC1-UI actionable error: $OUT"
 fi
 
-# AC1-EDGE: an out-of-vocabulary dash token in prose passes through untouched.
+# AC1-EDGE: a free-text SEED is sent VERBATIM - an out-of-vocabulary dash token
+# (and any flag-shaped token) passes untouched, no /target wrap (x-cbb0).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "support -v verbose output in the CLI")"
 if [[ "$(field "$OUT" status)" == "ok" ]] \
-   && [[ "$(field "$OUT" message)" == "/target support -v verbose output in the CLI no-merge" ]]; then
-  pass "AC1-EDGE out-of-vocabulary -v passes as prose, dispatch proceeds"
+   && [[ "$(field "$OUT" payload_mode)" == "seed" ]] \
+   && [[ "$(field "$OUT" message)" == "support -v verbose output in the CLI" ]]; then
+  pass "AC1-EDGE seed sent verbatim (out-of-vocabulary -v passes as content)"
 else
   fail "AC1-EDGE vocabulary scope: $OUT"
 fi
@@ -441,19 +450,21 @@ OUT="$(PATH="$STUB_FNO_ERR_DIR:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" b
 OUT="$(PATH="$STUB_FNO_TRUE_DIR:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude)"
 [[ "$(field "$OUT" message)" != *"no-merge"* ]] && pass "x-4391 allow posture: claude /target message omits no-merge" || fail "allow message no-merge: $OUT"
 
-# P2-2c (review): ask payloads are exempt from the vocabulary scan - a flag token
-# in a question is part of the prompt, not a mangled dispatch flag.
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --ask --input "what does grep -i do")"
+# P2-2c (x-cbb0): a free-text SEED is exempt from the vocabulary scan - a flag
+# token in verbatim conversational text is content, not a mangled dispatch flag
+# (this is the retired `ask` verb's exemption, now the default seed behavior).
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "what does grep -i do")"
 if [[ "$(field "$OUT" status)" == "ok" ]] \
+   && [[ "$(field "$OUT" payload_mode)" == "seed" ]] \
    && [[ "$(field "$OUT" message)" == "what does grep -i do" ]]; then
-  pass "P2-2c ask payload exempt from vocabulary scan (-i kept verbatim)"
+  pass "P2-2c seed exempt from vocabulary scan (-i kept verbatim)"
 else
   fail "P2-2c ask exemption: $OUT"
 fi
-# but a BUILD payload with the same token still fails loud (Locked Decision 5:
-# a known-vocabulary flag token in build prose is status=error, not silent prose).
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "make grep -i case insensitive")"
-[[ "$(field "$OUT" status)" == "error" ]] && pass "P2-2 build payload still fails loud on -i (Locked Decision 5)" || fail "build -i scan: $OUT"
+# but a DISPATCHED command (a node-id build) with the same glued token still fails
+# loud - a flag folded into the /target command line would corrupt it.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "ab-deadbeef -i")"
+[[ "$(field "$OUT" status)" == "error" ]] && pass "P2-2 node build still fails loud on a glued -i" || fail "build -i scan: $OUT"
 
 echo ""
 echo "test_agent_normalize: $PASS passed, $FAIL failed"

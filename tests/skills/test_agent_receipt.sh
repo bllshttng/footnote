@@ -465,27 +465,27 @@ else
   fail "ab-ca822421 gemini handoff route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
-# ---- provider-neutral discuss is a seeded, running pane -------------------
+# ---- a verbatim SEED is a seeded, running pane (x-cbb0: replaces `discuss`) ----
 reset_log
-discuss_seed='Compare the retry designs and wait for my follow-up.'
+seed_msg='Compare the retry designs and wait for my follow-up.'
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json discuss1 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name discuss-retries --provider codex --payload-mode discuss --message "$discuss_seed" --mode exec)"
+       run_spawn --name discuss-retries --provider codex --payload-mode seed --message "$seed_msg" --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=discuss1"* ]] \
-   && [[ "$OUT" == *"mode=discuss"* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
-   && grep -qF -- "$discuss_seed" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
+   && [[ "$OUT" == *"mode=seed"* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
+   && grep -qF -- "$seed_msg" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
-  pass "discuss codex -> seeded interactive pane"
+  pass "seed codex -> seeded interactive pane (mode=seed)"
 else
   fail "discuss codex route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json discuss2 gemini)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name discuss-retries-gemini --provider gemini --payload-mode discuss --message "$discuss_seed" --mode exec)"
-if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"mode=discuss"* ]] \
+       run_spawn --name discuss-retries-gemini --provider gemini --payload-mode seed --message "$seed_msg" --mode exec)"
+if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"mode=seed"* ]] \
    && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
-  pass "discuss gemini -> seeded interactive pane parity"
+  pass "seed gemini -> seeded interactive pane parity (mode=seed)"
 else
   fail "discuss gemini route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
@@ -583,84 +583,84 @@ else
 fi
 
 # ===========================================================================
-# US4 - ask mode -> `fno agents spawn --once` (Group 1 ab-8b3e4fe0)
+# US4 - one-shot Q&A -> `fno agents spawn --substrate headless` (x-cbb0)
 # ===========================================================================
-# `ask` never creates after Group 1, so the one-shot exchange the dispatch
-# skill's ask-mode performs lives on `spawn --once`: a client-side
-# `codex exec`/`gemini -p` whose stdout is the REPLY verbatim (the teardown
-# receipt rides stderr), NOT a short-id. claude has no --once (persistent bg
-# threads); claude ask-mode routes to plain `spawn` with the JSON receipt.
+# The retired `ask` verb's one-shot exchange is now the `headless` substrate: a
+# client-side `codex exec` / `gemini -p` / `claude -p` whose stdout is the REPLY
+# verbatim (the teardown receipt rides stderr), NOT a short-id. REPLY is driven by
+# `--substrate headless`, so all three providers now share this reply lane.
 
-# ---- AC4-HP: codex ask-mode -> reply receipt (the reply is the deliverable) -
+# ---- AC4-HP: codex headless -> reply receipt (the reply is the deliverable) -
 reset_log
 OUT="$(MOCK_SPAWN_OUT=$'Bubble sort is O(n^2) worst/average case,\nO(n) best case on a pre-sorted input.\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --payload-mode ask --message "what is bubble sort" --mode exec)"
+       run_spawn --name tgt-q --provider codex --substrate headless --message "what is bubble sort" --mode exec)"
 if [[ "$OUT" == *"result=replied"* ]] && [[ "$OUT" == *"Bubble sort is O(n^2)"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
-   && grep -q -- "--once" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
-  pass "AC4-HP codex ask-mode -> spawn --once reply receipt, no short-id, ask not called"
+   && grep -q -- "--substrate headless" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
+  pass "AC4-HP codex headless -> reply receipt, no short-id, ask not called"
 else
   fail "AC4-HP codex ask reply: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
-# ---- AC1-EDGE parity: gemini ask -> same reply receipt --------------------
+# ---- AC1-EDGE parity: gemini headless -> same reply receipt ----------------
 reset_log
 OUT="$(MOCK_SPAWN_OUT=$'The retry loop converges after K dry rounds.\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider gemini --payload-mode ask --message "how does retry converge" --mode exec)"
+       run_spawn --name tgt-q --provider gemini --substrate headless --message "how does retry converge" --mode exec)"
 if [[ "$OUT" == *"result=replied"* ]] && [[ "$OUT" == *"converges after K dry rounds"* ]] \
-   && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && grep -q -- "--once" "$SPAWN_LOG"; then
-  pass "gemini ask-mode -> spawn --once reply receipt parity"
+   && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && grep -q -- "--substrate headless" "$SPAWN_LOG"; then
+  pass "gemini headless -> reply receipt parity"
 else
   fail "gemini ask reply: $OUT"
 fi
 
-# ---- AC4-FR: codex ask exits 0 with an empty reply -> failed, never faked --
+# ---- AC4-FR: codex headless exits 0 with an empty reply -> failed, never faked
 reset_log
 OUT="$(MOCK_SPAWN_OUT="" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --payload-mode ask --message "what is bubble sort" --mode exec)"
+       run_spawn --name tgt-q --provider codex --substrate headless --message "what is bubble sort" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"empty reply"* ]] \
    && [[ "$OUT" != *"result=replied"* ]] && [[ "$OUT" != *"result=launched"* ]]; then
-  pass "AC4-FR codex ask empty reply (exit 0) -> failed, no fabricated answer"
+  pass "AC4-FR codex headless empty reply (exit 0) -> failed, no fabricated answer"
 else
   fail "AC4-FR codex ask empty: $OUT"
 fi
 
-# ---- codex ask whitespace-only reply -> failed (not a real answer) ---------
+# ---- codex headless whitespace-only reply -> failed (not a real answer) -----
 reset_log
 OUT="$(MOCK_SPAWN_OUT=$'   \n  \t\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --payload-mode ask --message "q" --mode exec)"
+       run_spawn --name tgt-q --provider codex --substrate headless --message "q" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"empty reply"* ]] && [[ "$OUT" != *"result=replied"* ]]; then
-  pass "codex ask whitespace-only reply -> failed"
+  pass "codex headless whitespace-only reply -> failed"
 else
   fail "codex ask whitespace reply: $OUT"
 fi
 
-# ---- codex ask nonzero exit -> failed + stderr (binary missing) ------------
+# ---- codex headless nonzero exit -> failed + stderr (binary missing) --------
 reset_log
 OUT="$(MOCK_SPAWN_ERR="codex: command not found" MOCK_SPAWN_RC=1 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --payload-mode ask --message "q" --mode exec)"
+       run_spawn --name tgt-q --provider codex --substrate headless --message "q" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"command not found"* ]] && [[ "$OUT" != *"result=replied"* ]]; then
-  pass "codex ask nonzero exit -> failed + stderr"
+  pass "codex headless nonzero exit -> failed + stderr"
 else
   fail "codex ask nonzero: $OUT"
 fi
 
-# ---- claude ask-mode routes to plain spawn (persistent bg; JSON receipt) ----
+# ---- claude headless -> `claude -p` one-shot reply (x-cbb0: claude now has a
+#      headless lane, so it shares the reply receipt with codex/gemini) --------
 reset_log
-OUT="$(MOCK_SPAWN_OUT="$(claude_receipt c1a0de77 tgt-q)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider claude --payload-mode ask --message "what is bubble sort" --mode exec)"
-if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=c1a0de77"* ]] \
-   && [[ "$OUT" != *"result=replied"* ]] && grep -q -- "spawn --provider claude" "$SPAWN_LOG" \
-   && ! grep -q -- "--once" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
-  pass "claude ask-mode -> plain spawn (backgrounds, JSON receipt), never --once"
+OUT="$(MOCK_SPAWN_OUT=$'Bubble sort is a comparison sort.\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+       run_spawn --name tgt-q --provider claude --substrate headless --message "what is bubble sort" --mode exec)"
+if [[ "$OUT" == *"result=replied"* ]] && [[ "$OUT" == *"Bubble sort is a comparison sort"* ]] \
+   && [[ "$OUT" != *"short_id="* ]] && grep -q -- "spawn --provider claude" "$SPAWN_LOG" \
+   && grep -q -- "--substrate headless" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
+  pass "claude headless -> claude -p reply receipt (shares the reply lane)"
 else
   fail "claude ask-mode: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
-# ---- claude spawn non-JSON / non-8-hex output -> failed ---------------------
+# ---- claude default spawn non-JSON / non-8-hex output -> failed -------------
 reset_log
 OUT="$(MOCK_SPAWN_OUT=$'deadbeefxyz\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider claude --payload-mode ask --message "what is X" --mode exec)"
+       run_spawn --name tgt-q --provider claude --payload-mode seed --message "what is X" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"short_id="* ]] && [[ "$OUT" != *"result=launched"* ]]; then
   pass "claude spawn non-JSON receipt -> failed"
 else

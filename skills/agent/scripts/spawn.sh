@@ -42,7 +42,7 @@ MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
 MODEL=""               # exact model name, forwarded as `spawn --model` (each
                        # provider's own --model). Empty = provider default.
 EFFORT=""              # reasoning effort forwarded as `spawn --effort`.
-PAYLOAD_MODE="build"   # build | ask | handoff | discuss | passthrough
+PAYLOAD_MODE="build"   # build (node-id /target) | seed | handoff | passthrough
 SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
                        # (JSON receipt); headless -> one-shot (reply receipt).
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
@@ -122,19 +122,15 @@ if [[ -z "$PROVIDER" ]]; then
 fi
 
 # ---- Verb selection (Locked Decisions 1 + 2; Group 1 ab-8b3e4fe0) -------
-# `ask` never creates (bus epic Group 1): creation is always spawn/host. claude
-# routes to `spawn` (client-side `claude --bg --name`, subscription lane, JSON
-# receipt); codex/gemini build dispatch routes to `spawn` (exec, autonomous) by
-# default and `host` (interactive, human-driven) under `-i`; ask-mode is the
-# one-shot exchange and routes to `spawn --once` (the old ask-create lineage,
-# reply on stdout + teardown receipt on stderr). A codex/gemini passthrough
-# never reaches here (normalize.sh refuses it); a claude passthrough runs the
-# slash command via `spawn`.
-ONCE=0
+# Creation is always spawn/host. claude routes to `spawn` (client-side `claude
+# --bg --name`, subscription lane, JSON receipt); a codex/gemini build/seed
+# routes to `spawn` (exec, autonomous) by default and `host` (interactive,
+# human-driven) under `-i`. A one-shot exchange is the `headless` substrate
+# (x-cbb0: subsumes the retired `ask` verb) -> `spawn --substrate headless`
+# (reply on stdout). A codex/gemini passthrough never reaches here (normalize.sh
+# refuses it); a claude passthrough runs the slash command via `spawn`.
 if [[ "$PROVIDER" == "claude" ]]; then
   VERB="spawn"
-elif [[ "$PAYLOAD_MODE" == "ask" ]]; then
-  VERB="spawn"; ONCE=1
 elif [[ "$MODE" == "interactive" ]]; then
   VERB="host"
 else
@@ -142,17 +138,17 @@ else
 fi
 
 # x-2c27: an explicit --substrate (bg|headless) always selects the spawn verb
-# (never host) and supersedes the --once ask alias. `headless` yields a one-shot
-# reply receipt (like --once); `bg` (and pane/default) yield the JSON short-id
-# receipt. REPLY drives the receipt-family branch below.
-REPLY=$ONCE
+# (never host). `headless` yields a one-shot reply receipt; `bg` (and pane/
+# default) yield the JSON short-id receipt. REPLY drives the receipt-family
+# branch below.
+REPLY=0
 if [[ -n "$SUBSTRATE" ]]; then
   VERB="spawn"
   [[ "$SUBSTRATE" == "headless" ]] && REPLY=1
 fi
 
 # A non-host launch needs a task; only a bare interactive host may be idle
-# (AC2-EDGE). Reject an empty exec/ask payload before any billed launch.
+# (AC2-EDGE). Reject an empty exec payload before any billed launch.
 if [[ -z "$MESSAGE" && "$VERB" != "host" ]]; then
   fail "missing --message (only a host/interactive launch may have an empty task)"
 fi
@@ -163,8 +159,8 @@ sanitize() { printf '%s' "$1" | tr '\n\r' '  ' | sed 's/"/'"'"'/g' | cut -c1-300
 # The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
 # reservation (Guard 2) live in `fno agents spawn-guard` so this path and the
 # /target bg path (skills/target/scripts/dispatch-node.sh) can never drift on
-# the part that matters. Only a NODE dispatch is guarded; a free-text / handoff
-# / discuss launch (no --node) skips the guard exactly as before. The verb does
+# the part that matters. Only a NODE dispatch is guarded; a free-text seed /
+# handoff launch (no --node) skips the guard exactly as before. The verb does
 # Guard 1 then Guard 2 in one process: a `dispatchable` verdict means it has
 # acquired dispatch:<node> for $RES_HOLDER (released on every non-launch path
 # via fail(); left to TTL-expire on a launch). Fail CLOSED: a stale `fno`
@@ -264,23 +260,29 @@ esac
 # deterministic per dispatch, so a re-spawn of the same node reuses it rather
 # than colliding (failure mode 3).
 AUTO_WT=""
-# A payload writes code (and so wants isolation) when it is a build dispatch OR
-# an explicit claude /target|/do|/fix passthrough. Keying off PAYLOAD_MODE -- not
-# only the message prefix -- is load-bearing: a codex/gemini build reaches here
-# as a prose brief ("Implement backlog node ...", normalize.sh build case), never
-# a literal /target, and those workers have NO location gate, so a prefix-only
-# check would leave them editing a protected main checkout -- the exact harm this
-# guards against. ask/handoff/discuss (one-shot / doc / chat) and a non-code
-# claude slash command (/think writes a design doc) are NOT code payloads.
+# A payload writes code (and so wants isolation) when it is a node-id build
+# dispatch OR an explicit /target|/do|/fix passthrough. Keying off PAYLOAD_MODE --
+# not only the message prefix -- is load-bearing: an opencode/codex node build
+# reaches here as `/fno:target ab-xxxx` / `$fno:target ab-xxxx`, not a literal
+# /target, and those workers have NO location gate, so a prefix-only check would
+# leave them editing a protected main checkout -- the exact harm this guards
+# against. The passthrough arm matches the SAME per-harness namespacing: an
+# explicit `/target`|`/do`|`/fix` reaches here verbatim on claude/agy but as
+# `/fno:target` (opencode) / `$fno:target` (codex), so all three renderings must
+# isolate. seed (verbatim conversational pane) and handoff (a doc continuation)
+# and a non-code claude slash command (/think writes a design doc) are NOT code
+# payloads.
 is_code_payload() {
   case "$PAYLOAD_MODE" in
-    build) return 0 ;;  # claude `/target` wrap OR codex/gemini "Implement ..." brief
-    passthrough)        # claude-only verbatim slash command; isolate only code verbs
+    build) return 0 ;;  # node-id dispatch: /target|/fno:target|$fno:target <id>
+    passthrough)        # explicit slash command; isolate only code verbs
       case "$MESSAGE" in
         /target|/target\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
+        /fno:target|/fno:target\ *|/fno:do|/fno:do\ *|/fno:fix|/fno:fix\ *) return 0 ;;
+        '$fno:target'|'$fno:target '*|'$fno:do'|'$fno:do '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
         *) return 1 ;;
       esac ;;
-    *) return 1 ;;      # ask | handoff | discuss
+    *) return 1 ;;      # seed | handoff
   esac
 }
 maybe_auto_worktree() {
@@ -364,13 +366,9 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 [[ -n "$AGENT" ]] && cmd+=(--agent "$AGENT")
 [[ -n "$TOOLS" ]] && cmd+=(--tools "$TOOLS")
 [[ -n "$DENY_TOOLS" ]] && cmd+=(--deny-tools "$DENY_TOOLS")
-# x-2c27: an explicit substrate emits --substrate (the canonical selector) and
-# supersedes the --once alias; otherwise the ask lane keeps --once.
-if [[ -n "$SUBSTRATE" ]]; then
-  cmd+=(--substrate "$SUBSTRATE")
-elif [[ "$ONCE" -eq 1 ]]; then
-  cmd+=(--once)
-fi
+# x-2c27: an explicit substrate emits --substrate (the canonical selector); the
+# `headless` value carries the one-shot lane the retired `ask` verb used to.
+[[ -n "$SUBSTRATE" ]] && cmd+=(--substrate "$SUBSTRATE")
 # x-84a8: forward the node so a node-driven pane spawn exports FNO_NODE/SLUG/PLAN
 # provenance (the verb resolves slug/plan from the graph). Ad-hoc spawns have no
 # --node and export nothing new. Harmless on bg/headless (the verb ignores it).
@@ -392,8 +390,8 @@ fi
 # ---- Honest receipt (the cardinal guard) --------------------------------
 # Receipt family is keyed by the VERB/mode the skill ran (never by sniffing
 # the output - Locked Decision 3):
-#   spawn --once         -> a CLIENT-SIDE one-shot (`codex exec` / `gemini -p`,
-#                          the old ask-create lineage, Group 1 ab-8b3e4fe0):
+#   --substrate headless -> a CLIENT-SIDE one-shot (`codex exec` / `gemini -p`,
+#                          the lane the retired `ask` verb used, x-cbb0):
 #                          stdout is the model REPLY verbatim, NOT a short-id
 #                          (the teardown receipt rides stderr). Success = rc==0
 #                          (checked above) AND a non-empty reply; the reply IS
@@ -445,7 +443,7 @@ else
   # `.short_id` value - e.g. `{"short_id":"junk\ndeadbeef"}` or a banner leaking
   # into the value - must NOT pass on one of its lines being valid. `[[ =~ ]]`
   # anchors `^...$` to the whole string, so any embedded newline or stray byte
-  # fails (parity with the ask path's single-line requirement). bash 3.2 safe.
+  # fails (parity with the one-shot path's single-line requirement). bash 3.2 safe.
   #
   # The valid SHAPE depends on the substrate (x-61b7). Only `bg`/`headless` return
   # a real 8-hex session-id prefix (client-side `claude --bg` / one-shot). The
@@ -477,7 +475,7 @@ else
   wt_field=""; [[ -n "$AUTO_WT" ]] && wt_field=" cwd=\"$AUTO_WT\""
   report_mode="exec"
   [[ "$PAYLOAD_MODE" == "handoff" ]] && report_mode="spawn"
-  [[ "$PAYLOAD_MODE" == "discuss" ]] && report_mode="discuss"
+  [[ "$PAYLOAD_MODE" == "seed" ]] && report_mode="seed"
   if [[ -n "$PANE_SESSION" ]]; then
     # Pane worker: observe via mux, not `fno agents logs` (a pane row has no
     # log_path). Surface the coordinates and quote the ref (a session name may

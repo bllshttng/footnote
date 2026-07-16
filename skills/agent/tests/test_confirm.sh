@@ -87,9 +87,13 @@ if printf '%s' "$out" | grep -qi "fno update"; then PASS=$((PASS+1)); else FAIL=
 out="$(run "$R_TYPO" --node ab-deadbeef --provider claude --payload-mode build --mode exec)"
 ok 'invalid enum (typo) -> no confirm (auto), never silently confirms' "$(field "$out" confirm_required)" '0'
 
-# --- ask payload never confirms ------------------------------------------------
-out="$(run "$R_ALWAYS" --provider codex --payload-mode ask --mode exec)"
-ok 'ask never confirms even under always' "$(field "$out" confirm_required)" '0'
+# --- a free-text seed confirms under `always` (x-cbb0: the retired `ask` verb's
+#     never-confirm carve-out is gone; `always` confirms every free lane) --------
+out="$(run "$R_ALWAYS" --provider codex --payload-mode seed --mode exec)"
+ok 'seed confirms under always (no ask carve-out)' "$(field "$out" confirm_required)" '1'
+# under the default `auto` posture a seed still does not confirm (free lane)
+out="$(run "$R_AUTO" --provider codex --payload-mode seed --mode exec)"
+ok 'seed does not confirm under auto' "$(field "$out" confirm_required)" '0'
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
