@@ -206,7 +206,17 @@ def _worktree_ensure(
         )
         return 1
 
-    wt = pol.base / top.name / name
+    # harness-native + claude lands at the harness's own gitignored location
+    # (<repo>/.claude/worktrees/<name>), fno-created / fno-reaped. The resolver
+    # keeps `harness-native` ONLY for a claude harness (else it already degraded
+    # to `external`), so this is the claude-native default flip; `external` (and
+    # any degraded harness-native) uses the config-driven base. The `harness ==
+    # "claude"` guard is defensive against a future native harness (codex Phase 2)
+    # whose location differs -- it must not route through `.claude/worktrees/`.
+    if pol.policy == "harness-native" and harness == "claude":
+        wt = top / ".claude" / "worktrees" / name
+    else:
+        wt = pol.base / top.name / name
 
     # Idempotent reuse: an existing registered worktree rooted at wt -> reuse.
     if wt.exists():
@@ -218,6 +228,11 @@ def _worktree_ensure(
             and wt_top.returncode == 0
             and Path(wt_top.stdout.strip()).resolve() == wt.resolve()
         ):
+            typer.echo(
+                f"worktree ensure: policy={pol.policy} ({pol.project}); "
+                f"reusing worktree at {wt}",
+                err=True,
+            )
             typer.echo(str(wt))
             return 0
         # Exists but is NOT our worktree: never clobber a stray dir.
@@ -252,6 +267,13 @@ def _worktree_ensure(
     # (and forcing it to fail-on-bare-install would break the "best-effort,
     # never fail the ensure" contract). The in-repo skill callers
     # (dispatch-node.sh, spawn.sh, /do) run setup-worktree.sh after ensure.
+    # One stderr receipt naming the resolved mode + path (AC: every spawn names its
+    # location, incl. a harness-native->external degradation - the resolver already
+    # collapsed a non-native harness to `external`, so pol.policy is the true mode).
+    typer.echo(
+        f"worktree ensure: policy={pol.policy} ({pol.project}); worktree at {wt}",
+        err=True,
+    )
     typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt
     return 0
 

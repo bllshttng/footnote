@@ -654,13 +654,24 @@ for id in "${NODES[@]}"; do
     spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
-    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
+    # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
+    # so forward it as --harness: a claude bg dispatch lands harness-native at
+    # <repo>/.claude/worktrees/, a non-native harness degrades to external.
+    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null)"
     if [[ -n "$wt" ]]; then
-      # Link gitignored shared state into the new worktree (footnote-ecosystem
-      # only; absent -> skip). Caller-side because the verb is package code and
-      # may not shell out to a repo-root script (shellout-drift gate).
-      _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
-      [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
+      # policy=never returns the repo root: launch in place, but SKIP setup - it
+      # links shared state INTO the canonical checkout (Locked Decision 4: guard
+      # worktree-only side effects on path == repo root). Compare physical paths
+      # (ensure prints the resolved root; CANONICAL_ROOT is not phys-resolved).
+      _wt_phys="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+      _root_phys="$(cd "$CANONICAL_ROOT" 2>/dev/null && pwd -P || printf '%s' "$CANONICAL_ROOT")"
+      if [[ "$_wt_phys" != "$_root_phys" ]]; then
+        # Link gitignored shared state into the new worktree (footnote-ecosystem
+        # only; absent -> skip). Caller-side because the verb is package code and
+        # may not shell out to a repo-root script (shellout-drift gate).
+        _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
+        [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
+      fi
       spawn_out="$(fno agents spawn --provider "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else

@@ -419,3 +419,103 @@ def test_work_start_dispatch_non_fatal_on_missing_manifest(tmp_path, monkeypatch
 
     monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
     target_cli._maybe_dispatch_work_start()  # must not raise
+
+
+def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, monkeypatch):
+    """A `never` project: ensure returns the repo root, so `fno target start`
+    launches in place, forwards --harness claude, and does NOT run the setup hook
+    on the canonical checkout (Locked Decision 4: no worktree-only side effect on
+    path == repo root, which would corrupt canonical .fno)."""
+    import subprocess as _real_subprocess
+    from fno.harness_identity import HarnessIdentity
+
+    repo = tmp_path / "vault"
+    repo.mkdir()
+    _real_subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+    _real_subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "init"], check=True
+    )
+    monkeypatch.chdir(repo)
+
+    seen = {"ensure": None, "setup_called": False, "init": False}
+    real_run = _real_subprocess.run
+
+    def _dispatch(cmd, *a, **k):
+        cmd = list(cmd)
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, *a, **k)
+        if "ensure" in cmd:  # simulate policy=never: repo root on stdout, exit 0
+            seen["ensure"] = cmd
+            return _real_subprocess.CompletedProcess(cmd, 0, stdout=f"{repo.resolve()}\n", stderr="")
+        seen["init"] = True  # target init
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
+    )
+
+    def _setup_hook(*a, **k):
+        seen["setup_called"] = True
+        return (0, "")
+
+    monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", _setup_hook)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
+
+    result = runner.invoke(app, ["target", "start", "x-nev"])
+    assert result.exit_code == 0, result.output
+    assert seen["ensure"] is not None
+    assert "--harness" in seen["ensure"] and "claude" in seen["ensure"]
+    assert seen["init"] is True                     # init still runs, in place
+    assert seen["setup_called"] is False            # canonical .fno never touched
+    assert "base=in-place" in result.output
+
+
+def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkeypatch):
+    """In-place (policy=never) uses the SHARED canonical .fno, so a manifest for a
+    DIFFERENT node must refuse rather than report already-claimed and run under
+    another node's session state."""
+    import subprocess as _real_subprocess
+    from fno.harness_identity import HarnessIdentity
+
+    repo = tmp_path / "vault"
+    repo.mkdir()
+    _real_subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+    _real_subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "init"], check=True
+    )
+    # a manifest belonging to a DIFFERENT node already in the canonical .fno
+    (repo / ".fno").mkdir()
+    (repo / ".fno" / "target-state.md").write_text("---\ngraph_node_id: x-other\n---\n")
+    monkeypatch.chdir(repo)
+
+    seen = {"init": False}
+    real_run = _real_subprocess.run
+
+    def _dispatch(cmd, *a, **k):
+        cmd = list(cmd)
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, *a, **k)
+        if "ensure" in cmd:  # never -> repo root
+            return _real_subprocess.CompletedProcess(cmd, 0, stdout=f"{repo.resolve()}\n", stderr="")
+        seen["init"] = True
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
+    )
+    monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda n: None)
+
+    result = runner.invoke(app, ["target", "start", "x-nev"])
+    assert result.exit_code == 1                    # refused, not already-claimed
+    assert seen["init"] is False                    # never ran init under x-other
+    combined = result.output + (getattr(result, "stderr", "") or "")
+    assert "x-other" in combined

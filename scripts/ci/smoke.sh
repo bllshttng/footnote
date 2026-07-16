@@ -81,7 +81,8 @@ bash tests/hooks/test_worktree_write_protect.sh
 bash tests/hooks/test_worktree_harness_guard.sh
 bash tests/hooks/test_setup_nudge_session_start.sh
 bash tests/hooks/test_init_target_session_id.sh
-bash tests/hooks/test_agy_stop_hook.sh'
+bash tests/hooks/test_agy_stop_hook.sh
+bash tests/hooks/test_check_impl_location.sh'
     step "in_review dispatch guard (x-2dc5)" "." 'bash tests/hooks/test_init_in_review_gate.sh'
     step "born-with-why offer inject hook harness" "." 'bash tests/hooks/test_born_with_why_offer_inject.sh'
     step "eval-sweep hygiene harness (x-dbdf: canonical stamp + singleton + timeout)" "." 'bash tests/hooks/test_eval_sweep_session_start.sh'

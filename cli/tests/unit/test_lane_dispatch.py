@@ -38,10 +38,10 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
 
     calls: dict = {"worktrees": [], "spawns": []}
 
-    def fake_ensure(node_id, *, canonical_root):
+    def fake_ensure(node_id, *, canonical_root, harness="claude"):
         wt = tmp_path / "wt" / node_id
         (wt / ".fno").mkdir(parents=True, exist_ok=True)
-        calls["worktrees"].append(node_id)
+        calls["worktrees"].append((node_id, harness))
         return wt
 
     def fake_spawn(node_id, cwd, slug, model=None, provider=None, **kwargs):
@@ -53,6 +53,21 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     monkeypatch.setattr(advance, "_ensure_lane_worktree", fake_ensure)
     monkeypatch.setattr(advance, "_spawn_worker", fake_spawn)
     return calls
+
+
+def test_lane_harness_resolution():
+    """The lane worktree harness: an explicit non-claude harness keeps its own
+    (-> external base); claude, a claude account record (ccm/ccr), z.ai/glm, and
+    an empty/None provider all resolve to claude (-> harness-native)."""
+    assert advance._lane_harness(None) == "claude"
+    assert advance._lane_harness("") == "claude"
+    assert advance._lane_harness("claude") == "claude"
+    assert advance._lane_harness("ccm") == "claude"
+    assert advance._lane_harness("ccr") == "claude"
+    assert advance._lane_harness("glm") == "claude"
+    assert advance._lane_harness("codex") == "codex"
+    assert advance._lane_harness("gemini") == "gemini"
+    assert advance._lane_harness("opencode") == "opencode"
 
 
 def test_dispatch_spawns_one_isolated_worker_per_distinct_domain_lane(
@@ -68,7 +83,9 @@ def test_dispatch_spawns_one_isolated_worker_per_distinct_domain_lane(
     # Distinct-domain selection -> n-a (code) + n-c (docs); n-b (dup code) queued.
     assert [r["node_id"] for r in receipts] == ["n-a", "n-c"]
     assert all(r["status"] == "dispatched" for r in receipts)
-    assert calls["worktrees"] == ["n-a", "n-c"]
+    # (node_id, harness): no node carries a provider, so the lane worktree is
+    # isolated with the claude default harness (harness-native placement).
+    assert calls["worktrees"] == [("n-a", "claude"), ("n-c", "claude")]
     # Each worker is rooted in its OWN lane worktree (--cwd = the ensured path).
     for node_id, cwd, _slug in calls["spawns"]:
         assert cwd == str(tmp_path / "wt" / node_id)

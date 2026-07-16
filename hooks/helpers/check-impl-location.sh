@@ -126,5 +126,16 @@ while IFS= read -r _line; do
 done <<< "$_wt_list"
 _nested_count=${#_nested_paths[@]}
 
+# A per-project `never` worktree policy means working on the canonical checkout
+# IS the policy (an Obsidian vault whose working tree is the product), so the
+# protected-branch gate must not refuse it. Consult the SAME resolver ensure uses
+# (`fno worktree policy`); its `never` receipt is exactly `never` (non-never adds a
+# `base=` line), so exact-match needs no `head`/pipe. Fail CLOSED (empty != never).
+if [[ "$_verdict" == "canonical-protected" ]] && command -v fno >/dev/null 2>&1; then
+  if [[ "$(fno worktree policy --repo "$_root" 2>/dev/null)" == "never" ]]; then
+    _verdict="ok"
+  fi
+fi
+
 _emit
 exit 0

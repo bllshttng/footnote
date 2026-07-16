@@ -115,6 +115,40 @@ SIB="$TMP_BASE/sibling-clean"
 OUT="$(run_helper "$SIB")"
 [[ "$(val "$OUT" nested_count)" == "0" ]] && pass "nested_count=0 from a worktree with no .claude/worktrees/ under it" || fail "nested_count was '$(val "$OUT" nested_count)'"
 
+# --- per-project `never` policy flips canonical-protected -> ok -------------
+# The verdict consults `fno worktree policy`; a `never` project (working tree IS
+# the product) is legitimately worked on its canonical branch. Stub fno so the
+# case is hermetic and independent of the resolver (covered in test_worktree_ensure).
+echo ""
+echo "--- never policy flips protected -> ok ---"
+mk_fno_stub() { # <dir> <policy-line-or-'error'>
+    mkdir -p "$1"
+    if [[ "$2" == "error" ]]; then
+        printf '#!/usr/bin/env bash\n[[ "$1 $2" == "worktree policy" ]] && exit 1\nexit 0\n' > "$1/fno"
+    else
+        printf '#!/usr/bin/env bash\n[[ "$1 $2" == "worktree policy" ]] && { printf %s\\\\n "%s"; exit 0; }\nexit 0\n' "$2" > "$1/fno"
+    fi
+    chmod +x "$1/fno"
+}
+mk_fno_stub "$TMP_BASE/stub-never" never
+T="$TMP_BASE/never-canon"; make_repo "$T" main
+OUT="$( cd "$T" && PATH="$TMP_BASE/stub-never:$PATH" bash "$HELPER" )"
+[[ "$(val "$OUT" verdict)" == "ok" ]] && pass "never policy flips protected -> ok" || fail "verdict was '$(val "$OUT" verdict)'"
+
+echo ""
+echo "--- non-never policy leaves protected intact ---"
+mk_fno_stub "$TMP_BASE/stub-hn" harness-native
+T="$TMP_BASE/hn-canon"; make_repo "$T" main
+OUT="$( cd "$T" && PATH="$TMP_BASE/stub-hn:$PATH" bash "$HELPER" )"
+[[ "$(val "$OUT" verdict)" == "canonical-protected" ]] && pass "harness-native leaves protected intact" || fail "verdict was '$(val "$OUT" verdict)'"
+
+echo ""
+echo "--- policy verb error stays fail-closed to protected ---"
+mk_fno_stub "$TMP_BASE/stub-err" error
+T="$TMP_BASE/err-canon"; make_repo "$T" main
+OUT="$( cd "$T" && PATH="$TMP_BASE/stub-err:$PATH" bash "$HELPER" )"
+[[ "$(val "$OUT" verdict)" == "canonical-protected" ]] && pass "policy error stays protected" || fail "verdict was '$(val "$OUT" verdict)'"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

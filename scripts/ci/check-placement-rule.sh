@@ -139,6 +139,7 @@ cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
 cli/src/fno/backlog/advance.py
+cli/src/fno/backlog/batch.py
 cli/src/fno/claims/session_pid.py
 cli/src/fno/cost/_register.py
 cli/src/fno/cost/_session_cost.py
@@ -167,6 +168,7 @@ cli/src/fno/setup_cli.py
 cli/src/fno/setup/integration.py
 cli/src/fno/setup/recommended_rules.py
 cli/src/fno/setup/test_recommended_rules.py
+cli/src/fno/target_cli.py
 cli/src/fno/test_sigma_dispatch.py
 cli/src/fno/test_worktree_paths.py
 cli/src/fno/update.py
