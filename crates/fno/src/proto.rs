@@ -162,7 +162,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// row's lifecycle through `claude stop|rm <attach_id>` keyed by stable attach
 /// id, gated by a durable generation-checked compare-and-set in `squads.json`
 /// (`external_lifecycle` collection).
-pub const PROTO_VERSION: u32 = 30;
+///
+/// v31 (x-c914): the account-scoped dispatch verbs carry the client's
+/// session-local active account. `ClientMsg::DispatchNext { account }` and
+/// `Command::DispatchNode { node, account }` append `--account <id>` to the
+/// server's `fno dispatch one` shell so a mux-initiated spawn bills the chosen
+/// claude account; `None` = today's default (no flag). `AgentRow { account }`
+/// carries the birth/roster account for the sideline glyph.
+pub const PROTO_VERSION: u32 = 31;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -272,7 +279,12 @@ pub enum ClientMsg {
     /// server shells the Python porcelain off the core loop, and the outcome
     /// (no ready work / lanes full / failure) returns as a one-line `Notice`.
     /// A read-only observer client is refused at the core (mutating_sender).
-    DispatchNext,
+    /// (v31, x-c914) `account` is the client's session-local active account,
+    /// appended as `--account <id>` to the spawn; `None` = the default account.
+    DispatchNext {
+        #[serde(default)]
+        account: Option<String>,
+    },
     /// (v9, x-c929) Answer a blocked prompt from the queue without focusing it.
     /// `keystroke` is the exact bytes the daemon pinned for the chosen option
     /// (never client-fabricated); `fingerprint`/`region_lines` name the region
@@ -526,6 +538,13 @@ pub struct AgentRow {
     /// v24 reader wire-tolerant (defaults false).
     #[serde(default)]
     pub tombstone: bool,
+    /// (v31, x-c914) The claude account this row bills, for the sideline
+    /// account glyph: an isolated-account roster row's structural tag, or a
+    /// mux-spawned pane's `FNO_ACCOUNT` birth account. `None` = the default
+    /// `~/.claude` account (no glyph). `#[serde(default)]` keeps a v30 reader
+    /// wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -653,7 +672,13 @@ pub enum Command {
     /// bounces `already-dispatching`), and the "read-only observer refused"
     /// guarantee all hold exactly as leader+g. Value over `DispatchNext`: the
     /// operator picks WHICH card, not just "next".
-    DispatchNode(String),
+    /// (v31, x-c914) `account` rides the same session-local active-account
+    /// passthrough as `DispatchNext`; `None` = the default account.
+    DispatchNode {
+        node: String,
+        #[serde(default)]
+        account: Option<String>,
+    },
     /// (v16) Create a NAMED squad (a workspace) explicitly, bypassing the
     /// attach cwd-resolution path entirely (Unit 2). The server rejects a
     /// blank/whitespace-only `name` with a notice (nothing created); otherwise
@@ -1563,7 +1588,10 @@ mod tests {
             ClientMsg::Command(Command::SelectSquad(42)),
             ClientMsg::Command(Command::FocusPane(3)),
             ClientMsg::Command(Command::attach_agent("c19cd2c3")),
-            ClientMsg::Command(Command::DispatchNode("x-a496".into())),
+            ClientMsg::Command(Command::DispatchNode {
+                node: "x-a496".into(),
+                account: None,
+            }),
             ClientMsg::Query,
             ClientMsg::KillServer,
             ClientMsg::Mouse {
@@ -1766,6 +1794,7 @@ mod tests {
                         cwd_base: None,
                         tombstone: false,
                         tab: None,
+                        account: None,
                     },
                     AgentRow {
                         squad: None,
@@ -1781,6 +1810,7 @@ mod tests {
                         cwd_base: None,
                         tombstone: false,
                         tab: None,
+                        account: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),

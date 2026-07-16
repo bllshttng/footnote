@@ -57,6 +57,12 @@ def cmd_one(
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Scope the default selection to a project."
     ),
+    account: Optional[str] = typer.Option(
+        None,
+        "--account",
+        help="Pin the spawned worker to a registered claude account (x-d012 "
+        "overlay); the mux passes its session-local active account here.",
+    ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit a one-line JSON verdict."
     ),
@@ -67,7 +73,7 @@ def cmd_one(
     Exit 0 for the first three (a full cap / empty backlog is not an error the
     caller retries); exit 1 for ``failed``.
     """
-    verdict = _dispatch_one(session=session, node=node, project=project)
+    verdict = _dispatch_one(session=session, node=node, project=project, account=account)
     if json_output:
         typer.echo(json.dumps(verdict))
     else:
@@ -185,8 +191,27 @@ def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Opti
 
 
 def _dispatch_one(
-    *, session: str, node: Optional[str], project: Optional[str]
+    *,
+    session: str,
+    node: Optional[str],
+    project: Optional[str],
+    account: Optional[str] = None,
 ) -> dict:
+    # 0. Resolve the account overlay CLI-side (x-d012 owns the resolver + the
+    #    stale/missing-account refusal). A bad account fails the verdict here
+    #    rather than silently spawning under the wrong (default) account (AC2-ERR).
+    account_env: Optional[dict[str, str]] = None
+    if account:
+        from fno.agents.account_env import (
+            AccountResolutionError,
+            resolve_account_overlay,
+        )
+
+        try:
+            account_env = resolve_account_overlay(account).env
+        except AccountResolutionError as exc:
+            return {"outcome": "failed", "detail": f"--account {account}: {str(exc)[:180]}"}
+
     # 1. Select the node: explicit --node, else the board's next ready one.
     if node:
         rec = _lookup_node(node)
@@ -270,6 +295,7 @@ def _dispatch_one(
             cwd=workdir,
             session=session,
             provenance=resolve_provenance(node_id, slug),
+            account_env=account_env,
         )
     except Exception as exc:  # noqa: BLE001 - DispatchAskError or any spawn error
         release_lane_slot(node_id)

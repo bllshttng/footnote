@@ -112,6 +112,13 @@ pub enum ConnIntent {
     /// PaneRun front door - zero proto bump). Not single-flight/re-read: it opens
     /// a pane and returns; the modal marks the id pending-login locally.
     SpawnLogin(Vec<String>),
+    /// (x-c914) Set the client's session-local active account to the carried
+    /// value (the post-toggle state: `Some(id)`, or `None` when toggled off).
+    /// Shells NOTHING - the client mirrors this into its own `active_account`
+    /// so later spawns append `--account`. Distinct from the `use` verb (the
+    /// global credential slot-swap); this only routes NEW spawns (Locked
+    /// Decision 1).
+    SetActiveAccount(Option<String>),
 }
 
 /// A session-local pending login: a wizard spawned its login pane but register
@@ -275,6 +282,12 @@ pub struct ConnectionsView {
     /// Generation token, bumped per open/refresh so a read landing after a newer
     /// refresh (or a close) is discarded.
     pub gen: u64,
+    /// (x-c914) The client's session-local active account, mirrored here for the
+    /// "active for spawns" marker. Seeded from the client on open and re-set by
+    /// the set-active toggle (`act_set_active`); the client reads the yielded
+    /// `SetActiveAccount` intent back into its own authoritative copy. Never a
+    /// credential mutation (Locked Decisions 1-2).
+    pub active_account: Option<String>,
 }
 
 impl ConnectionsView {
@@ -296,7 +309,17 @@ impl ConnectionsView {
             wizard: None,
             pending: Vec::new(),
             gen: 0,
+            active_account: None,
         }
+    }
+
+    /// (x-c914) Seed the "active for spawns" marker from the client's current
+    /// session-local active account when the modal opens, so the marker is
+    /// correct on first paint (the client owns the authoritative value across
+    /// modal open/close).
+    pub fn with_active_account(mut self, account: Option<String>) -> Self {
+        self.active_account = account;
+        self
     }
 
     /// The combo the Order-tab cursor is on, if any.
@@ -428,6 +451,7 @@ impl ConnectionsView {
             b'j' => self.move_sel(1),
             b'k' => self.move_sel(-1),
             b'u' => self.act_use(),
+            b's' => self.act_set_active(),
             b'd' => self.act_remove(),
             b'a' => {
                 self.wizard = Some(Wizard {
@@ -668,6 +692,30 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec!["providers".into(), "use".into(), id])
+    }
+
+    /// `s`: set the selected account as the session-local active account for
+    /// NEW spawns (distinct from `u`se, the global credential slot-swap - Locked
+    /// Decision 1). Toggle: pressing it on the already-active account clears
+    /// back to the default (`None`). NOT single-flight-guarded (it mutates no
+    /// credential and shells nothing); a non-account row bells. Always repaints
+    /// the marker (AC1-UI: no zero-feedback keypress). Yields the post-toggle
+    /// value so the client mirrors it into its authoritative `active_account`.
+    fn act_set_active(&mut self) -> ConnIntent {
+        let Some(acct) = self.selected_account() else {
+            return ConnIntent::Bell;
+        };
+        let id = acct.id.clone();
+        self.active_account = if self.active_account.as_deref() == Some(id.as_str()) {
+            None // toggle off: back to the default account
+        } else {
+            Some(id)
+        };
+        self.notice = Some(match &self.active_account {
+            Some(id) => format!("spawns now bill {id}"),
+            None => "spawns back to default account".to_string(),
+        });
+        ConnIntent::SetActiveAccount(self.active_account.clone())
     }
 
     /// `d`: stage a remove confirm for the selected account.
@@ -965,13 +1013,21 @@ impl ConnectionsView {
         for (i, a) in self.accounts.iter().enumerate() {
             let cursor = if i == self.acct_sel { ">" } else { " " };
             let badge = if a.active { "●" } else { " " };
+            // (x-c914) A distinct billing marker for the active-for-spawns
+            // account, kept separate from the global-active `●` (Locked
+            // Decision 1). Always a column so alignment never shifts.
+            let spawn = if self.active_account.as_deref() == Some(a.id.as_str()) {
+                "$"
+            } else {
+                " "
+            };
             let snap = a
                 .snapshot
                 .as_deref()
                 .map(|s| format!("  snap={s}"))
                 .unwrap_or_default();
             out.push(format!(
-                "{cursor}{badge} {id}  [{cli}] {auth}  {headroom}{snap}",
+                "{cursor}{badge}{spawn} {id}  [{cli}] {auth}  {headroom}{snap}",
                 id = a.id,
                 cli = a.cli,
                 auth = a.auth,
@@ -984,7 +1040,7 @@ impl ConnectionsView {
             let idx = self.accounts.len() + j;
             let cursor = if idx == self.acct_sel { ">" } else { " " };
             out.push(format!(
-                "{cursor}  {id}  [{cli}] …login pending  (r: register)",
+                "{cursor}   {id}  [{cli}] …login pending  (r: register)",
                 id = p.id,
                 cli = p.cli,
             ));
@@ -1082,7 +1138,7 @@ impl ConnectionsView {
     fn footer(&self) -> String {
         match self.tab {
             Tab::Accounts => {
-                "Tab: order  j/k: move  u: use  d: remove  a: add  r: register  R: refresh  Esc: close"
+                "Tab: order  j/k: move  u: use  s: spawn-acct  d: remove  a: add  r: register  R: refresh  Esc: close"
                     .to_string()
             }
             Tab::Order => {
@@ -1309,6 +1365,57 @@ mod tests {
         assert!(out.contains("●")); // active badge on ccm
         assert!(out.contains("unknown")); // glm headroom shown, not hidden
         assert!(out.contains("snap=2h"));
+    }
+
+    // x-c914 piece 1: set-active-account (`s`) is a session-local spawn-routing
+    // toggle, distinct from `use` (the global slot-swap). AC1-HP / AC1-UI / AC1-ERR.
+    #[test]
+    fn set_active_marks_and_routes_new_spawns(/* AC1-HP + AC1-UI */) {
+        let mut v = ready_view();
+        v.acct_sel = 1; // ccr, NOT the globally-active ccm
+        let id = v.accounts[1].id.clone();
+        let intent = v.on_key(b's');
+        assert_eq!(intent, ConnIntent::SetActiveAccount(Some(id.clone())));
+        assert_eq!(v.active_account.as_deref(), Some(id.as_str()));
+        // The billing marker repaints immediately (no zero-feedback keypress).
+        assert!(v.render().join("\n").contains('$'));
+    }
+
+    #[test]
+    fn set_active_toggles_back_to_default(/* AC1-UI toggle-off */) {
+        let mut v = ready_view();
+        v.acct_sel = 1;
+        v.on_key(b's'); // set ccr active for spawns
+        let off = v.on_key(b's'); // same row again -> clear to default
+        assert_eq!(off, ConnIntent::SetActiveAccount(None));
+        assert_eq!(v.active_account, None);
+    }
+
+    #[test]
+    fn set_active_on_non_account_row_bells(/* AC1-ERR */) {
+        let mut v = ready_view();
+        v.pending.push(PendingLogin {
+            id: "x".into(),
+            cli: "claude".into(),
+            dir: String::new(),
+        });
+        v.acct_sel = v.accounts.len(); // the synthetic pending row (not an account)
+        assert_eq!(v.on_key(b's'), ConnIntent::Bell);
+        assert!(v.active_account.is_none());
+    }
+
+    #[test]
+    fn seeded_active_account_paints_marker_on_open() {
+        // The client seeds the modal with its current active account so the
+        // marker is correct on first paint (survives modal close/reopen).
+        let id = sample_accounts()[0].id.clone();
+        let mut v = ConnectionsView::new().with_active_account(Some(id.clone()));
+        v.apply_read(ReadOutcome::Ok {
+            accounts: sample_accounts(),
+            combos: sample_combos(),
+        });
+        assert!(v.render().join("\n").contains('$'));
+        assert_eq!(v.active_account.as_deref(), Some(id.as_str()));
     }
 
     #[test]

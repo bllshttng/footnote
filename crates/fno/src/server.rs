@@ -319,6 +319,9 @@ enum CoreMsg {
     /// no-work / lanes-full / failure outcomes come back as `DispatchResult`.
     DispatchNext {
         id: u64,
+        /// (x-c914) The requesting client's session-local active account, so
+        /// leader+g routes the spawn to it just like a targeted card click.
+        account: Option<String>,
     },
     /// The off-loop dispatch task's outcome, routed back so the notice is sent
     /// from the core loop (which owns `clients`). `notice` empty = say nothing
@@ -908,7 +911,7 @@ pub(crate) fn fno_bin() -> PathBuf {
 /// digest_overlay idiom), and turn its verdict into the client notice. An empty
 /// return says nothing (the launched pane speaks for itself); every error path
 /// yields a visible notice rather than a silent no-op (x-6f77).
-async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
+async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&str>) -> String {
     // Selection + spawn crosses a subprocess and a mux socket round-trip, so the
     // budget is seconds, not the digest's 800ms; a hung dispatch still fails
     // open to a notice rather than wedging.
@@ -920,6 +923,13 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
     if let Some(n) = node {
         args.push("--node");
         args.push(n);
+    }
+    // (x-c914) The client's session-local active account, resolved to the
+    // spawn's `--account` overlay CLI-side (x-d012 owns the resolver + the
+    // stale-account refusal); the mux only forwards the id.
+    if let Some(a) = account {
+        args.push("--account");
+        args.push(a);
     }
     let fut = tokio::process::Command::new(fno_bin())
         .args(&args)
@@ -1841,11 +1851,11 @@ impl Core {
     /// backlog read never stalls a pane. The launched pane appears through the
     /// existing registry reader; the outcome (dispatched / no-work / lanes-full
     /// / failure) routes back as `DispatchResult` for a one-line notice.
-    fn dispatch_next(&self, id: u64, node: Option<String>) {
+    fn dispatch_next(&self, id: u64, node: Option<String>, account: Option<String>) {
         let session = self.session_name.clone();
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_dispatch_one(&session, node.as_deref()).await;
+            let notice = run_dispatch_one(&session, node.as_deref(), account.as_deref()).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -2691,6 +2701,7 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
                                 tombstone: false,
+                                account: None,
                             }
                         }
                         None => {
@@ -2716,6 +2727,7 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 cwd_base: None,
                                 tombstone: false,
+                                account: None,
                             }
                         }
                     };
@@ -2752,6 +2764,7 @@ impl Core {
                         seen: self.seen.contains(pane),
                         cwd_base: None,
                         tombstone: false,
+                        account: None,
                     });
                 }
                 None => {
@@ -2790,6 +2803,7 @@ impl Core {
                         seen: false,
                         cwd_base,
                         tombstone: false,
+                        account: None,
                     });
                 }
             }
@@ -2823,6 +2837,7 @@ impl Core {
                     seen: false,
                     cwd_base: None,
                     tombstone: true,
+                    account: None,
                 });
             }
         }
@@ -2885,6 +2900,7 @@ impl Core {
                 seen: false,
                 cwd_base,
                 tombstone: false,
+                account: None,
             });
         }
         out
@@ -3839,7 +3855,7 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
-            Command::DispatchNode(node) => {
+            Command::DispatchNode { node, account } => {
                 // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
                 // the leader+g porcelain pinned to `--node`; the claim race
                 // (already-worked node bounces `already-dispatching`) and lane
@@ -3854,7 +3870,7 @@ impl Core {
                 // pick. An unknown or non-ready id fails closed to a notice, like
                 // the other catalog-named commands (and covers an empty id).
                 if card_ready_to_dispatch(&self.backlog, &node) {
-                    self.dispatch_next(client_id, Some(node));
+                    self.dispatch_next(client_id, Some(node), account);
                 } else if let Some(route) = self.inflight_route(&node) {
                     // The client's Layout was stale: the card went in-flight
                     // between publish and click, but the server can route it -
@@ -4600,8 +4616,8 @@ impl Core {
                 self.pane_answer(id, pane, fingerprint, region_lines, &keystroke);
                 Flow::Continue
             }
-            CoreMsg::DispatchNext { id } => {
-                self.dispatch_next(id, None);
+            CoreMsg::DispatchNext { id, account } => {
+                self.dispatch_next(id, None, account);
                 Flow::Continue
             }
             CoreMsg::DispatchResult { id, notice } => {
@@ -5924,8 +5940,12 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
-            Ok(ClientMsg::DispatchNext) => {
-                if core_tx.send(CoreMsg::DispatchNext { id }).await.is_err() {
+            Ok(ClientMsg::DispatchNext { account }) => {
+                if core_tx
+                    .send(CoreMsg::DispatchNext { id, account })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }

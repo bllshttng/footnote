@@ -107,6 +107,49 @@ def test_spawn_failure_releases_the_slot(monkeypatch, tmp_path):
     assert active_lane_count() == 0  # slot released -> node re-dispatchable
 
 
+# --- `--account` overlay threading (x-c914 piece 1) ------------------------
+
+
+def test_account_threads_overlay_env(monkeypatch, tmp_path):
+    # An --account resolves CLI-side to an env overlay (x-d012) and rides into
+    # the spawn as account_env, so the worker bills the chosen account (AC1-HP).
+    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    monkeypatch.setattr(
+        "fno.agents.account_env.resolve_account_overlay",
+        lambda acc: SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/home/u/.claude-alt"}),
+    )
+    v = dispatch._dispatch_one(session="s", node=None, project=None, account="rr")
+    assert v["outcome"] == "launched"
+    assert calls[0]["account_env"] == {"CLAUDE_CONFIG_DIR": "/home/u/.claude-alt"}
+
+
+def test_no_account_is_byte_identical(monkeypatch, tmp_path):
+    # account=None spawns exactly as pre-feature: account_env is None (AC2-HP).
+    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+    assert v["outcome"] == "launched"
+    assert calls[0]["account_env"] is None
+
+
+def test_bad_account_fails_before_spawn(monkeypatch, tmp_path):
+    # A stale/missing account fails the verdict (the x-d012 resolver's refusal)
+    # rather than silently spawning under the default account (AC2-ERR). No
+    # spawn, no lane slot held -> the node stays re-dispatchable.
+    from fno.agents.account_env import AccountResolutionError
+
+    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+
+    def boom(acc):
+        raise AccountResolutionError("no such account 'rr'")
+
+    monkeypatch.setattr("fno.agents.account_env.resolve_account_overlay", boom)
+    v = dispatch._dispatch_one(session="s", node=None, project=None, account="rr")
+    assert v["outcome"] == "failed"
+    assert "rr" in v["detail"]
+    assert len(calls) == 0  # never spawned
+    assert active_lane_count() == 0  # never took a slot
+
+
 # --- `fno dispatch resolve` --verb/--brief (US3) ---------------------------
 
 
