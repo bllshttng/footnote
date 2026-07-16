@@ -20,8 +20,17 @@ from fno.plan._stamp import read_plan_file, write_plan_file
 from fno.plan._status import project_plan_status
 
 # Graph-authoritative fields mirrored into frontmatter. `type` is usually
-# already present; the projection keeps it in sync with the node.
-MIRROR_KEYS: tuple[str, ...] = ("priority", "type", "blocked_by", "project")
+# already present; the projection keeps it in sync with the node. `parent_slug`
+# is not a native node field - the converger injects it (see project_graph_nodes).
+MIRROR_KEYS: tuple[str, ...] = (
+    "priority",
+    "type",
+    "blocked_by",
+    "project",
+    "size",
+    "parent",
+    "parent_slug",
+)
 
 
 def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
@@ -75,3 +84,68 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
     if changed:
         write_plan_file(target, fields, rest)
     return changed
+
+
+def project_graph_nodes(
+    entries: list[dict[str, Any]],
+    node_ids: list[str],
+    root: str | None = None,
+) -> int:
+    """Project each named node's mirror fields onto its linked plan.
+
+    The shared converger primitive behind both the instrumented mutating verbs
+    and the `fno plan sync` sweep: for each id, find the node in ``entries``,
+    resolve+absolutize its ``plan_path`` (against ``root``), skip absent files,
+    inject the parent's slug, and call ``project_node_to_plan``. Best-effort and
+    per-node isolated - one unreadable doc never aborts the batch. Returns the
+    count of docs rewritten.
+
+    ``entries`` is the already-read graph (this module never imports
+    ``graph.store`` - Locked Decision 1). ``root`` is resolved lazily only when a
+    relative ``plan_path`` is first seen.
+    """
+    ids = [i for i in dict.fromkeys(node_ids) if i]
+    if not ids:
+        return 0
+    from fno.graph._intake import _find_node, repo_root
+
+    slug_by_id = {n.get("id"): n.get("slug") for n in entries}
+    rewritten = 0
+    for nid in ids:
+        try:
+            node = _find_node(entries, nid)
+            if not node or not node.get("plan_path"):
+                continue
+            p = Path(node["plan_path"])
+            if not p.is_absolute():
+                if root is None:
+                    root = repo_root()
+                p = Path(root) / p
+            if not p.is_file():
+                continue
+            if project_node_to_plan(_with_parent_slug(node, slug_by_id), p):
+                rewritten += 1
+        except Exception as e:  # noqa: BLE001 - per-node best-effort
+            sys.stderr.write(f"warning: plan projection failed for {nid}: {e}\n")
+    return rewritten
+
+
+def _with_parent_slug(
+    node: dict[str, Any], slug_by_id: dict[Any, Any]
+) -> dict[str, Any]:
+    """Return ``node`` (or a shallow copy) carrying ``parent_slug`` when resolvable.
+
+    Never mutates the shared ``entries`` element. A null parent or a parent id
+    that resolves to no live node leaves ``parent_slug`` absent (the projector's
+    ``None``/missing-key guards then omit it), so a dangling ref mirrors the raw
+    ``parent`` id but never a wrong slug.
+    """
+    parent_id = node.get("parent")
+    if not parent_id:
+        return node
+    slug = slug_by_id.get(parent_id)
+    if not slug:
+        return node
+    copy = dict(node)
+    copy["parent_slug"] = slug
+    return copy

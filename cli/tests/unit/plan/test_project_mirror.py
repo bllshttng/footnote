@@ -141,3 +141,32 @@ def test_status_no_write_for_gated_states(tmp_path):
         assert project_node_to_plan({"_status": gated}, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert fields["status"] == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Extended mirror keys: size, parent, parent_slug (x-5d84)
+# ---------------------------------------------------------------------------
+
+
+def test_projects_size_and_parent(tmp_path):
+    """AC3-HP: size + parent + parent_slug mirror when present on the node."""
+    plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: S"))
+    node = {"size": "M", "parent": "x-fd7f", "parent_slug": "epic-slug"}
+
+    assert project_node_to_plan(node, plan) is True
+    _, fields, _ = read_plan_file(plan)
+    assert fields["size"] == "M"
+    assert fields["parent"] == "x-fd7f"
+    assert fields["parent_slug"] == "epic-slug"
+
+
+def test_null_parent_writes_neither_key(tmp_path):
+    """A top-level node (parent None, parent_slug absent) writes neither key."""
+    plan = _write_plan(tmp_path)
+    node = {"parent": None, "size": "L"}
+
+    assert project_node_to_plan(node, plan) is True  # size changed
+    _, fields, _ = read_plan_file(plan)
+    assert "parent" not in fields
+    assert "parent_slug" not in fields
+    assert fields["size"] == "L"

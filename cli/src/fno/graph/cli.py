@@ -4098,48 +4098,26 @@ def cmd_undefer(
 # -- done --
 
 def _project_plans_from_graph(node_ids: list[str]) -> None:
-    """Project each named node's forward status onto its linked plan (x-f34f).
+    """Project each named node's mirror fields + forward status onto its plan.
 
     Re-reads the graph so every node carries its recomputed ``_status`` (a claim
     reads ``claimed`` -> ``in_progress``; a close reads ``done`` -> ``done`` +
-    ``done_at``), then runs the forward-only status projection. Covers
-    cascade-closed epic parents that ``_stamp_and_graduate_plan`` never stamps.
-    Best-effort per node: a missing or unreadable plan never fails the mutation.
+    ``done_at``), then delegates to the shared converger. Covers cascade-closed
+    epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
+    node: a missing or unreadable plan never fails the mutation.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
         return
     try:
-        from fno.graph._intake import _find_node, repo_root
         from fno.graph.store import read_graph
-        from fno.plan._project import project_node_to_plan
+        from fno.plan._project import project_graph_nodes
 
         entries = read_graph(_graph_path())
-    except Exception as e:  # noqa: BLE001 - additive; never wedge the close
-        sys.stderr.write(f"warning: post-close plan projection setup failed: {e}\n")
+    except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
+        sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
-    root: Optional[str] = None
-    for nid in ids:
-        try:
-            node = _find_node(entries, nid)
-            if not node or not node.get("plan_path"):
-                continue
-            p = Path(node["plan_path"])
-            if not p.is_absolute():
-                if root is None:
-                    root = repo_root()
-                p = Path(root) / p
-            # A close-time projection for a node whose plan file is absent is a
-            # silent no-op (the sweep is the catch-all); skip before
-            # project_node_to_plan so its missing-file warning stays off the
-            # machine-readable close output.
-            if not p.is_file():
-                continue
-            project_node_to_plan(node, p)
-        except Exception as e:  # noqa: BLE001 - per-node best-effort
-            sys.stderr.write(
-                f"warning: post-close plan projection failed for {nid}: {e}\n"
-            )
+    project_graph_nodes(entries, ids)
 
 
 def _apply_completion_fields(node: dict) -> None:
