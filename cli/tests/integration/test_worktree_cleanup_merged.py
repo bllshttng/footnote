@@ -227,6 +227,22 @@ def test_dry_run_overrides_apply(repo: Path):
     assert wt.exists(), "--dry-run must veto --apply"
 
 
+# ── archive-worktree.sh must not false-match its own process tree ───────────
+# Regression for the CI-only failure: pgrep -f matched the script's own forks
+# (TARGET is argv[1], so the command-substitution subshells carry it), and the
+# headless /dev/tty prompt then declined with exit 3. Invoke the script
+# directly (no sweep) with a detached stdin to reproduce the exact path.
+def test_archive_script_excludes_own_process_tree(repo: Path):
+    wt = _add_merged(repo, "reapme")
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert not wt.exists(), f"stderr={r.stderr}"
+
+
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────
 def test_empty_state_is_explicit(repo: Path):
     r = _sweep(repo)

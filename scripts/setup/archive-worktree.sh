@@ -220,8 +220,24 @@ fi
 # effectively literal.
 TARGET_RE="$(printf '%s' "$TARGET" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g')"
 PIDS_F="$(pgrep -f -- "$TARGET_RE" 2>/dev/null || true)"
-# Drop our own PID; we're running from inside this script.
-ALL_PIDS="$(printf '%s\n%s\n' "$PIDS" "$PIDS_F" | grep -v "^$$\$" | grep -v '^$' | sort -u || true)"
+# Exclude our OWN process group, not just $$. When this script is invoked with
+# TARGET as argv[1] (e.g. by the merged sweep), pgrep -f matches the script's
+# own forks - the command-substitution subshells and pgrep itself all carry
+# TARGET in their cmdline with a PID != $$ but sharing our PGID. A genuine
+# squatter always runs in a SEPARATE session/PGID, so filtering our PGID drops
+# every self-match while keeping real ones. Without this the script false-
+# matched itself, prompted on /dev/tty, and (headless) declined with exit 3.
+MY_PGID="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+ALL_PIDS=""
+while IFS= read -r pid; do
+  [[ -z "$pid" || "$pid" == "$$" ]] && continue
+  if [[ -n "$MY_PGID" ]]; then
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$pgid" == "$MY_PGID" ]] && continue
+  fi
+  ALL_PIDS+="$pid"$'\n'
+done < <(printf '%s\n%s\n' "$PIDS" "$PIDS_F" | grep -v '^$' | sort -u)
+ALL_PIDS="$(printf '%s' "$ALL_PIDS" | grep -v '^$' | sort -u || true)"
 
 if [[ -n "$ALL_PIDS" ]]; then
   echo "    Processes rooted in $TARGET:" >&2
