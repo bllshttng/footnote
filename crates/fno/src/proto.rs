@@ -166,9 +166,12 @@ use crate::tree::{Dir, Rect, TabId};
 /// v31 (x-9f75): `PanePlacement.here` - open-here repoints the sender's focused
 /// (attach-viewer) pane at the target session instead of minting a tab or
 /// split. `#[serde(default)]` keeps a v30 placement (no `here`) parseable as
-/// `here: false` (today's semantics). Proto number coordinated with x-cd67 at
-/// land time (last to land rebases to the next free number).
-pub const PROTO_VERSION: u32 = 31;
+/// `here: false` (today's semantics).
+///
+/// v32 (x-cd67): `AgentRow.subline` - the server-composed dim line-2 subline
+/// (`<branch> · <cwd-tail>`) for the sideline. `#[serde(default)]` keeps a v31
+/// reader parsing it as `None` (the pre-feature one-line row).
+pub const PROTO_VERSION: u32 = 32;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -537,6 +540,15 @@ pub struct AgentRow {
     /// v24 reader wire-tolerant (defaults false).
     #[serde(default)]
     pub tombstone: bool,
+    /// (v32, x-cd67) The server-composed dim subline for the row's line 2:
+    /// `<branch> · <cwd-tail>` (either part omitted if unknown, both absent ->
+    /// `None`). The server owns the formatting; the client renders it verbatim
+    /// under the name line and truncates to the panel width. `None` -> no
+    /// sub-row is emitted (no blank gap). `#[serde(default)]` keeps a v31 reader
+    /// wire-tolerant (a missing `subline` degrades to the pre-feature one-line
+    /// row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subline: Option<String>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1689,6 +1701,17 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_from_pre_subline_json_defaults_subline_none() {
+        // AC2-EDGE (x-cd67): a pre-v32 AgentRow omits `subline` entirely
+        // (skip-when-None). A v32 reader must decode it as `None` and render
+        // the pre-feature one-line row, never fail - the skew window contract.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(older).unwrap();
+        assert_eq!(row.subline, None, "missing subline key => None");
+    }
+
+    #[test]
     fn backlog_card_from_pre_v18_json_defaults_route_fields_none() {
         // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
         // (skip-when-None). A v18 reader must decode it as all-None, never
@@ -1802,6 +1825,7 @@ mod tests {
                         cwd_base: None,
                         tombstone: false,
                         tab: None,
+                        subline: None,
                     },
                     AgentRow {
                         squad: None,
@@ -1817,6 +1841,7 @@ mod tests {
                         cwd_base: None,
                         tombstone: false,
                         tab: None,
+                        subline: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
