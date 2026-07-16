@@ -311,6 +311,32 @@ class TestWhoami:
         )
         assert payload["mail_unread"] == 3  # handle (1) + mesh name (2)
 
+    def test_mail_unread_excludes_self_project_broadcast(self, tmp_path, runner, monkeypatch):
+        """The project lane excludes this session's own --to-project broadcasts
+        (self-echo), matching the project-drain exclusion - else whoami advertises
+        mail it can never ack."""
+        from fno.inbox.store import write_new_thread
+
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
+        monkeypatch.setenv("FNO_AGENT_SELF", "webworker")
+        self._isolate_bus(tmp_path, monkeypatch)
+        project = _make_workspace(tmp_path, target=True)
+        (project / ".fno" / "config.toml").write_text(
+            '[config.project]\nid = "webproj"\n', encoding="utf-8"
+        )
+        write_new_thread(  # this session's own broadcast (self-echo)
+            recipient="webproj", sender="webworker", kind="fyi",
+            body="build green", to_kind="project",
+        )
+        write_new_thread(  # a genuine inbound broadcast from someone else
+            recipient="webproj", sender="etl", kind="fyi",
+            body="fyi", to_kind="project",
+        )
+        payload = json.loads(
+            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
+        )
+        assert payload["mail_unread"] == 1  # the etl broadcast only, not our own
+
     def test_mail_unread_corrupt_cursor_stays_silent(self, tmp_path, runner, monkeypatch):
         """A corrupt cursor makes read_cursor warn on stderr; whoami must swallow
         it - the recovery verb never gains noisy output."""

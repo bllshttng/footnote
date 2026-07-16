@@ -27,7 +27,7 @@ import os
 from dataclasses import asdict, is_dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import typer
 
@@ -52,49 +52,54 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
-def _mail_addresses(
-    handle: Optional[str], agent_self: str, project_root: Path
-) -> list[Optional[str]]:
-    """The durable addresses this session answers to: canonical reply handle,
-    mesh name (registered-agent send lane), and project inbox (project lane).
-    Project resolution is guarded - an unresolvable project just omits that lane
-    rather than breaking whoami."""
-    addrs: list[Optional[str]] = [handle]
-    if agent_self:
-        addrs.append(agent_self)
-    try:
-        from fno.inbox.store import resolve_project
-
-        addrs.append(resolve_project(cwd=project_root))
-    except Exception:
-        pass
-    return addrs
-
-
-def _mail_unread_count(addresses: Iterable[Optional[str]]) -> int:
+def _mail_unread_count(
+    handle: Optional[str], agent_self: str, session_id: Optional[str], project_root: Path
+) -> int:
     """Total unread bus messages across every durable address this session
-    answers to (canonical handle, mesh name, project inbox) - the same cursor
-    scan ``fno mail unread`` runs, deduped. The durable-floor lanes this exposes
-    address by handle, by mesh name (registered-agent send), and by project, so
-    counting only the handle would leave the other dead-letter lanes invisible.
+    answers to - canonical handle, mesh name (registered-agent send lane), and
+    project inbox (project lane) - the same cursor scan ``fno mail unread`` runs,
+    deduped. Counting only the handle would leave the mesh-name and project
+    dead-letter lanes invisible, which is what this surface exists to expose.
+
+    The project read excludes this session's own identities (handle / mesh name /
+    session id), matching the project-drain path (cv-d54ddd45): a plain scan
+    would count the session's own ``--to-project`` broadcasts as unread, a false
+    dead-letter warning it can never ack. Direct addresses never self-echo, so
+    they exclude nothing.
+
     Each address is guarded independently so one unreadable lane never zeroes the
     others; whoami is the confused-agent recovery verb and must never gain a
     failure mode. stderr is swallowed for the scan: ``warn=False`` silences
-    ``iter_messages`` but not ``read_cursor``'s own corrupt-cursor warning, which
-    would otherwise leak into whoami's output."""
+    ``iter_messages`` but not ``read_cursor``'s corrupt-cursor warning."""
+    try:
+        from fno.bus.cursor import scan_unread
+        from fno.inbox.store import resolve_project
+    except Exception:
+        return 0
+
+    def _count(addr: Optional[str], exclude: Optional[set[str]]) -> int:
+        if not addr:
+            return 0
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                return len(scan_unread(addr, warn=False, exclude_from=exclude))
+        except Exception:
+            return 0
+
     total = 0
     seen: set[str] = set()
-    for addr in addresses:
-        if not addr or addr in seen:
-            continue
-        seen.add(addr)
-        try:
-            from fno.bus.cursor import scan_unread
+    for addr in (handle, agent_self):
+        if addr and addr not in seen:
+            seen.add(addr)
+            total += _count(addr, None)
 
-            with contextlib.redirect_stderr(io.StringIO()):
-                total += len(scan_unread(addr, warn=False))
-        except Exception:
-            continue
+    try:
+        project = resolve_project(cwd=project_root)
+    except Exception:
+        project = None
+    if project and project not in seen:
+        self_ids = {x for x in (handle, agent_self, session_id) if x}
+        total += _count(project, self_ids or None)
     return total
 
 
@@ -232,7 +237,7 @@ def whoami_command(
     state = _drop_layers(_load_or_exit(opts), opts)
     mail, harness_sid = _mail_handle()
     agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
-    mail_unread = _mail_unread_count(_mail_addresses(mail, agent_self, state.project_root))
+    mail_unread = _mail_unread_count(mail, agent_self, harness_sid, state.project_root)
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
