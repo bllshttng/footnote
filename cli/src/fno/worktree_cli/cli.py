@@ -140,14 +140,20 @@ def _base_ref(repo: Path) -> Optional[str]:
     return None
 
 
-def _worktree_ensure(repo: str, name: str, branch: Optional[str]) -> int:
-    """Idempotently ensure `~/conductor/workspaces/<repo>/<name>` exists.
+def _worktree_ensure(
+    repo: str, name: str, branch: Optional[str], harness: Optional[str] = None
+) -> int:
+    """Idempotently ensure `<worktrees_base>/<repo>/<name>` exists.
 
     On success prints the worktree path on stdout (exit 0). On ANY failure
     prints a reason on stderr and NOTHING on stdout (non-zero), so a caller's
     `wt=$(fno worktree ensure ...)` reads empty and falls back to its prior
     cwd -- the dispatch is never blocked. Mechanism only: the caller owns the
     "is this a code payload / a main checkout" policy.
+
+    Step 0 is the per-project policy gate: `never` launches in place (repo root
+    on stdout, exit 0), and a parse error / out-of-enum value REFUSES creation
+    (empty stdout, exit 1) so a misconfig fails closed, never auto-isolating.
     """
     repo_path = Path(repo)
     top_out = _git(repo_path, "rev-parse", "--show-toplevel")
@@ -155,6 +161,24 @@ def _worktree_ensure(repo: str, name: str, branch: Optional[str]) -> int:
         typer.echo(f"worktree ensure: {repo} is not a git repository", err=True)
         return 1
     top = Path(top_out.stdout.strip()).resolve()
+
+    # Step 0: policy gate, before any worktree operation. A `never` project
+    # (e.g. an Obsidian vault whose working tree IS the product) launches in
+    # place; a parse error / out-of-enum value refuses (fail closed).
+    from fno.worktree_paths import WorktreePolicyError, resolve_worktree_policy
+
+    try:
+        pol = resolve_worktree_policy(top, harness)
+    except WorktreePolicyError as exc:
+        typer.echo(f"worktree ensure: {exc}", err=True)
+        return 1
+    if pol.policy == "never":
+        typer.echo(str(top))  # repo main-checkout path -> caller launches here
+        typer.echo(
+            f"worktree ensure: policy=never ({pol.project}); launching in place",
+            err=True,
+        )
+        return 0
 
     # Only a MAIN checkout may spawn a worktree (git-dir == git-common-dir);
     # a linked worktree has no business nesting another.
@@ -167,7 +191,7 @@ def _worktree_ensure(repo: str, name: str, branch: Optional[str]) -> int:
         )
         return 1
 
-    wt = Path.home() / "conductor" / "workspaces" / top.name / name
+    wt = pol.base / top.name / name
 
     # Idempotent reuse: an existing registered worktree rooted at wt -> reuse.
     if wt.exists():
@@ -224,11 +248,42 @@ def ensure(
     branch: Optional[str] = typer.Option(
         None, "--branch", help="Branch to create/checkout (default: feature/<name>)."
     ),
+    harness: Optional[str] = typer.Option(
+        None, "--harness", help="Resolved harness (claude/codex/...); drives the policy gate."
+    ),
 ) -> None:
-    """Ensure a conductor worktree for <name>; print its path (mechanism-only).
+    """Ensure a worktree for <name>; print its path (mechanism-only).
 
     Used by dispatch callers to deterministically isolate a code worker instead
     of relying on the worker to self-isolate in-session. Failure is non-fatal:
     exits non-zero with empty stdout so the caller falls back to its prior cwd.
+    A `never`-policy project exits 0 with the repo root on stdout (launch here).
     """
-    raise typer.Exit(code=_worktree_ensure(repo, name, branch))
+    raise typer.Exit(code=_worktree_ensure(repo, name, branch, harness))
+
+
+@app.command()
+def policy(
+    repo: str = typer.Option(..., "--repo", help="Repo MAIN checkout to resolve policy for."),
+    harness: Optional[str] = typer.Option(
+        None, "--harness", help="Resolved harness (claude/codex/...); drives harness-native degradation."
+    ),
+) -> None:
+    """Print the resolved worktree policy for <repo>. Read-only.
+
+    Line 1 is the policy (never|harness-native|external); for a non-never result
+    line 2 is `base=<worktrees-base>`. Shares the SAME resolver `ensure` uses, so
+    bash callers get the identical verdict with no second precedence impl. A
+    parse error / out-of-enum value exits 1 with the reason on stderr.
+    """
+    from fno.worktree_paths import WorktreePolicyError, resolve_worktree_policy
+
+    try:
+        pol = resolve_worktree_policy(Path(repo).resolve(), harness)
+    except WorktreePolicyError as exc:
+        typer.echo(f"worktree policy: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo(pol.policy)
+    if pol.policy != "never":
+        typer.echo(f"base={pol.base}")
+    raise typer.Exit(0)
