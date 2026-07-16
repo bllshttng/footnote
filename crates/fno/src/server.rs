@@ -1531,15 +1531,64 @@ impl Core {
         claim: bool,
         placement: PanePlacement,
     ) -> Result<u64, String> {
-        let current = self.session.find_by_cwd(&squad_key);
-        let dest = self.resolve_placement_target(&placement.target, current)?;
+        // Create-if-absent lives ONLY on this script path (Locked 7, x-9f75): a
+        // `pane run --squad <name>` naming a not-yet-existing squad mints a
+        // persisted named workspace so dispatch lanes group by project.
+        // AttachAgent / UI targets stay fail-closed (a stale menu must not mint
+        // squads). Only an UNKNOWN name is creatable; a blank name or an
+        // unknown numeric id still errors. Planned before the spawn so a bad
+        // explicit target fails closed with no pane.
+        let (dest, create_name): (Option<u64>, Option<String>) = match &placement.target {
+            PaneTarget::SquadName(name) => {
+                let n = name.trim();
+                if n.is_empty() {
+                    return Err("squad name cannot be blank".into());
+                }
+                match self.resolve_placement_target(&placement.target, None) {
+                    Ok(d) => (d, None),
+                    // Co-located with resolve_placement_target's own error text:
+                    // a name matching NO squad is creatable; an ambiguous name
+                    // (2+ matches) still errors - never silently pick one.
+                    Err(e) if e.starts_with("no such squad") => (None, Some(n.to_string())),
+                    Err(e) => return Err(e),
+                }
+            }
+            _ => {
+                let current = self.session.find_by_cwd(&squad_key);
+                (self.resolve_placement_target(&placement.target, current)?, None)
+            }
+        };
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
             // The claim itself is acquired per-burst via PaneClaim.
             self.claim_eligible.insert(pid);
         }
-        self.place_spawned_pane(dest, &squad_key, pid, placement.split)?;
+        if let Some(name) = create_name {
+            // Mint the named squad with this run's pane as its first tab
+            // (origins = the spawn's squad_key / repo root, so same-project
+            // lanes converge here). Write-through persisted, non-blocking
+            // (x-8f11 precedent): a failed write degrades restore, never the
+            // live session.
+            let sid = self.next_squad_id;
+            self.next_squad_id += 1;
+            let tid = self.session.mint_tab_id();
+            self.session.add_squad(
+                sid,
+                vec![squad_key.clone()],
+                Some(name),
+                Tab {
+                    name: None,
+                    id: tid,
+                    root: Node::Leaf(pid),
+                    focus: pid,
+                },
+            );
+            self.squad_members.insert(sid, Vec::new());
+            self.persist_squad(sid);
+        } else {
+            self.place_spawned_pane(dest, &squad_key, pid, placement.split)?;
+        }
         // Keep any attached client's view consistent; a script-only session
         // has no clients, so this is then a cheap no-op.
         self.push_layout(true);
@@ -8918,6 +8967,88 @@ mod tests {
 
         core.reap_pane(pid);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_pane_create_if_absent_mints_persisted_named_squad() {
+        // AC2-HP (x-9f75): a `pane run --squad <name>` naming no existing squad
+        // mints a persisted named squad (origins = the spawn's repo root) and
+        // lands the pane as its first tab. A second run with the same name
+        // joins it - no duplicate mint.
+        let _s = StoreScratch::new("run-create-if-absent");
+        let mut core = empty_core();
+        let run = |core: &mut Core| {
+            core.run_pane(
+                "/repo/proj".into(),
+                "/repo/proj".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadName("readyrule".into()),
+                    split: None,
+                    here: false,
+                },
+            )
+            .unwrap()
+        };
+        let pid = run(&mut core);
+        let (sid, _) = core.session.find_pane(pid).unwrap();
+        let sq = core.session.squad(sid).unwrap();
+        assert_eq!(sq.name.as_deref(), Some("readyrule"));
+        assert_eq!(sq.origins, vec!["/repo/proj".to_string()]);
+        assert_eq!(tree::leaves(&sq.tabs[0].root), vec![pid]);
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .any(|s| s.name == "readyrule"),
+            "the named squad is persisted (write-through)"
+        );
+
+        let pid2 = run(&mut core);
+        let (sid2, _) = core.session.find_pane(pid2).unwrap();
+        assert_eq!(sid2, sid, "the second run joins the existing named squad");
+        assert_eq!(
+            core.session
+                .squads
+                .iter()
+                .filter(|s| s.name.as_deref() == Some("readyrule"))
+                .count(),
+            1,
+            "no duplicate squad minted"
+        );
+
+        core.reap_pane(pid);
+        core.reap_pane(pid2);
+    }
+
+    #[test]
+    fn run_pane_create_if_absent_rejects_blank_name_before_spawn() {
+        // A blank/whitespace SquadName is still refused (never a minted squad),
+        // and no pane is spawned - fail-closed, mirroring resolve_placement.
+        let _s = StoreScratch::new("run-create-blank");
+        let mut core = empty_core();
+        let before = core.panes.len();
+        let err = core
+            .run_pane(
+                "/repo/proj".into(),
+                "/repo/proj".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadName("   ".into()),
+                    split: None,
+                    here: false,
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("blank"), "{err}");
+        assert_eq!(core.panes.len(), before, "no pane spawned on a blank name");
+        assert!(core.session.squads.is_empty(), "no squad minted");
     }
 
     fn client(id: u64, view_tab: TabId, dims: (u16, u16), passive: bool) -> Client {
