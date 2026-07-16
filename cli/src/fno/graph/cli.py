@@ -1351,16 +1351,11 @@ def _intake_impl(
         )
         # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
         # this branch returns early, so the append-path projection never runs.
+        # Routed through the converger so parent_slug is injected consistently.
         try:
-            from fno.graph._intake import _find_node, repo_root
-            from fno.plan._project import project_node_to_plan
+            from fno.plan._project import project_graph_nodes
 
-            claimed = _find_node(read_graph(_graph_path()), claim_id)
-            if claimed and claimed.get("plan_path"):
-                p = Path(claimed["plan_path"])
-                if not p.is_absolute():
-                    p = Path(repo_root()) / p
-                project_node_to_plan(claimed, p)
+            project_graph_nodes(read_graph(_graph_path()), [claim_id])
         except Exception as e:  # noqa: BLE001 - additive; never wedge the claim
             sys.stderr.write(f"warning: post-claim plan projection failed: {e}\n")
         return
@@ -1397,18 +1392,12 @@ def _intake_impl(
 
     # Mirror the graph-authoritative navigation fields onto the plan doc the
     # node just linked. Non-fatal: a missing/unreadable plan never fails intake.
+    # Routed through the converger so parent_slug is injected consistently.
     if new_id_holder[0]:
         try:
-            from fno.graph._intake import _find_node, repo_root
-            from fno.plan._project import project_node_to_plan
+            from fno.plan._project import project_graph_nodes
 
-            landed = _find_node(read_graph(_graph_path()), new_id_holder[0])
-            pp = landed.get("plan_path") if landed else None
-            if landed and pp:
-                p = Path(pp)
-                if not p.is_absolute():
-                    p = Path(repo_root()) / p
-                project_node_to_plan(landed, p)
+            project_graph_nodes(read_graph(_graph_path()), [new_id_holder[0]])
         except Exception as e:  # noqa: BLE001 - additive; never wedge the intake
             sys.stderr.write(f"warning: post-intake plan projection failed: {e}\n")
 
