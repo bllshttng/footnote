@@ -684,8 +684,14 @@ def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
     stdout / non-zero) so the caller releases the lane slot and skips this lane
     without touching the others (Failure Modes: Errors).
     """
+    # advance dispatches a claude `/target` worker (_spawn_worker never passes a
+    # harness, so resolve_dispatch defaults to the claude substrate), so the lane
+    # is claude harness-native: forward --harness claude and ensure lands it at
+    # <repo>/.claude/worktrees/<node>. A `never` project still returns the repo
+    # root (guarded below), independent of the harness.
     proc = subprocess.run(
-        [*_subprocess_util.fno_py_cmd(), "worktree", "ensure", "--repo", str(canonical_root), "--name", node_id],
+        [*_subprocess_util.fno_py_cmd(), "worktree", "ensure",
+         "--repo", str(canonical_root), "--name", node_id, "--harness", "claude"],
         capture_output=True,
         text=True,
         timeout=300,

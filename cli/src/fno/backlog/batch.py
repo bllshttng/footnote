@@ -605,7 +605,12 @@ def prepare_batch(
         # random suffix guarantees one branch per batch (codex P2).
         name = f"batch-{_safe(domain)}-{secrets.token_hex(3)}"
         branch = f"feature/{name}"
-        we = run([*_subprocess_util.fno_py_cmd(), "worktree", "ensure", "--repo", repo, "--name", name, "--branch", branch])
+        # A batch lane runs a claude `/target batched` member, so it is claude
+        # harness-native: forward --harness claude to land it at .claude/worktrees/.
+        # The explicit --branch means a `never` project refuses (cannot isolate a
+        # branch in place) and degrades to solo below - never launches on canonical.
+        we = run([*_subprocess_util.fno_py_cmd(), "worktree", "ensure",
+                  "--repo", repo, "--name", name, "--branch", branch, "--harness", "claude"])
         worktree = (we.stdout or "").strip()
         if we.returncode != 0 or not worktree:
             return {"mode": "solo", "reason": f"worktree ensure failed: {(we.stderr or '').strip()[:160]}"}
