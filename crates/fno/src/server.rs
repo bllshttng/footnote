@@ -5331,7 +5331,8 @@ async fn serve(
                     let branches = tokio::task::spawn_blocking(move || {
                         cwds.into_iter()
                             .filter_map(|c| {
-                                agents_view::resolve_branch(std::path::Path::new(&c)).map(|b| (c, b))
+                                agents_view::resolve_branch(std::path::Path::new(&c))
+                                    .map(|b| (c, b))
                             })
                             .collect::<HashMap<String, String>>()
                     })
@@ -8164,9 +8165,15 @@ mod tests {
             Some("main · footnote".into())
         );
         // Branch unresolved -> tail alone (AC1-ERR degradation).
-        assert_eq!(subline_from(None, "/code/footnote"), Some("footnote".into()));
+        assert_eq!(
+            subline_from(None, "/code/footnote"),
+            Some("footnote".into())
+        );
         // Trailing slash is trimmed before taking the tail.
-        assert_eq!(subline_from(None, "/code/footnote/"), Some("footnote".into()));
+        assert_eq!(
+            subline_from(None, "/code/footnote/"),
+            Some("footnote".into())
+        );
         // No cwd -> no subline (AC1-EDGE: no sub-row emitted).
         assert_eq!(subline_from(None, ""), None);
         assert_eq!(subline_from(Some("main"), ""), Some("main".into()));

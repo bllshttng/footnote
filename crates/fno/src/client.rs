@@ -9192,13 +9192,13 @@ mod tests {
             7,
             "j from the footer skips the spacer + '~ elsewhere'"
         );
-        assert_eq!(v.selector_down(8), 11, "j skips the spacer + '~ work queue'");
-        assert_eq!(v.selector_down(13), 13, "clamp at the last row");
         assert_eq!(
-            v.selector_up(7),
-            4,
-            "k skips '~ elsewhere' + spacer upward"
+            v.selector_down(8),
+            11,
+            "j skips the spacer + '~ work queue'"
         );
+        assert_eq!(v.selector_down(13), 13, "clamp at the last row");
+        assert_eq!(v.selector_up(7), 4, "k skips '~ elsewhere' + spacer upward");
         assert_eq!(
             v.selector_up(11),
             8,
@@ -10216,7 +10216,11 @@ mod tests {
         v.selector = Some(4);
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"j", &mut buf).await.unwrap();
-        assert_eq!(v.selector, Some(7), "j skips the spacer + '~ elsewhere' header");
+        assert_eq!(
+            v.selector,
+            Some(7),
+            "j skips the spacer + '~ elsewhere' header"
+        );
         selector_keys(&mut v, b"k", &mut buf).await.unwrap();
         assert_eq!(v.selector, Some(4), "k skips it back");
         assert!(buf.is_empty(), "navigation sends nothing");
@@ -11109,6 +11113,21 @@ mod tests {
             0,
             "an inert sub row is never highlighted"
         );
+    }
+
+    // (x-cd67 US5, AC4-EDGE) A pathologically narrow panel (text_w < 3) must
+    // truncate the subline via `.take(text_w)` without underflow or panic.
+    #[test]
+    fn draw_sideline_narrow_panel_truncates_subline_without_panic() {
+        let mut agent = blocked_row("worker", 4, None);
+        agent.subline = Some("main · footnote".into());
+        let v = view_with_agents(vec![agent]);
+        let (rows, cols, panel_w) = (10usize, 40usize, 2usize); // text_w = 1
+        let mut cells = vec![Cell::default(); rows * cols];
+        v.draw_sideline(&mut cells, rows, cols, panel_w); // must not panic
+                                                          // The divider still lands at panel_w - 1 on every drawn row.
+        assert_eq!(cells[panel_w - 1].c, '│');
+        assert_eq!(cells[cols + (panel_w - 1)].c, '│');
     }
 
     // (x-cd67 US2, AC1-EDGE) An agent with no subline emits no Sub row - no blank

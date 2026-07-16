@@ -169,8 +169,7 @@ pub fn resolve_branch(cwd: &Path) -> Option<String> {
             .map(str::to_string);
     }
     // Detached HEAD: a bare 40-hex sha -> short form. Anything else is malformed.
-    (head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit()))
-        .then(|| head[..8].to_string())
+    (head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head[..8].to_string())
 }
 
 /// The registry path, resolved exactly as fno-agents' `AgentsHome::from_env`
@@ -1839,7 +1838,11 @@ mod tests {
     fn resolve_branch_detached_head_shortens_sha() {
         let cwd = branch_tmp("detached");
         std::fs::create_dir_all(cwd.join(".git")).unwrap();
-        std::fs::write(cwd.join(".git/HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+        std::fs::write(
+            cwd.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
         assert_eq!(resolve_branch(&cwd), Some("01234567".into()));
         std::fs::remove_dir_all(&cwd).unwrap();
     }
