@@ -7078,6 +7078,7 @@ mod tests {
             cwd_base: None,
             tombstone: false,
             tab: None,
+            subline: None,
         };
         let ChromeHit::Cmds(c) = agent_hit(&row, 1) else {
             panic!("expected Cmds for a same-workspace watch-only row");
