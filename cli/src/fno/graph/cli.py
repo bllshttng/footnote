@@ -1153,6 +1153,11 @@ def cmd_decompose(
         # condition that cannot cause early graduation - target can't stamp it
         # either). Proceed silently; the graph mutation already succeeded.
 
+    # Repaint the epic and every child/orphan the decompose touched so a
+    # decomposed epic's children carry correct blocked_by/parent mirrors from
+    # birth (AC-HP #5). Best-effort per node.
+    _project_plans_from_graph([epic_resolved_id, *spec_ids, *orphan_ids])
+
 
 # -- intake --
 
@@ -1929,6 +1934,8 @@ def cmd_update(
         or type_ is not None
         or has_blocker_edit
         or plan_path is not None
+        or size is not None
+        or parent is not None
     ):
         _project_plans_from_graph(
             [projected_node[0]["id"], *cascade_closed_update]
@@ -3454,6 +3461,7 @@ def cmd_defer(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f'Deferred {task_id}: "{cleaned_reason}"')
+    _project_plans_from_graph([task_id])
 
 
 # -- queue / unqueue / queued --
@@ -4093,6 +4101,7 @@ def cmd_undefer(
     if not was_deferred_holder[0]:
         typer.echo(f"warning: {task_id} was not deferred", err=True)
     typer.echo(f"Undeferred {task_id}")
+    _project_plans_from_graph([task_id])
 
 
 # -- done --
@@ -5928,6 +5937,7 @@ def cmd_rank(
         typer.echo(
             f"Ranked {result['id']} {result['action']} (rank={result['rank']}) in {result['lane']}"
         )
+    _project_plans_from_graph([result["id"]])
 
 
 # -- archive --
@@ -6593,3 +6603,4 @@ def cmd_supersede(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
+    _project_plans_from_graph([replaces, new_id])

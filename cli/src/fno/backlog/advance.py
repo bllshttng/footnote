@@ -1359,6 +1359,23 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     return out
 
 
+def _project_unblocked(node_ids: list[str]) -> None:
+    """Best-effort graph->doc projection for the given ids (advance's unblocked
+    dependents). Reads the graph fresh and calls the shared converger directly
+    (never imports graph.cli). Never raises: a projection failure must not block
+    the merge-triggered dispatch that follows."""
+    if not node_ids:
+        return
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+        from fno.plan._project import project_graph_nodes
+
+        project_graph_nodes(read_graph(graph_json()), node_ids)
+    except Exception as exc:  # noqa: BLE001 - convergence, never fatal
+        sys.stderr.write(f"warning: unblocked-dependent projection failed: {exc}\n")
+
+
 def _walker_live_at(project_root: str) -> bool:
     """True when the DEPENDENT project's own megawalk/active-backlog walker is
     live. Its ``walker:<root>`` claim lives under ``<root>/.fno/claims`` (the
@@ -1555,6 +1572,11 @@ def advance_dependents(
             ev_path,
         )
         return [AdvanceResult("skipped", EVENT_SKIPPED, reason="dependents-error", detail=str(exc))]
+
+    # Repaint each now-unblocked dependent's doc so a merge-gated dependent
+    # carries current mirror fields the moment its blocker closes (US5).
+    # Best-effort: convergence, never a dispatch blocker.
+    _project_unblocked([d["id"] for d in deps])
 
     return [
         _dispatch_one_dependent(
