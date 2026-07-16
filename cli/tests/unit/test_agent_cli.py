@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from fno.agent.cli import _tail_events
 from fno.cli import app
+from fno.paths_testing import use_tmpdir
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agent"
 
@@ -254,6 +255,48 @@ class TestWhoami:
         assert result.exit_code == 0, result.stdout + result.stderr
         assert "agent:    myworker (mesh)" in result.stdout
         assert "mail:     claude-879d8d26" in result.stdout
+
+    # --- x-730d: dead-letterbox visibility (unread count) --------------------
+
+    def _isolate_bus(self, tmp_path, monkeypatch):
+        """Point the bus + md render at tmp so seeded mail is the only mail."""
+        monkeypatch.delenv("FNO_BUS_DIR", raising=False)
+        monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path))
+        use_tmpdir(monkeypatch, tmp_path)
+
+    def test_mail_unread_count_surfaced(self, tmp_path, runner, monkeypatch):
+        """Unread bus mail addressed to this session's handle shows as a
+        `mail: N unread` line and a `mail_unread` JSON key."""
+        from fno.inbox.store import write_new_thread
+
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
+        self._isolate_bus(tmp_path, monkeypatch)
+        for _ in range(3):
+            write_new_thread(
+                recipient="claude-879d8d26", sender="etl", kind="send",
+                body="ping", to_kind="name",
+            )
+        project = _make_workspace(tmp_path, target=True)
+        result = _invoke(runner, project, monkeypatch, "whoami")
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "mail:     3 unread" in result.stdout
+        payload = json.loads(
+            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
+        )
+        assert payload["mail_unread"] == 3
+
+    def test_mail_unread_zero_silent(self, tmp_path, runner, monkeypatch):
+        """No unread mail: no unread line, no JSON key, exit 0 as today."""
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
+        self._isolate_bus(tmp_path, monkeypatch)
+        project = _make_workspace(tmp_path, target=True)
+        result = _invoke(runner, project, monkeypatch, "whoami")
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert " unread" not in result.stdout  # no `mail: N unread` line
+        payload = json.loads(
+            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
+        )
+        assert "mail_unread" not in payload
 
 
 # --- status --------------------------------------------------------------

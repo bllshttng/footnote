@@ -50,6 +50,20 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _mail_unread_count(handle: Optional[str]) -> int:
+    """Unread bus messages addressed to ``handle`` (the same cursor scan
+    ``fno mail unread`` runs). Degrades to 0 on any read error - whoami is the
+    confused-agent recovery verb and must never gain a failure mode."""
+    if not handle:
+        return 0
+    try:
+        from fno.bus.cursor import scan_unread
+
+        return len(scan_unread(handle, warn=False))
+    except Exception:
+        return 0
+
+
 def _derive_status_from_events(project_root: Path, session_id: Optional[str]) -> str:
     """Derive session status from the latest termination event in events.jsonl.
 
@@ -183,10 +197,13 @@ def whoami_command(
     )
     state = _drop_layers(_load_or_exit(opts), opts)
     mail, harness_sid = _mail_handle()
+    mail_unread = _mail_unread_count(mail)
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
         payload["harness_session_id"] = harness_sid
+        if mail_unread:
+            payload["mail_unread"] = mail_unread
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
         _emit_warnings(state)
         return
@@ -219,6 +236,8 @@ def whoami_command(
         )
     if mail:
         typer.echo(f"mail:     {mail}  (reply handle - pass as --from-name, or omit to self-stamp)")
+    if mail_unread:
+        typer.echo(f"mail:     {mail_unread} unread")
     typer.echo(f"provider: {state.provider}")
     # x-301a: opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this
