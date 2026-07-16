@@ -9051,6 +9051,44 @@ mod tests {
         assert!(core.session.squads.is_empty(), "no squad minted");
     }
 
+    #[test]
+    fn attach_new_tab_anchors_pane_in_row_cwd() {
+        // US5 contract (x-9f75): attaching a watch-only row spawns the pane in
+        // the ROW's own cwd, not the viewer's squad cwd. Asserting the existing
+        // behavior so it becomes contract, not accident (the interactive cwd
+        // chooser is a deferred follow-up; these defaults are the floor).
+        let root = std::env::temp_dir().join(format!("fno-row-cwd-{}", std::process::id()));
+        let row_cwd = root.join("agent-home");
+        std::fs::create_dir_all(&row_cwd).unwrap();
+        let marker = row_cwd.join("cwd.txt");
+        // The attach spawn writes its pwd then idles, standing in for the real
+        // `claude attach <id>` (the id rides as $0 for `sh -c`, harmless).
+        set_attach_program(&["/bin/sh", "-c", "pwd > cwd.txt; sleep 30"]);
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![bg_row(
+            "home-agent",
+            &row_cwd.to_string_lossy(),
+            Some("deadbee2"),
+        )];
+
+        core.command(client_id, Command::attach_agent("deadbee2"));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let reported = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(reported.trim()).unwrap(),
+            std::fs::canonicalize(&row_cwd).unwrap(),
+            "the attach pane is anchored in the row's own cwd"
+        );
+        if let Some(&pid) = core.attached.get("deadbee2") {
+            core.reap_pane(pid);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn client(id: u64, view_tab: TabId, dims: (u16, u16), passive: bool) -> Client {
         Client {
             id,
