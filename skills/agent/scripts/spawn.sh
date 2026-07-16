@@ -298,16 +298,39 @@ maybe_auto_worktree() {
   # so $wt is empty and we launch in the original CWD -- isolation is best-effort
   # and never blocks the spawn. (NOTE: ensure bases the branch on origin/main,
   # which also retires the stale-base phantom-deletion bug here.)
+  # Forward the RESOLVED harness (not the raw provider: glm resolves to the claude
+  # harness, ccm/ccr are claude accounts) so ensure's policy gate can land a claude
+  # payload harness-native at <repo>/.claude/worktrees/. A blank/unresolvable
+  # harness omits the flag -> ensure degrades harness-native to external, never
+  # guessing a location.
+  local harness
+  harness="$(fno dispatch resolve --harness "$PROVIDER" 2>/dev/null | sed -n 's/^harness=//p' | head -1)"
+  local ensure_args=(worktree ensure --repo "$top" --name "$NAME")
+  [[ -n "$harness" ]] && ensure_args+=(--harness "$harness")
   local wt
-  wt="$(fno worktree ensure --repo "$top" --name "$NAME" 2>/dev/null)"
+  wt="$(fno "${ensure_args[@]}" 2>/dev/null)"
   if [[ -n "$wt" ]]; then
     CWD="$wt"; AUTO_WT="$wt"
-    # Link gitignored shared state (footnote-ecosystem only; absent -> skip).
-    # This stays caller-side: the verb is package code and may not shell out to
-    # a repo-root script (shellout-drift gate); a skill script may.
-    local setup="$top/scripts/setup/setup-worktree.sh"
-    [[ -f "$setup" ]] && CANONICAL="$top" WORKTREE="$wt" bash "$setup" >/dev/null 2>&1
-    printf 'auto-worktree: %s\n' "$wt" >&2
+    # policy=never launches in place: ensure prints the repo main checkout itself.
+    # Skip every worktree-only side effect - setup-worktree.sh would link shared
+    # state INTO the canonical checkout (Locked Decision 4: guard on path == root).
+    # Compare PHYSICAL paths: ensure prints the resolved root while $top is the raw
+    # show-toplevel, so a symlinked root (macOS /tmp -> /private/tmp) would defeat a
+    # bare string match and run setup on canonical.
+    local wt_phys top_phys
+    wt_phys="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+    top_phys="$(cd "$top" 2>/dev/null && pwd -P || printf '%s' "$top")"
+    if [[ "$wt_phys" != "$top_phys" ]]; then
+      # Link gitignored shared state (footnote-ecosystem only; absent -> skip).
+      # This stays caller-side: the verb is package code and may not shell out to
+      # a repo-root script (shellout-drift gate); a skill script may.
+      local setup="$top/scripts/setup/setup-worktree.sh"
+      [[ -f "$setup" ]] && CANONICAL="$top" WORKTREE="$wt" bash "$setup" >/dev/null 2>&1
+      printf 'auto-worktree: %s\n' "$wt" >&2
+    else
+      AUTO_WT=""  # in place: no worktree was created, so nothing to reap later
+      printf 'auto-worktree: policy=never, launching in place (%s)\n' "$wt" >&2
+    fi
   fi
 }
 maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout

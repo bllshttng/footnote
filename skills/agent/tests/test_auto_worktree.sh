@@ -42,9 +42,17 @@ case "$1 $2" in
   "agents list")         printf '{"agents":[]}\n'; exit 0 ;;
   "agents spawn"|"agents host") printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
   "claim release")       exit 0 ;;
+  "dispatch resolve")
+    # provider -> resolved harness (glm rides the claude harness); spawn.sh reads
+    # the `harness=` line to forward --harness to ensure.
+    prov=""; while [[ $# -gt 0 ]]; do [[ "$1" == "--harness" ]] && prov="${2:-}"; shift; done
+    case "$prov" in claude|glm) printf 'harness=claude\n' ;; "" ) : ;; *) printf 'harness=%s\n' "$prov" ;; esac
+    exit 0 ;;
   "worktree ensure")
-    shift 2  # drop "worktree ensure"; parse "--repo R --name N"
-    repo=""; wtname=""
+    shift 2  # drop "worktree ensure"; parse "--repo R --name N [--harness H]"
+    # Record the full arg vector so a test can assert --harness forwarding.
+    printf '%s\n' "$*" >> "${ENSURE_ARGS_LOG:-/dev/null}"
+    repo=""; wtname=""; harness=""
     while [[ $# -gt 0 ]]; do
       # `shift; shift` (not `shift 2`) so a value-less trailing flag can't
       # wedge the loop re-seeing the same flag -- malformed input falls through
@@ -52,6 +60,7 @@ case "$1 $2" in
       case "$1" in
         --repo) repo="${2:-}"; shift; shift ;;
         --name) wtname="${2:-}"; shift; shift ;;
+        --harness) harness="${2:-}"; shift; shift ;;
         *) shift ;;
       esac
     done
@@ -61,6 +70,9 @@ case "$1 $2" in
     gdir="$(git -C "$top" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
     common="$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
     [[ -n "$gdir" && "$gdir" == "$common" ]] || exit 1
+    # Simulated policy=never: a repo named "nevrepo" launches in place (repo root
+    # on stdout, exit 0, NO worktree) -- mirrors the real verb's never receipt.
+    if [[ "$(basename "$top")" == "nevrepo" ]]; then printf '%s\n' "$top"; exit 0; fi
     wt="$HOME/conductor/workspaces/$(basename "$top")/$wtname"
     if [[ -d "$wt" ]]; then
       # reuse our own worktree; never clobber a stray dir (test 5's decoy).
@@ -185,6 +197,39 @@ err9="$(cat "$TMP/err9")"
 has "handoff launched" "$out9" "result=launched"
 no  "handoff no worktree note" "$err9" "auto-worktree:"
 [[ -d "$TMP/conductor/workspaces/myrepo/handoff-doc-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: handoff payload got a worktree"; } || PASS=$((PASS+1))
+
+# 10. the resolved harness is forwarded to ensure (--harness claude for provider
+#     claude), so ensure's policy gate can land a claude payload harness-native.
+: > "$TMP/ensure-args"
+out10="$(HOME="$TMP" PATH="$STUBDIR:$PATH" ENSURE_ARGS_LOG="$TMP/ensure-args" \
+  bash "$SPAWN" --name "spawn-harness-demo" --provider claude --payload-mode passthrough \
+  --message "/target x-hn" --node "x-hn" --cwd "$REPO" 2>"$TMP/err10")"
+# fragment omits the leading dashes so the grep-based `has` helper does not parse
+# "--harness" as its own option; the recorded arg vector still proves forwarding.
+has  "harness forwarded to ensure" "$(cat "$TMP/ensure-args")" "harness claude"
+
+# 11. policy=never -> ensure returns the repo root -> spawn.sh launches in place,
+#     emits the never note, and does NOT run setup-worktree.sh on the canonical
+#     checkout (Locked Decision 4: no worktree-only side effect on path == root).
+NEVREPO="$TMP/nevrepo"
+git init -q "$NEVREPO"
+git -C "$NEVREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$NEVREPO/scripts/setup"
+cat > "$NEVREPO/scripts/setup/setup-worktree.sh" <<'S'
+#!/usr/bin/env bash
+touch "${WORKTREE:-$PWD}/.setup-ran"
+S
+chmod +x "$NEVREPO/scripts/setup/setup-worktree.sh"
+out11="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-never-demo" \
+  --provider claude --payload-mode passthrough --message "/target x-nev" --node "x-nev" \
+  --cwd "$NEVREPO" 2>"$TMP/err11")"
+err11="$(cat "$TMP/err11")"
+has  "never launched in place note" "$err11" "policy=never, launching in place"
+no   "never no real-worktree note" "$err11" "auto-worktree: $TMP/conductor"
+[[ -f "$NEVREPO/.setup-ran" ]] && { FAIL=$((FAIL+1)); echo "FAIL: setup-worktree.sh ran on the canonical never checkout"; } || PASS=$((PASS+1))
+# no auto-worktree was created, so the receipt advertises no worktree cwd field
+# (the worker still launches in the repo root via --cwd, same as a /think payload).
+no   "never no auto-worktree cwd field" "$out11" "cwd="
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
