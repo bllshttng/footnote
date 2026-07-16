@@ -547,6 +547,13 @@ struct View {
     /// (x-c376) Monotonic `PeekAgent` request counter, bumped per open/move so a
     /// body landing after a newer request is dropped by seq (AC1-FR).
     peek_seq: u64,
+    /// (x-c914) The session-local active claude account: every mux-initiated
+    /// worker spawn (leader+g `DispatchNext`, a targeted `DispatchNode`)
+    /// appends `--account <id>` while `Some`. Client-local ephemera like
+    /// `nav`/`peek` - dropped on exit, never persisted, never touches a
+    /// credential slot (Locked Decisions 1-2). Toggled via the Connections
+    /// modal's set-active key; `None` = the default account (no flag).
+    active_account: Option<String>,
     /// (x-84d7) The Connections modal (MENU -> connections): a stateful overlay
     /// listing provider accounts + combos, driving the `fno providers` CLI.
     /// `Some` while open; stdin diverts to [`connections_keys`]. Its reads run
@@ -969,6 +976,7 @@ impl View {
             peek: None,
             peek_esc: Vec::new(),
             peek_seq: 0,
+            active_account: None,
             connections: None,
             conn_esc: Vec::new(),
             conn_want: false,
@@ -982,7 +990,8 @@ impl View {
     /// read. Bumps the gen so any in-flight read from a prior open is discarded.
     fn open_connections(&mut self) {
         self.conn_gen = self.conn_gen.wrapping_add(1);
-        let mut cv = crate::connections_view::ConnectionsView::new();
+        let mut cv = crate::connections_view::ConnectionsView::new()
+            .with_active_account(self.active_account.clone());
         cv.gen = self.conn_gen;
         self.connections = Some(cv);
         self.conn_esc.clear();
@@ -2974,7 +2983,14 @@ impl View {
                     } else {
                         ' '
                     };
-                    let mut text = format!(" {mark}{glyph} {}", a.name);
+                    // (x-c914) The account glyph leads the truncatable text (right
+                    // after the fixed mark+glyph prefix) so a long agent name or a
+                    // narrow sideline never truncates the billing badge away (codex
+                    // P2). Absent for the default account.
+                    let mut text = match a.account.as_deref() {
+                        Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
+                        None => format!(" {mark}{glyph} {}", a.name),
+                    };
                     // (x-0090) A pane row names its tab with a `·N` ordinal; an
                     // orphan row names its repo with a ` (basename)` suffix. The
                     // two are mutually exclusive (a pane row has a tab, an orphan
@@ -3612,7 +3628,13 @@ fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> 
     } else {
         nav_glyph(pane_state(a.badge, a.seen))
     };
-    let mut lines = vec![pad_to(&format!(" {glyph} {}", a.name), PEEK_OVERLAY_W)];
+    // (x-c914) The account glyph rides the peek header next to the name, same
+    // vocabulary as the selector row.
+    let header = match a.account.as_deref() {
+        Some(acct) => format!(" {glyph} {}  @{acct}", a.name),
+        None => format!(" {glyph} {}", a.name),
+    };
+    let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
         for wl in wrap_words(&sanitize_peek_line(reason), PEEK_OVERLAY_W - 3) {
             lines.push(pad_to(&format!("   {wl}"), PEEK_OVERLAY_W));
@@ -4617,9 +4639,14 @@ async fn dispatch_event(
             .map_err(|e| format!("block-rerun send failed: {e}"))?;
         }
         Event::DispatchNext => {
-            write_msg(sock_w, &ClientMsg::DispatchNext)
-                .await
-                .map_err(|e| format!("dispatch-next send failed: {e}"))?;
+            write_msg(
+                sock_w,
+                &ClientMsg::DispatchNext {
+                    account: view.active_account.clone(),
+                },
+            )
+            .await
+            .map_err(|e| format!("dispatch-next send failed: {e}"))?;
         }
         Event::SearchOpen => {
             // Enter client-local typing mode over the focused pane; keystrokes
@@ -4752,7 +4779,10 @@ async fn confirm_keys(
     };
     if matches!(bytes.first(), Some(b'\r') | Some(b'\n')) {
         let cmd = match action.action {
-            ConfirmKind::Dispatch { node } => Command::DispatchNode(node),
+            ConfirmKind::Dispatch { node } => Command::DispatchNode {
+                node,
+                account: view.active_account.clone(),
+            },
             ConfirmKind::RemoveSquad { squad, .. } => Command::RemoveSquad(squad),
             ConfirmKind::StopAgent { name } => Command::StopAgent { name },
             ConfirmKind::RemoveAgent { name } => Command::RemoveAgent { name },
@@ -5515,6 +5545,13 @@ async fn connections_keys(
                 // recorded the pending row + notice. Marked is_login so a success
                 // keeps that notice.
                 view.conn_action = Some((argv, Vec::new(), true));
+            }
+            ConnIntent::SetActiveAccount(account) => {
+                // (x-c914) Mirror the modal's post-toggle value into the client's
+                // authoritative session-local active account. Shells nothing and
+                // touches no credential (Locked Decisions 1-2); later spawns read
+                // it. The modal already repainted its own marker.
+                view.active_account = account;
             }
         }
     }
@@ -7037,6 +7074,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -7079,6 +7117,7 @@ mod tests {
             tombstone: false,
             tab: None,
             subline: None,
+            account: None,
         };
         let ChromeHit::Cmds(c) = agent_hit(&row, 1) else {
             panic!("expected Cmds for a same-workspace watch-only row");
@@ -7885,6 +7924,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         // A watch-only bg row with a claude jobId: a click attaches it.
         let bg_attach = AgentRow {
@@ -7902,6 +7942,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -7919,6 +7960,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
@@ -7959,6 +8001,7 @@ mod tests {
                 tombstone: false,
                 subline: None,
                 tab: None,
+                account: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -8234,6 +8277,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -8403,6 +8447,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -8662,6 +8707,7 @@ mod tests {
                     tombstone: false,
                     subline: None,
                     tab: None,
+                    account: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -8678,6 +8724,7 @@ mod tests {
                     tombstone: false,
                     subline: None,
                     tab: None,
+                    account: None,
                 },
                 AgentRow {
                     squad: None,
@@ -8694,6 +8741,7 @@ mod tests {
                     tombstone: false,
                     subline: None,
                     tab: None,
+                    account: None,
                 },
             ],
             focus_node: None,
@@ -8759,6 +8807,7 @@ mod tests {
                 tombstone: false,
                 subline: None,
                 tab: None,
+                account: None,
             }
         }
         let mut view = two_pane_view();
@@ -8869,6 +8918,7 @@ mod tests {
                     tombstone: false,
                     subline: None,
                     tab: None,
+                    account: None,
                 },
                 AgentRow {
                     squad: None,
@@ -8885,6 +8935,7 @@ mod tests {
                     tombstone: false,
                     subline: None,
                     tab: None,
+                    account: None,
                 },
                 AgentRow {
                     squad: None,
@@ -8901,6 +8952,7 @@ mod tests {
                     tombstone: false,
                     subline: None,
                     tab: None,
+                    account: None,
                 },
             ],
             focus_node: None,
@@ -9159,6 +9211,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -9428,6 +9481,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         let loading = PeekView {
             cursor: 0,
@@ -9494,6 +9548,24 @@ mod tests {
             out.contains("red") && out.contains('c'),
             "printable text kept"
         );
+    }
+
+    // x-c914 piece 2 (AC2-UI): the account glyph rides the peek header for a
+    // row that bills a non-default account; a default-account row shows none.
+    #[test]
+    fn peek_header_carries_account_glyph() {
+        let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
+        row.account = Some("readyrule".into());
+        let peek = PeekView {
+            cursor: 0,
+            seq: 1,
+            body: None,
+            name: "w".into(),
+        };
+        assert!(peek_overlay_lines(Some(&row), &peek)[0].contains("@readyrule"));
+
+        row.account = None; // default account -> no glyph
+        assert!(!peek_overlay_lines(Some(&row), &peek)[0].contains('@'));
     }
 
     // x-c376 AC3-HP / AC2-ERR: a digit on a blocked, pane-hosted peeked row sends
@@ -9654,6 +9726,7 @@ mod tests {
             tombstone: true,
             subline: None,
             tab: None,
+            account: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.expanded.insert(1);
@@ -9691,6 +9764,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         }
     }
 
@@ -10272,6 +10346,7 @@ mod tests {
                 tombstone: false,
                 subline: None,
                 tab: Some(1),
+                account: None,
             },
             AgentRow {
                 squad: Some(1),
@@ -10288,6 +10363,7 @@ mod tests {
                 tombstone: false,
                 subline: None,
                 tab: None,
+                account: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -10321,6 +10397,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         };
         let bare = row("zsh", 10, None);
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
@@ -10377,6 +10454,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -10422,6 +10500,7 @@ mod tests {
                 tombstone: false,
                 subline: None,
                 tab: None,
+                account: None,
             },
             AgentRow {
                 squad: Some(2),
@@ -10438,6 +10517,7 @@ mod tests {
                 tombstone: false,
                 subline: None,
                 tab: None,
+                account: None,
             },
         ];
         let rows = v.nav_rows();
@@ -10518,6 +10598,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         }];
         let idx = v
             .nav_rows()
@@ -10879,6 +10960,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -11033,6 +11115,7 @@ mod tests {
             tombstone: false,
             subline: None,
             tab: None,
+            account: None,
         }
     }
 

@@ -319,6 +319,9 @@ enum CoreMsg {
     /// no-work / lanes-full / failure outcomes come back as `DispatchResult`.
     DispatchNext {
         id: u64,
+        /// (x-c914) The requesting client's session-local active account, so
+        /// leader+g routes the spawn to it just like a targeted card click.
+        account: Option<String>,
     },
     /// The off-loop dispatch task's outcome, routed back so the notice is sent
     /// from the core loop (which owns `clients`). `notice` empty = say nothing
@@ -507,6 +510,11 @@ struct PaneEntry {
     /// Basename of the spawned command ("claude", "htop"), parsed from the
     /// pane-run argv like [`node_from_argv`]. `None` for a shell pane.
     cmd: Option<String>,
+    /// (x-c914) The pane's birth claude account (`FNO_ACCOUNT`), parsed once at
+    /// spawn. `None` = the default account. Drives the sideline account glyph
+    /// for a mux-spawned pane; a durable pane fact (survives reattach), never
+    /// the registry schema (Locked Decision 5).
+    account: Option<String>,
 }
 
 /// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
@@ -519,13 +527,59 @@ struct PaneEntry {
 /// the actual command. So a real command that merely mentions `FNO_NODE=` in
 /// its own args (e.g. `grep FNO_NODE=x file`) is never mistaken for provenance.
 fn node_from_argv(argv: &[String]) -> Option<String> {
+    env_token_from_argv(argv, "FNO_NODE=")
+}
+
+/// (x-c914) The pane's `FNO_ACCOUNT` birth account, parsed from the same
+/// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
+/// spawn was routed with `--account`). `None` for a default-account or ad-hoc
+/// pane. This is the mux-spawned-pane source for the sideline account glyph
+/// (managed accounts share `~/.claude`, so the roster can't distinguish them -
+/// the pane's own birth env can).
+fn account_from_argv(argv: &[String]) -> Option<String> {
+    env_token_from_argv(argv, "FNO_ACCOUNT=")
+}
+
+/// The argv index where the `env(1)` `NAME=VALUE` assignment run begins:
+/// past `env` itself and its option run. `_mesh_env_wrapper` emits an auth-var
+/// scrub (`-u VAR`) BEFORE the assignments on an `--account` spawn (x-c914), so
+/// a naive "first token after env" scan would stop on `-u` and miss every
+/// assignment (dropping both `FNO_NODE` and `FNO_ACCOUNT`). Skip `-u VAR` (and
+/// `--unset VAR`) pairs, other `-flags`, and a `--` terminator. `None` when
+/// argv doesn't start with `env`.
+fn env_assignments_start(argv: &[String]) -> Option<usize> {
     if argv.first().map(String::as_str) != Some("env") {
         return None;
     }
-    argv.iter()
-        .skip(1)
+    let mut i = 1;
+    while let Some(tok) = argv.get(i).map(String::as_str) {
+        if tok == "--" {
+            i += 1;
+            break;
+        }
+        if tok.starts_with('-') {
+            // `-u`/`--unset` consumes the next token (the var name to unset).
+            i += if tok == "-u" || tok == "--unset" {
+                2
+            } else {
+                1
+            };
+        } else {
+            break; // the assignment run (or the command) starts here
+        }
+    }
+    Some(i)
+}
+
+/// Shared scan for a `NAME=` token in the leading `env(1)` assignment run of a
+/// pane-run argv (anchored to `env` so a command that merely mentions the token
+/// in its own args is never mistaken for provenance).
+fn env_token_from_argv(argv: &[String], prefix: &str) -> Option<String> {
+    let start = env_assignments_start(argv)?;
+    argv[start..]
+        .iter()
         .take_while(|a| a.contains('='))
-        .find_map(|a| a.strip_prefix("FNO_NODE="))
+        .find_map(|a| a.strip_prefix(prefix))
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
 }
@@ -535,10 +589,11 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
 /// scan shape as [`node_from_argv`]). `None` when the scan finds no command -
 /// spawn never fails on labeling.
 fn cmd_from_argv(argv: &[String]) -> Option<String> {
-    let cmd = if argv.first().map(String::as_str) == Some("env") {
-        argv.iter().skip(1).find(|a| !a.contains('='))?
-    } else {
-        argv.first()?
+    let cmd = match env_assignments_start(argv) {
+        // Past the assignment run (skip `NAME=VALUE`s) is the command; the
+        // option run was already skipped, so `-u` never masquerades as the cmd.
+        Some(start) => argv[start..].iter().find(|a| !a.contains('='))?,
+        None => argv.first()?,
     };
     let base = cmd.rsplit('/').next().unwrap_or(cmd);
     (!base.is_empty()).then(|| base.to_string())
@@ -552,10 +607,10 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The argv attaching bg session `id`: `claude attach <id>`. `id` is always a
-/// positional arg (never a shell string), so an 8-hex id can only name a
+/// The base argv attaching bg session `id`: `claude attach <id>`. `id` is always
+/// a positional arg (never a shell string), so an 8-hex id can only name a
 /// session. Tests override the program via `set_attach_program` (x-9f75).
-fn attach_argv(id: &str) -> Vec<String> {
+fn attach_base(id: &str) -> Vec<String> {
     #[cfg(test)]
     if let Some(mut argv) = ATTACH_PROGRAM.with(|p| p.borrow().clone()) {
         argv.push(id.to_string());
@@ -564,9 +619,57 @@ fn attach_argv(id: &str) -> Vec<String> {
     vec!["claude".to_string(), "attach".to_string(), id.to_string()]
 }
 
+/// The argv attaching bg session `id`, routed to the right claude daemon. For an
+/// isolated-account row (`config_dir` set), wrap with `env CLAUDE_CONFIG_DIR=<dir>`
+/// so the attach hits that account's daemon instead of the ambient `~/.claude`
+/// (codex P1: a bare `claude attach` under the default dir fails, or worse
+/// targets a colliding default-account session); `FNO_ACCOUNT` rides along so the
+/// re-attached pane keeps its account glyph. A default-account row passes `None`
+/// and is byte-identical to the pre-feature attach.
+fn attach_argv(
+    id: &str,
+    account: Option<&str>,
+    config_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let base = attach_base(id);
+    let Some(dir) = config_dir else {
+        return base;
+    };
+    let mut wrapped = vec![
+        "env".to_string(),
+        format!("CLAUDE_CONFIG_DIR={}", dir.display()),
+    ];
+    if let Some(a) = account {
+        wrapped.push(format!("FNO_ACCOUNT={a}"));
+    }
+    wrapped.extend(base);
+    wrapped
+}
+
 #[cfg(test)]
 fn set_attach_program(argv: &[&str]) {
     ATTACH_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
+/// (x-c914) `short_id -> (account, config_dir)` for every isolated-account roster
+/// worker, so restore can route a persisted isolated member's `claude attach` at
+/// the right daemon (codex P1): at restore time `self.agents` is empty and the
+/// stored member carries no account, so `attach_account_ctx` cannot resolve it -
+/// this reverse lookup reads the isolated rosters directly. One-shot, read-only,
+/// fail-open to empty.
+fn isolated_attach_ctx() -> HashMap<String, (String, std::path::PathBuf)> {
+    let mut map = HashMap::new();
+    for (account, roster_path) in agents_view::isolated_roster_paths() {
+        let Some(dir) = agents_view::account_config_dir(&account) else {
+            continue;
+        };
+        if let Ok(raw) = std::fs::read_to_string(&roster_path) {
+            for w in agents_view::parse_roster(&raw).into_iter().flatten() {
+                map.insert(w.short_id, (account.clone(), dir.clone()));
+            }
+        }
+    }
+    map
 }
 
 /// A tab's display label (x-c150), from spawn-time facts only - no I/O, no
@@ -946,7 +1049,7 @@ pub(crate) fn fno_bin() -> PathBuf {
 /// digest_overlay idiom), and turn its verdict into the client notice. An empty
 /// return says nothing (the launched pane speaks for itself); every error path
 /// yields a visible notice rather than a silent no-op (x-6f77).
-async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
+async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&str>) -> String {
     // Selection + spawn crosses a subprocess and a mux socket round-trip, so the
     // budget is seconds, not the digest's 800ms; a hung dispatch still fails
     // open to a notice rather than wedging.
@@ -958,6 +1061,13 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
     if let Some(n) = node {
         args.push("--node");
         args.push(n);
+    }
+    // (x-c914) The client's session-local active account, resolved to the
+    // spawn's `--account` overlay CLI-side (x-d012 owns the resolver + the
+    // stale-account refusal); the mux only forwards the id.
+    if let Some(a) = account {
+        args.push("--account");
+        args.push(a);
     }
     let fut = tokio::process::Command::new(fno_bin())
         .args(&args)
@@ -1076,10 +1186,21 @@ async fn run_reap() -> String {
 /// (Domain Pitfall 2 - they are not interchangeable). Bounded + argv-safe (the
 /// id is 8-hex validated at load, never a shell string). Returns `(ok, reason)`:
 /// the caller's `complete_external` maps `ok` to stopped/removed vs failed.
-async fn run_claude_lifecycle(verb: &'static str, attach_id: &str) -> (bool, Option<String>) {
+async fn run_claude_lifecycle(
+    verb: &'static str,
+    attach_id: &str,
+    config_dir: Option<std::path::PathBuf>,
+) -> (bool, Option<String>) {
     const CLAUDE_TIMEOUT: Duration = Duration::from_secs(20);
-    let fut = tokio::process::Command::new("claude")
-        .args([verb, attach_id])
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args([verb, attach_id]);
+    // (x-c914) Route the lifecycle action at the row's own daemon: an isolated
+    // account lives in its own CLAUDE_CONFIG_DIR, so a bare `claude stop|rm`
+    // under the default dir would miss it or hit a colliding id (codex P1).
+    if let Some(dir) = config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let fut = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1283,7 +1404,7 @@ impl Core {
         )
         .map_err(|e| e.to_string())?;
         // A shell pane carries no node provenance (no wrapper argv).
-        self.register_pane(id, pty, rows, cols, None, cwd.to_string(), None);
+        self.register_pane(id, pty, rows, cols, None, cwd.to_string(), None, None);
         Ok(id)
     }
 
@@ -1303,6 +1424,7 @@ impl Core {
         }
         let node = node_from_argv(argv);
         let cmd = cmd_from_argv(argv);
+        let account = account_from_argv(argv);
         let id = self.next_pane_id;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
@@ -1316,7 +1438,7 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
-        self.register_pane(id, pty, rows, cols, node, cwd.to_string(), cmd);
+        self.register_pane(id, pty, rows, cols, node, cwd.to_string(), cmd, account);
         Ok(id)
     }
 
@@ -1333,6 +1455,7 @@ impl Core {
         node: Option<String>,
         cwd: String,
         cmd: Option<String>,
+        account: Option<String>,
     ) {
         self.next_pane_id += 1;
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
@@ -1344,6 +1467,7 @@ impl Core {
                 node,
                 cwd,
                 cmd,
+                account,
             },
         );
         let (tx, _rx) = watch::channel(WaitTick::default());
@@ -1713,6 +1837,21 @@ impl Core {
         }
     }
 
+    /// (x-c914) The birth account + isolated `config_dir` for a to-be-attached
+    /// row, looked up by `attach_id` in the current catalog. A default-account
+    /// row (or an unknown id) yields `(None, None)`, so the attach runs under
+    /// the ambient `~/.claude` exactly as before; an isolated-account row yields
+    /// its config_dir so `attach_argv` routes to the right daemon (codex P1).
+    fn attach_account_ctx(&self, attach_id: &str) -> (Option<String>, Option<std::path::PathBuf>) {
+        let account = self
+            .agents
+            .iter()
+            .find(|a| a.attach_id.as_deref() == Some(attach_id))
+            .and_then(|a| a.account.clone());
+        let dir = account.as_deref().and_then(agents_view::account_config_dir);
+        (account, dir)
+    }
+
     /// The attach-ids that are LIVE right now, read synchronously from the
     /// registry + roster files. Restore runs at the first attach, before the
     /// off-loop 1s reader has populated `self.agents`, so a stale in-memory
@@ -1725,7 +1864,18 @@ impl Core {
             .unwrap_or(0);
         let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
         let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
-        live_ids_from(reg.as_deref(), roster.as_deref(), now)
+        let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
+        // (x-c914) An isolated-account worker in a persisted squad is live in
+        // ITS roster, not the default one; fold each so restore does not
+        // tombstone a live alt-account member.
+        for (_account, path) in agents_view::isolated_roster_paths() {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                for w in agents_view::parse_roster(&raw).into_iter().flatten() {
+                    live.insert(w.short_id);
+                }
+            }
+        }
+        live
     }
 
     /// Materialize the persisted named squads at the first real attach (US2).
@@ -1749,6 +1899,9 @@ impl Core {
             return;
         }
         let live = self.live_attach_ids_now();
+        // (x-c914) Reverse lookup so a persisted isolated-account member restores
+        // against its own daemon, not the default ~/.claude.
+        let iso_ctx = isolated_attach_ctx();
         let home_cwd = std::env::var_os("HOME")
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -1774,12 +1927,12 @@ impl Core {
                     });
                     continue;
                 }
-                // Live: re-attach it into a fresh pane.
-                let argv = vec![
-                    "claude".to_string(),
-                    "attach".to_string(),
-                    m.attach_id.clone(),
-                ];
+                // Live: re-attach it into a fresh pane, routed to its daemon.
+                let (acct, cd) = match iso_ctx.get(&m.attach_id) {
+                    Some((a, d)) => (Some(a.as_str()), Some(d.as_path())),
+                    None => (None, None),
+                };
+                let argv = attach_argv(&m.attach_id, acct, cd);
                 match self.spawn_pane_cmd(&argv, rows, cols, &cwd0) {
                     Ok(pid) => {
                         let tid = self.session.mint_tab_id();
@@ -1920,11 +2073,11 @@ impl Core {
     /// backlog read never stalls a pane. The launched pane appears through the
     /// existing registry reader; the outcome (dispatched / no-work / lanes-full
     /// / failure) routes back as `DispatchResult` for a one-line notice.
-    fn dispatch_next(&self, id: u64, node: Option<String>) {
+    fn dispatch_next(&self, id: u64, node: Option<String>, account: Option<String>) {
         let session = self.session_name.clone();
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_dispatch_one(&session, node.as_deref()).await;
+            let notice = run_dispatch_one(&session, node.as_deref(), account.as_deref()).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -2024,8 +2177,9 @@ impl Core {
         action: crate::squad_store::ExternalState,
     ) {
         let core_tx = self.self_tx.clone();
+        let (_acct, config_dir) = self.attach_account_ctx(&attach_id);
         tokio::spawn(async move {
-            let (ok, reason) = run_claude_lifecycle(verb, &attach_id).await;
+            let (ok, reason) = run_claude_lifecycle(verb, &attach_id, config_dir).await;
             let _ = crate::squad_store::complete_external(
                 &attach_id,
                 generation,
@@ -2779,6 +2933,12 @@ impl Core {
                                 cwd_base: None,
                                 tombstone: false,
                                 subline: self.compose_subline(&a.cwd),
+                                // Structural roster-dir tag wins (Locked
+                                // Decision 6); else this pane's birth account.
+                                account: a
+                                    .account
+                                    .clone()
+                                    .or_else(|| pane_entry.and_then(|e| e.account.clone())),
                             }
                         }
                         None => {
@@ -2806,6 +2966,7 @@ impl Core {
                                 tombstone: false,
                                 subline: self
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
+                                account: e.and_then(|e| e.account.clone()),
                             }
                         }
                     };
@@ -2843,6 +3004,7 @@ impl Core {
                         cwd_base: None,
                         tombstone: false,
                         subline: self.compose_subline(&a.cwd),
+                        account: a.account.clone(),
                     });
                 }
                 None => {
@@ -2882,6 +3044,9 @@ impl Core {
                         cwd_base,
                         tombstone: false,
                         subline: self.compose_subline(&a.cwd),
+                        // The structural roster-dir tag: an isolated-account
+                        // foreign row carries its source account here (piece 3).
+                        account: a.account.clone(),
                     });
                 }
             }
@@ -2917,6 +3082,7 @@ impl Core {
                     tombstone: true,
                     // A synthesized dead member has no cwd to derive a branch/tail.
                     subline: None,
+                    account: None,
                 });
             }
         }
@@ -2980,6 +3146,7 @@ impl Core {
                 cwd_base,
                 tombstone: false,
                 subline: self.compose_subline(&r.cwd),
+                account: None,
             });
         }
         out
@@ -3914,7 +4081,8 @@ impl Core {
                         .map(|c| c.dims)
                         .unwrap_or((vp.rows, vp.cols));
                     // Spawn-first (Locked 4): a spawn failure leaves the layout untouched (AC3-ERR).
-                    let argv = attach_argv(&id);
+                    let (acct, cd) = self.attach_account_ctx(&id);
+                    let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
                     let new_pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                         Ok(p) => p,
                         Err(e) => {
@@ -3996,7 +4164,8 @@ impl Core {
                 } else {
                     row_cwd
                 };
-                let argv = attach_argv(&id);
+                let (acct, cd) = self.attach_account_ctx(&id);
+                let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
                 let pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                     Ok(p) => p,
                     Err(e) => {
@@ -4025,7 +4194,7 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
-            Command::DispatchNode(node) => {
+            Command::DispatchNode { node, account } => {
                 // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
                 // the leader+g porcelain pinned to `--node`; the claim race
                 // (already-worked node bounces `already-dispatching`) and lane
@@ -4040,7 +4209,7 @@ impl Core {
                 // pick. An unknown or non-ready id fails closed to a notice, like
                 // the other catalog-named commands (and covers an empty id).
                 if card_ready_to_dispatch(&self.backlog, &node) {
-                    self.dispatch_next(client_id, Some(node));
+                    self.dispatch_next(client_id, Some(node), account);
                 } else if let Some(route) = self.inflight_route(&node) {
                     // The client's Layout was stale: the card went in-flight
                     // between publish and click, but the server can route it -
@@ -4402,7 +4571,8 @@ impl Core {
                         .and_then(|s| self.session.squad(s))
                         .map(|s| s.canonical_cwd().to_string())
                         .unwrap_or_default();
-                    let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
+                    let (acct, cd) = self.attach_account_ctx(&id);
+                    let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
                     let pid = match self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
                         Ok(p) => p,
                         Err(e) => {
@@ -4786,8 +4956,8 @@ impl Core {
                 self.pane_answer(id, pane, fingerprint, region_lines, &keystroke);
                 Flow::Continue
             }
-            CoreMsg::DispatchNext { id } => {
-                self.dispatch_next(id, None);
+            CoreMsg::DispatchNext { id, account } => {
+                self.dispatch_next(id, None, account);
                 Flow::Continue
             }
             CoreMsg::DispatchResult { id, notice } => {
@@ -5306,6 +5476,23 @@ async fn serve(
                 let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
                 let (roster_stamp, roster_raw) =
                     scan(roster_path.clone(), state.roster_stamp()).await;
+                // (x-c914) Each registered isolated account's roster.json, folded
+                // into the union tagged by account (managed accounts share
+                // ~/.claude and add no dir). The config re-read is tiny and
+                // gated on an attached viewer; each roster read is stamp-gated
+                // per dir by `isolated_stamp`, so only a changed dir re-reads.
+                let iso_paths = tokio::task::spawn_blocking(agents_view::isolated_roster_paths)
+                    .await
+                    .unwrap_or_default();
+                let mut isolated = Vec::with_capacity(iso_paths.len());
+                for (account, path) in iso_paths {
+                    let (stamp, raw) = scan(path, state.isolated_stamp(&account)).await;
+                    isolated.push(agents_view::IsolatedRead {
+                        account,
+                        stamp,
+                        raw,
+                    });
+                }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -5315,6 +5502,7 @@ async fn serve(
                     move || reg_raw,
                     roster_stamp,
                     move || roster_raw,
+                    isolated,
                     now,
                 ) {
                     // (x-cd67 US4) Resolve the git branch per UNIQUE row cwd,
@@ -6134,8 +6322,12 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
-            Ok(ClientMsg::DispatchNext) => {
-                if core_tx.send(CoreMsg::DispatchNext { id }).await.is_err() {
+            Ok(ClientMsg::DispatchNext { account }) => {
+                if core_tx
+                    .send(CoreMsg::DispatchNext { id, account })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -6280,6 +6472,76 @@ mod tests {
         );
         // No `env` wrapper at all -> never scanned, even with a bare token.
         assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
+    }
+
+    #[test]
+    fn account_from_argv_reads_the_fno_account_token() {
+        // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.
+        let from =
+            |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            from(&["env", "FNO_NODE=x-1", "FNO_ACCOUNT=readyrule", "claude"]),
+            Some("readyrule".to_string())
+        );
+        // Default account (no token) / ad-hoc pane / empty value -> None.
+        assert_eq!(from(&["env", "FNO_NODE=x-1", "claude"]), None);
+        assert_eq!(from(&["claude"]), None);
+        assert_eq!(from(&["env", "FNO_ACCOUNT=", "claude"]), None);
+    }
+
+    #[test]
+    fn attach_argv_routes_isolated_account_to_its_daemon(/* codex P1 */) {
+        set_attach_program(&["claude", "attach"]); // pin the base (no leak)
+                                                   // Default account: no env wrapper (byte-identical to the bare attach).
+        assert_eq!(
+            attach_argv("job1", None, None),
+            vec![
+                "claude".to_string(),
+                "attach".to_string(),
+                "job1".to_string()
+            ]
+        );
+        // Isolated account: wrapped so `claude attach` hits THAT daemon, with the
+        // birth account stamped for the re-attached pane's glyph.
+        let dir = std::path::Path::new("/home/u/.claude-alt");
+        assert_eq!(
+            attach_argv("job1", Some("readyrule"), Some(dir)),
+            vec![
+                "env".to_string(),
+                "CLAUDE_CONFIG_DIR=/home/u/.claude-alt".to_string(),
+                "FNO_ACCOUNT=readyrule".to_string(),
+                "claude".to_string(),
+                "attach".to_string(),
+                "job1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn env_provenance_survives_the_account_scrub_prefix() {
+        // The REAL `_mesh_env_wrapper` output for an --account spawn: the auth-var
+        // scrub (`-u VAR` pairs) leads the assignments. Both FNO_ACCOUNT AND
+        // FNO_NODE must still parse past it (codex P1: a naive scan stopped on
+        // `-u` and dropped both, so the badge never showed and node provenance
+        // was lost for every routed spawn).
+        let argv: Vec<String> = [
+            "env",
+            "-u",
+            "ANTHROPIC_API_KEY",
+            "-u",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "FNO_AGENT_SELF=w",
+            "FNO_NODE=x-1",
+            "FNO_ACCOUNT=readyrule",
+            "CLAUDE_CONFIG_DIR=/home/u/.claude-alt",
+            "claude",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(node_from_argv(&argv), Some("x-1".to_string()));
+        assert_eq!(account_from_argv(&argv), Some("readyrule".to_string()));
+        assert_eq!(cmd_from_argv(&argv).as_deref(), Some("claude"));
     }
 
     #[test]
@@ -6543,6 +6805,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            account: None,
         }
     }
 
@@ -6573,6 +6836,7 @@ mod tests {
                 answerable: None,
                 attach_id: None,
                 external: false,
+                account: None,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -6586,6 +6850,7 @@ mod tests {
                 answerable: None,
                 attach_id: Some("c19cd2c3".into()),
                 external: false,
+                account: None,
             },
         ];
         let rows = core.agent_rows();
@@ -6656,6 +6921,7 @@ mod tests {
                 answerable: None,
                 attach_id: None,
                 external: false,
+                account: None,
             },
         ];
         let rows = core.agent_rows();
@@ -6691,6 +6957,7 @@ mod tests {
                 answerable: None,
                 attach_id: Some("ab12cd34".into()),
                 external: true,
+                account: None,
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
@@ -6703,6 +6970,7 @@ mod tests {
                 answerable: None,
                 attach_id: Some("ffffffff".into()),
                 external: true,
+                account: None,
             },
         ];
         assert!(
@@ -6749,6 +7017,7 @@ mod tests {
             answerable: None,
             attach_id: Some("ab12cd34".into()),
             external: true,
+            account: None,
         }];
         let rows = core.agent_rows();
         let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
@@ -8155,6 +8424,7 @@ mod tests {
             answerable: None,
             attach_id: attach.map(str::to_owned),
             external: false,
+            account: None,
         }
     }
 

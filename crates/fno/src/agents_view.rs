@@ -48,6 +48,12 @@ pub struct RegistryAgent {
     /// attachability signal - that is `attach_id.is_some() && !exited` (an
     /// external row whose pane died still carries `external: true`).
     pub external: bool,
+    /// (x-c914) The claude account this row bills, for the account glyph.
+    /// Precedence (Locked Decision 6): the STRUCTURAL roster-dir tag (a foreign
+    /// isolated-account worker, piece 3) is ground truth; else the birth
+    /// account of a mux-spawned pane (`FNO_ACCOUNT`, piece 2). `None` = the
+    /// default `~/.claude` account (no glyph).
+    pub account: Option<String>,
 }
 
 /// One claude-roster worker as the sideline consumes it (three fields, not
@@ -60,6 +66,11 @@ pub struct RosterWorker {
     pub short_id: String,
     pub name: String,
     pub cwd: String,
+    /// (x-c914) Which claude account's daemon roster this worker was read from:
+    /// `None` = the default `~/.claude` roster, `Some(id)` = an isolated
+    /// account's `<config_dir>/daemon/roster.json`. Set by the reader (which
+    /// knows the source dir), never by `parse_roster` (the file is dir-blind).
+    pub account: Option<String>,
 }
 
 /// The claude daemon roster path, mirroring fno-agents'
@@ -75,6 +86,113 @@ pub fn roster_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join(".claude").join("daemon").join("roster.json")
+}
+
+/// (x-c914) The `[[providers.records]]` entries carrying an isolated
+/// `config_dir` (an own-dir claude account), as `(account_id, config_dir)`.
+/// Managed accounts share `~/.claude` and set no `config_dir`, so they
+/// contribute nothing - an all-managed config yields `[]` and the roster union
+/// stays byte-identical to the single default read (AC3-EDGE). Tolerant: a
+/// malformed body or a record missing `id`/`config_dir` is skipped, never a
+/// panic. `~/` in a stored dir is expanded against `home`.
+pub fn parse_isolated_dirs(
+    toml_body: &str,
+    home: Option<&std::ffi::OsStr>,
+) -> Vec<(String, PathBuf)> {
+    let Ok(t) = toml_body.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let records = t
+        .get("providers")
+        .and_then(|p| p.get("records"))
+        .and_then(|r| r.as_array());
+    let mut out = Vec::new();
+    for rec in records.into_iter().flatten() {
+        let (Some(id), Some(dir)) = (
+            rec.get("id").and_then(|v| v.as_str()),
+            rec.get("config_dir").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        if id.is_empty() || dir.trim().is_empty() {
+            continue;
+        }
+        out.push((
+            id.to_string(),
+            PathBuf::from(crate::connections_view::expand_tilde(dir, home)),
+        ));
+    }
+    out
+}
+
+/// (x-c914) `roster.json` path for every isolated account, `(account_id,
+/// path)`, mapping each isolated `config_dir` to `<config_dir>/daemon/roster.json`.
+///
+/// Mirrors `load_providers`' record source precedence (codex P2) so an account
+/// the Connections modal can show is one this reader can also find: project-local
+/// `$PWD/.fno/config.toml` FIRST, then the global override
+/// (`$FNO_GLOBAL_SETTINGS_PATH` sibling `config.toml`) else `~/.fno/config.toml`.
+/// Project-local wins on an id collision. Fail-open to `[]`: an unreadable config
+/// just means no isolated dirs, so the union degrades to the default roster.
+pub fn isolated_roster_paths() -> Vec<(String, PathBuf)> {
+    isolated_account_dirs()
+        .into_iter()
+        .map(|(id, dir)| (id, dir.join("daemon").join("roster.json")))
+        .collect()
+}
+
+/// (x-c914) The isolated `config_dir` for one account, or `None` for a managed
+/// / unknown account. Used to route a cross-account `claude attach|stop|rm` to
+/// the right daemon via `CLAUDE_CONFIG_DIR` (codex P1) - a default-account row
+/// resolves to `None` and runs under the ambient `~/.claude` as before.
+pub fn account_config_dir(account_id: &str) -> Option<PathBuf> {
+    isolated_account_dirs()
+        .into_iter()
+        .find(|(id, _)| id == account_id)
+        .map(|(_, dir)| dir)
+}
+
+/// (x-c914) `(account_id, config_dir)` for every isolated account, resolved with
+/// `load_providers`' record precedence: project-local `$PWD/.fno/config.toml`
+/// first, then the global override (`$FNO_GLOBAL_SETTINGS_PATH` sibling
+/// `config.toml`) else `~/.fno/config.toml`; project-local wins on an id
+/// collision. Fail-open to `[]`.
+fn isolated_account_dirs() -> Vec<(String, PathBuf)> {
+    let home = std::env::var_os("HOME");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // project-local (loader's `repo_root` = $PWD else cwd)
+    if let Some(pwd) = std::env::var_os("PWD")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        candidates.push(pwd.join(".fno").join("config.toml"));
+    }
+    // global: $FNO_GLOBAL_SETTINGS_PATH sibling config.toml, else ~/.fno/config.toml
+    let global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH")
+        .filter(|v| !v.is_empty())
+        .map(|v| PathBuf::from(v).with_file_name("config.toml"))
+        .or_else(|| {
+            home.as_ref()
+                .map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
+        });
+    if let Some(g) = global {
+        candidates.push(g);
+    }
+
+    // First candidate wins per id (project-local over global), matching the loader.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for cfg in candidates {
+        let Ok(body) = std::fs::read_to_string(&cfg) else {
+            continue;
+        };
+        for (id, dir) in parse_isolated_dirs(&body, home.as_deref()) {
+            if seen.insert(id.clone()) {
+                out.push((id, dir));
+            }
+        }
+    }
+    out
 }
 
 /// Parse the claude daemon roster into the sideline's three-field workers.
@@ -125,6 +243,7 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
             short_id,
             name,
             cwd,
+            account: None,
         });
     }
     Some(out)
@@ -694,6 +813,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             answerable,
             attach_id,
             external: false,
+            account: None,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -717,27 +837,41 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
 ///    a synthesized external row (paneless, attachable via `attach_id`).
 /// 4. Sort by name (the determinism rule the change gate and layouts need).
 pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
-    use std::collections::HashSet;
-    let roster_ids: HashSet<&str> = roster.iter().map(|w| w.short_id.as_str()).collect();
+    use std::collections::{HashMap, HashSet};
+    // short_id -> source account, so an upgrade can adopt the roster row's
+    // structural account tag (x-c914), not just test membership.
+    let roster_by_id: HashMap<&str, Option<&str>> = roster
+        .iter()
+        .map(|w| (w.short_id.as_str(), w.account.as_deref()))
+        .collect();
 
     // Upgrade in place, then dedup the roster against the (borrowed) registry
     // ids - no per-tick String clones of the short ids (gemini review).
     let mut out = reg_rows;
     for r in &mut out {
+        let Some(id) = r.attach_id.as_deref() else {
+            continue;
+        };
+        let Some(&acct) = roster_by_id.get(id) else {
+            continue;
+        };
+        // Structural roster-dir tag wins (Locked Decision 6) for EVERY matching
+        // registry row, live or exited: a live `--account` bg worker whose row
+        // is deduped registry-wins must still carry its isolated-roster account
+        // (codex P1). The liveness upgrade below stays exited-only.
+        if let Some(a) = acct {
+            r.account = Some(a.to_string());
+        }
         if r.exited {
-            if let Some(id) = r.attach_id.as_deref() {
-                if roster_ids.contains(id) {
-                    r.exited = false;
-                    r.external = true;
-                    // Drop any stale inside-leg/scrape verdict that a terminal
-                    // row happened to still carry: an upgraded row renders as a
-                    // plain live external row (plan merge step 2), matching the
-                    // synthesized-foreign shape below.
-                    r.badge = None;
-                    r.reason = None;
-                    r.answerable = None;
-                }
-            }
+            r.exited = false;
+            r.external = true;
+            // Drop any stale inside-leg/scrape verdict that a terminal row
+            // happened to still carry: an upgraded row renders as a plain live
+            // external row (plan merge step 2), matching the synthesized-foreign
+            // shape below.
+            r.badge = None;
+            r.reason = None;
+            r.answerable = None;
         }
     }
 
@@ -757,6 +891,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             answerable: None,
             attach_id: Some(w.short_id.clone()),
             external: true,
+            account: w.account.clone(),
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -909,7 +1044,29 @@ pub struct ReaderState {
     /// `last_sent` alone can't distinguish which source went stale).
     last_good_reg: Option<Vec<RegistryAgent>>,
     last_good_roster: Option<Vec<RosterWorker>>,
+    /// (x-c914) Per-isolated-account roster caches, keyed by account id. Each
+    /// isolated account's `<config_dir>/daemon/roster.json` is stamp-gated and
+    /// parsed independently so a torn/corrupt one keeps ITS last-good without
+    /// blanking the default roster or the other accounts (AC1-FR per source).
+    isolated: std::collections::HashMap<String, IsolatedRoster>,
     last_sent: Option<Vec<RegistryAgent>>,
+}
+
+/// (x-c914) One isolated account's roster cache: the mtime stamp gate plus the
+/// already-parsed+tagged workers (re-parsed only when the stamp moves).
+#[derive(Default)]
+struct IsolatedRoster {
+    stamp: Option<(std::time::SystemTime, u64)>,
+    last_good: Option<Vec<RosterWorker>>,
+}
+
+/// (x-c914) One isolated account's per-tick roster read, assembled by the
+/// server's off-loop scanner (the same stat+conditional-read the default
+/// roster uses): `raw` is `Some` only when `stamp` moved past the cache.
+pub struct IsolatedRead {
+    pub account: String,
+    pub stamp: Option<(std::time::SystemTime, u64)>,
+    pub raw: Option<String>,
 }
 
 impl ReaderState {
@@ -923,6 +1080,13 @@ impl ReaderState {
     /// mtime+len gate for the roster read).
     pub fn roster_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
         self.roster_stamp
+    }
+
+    /// (x-c914) The cached stamp of `account`'s isolated roster, so the
+    /// server's scanner gates that dir's read the same way it gates the
+    /// default roster. `None` for a never-seen account (its first scan reads).
+    pub fn isolated_stamp(&self, account: &str) -> Option<(std::time::SystemTime, u64)> {
+        self.isolated.get(account).and_then(|c| c.stamp)
     }
 
     /// One tick: fold fresh stats/reads of BOTH files (taken OFF the core loop
@@ -939,6 +1103,7 @@ impl ReaderState {
         reg_read: impl FnOnce() -> Option<String>,
         roster_stamp: Option<(std::time::SystemTime, u64)>,
         roster_read: impl FnOnce() -> Option<String>,
+        isolated: Vec<IsolatedRead>,
         now_secs: u64,
     ) -> Option<Vec<RegistryAgent>> {
         // Advance the cached stamp ONLY when the read resolves (fresh bytes, or
@@ -994,7 +1159,42 @@ impl ReaderState {
         };
         self.last_good_roster = Some(roster.clone());
 
-        let rows = merge_rows(reg_rows, &roster);
+        // (x-c914) Fold each isolated account's roster into the union, tagging
+        // its workers with the source account. Same stamp-gate + per-source
+        // last-good contract as the default roster above; a torn/corrupt file
+        // keeps THIS account's last-good and never blanks the others (AC1-FR),
+        // a vanished file empties just this account (AC2-EDGE).
+        let mut all = roster;
+        for r in isolated {
+            let cache = self.isolated.entry(r.account.clone()).or_default();
+            // Parse + tag ONLY when the stamp moved; an unchanged tick reuses the
+            // cached tagged workers (gemini review: no re-parse of an unchanged
+            // roster per tick, N accounts x every second). A torn/garbage read
+            // keeps last-good (AC1-FR), a vanished file empties it (AC2-EDGE).
+            if r.stamp != cache.stamp {
+                match (r.raw, r.stamp) {
+                    (Some(raw), _) => {
+                        if let Some(mut ws) = parse_roster(&raw) {
+                            for w in &mut ws {
+                                w.account = Some(r.account.clone());
+                            }
+                            cache.last_good = Some(ws);
+                        } // else garbage bytes: keep last-good (AC1-FR)
+                        cache.stamp = r.stamp;
+                    }
+                    (None, None) => {
+                        cache.last_good = None;
+                        cache.stamp = None;
+                    }
+                    (None, Some(_)) => {} // raced/failed read: keep last-good, retry
+                }
+            }
+            if let Some(workers) = &cache.last_good {
+                all.extend(workers.iter().cloned());
+            }
+        }
+
+        let rows = merge_rows(reg_rows, &all);
         if self.last_sent.as_ref() != Some(&rows) {
             self.last_sent = Some(rows.clone());
             Some(rows)
@@ -1203,6 +1403,7 @@ mod tests {
             short_id: short.into(),
             name: name.into(),
             cwd: cwd.into(),
+            account: None,
         }
     }
 
@@ -1286,12 +1487,15 @@ mod tests {
                 || Some(reg.clone()),
                 stamp(1),
                 || Some(roster.clone()),
+                Vec::new(),
                 NOW,
             )
             .expect("first tick publishes");
         assert_eq!(rows.len(), 2);
         // Idle tick: same stamps, nothing read, merged set unchanged.
-        assert!(st.tick(stamp(1), || None, stamp(1), || None, NOW).is_none());
+        assert!(st
+            .tick(stamp(1), || None, stamp(1), || None, Vec::new(), NOW)
+            .is_none());
     }
 
     #[test]
@@ -1306,19 +1510,27 @@ mod tests {
                 || Some(reg.clone()),
                 stamp(1),
                 || Some(roster),
+                Vec::new(),
                 NOW,
             )
             .unwrap();
         assert_eq!(first.len(), 2, "registry row + foreign");
         // Torn roster (new stamp, garbage bytes): foreign row persists.
-        let torn = st.tick(stamp(1), || None, stamp(2), || Some("garbage".into()), NOW);
+        let torn = st.tick(
+            stamp(1),
+            || None,
+            stamp(2),
+            || Some("garbage".into()),
+            Vec::new(),
+            NOW,
+        );
         assert!(
             torn.is_none(),
             "last-good keeps merged set identical => no publish"
         );
         // Vanished roster (stamp -> None): foreign row disappears, registry stays.
         let gone = st
-            .tick(stamp(1), || None, None, || None, NOW)
+            .tick(stamp(1), || None, None, || None, Vec::new(), NOW)
             .expect("vanish changes the merged set");
         assert_eq!(gone.len(), 1);
         assert_eq!(gone[0].name, "r");
@@ -1336,9 +1548,10 @@ mod tests {
             || Some(reg(r#"{"name":"a","cwd":"/w","status":"live"}"#)),
             None,
             || None,
+            Vec::new(),
             NOW,
         );
-        let raced = st.tick(stamp(2), || None, None, || None, NOW);
+        let raced = st.tick(stamp(2), || None, None, || None, Vec::new(), NOW);
         assert!(
             raced.is_none(),
             "a raced read keeps last-good => no publish"
@@ -1349,6 +1562,7 @@ mod tests {
                 || Some(reg(r#"{"name":"b","cwd":"/w","status":"live"}"#)),
                 None,
                 || None,
+                Vec::new(),
                 NOW,
             )
             .expect("the same stamp retries and publishes once the read succeeds");
@@ -1386,14 +1600,245 @@ mod tests {
     fn reader_roster_only_change_republishes() {
         let mut st = ReaderState::default();
         let reg = reg(r#"{"name":"r","cwd":"/w","status":"live"}"#);
-        st.tick(stamp(1), || Some(reg), stamp(1), || Some("{}".into()), NOW);
+        st.tick(
+            stamp(1),
+            || Some(reg),
+            stamp(1),
+            || Some("{}".into()),
+            Vec::new(),
+            NOW,
+        );
         // A worker appears in the roster only; registry untouched.
         let roster =
             r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
         let rows = st
-            .tick(stamp(1), || None, stamp(2), || Some(roster), NOW)
+            .tick(
+                stamp(1),
+                || None,
+                stamp(2),
+                || Some(roster),
+                Vec::new(),
+                NOW,
+            )
             .expect("roster-only change publishes");
         assert_eq!(rows.len(), 2);
+    }
+
+    // ---- Dual-dir roster union, tagged by account (x-c914 piece 3) ----
+
+    fn iso(
+        account: &str,
+        stamp: Option<(std::time::SystemTime, u64)>,
+        raw: Option<&str>,
+    ) -> IsolatedRead {
+        IsolatedRead {
+            account: account.into(),
+            stamp,
+            raw: raw.map(str::to_string),
+        }
+    }
+
+    fn roster_json(short: &str, name: &str, cwd: &str) -> String {
+        format!(
+            r#"{{"workers":{{"{short}":{{"sessionId":"{short}-1","cwd":"{cwd}","dispatch":{{"seed":{{"name":"{name}"}}}}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn parse_isolated_dirs_skips_managed_and_expands_tilde() {
+        // Two records: a managed account (no config_dir, shares ~/.claude) and
+        // an isolated one (~/.claude-alt). Only the isolated one contributes,
+        // and its `~/` is expanded against HOME.
+        let body = r#"
+[providers]
+active = "home"
+[[providers.records]]
+id = "home"
+cli = "claude"
+auth = "managed"
+[[providers.records]]
+id = "alt"
+cli = "claude"
+config_dir = "~/.claude-alt"
+"#;
+        let home = std::ffi::OsString::from("/home/u");
+        let dirs = parse_isolated_dirs(body, Some(home.as_os_str()));
+        assert_eq!(
+            dirs,
+            vec![("alt".to_string(), PathBuf::from("/home/u/.claude-alt"))]
+        );
+    }
+
+    #[test]
+    fn parse_isolated_dirs_tolerates_garbage_and_partial_records() {
+        assert!(parse_isolated_dirs("not = toml = broken", None).is_empty());
+        // A record missing `id` (or `config_dir`) is skipped, never a panic.
+        let no_id = "[[providers.records]]\ncli = \"claude\"\nconfig_dir = \"/x\"\n";
+        assert!(parse_isolated_dirs(no_id, None).is_empty());
+        let empty_dir = "[[providers.records]]\nid = \"a\"\nconfig_dir = \"\"\n";
+        assert!(parse_isolated_dirs(empty_dir, None).is_empty());
+    }
+
+    #[test]
+    fn isolated_roster_workers_tagged_by_account(/* AC1-EDGE */) {
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"home","cwd":"/w","status":"live"}"#);
+        let default_roster = roster_json("aa11bb22", "default-w", "/w");
+        let alt_roster = roster_json("cc33dd44", "alt-w", "/alt");
+        let rows = st
+            .tick(
+                stamp(1),
+                || Some(reg),
+                stamp(1),
+                || Some(default_roster),
+                vec![iso("readyrule", stamp(1), Some(&alt_roster))],
+                NOW,
+            )
+            .expect("first tick publishes the union");
+        let alt = rows
+            .iter()
+            .find(|r| r.name == "alt-w")
+            .expect("isolated worker present");
+        assert_eq!(
+            alt.account.as_deref(),
+            Some("readyrule"),
+            "isolated row tagged by its source account"
+        );
+        assert!(alt.external);
+        let def = rows
+            .iter()
+            .find(|r| r.name == "default-w")
+            .expect("default worker present");
+        assert_eq!(def.account, None, "default roster stays untagged");
+    }
+
+    #[test]
+    fn missing_isolated_roster_omits_that_account(/* AC2-EDGE */) {
+        // A registered isolated account whose roster.json does not exist (stamp
+        // None, raw None) is omitted; the registry row is unaffected.
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"home","cwd":"/w","status":"live"}"#);
+        let rows = st
+            .tick(
+                stamp(1),
+                || Some(reg),
+                None,
+                || None,
+                vec![iso("readyrule", None, None)],
+                NOW,
+            )
+            .expect("publishes the registry row");
+        assert_eq!(rows.len(), 1, "no isolated rows for a missing roster");
+        assert_eq!(rows[0].name, "home");
+    }
+
+    #[test]
+    fn upgraded_registry_row_adopts_roster_account(/* Locked Decision 6 */) {
+        // An exited registry row (account None) whose short_id is live in an
+        // ISOLATED roster is upgraded AND adopts that roster's account tag - the
+        // structural source is ground truth for an adopted isolated worker.
+        let reg = derive_rows(
+            &reg(r#"{"name":"adopted","cwd":"/w","status":"exited","provider":"claude","short_id":"ab12cd34"}"#),
+            NOW,
+        )
+        .unwrap();
+        assert!(reg[0].exited && reg[0].account.is_none());
+        let mut w = worker("ab12cd34", "adopted", "/w");
+        w.account = Some("readyrule".into());
+        let rows = merge_rows(reg, &[w]);
+        assert_eq!(rows.len(), 1, "no duplicate foreign row");
+        assert!(!rows[0].exited && rows[0].external);
+        assert_eq!(rows[0].account.as_deref(), Some("readyrule"));
+    }
+
+    #[test]
+    fn live_registry_row_adopts_matching_roster_account(/* codex P1 */) {
+        // A LIVE (non-exited) registry row for a paneless --account bg worker is
+        // deduped registry-wins, but must still carry the isolated-roster
+        // account tag - not only the exited liveness-upgrade path.
+        let reg = derive_rows(
+            &reg(r#"{"name":"bg","cwd":"/w","status":"live","provider":"claude","short_id":"ab12cd34"}"#),
+            NOW,
+        )
+        .unwrap();
+        assert!(!reg[0].exited && reg[0].account.is_none());
+        let mut w = worker("ab12cd34", "bg", "/w");
+        w.account = Some("readyrule".into());
+        let rows = merge_rows(reg, &[w]);
+        assert_eq!(rows.len(), 1, "registry-wins dedup, no foreign twin");
+        assert!(
+            !rows[0].exited,
+            "a live row stays live (no spurious upgrade)"
+        );
+        assert_eq!(rows[0].account.as_deref(), Some("readyrule"));
+    }
+
+    #[test]
+    fn isolated_idle_tick_reuses_cache_without_republish() {
+        // gemini review: an unchanged isolated roster is not re-parsed - the
+        // cached tagged workers are reused and the merged set stays identical,
+        // so an idle tick publishes nothing.
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"home","cwd":"/w","status":"live"}"#);
+        let alt = roster_json("cc33dd44", "alt-w", "/alt");
+        let first = st
+            .tick(
+                stamp(1),
+                || Some(reg),
+                None,
+                || None,
+                vec![iso("rr", stamp(1), Some(&alt))],
+                NOW,
+            )
+            .expect("first publish");
+        assert!(first.iter().any(|r| r.name == "alt-w"));
+        // Idle: same stamp, the server did not re-read (raw None). Cache reused.
+        let idle = st.tick(
+            stamp(1),
+            || None,
+            None,
+            || None,
+            vec![iso("rr", stamp(1), None)],
+            NOW,
+        );
+        assert!(
+            idle.is_none(),
+            "unchanged roster reuses cache, no republish"
+        );
+    }
+
+    #[test]
+    fn torn_isolated_roster_keeps_its_last_good(/* AC1-FR */) {
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"home","cwd":"/w","status":"live"}"#);
+        let alt = roster_json("cc33dd44", "alt-w", "/alt");
+        let first = st
+            .tick(
+                stamp(1),
+                || Some(reg),
+                None,
+                || None,
+                vec![iso("rr", stamp(1), Some(&alt))],
+                NOW,
+            )
+            .expect("first publish");
+        assert!(first
+            .iter()
+            .any(|r| r.name == "alt-w" && r.account.as_deref() == Some("rr")));
+        // Torn read (new stamp, garbage bytes) for THAT account keeps its
+        // last-good, so the merged set is identical => no publish.
+        let torn = st.tick(
+            stamp(1), // reg cached (same stamp, no re-read)
+            || None,
+            None,
+            || None,
+            vec![iso("rr", stamp(2), Some("garbage"))],
+            NOW,
+        );
+        assert!(
+            torn.is_none(),
+            "corrupt isolated roster falls back to last-good"
+        );
     }
 
     // x-c929: a live `blocked` scrape verdict with an `answerable` payload parses
@@ -1452,6 +1897,7 @@ mod tests {
             answerable: None,
             attach_id: None,
             external: false,
+            account: None,
         }
     }
 
