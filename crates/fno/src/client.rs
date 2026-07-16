@@ -1668,7 +1668,8 @@ impl View {
             // A work-queue card dispatches/focuses via [`View::card_hit`], the
             // same resolver the navigator uses (x-653d).
             DisplayRow::Card(c) => Some(self.card_hit(c)),
-            DisplayRow::Header(_) => None,
+            // Inert rows (label, subline, spacer) resolve to no action (x-cd67).
+            DisplayRow::Header(_) | DisplayRow::Sub(_) | DisplayRow::Blank => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -2051,12 +2052,12 @@ impl View {
             return None;
         }
         let cur = cur.min(rows.len() - 1);
-        if !matches!(rows[cur], DisplayRow::Header(_)) {
+        if !row_is_inert(&rows[cur]) {
             return Some(cur);
         }
         (cur + 1..rows.len())
             .chain((0..cur).rev())
-            .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
+            .find(|&i| !row_is_inert(&rows[i]))
     }
 
     /// The next selector stop below `cur`: the nearest following display row
@@ -2065,7 +2066,7 @@ impl View {
     fn selector_down(&self, cur: usize) -> usize {
         let rows = self.display_rows();
         (cur + 1..rows.len())
-            .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
+            .find(|&i| !row_is_inert(&rows[i]))
             .unwrap_or(cur)
     }
 
@@ -2074,7 +2075,7 @@ impl View {
         let rows = self.display_rows();
         (0..cur.min(rows.len()))
             .rev()
-            .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
+            .find(|&i| !row_is_inert(&rows[i]))
             .unwrap_or(cur)
     }
 
@@ -2804,13 +2805,15 @@ impl View {
             // rollup is the sole signal there - no more agent rows rendering
             // unconditionally under a folded squad.
             if self.expanded.contains(&s.id) {
-                out.extend(
-                    self.layout
-                        .agents
-                        .iter()
-                        .filter(|a| a.squad == Some(s.id))
-                        .map(DisplayRow::Agent),
-                );
+                for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
+                    out.push(DisplayRow::Agent(a));
+                    // (x-cd67 US2) A dim line-2 subline follows the agent row
+                    // whenever the server composed one; a `None`/empty subline
+                    // emits no Sub row (AC1-EDGE: no blank gap).
+                    if agent_has_subline(a) {
+                        out.push(DisplayRow::Sub(a));
+                    }
+                }
             }
         }
         // The `+` create-workspace affordance sits directly under the squad list
@@ -2828,7 +2831,12 @@ impl View {
             // Orphans (cwd matched no squad) keep one flat section in the same
             // row grammar; the header reads `~ elsewhere` (Locked 6).
             out.push(DisplayRow::Header("~ elsewhere"));
-            out.extend(orphans.into_iter().map(DisplayRow::Agent));
+            for a in orphans {
+                out.push(DisplayRow::Agent(a));
+                if agent_has_subline(a) {
+                    out.push(DisplayRow::Sub(a));
+                }
+            }
         }
         // The work-queue lane (x-6f77): board-ordered ready/blocked/in-flight
         // cards under their own header. Empty (unreadable/no-work graph) renders
@@ -2853,7 +2861,7 @@ impl View {
             if r >= rows {
                 break;
             }
-            let is_header = matches!(drow, DisplayRow::Header(_));
+            let is_inert = row_is_inert(&drow);
             let (text, mut flags) = match drow {
                 DisplayRow::Sel(row) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
@@ -2956,7 +2964,14 @@ impl View {
                     // is paneless), so at most one suffix ever lands.
                     if let Some(ord) = a.tab.and_then(|tid| self.tab_ordinal(a.squad, tid)) {
                         text.push_str(&format!(" ·{ord}"));
-                    } else if let Some(base) = a.cwd_base.as_deref() {
+                    } else if let Some(base) = a
+                        .cwd_base
+                        .as_deref()
+                        // (x-cd67 US2) When a subline carries the cwd on line 2,
+                        // the orphan basename suffix is suppressed on line 1 so
+                        // it does not duplicate (silent-failure-hunter guard).
+                        .filter(|_| !agent_has_subline(a))
+                    {
                         text.push_str(&format!(" ({base})"));
                     }
                     if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
@@ -3010,6 +3025,15 @@ impl View {
                     };
                     (label, cell_flags::DIM)
                 }
+                DisplayRow::Sub(a) => {
+                    // (x-cd67 US2) The dim line-2 subline, indented 4 cells to sit
+                    // under the agent name (` {mark}{glyph} ` is 4 cells wide). The
+                    // later `.take(text_w)` truncates it to the panel width.
+                    let sub = a.subline.as_deref().unwrap_or("");
+                    (format!("    {sub}"), cell_flags::DIM)
+                }
+                // (x-cd67 US3) A blank section spacer paints nothing.
+                DisplayRow::Blank => (String::new(), 0),
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -3017,7 +3041,7 @@ impl View {
             // neither bar lands on an inert Header (the cursor skips them; the
             // hover check here keeps a label from reading as actionable -
             // gemini review).
-            let highlit = !is_header && (self.selector == Some(i) || self.hover_row == Some(i));
+            let highlit = !is_inert && (self.selector == Some(i) || self.hover_row == Some(i));
             if highlit {
                 flags |= cell_flags::INVERSE;
             }
@@ -3049,9 +3073,11 @@ impl View {
     }
 }
 
-/// One rendered sideline line. Every variant except `Header` is actionable:
-/// the selector's Enter and a mouse click resolve it through
-/// [`View::row_action`] (x-260a).
+/// One rendered sideline line. The actionable variants (`Sel`, `Agent`, `Card`,
+/// `NewSquad`) resolve through [`View::row_action`] via the selector's Enter or a
+/// mouse click (x-260a); the inert variants (`Header`, `Sub`, `Blank`) are
+/// skipped by the selector, never hover-highlighted, and return `None` from
+/// `row_action` - see [`row_is_inert`].
 enum DisplayRow<'a> {
     Sel(SelRow),
     Agent(&'a AgentRow),
@@ -3062,6 +3088,32 @@ enum DisplayRow<'a> {
     /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
+    /// (x-cd67 US2) The dim line-2 subline under an agent row, carrying the
+    /// server-composed `<branch> · <cwd-tail>`. Inert: every painted line stays
+    /// one display row (the x-260a single-enumeration invariant), so scroll,
+    /// hover, and hit-test index math are untouched.
+    Sub(&'a AgentRow),
+    /// (x-cd67 US3) A one-line spacer between workspace groups and before the
+    /// trailing sections. Inert, like `Sub`.
+    Blank,
+}
+
+/// (x-cd67) True for a non-actionable sideline row: the selector skips it, it is
+/// never hover/selection-highlighted, and [`View::row_action`] returns `None`.
+/// Header (a section label), Sub (an agent's dim subline), and Blank (a section
+/// spacer). One predicate so paint, hit-test, and the selector never diverge.
+fn row_is_inert(drow: &DisplayRow) -> bool {
+    matches!(
+        drow,
+        DisplayRow::Header(_) | DisplayRow::Sub(_) | DisplayRow::Blank
+    )
+}
+
+/// (x-cd67 US2) Whether an agent row carries a non-empty server-composed subline
+/// (a `Sub` display row follows it). An empty string is treated as absent so a
+/// blank actionable-looking gap can never paint.
+fn agent_has_subline(a: &AgentRow) -> bool {
+    a.subline.as_deref().is_some_and(|s| !s.is_empty())
 }
 
 /// One clickable span in the tab bar (label + render flags + what a click does;
@@ -10915,6 +10967,72 @@ mod tests {
             evidence: format!("{kind} evidence"),
             live,
         }
+    }
+
+    // (x-cd67 US2) AC2-HP + AC1-UI + line-1 suppression: an agent with a subline
+    // gets a dim, inert Sub row under it; the selector skips it; and the orphan
+    // basename suffix is dropped from line 1 (the cwd now lives on line 2).
+    #[test]
+    fn sub_row_is_dim_inert_and_suppresses_line1_basename() {
+        let mut agent = blocked_row("worker", 4, None);
+        agent.subline = Some("main · footnote".into());
+        agent.cwd_base = Some("footnote".into()); // would suffix line 1 without a subline
+        let mut v = view_with_agents(vec![agent]);
+        let rows = v.display_rows();
+        let ai = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "worker"))
+            .unwrap();
+        // AC2-HP: a Sub row immediately follows the agent.
+        assert!(
+            matches!(rows[ai + 1], DisplayRow::Sub(_)),
+            "sub row follows the agent"
+        );
+        // AC1-UI: inert - no row action, and the selector steps over it.
+        assert!(v.row_action(ai + 1).is_none(), "sub row is not actionable");
+        assert!(v.selector_down(ai) > ai + 1, "selector skips the sub row");
+        assert_eq!(v.selector_anchor(ai + 1), v.selector_anchor(ai + 2));
+
+        let frame = v.compose();
+        let cols = frame.cols as usize;
+        let text = frame_text(&frame);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[ai].contains("worker"));
+        assert!(
+            !lines[ai].contains("(footnote)"),
+            "line-1 basename suffix suppressed when a subline exists: {:?}",
+            lines[ai]
+        );
+        assert!(
+            lines[ai + 1].contains("main · footnote"),
+            "subline on line 2: {:?}",
+            lines[ai + 1]
+        );
+        // The sub row paints DIM.
+        let sub_cell = frame.cells[(ai + 1) * cols + 4];
+        assert_eq!(sub_cell.flags & cell_flags::DIM, cell_flags::DIM);
+        // AC1-UI: hover on the sub index paints no INVERSE bar.
+        v.hover_row = Some(ai + 1);
+        let frame = v.compose();
+        assert_eq!(
+            frame.cells[(ai + 1) * cols + 4].flags & cell_flags::INVERSE,
+            0,
+            "an inert sub row is never highlighted"
+        );
+    }
+
+    // (x-cd67 US2, AC1-EDGE) An agent with no subline emits no Sub row - no blank
+    // gap under it - and its line-1 grammar is unchanged.
+    #[test]
+    fn no_subline_emits_no_sub_row() {
+        let agent = blocked_row("worker", 4, None); // subline: None
+        let v = view_with_agents(vec![agent]);
+        assert!(
+            !v.display_rows()
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Sub(_))),
+            "no subline -> no Sub row"
+        );
     }
 
     #[test]
