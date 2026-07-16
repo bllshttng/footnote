@@ -497,14 +497,23 @@ CANONICAL_ROOT="$(git worktree list --porcelain | awk 'NR==1 {sub(/^worktree /, 
 # must never match a local branch. Compare the PR's owner/repo (from its URL)
 # against this canonical's origin; a mismatch skips resolution entirely.
 PR_META="$(gh pr view "$PR" --json headRefName,url 2>/dev/null || true)"
-BRANCH_NAME="$(printf '%s' "$PR_META" | jq -r '.headRefName // empty' 2>/dev/null)"
-PR_NWO="$(printf '%s' "$PR_META" | jq -r '.url // ""' 2>/dev/null | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/.*#\1#')"
-ORIGIN_NWO="$(git -C "$CANONICAL_ROOT" remote get-url origin 2>/dev/null | sed -E 's#^(git@[^:]+:|https?://[^/]+/)##; s#\.git$##')"
+BRANCH_NAME=""; PR_NWO=""
+# `select(. != null and . != "")` not `// empty`: jq's `//` treats "" as truthy.
+if [[ -n "$PR_META" ]]; then
+  BRANCH_NAME="$(printf '%s' "$PR_META" | jq -r '.headRefName | select(. != null and . != "")' 2>/dev/null)"
+  PR_NWO="$(printf '%s' "$PR_META" | jq -r '.url | select(. != null and . != "")' 2>/dev/null | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/.*#\1#')"
+fi
+# origin -> owner/repo. Normalize all three remote forms (scp git@host:o/r,
+# ssh://git@host/o/r, https://host/o/r), else an ssh:// origin would leave the
+# scheme in ORIGIN_NWO and the guard would reject every same-repo PR as foreign.
+ORIGIN_NWO="$(git -C "$CANONICAL_ROOT" remote get-url origin 2>/dev/null | sed -E 's#^(git@[^:]+:|ssh://[^/]+/|https?://[^/]+/)##; s#\.git$##')"
 WORKTREE_PATH=""
 
 # Nested so every outcome (foreign-repo, no-match, inside, missing-script,
 # archived, kept) reports on exactly one line - never two, never silent.
-if [[ -n "$PR_NWO" && -n "$ORIGIN_NWO" && "$PR_NWO" != "$ORIGIN_NWO" ]]; then
+if [[ -z "$PR_META" ]]; then
+  echo "post-merge: could not fetch PR #$PR metadata (gh unavailable?) - worktree prune skipped."
+elif [[ -n "$PR_NWO" && -n "$ORIGIN_NWO" && "$PR_NWO" != "$ORIGIN_NWO" ]]; then
   echo "post-merge: PR #$PR is $PR_NWO, not this repo ($ORIGIN_NWO) - worktree prune skipped."
 else
   if [[ -n "$BRANCH_NAME" && "$BRANCH_NAME" != "null" ]]; then
@@ -521,10 +530,11 @@ else
     echo "post-merge: no worktree found for branch $BRANCH_NAME - skipped (merged from canonical or already removed)."
   elif [[ "$(cd "$WORKTREE_PATH" 2>/dev/null && pwd)" == "$(pwd)" ]]; then
     # Running inside the worktree to archive: removing our own cwd would break
-    # the session. Defer to the standing merged-worktree sweep, which reaps it
-    # from canonical - the merged-branch predicate already makes this worktree a
-    # sweep candidate, so no marker is needed.
-    echo "post-merge: prune deferred: ritual is running inside $WORKTREE_PATH; next 'fno worktree cleanup --merged --apply' reaps it."
+    # the session. Defer to the standing merged-worktree sweep, run FROM CANONICAL
+    # - the sweep skips its own cwd's worktree (worktree-lifecycle.sh MAIN_DIR),
+    # so run from inside this worktree it would skip the very one to reap. The
+    # merged-branch predicate makes it a sweep candidate; no marker is needed.
+    echo "post-merge: prune deferred: ritual is running inside $WORKTREE_PATH; run 'cd \"$CANONICAL_ROOT\" && fno worktree cleanup --merged --apply' from canonical to reap it."
   elif [[ ! -f "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" ]]; then
     echo "post-merge: archive-worktree.sh not found at $CANONICAL_ROOT/scripts/setup/ - skipped."
   else
@@ -540,7 +550,7 @@ fi
 Guard rules:
 - **Never use `--force`**. Strict checks (clean tree, no unpushed commits, no live target session) stay ON so a partially-dirty worktree is never silently destroyed.
 - **Never archive the canonical checkout** - the script already refuses, but we also never pass the canonical root as the target.
-- **Session inside the worktree** - never self-remove; print the deferral naming `fno worktree cleanup --merged --apply` (the standing sweep reaps it from canonical) and continue.
+- **Session inside the worktree** - never self-remove; print the deferral naming `cd <canonical> && fno worktree cleanup --merged --apply` (the sweep must run from canonical - it skips its own cwd's worktree) and continue.
 - **Foreign-repo PR** - a PR whose owner/repo is not this canonical's origin skips resolution; local worktrees are never considered.
 - **Missing archive script** - older checkouts may not have it; skip silently.
 - **Any exit non-zero from the script** - surface verbatim, mark step "skipped (checks failed)", and continue. This step never blocks the rest of the ritual.
