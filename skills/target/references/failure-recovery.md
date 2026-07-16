@@ -115,7 +115,7 @@ The order is load-bearing: supersede runs **before** cancel so no window exists 
    If this exits non-zero (lock contention, bad id), **STOP** - do not cancel, do not dispatch. The old node stays claimed and the operator resolves the error first.
 3. **Close the PR if one exists.** Comment linking the lessons block; the branch is preserved, never deleted (its commits survive the discard - see AC5):
    ```bash
-   gh pr close <N> --comment "Superseded by <NEW_ID> (reviewer-ordered restart). Lessons: <pointer>. Branch preserved."
+   gh pr close <N> --comment "Superseded by <NEW_ID> (reviewer-ordered restart). Lessons are in the details of node <NEW_ID>. Branch preserved."
    ```
 4. **Cancel this session.** The loop-check verb terminates as `Interrupted`, never any `Done` variant:
    ```bash
