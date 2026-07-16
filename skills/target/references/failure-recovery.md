@@ -96,7 +96,7 @@ A deliberate `/fno:target cancel` writes a session-keyed `.target-cancelled-fina
 
 ## Reviewer-ordered restart
 
-The failure-recovery machinery above is builder-side: `stuck_test` self-aborts on repeated test failure, the circuit breaker rotates approach after 3 same-error failures. What none of it can do is *order* a discard-and-restart - a builder never throws away its own work. That order comes from a review: a sigma/peer panel that judges the approach unsalvageable emits the terminal `RECOMMEND RESTART` verdict (contract: [../../review/references/report-template.md](../../review/references/report-template.md), "Terminal recommendation: RECOMMEND RESTART"). This section is the operator playbook that honors it.
+The failure-recovery machinery above is builder-side: `stuck_test` self-aborts on repeated test failure, the circuit breaker rotates approach after 3 same-error failures. What none of it can do is *order* a discard-and-restart - a builder never throws away its own work. That order comes from a review: a sigma/peer panel that judges the approach unsalvageable emits the terminal `RECOMMEND RESTART` verdict (contract: `skills/review/references/report-template.md`, "Terminal recommendation: RECOMMEND RESTART"). This section is the operator playbook that honors it.
 
 **Precondition (never honor a malformed recommendation).** A `RECOMMEND RESTART` is only honored when it carries both a why-fix-in-place-fails rationale and a lessons block. Missing either, treat it as a normal blocking review (a fix round), not a restart.
 

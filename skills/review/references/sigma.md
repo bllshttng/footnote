@@ -291,8 +291,7 @@ terminal `RECOMMEND RESTART` verdict instead of a fix-in-place blocking review. 
 legal only with a why-fix-in-place-fails rationale and a lessons block; severity alone
 never triggers it. Contract: [report-template.md](report-template.md), "Terminal
 recommendation: RECOMMEND RESTART". Honor sequence:
-[skills/target/references/failure-recovery.md](../../target/references/failure-recovery.md),
-"Reviewer-ordered restart".
+`skills/target/references/failure-recovery.md`, "Reviewer-ordered restart".
 
 ## Cross-Model Review Routing (optional)
 
