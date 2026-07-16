@@ -177,6 +177,28 @@ def _default_gh(args: list[str]) -> "tuple[int, str, str]":
         return 1, "", str(exc)
 
 
+# Per-run cap on gh invocations. The eval loop is a background accumulator, not
+# a deadline job: nodes past the cap are picked up by later daily sweeps. Bounds
+# a sweep's total network fan-out (each gh call already has its own 60s timeout)
+# so N concurrent sweeps can't stretch a seconds-job into tens of minutes (x-dbdf).
+_GH_FANOUT_CAP = int(os.environ.get("FNO_OBSERVER_GH_CAP", "10"))
+
+
+def _capped_gh(gh_runner, cap: int):
+    """Wrap *gh_runner* so at most *cap* real gh invocations occur per sweep.
+    Past the cap, return a gh-unavailable result - the caller's existing
+    gh-down degrade counts the node as a coverage gap, never a crash."""
+    calls = {"n": 0}
+
+    def wrapped(args: list[str]) -> "tuple[int, str, str]":
+        if calls["n"] >= cap:
+            return 1, "", "observer: gh fan-out cap reached"
+        calls["n"] += 1
+        return gh_runner(args)
+
+    return wrapped
+
+
 def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Optional[str]]:
     """Score one corpus item, returning ``{dimension: verdict|None}``. A gh/disk
     failure for an attributed item yields all-None (a coverage gap), never a
@@ -349,7 +371,7 @@ def sweep(
 
     run_id = _mint_run_id(skill_id)
     events_paths = _events_paths()
-    gh_runner = _default_gh
+    gh_runner = _capped_gh(_default_gh, _GH_FANOUT_CAP)
     skill_version = items[0].get("skill_version") or "unknown"
 
     findings: list[tuple[str, str]] = []

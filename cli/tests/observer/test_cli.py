@@ -164,6 +164,58 @@ def test_sweep_partial_when_an_item_is_unscorable(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# gh fan-out cap (x-dbdf US4 / AC2-EDGE)
+# --------------------------------------------------------------------------- #
+
+def test_capped_gh_bounds_invocations_to_cap():
+    """A sweep with more gh-needing nodes than the cap fetches exactly `cap`
+    times; every call past the cap short-circuits to a gh-unavailable result
+    (which the caller degrades to a coverage gap, not a crash)."""
+    calls: list[list[str]] = []
+
+    def fake_gh(args):
+        calls.append(args)
+        return 0, "diff", ""
+
+    capped = cli._capped_gh(fake_gh, cap=10)
+    results = [capped(["pr", "diff", str(n)]) for n in range(15)]
+
+    assert len(calls) == 10  # exactly the cap reached the real runner
+    assert all(rc == 0 for rc, _o, _e in results[:10])
+    assert all(rc == 1 and "cap reached" in err for rc, _o, err in results[10:])
+
+
+def test_sweep_wires_the_gh_cap(monkeypatch, tmp_path):
+    """End-to-end: 15 nodes with no on-disk plan (all fall to gh) under a cap of
+    3 -> the real gh runner is invoked at most 3 times for the whole run."""
+    monkeypatch.setenv("FNO_OBSERVER_GH_CAP", "3")
+    import importlib
+    importlib.reload(cli)
+
+    calls = {"n": 0}
+
+    def counting_gh(args):
+        calls["n"] += 1
+        return 0, "# Plan\n\n## Failure Modes\n\nx\n\n## Execution Strategy\n\n```yaml\ntasks: []\n```\n", ""
+
+    monkeypatch.setattr(cli, "_default_gh", counting_gh)
+    items = [_item(f"s{i}", f"x-{i}", None) for i in range(15)]
+    by_id = {f"x-{i}": {"pr_number": 100 + i, "pr_url": f"https://github.com/o/r/pull/{100 + i}"} for i in range(15)}
+    events_path = tmp_path / "events.jsonl"
+    monkeypatch.setattr(cli, "_events_paths", lambda: [events_path])
+    monkeypatch.setattr(cli, "_load_corpus", lambda skill, since: ({"items": items, "attributed": len(items)}, by_id))
+    import fno.paths as paths
+    monkeypatch.setattr(paths, "observer_reports_dir", lambda *a, **k: tmp_path / "reports")
+
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "blueprint"])
+    assert r.exit_code == 0, r.output
+    assert calls["n"] == 3  # cap held across the whole sweep
+
+    monkeypatch.delenv("FNO_OBSERVER_GH_CAP", raising=False)
+    importlib.reload(cli)
+
+
+# --------------------------------------------------------------------------- #
 # replay
 # --------------------------------------------------------------------------- #
 
