@@ -55,6 +55,10 @@ _eval_sweep_bounded() {
     "$@" & local cmd_pid=$!
     ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) & local wd_pid=$!
     wait "$cmd_pid" 2>/dev/null; local rc=$?
+    # Reap the watchdog's `sleep` child before its parent, then the subshell -
+    # otherwise the sleep reparents to pid 1 and becomes the orphan we are here
+    # to prevent (Domain Pitfall).
+    pkill -P "$wd_pid" 2>/dev/null
     kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
     return $rc
 }
