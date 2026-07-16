@@ -66,7 +66,23 @@ finding. Forensics-only — does not affect verdict or severity._
 ### Verdict
 - [ ] **Ready to merge** - All tests pass, coverage adequate
 - [ ] **Needs work** - See critical issues above
+- [ ] **RECOMMEND RESTART** - Fix-in-place is worse than re-derivation (see contract below)
 
 ### Notes
 - [Any special observations, e.g., "Shell scripts detected - manual bash review recommended"]
 ```
+
+## Terminal recommendation: RECOMMEND RESTART
+
+A blocking review is fix-in-place by default: the operator addresses the findings on the same branch. `RECOMMEND RESTART` is the one verdict that says *don't* fix in place - discard this attempt and re-derive from a fresh node. It exists because a builder never discards its own work (the generator is proud of its output), so the order to restart has to come from the reviewer, not the session under review.
+
+**Legal only when** the panel judges re-derivation cheaper than patching: wrong architecture, a cascading design error the findings all descend from, or patch-on-patch accumulation where each fix spawns the next. Severity alone is NOT a trigger - a pile of P1s that are each fixable in place is a fix round, not a restart.
+
+A `RECOMMEND RESTART` verdict MUST carry both:
+
+1. **Why fix-in-place fails** - not a severity count, the specific reason re-derivation beats patching here.
+2. **A lessons block** - what this attempt learned and what the successor must avoid, in prose the successor's node `details` can carry verbatim.
+
+It must also name the honor sequence by explicit path: `skills/target/references/failure-recovery.md`, "Reviewer-ordered restart" section.
+
+**Malformed degrades to blocking.** A `RECOMMEND RESTART` missing its rationale or its lessons block is treated as a normal `Needs work` verdict (degrade, never guess an incomplete restart into an executed one). The operator side never honors a malformed recommendation.

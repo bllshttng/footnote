@@ -94,6 +94,46 @@ The counter is anchored to **(repo, conversation)**: keyed by the session UUID a
 
 A deliberate `/fno:target cancel` writes a session-keyed `.target-cancelled-final` tombstone that this detector honors before any block, so cancelling does not trip it.
 
+## Reviewer-ordered restart
+
+The failure-recovery machinery above is builder-side: `stuck_test` self-aborts on repeated test failure, the circuit breaker rotates approach after 3 same-error failures. What none of it can do is *order* a discard-and-restart - a builder never throws away its own work. That order comes from a review: a sigma/peer panel that judges the approach unsalvageable emits the terminal `RECOMMEND RESTART` verdict (contract: `skills/review/references/report-template.md`, "Terminal recommendation: RECOMMEND RESTART"). This section is the operator playbook that honors it.
+
+**Precondition (never honor a malformed recommendation).** A `RECOMMEND RESTART` is only honored when it carries both a why-fix-in-place-fails rationale and a lessons block. Missing either, treat it as a normal blocking review (a fix round), not a restart.
+
+### Honor sequence (strictly ordered)
+
+The order is load-bearing: supersede runs **before** cancel so no window exists where the old node is both unclaimed and dispatchable (the dispatcher-stampede class this repo has hit before). Every step is a CLI verb with an exit code - **a failure at any step stops the sequence with the error surfaced; never assume a step succeeded and continue.**
+
+1. **Mint the successor, carrying the lessons.** The lessons block becomes the successor's `details` so the next attempt starts knowing what to avoid:
+   ```bash
+   fno backlog idea "<old title> (restart)" -d "<lessons block>"   # prints the new node id
+   ```
+2. **Supersede the old node.** This sets `superseded_by` on the old node and auto-defers it, so `next`/`ready` stop selecting it *before* anything is cancelled:
+   ```bash
+   fno backlog supersede <NEW_ID> --replaces <OLD_ID> -R "restart: <one-line why fix-in-place fails>"
+   ```
+   If this exits non-zero (lock contention, bad id), **STOP** - do not cancel, do not dispatch. The old node stays claimed and the operator resolves the error first.
+3. **Close the PR if one exists.** Comment linking the lessons block; the branch is preserved, never deleted (its commits survive the discard - see AC5):
+   ```bash
+   gh pr close <N> --comment "Superseded by <NEW_ID> (reviewer-ordered restart). Lessons are in the details of node <NEW_ID>. Branch preserved."
+   ```
+4. **Cancel this session.** The loop-check verb terminates as `Interrupted`, never any `Done` variant:
+   ```bash
+   touch .fno/.target-cancelled
+   ```
+5. **Dispatch the successor, or leave it `ready`** for the normal dispatcher to pick up. Then print ONE operator-visible line naming the old node, the new node, and the lessons pointer:
+   ```
+   restart: <OLD_ID> -> <NEW_ID>; lessons in <NEW_ID> details (branch feature/<OLD_ID> preserved)
+   ```
+
+### Lineage cap (one restart per lineage)
+
+At most **one** auto-honored restart per node lineage. A `RECOMMEND RESTART` on a node that is itself a restart successor (its title carries `(restart)`, or it has a `supersedes` entry) is **not** auto-honored: emit `<help reason="restart-recommended" evidence="second restart in lineage <OLD_ID>">` and hold for the human. This bounds budget burn at one rebuild - a restart loop can never run away.
+
+### Unattended posture (v1: never auto-honor)
+
+In v1 an unattended / headless session never runs the honor sequence itself. On a `RECOMMEND RESTART`, emit `<help reason="restart-recommended" evidence="<why + lessons pointer>">` and hold - do not mint, supersede, cancel, or dispatch. Only an attended operator executes the sequence. (A config-gated autonomous auto-honor, like `auto_merge_approved`, is deferred until the docs-first version shows real usage.)
+
 ## Standard Error Responses
 
 ### /do waves Returns FAILED
