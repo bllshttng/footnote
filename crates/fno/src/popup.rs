@@ -422,6 +422,112 @@ pub fn draw(cells: &mut [Cell], rows: usize, cols: usize, r: &Rendered) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SPIKE (throwaway): the ratatui-rendered popup path.
+//
+// Renders the popup through ratatui widgets + `chrome_bridge` instead of the
+// hand-rolled `draw` above. Same visual contract - opaque inverse block, bold
+// headers, normal-video selection - but every row's padding, right-alignment
+// and truncation is ratatui layout, with ZERO pad()/center()/.take() arithmetic
+// (the mux's standing footgun class). A/B'd against `draw` in tests; the deltas
+// (ratatui CLIPS where `pad` ELLIPSIZES) are the spike's rubric evidence.
+// ---------------------------------------------------------------------------
+
+/// One popup row as a ratatui widget: an inverse (or, when selected,
+/// normal-video) 1-row block whose content is laid out by ratatui, not by hand.
+struct RowWidget<'a> {
+    row: &'a PopupRow,
+    ri: usize,
+    sel: Option<(usize, usize)>,
+    width: usize,
+}
+
+impl ratatui::widgets::Widget for RowWidget<'_> {
+    fn render(self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::layout::{Constraint, Layout};
+        use ratatui::style::Style;
+        use ratatui::widgets::Paragraph;
+
+        // The whole row is the opaque inverse block; selected sub-spans reset to
+        // normal-video. `reset()` (not `default()`) because set_style PATCHES -
+        // an empty default patch would leave the inverse modifier in place.
+        let inverse = Style::default().reversed();
+        let normal = Style::reset();
+        buf.set_style(area, inverse);
+        let is_sel = |ci: usize| self.sel == Some((self.ri, ci));
+
+        match self.row {
+            PopupRow::Header(s) => {
+                buf.set_style(area, inverse.bold());
+                Paragraph::new(format!(" {s}")).render(area, buf);
+            }
+            PopupRow::Rule => {
+                Paragraph::new("─".repeat(self.width)).render(area, buf);
+            }
+            PopupRow::FullWidth(s) => {
+                if is_sel(0) {
+                    buf.set_style(area, normal);
+                }
+                Paragraph::new(format!(" {s}")).render(area, buf);
+            }
+            PopupRow::Entry { glyph, label, hint } => {
+                if is_sel(0) {
+                    buf.set_style(area, normal);
+                }
+                // Right-aligned hint via layout, not a hand-computed gap: the
+                // hint region is `hint_w + 1` (the legacy trailing space), the
+                // rest is the left region. No `width - left_w - hint_w - 1`.
+                let hint_region = hint.chars().count() as u16 + 1;
+                let parts =
+                    Layout::horizontal([Constraint::Fill(1), Constraint::Length(hint_region)])
+                        .split(area);
+                Paragraph::new(format!(" {glyph} {label}")).render(parts[0], buf);
+                Paragraph::new(format!("{hint} ")).render(parts[1], buf);
+            }
+            PopupRow::Grid(gcells) => {
+                let n = gcells.len().max(1) as u16;
+                let each = (self.width as u16 / n).max(1);
+                let cons: Vec<Constraint> = (0..gcells.len()).map(|_| Constraint::Length(each)).collect();
+                let parts = Layout::horizontal(cons).split(area);
+                for (ci, gc) in gcells.iter().enumerate() {
+                    if is_sel(ci) {
+                        buf.set_style(parts[ci], normal);
+                    }
+                    Paragraph::new(format!("{} {}", gc.glyph, gc.label))
+                        .centered()
+                        .render(parts[ci], buf);
+                }
+            }
+        }
+    }
+}
+
+/// SPIKE path: render the popup via ratatui widgets + the chrome bridge. Reuses
+/// [`Popup::render`] ONLY for width + origin (content measurement + positioning,
+/// which ratatui layout needs too); the row cells are rebuilt through ratatui.
+pub fn draw_via_bridge(cells: &mut [Cell], rows: usize, cols: usize, p: &Popup, term: (u16, u16)) {
+    let laid = p.render(term);
+    let (width, origin) = (laid.width, laid.origin);
+    let trows = term.0.max(1) as usize;
+    let block_h = p.rows.len();
+    let vis_h = block_h.min(trows);
+    let scroll = p.scroll.min(block_h.saturating_sub(vis_h));
+    let sel = p.selected();
+    for (i, ri) in (scroll..scroll + vis_h).enumerate() {
+        let sr = origin.0 + i;
+        if sr >= rows {
+            break;
+        }
+        let w = RowWidget {
+            row: &p.rows[ri],
+            ri,
+            sel,
+            width,
+        };
+        crate::chrome_bridge::render_chrome(w, (1, width as u16), (sr, origin.1), cells, rows, cols);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +718,90 @@ mod tests {
         p.clamp_sel_to_view(5);
         let (ri, _) = p.selected().unwrap();
         assert!(ri >= p.scroll, "selection moved into the scrolled viewport");
+    }
+
+    // ----- SPIKE: A/B parity between hand-rolled `draw` and `draw_via_bridge` -
+
+    fn draw_legacy(p: &Popup, term: (u16, u16)) -> Vec<Cell> {
+        let (rows, cols) = (term.0 as usize, term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        draw(&mut cells, rows, cols, &p.render(term));
+        cells
+    }
+    fn draw_bridge(p: &Popup, term: (u16, u16)) -> Vec<Cell> {
+        let (rows, cols) = (term.0 as usize, term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        draw_via_bridge(&mut cells, rows, cols, p, term);
+        cells
+    }
+    /// First `(index, legacy, bridge)` cell that differs, or None if identical.
+    fn first_diff(a: &[Cell], b: &[Cell]) -> Option<(usize, Cell, Cell)> {
+        a.iter()
+            .zip(b)
+            .enumerate()
+            .find(|(_, (x, y))| x != y)
+            .map(|(i, (x, y))| (i, *x, *y))
+    }
+
+    // AC2-HP: a real menu popup that FITS renders byte-identically via the
+    // bridge - header (bold inverse), rule, entries with a right-aligned hint,
+    // and the normal-video selection cut-out all match the hand-rolled draw.
+    #[test]
+    fn bridge_matches_legacy_when_content_fits() {
+        let p = Popup::new(
+            vec![
+                PopupRow::Header("agent".into()),
+                PopupRow::Rule,
+                entry("▸", "peek", "p"),
+                entry("◆", "drive", "⏎"),
+                PopupRow::FullWidth("close".into()),
+            ],
+            Anchor::Center,
+        );
+        let term = (24u16, 80u16);
+        let (a, b) = (draw_legacy(&p, term), draw_bridge(&p, term));
+        assert_eq!(
+            first_diff(&a, &b),
+            None,
+            "bridge output diverged from legacy draw on a fitting popup"
+        );
+    }
+
+    // Parity holds regardless of which target is selected (the normal-video
+    // cut-out lands on the same row both ways).
+    #[test]
+    fn bridge_matches_legacy_across_selection() {
+        let mut p = Popup::new(
+            vec![entry("a", "one", "x"), entry("b", "two", "yy"), entry("c", "three", "")],
+            Anchor::Center,
+        );
+        let term = (24u16, 80u16);
+        for sel in 0..3 {
+            p.sel = sel;
+            assert_eq!(
+                first_diff(&draw_legacy(&p, term), &draw_bridge(&p, term)),
+                None,
+                "divergence with target {sel} selected"
+            );
+        }
+    }
+
+    // THE FINDING (rubric 3 vs rubric 2/4 collision): when a label overflows the
+    // width cap, the hand-rolled `pad` ellipsizes ('…') while ratatui CLIPS. The
+    // bridge kills the width guards but cannot reproduce the ellipsis without a
+    // manual truncation pass - so parity BREAKS exactly at the truncation column.
+    // This test pins that delta so the verdict is grounded, not asserted.
+    #[test]
+    fn bridge_diverges_from_legacy_on_overflow_ellipsis() {
+        // A label far wider than WIDTH_CAP forces truncation in a narrow term.
+        let long = "x".repeat(WIDTH_CAP + 20);
+        let p = Popup::new(vec![PopupRow::FullWidth(long)], Anchor::Center);
+        let term = (24u16, 80u16);
+        let (a, b) = (draw_legacy(&p, term), draw_bridge(&p, term));
+        let diff = first_diff(&a, &b).expect("expected an ellipsis-vs-clip divergence");
+        // Legacy wrote the ellipsis; the bridge wrote the clipped source char.
+        assert_eq!(diff.1.c, '…', "legacy truncates with an ellipsis");
+        assert_ne!(diff.2.c, '…', "bridge clips (no ellipsis) - the finding");
     }
 
     #[test]

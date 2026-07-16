@@ -2289,13 +2289,13 @@ impl View {
         } else if let Some(m) = &self.keys_modal {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+            draw_popup(&mut cells, rows, cols, &m.popup, self.term);
         } else if let Some(m) = &self.row_menu {
             // x-8ccf US2: the anchored row context menu, drawn at the pointer.
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+            draw_popup(&mut cells, rows, cols, &m.popup, self.term);
         } else if let Some(m) = &self.aux {
             // x-8ccf US4/US5: the sideline MENU popup or settings modal.
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+            draw_popup(&mut cells, rows, cols, &m.popup, self.term);
         } else if let Some(sel) = self.answers {
             // x-feec needs-me queue (grown from the x-c929 answer overlay): the
             // severity-ranked union + the selected row's answer options, on the
@@ -3398,6 +3398,22 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
 /// row excluded). Shared by every corner-anchored popover (key-table, needs
 /// queue, nav, peek, move-pick, attach-place, connections) so centering all of
 /// them is this one change (x-e9c3; placement policy per x-9f75).
+/// SPIKE flag (throwaway, chrome-layer ratatui evaluation): route popups through
+/// the ratatui chrome bridge instead of the hand-rolled `popup::draw`. Default
+/// `false` = the compose() output is byte-identical to main; the compiler folds
+/// the branch away, so the default path carries zero overhead. Flip to A/B the
+/// bridge live against the legacy draw.
+const POPUP_VIA_BRIDGE: bool = false;
+
+/// Dispatch a popup to the legacy hand-rolled draw or the ratatui bridge path.
+fn draw_popup(cells: &mut [Cell], rows: usize, cols: usize, p: &Popup, term: (u16, u16)) {
+    if POPUP_VIA_BRIDGE {
+        popup::draw_via_bridge(cells, rows, cols, p, term);
+    } else {
+        popup::draw(cells, rows, cols, &p.render(term));
+    }
+}
+
 fn draw_lines_overlay<S: AsRef<str>>(
     cells: &mut [Cell],
     rows: usize,
