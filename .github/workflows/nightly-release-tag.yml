@@ -1,19 +1,19 @@
 name: nightly-release-tag
 
-# Cadence for PyPI publishing. Per-merge auto-bump is ruled out (30-50 PRs/day);
-# this caps releases at one/day and keeps the published wheel <= ~1 day stale so
-# the Rust shim's first-run recovery (`uv tool install --force fno`) resolves a
-# wheel that ships `fno-py`. It only ever mints the NEXT patch off an existing
-# v* tag - the first release is a deliberate operator step (see the runbook).
+# Cut the NEXT patch release: bump every version file in lockstep, tag it, and
+# dispatch the (still one-click-gated) publish workflows. Runs ONLY on manual
+# dispatch - the nightly cron was removed because with 30-50 PRs/day every night
+# had commits, so it minted a bump + tag every single night while publishing
+# stayed behind the one-click gate. Tags climbed ahead of actual releases
+# (v0.3.0, v0.3.1 with nothing on PyPI). Releases are deliberate now: dispatch
+# this when you actually want to ship. The "no commits since the last tag" guard
+# below still makes a redundant dispatch a safe no-op.
 #
 # It never publishes on its own: it pushes a bump commit + tag, then explicitly
 # dispatches release-wheels. That workflow still waits at the one-click `release`
 # environment approval before the PyPI upload. Autonomy ends at the click.
 
 on:
-  schedule:
-    # ~09:00 UTC / 2am PT
-    - cron: "0 9 * * *"
   workflow_dispatch:
 
 # Serialize runs so two nights (or a manual + scheduled overlap) never race on
