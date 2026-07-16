@@ -552,7 +552,7 @@ def cmd_drain(
         typer.echo(f"{r.thread_id}  kind:{r.kind}  action:{r.action}")
 
 
-@mail_app.command("migrate-bus")
+@mail_app.command("migrate-bus", hidden=True)
 def cmd_migrate_bus(
     json_out: bool = typer.Option(False, "--json", "-J", help="Output as JSON"),
 ) -> None:
@@ -691,7 +691,7 @@ def cmd_status(
     typer.echo(f"errors_24h: {snapshot['errors_24h']}")
 
 
-@mail_app.command("lint")
+@mail_app.command("lint", hidden=True)
 def cmd_lint(
     project: Optional[str] = typer.Argument(None, help="Project to lint (default: own)"),
 ) -> None:
@@ -1306,7 +1306,7 @@ def cmd_bus_ack(
         print(f"cursor for {name!r} already at or past {msg_id}; unchanged")
 
 
-@mail_app.command("drain-self")
+@mail_app.command("drain-self", hidden=True)
 def cmd_drain_self(
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit JSON regardless of TTY."
@@ -1371,7 +1371,7 @@ def cmd_drain_self(
         advance_cursor(handle, msgs[-1].id)
 
 
-@mail_app.command("rebuild-render")
+@mail_app.command("rebuild-render", hidden=True)
 def cmd_rebuild_render(
     recipient: Optional[str] = typer.Argument(
         None, help="Recipient whose render to rebuild (default: own project)."

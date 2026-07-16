@@ -210,11 +210,18 @@ def menu_caps() -> None:
             f"  Remedy 2: raise MENU_CAP_TOP_LEVEL (a deliberate one-line diff)."
         )
 
-    for name in top_visible:
-        entry = LAZY_SUBCOMMANDS.get(name)
-        if entry is None:
-            continue  # eager single command (help/cost/review), not a sub-app
-        module_path, _, attr = entry[0].rpartition(":")
+    # Every group sub-app is capped, INCLUDING hidden top-level ones: opening
+    # `fno mail --help` renders mail's own menu even though `mail` is hidden from
+    # the top-level surface, so that menu must stay curated too. Iterate the whole
+    # registry, not just the advertised entries. Dedupe by import target so an
+    # alias (e.g. `graph` -> `backlog`) is checked once.
+    seen_targets: set[str] = set()
+    for name, entry in LAZY_SUBCOMMANDS.items():
+        import_path = entry[0]
+        if import_path in seen_targets:
+            continue
+        seen_targets.add(import_path)
+        module_path, _, attr = import_path.rpartition(":")
         try:
             obj = getattr(importlib.import_module(module_path), attr, None)
         except Exception as exc:  # noqa: BLE001 - a lint must degrade, not crash
@@ -223,7 +230,10 @@ def menu_caps() -> None:
         if not isinstance(obj, typer.Typer):
             continue  # single-command entry, not a group
         sub_group = typer.main.get_command(obj)
-        if not isinstance(sub_group, click.Group):
+        # Duck-type, not isinstance(click.Group): Typer bundles a vendored click
+        # (typer._click), so a TyperGroup is NOT an instance of the top-level
+        # `click.Group` - an isinstance check here silently skips every sub-app.
+        if not hasattr(sub_group, "list_commands"):
             continue
         sub_visible = _visible_command_names(sub_group)
         if len(sub_visible) > MENU_CAP_SUB_APP:

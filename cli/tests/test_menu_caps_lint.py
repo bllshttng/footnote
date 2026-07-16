@@ -90,3 +90,46 @@ def test_shipped_sub_apps_within_cap():
         assert len(visible) <= L.MENU_CAP_SUB_APP, (
             f"sub-app {name} advertises {len(visible)} verbs: {sorted(visible)}"
         )
+
+
+def test_menu_caps_enforces_cap_on_HIDDEN_top_level_groups():
+    """Codex P2: the sub-app cap applies to every group, including one whose
+    top-level entry is hidden (e.g. `fno mail`). Regression guard for two bugs:
+    (1) iterating only advertised entries, and (2) the isinstance(click.Group)
+    check that silently skipped ALL sub-apps because Typer bundles a vendored
+    click (a TyperGroup is not a top-level click.Group instance)."""
+    import typer
+    import typer.main
+
+    from fno.cli import LAZY_SUBCOMMANDS
+
+    # A hidden top-level group must be *reached* by the lint (proves it does not
+    # gate on top-level visibility) and be within the cap (proves the duck-typed
+    # resolution counts it, not skips it).
+    entry = LAZY_SUBCOMMANDS["mail"]
+    assert isinstance(entry, tuple) and entry[2].get("hidden") is True, (
+        "this test assumes `mail` is a hidden top-level group"
+    )
+    mail_app = getattr(__import__("fno.mail.cli", fromlist=["mail_app"]), "mail_app")
+    group = typer.main.get_command(mail_app)
+    # The duck-typed resolution the lint uses (NOT isinstance(click.Group)).
+    assert hasattr(group, "list_commands")
+    assert len(L._visible_command_names(group)) <= L.MENU_CAP_SUB_APP
+
+
+def test_visible_command_names_works_on_typergroup():
+    """The counter must work on a real TyperGroup via duck-typing, not an
+    isinstance(click.Group) check: Typer may bundle a vendored click so a
+    TyperGroup is not always a top-level `click.Group` instance (it is under
+    pytest, but NOT under the installed `uv run` CLI - which is why the original
+    isinstance gate silently skipped every sub-app in CI while tests passed).
+    ``_visible_command_names`` must return the right names regardless."""
+    import typer
+    import typer.main
+
+    sub = typer.Typer(no_args_is_help=True)
+    sub.command("alpha")(lambda: None)
+    sub.command("beta", hidden=True)(lambda: None)
+    group = typer.main.get_command(sub)
+    assert hasattr(group, "list_commands")  # the duck-typed check the lint uses
+    assert L._visible_command_names(group) == ["alpha"]

@@ -275,15 +275,73 @@ def _render_full_menu() -> str:
 
     Reads short-help strings straight from LAZY_SUBCOMMANDS + the eager map -
     it never imports a command module, so a broken sub-app still lists here
-    (AC3-UI). The curated menu is `fno --help`; this is the full warehouse.
+    (AC3-UI). Scope is the TOP LEVEL only: a sub-app's own (hidden) verbs are
+    one import away and would break the no-import guarantee, so they live behind
+    the scoped door `fno help <group> --all` instead.
     """
     rows = dict(_EAGER_COMMAND_HELP)
     for name, entry in LAZY_SUBCOMMANDS.items():
         rows[name] = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
     width = max(len(n) for n in rows)
     lines = [
-        "fno full command surface - every command, including hidden.",
-        "The curated menu is `fno --help`; hidden verbs are invocable, just "
+        "fno full top-level surface - every top-level command, including hidden.",
+        "The curated menu is `fno --help`; hidden commands are invocable, just "
+        "not advertised.",
+        "For a group's own verbs (hidden included) run `fno help <group> --all` "
+        "(e.g. `fno help agents --all`), or `fno <group> --help` for its menu.",
+        "",
+        "Commands:",
+    ]
+    lines.extend(f"  {name.ljust(width)}  {rows[name]}" for name in sorted(rows))
+    return "\n".join(lines)
+
+
+def _render_group_full_menu(path: list[str]) -> Optional[str]:
+    """Render a sub-app's full command list (hidden included) for
+    `fno help <group> [<subgroup> ...] --all`.
+
+    Unlike the top-level door this DOES import the named group (one module), so
+    it can enumerate the group's own hidden verbs - the discovery path that the
+    import-free top-level `help --all` cannot provide. Returns None when the path
+    does not resolve to a command group (the caller then forwards to `--help`).
+    """
+    import click
+    import typer.main
+
+    root = typer.main.get_command(app)
+    ctx = click.Context(root, info_name="fno")
+    cmd: Any = root
+    cur = ctx
+    trail: list[str] = []
+    for seg in path:
+        nxt = cmd.get_command(cur, seg) if hasattr(cmd, "get_command") else None
+        if nxt is None:
+            return None
+        # A lazy top-level entry resolves to a stub; load its real command so we
+        # can descend and enumerate.
+        if hasattr(nxt, "_load_real"):
+            nxt = nxt._load_real()
+        cmd = nxt
+        trail.append(seg)
+        cur = click.Context(cmd, info_name=seg, parent=cur)
+
+    if not hasattr(cmd, "list_commands"):
+        return None  # a leaf command, not a group
+
+    rows: dict[str, str] = {}
+    for name in cmd.list_commands(cur):
+        sub = cmd.get_command(cur, name)
+        if sub is None:
+            continue
+        rows[name] = sub.get_short_help_str() if hasattr(sub, "get_short_help_str") else ""
+    if not rows:
+        return None
+
+    title = " ".join(["fno", *trail])
+    width = max(len(n) for n in rows)
+    lines = [
+        f"{title} full command surface - every subcommand, including hidden.",
+        f"The curated menu is `{title} --help`; hidden verbs are invocable, just "
         "not advertised.",
         "",
         "Commands:",
@@ -312,10 +370,21 @@ def help_command(ctx: typer.Context) -> None:
     """Forward to `fno <args> --help` so subcommands' own help formatters run."""
     args = list(ctx.args)
     if "--all" in args or "-A" in args:
-        # The full-surface door: list every command including hidden ones,
-        # rendered from the registry strings without importing any module.
-        typer.echo(_render_full_menu())
-        return
+        rest = [a for a in args if a not in ("--all", "-A")]
+        if rest:
+            # Scoped door: `fno help <group> [<subgroup>] --all` lists that
+            # group's own verbs, hidden included (imports the one named group).
+            group_menu = _render_group_full_menu(rest)
+            if group_menu is not None:
+                typer.echo(group_menu)
+                return
+            # Not a command group - fall through to the group's normal --help.
+            args = rest
+        else:
+            # The top-level full-surface door: every top-level command including
+            # hidden ones, rendered from the registry with no module import.
+            typer.echo(_render_full_menu())
+            return
     if args == ["shorthands"]:
         # Help topic, not a command - print the legend instead of forwarding
         # to a (nonexistent) `fno shorthands --help`.

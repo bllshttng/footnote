@@ -207,10 +207,31 @@ def test_help_all_lists_every_command_including_hidden():
     runner = CliRunner()
     result = runner.invoke(app, ["help", "--all"])
     assert result.exit_code == 0, f"fno help --all failed: {result.output}"
-    # Names itself as the full surface.
-    assert "full command surface" in result.output
+    # Names itself as the full (top-level) surface and points at the scoped door.
+    assert "full top-level surface" in result.output
+    assert "fno help <group> --all" in result.output
     for cmd in _ADVERTISED_SUBCOMMANDS + _HIDDEN_SUBCOMMANDS:
         assert cmd in result.output, f"{cmd!r} missing from fno help --all"
+
+
+def test_help_group_all_lists_hidden_subverbs():
+    """Codex P2: `fno help <group> --all` gives a discovery path for hidden
+    nested verbs (e.g. `fno agents ask`, `fno backlog ready`) that neither the
+    parent `--help` nor the top-level `help --all` surfaces."""
+    import re
+
+    from fno.cli import app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    for group, hidden_verb in (("agents", "ask"), ("backlog", "ready"), ("mail", "migrate-bus")):
+        result = runner.invoke(app, ["help", group, "--all"])
+        assert result.exit_code == 0, f"help {group} --all failed: {result.output}"
+        plain = _strip_ansi(result.output)
+        assert f"fno {group} full command surface" in plain
+        assert re.search(rf"^\s*{re.escape(hidden_verb)}\b", plain, re.MULTILINE), (
+            f"hidden verb {hidden_verb!r} missing from `fno help {group} --all`"
+        )
 
 
 def test_help_all_never_imports_command_modules(monkeypatch):
