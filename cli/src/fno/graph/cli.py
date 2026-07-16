@@ -38,14 +38,14 @@ cli.add_typer(_triage_cli, name="triage")
 # the top-level `fno graph` -> `fno backlog` precedent.
 from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 
-cli.add_typer(_capture_cli, name="capture")
+cli.add_typer(_capture_cli, name="capture", hidden=True)
 cli.add_typer(_capture_cli, name="inbox", hidden=True)
 
 # Nested batch sub-app: `fno backlog batch <verb>`. Batch-lane state
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.
 from fno.backlog.batch import cli as _batch_cli  # noqa: E402
 
-cli.add_typer(_batch_cli, name="batch")
+cli.add_typer(_batch_cli, name="batch", hidden=True)
 
 
 # Selection-time enforcement (ab-fcf9cec5): a node another session is actively
@@ -215,7 +215,7 @@ def cmd_relatedness_get(
             typer.echo(f"{r['id']}\t{r['score']}\t{r['reason']}")
 
 
-cli.add_typer(_relatedness_cli, name="relatedness")
+cli.add_typer(_relatedness_cli, name="relatedness", hidden=True)
 
 
 # -- shared node construction --
@@ -589,7 +589,7 @@ def cmd_idea(
 
 # -- decompose (bounded epic -> group child nodes) --
 
-@cli.command("decompose")
+@cli.command("decompose", hidden=True)
 def cmd_decompose(
     ctx: typer.Context,
     epic_id: str = typer.Argument(..., help="Epic node ab-ID to decompose into group children"),
@@ -1426,7 +1426,7 @@ def _intake_impl(
             pass
 
 
-@cli.command("intake")
+@cli.command("intake", hidden=True)
 def cmd_intake(
     plan_paths: Optional[List[str]] = typer.Argument(default=None, help="Plan paths"),
     from_list: Optional[str] = typer.Option(None, "--from", help="Read paths from FILE or '-' for stdin"),
@@ -1467,7 +1467,7 @@ def cmd_intake(
 
 # -- update --
 
-@cli.command("note")
+@cli.command("note", hidden=True)
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
@@ -2078,7 +2078,7 @@ def _unclaim_node(task_id: str) -> None:
     typer.echo(f"Unclaimed {resolved_id or task_id} ({lock_note})")
 
 
-@cli.command("unclaim")
+@cli.command("unclaim", hidden=True)
 def cmd_unclaim(
     task_id: str = typer.Argument(
         ..., help="Node id to free (reverts claimed -> ready, releases the lockfile)"
@@ -2088,7 +2088,7 @@ def cmd_unclaim(
     _unclaim_node(task_id)
 
 
-@cli.command("release")
+@cli.command("release", hidden=True)
 def cmd_release(
     task_id: str = typer.Argument(..., help="Alias for `unclaim`"),
 ) -> None:
@@ -2279,7 +2279,7 @@ def cmd_next(
 
 # -- ready --
 
-@cli.command("ready")
+@cli.command("ready", hidden=True)
 def cmd_ready(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
@@ -2401,7 +2401,7 @@ def cmd_ready(
 
 # -- lane-fill --
 
-@cli.command("lane-fill")
+@cli.command("lane-fill", hidden=True)
 def cmd_lane_fill(
     max_lanes: Optional[int] = typer.Option(
         None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
@@ -2438,7 +2438,7 @@ def cmd_lane_fill(
 
 # -- dispatch-lanes --
 
-@cli.command("dispatch-lanes")
+@cli.command("dispatch-lanes", hidden=True)
 def cmd_dispatch_lanes(
     max_lanes: Optional[int] = typer.Option(
         None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
@@ -2491,7 +2491,7 @@ def cmd_dispatch_lanes(
 
 # -- lanes --
 
-@cli.command("lanes")
+@cli.command("lanes", hidden=True)
 def cmd_lanes(
     json_output: bool = typer.Option(False, "--json", "-J", help="JSON rollup."),
 ) -> None:
@@ -2629,7 +2629,7 @@ def cmd_get(
 
 # -- project-root (work-map resolution; null-for-unmapped) --
 
-@cli.command("project-root")
+@cli.command("project-root", hidden=True)
 def cmd_project_root(
     project: str = typer.Argument(..., help="Project name to resolve against config.work.workspaces."),
 ) -> None:
@@ -2653,7 +2653,7 @@ def cmd_project_root(
 
 # -- provenance --
 
-@cli.command("provenance")
+@cli.command("provenance", hidden=True)
 def cmd_provenance(
     id: str = typer.Argument(
         ...,
@@ -2884,12 +2884,12 @@ def cmd_session_add(
         typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")
 
 
-cli.add_typer(session_app, name="session")
+cli.add_typer(session_app, name="session", hidden=True)
 
 
 # -- backfill-slugs --
 
-@cli.command("backfill-slugs")
+@cli.command("backfill-slugs", hidden=True)
 def cmd_backfill_slugs() -> None:
     """Assign a title-derived slug to every node lacking one (ab-f82e8083).
 
@@ -2963,7 +2963,7 @@ def cmd_view() -> None:
 
 # -- roadmap (public, curated) --
 
-@cli.command("roadmap")
+@cli.command("roadmap", hidden=True)
 def cmd_roadmap(
     project: Optional[str] = typer.Option(
         None,
@@ -3015,7 +3015,7 @@ def cmd_roadmap(
 
 # -- tree --
 
-@cli.command("tree")
+@cli.command("tree", hidden=True)
 def cmd_tree(
     project: Optional[str] = typer.Option(None, help="Filter by project"),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -3080,7 +3080,7 @@ def cmd_tree(
 
 # -- status --
 
-@cli.command("status")
+@cli.command("status", hidden=True)
 def cmd_status(
     project: Optional[str] = typer.Option(None, help="Filter by project"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
@@ -3178,7 +3178,7 @@ def cmd_status(
 
 # -- briefs --
 
-@cli.command("briefs")
+@cli.command("briefs", hidden=True)
 def cmd_briefs(
     limit: int = typer.Option(5, help="Number of briefs to load"),
 ) -> None:
@@ -3226,7 +3226,7 @@ def cmd_briefs(
 
 # -- validate --
 
-@cli.command("validate")
+@cli.command("validate", hidden=True)
 def cmd_validate(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
 ) -> None:
@@ -3301,7 +3301,7 @@ def cmd_validate(
 
 # -- cost --
 
-@cli.command("cost")
+@cli.command("cost", hidden=True)
 def cmd_cost(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     session: Optional[str] = typer.Option(None, "--session-id", help="Session ID"),
@@ -3355,7 +3355,7 @@ def cmd_cost(
 
 # -- remove --
 
-@cli.command("remove")
+@cli.command("remove", hidden=True)
 def cmd_remove(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     force: bool = typer.Option(False, "--force", "-F", help="Skip cascade warning"),
@@ -3402,7 +3402,10 @@ def cmd_remove(
 # auto-migrates the prefix to the new schema, so callers should never see
 # the old shape after one mutation.
 
-@cli.command("defer")
+@cli.command(
+    "defer",
+    epilog="Paired verb: `fno backlog undefer <id>` reverses this (hidden; run its own --help).",
+)
 def cmd_defer(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     reason: str = typer.Option(
@@ -3492,7 +3495,7 @@ def _expand_id_args(raw_ids: list[str]) -> list[str]:
     return out
 
 
-@cli.command("queue")
+@cli.command("queue", hidden=True)
 def cmd_queue(
     task_ids: List[str] = typer.Argument(
         ...,
@@ -3545,7 +3548,7 @@ def cmd_queue(
         typer.echo(f"Queued {tid}{suffix}")
 
 
-@cli.command("unqueue")
+@cli.command("unqueue", hidden=True)
 def cmd_unqueue(
     task_ids: List[str] = typer.Argument(
         ...,
@@ -3733,7 +3736,7 @@ NR == FNR {
 """
 
 
-@cli.command("pick")
+@cli.command("pick", hidden=True)
 def cmd_pick(
     project: Optional[str] = typer.Option(None, help="Filter by project name"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects (default: current cwd)"),
@@ -4020,7 +4023,7 @@ def cmd_pick(
         typer.echo("(no changes)")
 
 
-@cli.command("queued")
+@cli.command("queued", hidden=True)
 def cmd_queued(
     project: Optional[str] = typer.Option(None, help="Filter by project name"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
@@ -4045,7 +4048,7 @@ def cmd_queued(
     typer.echo(json.dumps(output, indent=2))
 
 
-@cli.command("undefer")
+@cli.command("undefer", hidden=True)
 def cmd_undefer(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
 ) -> None:
@@ -4427,7 +4430,10 @@ def _done_gh_query(pr_number, **kwargs):
     return query_pr_merge_state(pr_number, **kwargs)
 
 
-@cli.command("done")
+@cli.command(
+    "done",
+    epilog="Related: `fno backlog reconcile` closes nodes whose PR merged outside the gate (hidden).",
+)
 def cmd_done(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     skip_stamp: bool = typer.Option(
@@ -4734,7 +4740,7 @@ def cmd_done(
 
 # -- reconcile (close merged-PR drift) --
 
-@cli.command("advance")
+@cli.command("advance", hidden=True)
 def cmd_advance(
     closed: Optional[str] = typer.Option(
         None,
@@ -4853,7 +4859,7 @@ def cmd_advance(
         typer.echo(" ".join(parts))
 
 
-@cli.command("reconcile")
+@cli.command("reconcile", hidden=True)
 def cmd_reconcile(
     dry_run: bool = typer.Option(
         False,
@@ -5373,7 +5379,7 @@ def _maintain_source_timeout() -> float:
     return _m.EVIDENCE_SOURCE_TIMEOUT_S
 
 
-@cli.command("maintain")
+@cli.command("maintain", hidden=True)
 def cmd_maintain(
     apply: bool = typer.Option(
         False,
@@ -5752,7 +5758,7 @@ def cmd_maintain(
 
 # -- reprioritize --
 
-@cli.command("reprioritize")
+@cli.command("reprioritize", hidden=True)
 def cmd_reprioritize(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     priority: str = typer.Argument(..., help="New priority: p0|p1|p2|p3"),
@@ -5954,7 +5960,7 @@ def cmd_rank(
 
 # -- archive --
 
-@cli.command("archive")
+@cli.command("archive", hidden=True)
 def cmd_archive(
     apply: bool = typer.Option(
         False, "--apply", help="Move the entries (default: dry-run, report only)."
@@ -6282,7 +6288,7 @@ def cmd_find(
 # -- new --
 
 
-@cli.command("new")
+@cli.command("new", hidden=True)
 def cmd_new(
     title: str = typer.Argument(..., help="Title of the new entry"),
     domain: str = typer.Option("code", "--domain", help="Domain (fuzzy-suggested against history)"),
@@ -6421,7 +6427,7 @@ def cmd_new(
 
 # -- rehash --
 
-@cli.command("rehash")
+@cli.command("rehash", hidden=True)
 def cmd_rehash(
     revert: bool = typer.Option(
         False,
@@ -6533,7 +6539,7 @@ def cmd_collisions_check(
         typer.echo("")
 
 
-cli.add_typer(collisions_app, name="collisions")
+cli.add_typer(collisions_app, name="collisions", hidden=True)
 
 
 # ---------------------------------------------------------------------------
@@ -6541,7 +6547,7 @@ cli.add_typer(collisions_app, name="collisions")
 # ---------------------------------------------------------------------------
 
 
-@cli.command("supersede")
+@cli.command("supersede", hidden=True)
 def cmd_supersede(
     new_id: str = typer.Argument(..., help="The new node ID that replaces the old"),
     replaces: str = typer.Option(..., "--replaces", help="The old node ID being superseded"),

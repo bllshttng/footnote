@@ -47,10 +47,13 @@ def _invoke(*args, input=None):
 
 
 def test_ac1_hp_backlog_help_lists_verbs():
-    """`fno backlog --help` lists every verb the sub-app exposes."""
+    """`fno backlog --help` lists the advertised verbs (x-71b6 tiering).
+
+    `ready`/`intake` are hidden now; the advertised menu leads with add/next/get.
+    """
     r = _invoke("backlog", "--help")
     assert r.exit_code == 0, r.output
-    for verb in ("add", "next", "ready", "get", "intake"):
+    for verb in ("add", "next", "get", "find", "done"):
         assert verb in r.output, f"verb {verb!r} missing from backlog help"
 
 
@@ -59,8 +62,8 @@ def test_ac1_hp_graph_alias_help_identical_to_backlog():
     r_backlog = _invoke("backlog", "--help")
     r_graph = _invoke("graph", "--help")
     assert r_backlog.exit_code == 0 and r_graph.exit_code == 0
-    # Every verb listed in backlog must also be listed in graph
-    for verb in ("add", "next", "ready", "get", "intake"):
+    # Every advertised verb listed in backlog must also be listed in graph.
+    for verb in ("add", "next", "get", "find", "done"):
         assert verb in r_graph.output, f"verb {verb!r} missing from graph alias help"
 
 
@@ -142,11 +145,14 @@ def test_adopt_alias_is_gone(tmp_graph, tmp_path):
         f"expected Typer 'No such command' rejection, got: {r.output!r}"
     )
 
-    # The canonical verb must still be advertised in --help.
+    # The canonical verb must still be registered and invocable. `intake` is
+    # display-hidden under the x-71b6 In-N-Out tiering, so it no longer appears
+    # in `backlog --help`; its own --help still works (hiding != removal).
+    hi = _invoke("backlog", "intake", "--help")
+    assert hi.exit_code == 0, f"intake must stay invocable: {hi.output!r}"
+    # adopt must not appear as a visible command row either
     h = _invoke("backlog", "--help")
     assert h.exit_code == 0
-    assert "intake" in h.output
-    # adopt must not appear as a visible command row either
     command_lines = [
         ln for ln in h.output.splitlines()
         if ln.strip().startswith("adopt ") or ln.strip() == "adopt"
@@ -229,6 +235,55 @@ def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
     assert r.exit_code == 0, r.output
     data = json.loads(r.stdout)
     assert data == {"projects": []}
+
+
+# ---------------------------------------------------------------------------
+# x-71b6 In-N-Out tiering: `fno backlog --help` advertises 11 verbs; the rest
+# are hidden but invocable, with sibling pointers on the advertised verbs.
+# ---------------------------------------------------------------------------
+
+_ADVERTISED_BACKLOG_VERBS = {
+    "add", "idea", "get", "update", "view", "find", "next", "done", "defer",
+    "rank", "triage",
+}
+
+
+def test_backlog_help_advertises_only_the_menu():
+    """AC1-HP: `fno backlog --help` lists exactly the advertised verbs (<=12)."""
+    import click
+    import typer.main
+
+    from fno.graph.cli import cli as backlog_app
+
+    group = typer.main.get_command(backlog_app)
+    ctx = click.Context(group)
+    listed = [
+        name
+        for name in group.list_commands(ctx)
+        if not (cmd := group.get_command(ctx, name)) or not cmd.hidden
+    ]
+    assert set(listed) == _ADVERTISED_BACKLOG_VERBS, (
+        f"advertised backlog verbs drifted: {sorted(listed)}"
+    )
+    assert len(listed) <= 12
+
+
+@pytest.mark.parametrize(
+    "verb",
+    ["decompose", "intake", "undefer", "reconcile", "maintain", "roadmap", "supersede"],
+)
+def test_hidden_backlog_verbs_stay_invocable(verb):
+    """AC2-ERR: a hidden backlog verb still runs its own --help (exit 0)."""
+    r = _invoke("backlog", verb, "--help")
+    assert r.exit_code == 0, f"hidden verb {verb!r} --help failed: {r.output!r}"
+
+
+def test_advertised_verbs_point_at_hidden_siblings():
+    """AC3-UI: paired-verb pointers keep the hidden sibling discoverable."""
+    d = _invoke("backlog", "defer", "--help")
+    assert d.exit_code == 0 and "undefer" in d.output, d.output
+    dn = _invoke("backlog", "done", "--help")
+    assert dn.exit_code == 0 and "reconcile" in dn.output, dn.output
 
 
 def test_ac2_hp_triage_propose_dry_run_emits_template(tmp_graph):
