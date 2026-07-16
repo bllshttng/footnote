@@ -25,7 +25,7 @@ import os
 from dataclasses import asdict, is_dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import typer
 
@@ -50,18 +50,47 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
-def _mail_unread_count(handle: Optional[str]) -> int:
-    """Unread bus messages addressed to ``handle`` (the same cursor scan
-    ``fno mail unread`` runs). Degrades to 0 on any read error - whoami is the
-    confused-agent recovery verb and must never gain a failure mode."""
-    if not handle:
-        return 0
+def _mail_addresses(
+    handle: Optional[str], agent_self: str, project_root: Path
+) -> list[Optional[str]]:
+    """The durable addresses this session answers to: canonical reply handle,
+    mesh name (registered-agent send lane), and project inbox (project lane).
+    Project resolution is guarded - an unresolvable project just omits that lane
+    rather than breaking whoami."""
+    addrs: list[Optional[str]] = [handle]
+    if agent_self:
+        addrs.append(agent_self)
     try:
-        from fno.bus.cursor import scan_unread
+        from fno.inbox.store import resolve_project
 
-        return len(scan_unread(handle, warn=False))
+        addrs.append(resolve_project(cwd=project_root))
     except Exception:
-        return 0
+        pass
+    return addrs
+
+
+def _mail_unread_count(addresses: Iterable[Optional[str]]) -> int:
+    """Total unread bus messages across every durable address this session
+    answers to (canonical handle, mesh name, project inbox) - the same cursor
+    scan ``fno mail unread`` runs, deduped. The durable-floor lanes this exposes
+    address by handle, by mesh name (registered-agent send), and by project, so
+    counting only the handle would leave the other dead-letter lanes invisible.
+    Each address is guarded independently so one unreadable lane never zeroes the
+    others; whoami is the confused-agent recovery verb and must never gain a
+    failure mode."""
+    total = 0
+    seen: set[str] = set()
+    for addr in addresses:
+        if not addr or addr in seen:
+            continue
+        seen.add(addr)
+        try:
+            from fno.bus.cursor import scan_unread
+
+            total += len(scan_unread(addr, warn=False))
+        except Exception:
+            continue
+    return total
 
 
 def _derive_status_from_events(project_root: Path, session_id: Optional[str]) -> str:
@@ -197,7 +226,8 @@ def whoami_command(
     )
     state = _drop_layers(_load_or_exit(opts), opts)
     mail, harness_sid = _mail_handle()
-    mail_unread = _mail_unread_count(mail)
+    agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
+    mail_unread = _mail_unread_count(_mail_addresses(mail, agent_self, state.project_root))
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
@@ -237,7 +267,10 @@ def whoami_command(
     if mail:
         typer.echo(f"mail:     {mail}  (reply handle - pass as --from-name, or omit to self-stamp)")
     if mail_unread:
-        typer.echo(f"mail:     {mail_unread} unread")
+        # Distinct label (not a second `mail:` line): the `mail:` line is the
+        # reply handle to copy as --from-name, and this render is injected into
+        # SessionStart context - a collidable prefix invites copying the count.
+        typer.echo(f"mail_unread: {mail_unread}")
     typer.echo(f"provider: {state.provider}")
     # x-301a: opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this
@@ -245,7 +278,6 @@ def whoami_command(
     # as one extra line so a worker that ran the reflexive `fno whoami` sees its
     # own handle. Env-gated, so a human / non-mesh session is byte-for-byte
     # unchanged. The focused, complete answer remains `fno agents whoami`.
-    agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
     if agent_self:
         typer.echo(f"agent:    {agent_self} (mesh)")
     _emit_warnings(state)

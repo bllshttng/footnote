@@ -279,11 +279,37 @@ class TestWhoami:
         project = _make_workspace(tmp_path, target=True)
         result = _invoke(runner, project, monkeypatch, "whoami")
         assert result.exit_code == 0, result.stdout + result.stderr
-        assert "mail:     3 unread" in result.stdout
+        # A distinct label, not a second `mail:` line (the handle line stays
+        # unambiguous for --from-name copying).
+        assert "mail_unread: 3" in result.stdout
+        assert result.stdout.count("mail:") == 1
         payload = json.loads(
             _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
         )
         assert payload["mail_unread"] == 3
+
+    def test_mail_unread_counts_mesh_name_lane(self, tmp_path, runner, monkeypatch):
+        """A registered-agent send addresses the mesh name (FNO_AGENT_SELF), not
+        the canonical handle - that dead-letter lane is counted too."""
+        from fno.inbox.store import write_new_thread
+
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
+        monkeypatch.setenv("FNO_AGENT_SELF", "billing-worker")
+        self._isolate_bus(tmp_path, monkeypatch)
+        write_new_thread(  # to the canonical handle
+            recipient="claude-879d8d26", sender="etl", kind="send",
+            body="ping", to_kind="name",
+        )
+        for _ in range(2):  # to the mesh name
+            write_new_thread(
+                recipient="billing-worker", sender="etl", kind="send",
+                body="q", to_kind="name",
+            )
+        project = _make_workspace(tmp_path, target=True)
+        payload = json.loads(
+            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
+        )
+        assert payload["mail_unread"] == 3  # handle (1) + mesh name (2)
 
     def test_mail_unread_zero_silent(self, tmp_path, runner, monkeypatch):
         """No unread mail: no unread line, no JSON key, exit 0 as today."""
@@ -292,7 +318,7 @@ class TestWhoami:
         project = _make_workspace(tmp_path, target=True)
         result = _invoke(runner, project, monkeypatch, "whoami")
         assert result.exit_code == 0, result.stdout + result.stderr
-        assert " unread" not in result.stdout  # no `mail: N unread` line
+        assert "mail_unread:" not in result.stdout  # no unread line
         payload = json.loads(
             _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
         )
