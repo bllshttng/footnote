@@ -373,7 +373,9 @@ for id in "${NODES[@]}"; do
   squad_args=()
   squad_hint=""
   if [[ "$DISPATCH_SUBSTRATE" == "pane" ]]; then
-    node_project="$(printf '%s' "$node_json" | jq -r '.project // empty' 2>/dev/null)"
+    # `.project` is a Rust String (serialized "" when unset, not null), and jq's
+    # `//` treats "" as truthy, so filter empties explicitly before the fallback.
+    node_project="$(printf '%s' "$node_json" | jq -r '.project | select(. != "") // empty' 2>/dev/null)"
     if [[ -n "$node_project" ]]; then
       squad_args=("--squad" "$node_project")
       squad_hint="--squad $node_project "
