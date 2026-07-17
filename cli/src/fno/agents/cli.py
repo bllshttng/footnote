@@ -1549,6 +1549,68 @@ def cmd_whoami(
         raise typer.Exit(code=result.exit_code)
 
 
+@agents_app.command("register", hidden=True)
+def cmd_register(
+    name: str | None = typer.Option(
+        None, "--name", "-n", help="Explicit roster name (default: canonical <harness>-<shortid>)."
+    ),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
+) -> None:
+    """Join THIS session to the mesh roster so peers can `fno mail send` to it.
+
+    The self-service seam behind ``/fno-me``: a session a human started by hand
+    has no spawn-created roster row. This resolves the ambient harness identity
+    (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / ...) and writes an ``idle`` row
+    named by the canonical ``<harness>-<shortid>`` handle — the same string the
+    session self-stamps and drains, so a durable ``fno mail send`` to it lands.
+    ``fno agents whoami`` then reports ``registered: true`` via its session-id
+    fallback, no ``FNO_AGENT_SELF`` env needed.
+
+    Idempotent (re-running refreshes the row). Exit 3 for a session with no
+    ambient harness identity (nothing addressable to register).
+    """
+    from fno.agents import events
+    from fno.agents.registry import register_existing_session
+    from fno.harness_identity import resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    session_id = ident.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    harness = ident.harness or ("claude" if session_id else None)
+    if not session_id or not harness:
+        sys.stderr.write(
+            "no ambient harness identity - nothing to register "
+            "(run /fno-me inside a claude/codex session)\n"
+        )
+        raise typer.Exit(code=3)
+
+    try:
+        entry = register_existing_session(
+            provider=harness, session_id=session_id, cwd=os.getcwd(), name=name or None
+        )
+    except Exception as exc:  # a deliberate manual join reports failure (unlike the fail-open hook)
+        sys.stderr.write(f"register failed: {exc}\n")
+        raise typer.Exit(code=1) from exc
+
+    events.emit(
+        "session_registered",
+        provider=entry.provider,
+        name=entry.name,
+        session_id=session_id,
+        cwd=entry.cwd,
+    )
+    if json_out or not bool(getattr(sys.stdout, "isatty", lambda: False)()):
+        import json as _json
+
+        sys.stdout.write(
+            _json.dumps({"registered": True, "name": entry.name, "provider": entry.provider}) + "\n"
+        )
+    else:
+        sys.stdout.write(
+            f"joined the mesh as {entry.name} - peers can now reach you with "
+            f"`fno mail send {entry.name} \"...\"`\n"
+        )
+
+
 @agents_app.command("top", hidden=True)
 def cmd_top(
     as_json: bool = typer.Option(
