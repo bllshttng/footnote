@@ -207,6 +207,76 @@ def test_registered_session_not_a_live_anycast_target(tmp_path: Path, monkeypatc
     assert res.recipient is None
 
 
+# ---------------------------------------------------------------------------
+# `fno agents register` verb (the /fno-me seam): self-service join resolved
+# from the ambient harness identity, no --session-id argument.
+# ---------------------------------------------------------------------------
+
+_MARKERS = (
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "GEMINI_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "FNO_AGENT_SELF",
+)
+
+
+def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch) -> None:
+    """A claude session self-registers under `claude-<first8>` from its ambient id."""
+    use_tmpdir(monkeypatch, tmp_path)
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "deadbeef-1111-2222-3333-444455556666")
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+
+    result = CliRunner().invoke(agents_app, ["register"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"registered": True, "name": "claude-deadbeef", "provider": "claude"}
+    rows = load_registry()
+    assert len(rows) == 1 and rows[0].name == "claude-deadbeef" and rows[0].status == "idle"
+
+
+def test_register_then_whoami_reports_registered(tmp_path: Path, monkeypatch) -> None:
+    """Regression (codex PR#451 P2): a /fno-me claude session must resolve as
+    registered. register stores the FULL uuid in short_id for claude, and
+    whoami's session-id fallback (_find_by_session) must still find it via the
+    de-hyphenated prefix match - else whoami reports unregistered despite the
+    written row (exit 3), defeating the verb."""
+    use_tmpdir(monkeypatch, tmp_path)
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "ef9982cc-2543-4cea-9a20-081cca7119f6")
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+
+    runner = CliRunner()
+    assert runner.invoke(agents_app, ["register"]).exit_code == 0
+    result = runner.invoke(agents_app, ["whoami", "--json"])
+    assert result.exit_code == 0, result.output  # exit 3 == unregistered (the bug)
+    assert '"registered": true' in result.output
+    assert '"name": "claude-ef9982cc"' in result.output
+
+
+def test_register_verb_exit3_without_ambient_identity(tmp_path: Path, monkeypatch) -> None:
+    """No harness marker in env -> nothing addressable -> exit 3, no row written."""
+    use_tmpdir(monkeypatch, tmp_path)
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+
+    result = CliRunner().invoke(agents_app, ["register"])
+    assert result.exit_code == 3
+    assert load_registry() == []
+
+
 def test_ac7_fr_unreachable_registered_session_orphaned(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents import dispatch

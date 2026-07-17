@@ -1580,8 +1580,12 @@ impl View {
     /// the panel is too narrow to add the button beside the `+ new workspace`
     /// affordance, or a recruit-mark tally is competing for the row.
     fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
-        let tw = panel_w.saturating_sub(1); // last column is the divider
-        let mw = FOOTER_MENU.chars().count();
+        // last column is the divider
+        let tw = panel_w.saturating_sub(1);
+        // Display columns, not char count: the menu trigram (U+2630) is two display columns, so a
+        // char-count range under-reserves by one and the button crosses the
+        // divider into the pane.
+        let mw = FOOTER_MENU.chars().map(glyph_cols).sum::<usize>();
         (self.marks.is_empty() && tw >= FOOTER_NEW_LABEL.len() + 2 + mw).then(|| (tw - mw)..tw)
     }
 
@@ -2176,6 +2180,35 @@ impl View {
             }
         }
         self.sideline_offset = self.sideline_offset.min(total - visible);
+    }
+
+    /// Wheel-scroll the sideline list by one row. With the selector open it walks
+    /// the cursor (reusing the j/k path so the highlight and offset stay
+    /// coherent); otherwise it nudges the scroll offset directly, bounded to the
+    /// catalog. A sideline that already fits its height is a no-op.
+    fn scroll_sideline(&mut self, down: bool) {
+        let total = self.display_rows().len();
+        let visible = self.sideline_visible_rows();
+        if total <= visible || visible == 0 {
+            return;
+        }
+        match self.selector {
+            Some(cur) => {
+                self.selector = Some(if down {
+                    self.selector_down(cur)
+                } else {
+                    self.selector_up(cur)
+                });
+                self.clamp_sideline_offset();
+            }
+            None => {
+                self.sideline_offset = if down {
+                    (self.sideline_offset + 1).min(total - visible)
+                } else {
+                    self.sideline_offset.saturating_sub(1)
+                };
+            }
+        }
     }
 
     /// Compose the full-terminal frame: tab bar, sideline, dividers, panes.
@@ -2834,6 +2867,13 @@ impl View {
                 }
             }
         }
+        // One spacer sets the footer off from the workspace list above so the
+        // `+ new workspace` / menu row doesn't read as another workspace. Gated on
+        // `multi_squad` like the other US3 spacers (a lone workspace needs no
+        // separation, and single-squad layouts stay byte-identical).
+        if multi_squad {
+            out.push(DisplayRow::Blank);
+        }
         // The `+` create-workspace affordance sits directly under the squad list
         // (x-9e5e), above the agents/work-queue sections.
         out.push(DisplayRow::NewSquad);
@@ -3078,17 +3118,35 @@ impl View {
             if highlit {
                 flags |= cell_flags::INVERSE;
             }
-            for (j, ch) in text.chars().take(text_w).enumerate() {
-                cells[r * cols + j] = Cell {
+            // Advance by DISPLAY columns, not char index: a double-width glyph
+            // (the menu trigram) claims two columns and marks its right half a
+            // WIDE_SPACER so the compositor keeps the row in sync instead of
+            // shoving the divider (and every cell after it) past the panel.
+            let mut col = 0usize;
+            for ch in text.chars() {
+                let w = glyph_cols(ch);
+                if col + w > text_w {
+                    break;
+                }
+                cells[r * cols + col] = Cell {
                     c: ch,
                     fg: Color::Default,
                     bg: Color::Default,
                     flags,
                 };
+                if w == 2 {
+                    cells[r * cols + col + 1] = Cell {
+                        c: ' ',
+                        fg: Color::Default,
+                        bg: Color::Default,
+                        flags: flags | cell_flags::WIDE_SPACER,
+                    };
+                }
+                col += w;
             }
             // Pad the highlight across the row so the cursor reads as a bar.
             if highlit {
-                for j in text.chars().count().min(text_w)..text_w {
+                for j in col..text_w {
                     cells[r * cols + j].flags |= cell_flags::INVERSE;
                 }
             }
@@ -3135,6 +3193,19 @@ enum DisplayRow<'a> {
 /// never hover/selection-highlighted, and [`View::row_action`] returns `None`.
 /// Header (a section label), Sub (an agent's dim subline), and Blank (a section
 /// spacer). One predicate so paint, hit-test, and the selector never diverge.
+/// Display columns a sideline glyph occupies. The client draws chrome one glyph
+/// per cell, so a double-width glyph must claim two columns (plus a WIDE_SPACER)
+/// or it desyncs the rest of the row against a standards-compliant terminal.
+/// ponytail: only the menu trigram block (U+2630..U+2637) is wide in the
+/// sideline today; widen this if a CJK/emoji glyph ever lands here.
+fn glyph_cols(ch: char) -> usize {
+    if ('\u{2630}'..='\u{2637}').contains(&ch) {
+        2
+    } else {
+        1
+    }
+}
+
 fn row_is_inert(drow: &DisplayRow) -> bool {
     matches!(
         drow,
@@ -4395,6 +4466,16 @@ async fn handle_stdin(
                         col: rep.col,
                     },
                 );
+                continue;
+            }
+        }
+        // Wheel over the sideline scrolls the workspace/session list (there is no
+        // pane there to forward to); a wheel over the content area falls through
+        // to the pane below, unchanged.
+        if matches!(rep.kind, MouseKind::WheelUp | MouseKind::WheelDown) {
+            let panel_w = view.panel_w();
+            if panel_w > 0 && rep.col < panel_w {
+                view.scroll_sideline(matches!(rep.kind, MouseKind::WheelDown));
                 continue;
             }
         }
@@ -7964,20 +8045,20 @@ mod tests {
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
-        // (sideline owns row 0, terminal row == display index) + US3 Blank
-        // spacers: squad 1 (0), "worker" (1), Blank (2), squad 2 (3),
-        // "+ new workspace" footer (4), Blank (5), "~ elsewhere" header (6),
-        // orphan "bg-claude" (7), orphan "bg-other" (8).
+        // (sideline owns row 0, terminal row == display index) + Blank spacers:
+        // squad 1 (0), "worker" (1), Blank (2), squad 2 (3), Blank footer spacer
+        // (4), "+ new workspace" footer (5), Blank (6), "~ elsewhere" header (7),
+        // orphan "bg-claude" (8), orphan "bg-other" (9).
         assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::FocusPane(10)]);
         assert_eq!(
-            cmds(view.chrome_hit(7, 4)),
+            cmds(view.chrome_hit(8, 4)),
             vec![Command::attach_agent("c19cd2c3")]
         );
-        assert!(matches!(view.chrome_hit(8, 4), Some(ChromeHit::Notice(_))));
+        assert!(matches!(view.chrome_hit(9, 4), Some(ChromeHit::Notice(_))));
         // The "~ elsewhere" header row is inert.
-        assert!(view.chrome_hit(6, 4).is_none());
+        assert!(view.chrome_hit(7, 4).is_none());
         // The "+ new workspace" footer opens the create overlay.
-        assert!(matches!(view.chrome_hit(4, 4), Some(ChromeHit::OpenCreate)));
+        assert!(matches!(view.chrome_hit(5, 4), Some(ChromeHit::OpenCreate)));
     }
 
     // A click on the bottom row belongs to the status/which-key/search chrome
@@ -8751,9 +8832,9 @@ mod tests {
         let text = frame_text(&frame);
         let lines: Vec<&str> = text.lines().collect();
         // Agents-first row order (x-0090; no tab rows): footnote (auto-expanded,
-        // x-2f99), its two agent rows, a US3 Blank spacer, notes squad, the
-        // "+ new workspace" footer, a US3 spacer, the "~ elsewhere" header, the
-        // orphan row. (x-cd67 US1) The sideline owns row 0.
+        // x-2f99), its two agent rows, a Blank spacer, notes squad, the footer
+        // spacer, the "+ new workspace" footer, a spacer, the "~ elsewhere"
+        // header, the orphan row. (x-cd67 US1) The sideline owns row 0.
         assert!(lines[0].contains("\u{25be}*footnote"), "{:?}", lines[0]);
         assert!(
             lines[1].contains("\u{25b2} peer: perm prompt"),
@@ -8762,9 +8843,9 @@ mod tests {
         );
         assert!(lines[2].contains("\u{2717} dead"), "{:?}", lines[2]);
         assert!(lines[4].contains("\u{25b8} notes"), "{:?}", lines[4]);
-        assert!(lines[5].contains("+ new workspace"), "{:?}", lines[5]);
-        assert!(lines[7].contains("~ elsewhere"), "{:?}", lines[7]);
-        assert!(lines[8].contains("\u{25cf} bg-watch"), "{:?}", lines[8]);
+        assert!(lines[6].contains("+ new workspace"), "{:?}", lines[6]);
+        assert!(lines[8].contains("~ elsewhere"), "{:?}", lines[8]);
+        assert!(lines[9].contains("\u{25cf} bg-watch"), "{:?}", lines[9]);
         // The exited row is DIM (fact beats badge, visually too). "dead" is
         // display index 2 -> frame row 2 (no spacer before it).
         let cols = frame.cols as usize;
@@ -9239,23 +9320,24 @@ mod tests {
     fn selector_nav_skips_headers_and_clamps() {
         // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
         // section headers, and clamp (no wrap) at both ends.
-        // (x-cd67 US3) Indices shift for the Blank spacers (2, 5, 9) and headers.
+        // Blank spacers sit at 2, 4, 6, 10 (the 4 = footer spacer); footer at 5,
+        // headers at 7 and 11.
         let v = unified_rows_view();
         assert_eq!(
-            v.selector_down(4),
-            7,
+            v.selector_down(5),
+            8,
             "j from the footer skips the spacer + '~ elsewhere'"
         );
         assert_eq!(
-            v.selector_down(8),
-            11,
+            v.selector_down(9),
+            12,
             "j skips the spacer + '~ work queue'"
         );
-        assert_eq!(v.selector_down(13), 13, "clamp at the last row");
-        assert_eq!(v.selector_up(7), 4, "k skips '~ elsewhere' + spacer upward");
+        assert_eq!(v.selector_down(14), 14, "clamp at the last row");
+        assert_eq!(v.selector_up(8), 5, "k skips '~ elsewhere' + spacer upward");
         assert_eq!(
-            v.selector_up(11),
-            8,
+            v.selector_up(12),
+            9,
             "k skips '~ work queue' + spacer upward"
         );
         assert_eq!(v.selector_up(0), 0, "clamp at the top");
@@ -9265,11 +9347,11 @@ mod tests {
     fn selector_anchor_steps_off_headers() {
         // AC1-FR / AC2-EDGE: a re-anchored cursor never rests on a Header -
         // forward first, and an out-of-range index clamps to the last row.
-        // (x-cd67 US3) Headers now sit at 6 and 10 (Blank spacers at 2, 5, 9).
+        // Headers sit at 7 and 11 (Blank spacers at 2, 4, 6, 10).
         let v = unified_rows_view();
-        assert_eq!(v.selector_anchor(6), Some(7), "header steps forward");
-        assert_eq!(v.selector_anchor(10), Some(11), "header steps forward");
-        assert_eq!(v.selector_anchor(50), Some(13), "stale index clamps");
+        assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
+        assert_eq!(v.selector_anchor(11), Some(12), "header steps forward");
+        assert_eq!(v.selector_anchor(50), Some(14), "stale index clamps");
         assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
     }
 
@@ -9285,8 +9367,8 @@ mod tests {
             .filter(|r| matches!(r, DisplayRow::Blank))
             .count();
         assert_eq!(
-            blanks, 3,
-            "one between the two groups + one before each of the two headers"
+            blanks, 4,
+            "one between the two groups + one before the footer + one before each of the two headers"
         );
         // Never two spacers in a row.
         assert!(
@@ -10063,7 +10145,7 @@ mod tests {
         // AC1-EDGE: Enter on a claude bg row with an attach id sends
         // AttachAgent.
         let mut v = unified_rows_view();
-        v.selector = Some(7); // bg-claude (x-cd67 US3 shifted +2)
+        v.selector = Some(8); // bg-claude
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -10080,7 +10162,7 @@ mod tests {
     #[tokio::test]
     async fn selector_p_opens_attach_placement_without_sending() {
         let mut v = unified_rows_view();
-        v.selector = Some(7); // bg-claude (x-cd67 US3 shifted +2)
+        v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         let picker = v.attach_place.as_ref().expect("placement picker opens");
@@ -10098,7 +10180,7 @@ mod tests {
     #[tokio::test]
     async fn attach_placement_selects_target_and_direction() {
         let mut v = unified_rows_view();
-        v.selector = Some(7); // bg-claude (x-cd67 US3 shifted +2)
+        v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         attach_place_keys(&mut v, b"2h", &mut buf).await.unwrap();
@@ -10121,7 +10203,7 @@ mod tests {
     #[tokio::test]
     async fn attach_placement_invalid_target_digit_drops_the_input_batch() {
         let mut v = unified_rows_view();
-        v.selector = Some(7); // bg-claude (x-cd67 US3 shifted +2)
+        v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         attach_place_keys(&mut v, b"9h", &mut buf).await.unwrap();
@@ -10133,7 +10215,7 @@ mod tests {
     #[tokio::test]
     async fn attach_placement_new_tab_and_cancel_are_distinct() {
         let mut v = unified_rows_view();
-        v.selector = Some(7); // bg-claude (x-cd67 US3 shifted +2)
+        v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
@@ -10151,7 +10233,7 @@ mod tests {
             })
         );
 
-        v.selector = Some(7); // bg-claude (x-cd67 US3 shifted +2)
+        v.selector = Some(8); // bg-claude
         let mut cancelled = Vec::new();
         selector_keys(&mut v, b"p", &mut cancelled).await.unwrap();
         attach_place_keys(&mut v, b"q", &mut cancelled)
@@ -10164,7 +10246,7 @@ mod tests {
     #[tokio::test]
     async fn attach_placement_refuses_stale_target_without_sending() {
         let mut v = unified_rows_view();
-        v.selector = Some(7); // bg-claude (x-cd67 US3 shifted +2)
+        v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         v.attach_place.as_mut().unwrap().target = 2;
@@ -10181,8 +10263,8 @@ mod tests {
         // card, in-flight card) shows a notice, sends nothing, and the
         // selector stays open.
         let mut v = unified_rows_view();
-        // (x-cd67 US3) bg-other (8), blocked card (12), in-flight card (13).
-        for row in [8usize, 12, 13] {
+        // bg-other (9), blocked card (13), in-flight card (14).
+        for row in [9usize, 13, 14] {
             v.selector = Some(row);
             v.notice = None;
             let mut buf: Vec<u8> = Vec::new();
@@ -10200,7 +10282,7 @@ mod tests {
         // Enter (confirm_keys) sends the DispatchNode (AC2-FR: the confirm
         // takes the action, so one dispatch at most).
         let mut v = unified_rows_view();
-        v.selector = Some(11); // ready card (x-cd67 US3 shifted)
+        v.selector = Some(12); // ready card
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "confirm first, dispatch on the next Enter");
@@ -10215,7 +10297,7 @@ mod tests {
     async fn selector_enter_footer_opens_create_overlay() {
         // AC3-HP: Enter on "+ new workspace" opens the name-input overlay.
         let mut v = unified_rows_view();
-        v.selector = Some(4); // footer (x-cd67 US3 shifted)
+        v.selector = Some(5); // footer
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         assert!(buf.is_empty());
@@ -10265,39 +10347,39 @@ mod tests {
         // prompt cannot render, so a Ready card and the footer refuse with a
         // notice instead of arming an invisible modal (which could dispatch
         // blind on the next Enter).
-        // (x-cd67 US3) ready card at 11, footer at 4.
+        // ready card at 12, footer at 5.
         let mut v = unified_rows_view();
         v.term.0 = MIN_ROWS_FOR_STATUS - 1;
         assert!(
-            matches!(v.row_action(11), Some(ChromeHit::Notice(_))),
+            matches!(v.row_action(12), Some(ChromeHit::Notice(_))),
             "ready card refuses on a too-short terminal"
         );
         assert!(
-            matches!(v.row_action(4), Some(ChromeHit::Notice(_))),
+            matches!(v.row_action(5), Some(ChromeHit::Notice(_))),
             "footer refuses on a too-short terminal"
         );
         // At the minimum height both act normally again.
         v.term.0 = MIN_ROWS_FOR_STATUS;
-        assert!(matches!(v.row_action(11), Some(ChromeHit::Confirm(_))));
-        assert!(matches!(v.row_action(4), Some(ChromeHit::OpenCreate)));
+        assert!(matches!(v.row_action(12), Some(ChromeHit::Confirm(_))));
+        assert!(matches!(v.row_action(5), Some(ChromeHit::OpenCreate)));
     }
 
     #[tokio::test]
     async fn selector_keys_navigate_unified_rows() {
         // AC1-UI / AC2-UI: j/k through selector_keys land on agent and card
         // rows, skipping headers, without sending anything.
-        // (x-cd67 US3) footer at 4; j lands on bg-claude (7) past the spacer + header.
+        // footer at 5; j lands on bg-claude (8) past the spacer + header.
         let mut v = unified_rows_view();
-        v.selector = Some(4);
+        v.selector = Some(5);
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"j", &mut buf).await.unwrap();
         assert_eq!(
             v.selector,
-            Some(7),
+            Some(8),
             "j skips the spacer + '~ elsewhere' header"
         );
         selector_keys(&mut v, b"k", &mut buf).await.unwrap();
-        assert_eq!(v.selector, Some(4), "k skips it back");
+        assert_eq!(v.selector, Some(5), "k skips it back");
         assert!(buf.is_empty(), "navigation sends nothing");
     }
 
@@ -10814,6 +10896,50 @@ mod tests {
             v.sideline_row_at(0, 0),
             Some(v.sideline_offset),
             "the top drawn row (row 0) hit-tests to the scrolled index"
+        );
+    }
+
+    #[test]
+    fn wheel_scrolls_sideline_offset_when_no_selector() {
+        // Fix 3: a wheel over a focused (overflowing) sideline nudges the scroll
+        // offset directly when the selector is closed, and stays in range.
+        let mut v = two_pane_view();
+        let total = v.display_rows().len();
+        assert!(total >= 2, "fixture needs >=2 sideline rows");
+        v.term = ((total - 1) as u16, 100); // one row below the fold
+        let visible = v.sideline_visible_rows();
+        v.selector = None;
+        v.sideline_offset = 0;
+        v.scroll_sideline(true);
+        assert_eq!(v.sideline_offset, 1, "wheel-down advances one row");
+        v.scroll_sideline(false);
+        assert_eq!(v.sideline_offset, 0, "wheel-up retreats one row");
+        v.scroll_sideline(false);
+        assert_eq!(v.sideline_offset, 0, "wheel-up saturates at the top");
+        for _ in 0..total + 5 {
+            v.scroll_sideline(true);
+        }
+        assert_eq!(
+            v.sideline_offset,
+            total - visible,
+            "wheel-down stops at the last full window"
+        );
+    }
+
+    #[test]
+    fn wheel_walks_the_selector_when_open() {
+        // Fix 3: with the selector open the wheel reuses the j/k cursor walk so
+        // the highlight and offset stay coherent (no raw-offset drift).
+        let mut v = two_pane_view();
+        let total = v.display_rows().len();
+        v.term = ((total - 1) as u16, 100); // overflow, else scroll is a no-op
+        let first = v.selector_down(0); // first non-inert stop from the top
+        v.selector = Some(first);
+        v.scroll_sideline(true);
+        assert_eq!(
+            v.selector,
+            Some(v.selector_down(first)),
+            "wheel-down walks the selector to the next stop"
         );
     }
 

@@ -200,6 +200,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # peer's on-disk transcript / status events via fno.agents.peek. No Rust
     # client port, so it must never auto-route to the daemon.
     "peek",
+    # The /fno-me self-service join verb: resolves ambient harness identity and
+    # writes an idle roster row (register_existing_session). Pure Python, no Rust
+    # client port, so it must never auto-route to the daemon.
+    "register",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs

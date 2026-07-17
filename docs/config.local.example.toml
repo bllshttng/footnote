@@ -29,6 +29,12 @@ enabled = false          # set true + a vault area name to route docs there
 [target]
 auto_launch_on_blueprint = true   # /blueprint then auto-kicks /target
 
+# Mesh roster population for THIS project. Default false = opt-in: a hand-started
+# session joins the roster via /fno-me. Flip to true to auto-join every
+# hand-started session in this project (scope is wherever you set the key).
+[agents]
+auto_register_sessions = false
+
 # Post-merge ritual: where this repo's prose follow-ups get written.
 [post_merge]
 enabled = true           # already the code default; shown for awareness

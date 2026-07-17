@@ -10,6 +10,18 @@ HOOK = ROOT / "hooks" / "register-session-start.sh"
 SHARED_HOOK = ROOT / "hooks" / "session-start.sh"
 
 
+def _mock_fno_auto_register(bin_dir: Path) -> None:
+    """A mock `fno` on PATH that answers the hook's one config read
+    (`config get agents.auto_register_sessions`) with `true`, so the opt-in
+    auto-register gate proceeds to the registration these tests exercise."""
+    fno = bin_dir / "fno"
+    fno.write_text(
+        '#!/usr/bin/env bash\n[[ "$1" == "config" && "$2" == "get" ]] && echo true\nexit 0\n',
+        encoding="utf-8",
+    )
+    fno.chmod(0o755)
+
+
 def test_register_session_start_shell_syntax() -> None:
     subprocess.run(["bash", "-n", str(HOOK)], check=True)
 
@@ -24,6 +36,7 @@ def test_codex_thread_id_wins_with_mocked_uv(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     uv.chmod(0o755)
+    _mock_fno_auto_register(bin_dir)
 
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -51,6 +64,7 @@ def test_shared_codex_session_start_registers_thread_once(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     uv.chmod(0o755)
+    _mock_fno_auto_register(bin_dir)
 
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",

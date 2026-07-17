@@ -173,6 +173,7 @@ FIELD_META: dict[str, Meta] = {
     "agents.a2a.auto": Meta("advanced", "Allow agents to auto-open agent-to-agent threads."),
     "agents.a2a.turn_ceiling": Meta("advanced", "Max turns in an agent-to-agent thread."),
     "agents.confirm": Meta("never", "Agent-launch confirmation policy (auto/always/never)."),
+    "agents.auto_register_sessions": Meta("advanced", "Auto-join every hand-started session to the roster at SessionStart (default false = opt-in via /fno-me). Spawned workers register regardless.", default_source="default"),
     "agents.defaults.provider": Meta("advanced", "Default provider for bare `fno agents spawn` / `/agent spawn` (claude/codex/gemini/agy/opencode); an explicit -p flag wins, empty = unset (harness inference then claude). Validated at the spawn seam.", default_source="default"),
     "agents.defaults.model": Meta("advanced", "Default model for bare spawns, forwarded as --model; an explicit -m flag wins, empty = unset (provider default). Passthrough (provider CLIs own model names).", default_source="default"),
     "agents.defaults.effort": Meta("advanced", "Default reasoning effort for bare spawns (minimal|low|medium|high|xhigh|max); an explicit --effort wins, empty = unset. Config-sourced effort degrades open on providers with no effort surface (gemini/agy).", default_source="default"),
