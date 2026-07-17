@@ -1580,8 +1580,9 @@ impl View {
     /// the panel is too narrow to add the button beside the `+ new workspace`
     /// affordance, or a recruit-mark tally is competing for the row.
     fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
-        let tw = panel_w.saturating_sub(1); // last column is the divider
-        // Display columns, not char count: the `☰` trigram is double-width, so a
+        // last column is the divider
+        let tw = panel_w.saturating_sub(1);
+        // Display columns, not char count: the menu trigram (U+2630) is two display columns, so a
         // char-count range under-reserves by one and the button crosses the
         // divider into the pane.
         let mw = FOOTER_MENU.chars().map(glyph_cols).sum::<usize>();
