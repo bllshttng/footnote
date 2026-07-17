@@ -1,6 +1,6 @@
 {
   "name": "fno-opencode-plugin",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "footnote's self-contained opencode orchestration plugin",
   "type": "module",
   "private": true,
