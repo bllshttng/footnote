@@ -1551,9 +1551,6 @@ def cmd_whoami(
 
 @agents_app.command("register", hidden=True)
 def cmd_register(
-    name: str | None = typer.Option(
-        None, "--name", "-n", help="Explicit roster name (default: canonical <harness>-<shortid>)."
-    ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
 ) -> None:
     """Join THIS session to the mesh roster so peers can `fno mail send` to it.
@@ -1561,10 +1558,14 @@ def cmd_register(
     The self-service seam behind ``/fno-me``: a session a human started by hand
     has no spawn-created roster row. This resolves the ambient harness identity
     (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / ...) and writes an ``idle`` row
-    named by the canonical ``<harness>-<shortid>`` handle — the same string the
+    named by the canonical ``<harness>-<shortid>`` handle, the same string the
     session self-stamps and drains, so a durable ``fno mail send`` to it lands.
     ``fno agents whoami`` then reports ``registered: true`` via its session-id
     fallback, no ``FNO_AGENT_SELF`` env needed.
+
+    The handle is ALWAYS the canonical one (no custom-name override): a custom
+    alias would not be drained by ``mail drain-self`` (which scans only the
+    canonical handle), so mail to it would silently strand.
 
     Idempotent (re-running refreshes the row). Exit 3 for a session with no
     ambient harness identity (nothing addressable to register).
@@ -1585,7 +1586,7 @@ def cmd_register(
 
     try:
         entry = register_existing_session(
-            provider=harness, session_id=session_id, cwd=os.getcwd(), name=name or None
+            provider=harness, session_id=session_id, cwd=os.getcwd()
         )
     except Exception as exc:  # a deliberate manual join reports failure (unlike the fail-open hook)
         sys.stderr.write(f"register failed: {exc}\n")
