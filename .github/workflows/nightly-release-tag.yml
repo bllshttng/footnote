@@ -99,30 +99,19 @@ jobs:
           fi
           echo "next version: ${next}"
 
-          # 4. Bump the version in every file that ships it, commit [skip ci],
-          #    push with rebase-retry (merges land constantly). Fetch+reset at
-          #    the top of each attempt so we always build on the freshest origin.
-          #    All three files stay in lockstep: the v* tag drives release-wheels
-          #    AND crates-publish AND release-binaries, so the wheel and both
-          #    Rust crates must read the same version at tag time (a crate left
-          #    behind fails crates-publish or ships a mislabeled binary).
-          PY_FILE="cli/src/fno/__init__.py"
-          CRATE_FILES="crates/fno/Cargo.toml crates/fno-agents/Cargo.toml"
-
+          # 4. Bump every version-bearing manifest through the single propagation
+          #    point, commit [skip ci], push with rebase-retry (merges land
+          #    constantly). Fetch+reset at the top of each attempt so we always
+          #    build on the freshest origin. sync-version.sh keeps the wheel, both
+          #    Rust crates (+ lockfiles), and every plugin/extension manifest in
+          #    lockstep, so the v* tag drives release-wheels + crates-publish + the
+          #    plugin surfaces all at the same version (a lagging manifest is the
+          #    exact drift that stranded the plugins at 0.2.x behind a 0.3.0 CLI).
           apply_bump() {
-            sed -i -E "s/^__version__ = \".*\"/__version__ = \"${new_ver}\"/" "$PY_FILE"
-            grep -q "^__version__ = \"${new_ver}\"$" "$PY_FILE" \
-              || { echo "::error::failed to set __version__ to ${new_ver} in ${PY_FILE}"; return 1; }
-            for cf in $CRATE_FILES; do
-              # Each Cargo.toml has exactly one top-level `version = "..."` (the
-              # [package] version); dependency versions are never at column 0.
-              sed -i -E "s/^version = \".*\"/version = \"${new_ver}\"/" "$cf"
-              grep -q "^version = \"${new_ver}\"$" "$cf" \
-                || { echo "::error::failed to set version to ${new_ver} in ${cf}"; return 1; }
-              # Keep the lockfile's own package entry in step so cargo publish /
-              # the frozen build in CI do not choke on a stale lock.
-              cargo update --manifest-path "$cf" -p "$(basename "$(dirname "$cf")")" --precise "${new_ver}" >/dev/null 2>&1 || true
-            done
+            bash scripts/release/sync-version.sh "${new_ver}" \
+              || { echo "::error::sync-version.sh failed to set ${new_ver}"; return 1; }
+            grep -q "^__version__ = \"${new_ver}\"$" cli/src/fno/__init__.py \
+              || { echo "::error::__version__ not at ${new_ver} after sync"; return 1; }
           }
 
           bump_sha=""
