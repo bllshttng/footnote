@@ -62,9 +62,9 @@ Advanced lifecycle intents (`drive`/`grid`/`attach`/`resume`/`reconcile`/`rm`/
 `ack`/`promote`) map to their corresponding raw `fno agents` verbs; the skill
 resolves their arguments and runs them rather than reimplementing them. The
 capability matrix at `docs/harness-command-matrix.md` remains the per-provider
-truth. For the full verb map - which verbs are human-facing vs
+truth. For the full subcommand map - which are human-facing vs
 machine-internal vs exploratory channel infra - see
-[references/fno-agents-verbs.md](references/fno-agents-verbs.md).
+[references/fno-agents-subcommands.md](references/fno-agents-subcommands.md).
 
 Route on the verb, then run the matching section below.
 
