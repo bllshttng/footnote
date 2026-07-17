@@ -1167,6 +1167,13 @@ class AgentsBlock(BaseModel):
     a2a: A2aBlock = Field(default_factory=A2aBlock)
     defaults: SpawnDefaultsBlock = Field(default_factory=SpawnDefaultsBlock)
     confirm: str = "auto"
+    # When true, the SessionStart register hook auto-joins EVERY hand-started
+    # session to the roster (discoverable + mail-addressable). Default false is
+    # opt-in: a session joins deliberately via `/fno-me` (`fno agents register`),
+    # so the roster stays the workers you coordinate with, not every terminal you
+    # opened. Spawned workers register at spawn regardless of this knob. Flip to
+    # true if your workflow is many hand-started sessions cross-talking.
+    auto_register_sessions: bool = False
     # Dead-row GC grace window in SECONDS (x-b1aa). A finished agent-view row
     # stays visible this long after the daemon GC first observes its process gone,
     # before it is reaped. Default 3600 (1h). The Rust daemon + `fno agents reap`

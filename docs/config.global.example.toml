@@ -77,6 +77,14 @@ notify_on_done = false            # ...and on a terminal 'done' (opt-in - flip t
 [worktree]
 auto_install = true       # run dep install on new worktrees; false to skip
 
+# Mesh roster population. Default false is OPT-IN: a hand-started session joins
+# the roster (so peers can `fno mail send` to it) only when it runs /fno-me.
+# Flip to true and the SessionStart hook auto-joins EVERY hand-started session
+# in scope - machine-wide from this global file. Spawned workers register
+# regardless of this knob; this only governs hand-started sessions.
+[agents]
+auto_register_sessions = false
+
 # --- opt-in / safety-sensitive: OFF on purpose. Uncomment to enable. ---
 # [auto_merge]
 # enabled = true          # auto-merge once external review passes (BILLING)

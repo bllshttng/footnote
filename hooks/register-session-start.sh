@@ -18,14 +18,23 @@ REPO_ROOT="${CLAUDE_PROJECT_DIR:-${GEMINI_PROJECT_DIR:-$(git rev-parse --show-to
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(cd "$HOOK_DIR/.." && pwd)/cli"
 
-# Detect the harness and its session-id env in lockstep (mirrors
-# session-start.sh detect_platform). Only the matched provider's id is read.
+# Auto-join is opt-in (config.agents.auto_register_sessions, default false): a
+# session joins the roster deliberately via `/fno-me` (`fno agents register`),
+# so the roster stays the workers you coordinate with, not every terminal. Flip
+# the knob to auto-join every hand-started session. A failed/absent read is the
+# default (false) — never auto-register on a config we could not confirm.
+AUTO="$(fno config get agents.auto_register_sessions 2>/dev/null || true)"
+[[ "$AUTO" == "true" ]] || exit 0
+
+# Detect the harness and read the SAME session-id env the rest of fno resolves
+# on (harness_identity.HARNESS_SESSION_MARKERS): claude uses CLAUDE_CODE_SESSION_ID,
+# not CLAUDE_SESSION_ID (the old name here was unset, so claude never registered).
 if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
     PROVIDER="gemini"; SESSION_ID="${GEMINI_SESSION_ID:-}"
 elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
     PROVIDER="codex"; SESSION_ID="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
 elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-    PROVIDER="claude"; SESSION_ID="${CLAUDE_SESSION_ID:-}"
+    PROVIDER="claude"; SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 else
     exit 0  # generic/unknown harness: nothing addressable to register
 fi
