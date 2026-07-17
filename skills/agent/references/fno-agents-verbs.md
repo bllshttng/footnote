@@ -1,4 +1,4 @@
-# `fno agents` surface map
+# `fno agents` verb map
 
 The classification companion to [`docs/harness-command-matrix.md`](../../../docs/harness-command-matrix.md). That page answers *which provider supports a verb*; this page answers *which verbs a human drives, which are machine-internal, and which `/agent` routes vs leaves raw*. It is a map, not an encyclopedia: it exists so `/agent` documents its routing boundary and a reader can tell "not a `/agent` verb" apart from "missing feature".
 
@@ -7,7 +7,7 @@ The classification companion to [`docs/harness-command-matrix.md`](../../../docs
 `fno agents <verb>` dispatches across two layers:
 
 - **Python typer group** (`fno agents --help`) - the human-facing help. Supports `hidden=True` to keep a machine verb out of the listing while it still runs.
-- **Rust client** (`fno-agents --help`) - emits JSON of every routable verb (a machine list, correctly exhaustive). Most machine verbs are Rust-only and never reach the typer help, so they do not clutter the human surface at all.
+- **Rust client** (`fno-agents --help`) - emits JSON of every routable verb (a machine list, correctly exhaustive). Most machine verbs are Rust-only and never reach the typer help, so they do not clutter the human `--help` at all.
 
 So "declutter the human `--help`" only touches the handful of *Python-registered* machine verbs. Everything Rust-only is already invisible to `fno agents --help`.
 
