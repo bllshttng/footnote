@@ -24,6 +24,7 @@ So "declutter the human `--help`" only touches the handful of *Python-registered
 | `stop` | yes | Terminate a worker (confirm). |
 | `watch` / `list` / `logs` | yes | Observe. |
 | `whoami` | yes | This session's registered mesh identity. |
+| `register` | raw (via `/fno-me`) | Join THIS hand-started session to the roster under its canonical `<harness>-<shortid>` handle, so peers can `fno mail send` to it. The write-side counterpart of `whoami`. |
 | `status` | raw | Daemon liveness + per-agent state. |
 | `rm` / `restart` / `resume` / `attach` | raw | Registry / session admin. |
 | `top` | raw | Live agent-activity view. |
