@@ -75,6 +75,17 @@ _DEFAULT_MODEL = "claude-haiku-4-5"
 # fire (``check``) implements external review and stays on the default model.
 _ROLE_FOR_VERB: dict[str, str] = {"merged": "post-merge"}
 
+# Per-verb wall-clock ceiling for the headless fire. A launchd tick never
+# overlaps, so an unbounded child call wedges every future tick forever
+# (x-97d8); these bounds turn a hung fire into a normal failed dispatch that
+# the retry/park machinery already handles. The merged ritual (reconcile +
+# retro + parking-lot) legitimately runs longer than a check fire.
+# ponytail: fixed ceilings, not config -- mirrors _discover.read_pr_state's
+# plain timeout_s default; expose config.pr_watch.fire_timeout only if a repo
+# ever needs to tune it.
+_TIMEOUT_FOR_VERB: dict[str, float] = {"check": 180.0, "merged": 300.0}
+_DEFAULT_FIRE_TIMEOUT = 300.0
+
 
 def _ensure_onboarding_bypass() -> None:
     """Pre-set ``~/.claude.json`` ``hasCompletedOnboarding`` so a cold headless
@@ -133,6 +144,7 @@ def fire_skill(
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     env_seam: str = _ENV_SEAM,
     resolve_route_fn: Optional[Callable[[str], Optional[dict]]] = None,
+    timeout_s: Optional[float] = None,
 ) -> DispatchResult:
     """Fire a headless ``claude --print`` for one PR and return the result.
 
@@ -152,6 +164,10 @@ def fire_skill(
     model, so no ``--model`` flag is passed). Without a key it fail-safes to the
     primary model, byte-identical to today. ``resolve_route_fn`` is an injectable
     seam for tests.
+
+    ``timeout_s`` bounds the headless fire so a hung claude cannot wedge the
+    launchd tick forever (x-97d8); when None it defaults per-verb
+    (``_TIMEOUT_FOR_VERB``). A timeout surfaces as a normal failed dispatch.
 
     SUCCESS = rc == 0 AND parsed ``is_error`` is ``False``.
     Every other outcome is a failure.
@@ -209,6 +225,12 @@ def fire_skill(
             prompt += " autonomous"
         cmd.append(prompt)
 
+    fire_timeout = (
+        timeout_s
+        if timeout_s is not None
+        else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)
+    )
+
     run_kwargs: dict[str, Any] = {}
     if route:
         # Cold headless routed fire: bypass the onboarding wall, then hand the
@@ -231,6 +253,7 @@ def fire_skill(
             text=True,
             check=False,
             cwd=str(repo_dir),
+            timeout=fire_timeout,
             **run_kwargs,
         )
     except subprocess.TimeoutExpired as exc:
