@@ -122,8 +122,13 @@ def _find_by_session(
             for entry in registry:
                 if _row_harness(entry) != "claude":
                     continue
-                short_id = entry.short_id
-                if short_id and norm.startswith(short_id.lower()):
+                # A hand-started registered row stores the FULL uuid in short_id
+                # (register_existing_session / `fno agents register`); a spawn row
+                # stores the 8-hex jobId prefix. De-hyphenate so the prefix match
+                # accepts either shape - else a /fno-me claude session reports
+                # unregistered despite a written row.
+                sid = (entry.short_id or "").replace("-", "").lower()
+                if sid and norm.startswith(sid):
                     return entry
         return None
 
@@ -141,8 +146,8 @@ def _find_by_session(
         # daemon worker's name-derived short must never prefix-match a uuid.
         if entry.provider != "claude":
             continue
-        short_id = entry.short_id
-        if short_id and norm.startswith(short_id.lower()):
+        sid = (entry.short_id or "").replace("-", "").lower()
+        if sid and norm.startswith(sid):
             return entry
     return None
 
