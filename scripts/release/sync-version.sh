@@ -44,9 +44,15 @@ if [[ "$arg" == "--check" ]]; then
     [[ "$got" == "$want" ]] || { echo "drift: $cf = $got (want $want)"; bad=1; }
   done
   for j in "${JSON_MANIFESTS[@]}"; do
+    matches="$(perl -ne 'print "$1\n" while /"version"\s*:\s*"([^"]*)"/g' "$j")"
+    # Zero version fields is itself drift: a dropped/renamed key would otherwise
+    # pass silently (the while loop just never runs).
+    if [[ -z "$matches" ]]; then
+      echo "drift: $j has no \"version\" field (want $want)"; bad=1; continue
+    fi
     while IFS= read -r got; do
       [[ "$got" == "$want" ]] || { echo "drift: $j = $got (want $want)"; bad=1; }
-    done < <(perl -ne 'print "$1\n" while /"version": "([^"]*)"/g' "$j")
+    done <<< "$matches"
   done
   [[ "$bad" == 0 ]] && echo "sync-version: all surfaces agree at ${want}"
   exit "$bad"
@@ -75,7 +81,15 @@ done
 #    marketplace.json legitimately carries two (listing metadata + the plugin row).
 for j in "${JSON_MANIFESTS[@]}"; do
   [[ -f "$j" ]] || { echo "sync-version: manifest missing: $j" >&2; exit 1; }
-  perl -i -pe "s/\"version\": \"[^\"]*\"/\"version\": \"${ver}\"/g" "$j"
+  # Whitespace-tolerant match (handles a compact `"version":"x"` reformat too),
+  # normalized to the canonical spaced form.
+  perl -i -pe "s/\"version\"\s*:\s*\"[^\"]*\"/\"version\": \"${ver}\"/g" "$j"
+  # Verify the bump actually landed. A missing/renamed version key - or a format
+  # this regex somehow still missed - would otherwise no-op SILENTLY and ship a
+  # stale plugin version behind a bumped CLI (the exact drift this guards, and
+  # the nightly only re-verifies __version__). Fail loud instead.
+  grep -q "\"version\": \"${ver}\"" "$j" \
+    || { echo "sync-version: no \"version\" field set to ${ver} in $j (missing or unrecognized key?)" >&2; exit 1; }
 done
 
 echo "sync-version: all surfaces set to ${ver}"
