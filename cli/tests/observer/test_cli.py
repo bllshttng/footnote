@@ -155,7 +155,7 @@ def test_sweep_ok_emits_findings_run_complete_and_digest(monkeypatch, tmp_path):
 def test_sweep_partial_when_an_item_is_unscorable(monkeypatch, tmp_path):
     items = [_item(f"s{i}", f"x-{i}", _good_plan(tmp_path, f"p{i}.md")) for i in range(9)]
     items.append(_item("s9", "x-9", tmp_path / "missing.md"))  # no plan on disk, no node -> gap
-    events_path = _wire(monkeypatch, tmp_path, items)
+    _wire(monkeypatch, tmp_path, items)  # side effects only (monkeypatch); events unread here
     r = runner.invoke(cli.observer_app, ["sweep", "--skill", "blueprint", "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
