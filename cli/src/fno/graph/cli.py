@@ -494,6 +494,12 @@ def _create_node_impl(
         except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
             pass
 
+    # Repaint the new child's ancestors so a parent epic/mission rollup reflects
+    # the birth immediately (a plan-less idea still counts toward children_total).
+    # The converger walks up from the child id to the epic + mission (codex P2).
+    if node_holder[0] is not None and node_holder[0].get("parent"):
+        _project_plans_from_graph([new_id_holder[0]])
+
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
 
@@ -1757,6 +1763,7 @@ def cmd_update(
 
     projected_node: list = [None]
     cascade_closed_update: list = []
+    reparent_old_parent: list = [None]
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
     # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
@@ -1944,6 +1951,10 @@ def cmd_update(
             current_tags = [t for t in current_tags if t not in remove_tags]
             node["tags"] = current_tags
         if parent is not None:
+            # Remember the outgoing parent so its rollup can be repainted too:
+            # a reparent (or --parent null) leaves the OLD epic/mission counting
+            # a child it no longer owns until it is projected (codex P2).
+            reparent_old_parent[0] = node.get("parent")
             if parent.lower() == "null":
                 node["parent"] = None
             else:
@@ -1968,6 +1979,23 @@ def cmd_update(
                     )
                     raise typer.Exit(code=1)
                 node["parent"] = target["id"]
+
+        # The depth cap must also hold when a --type change alone promotes a node
+        # to epic under an already-nested epic (the --parent guard above never
+        # fires without --parent). Checked against the FINAL parent edge (codex
+        # P1), so a combined --type epic --parent <x> is covered by whichever ran.
+        if type_ is not None and node.get("type") == "epic" and node.get("parent"):
+            parent_node = _find_node(entries, node["parent"])
+            if parent_node is not None and _would_exceed_epic_depth(
+                entries, node, parent_node
+            ):
+                typer.echo(
+                    f"Error: making {node['id']} an epic under {parent_node['id']} "
+                    f"would exceed the {EPIC_NEST_MAX_DEPTH}-level cap (mission -> "
+                    f"epic -> leaf); an epic may nest only under a top-level mission",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
 
         # Completion runs LAST so it sees the FINAL parent edge (codex P2): a
         # combined `--completed --parent <epic>` must cascade against the new
@@ -2003,8 +2031,15 @@ def cmd_update(
         or parent is not None
         or has_tag_edit
     ):
+        # Include the OLD parent on a reparent so its now-stale rollup repaints
+        # alongside the new parent's (the converger walks each id's ancestors in
+        # the post-mutation graph, so the old chain is only reachable via this id).
         _project_plans_from_graph(
-            [projected_node[0]["id"], *cascade_closed_update]
+            [
+                projected_node[0]["id"],
+                *cascade_closed_update,
+                *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
+            ]
         )
 
 

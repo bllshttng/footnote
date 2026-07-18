@@ -277,6 +277,73 @@ def test_add_leaf_under_epic_still_allowed(tmp_graph, tmp_path):
     assert res.exit_code == 0, res.output
 
 
+_EPIC_DOC = """\
+---
+node: {nid}
+status: ready
+type: epic
+---
+
+# {nid} epic
+"""
+
+
+def _epic_with_plan(tmp_path, nid, slug, parent=None):
+    p = tmp_path / f"{nid}.md"
+    p.write_text(_EPIC_DOC.format(nid=nid), encoding="utf-8")
+    e = _epic(nid, slug, parent)
+    e["plan_path"] = str(p)
+    return e, p
+
+
+def test_type_change_to_epic_respects_depth_cap(tmp_graph, tmp_path):
+    """codex P1: promoting a feature to epic under a nested epic is capped too,
+    even though --parent is not passed."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+        _node(plan, parent="x-0e02"),  # a feature under the nested epic
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--type", "epic"])
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-1234")["type"] == "feature"  # unchanged
+
+
+def test_reparent_repaints_old_epic(tmp_graph, tmp_path):
+    """codex P2: moving a child off epic A onto epic B repaints A's rollup too
+    (A no longer counts the moved child)."""
+    epic_a, a_doc = _epic_with_plan(tmp_path, "x-0a0a", "epic-a")
+    epic_b, b_doc = _epic_with_plan(tmp_path, "x-0b0b", "epic-b")
+    child_plan = tmp_path / "child.md"
+    child_plan.write_text(_PLAN, encoding="utf-8")
+    child = _node(child_plan, id="x-0c0c", slug="child", parent="x-0a0a")
+    _seed(tmp_graph, [epic_a, epic_b, child])
+    # Converge the initial state so A shows its child.
+    runner.invoke(app, ["backlog", "update", "x-0a0a", "--priority", "p1"])
+    _, fa, _ = read_plan_file(a_doc)
+    assert fa["children_total"] == "1"
+    # Move the child from A to B.
+    res = runner.invoke(app, ["backlog", "update", "x-0c0c", "--parent", "x-0b0b"])
+    assert res.exit_code == 0, res.output
+    _, fa2, _ = read_plan_file(a_doc)
+    _, fb2, _ = read_plan_file(b_doc)
+    assert fa2["children_total"] == "0"  # A repainted: lost the child
+    assert fb2["children_total"] == "1"  # B repainted: gained the child
+
+
+def test_add_child_repaints_parent_epic(tmp_graph, tmp_path):
+    """codex P2: creating a child via `add --parent <epic>` repaints the epic."""
+    epic, e_doc = _epic_with_plan(tmp_path, "x-0e0e", "epic")
+    _seed(tmp_graph, [epic])
+    res = runner.invoke(app, ["backlog", "add", "A child", "--parent", "x-0e0e"])
+    assert res.exit_code == 0, res.output
+    _, fe, _ = read_plan_file(e_doc)
+    assert fe["children_total"] == "1"
+
+
 def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
     """defer + undefer both project best-effort and never fail on a live doc."""
     plan = _plan(tmp_path)
