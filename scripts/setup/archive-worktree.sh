@@ -263,8 +263,23 @@ if [[ -n "$ALL_PIDS" ]]; then
   done <<< "$ALL_PIDS"
 
   if [[ "$ASSUME_YES" -ne 1 ]]; then
+    # No controlling tty (a non-interactive sweep): decline cleanly with one
+    # line instead of letting `read </dev/tty` spew "/dev/tty: Device not
+    # configured" and decline anyway. Same rc=3; SIGTERMing live processes
+    # stays opt-in via --yes / --kill-orphans, never a headless default.
+    # `-r /dev/tty` only tests the perm bits, so actually open it (fd 3) - on
+    # macOS a session with no controlling terminal fails the open, not the test.
+    # The brace group redirects the open's own failure message ("/dev/tty:
+    # Device not configured") to /dev/null while still applying fd 3 to THIS
+    # shell (a plain `exec 3</dev/tty 2>/dev/null` leaks the error, since bash
+    # opens fd 3 before the 2>/dev/null takes effect).
+    if ! { exec 3</dev/tty; } 2>/dev/null; then
+      echo "archive-worktree: processes present and no tty for confirmation; re-run with --yes or interactively" >&2
+      exit 3
+    fi
     printf '    Send SIGTERM to these processes? [y/N] ' >&2
-    read -r REPLY </dev/tty || REPLY="n"
+    read -r REPLY <&3 || REPLY="n"
+    exec 3<&-
     case "$REPLY" in
       y|Y|yes|YES) ;;
       *) echo "archive-worktree: declined; not archiving." >&2; exit 3 ;;
