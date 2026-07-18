@@ -437,6 +437,8 @@ enum CoreMsg {
     BacklogCards {
         cards: Vec<BacklogCard>,
         holders: HashMap<String, String>,
+        /// (x-9c5f) node id -> pr_number, from the same graph read as `cards`.
+        prs: HashMap<String, u64>,
     },
 }
 
@@ -887,6 +889,10 @@ struct Core {
     /// Claim holder per in-flight node id (x-54fa), from the reader's sweep;
     /// joined at publish time into card routes / `where_hint`.
     backlog_holders: HashMap<String, String>,
+    /// (x-9c5f) node id -> pr_number, from the off-loop graph reader; joined at
+    /// layout time (holder name -> node -> pr) into `AgentRow.pr` for the peek
+    /// header's `PR #N` label.
+    backlog_pr: HashMap<String, u64>,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -1114,6 +1120,131 @@ async fn run_agent_action(verb: &str, name: &str) -> String {
         Ok(Err(_)) => format!("{verb} {name}: unavailable"),
         Ok(Ok(status)) if status.success() => format!("{past} {name}"),
         Ok(Ok(_)) => format!("{verb} {name}: failed"),
+    }
+}
+
+/// (x-9c5f) Sanitize peek-overlay free-text mail: strip control chars, trim,
+/// refuse blank-after-sanitize and over-`MAX_MAIL_TEXT` (never truncate - a
+/// silently cut instruction to a worker is worse than a visible refusal, Locked
+/// Decision 7). The count is chars, matching the client's printable-ASCII cap.
+fn sanitize_mail_text(text: &str) -> Result<String, String> {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return Err("message is empty".to_string());
+    }
+    if clean.chars().count() > crate::proto::MAX_MAIL_TEXT {
+        return Err("message too long".to_string());
+    }
+    Ok(clean.to_string())
+}
+
+/// (x-9c5f) Whether `s` is a lowercase 8-4-4-4-12 hex uuid (the respawn shape
+/// gate, the AttachAgent jobId precedent): a malformed value never reaches
+/// `spawn --resume`'s argv.
+fn valid_session_uuid(s: &str) -> bool {
+    let groups = [8usize, 4, 4, 4, 12];
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == groups.len()
+        && parts.iter().zip(groups).all(|(p, n)| {
+            p.len() == n
+                && p.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
+/// (x-9c5f) First non-empty line of `s` with control chars stripped, else
+/// `fallback`. Subprocess stdout/stderr becomes an operator-visible notice, so
+/// raw ANSI/C0 must never reach the status line (Domain Pitfall: route stderr
+/// through the same strip the peek body uses).
+fn first_line_or(s: &str, fallback: &str) -> String {
+    s.lines()
+        .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>())
+        .map(|l| l.trim().to_string())
+        .find(|l| !l.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// (x-9c5f) Shell `fno mail send <name> <text>` off-loop, bounded + capturing:
+/// the CLI's one-line stdout verdict (`msg-<id> delivered|queued`) becomes the
+/// notice verbatim; a nonzero exit surfaces the first stderr line. Never silent
+/// (Locked Decision 6). Uses the `fno` porcelain; argv array only.
+async fn run_mail_send(name: &str, text: &str) -> String {
+    const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
+    // `--` ends option parsing so operator text starting with `-` (e.g. a reply
+    // of `--help`) is delivered as the message, not consumed as a CLI flag.
+    let fut = tokio::process::Command::new(fno_bin())
+        .args(["mail", "send", "--", name, text])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(MAIL_TIMEOUT, fut).await {
+        Err(_) => format!("mail {name}: timed out"),
+        Ok(Err(_)) => format!("mail {name}: unavailable"),
+        Ok(Ok(o)) if o.status.success() => first_line_or(
+            &String::from_utf8_lossy(&o.stdout),
+            &format!("mailed {name}"),
+        ),
+        Ok(Ok(o)) => first_line_or(
+            &String::from_utf8_lossy(&o.stderr),
+            &format!("mail {name}: failed"),
+        ),
+    }
+}
+
+/// (x-9c5f) Shell `fno agents spawn <name> --resume <uuid> --substrate bg`
+/// off-loop for the peek `r` respawn: a longer 60s bound (a bg spawn creates a
+/// thread; 20s is too tight). Success -> `respawned <name>`; failure -> the
+/// first stderr line. The 1s registry poll owns the row flipping live; this
+/// notice is advisory. Uses the `fno` porcelain, NOT `fno-agents`: the Rust
+/// runtime intercepts `agents spawn` and routes it (unlike stop/rm, which use
+/// the `fno-agents` binary deliberately).
+///
+/// `cwd` + `account` come from the registry row, NOT the `--resume` uuid:
+/// `fno agents spawn` defaults `--cwd` to the CANONICAL checkout (x-85fe), so a
+/// worker revived from a feature worktree would land in main without `--cwd`;
+/// an isolated-account session's uuid lives in that account's config dir, so it
+/// needs `--account` to be found. Both are omitted when empty/absent (the
+/// pre-existing default, correct for a canonical/default-account worker).
+async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -> String {
+    const RESPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+    // Pin `--provider claude`: respawn is definitionally a claude revival (the
+    // uuid is carried only for claude rows), but `fno agents spawn` otherwise
+    // infers the provider from the invoking harness, so a mux server running
+    // under a non-claude context would infer the wrong provider and fail the
+    // claude-only `--resume` guard.
+    let mut args: Vec<&str> = vec![
+        "agents",
+        "spawn",
+        name,
+        "--provider",
+        "claude",
+        "--resume",
+        uuid,
+        "--substrate",
+        "bg",
+    ];
+    if !cwd.is_empty() {
+        args.push("--cwd");
+        args.push(cwd);
+    }
+    if let Some(acct) = account.filter(|a| !a.is_empty()) {
+        args.push("--account");
+        args.push(acct);
+    }
+    let fut = tokio::process::Command::new(fno_bin())
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(RESPAWN_TIMEOUT, fut).await {
+        Err(_) => format!("respawn {name}: timed out"),
+        Ok(Err(_)) => format!("respawn {name}: unavailable"),
+        Ok(Ok(o)) if o.status.success() => format!("respawned {name}"),
+        Ok(Ok(o)) => first_line_or(
+            &String::from_utf8_lossy(&o.stderr),
+            &format!("respawn {name}: failed"),
+        ),
     }
 }
 
@@ -2096,6 +2227,37 @@ impl Core {
         });
     }
 
+    /// (x-9c5f) Shell `fno mail send <name> <text>` OFF the core loop, mirroring
+    /// `agent_action`: the CLI's one-line verdict routes back as a
+    /// `DispatchResult` notice. `name` was catalog-validated and `text` sanitized
+    /// by the caller.
+    fn mail_agent(&self, id: u64, name: String, text: String) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_mail_send(&name, &text).await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
+    /// (x-9c5f) Shell `fno agents spawn <name> --resume <uuid> --substrate bg`
+    /// OFF the core loop: the advisory outcome routes back as a `DispatchResult`
+    /// notice; the 1s registry poll owns the row flipping live. `uuid` was
+    /// shape-validated by the caller.
+    fn respawn_agent(
+        &self,
+        id: u64,
+        name: String,
+        uuid: String,
+        cwd: String,
+        account: Option<String>,
+    ) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_respawn(&name, &uuid, &cwd, account.as_deref()).await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
     /// Shell `fno agents peek <name>` OFF the core loop (x-c376), the
     /// `dispatch_next` pattern: the transcript routes back as a `PeekResult` the
     /// core loop turns into a `PeekBody` for the requesting client only. `seq`
@@ -2251,7 +2413,11 @@ impl Core {
     /// external row sharing the name (never act on a registry agent an external
     /// shadows), or a >1 non-external collision - so a keypress can only ever act
     /// on exactly one unambiguous registry agent, never a guessed match.
-    fn resolve_lifecycle_target(&self, name: &str) -> Result<bool, String> {
+    /// (x-9c5f) Widened from `Result<bool>` to the resolved row reference so
+    /// callers can read `.exited` AND `.claude_session_uuid` (the respawn arm
+    /// needs both); the fail-closed semantics (absent / external / ambiguous all
+    /// refused) are unchanged.
+    fn resolve_lifecycle_target(&self, name: &str) -> Result<&RegistryAgent, String> {
         let matches: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.name == name).collect();
         if matches.is_empty() {
             return Err(format!("no such agent: {name}"));
@@ -2262,7 +2428,7 @@ impl Core {
             ));
         }
         match matches.as_slice() {
-            [one] => Ok(one.exited),
+            [one] => Ok(one),
             _ => Err(format!("{name} is ambiguous - use the CLI")),
         }
     }
@@ -2885,6 +3051,16 @@ impl Core {
         // Which registry agents a pane row already claimed (so they don't
         // double-render as watch-only). Indexed like `self.agents`.
         let mut consumed = vec![false; self.agents.len()];
+        // (x-9c5f) holder name -> pr_number, joining the live-claim holders map
+        // (node -> holder) with the graph's node -> pr map, so a row whose name
+        // holds a live claim on a pr-carrying node gets the peek `PR #N` label.
+        // Harness-native claims make holder == worker name (x-3e70); a session-id
+        // holder simply yields no label (Open Question 2: graceful absence).
+        let pr_by_holder: HashMap<&str, u64> = self
+            .backlog_holders
+            .iter()
+            .filter_map(|(node, holder)| self.backlog_pr.get(node).map(|pr| (holder.as_str(), *pr)))
+            .collect();
 
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
@@ -2939,6 +3115,8 @@ impl Core {
                                     .account
                                     .clone()
                                     .or_else(|| pane_entry.and_then(|e| e.account.clone())),
+                                updated_at: a.updated_at,
+                                pr: pr_by_holder.get(a.name.as_str()).copied(),
                             }
                         }
                         None => {
@@ -2967,6 +3145,10 @@ impl Core {
                                 subline: self
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
                                 account: e.and_then(|e| e.account.clone()),
+                                // A bare shell pane is not a registry worker: no
+                                // activity stamp, no claim, no pr.
+                                updated_at: None,
+                                pr: None,
                             }
                         }
                     };
@@ -3005,6 +3187,8 @@ impl Core {
                         tombstone: false,
                         subline: self.compose_subline(&a.cwd),
                         account: a.account.clone(),
+                        updated_at: a.updated_at,
+                        pr: pr_by_holder.get(a.name.as_str()).copied(),
                     });
                 }
                 None => {
@@ -3047,6 +3231,8 @@ impl Core {
                         // The structural roster-dir tag: an isolated-account
                         // foreign row carries its source account here (piece 3).
                         account: a.account.clone(),
+                        updated_at: a.updated_at,
+                        pr: pr_by_holder.get(a.name.as_str()).copied(),
                     });
                 }
             }
@@ -3083,6 +3269,9 @@ impl Core {
                     // A synthesized dead member has no cwd to derive a branch/tail.
                     subline: None,
                     account: None,
+                    // A dead member carries no live claim or activity stamp.
+                    updated_at: None,
+                    pr: None,
                 });
             }
         }
@@ -3147,6 +3336,10 @@ impl Core {
                 tombstone: false,
                 subline: self.compose_subline(&r.cwd),
                 account: None,
+                // An external row is never joined (respawn/pr are fno-registry
+                // concerns); its stamps live in its own daemon.
+                updated_at: None,
+                pr: None,
             });
         }
         out
@@ -4670,7 +4863,7 @@ impl Core {
                 // the exited flag is unused here.
                 match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(_exited) => self.agent_action(client_id, "stop", name),
+                    Ok(_row) => self.agent_action(client_id, "stop", name),
                 }
                 Flow::Continue
             }
@@ -4680,12 +4873,14 @@ impl Core {
                 // refused with the stop-first reason (the CLI enforces this too,
                 // but refusing here keeps the notice specific and skips a doomed
                 // subprocess).
-                match self.resolve_lifecycle_target(&name) {
+                // `.map(|a| a.exited)` drops the row borrow before the arm bodies
+                // call `&mut self` methods (the resolver now returns a reference).
+                match self.resolve_lifecycle_target(&name).map(|a| a.exited) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(exited) if !exited => {
+                    Ok(false) => {
                         self.notice(client_id, format!("{name} is still live - stop it first"))
                     }
-                    Ok(_) => self.agent_action(client_id, "rm", name),
+                    Ok(true) => self.agent_action(client_id, "rm", name),
                 }
                 Flow::Continue
             }
@@ -4770,6 +4965,61 @@ impl Core {
                             generation,
                             crate::squad_store::ExternalState::Removing,
                         );
+                    }
+                }
+                Flow::Continue
+            }
+            Command::MailAgent { name, text } => {
+                // (x-9c5f) Free-text reply from peek (`m`). Resolve fail-closed
+                // (mail to an EXITED row is legal - it queues durable; an external
+                // row is refused), sanitize the text (blank/over-cap refused,
+                // never truncated), then shell `fno mail send` off-loop.
+                match self.resolve_lifecycle_target(&name) {
+                    Err(msg) => self.notice(client_id, msg),
+                    Ok(_) => match sanitize_mail_text(&text) {
+                        Err(msg) => self.notice(client_id, msg),
+                        Ok(clean) => self.mail_agent(client_id, name, clean),
+                    },
+                }
+                Flow::Continue
+            }
+            Command::RespawnAgent { name } => {
+                // (x-9c5f) Respawn an exited claude bg row from peek (`r`). Copy
+                // the two fields out via `.map` so the row borrow is dropped
+                // before the arm bodies touch `&mut self`. Refuse a still-live
+                // row, a uuid-less row (also covers non-claude - derive_rows only
+                // carries the uuid for claude), and a malformed uuid (shape gate
+                // before argv); else shell `fno agents spawn --resume` off-loop.
+                // Carry the row's cwd + account too: `fno agents spawn` defaults
+                // to the CANONICAL checkout (x-85fe), NOT the row's worktree, so a
+                // cross-worktree revival must pass `--cwd <recorded>` or it comes
+                // back in main; an isolated-account session needs `--account`
+                // (its uuid lives in that account's config dir). The row is the
+                // only source of these - they are not on the `--resume` uuid.
+                let resolved = self.resolve_lifecycle_target(&name).map(|a| {
+                    (
+                        a.exited,
+                        a.claude_session_uuid.clone(),
+                        a.cwd.clone(),
+                        a.account.clone(),
+                    )
+                });
+                match resolved {
+                    Err(msg) => self.notice(client_id, msg),
+                    Ok((false, ..)) => self.notice(client_id, format!("{name} is still live")),
+                    Ok((true, None, ..)) => self.notice(
+                        client_id,
+                        format!("{name}: no claude session recorded - cannot respawn"),
+                    ),
+                    Ok((true, Some(uuid), cwd, account)) => {
+                        if valid_session_uuid(&uuid) {
+                            self.respawn_agent(client_id, name, uuid, cwd, account);
+                        } else {
+                            self.notice(
+                                client_id,
+                                format!("{name}: malformed session id - cannot respawn"),
+                            );
+                        }
                     }
                 }
                 Flow::Continue
@@ -5223,11 +5473,16 @@ impl Core {
                 self.push_layout(false);
                 Flow::Continue
             }
-            CoreMsg::BacklogCards { cards, holders } => {
+            CoreMsg::BacklogCards {
+                cards,
+                holders,
+                prs,
+            } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
                 self.backlog_holders = holders;
+                self.backlog_pr = prs;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -5403,6 +5658,7 @@ async fn serve(
         branch_by_cwd: HashMap::new(),
         backlog: Vec::new(),
         backlog_holders: HashMap::new(),
+        backlog_pr: HashMap::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -5613,10 +5869,14 @@ async fn serve(
                 } else {
                     None
                 };
-                if let Some(cards) = state.tick(stamp, move || raw, last_live.as_ref()) {
+                if let Some((cards, prs)) = state.tick(stamp, move || raw, last_live.as_ref()) {
                     let holders = last_live.clone().unwrap_or_default();
                     if core_tx
-                        .send(CoreMsg::BacklogCards { cards, holders })
+                        .send(CoreMsg::BacklogCards {
+                            cards,
+                            holders,
+                            prs,
+                        })
                         .await
                         .is_err()
                     {
@@ -6806,6 +7066,8 @@ mod tests {
             attach_id: None,
             external: false,
             account: None,
+            claude_session_uuid: None,
+            updated_at: None,
         }
     }
 
@@ -6837,6 +7099,8 @@ mod tests {
                 attach_id: None,
                 external: false,
                 account: None,
+                claude_session_uuid: None,
+                updated_at: None,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -6851,6 +7115,8 @@ mod tests {
                 attach_id: Some("c19cd2c3".into()),
                 external: false,
                 account: None,
+                claude_session_uuid: None,
+                updated_at: None,
             },
         ];
         let rows = core.agent_rows();
@@ -6922,6 +7188,8 @@ mod tests {
                 attach_id: None,
                 external: false,
                 account: None,
+                claude_session_uuid: None,
+                updated_at: None,
             },
         ];
         let rows = core.agent_rows();
@@ -6958,6 +7226,8 @@ mod tests {
                 attach_id: Some("ab12cd34".into()),
                 external: true,
                 account: None,
+                claude_session_uuid: None,
+                updated_at: None,
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
@@ -6971,6 +7241,8 @@ mod tests {
                 attach_id: Some("ffffffff".into()),
                 external: true,
                 account: None,
+                claude_session_uuid: None,
+                updated_at: None,
             },
         ];
         assert!(
@@ -7018,6 +7290,8 @@ mod tests {
             attach_id: Some("ab12cd34".into()),
             external: true,
             account: None,
+            claude_session_uuid: None,
+            updated_at: None,
         }];
         let rows = core.agent_rows();
         let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
@@ -7698,6 +7972,160 @@ mod tests {
             },
         );
         assert!(drain_notice(&mut rx).unwrap().contains("still live"));
+    }
+
+    /// A helper for the respawn refusal tests: an EXITED registry row with an
+    /// optional recorded claude session uuid.
+    fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
+        RegistryAgent {
+            name: name.into(),
+            cwd: "/w".into(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: uuid.map(str::to_owned),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn respawn_agent_live_row_refused() {
+        // AC2-ERR: RespawnAgent on a still-live row is refused (a plain #[test]
+        // has no tokio runtime, so the clean refusal is also proof the spawn arm
+        // is never reached).
+        let mut core = empty_core();
+        core.agents = vec![bg_row("live-worker", "/w", None)]; // exited: false
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::RespawnAgent {
+                name: "live-worker".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("still live"));
+    }
+
+    #[test]
+    fn respawn_agent_no_uuid_refused() {
+        // AC2-ERR: an exited row with no recorded claude_session_uuid (also the
+        // non-claude case, since derive_rows only carries the uuid for claude).
+        let mut core = empty_core();
+        core.agents = vec![exited_claude_row("dead-worker", None)];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::RespawnAgent {
+                name: "dead-worker".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx)
+            .unwrap()
+            .contains("no claude session recorded"));
+    }
+
+    #[test]
+    fn respawn_agent_malformed_uuid_refused_before_argv() {
+        // AC2-ERR: a malformed uuid is refused with the SPECIFIC reason (a
+        // generic "error" would fail this AC) before it could reach argv.
+        let mut core = empty_core();
+        core.agents = vec![exited_claude_row("dead-worker", Some("not-a-uuid"))];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::RespawnAgent {
+                name: "dead-worker".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx)
+            .unwrap()
+            .contains("malformed session id"));
+    }
+
+    #[test]
+    fn mail_agent_unknown_name_refused() {
+        // AC1-ERR: MailAgent naming an absent row is refused fail-closed.
+        let mut core = empty_core();
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::MailAgent {
+                name: "ghost".into(),
+                text: "hi".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));
+    }
+
+    #[test]
+    fn mail_agent_blank_text_refused_after_resolve() {
+        // AC3-ERR: a valid target but blank-after-sanitize text is refused (the
+        // resolve succeeds, so the refusal proves the sanitize gate, not the
+        // resolver, caught it - and no subprocess is reached in a plain #[test]).
+        let mut core = empty_core();
+        core.agents = vec![bg_row("worker", "/w", None)];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::MailAgent {
+                name: "worker".into(),
+                text: "   ".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("empty"));
+    }
+
+    #[test]
+    fn sanitize_mail_text_strips_trims_and_bounds() {
+        // Control chars stripped, trimmed; blank refused; over-cap refused (never
+        // truncated - Locked Decision 7).
+        assert_eq!(sanitize_mail_text("  hi \x07there \n").unwrap(), "hi there");
+        assert!(sanitize_mail_text("").is_err());
+        assert!(sanitize_mail_text("\x07\x08 \t").is_err());
+        let ok = "x".repeat(crate::proto::MAX_MAIL_TEXT);
+        assert_eq!(
+            sanitize_mail_text(&ok).unwrap().len(),
+            crate::proto::MAX_MAIL_TEXT
+        );
+        assert!(sanitize_mail_text(&"x".repeat(crate::proto::MAX_MAIL_TEXT + 1)).is_err());
+    }
+
+    #[test]
+    fn valid_session_uuid_accepts_only_lowercase_8_4_4_4_12_hex() {
+        assert!(valid_session_uuid("12345678-1234-1234-1234-1234567890ab"));
+        assert!(!valid_session_uuid("not-a-uuid"));
+        assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890AB")); // uppercase
+        assert!(!valid_session_uuid("12345678123412341234567890ab")); // no dashes
+        assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890a")); // short group
+    }
+
+    #[test]
+    fn agent_rows_join_pr_from_holder_map() {
+        // US8: a watch-only worker whose name holds a live claim on a node with a
+        // pr_number gets AgentRow.pr; a non-holder row gets None. updated_at
+        // passes through from the registry row.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        let mut worker = bg_row("target-x-9c5f", "/w", None);
+        worker.updated_at = Some(42);
+        core.agents = vec![worker, bg_row("other-worker", "/x", None)];
+        core.backlog_holders = HashMap::from([("x-9c5f".to_string(), "target-x-9c5f".to_string())]);
+        core.backlog_pr = HashMap::from([("x-9c5f".to_string(), 385)]);
+        let rows = core.agent_rows();
+        let joined = rows.iter().find(|r| r.name == "target-x-9c5f").unwrap();
+        assert_eq!(joined.pr, Some(385));
+        assert_eq!(joined.updated_at, Some(42));
+        let other = rows.iter().find(|r| r.name == "other-worker").unwrap();
+        assert_eq!(other.pr, None);
     }
 
     #[test]
@@ -8425,6 +8853,8 @@ mod tests {
             attach_id: attach.map(str::to_owned),
             external: false,
             account: None,
+            claude_session_uuid: None,
+            updated_at: None,
         }
     }
 
@@ -9181,6 +9611,7 @@ mod tests {
             branch_by_cwd: HashMap::new(),
             backlog: Vec::new(),
             backlog_holders: HashMap::new(),
+            backlog_pr: HashMap::new(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),

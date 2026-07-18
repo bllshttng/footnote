@@ -54,6 +54,16 @@ pub struct RegistryAgent {
     /// account of a mux-spawned pane (`FNO_ACCOUNT`, piece 2). `None` = the
     /// default `~/.claude` account (no glyph).
     pub account: Option<String>,
+    /// (x-9c5f) The claude session uuid recorded on the registry row, the
+    /// `spawn --resume <uuid>` target for the peek `r` respawn. Carried ONLY when
+    /// `provider == "claude"` (the registry writes it null on codex), so its
+    /// presence alone is the respawn-eligibility signal the server arm checks.
+    pub claude_session_uuid: Option<String>,
+    /// (x-9c5f) The freshest parseable activity stamp on the row (epoch secs):
+    /// the max of `last_message_at`, `inside_leg.received_at`, `screen_state.at`,
+    /// and `exited_at`. `None` when none parsed. Feeds the peek `changed Ns ago`
+    /// line via `AgentRow.updated_at`.
+    pub updated_at: Option<u64>,
 }
 
 /// One claude-roster worker as the sideline consumes it (three fields, not
@@ -728,7 +738,37 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             })
             .flatten()
             .map(str::to_string);
-        let (badge, reason, answerable) = match row.get("inside_leg") {
+        // (x-9c5f) The `spawn --resume` uuid for the peek `r` respawn: claude
+        // rows only (the registry writes it null on codex), so uuid presence
+        // alone gates respawn eligibility in the server arm.
+        let claude_session_uuid = is_claude
+            .then(|| {
+                row.get("claude_session_uuid")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+            .flatten()
+            .map(str::to_string);
+        // (x-9c5f) The freshest activity stamp: the max of the row's parseable
+        // UTC stamps (same fixed-format parser the badge TTL uses). Any
+        // unparseable/missing stamp is skipped; all absent -> None (no line).
+        // Bound once and reused by both `updated_at` and the badge match below.
+        let inside_leg = row.get("inside_leg");
+        let updated_at = [
+            row.get("last_message_at").and_then(|v| v.as_str()),
+            inside_leg
+                .and_then(|l| l.get("received_at"))
+                .and_then(|v| v.as_str()),
+            row.get("screen_state")
+                .and_then(|s| s.get("at"))
+                .and_then(|v| v.as_str()),
+            row.get("exited_at").and_then(|v| v.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(rfc3339_like_to_secs)
+        .max();
+        let (badge, reason, answerable) = match inside_leg {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
                     leg.get("received_at")
@@ -814,6 +854,8 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             attach_id,
             external: false,
             account: None,
+            claude_session_uuid,
+            updated_at,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -892,6 +934,10 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             attach_id: Some(w.short_id.clone()),
             external: true,
             account: w.account.clone(),
+            // A synthesized foreign roster row is external (respawn refuses it)
+            // and carries no registry stamps.
+            claude_session_uuid: None,
+            updated_at: None,
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -1324,6 +1370,47 @@ mod tests {
             None,
             "a hook-capable row (even lapsed) never badges from a scrape verdict"
         );
+    }
+
+    #[test]
+    fn derive_rows_carries_claude_uuid_only_for_claude_provider() {
+        // AC3-EDGE (x-9c5f): a claude row carries its claude_session_uuid; a
+        // codex row with (hypothetically) the same field set carries NONE, so
+        // uuid presence alone gates respawn eligibility downstream.
+        let raw = reg(
+            r#"{"name":"cc","cwd":"/w","status":"live","provider":"claude",
+                "claude_session_uuid":"12345678-1234-1234-1234-1234567890ab"},
+               {"name":"cx","cwd":"/w","status":"live","provider":"codex",
+                "claude_session_uuid":"12345678-1234-1234-1234-1234567890ab"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(
+            get("cc").claude_session_uuid.as_deref(),
+            Some("12345678-1234-1234-1234-1234567890ab")
+        );
+        assert_eq!(get("cx").claude_session_uuid, None, "codex carries no uuid");
+    }
+
+    #[test]
+    fn derive_rows_updated_at_is_max_parseable_stamp() {
+        // US7: updated_at is the max of the parseable stamps; a row with none is
+        // None (no changed-ago line rendered).
+        let raw = reg(
+            r#"{"name":"stamped","cwd":"/w","status":"live","provider":"claude",
+                "last_message_at":"2027-01-15T07:00:00Z",
+                "inside_leg":{"state":"working","seq":1,"received_at":"2027-01-15T07:59:30Z","ttl_ms":120000}},
+               {"name":"bare","cwd":"/w","status":"live","provider":"claude"}"#,
+        );
+        let now = rfc3339_like_to_secs("2027-01-15T08:00:00Z").unwrap();
+        let rows = derive_rows(&raw, now).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        // The freshest of 07:00:00 and 07:59:30 is the inside_leg stamp.
+        assert_eq!(
+            get("stamped").updated_at,
+            rfc3339_like_to_secs("2027-01-15T07:59:30Z")
+        );
+        assert_eq!(get("bare").updated_at, None);
     }
 
     #[test]
@@ -1898,6 +1985,8 @@ config_dir = "~/.claude-alt"
             attach_id: None,
             external: false,
             account: None,
+            claude_session_uuid: None,
+            updated_at: None,
         }
     }
 

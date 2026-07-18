@@ -178,7 +178,18 @@ use crate::tree::{Dir, Rect, TabId};
 /// server's `fno dispatch one` shell so a mux-initiated spawn bills the chosen
 /// claude account; `None` = today's default (no flag). `AgentRow { account }`
 /// carries the birth/roster account for the sideline glyph.
-pub const PROTO_VERSION: u32 = 33;
+///
+/// v34 (x-9c5f): peek-overlay follow-ups. `Command::MailAgent { name, text }`
+/// and `Command::RespawnAgent { name }` are the two new off-loop server verbs;
+/// `AgentRow { updated_at, pr }` carry the peek header's `changed Ns ago` stamp
+/// and `PR #N` label.
+pub const PROTO_VERSION: u32 = 34;
+
+/// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
+/// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
+/// because a silently cut instruction to a worker is worse than a visible
+/// refusal (Locked Decision 7).
+pub const MAX_MAIL_TEXT: usize = 400;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -568,6 +579,19 @@ pub struct AgentRow {
     /// wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// (v34, x-9c5f) The freshest activity stamp on the row (epoch secs, the max
+    /// of the registry's parseable timestamps), for the peek header's `changed Ns
+    /// ago` line. `None` when no stamp parsed (the line is then absent, never a
+    /// placeholder). `#[serde(default)]` keeps a v33 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
+    /// (v34, x-9c5f) The PR number of the node this row's live claim holds, for
+    /// the peek header's `PR #N` label. A server-side layout-time join (holder
+    /// name -> node id -> `pr_number`); `None` when the row holds no live claim,
+    /// the holder is not this row's name, or the node carries no pr.
+    /// `#[serde(default)]` keeps a v33 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -848,6 +872,30 @@ pub enum Command {
     /// (stop-before-rm ordering). `name` is cosmetic.
     RemoveExternal {
         attach_id: String,
+        name: String,
+    },
+    /// (v34, x-9c5f) Send a one-line free-text message to a sideline row from the
+    /// peek overlay (`m`). The server resolves `name` fail-closed via the shared
+    /// `resolve_lifecycle_target` (mail to an EXITED row is legal - it
+    /// queues durable; an external row is refused - it is not in the fno
+    /// registry), sanitizes `text` (strip control chars, trim, cap
+    /// [`MAX_MAIL_TEXT`] - blank-after-sanitize or over-cap is refused with a
+    /// notice, never truncated), then shells `fno mail send <name> <text>`
+    /// OFF-loop and surfaces the CLI's one-line stdout verdict as the notice. The
+    /// argv is an array (never a shell string); the client stays shell-free.
+    MailAgent {
+        name: String,
+        text: String,
+    },
+    /// (v34, x-9c5f) Respawn an EXITED claude bg row from the peek overlay (`r`).
+    /// The server resolves `name` fail-closed, refuses a still-live row, refuses
+    /// a row with no recorded `claude_session_uuid` (which also covers non-claude
+    /// providers, since `derive_rows` carries the uuid only for claude rows),
+    /// shape-validates the uuid before it reaches argv, then shells `fno agents
+    /// spawn <name> --resume <uuid> --substrate bg` OFF-loop. The 1s registry
+    /// poll owns the row flipping live; the notice is advisory (fact beats
+    /// report). Rides x-9844's revive-in-place: the porcelain is shelled as-is.
+    RespawnAgent {
         name: String,
     },
 }
@@ -1855,6 +1903,8 @@ mod tests {
                         tab: None,
                         subline: None,
                         account: None,
+                        updated_at: None,
+                        pr: None,
                     },
                     AgentRow {
                         squad: None,
@@ -1872,6 +1922,8 @@ mod tests {
                         tab: None,
                         subline: None,
                         account: None,
+                        updated_at: None,
+                        pr: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
