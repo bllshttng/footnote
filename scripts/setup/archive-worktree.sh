@@ -205,13 +205,16 @@ if [[ "$FORCE" -eq 0 ]]; then
 fi
 
 # ---- Process cleanup -----------------------------------------------------
-# Collect PIDs that have files open under TARGET *and* PIDs whose cmdline
+# Collect PIDs rooted in TARGET (cwd under it) *and* PIDs whose cmdline
 # references TARGET. Both surfaces matter: lsof catches editors and shells
 # with cwd inside the worktree; pgrep -f catches background processes that
 # may have changed directory after launch.
+# `lsof -a -d cwd +D` (NOT bare `+D`) keys on the cwd fd: uv hardlinks the same
+# venv `.so` inodes into every worktree, so a daemon mmapping one shows up under
+# every worktree's path with bare `+D`. Anchoring on cwd drops those phantoms.
 PIDS=""
 if command -v lsof >/dev/null 2>&1; then
-  PIDS="$(lsof +D "$TARGET" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)"
+  PIDS="$(lsof -a -d cwd +D "$TARGET" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)"
 fi
 # `pgrep -f` matches its pattern as an extended regex against the full
 # cmdline. Pass TARGET unescaped and any `.`/`+`/`[` in the path matches
@@ -241,6 +244,12 @@ while IFS= read -r pid; do
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     [[ "$pgid" == "$MY_PGID" ]] && continue
   fi
+  # Concurrent-sweep race: another archive-worktree.sh / worktree-lifecycle.sh
+  # run carries TARGET in its argv but lives in a DIFFERENT PGID, so the check
+  # above misses it. It is our own tooling, never a squatter - never SIGTERM it.
+  case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+    *archive-worktree.sh*|*worktree-lifecycle.sh*) continue ;;
+  esac
   ALL_PIDS+="$pid"$'\n'
 done < <(printf '%s\n%s\n' "$PIDS" "$PIDS_F" | grep -v '^$' | sort -u)
 ALL_PIDS="$(printf '%s' "$ALL_PIDS" | grep -v '^$' | sort -u || true)"

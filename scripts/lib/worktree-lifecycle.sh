@@ -22,17 +22,31 @@ _wt_live() {
     return 1
 }
 
-# PIDs with an open fd under the worktree OR whose cmdline references it.
-# Mirrors archive-worktree.sh's enumeration (escaped regex so path metachars
-# are literal); drops our own PID.
+# PIDs actually rooted in the worktree (cwd under it) OR whose cmdline
+# references it. Mirrors archive-worktree.sh's enumeration (escaped regex so
+# path metachars are literal); drops our own PID and our own tooling.
+#
+# `lsof -a -d cwd +D` (NOT bare `+D`) keys on the cwd fd so uv-hardlinked venv
+# `.so` files mmapped by long-lived daemons - the same inode under every
+# worktree - never count as "rooted here". The pgrep lane still catches bg
+# processes carrying the path in argv.
 _wt_pids() {
     local wt="$1" pids="" pids_f="" re
     if command -v lsof >/dev/null 2>&1; then
-        pids="$(lsof +D "$wt" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)"
+        pids="$(lsof -a -d cwd +D "$wt" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)"
     fi
     re="$(printf '%s' "$wt" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g')"
     pids_f="$(pgrep -f -- "$re" 2>/dev/null || true)"
-    printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u
+    # Drop our own PID and any live pid running the sweep/archive tooling: a
+    # concurrent sweep carries the worktree path in its argv (a different PGID,
+    # so pgrep -f matches it), and it is our own machinery, never a squatter.
+    printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u \
+        | while IFS= read -r pid; do
+            case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+                *archive-worktree.sh*|*worktree-lifecycle.sh*) continue ;;
+            esac
+            printf '%s\n' "$pid"
+        done
 }
 
 # All given PIDs reparented to pid 1 (orphans)? Unreadable ppid -> not-orphan
