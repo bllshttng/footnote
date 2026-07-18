@@ -223,22 +223,28 @@ DB)" so the reader knows it may be incomplete (AC1-FR).
 
 ### 1f. Deliverable Type Resolution
 
-Classify the work into one of three deliverable types - **feature**, **bug**, or
-**investigation** - and record the result as `deliverable_type:` in the saved
-doc's frontmatter. The type drives which sections the contract (Step 8) requires,
-so resolve it before the Step 2 interview: a free-text seed folds its type
-confirmation into the first question batch.
+Classify the work into one of four deliverable types - **feature**, **bug**,
+**investigation**, or **epic** - and record the result as `deliverable_type:` in
+the saved doc's frontmatter. The type drives which sections the contract (Step 8)
+requires, so resolve it before the Step 2 interview: a free-text seed folds its
+type confirmation into the first question batch.
 
 **Resolution order (first match wins):**
 
 1. **Graph type wins.** A node-seeded invocation (`/think <node-id>`) carries a
-   graph `type` field: `bug -> bug`; `feature | task | epic -> feature` (an
-   `epic` additionally trips the Step 1b decomposition check). No question asked.
+   graph `type` field: `bug -> bug`; `epic -> epic`; `feature | task -> feature`.
+   No question asked. The epic contract **subsumes** the Step 1b decomposition
+   check: its `## Gaps / Candidate Children` and `## Decomposition Guidance`
+   sections ARE the decomposition product, so an epic-typed node proceeds through
+   the epic flow instead of being redirected to split first. Step 1b's redirect
+   still fires for non-epic types.
 2. **Seed inference.** For a free-text seed, classify from the seed text and fold
    a one-line confirmation into the FIRST interview batch (Step 2) - never a
    dedicated extra round. Investigation signals: "audit", "verify",
-   "investigate", "why does", "root-cause", "is it true that". Absent any signal,
-   default to **feature** (the full contract - the conservative direction).
+   "investigate", "why does", "root-cause", "is it true that". Epic signals:
+   "epic", "roadmap", "mission", "consolidate X across Y", or an enumeration of
+   multiple independent subsystems. Absent any signal, default to **feature** (the
+   full contract - the conservative direction).
 3. **User override wins.** An explicit user correction at any point outranks a
    graph type and a seed inference alike.
 
