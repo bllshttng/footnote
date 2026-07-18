@@ -23,9 +23,9 @@ def test_open_tag_omits_node_includes_directed_to():
     # node omitted for a node-less sender; `to` included when directed at a peer.
     assert (
         fno_mail_open(
-            from_="7d1f8bdc", harness="claude-code", model="opus-4.8", to="ee99ff00"
+            from_="7d1f8bdc", harness="claude-code", model="opus-4.8", to="claude-ee99ff00"
         )
-        == '<fno_mail from="7d1f8bdc" harness="claude-code" model="opus-4.8" to="ee99ff00">'
+        == '<fno_mail from="7d1f8bdc" harness="claude-code" model="opus-4.8" to="claude-ee99ff00">'
     )
 
 
@@ -37,10 +37,10 @@ def test_open_tag_renders_reply_to_last_when_present():
             from_="7d1f8bdc",
             harness="claude-code",
             model="opus-4.8",
-            to="e5f6a7b8",
+            to="claude-e5f6a7b8",
             reply_to="msg-0091f3",
         )
-        == '<fno_mail from="7d1f8bdc" harness="claude-code" model="opus-4.8" to="e5f6a7b8" reply_to="msg-0091f3">'
+        == '<fno_mail from="7d1f8bdc" harness="claude-code" model="opus-4.8" to="claude-e5f6a7b8" reply_to="msg-0091f3">'
     )
 
 
