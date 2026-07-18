@@ -645,30 +645,39 @@ Save to the path printed by `fno plan path --slug "<feature-slug>" [--node "<nod
 - **Raw prose** (no node): omit `--node` for the id-less name. If `/blueprint` later intakes it and assigns a node id, its step 3b-bis renames the artifact to carry the id and repoints `plan_path` - so the final invariant (id in both filename and `plan_path`) is reached either way.
 
 Stamp the resolved type into the doc's frontmatter as
-`deliverable_type: feature | bug | investigation` (Step 1f).
+`deliverable_type: feature | bug | investigation | epic` (Step 1f). An **epic**
+additionally stamps `scope: epic` - that second key is `/blueprint`'s auto-group
+trigger; without it an epic silently collapses into the single-PR lean mutation,
+shipping a multi-wave epic as one PR. Stamp both keys on every epic doc.
 
 **The required sections scale to `deliverable_type`.** The uniform 12-section
 contract manufactured filler on non-feature work (an investigation verdict was
 forced to fabricate AC-UI and UI-state sections). Include a section only where
 this table marks it for the resolved type:
 
-| Section | feature | bug | investigation |
-|---|---|---|---|
-| Overview | yes | yes | yes |
-| Schema Reconciliation (1e, DB-backed) | yes | yes | yes |
-| Architecture | yes | as "Fix approach" | optional |
-| User Stories | yes | yes - the fix's discrete work items (see note) | no |
-| Multi-Perspective Findings (5) | full | Pessimist + Silent-Failure only | no (Evidence Chain replaces it) |
-| UI State Machines (6) | only if UI surface | only if UI surface | never |
-| **Failure Modes (6b)** | **yes** | **yes** | **yes** |
-| Interface Contract (6c) | if cross-repo | if cross-repo | never |
-| Repro (new) | no | **yes** - commands/steps that reproduce the bug | no |
-| Acceptance Criteria (7) | all 5 types | AC-HP/ERR/FR/EDGE; AC-UI only if UI surface | none |
-| Evidence Chain (new) | no | no | **yes** - each claim pinned to a source |
-| Re-open Conditions (new) | no | no | **yes** - the observation that would invalidate the verdict |
-| Domain Pitfalls (7b) | yes | yes | optional |
-| Locked Decisions + Claude's Discretion | yes | yes | yes |
-| Open Questions | yes | yes | yes |
+| Section | feature | bug | investigation | epic |
+|---|---|---|---|---|
+| Overview | yes | yes | yes | yes |
+| Schema Reconciliation (1e, DB-backed) | yes | yes | yes | yes |
+| **Vision** (new) | no | no | no | **yes** - the end state in prose (no implementation detail) |
+| **Success Definition** (new) | no | no | no | **yes** - measurable mission-level outcomes (the epic-altitude replacement for BDD ACs) |
+| Architecture / **Current State** | yes | as "Fix approach" | optional | Current State recommended for brownfield (the traced as-is landscape) |
+| **Gaps / Candidate Children** (new) | no | no | no | **yes** - enumerated gaps, each a candidate child (explicitly NOT a final node list) |
+| **Decomposition Guidance** (new) | no | no | no | **yes** - grouping / sequencing instructions to the decomposing session |
+| **Operator Intent** (new) | no | no | no | **yes** - decision principles and context over structure |
+| User Stories | yes | yes - the fix's discrete work items (see note) | no | yes - one story per candidate child or delivery group |
+| Multi-Perspective Findings (5) | full | Pessimist + Silent-Failure only | no (Evidence Chain replaces it) | optional - strategic lenses; hand off deep stress-testing to `/think what-if` or `panel` |
+| UI State Machines (6) | only if UI surface | only if UI surface | never | never |
+| **Failure Modes (6b)** | **yes** | **yes** | **yes** | **yes** |
+| Interface Contract (6c) | if cross-repo | if cross-repo | never | optional (cross-repo epic) |
+| Repro (new) | no | **yes** - commands/steps that reproduce the bug | no | no |
+| Acceptance Criteria (7) | all 5 types | AC-HP/ERR/FR/EDGE; AC-UI only if UI surface | none | **no - excluded** (anti-filler target; Success Definition carries verification) |
+| Evidence Chain (new) | no | no | **yes** - each claim pinned to a source | no |
+| Re-open Conditions (new) | no | no | **yes** - the observation that would invalidate the verdict | no |
+| Domain Pitfalls (7b) | yes | yes | optional | optional |
+| **Non-goals** (new) | no | no | no | recommended - scope creep is the canonical epic failure mode |
+| Locked Decisions + Claude's Discretion | yes | yes | yes | yes - written child-consumable (decompose transcribes the Locked block verbatim) |
+| Open Questions | yes | yes | yes | yes |
 
 **Why a bug keeps `## User Stories`.** `/blueprint` synthesizes its
 `## Execution Strategy` task list *solely* from `## User Stories`
@@ -689,6 +698,34 @@ omits it because it is no-build (it never reaches `/blueprint`).
   investigation's rigor lives here in place of BDD ACs.
 - `## Re-open Conditions` (investigation) - the concrete observation(s) that
   would invalidate the verdict and warrant re-opening the question.
+
+**The epic-specific new sections** (mission framing at epic altitude, in place of
+feature ACs and UI rigor):
+
+- `## Vision` (epic) - the end state in prose: what is true when the epic is done
+  and why it matters. No implementation detail; this is the direction the children
+  serve.
+- `## Success Definition` (epic) - measurable mission-level outcomes, each
+  checkable after all children land. This is the epic-altitude replacement for BDD
+  acceptance criteria; write each outcome so a wrong-but-passing world would fail
+  it, never a bare "the system works."
+- `## Current State` (epic, recommended for brownfield) - the traced as-is
+  landscape the epic changes. Replaces the Architecture row at this altitude;
+  greenfield epics may omit it.
+- `## Gaps / Candidate Children` (epic) - the enumerated gaps between current state
+  and vision, each a candidate child node. Explicitly NOT a final node list - the
+  decomposing session calibrates the real count from Decomposition Guidance.
+- `## Decomposition Guidance` (epic) - instructions to the decomposing session:
+  grouping principles, what must not be split, sequencing, "do not mint one node
+  per gap." Size in PRs - one node is one PR; coordination, acceptance, and
+  research gates are epic-level work, never PR nodes, and trigger-based follow-ons
+  stay OUT of the initial decomposition with their trigger named.
+- `## Operator Intent` (epic) - decision principles and context over structure:
+  what the operator would decide when a child hits ambiguity, so a child's own
+  design pass inherits the intent rather than re-litigating it.
+- `## Non-goals` (epic, recommended) - what this epic explicitly does not cover.
+  Scope creep is the canonical epic failure mode; naming the out-of-scope surfaces
+  is the cheapest guard against it.
 
 **`## Failure Modes` stays mandatory for all three types** with all four bold
 labels (Boundaries / Errors / Invariants / Concurrency), using the "Not
