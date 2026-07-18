@@ -7450,7 +7450,10 @@ mod tests {
         // Empty tab -> no rollup (AC2-EDGE).
         assert_eq!(tab_rollup_state(&[], 1, 0), None);
         // Idle-only -> no rollup, so a stateless tab stays byte-identical.
-        assert_eq!(tab_rollup_state(&[tab_agent(Some(0), None, false)], 1, 0), None);
+        assert_eq!(
+            tab_rollup_state(&[tab_agent(Some(0), None, false)], 1, 0),
+            None
+        );
         // All-exited -> no rollup: exit folds to Idle and drops out (AC2-EDGE).
         assert_eq!(
             tab_rollup_state(&[tab_agent(Some(0), Some(AgentBadge::Blocked), true)], 1, 0),
@@ -7470,7 +7473,11 @@ mod tests {
         );
         // A pane in a DIFFERENT tab never leaks into this tab's rollup.
         assert_eq!(
-            tab_rollup_state(&[tab_agent(Some(1), Some(AgentBadge::Blocked), false)], 1, 0),
+            tab_rollup_state(
+                &[tab_agent(Some(1), Some(AgentBadge::Blocked), false)],
+                1,
+                0
+            ),
             None
         );
     }
