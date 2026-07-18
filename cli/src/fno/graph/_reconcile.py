@@ -1003,10 +1003,11 @@ def _origin_transcript_path(
 
     Liveness-independent: pure filesystem existence, deliberately NOT
     ``discover_live_sessions`` (which keys on a live process — exactly what a
-    dead origin lacks). Reuses discover's cwd->projects-subdir encoding rather
-    than re-deriving the ``~/.claude/projects/<enc>`` path (the encoding is
-    non-obvious, the classic silent-miss). Claude-first: a non-claude harness
-    yields None, so a codex/gemini origin falls through to cold + the backstop.
+    dead origin lacks). Reuses discover's cwd->projects-subdir encoding + its
+    projects-store constant rather than re-deriving the transcript path here
+    (the encoding is non-obvious, the classic silent-miss). Claude-first: a
+    non-claude harness yields None, so a codex/gemini origin falls through to
+    cold + the backstop.
     """
     if not session_id or not cwd:
         return None
@@ -1250,26 +1251,33 @@ def dispatch_post_merge_ritual(
         # manifest + transcript survive on disk. Finalize them directly - the
         # SAME writer the stop hook would have run, reached deterministically
         # (no session revival, no dependency on the stop hook's foreign-session
-        # guard). Writes the origin's OWN full-fidelity row (its real cost/
-        # phases/provider), higher fidelity than any fresh ceremony thread. A
-        # non-zero finalize degrades to the cold spawn exactly as a warm miss
-        # does; the marker is written only on exit 0 (AC2-ERR).
+        # guard). Writes the origin's OWN full-fidelity ledger row (its real
+        # cost/phases/provider), higher fidelity than any fresh ceremony thread.
+        #
+        # This writes ONLY the ledger row - it does NOT run the post-merge
+        # ritual (retro harvest / parking-lot / canonical sync). So it does NOT
+        # short-circuit dispatch: after finalizing, control FALLS THROUGH to the
+        # cold spawn, which runs `/fno:pr merged` for those ritual steps exactly
+        # as a dead origin got before this rung existed. The cold worker is not
+        # a /target session, so it writes no second ledger row - finalize's row
+        # stands (deduped by fno_id). A non-zero finalize degrades to cold as a
+        # warm miss does. (Corrects a review P1: an early return here silently
+        # skipped the ritual for every dead-origin merge.)
+        finalized_origin = False
         if origin_dead and origin_transcript_exists(source_session_id, source_cwd, source_harness):
             _tpath = _origin_transcript_path(source_session_id, source_cwd, source_harness)
             if _tpath is not None:
                 _finalize = finalize_origin if finalize_origin is not None else _finalize_origin_ledger
                 try:
-                    _ok = _finalize(source_cwd, str(_tpath), source_harness)
+                    finalized_origin = _finalize(source_cwd, str(_tpath), source_harness)
                 except Exception as exc:  # noqa: BLE001 - degrade to cold, never break dispatch
-                    _ok = False
+                    finalized_origin = False
                     cold_reason = f"finalize-error: {exc}"[:120]
-                if _ok:
-                    _persist_marker()
-                    return PostMergeDispatchResult(
-                        "finalized-origin", pr_number, detail="direct-finalize"
-                    )
                 if cold_reason == "no-live-source-session":
-                    cold_reason = "finalize-nonzero"
+                    cold_reason = (
+                        "ledger direct-finalized; ritual cold"
+                        if finalized_origin else "finalize-nonzero"
+                    )
 
         if spawn is None:
             spawn = _spawn_post_merge_worker
@@ -1296,8 +1304,11 @@ def dispatch_post_merge_ritual(
                 _notify(source_session_id, pr_number, source_harness, cold_reason)
             except Exception as exc:  # noqa: BLE001 - advisory, never fatal
                 _emit_origin_notify_failed(pr_number, source_session_id, str(exc)[:200], node_cwd)
+        # "finalized-origin" when the ledger row came from the direct finalize
+        # above (the ritual still ran cold); plain "dispatched" otherwise.
         return PostMergeDispatchResult(
-            "dispatched", pr_number, short_id=short_id, detail=f"cold: {cold_reason}"
+            "finalized-origin" if finalized_origin else "dispatched",
+            pr_number, short_id=short_id, detail=f"cold: {cold_reason}",
         )
     finally:
         try:

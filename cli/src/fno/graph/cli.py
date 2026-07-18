@@ -5625,7 +5625,8 @@ def cmd_reconcile(
                         elif _pm.outcome == "finalized-origin":
                             typer.echo(
                                 f"post-merge: direct-finalized dead origin for "
-                                f"PR #{record.pr_number} (full-fidelity ledger row)"
+                                f"PR #{record.pr_number} (full-fidelity ledger "
+                                f"row; ritual dispatched cold, {_pm.detail})"
                             )
                         elif _pm.outcome == "already-dispatched":
                             typer.echo(

@@ -85,7 +85,9 @@ def _dead_origin(monkeypatch):
     monkeypatch.setattr(route, "resolve_warm_session", lambda *a, **k: None)
 
 
-def test_dead_origin_direct_finalizes_and_marks(tmp_path, monkeypatch):
+def test_dead_origin_direct_finalizes_then_runs_ritual_cold(tmp_path, monkeypatch):
+    # Finalize writes the ledger row, THEN falls through to the cold spawn so
+    # the post-merge ritual (retro/parking-lot/canonical-sync) still runs.
     cwd, projects = _mk_origin(tmp_path, "sid-live")
     _point_projects(monkeypatch, projects)
     _dead_origin(monkeypatch)
@@ -102,8 +104,8 @@ def test_dead_origin_direct_finalizes_and_marks(tmp_path, monkeypatch):
         spawn=spawn, source_session_id="sid-live", source_harness="claude",
         source_cwd=cwd, finalize_origin=_fin,
     )
-    assert res.outcome == "finalized-origin"
-    assert spawn.calls == []  # cold spawn never reached
+    assert res.outcome == "finalized-origin"  # ledger came from direct finalize
+    assert spawn.calls == [(7, str(tmp_path))]  # ritual STILL dispatched cold
     assert len(seam_calls) == 1
     assert seam_calls[0][0] == cwd and seam_calls[0][2] == "claude"
     assert seam_calls[0][1].endswith("sid-live.jsonl")
