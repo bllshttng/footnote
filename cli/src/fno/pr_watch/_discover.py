@@ -55,6 +55,9 @@ class PrCandidate:
     # The originating session's harness (claude|codex|gemini): selects which
     # live vehicle the warm route uses. None -> claude (back-compat default).
     source_harness: Optional[str] = None
+    # The originating session's cwd: the direct-finalize rung (x-88df) resolves
+    # its on-disk transcript + manifest from here. None -> probe skipped (cold).
+    source_cwd: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -213,6 +216,7 @@ def discover_open_prs(
                     repo_slug=slug,
                     source_session_id=node.get("source_session_id") or None,
                     source_harness=node.get("source_harness") or None,
+                    source_cwd=node.get("source_cwd") or None,
                 )
             )
     return candidates

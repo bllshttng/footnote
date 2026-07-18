@@ -726,6 +726,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
         spawn=_cold_spawn,
         source_session_id=getattr(cand, "source_session_id", None),
         source_harness=getattr(cand, "source_harness", None),
+        source_cwd=getattr(cand, "source_cwd", None),
     )
 
 
