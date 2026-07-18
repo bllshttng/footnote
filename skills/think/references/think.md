@@ -44,6 +44,13 @@ Do NOT invoke any implementation skill, write any code, scaffold any project, or
 ### 1b. Scope Decomposition Check
 Before diving into design, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
 
+**Epic exemption (do this check first).** Do NOT redirect an **epic** here.
+An epic is a node with graph `type: epic`, or a free-text seed carrying epic signals (see Step 1f: "epic", "roadmap", "mission", "consolidate X across Y", an enumeration of multiple independent subsystems).
+The epic contract subsumes this check: its `## Gaps / Candidate Children` and `## Decomposition Guidance` sections ARE the decomposition product, produced by the epic design flow rather than by splitting first.
+Proceed into the normal flow and let Step 1f resolve `deliverable_type: epic`.
+This redirect still fires for every non-epic multi-subsystem request.
+Because Step 1b physically precedes Step 1f, resolve the epic question here (graph type, or a quick seed check) before acting on the redirect, so an epic is never split away before it reaches its own contract.
+
 If the project is too large for a single spec, help the user decompose into sub-projects: what are the independent pieces, how do they relate, what order should they be built? Then think through the first sub-project through the normal design flow. Each sub-project gets its own think → plan → do cycle.
 
 ### 1c. Discovery Gate (optional)
@@ -661,7 +668,7 @@ this table marks it for the resolved type:
 | Schema Reconciliation (1e, DB-backed) | yes | yes | yes | yes |
 | **Vision** (new) | no | no | no | **yes** - the end state in prose (no implementation detail) |
 | **Success Definition** (new) | no | no | no | **yes** - measurable mission-level outcomes (the epic-altitude replacement for BDD ACs) |
-| Architecture / **Current State** | yes | as "Fix approach" | optional | Current State recommended for brownfield (the traced as-is landscape) |
+| Architecture | yes | as "Fix approach" | optional | recommended for brownfield - the traced as-is landscape, under the literal `## Architecture` heading (`/blueprint` reads it) |
 | **Gaps / Candidate Children** (new) | no | no | no | **yes** - enumerated gaps, each a candidate child (explicitly NOT a final node list) |
 | **Decomposition Guidance** (new) | no | no | no | **yes** - grouping / sequencing instructions to the decomposing session |
 | **Operator Intent** (new) | no | no | no | **yes** - decision principles and context over structure |
@@ -709,9 +716,12 @@ feature ACs and UI rigor):
   checkable after all children land. This is the epic-altitude replacement for BDD
   acceptance criteria; write each outcome so a wrong-but-passing world would fail
   it, never a bare "the system works."
-- `## Current State` (epic, recommended for brownfield) - the traced as-is
-  landscape the epic changes. Replaces the Architecture row at this altitude;
-  greenfield epics may omit it.
+- `## Architecture` (epic, recommended for brownfield) - the traced as-is
+  landscape the epic changes (its "current state"), documented under the literal
+  `## Architecture` heading. Keep that exact heading even at epic altitude:
+  `/blueprint` reads `get_section("Architecture")` to detect brownfield and build
+  the File Ownership Map, so a renamed heading (e.g. `## Current State`) silently
+  loses those downstream sections. Greenfield epics may omit it.
 - `## Gaps / Candidate Children` (epic) - the enumerated gaps between current state
   and vision, each a candidate child node. Explicitly NOT a final node list - the
   decomposing session calibrates the real count from Decomposition Guidance.
@@ -802,10 +812,14 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      under it** (the empty-section rule, same substrate as the empty-stories check
      below) - or missing the `scope: epic` frontmatter key, or with `## User
      Stories` absent or empty.
-   - **Anti-filler check (new):** a section the resolved type EXCLUDES that is
-     present anyway - AC blocks or UI-state tables on an `investigation` **or an
-     `epic`**, an `## Evidence Chain` on a `feature` or `bug` - is flagged **for
-     removal, not approved**. This is the
+   - **Anti-filler check (new):** ANY section the resolved type EXCLUDES (marked
+     `no` for that type in the Step 8 required-section table) that is present
+     anyway is flagged **for removal, not approved** - AC blocks or UI-state
+     tables on an `investigation` **or an `epic`**, an `## Evidence Chain` on a
+     `feature` or `bug`, or an epic-only mission section (`## Vision`,
+     `## Success Definition`, `## Gaps / Candidate Children`,
+     `## Decomposition Guidance`, `## Operator Intent`, `## Non-goals`) on a
+     `feature`, `bug`, or `investigation`. This is the
      x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
      fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
      is now a finding.
