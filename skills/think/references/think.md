@@ -44,6 +44,13 @@ Do NOT invoke any implementation skill, write any code, scaffold any project, or
 ### 1b. Scope Decomposition Check
 Before diving into design, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
 
+**Epic exemption (do this check first).** Do NOT redirect an **epic** here.
+An epic is a node with graph `type: epic`, or a free-text seed carrying epic signals (see Step 1f: "epic", "roadmap", "mission", "consolidate X across Y", an enumeration of multiple independent subsystems).
+The epic contract subsumes this check: its `## Gaps / Candidate Children` and `## Decomposition Guidance` sections ARE the decomposition product, produced by the epic design flow rather than by splitting first.
+Proceed into the normal flow and let Step 1f resolve `deliverable_type: epic`.
+This redirect still fires for every non-epic multi-subsystem request.
+Because Step 1b physically precedes Step 1f, resolve the epic question here (graph type, or a quick seed check) before acting on the redirect, so an epic is never split away before it reaches its own contract.
+
 If the project is too large for a single spec, help the user decompose into sub-projects: what are the independent pieces, how do they relate, what order should they be built? Then think through the first sub-project through the normal design flow. Each sub-project gets its own think → plan → do cycle.
 
 ### 1c. Discovery Gate (optional)
@@ -223,22 +230,25 @@ DB)" so the reader knows it may be incomplete (AC1-FR).
 
 ### 1f. Deliverable Type Resolution
 
-Classify the work into one of three deliverable types - **feature**, **bug**, or
-**investigation** - and record the result as `deliverable_type:` in the saved
-doc's frontmatter. The type drives which sections the contract (Step 8) requires,
-so resolve it before the Step 2 interview: a free-text seed folds its type
-confirmation into the first question batch.
+Classify the work into one of four deliverable types - **feature**, **bug**, **investigation**, or **epic** - and record the result as `deliverable_type:` in the saved doc's frontmatter.
+The type drives which sections the contract (Step 8) requires, so resolve it before the Step 2 interview: a free-text seed folds its type confirmation into the first question batch.
 
 **Resolution order (first match wins):**
 
 1. **Graph type wins.** A node-seeded invocation (`/think <node-id>`) carries a
-   graph `type` field: `bug -> bug`; `feature | task | epic -> feature` (an
-   `epic` additionally trips the Step 1b decomposition check). No question asked.
+   graph `type` field: `bug -> bug`; `epic -> epic`; `feature | task -> feature`.
+   No question asked. The epic contract **subsumes** the Step 1b decomposition
+   check: its `## Gaps / Candidate Children` and `## Decomposition Guidance`
+   sections ARE the decomposition product, so an epic-typed node proceeds through
+   the epic flow instead of being redirected to split first. Step 1b's redirect
+   still fires for non-epic types.
 2. **Seed inference.** For a free-text seed, classify from the seed text and fold
    a one-line confirmation into the FIRST interview batch (Step 2) - never a
    dedicated extra round. Investigation signals: "audit", "verify",
-   "investigate", "why does", "root-cause", "is it true that". Absent any signal,
-   default to **feature** (the full contract - the conservative direction).
+   "investigate", "why does", "root-cause", "is it true that". Epic signals:
+   "epic", "roadmap", "mission", "consolidate X across Y", or an enumeration of
+   multiple independent subsystems. Absent any signal, default to **feature** (the
+   full contract - the conservative direction).
 3. **User override wins.** An explicit user correction at any point outranks a
    graph type and a seed inference alike.
 
@@ -293,7 +303,7 @@ Cover:
 
 ### 5. Multi-Perspective Challenge
 
-**Applies to:** feature (all three perspectives) · bug (Pessimist + Silent-Failure Hunter only) · investigation (skip - the Evidence Chain section replaces it).
+**Applies to:** feature (all three perspectives) · bug (Pessimist + Silent-Failure Hunter only) · investigation (skip - the Evidence Chain section replaces it) · epic (optional - strategic lenses only; hand off deep stress-testing to `/think what-if` or `panel`).
 
 Before finalizing the design, stress-test it from three angles. Present findings to the user for each:
 
@@ -327,7 +337,7 @@ Present a summary table:
 
 ### 6. CRITICAL: UI State Machine Audit (gated on UI surface)
 
-**Applies to:** feature / bug **only when a UI surface is present** · investigation (skip unconditionally).
+**Applies to:** feature / bug **only when a UI surface is present** · investigation (skip unconditionally) · epic (skip unconditionally - children carry their own UI rigor).
 
 Detect the surface with the same helper Step 6.5 uses, then decide:
 
@@ -578,7 +588,7 @@ tasks while the plan default stays `executor: do`.
 
 ### 7. Generate BDD Acceptance Criteria
 
-**Applies to:** feature (all 5 types) · bug (AC-HP + AC-ERR + AC-FR + AC-EDGE; AC-UI only when the Step 6 gate found a UI surface) · investigation (skip - a verdict has no ACs; the Evidence Chain and Re-open Conditions sections carry its rigor).
+**Applies to:** feature (all 5 types) · bug (AC-HP + AC-ERR + AC-FR + AC-EDGE; AC-UI only when the Step 6 gate found a UI surface) · investigation (skip - a verdict has no ACs; the Evidence Chain and Re-open Conditions sections carry its rigor) · epic (skip - `## Success Definition` replaces ACs; children carry their own AC rigor in their own design passes).
 
 **Load the `/bdd-acceptance-criteria` skill** for comprehensive patterns.
 
@@ -586,13 +596,13 @@ For each testable behavior, write Given/When/Then using patterns from `bdd-accep
 
 **The required AC types per deliverable type:**
 
-| Type | Code | Tests | feature | bug | investigation |
-|------|------|-------|---------|-----|---------------|
-| Happy path | AC-HP | Expected behavior works (bug: the repro now passes) | yes | yes | none |
-| Error/validation | AC-ERR | Invalid input, API errors | yes | yes | none |
-| UI state changes | AC-UI | Loading, disabled, feedback | yes | only if UI surface | none |
-| Edge cases | AC-EDGE | Boundaries, empty state, concurrency | yes | yes | none |
-| **Failure recovery** | **AC-FR** | **Silent failures, state recovery, interrupted operations** | yes | yes | none |
+| Type | Code | Tests | feature | bug | investigation | epic |
+|------|------|-------|---------|-----|---------------|------|
+| Happy path | AC-HP | Expected behavior works (bug: the repro now passes) | yes | yes | none | none |
+| Error/validation | AC-ERR | Invalid input, API errors | yes | yes | none | none |
+| UI state changes | AC-UI | Loading, disabled, feedback | yes | only if UI surface | none | none |
+| Edge cases | AC-EDGE | Boundaries, empty state, concurrency | yes | yes | none | none |
+| **Failure recovery** | **AC-FR** | **Silent failures, state recovery, interrupted operations** | yes | yes | none | none |
 
 The AC-FR type is new and catches the bugs that slip through:
 
@@ -638,31 +648,38 @@ Save to the path printed by `fno plan path --slug "<feature-slug>" [--node "<nod
 - **Node-seeded** (`/think <node-id>`): pass `--node` - the canonical node id is the filename suffix so a roadmap base keyed on the node id can find the doc (`/think x-8af8` → `…-x-8af8.md`; the configured prefix/width is preserved verbatim, never re-prefixed). First **reuse if claimed**: if a plans-dir file already carries this node in its frontmatter (`claims:`/`graph_node_id:`) or already ends `-<node-id>.md`, finalize INTO that file instead of minting a second one (a pre-created roadmap stub is the doc's home; a re-dispatch after a slug edit reuses the same doc). An empty slug degrades cleanly (the verb collapses the dangling separator), never a `--<node-id>.md`.
 - **Raw prose** (no node): omit `--node` for the id-less name. If `/blueprint` later intakes it and assigns a node id, its step 3b-bis renames the artifact to carry the id and repoints `plan_path` - so the final invariant (id in both filename and `plan_path`) is reached either way.
 
-Stamp the resolved type into the doc's frontmatter as
-`deliverable_type: feature | bug | investigation` (Step 1f).
+Stamp the resolved type into the doc's frontmatter as `deliverable_type: feature | bug | investigation | epic` (Step 1f).
+An **epic** additionally stamps `scope: epic` - that second key is `/blueprint`'s auto-group trigger; without it an epic silently collapses into the single-PR lean mutation, shipping a multi-wave epic as one PR.
+Stamp both keys on every epic doc.
 
 **The required sections scale to `deliverable_type`.** The uniform 12-section
 contract manufactured filler on non-feature work (an investigation verdict was
 forced to fabricate AC-UI and UI-state sections). Include a section only where
 this table marks it for the resolved type:
 
-| Section | feature | bug | investigation |
-|---|---|---|---|
-| Overview | yes | yes | yes |
-| Schema Reconciliation (1e, DB-backed) | yes | yes | yes |
-| Architecture | yes | as "Fix approach" | optional |
-| User Stories | yes | yes - the fix's discrete work items (see note) | no |
-| Multi-Perspective Findings (5) | full | Pessimist + Silent-Failure only | no (Evidence Chain replaces it) |
-| UI State Machines (6) | only if UI surface | only if UI surface | never |
-| **Failure Modes (6b)** | **yes** | **yes** | **yes** |
-| Interface Contract (6c) | if cross-repo | if cross-repo | never |
-| Repro (new) | no | **yes** - commands/steps that reproduce the bug | no |
-| Acceptance Criteria (7) | all 5 types | AC-HP/ERR/FR/EDGE; AC-UI only if UI surface | none |
-| Evidence Chain (new) | no | no | **yes** - each claim pinned to a source |
-| Re-open Conditions (new) | no | no | **yes** - the observation that would invalidate the verdict |
-| Domain Pitfalls (7b) | yes | yes | optional |
-| Locked Decisions + Claude's Discretion | yes | yes | yes |
-| Open Questions | yes | yes | yes |
+| Section | feature | bug | investigation | epic |
+|---|---|---|---|---|
+| Overview | yes | yes | yes | yes |
+| Schema Reconciliation (1e, DB-backed) | yes | yes | yes | yes |
+| **Vision** (new) | no | no | no | **yes** - the end state in prose (no implementation detail) |
+| **Success Definition** (new) | no | no | no | **yes** - measurable mission-level outcomes (the epic-altitude replacement for BDD ACs) |
+| Architecture | yes | as "Fix approach" | optional | recommended for brownfield - the traced as-is landscape, under the literal `## Architecture` heading (`/blueprint` reads it) |
+| **Gaps / Candidate Children** (new) | no | no | no | **yes** - enumerated gaps, each a candidate child (explicitly NOT a final node list) |
+| **Decomposition Guidance** (new) | no | no | no | **yes** - grouping / sequencing instructions to the decomposing session |
+| **Operator Intent** (new) | no | no | no | **yes** - decision principles and context over structure |
+| User Stories | yes | yes - the fix's discrete work items (see note) | no | yes - one story per candidate child or delivery group |
+| Multi-Perspective Findings (5) | full | Pessimist + Silent-Failure only | no (Evidence Chain replaces it) | optional - strategic lenses; hand off deep stress-testing to `/think what-if` or `panel` |
+| UI State Machines (6) | only if UI surface | only if UI surface | never | never |
+| **Failure Modes (6b)** | **yes** | **yes** | **yes** | **yes** |
+| Interface Contract (6c) | if cross-repo | if cross-repo | never | optional (cross-repo epic) |
+| Repro (new) | no | **yes** - commands/steps that reproduce the bug | no | no |
+| Acceptance Criteria (7) | all 5 types | AC-HP/ERR/FR/EDGE; AC-UI only if UI surface | none | **no - excluded** (anti-filler target; Success Definition carries verification) |
+| Evidence Chain (new) | no | no | **yes** - each claim pinned to a source | no |
+| Re-open Conditions (new) | no | no | **yes** - the observation that would invalidate the verdict | no |
+| Domain Pitfalls (7b) | yes | yes | optional | optional |
+| **Non-goals** (new) | no | no | no | recommended - scope creep is the canonical epic failure mode |
+| Locked Decisions + Claude's Discretion | yes | yes | yes | yes - written child-consumable (decompose transcribes the Locked block verbatim) |
+| Open Questions | yes | yes | yes | yes |
 
 **Why a bug keeps `## User Stories`.** `/blueprint` synthesizes its
 `## Execution Strategy` task list *solely* from `## User Stories`
@@ -684,7 +701,38 @@ omits it because it is no-build (it never reaches `/blueprint`).
 - `## Re-open Conditions` (investigation) - the concrete observation(s) that
   would invalidate the verdict and warrant re-opening the question.
 
-**`## Failure Modes` stays mandatory for all three types** with all four bold
+**The epic-specific new sections** (mission framing at epic altitude, in place of
+feature ACs and UI rigor):
+
+- `## Vision` (epic) - the end state in prose: what is true when the epic is done
+  and why it matters. No implementation detail; this is the direction the children
+  serve.
+- `## Success Definition` (epic) - measurable mission-level outcomes, each
+  checkable after all children land. This is the epic-altitude replacement for BDD
+  acceptance criteria; write each outcome so a wrong-but-passing world would fail
+  it, never a bare "the system works."
+- `## Architecture` (epic, recommended for brownfield) - the traced as-is
+  landscape the epic changes (its "current state"), documented under the literal
+  `## Architecture` heading. Keep that exact heading even at epic altitude:
+  `/blueprint` reads `get_section("Architecture")` to detect brownfield and build
+  the File Ownership Map, so a renamed heading (e.g. `## Current State`) silently
+  loses those downstream sections. Greenfield epics may omit it.
+- `## Gaps / Candidate Children` (epic) - the enumerated gaps between current state
+  and vision, each a candidate child node. Explicitly NOT a final node list - the
+  decomposing session calibrates the real count from Decomposition Guidance.
+- `## Decomposition Guidance` (epic) - instructions to the decomposing session:
+  grouping principles, what must not be split, sequencing, "do not mint one node
+  per gap." Size in PRs - one node is one PR; coordination, acceptance, and
+  research gates are epic-level work, never PR nodes, and trigger-based follow-ons
+  stay OUT of the initial decomposition with their trigger named.
+- `## Operator Intent` (epic) - decision principles and context over structure:
+  what the operator would decide when a child hits ambiguity, so a child's own
+  design pass inherits the intent rather than re-litigating it.
+- `## Non-goals` (epic, recommended) - what this epic explicitly does not cover.
+  Scope creep is the canonical epic failure mode; naming the out-of-scope surfaces
+  is the cheapest guard against it.
+
+**`## Failure Modes` stays mandatory for all four types** with all four bold
 labels (Boundaries / Errors / Invariants / Concurrency), using the "Not
 applicable: <reason>" bullet rule where a label genuinely does not apply. The
 `/blueprint` parser seam is frozen: it greps for exactly `^## Failure Modes$` and
@@ -752,14 +800,28 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      without `## Repro`; an `investigation` without `## Evidence Chain` or
      `## Re-open Conditions`; a cross-repo feature/bug without a
      `## Interface Contract` carrying `contract_version` and a Locked Decision
-     referencing it (unless the omission is explained in Open Questions).
-   - **Anti-filler check (new):** a section the resolved type EXCLUDES that is
-     present anyway - AC blocks or UI-state tables on an `investigation`, an
-     `## Evidence Chain` on a `feature` or `bug` - is flagged **for removal, not
-     approved**. This is the
+     referencing it (unless the omission is explained in Open Questions); an
+     `epic` missing ANY of `## Vision`, `## Success Definition`,
+     `## Gaps / Candidate Children`, `## Decomposition Guidance`, or
+     `## Operator Intent` - **or carrying one as a bare heading with no content
+     under it** (the empty-section rule, same substrate as the empty-stories check
+     below) - or missing the `scope: epic` frontmatter key, or with `## User
+     Stories` absent or empty.
+   - **Anti-filler check (new):** ANY section the resolved type EXCLUDES (marked
+     `no` for that type in the Step 8 required-section table) that is present
+     anyway is flagged **for removal, not approved** - AC blocks or UI-state
+     tables on an `investigation` **or an `epic`**, an `## Evidence Chain` on a
+     `feature` or `bug`, or an epic-only mission section (`## Vision`,
+     `## Success Definition`, `## Gaps / Candidate Children`,
+     `## Decomposition Guidance`, `## Operator Intent`, `## Non-goals`) on a
+     `feature`, `bug`, or `investigation`. This is the
      x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
      fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
      is now a finding.
+   - **Empty-stories check (new, all buildable types):** a `## User Stories`
+     heading with no story content under it is a finding on `feature`, `bug`, AND
+     `epic` - `/blueprint` silently degrades to one empty "implement feature" task
+     otherwise. This is a reviewer-prompt line, not a parser change.
    - **AC adequacy attack (new):** for each AC in the doc, try to name one
      concrete implementation or input that satisfies the AC as written while
      violating the design's intent - a wrong-but-passing implementation, a
@@ -769,7 +831,9 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      per AC maximum; none-case ("Not applicable") ACs and Failure Mode bullets
      are out of scope, do not invent bugs for them. A rated critique ("this AC is
      weak") is not a finding; only a named bug is - vague criteria, vague
-     critiques.
+     critiques. On an `epic` this attack is a natural no-op: the epic contract
+     excludes ACs, and the anti-filler check already flags any AC block that
+     sneaks in.
    - General quality: missing error states, contradictions between sections,
      vague implementation details.
 3. If issues found: fix them, re-dispatch reviewer (max 3 iterations). Resolve an
