@@ -316,6 +316,7 @@ def _build_backlog_node(
     size: Optional[str] = None,
     batch: Optional[str] = None,
     plan_path: Optional[str] = None,
+    tags: Optional[list[str]] = None,
 ) -> _NodeFields:
     """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
 
@@ -332,6 +333,7 @@ def _build_backlog_node(
     return {
         "id": None,  # caller fills inside locked mutator
         "parent": parent,
+        "tags": list(tags or []),
         "title": title,
         "type": type_,
         "project": project,
@@ -379,6 +381,7 @@ def _create_node_impl(
     description: Optional[str] = None,
     size: Optional[str] = None,
     batch: Optional[str] = None,
+    tags: Optional[list[str]] = None,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
@@ -407,6 +410,13 @@ def _create_node_impl(
         typer.echo("Error: pass --details or --description, not both", err=True)
         raise typer.Exit(code=1)
     resolved_details = details if details is not None else description
+
+    from fno.graph._constants import normalize_tag
+    try:
+        resolved_tags = list(dict.fromkeys(normalize_tag(t) for t in (tags or [])))
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
     # Store an absolute path so downstream `detect_project()` (which compares
     # against `repo_root()` via normpath) finds matches. No explicit --cwd:
@@ -446,6 +456,7 @@ def _create_node_impl(
             details=resolved_details,
             size=size,
             batch=batch,
+            tags=resolved_tags,
         )
         node["id"] = new_id
         entries.append(node)
@@ -504,6 +515,9 @@ def cmd_add(
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
+    ),
 ) -> None:
     _create_node_impl(
         title=title,
@@ -520,6 +534,7 @@ def cmd_add(
         description=description,
         size=size,
         batch=batch,
+        tags=tag,
     )
 
 
@@ -559,6 +574,9 @@ def cmd_idea(
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -584,6 +602,7 @@ def cmd_idea(
         description=description,
         size=size,
         batch=batch,
+        tags=tag,
     )
 
 
@@ -1600,8 +1619,14 @@ def cmd_update(
         "--reverted/--no-reverted",
         help="Mark this node's ship as reverted (manual fallback for reconcile's best-effort revert detection).",
     ),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", hidden=True, help="Add a tag (repeatable, idempotent, lowercase-kebab)."
+    ),
+    untag: Optional[List[str]] = typer.Option(
+        None, "--untag", hidden=True, help="Remove a tag (repeatable, no-op if absent)."
+    ),
 ) -> None:
-    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix
+    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, normalize_tag
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
         _parse_blocker_list,
@@ -1657,6 +1682,18 @@ def cmd_update(
             err=True,
         )
         raise typer.Exit(code=1)
+
+    # Normalize + validate tags OUTSIDE the lock so a malformed tag refuses
+    # before any mutation (the node is unchanged on a bad --tag).
+    add_tags: list[str] = []
+    remove_tags: list[str] = []
+    try:
+        add_tags = [normalize_tag(t) for t in (tag or [])]
+        remove_tags = [normalize_tag(t) for t in (untag or [])]
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+    has_tag_edit = bool(add_tags or remove_tags)
 
     # Derive cwd from the work-map when --project is explicit but --cwd was
     # not given. Do this OUTSIDE the mutator so settings reads never happen
@@ -1877,6 +1914,15 @@ def cmd_update(
             node["fixes_pr"] = None if fixes_pr == 0 else int(fixes_pr)
         if reverted is not None:
             node["reverted"] = reverted
+        if has_tag_edit:
+            # Idempotent set semantics, order-preserving: adds skip dupes,
+            # removes are no-ops if absent. Normalization happened above.
+            current_tags = list(node.get("tags") or [])
+            for t in add_tags:
+                if t not in current_tags:
+                    current_tags.append(t)
+            current_tags = [t for t in current_tags if t not in remove_tags]
+            node["tags"] = current_tags
         if parent is not None:
             if parent.lower() == "null":
                 node["parent"] = None
@@ -1926,6 +1972,7 @@ def cmd_update(
         or plan_path is not None
         or size is not None
         or parent is not None
+        or has_tag_edit
     ):
         _project_plans_from_graph(
             [projected_node[0]["id"], *cascade_closed_update]

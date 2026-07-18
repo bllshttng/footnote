@@ -154,6 +154,43 @@ def test_missing_plan_file_never_fails_verb(tmp_graph, tmp_path):
     assert entries[0]["priority"] == "p0"
 
 
+def test_tag_roundtrip_reaches_doc(tmp_graph, tmp_path):
+    """AC1: `update --tag mux --tag mux` stores one tag and repaints the doc."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [_node(plan)])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--tag", "mux", "--tag", "mux"])
+    assert res.exit_code == 0, res.output
+
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert entries[0]["tags"] == ["mux"]  # dedup, idempotent
+    _, fields, _ = read_plan_file(plan)
+    assert fields["tags"] == ["mux"]
+
+
+def test_untag_removes_tag(tmp_graph, tmp_path):
+    """--untag removes a tag; absent tag is a no-op, not an error."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [_node(plan, tags=["mux", "ui"])])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--untag", "mux", "--untag", "gone"])
+    assert res.exit_code == 0, res.output
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert entries[0]["tags"] == ["ui"]
+
+
+def test_malformed_tag_refused_node_unchanged(tmp_graph, tmp_path):
+    """AC1-ERR: a malformed tag exits non-zero and leaves the node unchanged."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [_node(plan)])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--tag", "Mux UX!"])
+    assert res.exit_code != 0
+    assert "lowercase-kebab" in res.output
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert entries[0].get("tags", []) == []  # unchanged
+
+
 def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
     """defer + undefer both project best-effort and never fail on a live doc."""
     plan = _plan(tmp_path)

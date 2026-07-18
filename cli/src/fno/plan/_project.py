@@ -26,11 +26,16 @@ MIRROR_KEYS: tuple[str, ...] = (
     "priority",
     "type",
     "blocked_by",
+    "tags",
     "project",
     "size",
     "parent",
     "parent_slug",
 )
+
+# Mirror keys that are always lists; an empty list is meaningful (it clears a
+# stale mirror), so they bypass the None-skip path a scalar takes.
+LIST_MIRROR_KEYS: frozenset[str] = frozenset({"blocked_by", "tags"})
 
 # Mirror keys whose graph value can legitimately be cleared to None (a de-orphan
 # `--parent null`, a `--size null`). For these, an explicit None means "clear the
@@ -61,9 +66,9 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
         if key not in node:
             continue
         value = node[key]
-        if key == "blocked_by":
-            # Always a list; empty list is meaningful (clears a stale blocker
-            # mirror). A non-list value is corrupt input - skip, don't crash.
+        if key in LIST_MIRROR_KEYS:
+            # Always a list; empty list is meaningful (clears a stale mirror).
+            # A non-list value is corrupt input - skip, don't crash.
             if not isinstance(value, list):
                 continue
         elif value is None:
