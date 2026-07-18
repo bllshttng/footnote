@@ -266,9 +266,9 @@ fn main() {
             // (Locked 8). `--session`/`mux attach`/`FNO_SESSION` all bypass it
             // (AC5-FR) - they name a session outright.
             if flag.is_none() && env.is_none() {
-                match mux_cli::pick_session() {
-                    Some(session) => run_client(&session),
-                    None => {} // picker quit: clean exit 0, no spawn
+                // A `None` means the picker quit: clean exit 0, no spawn.
+                if let Some(session) = mux_cli::pick_session() {
+                    run_client(&session);
                 }
             } else {
                 let session = mux_cli::resolve_session(flag.as_deref(), env);

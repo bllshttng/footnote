@@ -81,6 +81,7 @@ impl PtyShell {
     /// reader thread sends `pane_id` on `exit_tx` and ends. An explicit exit
     /// channel replaces Phase 1's channel-close signal: with one shared
     /// output channel for N panes, one reader exiting can no longer close it.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         candidates: &[OsString],
         rows: u16,
@@ -116,6 +117,7 @@ impl PtyShell {
     /// `fno mux pane run` / agents-spawn primitive. No shell fallback: an
     /// unspawnable argv is the caller's error, surfaced verbatim. Env + cwd
     /// (incl. `FNO_SESSION`) match [`PtyShell::spawn`].
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_cmd(
         argv: &[String],
         rows: u16,

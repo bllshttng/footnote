@@ -582,6 +582,7 @@ struct View {
     /// clears this. `(argv, child-env, is_login)`: `is_login` runs `fno mux pane
     /// run` (opens the login pane, keeps the pending notice), else a single-flight
     /// mutation guarded by `ConnectionsView::acting`.
+    #[allow(clippy::type_complexity)]
     conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
 }
 
@@ -2139,9 +2140,7 @@ impl View {
     /// agent row (down first, then up); close peek when none remain. Returns the
     /// name to re-fetch when it re-anchored, `None` when it held or closed.
     fn peek_reanchor(&mut self) -> Option<(usize, String)> {
-        let Some((cursor, peeked)) = self.peek.as_ref().map(|p| (p.cursor, p.name.clone())) else {
-            return None;
-        };
+        let (cursor, peeked) = self.peek.as_ref().map(|p| (p.cursor, p.name.clone()))?;
         // One `display_rows()` snapshot for the whole check: the identity test,
         // both direction scans, and the re-anchored name all read it (gemini
         // review).

@@ -869,6 +869,9 @@ impl Pane {
     /// Read a command block. `Err(())` is `BLOCK_UNAVAILABLE`: an evicted or
     /// nonexistent block, or a specific `seq` on a markerless pane. A markerless
     /// pane's `Last` degrades to ONE implicit block (whole output), flagged.
+    // Err(()) is a documented BLOCK_UNAVAILABLE sentinel, not an error type; a
+    // real error enum would ripple through every caller for no signal gained.
+    #[allow(clippy::result_unit_err)]
     pub fn read_block(&self, sel: BlockSel) -> Result<BlockRead, ()> {
         match sel {
             BlockSel::Last => {

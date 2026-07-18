@@ -1782,6 +1782,7 @@ impl Core {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_pane(
         &mut self,
         squad_key: String,
@@ -2674,6 +2675,7 @@ impl Core {
         // smallest-client clamp (Locked 1/5). The applied area is cached so
         // the tab keeps it when its last viewer leaves.
         let viewed: HashSet<TabId> = self.clients.iter().map(|c| c.view.1).collect();
+        #[allow(clippy::type_complexity)]
         let mut tab_rects: HashMap<TabId, (Vec<(u64, Rect)>, u64, (u16, u16))> = HashMap::new();
         for tid in viewed {
             let Some((sid, idx)) = self.session.find_tab(tid) else {
@@ -2743,6 +2745,7 @@ impl Core {
         // Per-client messages, precomputed so the send loop can borrow
         // clients mutably. A dangling view yields an empty layout, never a
         // panic (re-anchor upstream is the real guarantee).
+        #[allow(clippy::type_complexity)]
         let per: Vec<(ServerMsg, Modes, Vec<(u64, Rect)>)> = self
             .clients
             .iter()
@@ -6660,19 +6663,14 @@ async fn client_writer(
                     // otherwise pin the writer inside this arm, and the
                     // biased select only prioritizes at the select point -
                     // not while an arm is running.
-                    loop {
-                        match reliable_rx.try_recv() {
-                            Ok(msg) => {
-                                let is_bye = matches!(msg, ServerMsg::Bye { .. });
-                                if write_msg(&mut w, &msg).await.is_err() {
-                                    let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                                    return;
-                                }
-                                if is_bye {
-                                    return;
-                                }
-                            }
-                            Err(_) => break,
+                    while let Ok(msg) = reliable_rx.try_recv() {
+                        let is_bye = matches!(msg, ServerMsg::Bye { .. });
+                        if write_msg(&mut w, &msg).await.is_err() {
+                            let _ = core_tx.send(CoreMsg::Gone(id)).await;
+                            return;
+                        }
+                        if is_bye {
+                            return;
                         }
                     }
                     let next = {
