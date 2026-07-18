@@ -142,12 +142,13 @@ def write_base(path: Path, content: str) -> str:
     """
     if path.exists():
         try:
-            first = path.read_text(encoding="utf-8").splitlines()[:1]
-        except OSError:
-            first = []
+            existing = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            existing = ""
+        first = existing.splitlines()[:1]
         if not first or not first[0].startswith(GENERATED_MARKER):
             return "refused"
-        if path.read_text(encoding="utf-8") == content:
+        if existing == content:
             return "unchanged"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")

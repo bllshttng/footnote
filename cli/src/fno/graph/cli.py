@@ -459,6 +459,24 @@ def _create_node_impl(
             tags=resolved_tags,
         )
         node["id"] = new_id
+        # Enforce the epic-nesting cap on the create path too, or `add --type
+        # epic --parent <nested-epic>` would slip a 3rd epic level past the same
+        # guard cmd_update applies (x-6c2b). Scoped to a real cap violation: a
+        # non-epic, or a parent that does not resolve, keeps the existing lenient
+        # pass-through (add/idea has never hard-validated --parent).
+        if parent:
+            from fno.graph._intake import _find_node, _would_exceed_epic_depth
+            from fno.graph._constants import EPIC_NEST_MAX_DEPTH
+
+            target = _find_node(entries, parent)
+            if target is not None and _would_exceed_epic_depth(entries, node, target):
+                typer.echo(
+                    f"Error: parenting epic {new_id} under {target['id']} would "
+                    f"exceed the {EPIC_NEST_MAX_DEPTH}-level cap (mission -> epic "
+                    f"-> leaf); an epic may nest only under a top-level mission",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
         entries.append(node)
         node_holder[0] = node
         return entries

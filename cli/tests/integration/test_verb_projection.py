@@ -251,6 +251,32 @@ def test_leaf_under_nested_epic_allowed(tmp_graph, tmp_path):
     assert res.exit_code == 0, res.output
 
 
+def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
+    """AC3-ERR (create path): `add --type epic --parent <nested-epic>` is capped
+    too, or the guard cmd_update applies would be bypassable at creation."""
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+    ])
+    res = runner.invoke(
+        app, ["backlog", "add", "Third level epic", "--type", "epic", "--parent", "x-0e02"]
+    )
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    # No new node was appended.
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert len(entries) == 2
+
+
+def test_add_leaf_under_epic_still_allowed(tmp_graph, tmp_path):
+    """A non-epic child under an epic is unaffected by the create-path cap."""
+    _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic", parent="x-0a01")])
+    res = runner.invoke(
+        app, ["backlog", "add", "A feature", "--type", "feature", "--parent", "x-0e02"]
+    )
+    assert res.exit_code == 0, res.output
+
+
 def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
     """defer + undefer both project best-effort and never fail on a live doc."""
     plan = _plan(tmp_path)

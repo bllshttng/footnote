@@ -58,7 +58,12 @@ def compute_rollup(
     total = done = in_flight = blocked = 0
     for child in _direct_children(entries, epic_id):
         if child.get("type") == "epic":
-            sub = compute_rollup(child["id"], entries, seen)
+            cid = child.get("id")
+            if not cid:
+                # An id-less epic child would recurse on None and fold in every
+                # top-level node (parent == None). Skip it rather than miscount.
+                continue
+            sub = compute_rollup(cid, entries, seen)
             total += sub["children_total"]
             done += sub["children_done"]
             in_flight += sub["children_in_flight"]

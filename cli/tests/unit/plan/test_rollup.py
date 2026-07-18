@@ -68,6 +68,19 @@ def test_mission_aggregates_child_epic_leaves():
     assert e["progress"] == "1/3"
 
 
+def test_idless_epic_child_skipped_not_miscounted():
+    """An id-less epic child is skipped, not recursed on None (which would fold
+    in every top-level node)."""
+    entries = [
+        _n("M", type_="epic"),
+        {"id": None, "parent": "M", "type": "epic", "_status": "ready"},
+        _n("top", status="done"),  # a top-level node (parent None) - must NOT count
+    ]
+    r = compute_rollup("M", entries)
+    assert r["children_total"] == 0
+    assert r["progress"] == "0/0"
+
+
 def test_epic_parent_cycle_terminates():
     """A malformed epic-parent cycle terminates instead of recursing forever."""
     entries = [
