@@ -1,11 +1,15 @@
-"""Unit tests for epic progress rollup counters (x-6c2b wave 2)."""
+"""Unit tests for epic progress rollup counters (x-6c2b wave 2) and derived
+wave strata (x-6c2b wave 4)."""
 from __future__ import annotations
 
-from fno.plan._rollup import compute_rollup
+from fno.plan._rollup import compute_rollup, compute_waves
 
 
-def _n(nid, parent=None, status="ready", type_="feature"):
-    return {"id": nid, "parent": parent, "_status": status, "type": type_}
+def _n(nid, parent=None, status="ready", type_="feature", blocked_by=None):
+    return {
+        "id": nid, "parent": parent, "_status": status, "type": type_,
+        "blocked_by": blocked_by or [],
+    }
 
 
 def test_direct_children_counted_by_status():
@@ -89,3 +93,65 @@ def test_epic_parent_cycle_terminates():
     ]
     r = compute_rollup("A", entries)  # must return, not hang
     assert r["progress"] == "0/0"
+
+
+# ---------------------------------------------------------------------------
+# Derived wave strata (x-6c2b wave 4, AC4)
+# ---------------------------------------------------------------------------
+
+
+def test_waves_derive_from_intra_epic_edges():
+    """AC4: A(no bl)->0, B/C(bl A)->1, D(bl B)->2, epic waves = max+1 = 3."""
+    entries = [
+        _n("E", type_="epic"),
+        _n("A", parent="E"),
+        _n("B", parent="E", blocked_by=["A"]),
+        _n("C", parent="E", blocked_by=["A"]),
+        _n("D", parent="E", blocked_by=["B"]),
+    ]
+    wave, max_wave = compute_waves("E", entries)
+    assert wave == {"A": 0, "B": 1, "C": 1, "D": 2}
+    assert max_wave + 1 == 3  # the epic's `waves` summary
+
+
+def test_waves_recompute_on_edge_removal():
+    """AC4 'And': removing D's blocker restratifies D with no hand edit."""
+    entries = [
+        _n("E", type_="epic"),
+        _n("A", parent="E"),
+        _n("B", parent="E", blocked_by=["A"]),
+        _n("D", parent="E", blocked_by=["B"]),
+    ]
+    assert compute_waves("E", entries)[0]["D"] == 2
+    # Drop the B->D edge: D now has no intra-epic blocker -> wave 0.
+    entries[3]["blocked_by"] = []
+    assert compute_waves("E", entries)[0]["D"] == 0
+
+
+def test_waves_ignore_cross_epic_blockers():
+    """A child blocked only by an EXTERNAL node is wave 0 within its epic."""
+    entries = [
+        _n("E", type_="epic"),
+        _n("A", parent="E", blocked_by=["x-external"]),
+        _n("ext", type_="feature"),  # not a child of E
+    ]
+    wave, max_wave = compute_waves("E", entries)
+    assert wave == {"A": 0}
+    assert max_wave == 0
+
+
+def test_waves_childless_epic():
+    wave, max_wave = compute_waves("E", [_n("E", type_="epic")])
+    assert wave == {}
+    assert max_wave + 1 == 0  # `waves` summary is 0
+
+
+def test_waves_sibling_cycle_terminates():
+    """A blocked_by cycle among siblings resolves to wave 0, not infinite loop."""
+    entries = [
+        _n("E", type_="epic"),
+        _n("A", parent="E", blocked_by=["B"]),
+        _n("B", parent="E", blocked_by=["A"]),
+    ]
+    wave, _ = compute_waves("E", entries)  # must return
+    assert wave["A"] == 0 or wave["B"] == 0

@@ -353,3 +353,22 @@ def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
     assert res.exit_code == 0, res.output
     res = runner.invoke(app, ["backlog", "undefer", "x-1234"])
     assert res.exit_code == 0, res.output
+
+
+def test_add_blocker_repaints_derived_waves(tmp_graph, tmp_path):
+    """AC4 e2e: `update <child> --add-blocker <sib>` repaints the epic family's
+    derived waves through the real verb (edges are the sole authority)."""
+    epic, e_doc = _epic_with_plan(tmp_path, "x-0e0e", "epic")
+    a_doc = tmp_path / "a.md"; a_doc.write_text(_PLAN.replace("x-1234", "x-0a0a"), encoding="utf-8")
+    b_doc = tmp_path / "b.md"; b_doc.write_text(_PLAN.replace("x-1234", "x-0b0b"), encoding="utf-8")
+    _seed(tmp_graph, [
+        epic,
+        _node(a_doc, id="x-0a0a", slug="a", parent="x-0e0e"),
+        _node(b_doc, id="x-0b0b", slug="b", parent="x-0e0e"),
+    ])
+    # Initially both siblings are wave 0.
+    res = runner.invoke(app, ["backlog", "update", "x-0b0b", "--add-blocker", "x-0a0a"])
+    assert res.exit_code == 0, res.output
+    assert read_plan_file(a_doc)[1]["wave"] == "0"
+    assert read_plan_file(b_doc)[1]["wave"] == "1"  # now blocked by its sibling
+    assert read_plan_file(e_doc)[1]["waves"] == "2"

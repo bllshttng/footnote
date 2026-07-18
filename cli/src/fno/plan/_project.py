@@ -18,7 +18,7 @@ from typing import Any
 
 from fno.plan._stamp import read_plan_file, write_plan_file
 from fno.plan._status import project_plan_status
-from fno.plan._rollup import ROLLUP_KEYS, compute_rollup
+from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 
 # Graph-authoritative fields mirrored into frontmatter. `type` is usually
 # already present; the projection keeps it in sync with the node. `parent_slug`
@@ -89,7 +89,10 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
     # stays clean. The frontmatter reader returns every scalar as a str, so
     # compare (and store) the str form or an int counter re-writes forever.
     # `children_total: 2` still serializes bareword, so Obsidian reads a number.
-    for key in ROLLUP_KEYS:
+    # `waves` (epic summary) and `wave` (a child's derived stratum) ride the
+    # same present-then-write-as-str path (x-6c2b AC4). Both are computed views
+    # off blocked_by edges, repainted every projection, never hand-set.
+    for key in (*ROLLUP_KEYS, "waves", "wave"):
         if key in node:
             value = str(node[key])
             if fields.get(key) != value:
@@ -162,6 +165,18 @@ def project_graph_nodes(
             augmented = _with_parent_slug(node, slug_by_id)
             if node.get("type") == "epic":
                 augmented.update(compute_rollup(node["id"], entries))
+                # Epic-altitude wave summary: max child stratum + 1 (0 when
+                # childless). Derived from intra-epic blocked_by edges (AC4).
+                _, max_wave = compute_waves(node["id"], entries)
+                augmented["waves"] = max_wave + 1
+            # A node's own stratum within its parent epic (mission or plain).
+            parent_id = node.get("parent")
+            if parent_id:
+                parent = _find_node(entries, parent_id)
+                if parent is not None and parent.get("type") == "epic":
+                    wave_map, _ = compute_waves(parent_id, entries)
+                    if node.get("id") in wave_map:
+                        augmented["wave"] = wave_map[node["id"]]
             if project_node_to_plan(augmented, p):
                 rewritten += 1
         except Exception as e:  # noqa: BLE001 - per-node best-effort
@@ -172,16 +187,27 @@ def project_graph_nodes(
 def _expand_repaint_targets(
     entries: list[dict[str, Any]], ids: list[str]
 ) -> list[str]:
-    """Add each projected node's ancestors so a child transition repaints the
-    epic AND its mission (x-6c2b: walk up to the mission -> epic -> leaf cap, so
-    two hops). Order-preserving, deduped. A missing/dangling parent just stops
-    the walk - an epic without a doc is a no-op later.
+    """Add each projected node's ancestors AND its siblings so a child transition
+    repaints the epic + mission rollup (walk up to the mission -> epic -> leaf
+    cap, two hops) and every sibling's derived wave (x-6c2b AC4: one child's
+    blocked_by edit can restratify the whole epic). Order-preserving, deduped. A
+    missing/dangling parent just stops the walk - a doc-less node is a later no-op.
     """
     by_id = {
         n.get("id"): n for n in entries if isinstance(n, dict) and n.get("id")
     }
+    children_by_parent: dict[str, list[str]] = {}
+    for n in entries:
+        if isinstance(n, dict) and n.get("id") and n.get("parent"):
+            children_by_parent.setdefault(n["parent"], []).append(n["id"])
     out = list(ids)
     seen = set(ids)
+
+    def _add(nid: str) -> None:
+        if nid not in seen:
+            seen.add(nid)
+            out.append(nid)
+
     for nid in ids:
         cur = by_id.get(nid)
         hops = 0
@@ -189,9 +215,11 @@ def _expand_repaint_targets(
             parent = cur.get("parent")
             if not parent:
                 break
-            if parent not in seen:
-                seen.add(parent)
-                out.append(parent)
+            _add(parent)
+            # Siblings share the parent's wave stratification, so an edge change
+            # on one child shifts theirs; repaint them all.
+            for sib in children_by_parent.get(parent, ()):
+                _add(sib)
             cur = by_id.get(parent)
             hops += 1
     return out
