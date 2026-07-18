@@ -16,6 +16,23 @@ from typing import Any, Dict
 
 import pytest
 
+# Routing overrides the spawn env sets; clear any ambient copy so the "unrouted"
+# assertions test that routing ADDS nothing, not that the dev's shell happened to
+# lack them (a real claude session sets ANTHROPIC_MODEL, which leaked in). Routed
+# tests re-set what they need after this fixture, so clearing first is harmless.
+_ROUTING_ENV = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_ambient_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in _ROUTING_ENV:
+        monkeypatch.delenv(key, raising=False)
+
 
 def _fake_run(captured: Dict[str, Any]):
     def fake_run(argv: list[str], **kw: Any) -> SimpleNamespace:
