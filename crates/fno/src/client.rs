@@ -3604,15 +3604,80 @@ fn needs_overlay_lines(
 /// to it so the inverse block is a clean rectangle, like the answer overlay.
 const NAV_OVERLAY_W: usize = 54;
 
-/// The leading state glyph for a navigator row (x-653d), reusing the sideline's
-/// agent-badge lattice: blocked `▲`, working `●`, done `✓`, idle `·`.
-fn nav_glyph(s: PaneState) -> char {
+/// The unified icon lattice (x-df4c): ONE state->style mapping every renderer
+/// (sideline rows, queue cards, tab rollups, overlays) calls, so glyph, weight,
+/// and accent read as one system. Outline `○` = waiting/idle, filled `●` =
+/// active, `▲` = needs-attention (the sole accent state). Exhaustive by design:
+/// a new variant is a compile error at every call site, never a silent glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LatticeState {
+    Working,
+    Idle,
+    Blocked,
+    DoneUnseen,
+    Exited,
+}
+
+/// The one accent color, reserved for the needs-attention (`Blocked`) state.
+/// `Indexed` so it follows the user's terminal palette (index 3 = amber/yellow)
+/// rather than a hardcoded RGB that would fight light themes.
+const LATTICE_ACCENT: Color = Color::Indexed(3);
+
+struct LatticeStyle {
+    glyph: char,
+    flags: u8,
+    fg: Color,
+}
+
+/// The single source of glyph/weight/color per state. Every state differs from
+/// every other by GLYPH alone (BOLD/DIM/accent are reinforcement, never the
+/// sole discriminator), so a weak-BOLD or monochrome terminal still reads.
+fn lattice_style(s: LatticeState) -> LatticeStyle {
     match s {
-        PaneState::Blocked => '▲',
-        PaneState::Working => '●',
-        PaneState::DoneUnseen => '✓',
-        PaneState::Idle => '·',
+        LatticeState::Working => LatticeStyle {
+            glyph: '●',
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+        },
+        LatticeState::Idle => LatticeStyle {
+            glyph: '○',
+            flags: 0,
+            fg: Color::Default,
+        },
+        LatticeState::Blocked => LatticeStyle {
+            glyph: '▲',
+            flags: cell_flags::BOLD,
+            fg: LATTICE_ACCENT,
+        },
+        LatticeState::DoneUnseen => LatticeStyle {
+            glyph: '✓',
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+        },
+        LatticeState::Exited => LatticeStyle {
+            glyph: '✗',
+            flags: cell_flags::DIM,
+            fg: Color::Default,
+        },
     }
+}
+
+/// The sideline/nav fold state maps 1:1 onto the lattice (no `Exited` - a folded
+/// pane's exit is already flattened to `Idle` by `nav_agent_state`).
+fn pane_to_lattice(s: PaneState) -> LatticeState {
+    match s {
+        PaneState::Blocked => LatticeState::Blocked,
+        PaneState::Working => LatticeState::Working,
+        PaneState::DoneUnseen => LatticeState::DoneUnseen,
+        PaneState::Idle => LatticeState::Idle,
+    }
+}
+
+/// The leading state glyph for a navigator row (x-653d), sourced from the one
+/// icon lattice (x-df4c) so nav and sideline read identically: blocked `▲`,
+/// working `●`, done `✓`, idle `○`.
+fn nav_glyph(s: PaneState) -> char {
+    lattice_style(pane_to_lattice(s)).glyph
 }
 
 /// Build the navigator overlay lines (x-653d): a top `find › <query>  [chip]`
@@ -7104,6 +7169,48 @@ mod tests {
             vec![SearchKey::Esc, SearchKey::Byte(b'x')]
         );
         assert!(esc.is_empty());
+    }
+
+    #[test]
+    fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
+        use LatticeState::*;
+        let states = [Working, Idle, Blocked, DoneUnseen, Exited];
+        let glyphs: Vec<char> = states.iter().map(|&s| lattice_style(s).glyph).collect();
+        // Pairwise distinct: every state pair reads differently by GLYPH alone,
+        // so a monochrome/weak-BOLD terminal never collapses two states
+        // (AC1-ERR / AC1-EDGE).
+        for (i, a) in glyphs.iter().enumerate() {
+            for b in &glyphs[i + 1..] {
+                assert_ne!(a, b, "lattice glyphs must be pairwise distinct");
+            }
+        }
+        // Single-cell width (AC1-EDGE): `glyph_cols` is the renderer's own width
+        // authority, and the codepoint stays out of the astral/emoji planes so
+        // no terminal renders it double-width (row alignment can never break).
+        for g in &glyphs {
+            assert_eq!(glyph_cols(*g), 1, "lattice glyph {g:?} must be single-cell");
+            assert!(
+                (*g as u32) < 0x1F000,
+                "lattice glyph {g:?} must not be an astral emoji"
+            );
+        }
+    }
+
+    #[test]
+    fn lattice_accent_only_on_blocked() {
+        use LatticeState::*;
+        // The accent is reserved for needs-attention (Blocked); every other
+        // state stays default-colored (US6 invariant).
+        assert_eq!(lattice_style(Blocked).fg, LATTICE_ACCENT);
+        for s in [Working, Idle, DoneUnseen, Exited] {
+            assert_eq!(
+                lattice_style(s).fg,
+                Color::Default,
+                "{s:?} must not carry the accent"
+            );
+        }
+        // Attention is never dimmed (AC1-UI): Blocked is BOLD, not DIM.
+        assert_eq!(lattice_style(Blocked).flags & cell_flags::DIM, 0);
     }
 
     #[test]
