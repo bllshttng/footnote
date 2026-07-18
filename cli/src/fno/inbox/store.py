@@ -1025,8 +1025,13 @@ def _project_id_from_settings(data: dict) -> Optional[str]:
 def resolve_project(
     cwd: Optional[Path] = None,
     override: Optional[str] = None,
+    flag_hint: str = "--from",
 ) -> str:
-    """Resolve the local project name from ``.fno/config.toml``."""
+    """Resolve the local project name from ``.fno/config.toml``.
+
+    ``flag_hint`` names the flag the caller actually exposes, so the failure
+    message points at a real flag (inbox verbs have ``--from``; ``mail send``
+    has ``--from-name``/``--from-self``)."""
     if override is not None:
         return override
 
@@ -1054,7 +1059,7 @@ def resolve_project(
         search = parent
 
     raise ProjectIdentificationError(
-        "set 'project' in .fno/config.toml or pass --from"
+        f"set 'project' in .fno/config.toml or pass {flag_hint}"
     )
 
 
