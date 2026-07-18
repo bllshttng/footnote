@@ -153,7 +153,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         sid_variants = {ident.session_id, ident.session_id[:8]}
         for entry in load_registry():
             same_session = (
-                entry.provider == ident.harness
+                entry.harness == ident.harness
                 and session_field is not None
                 and getattr(entry, session_field, None) in sid_variants
             )

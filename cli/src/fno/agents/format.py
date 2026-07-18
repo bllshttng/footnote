@@ -44,7 +44,7 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
     """
     return {
         "name": entry.name,
-        "provider": entry.provider,
+        "provider": entry.harness,
         "short_id": entry.short_id or None,
         "session_id": entry.session_id,
         "cwd": entry.cwd,

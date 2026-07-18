@@ -217,10 +217,13 @@ def _live_claude_rows(session_id: str):
     for e in rows:
         if not isinstance(e, dict):
             continue
-        if e.get("claude_session_uuid") != session_id:
+        # v10 stores identity under harness_session_id (claude_session_uuid is
+        # the legacy key, absent post-v10); read canonical-first so a raw-disk
+        # match works across both shapes.
+        if (e.get("harness_session_id") or e.get("claude_session_uuid")) != session_id:
             continue
-        if e.get("provider") not in (None, "claude"):
-            continue  # a claude_session_uuid on a non-claude row is malformed
+        if (e.get("harness") or e.get("provider")) not in (None, "claude"):
+            continue  # a claude session id on a non-claude row is malformed
         if e.get("status") not in (None, "live"):
             continue  # a dead worker holds no live PTY (LD#3: liveness authoritative)
         yield e

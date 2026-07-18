@@ -168,10 +168,10 @@ def select_provider(name: str, requested_provider: Optional[str]) -> str:
     )
 
     if existing is not None:
-        if requested_provider is None or requested_provider == existing.provider:
-            return existing.provider
+        if requested_provider is None or requested_provider == existing.harness:
+            return existing.harness
         raise ProviderMismatchError(
-            f"agent {name!r} is provider={existing.provider}, "
+            f"agent {name!r} is provider={existing.harness}, "
             f"refusing to follow-up as provider={requested_provider}"
         )
 
@@ -372,7 +372,7 @@ def _followup_path(
     _emit_ev(
         "agent_followup_started",
         name=name,
-        provider=existing.provider,
+        provider=existing.harness,
         short_id=short_id,
     )
 
@@ -388,7 +388,7 @@ def _followup_path(
     backend = "socket"
     demote_reason: Optional[str] = None
     demote_event_kind: Optional[str] = None
-    if existing.provider == "claude" and existing.mcp_channel_id:
+    if existing.harness == "claude" and existing.mcp_channel_id:
         try:
             mcp_alive = claude_mod.mcp_channel_reachable(existing.mcp_channel_id, timeout=0.25)
         except ReachabilityProbeError as probe_exc:
@@ -671,7 +671,7 @@ def _followup_path(
         "agent_followup_done",
         stage="followup",
         name=name,
-        provider=existing.provider,
+        provider=existing.harness,
         short_id=short_id,
         reply_chars=len(reply),
         backend=backend,
@@ -898,10 +898,10 @@ def _codex_followup_path(
     """
     from fno.agents.providers import codex as codex_mod
 
-    session_id = existing.codex_session_id
+    session_id = existing.harness_session_id
     if not session_id:
         raise DispatchAskError(
-            f"registry entry {name!r} has no codex_session_id; cannot follow up. "
+            f"registry entry {name!r} has no harness_session_id; cannot follow up. "
             f"Remove with 'fno agents rm {name}' and recreate.",
             exit_code=11,
         )
@@ -1167,10 +1167,10 @@ def _gemini_followup_path(
     """
     from fno.agents.providers import gemini as gemini_mod
 
-    session_id = existing.gemini_session_id
+    session_id = existing.harness_session_id
     if not session_id:
         raise DispatchAskError(
-            f"registry entry {name!r} has no gemini_session_id; cannot follow "
+            f"registry entry {name!r} has no harness_session_id; cannot follow "
             f"up. Remove with 'fno agents rm {name}' and recreate.",
             exit_code=11,
         )
@@ -1680,7 +1680,7 @@ def dispatch_ask(
                             existing=existing,
                             lock_handle=lock_handle,
                         )
-                    if yolo and existing.provider == "claude":
+                    if yolo and existing.harness == "claude":
                         # AC3-ERR: --yolo is a no-op for the claude path
                         # (claude's --bg has no equivalent flag). Emit a
                         # single-line stderr note and continue normally.
@@ -1688,7 +1688,7 @@ def dispatch_ask(
                             "--yolo has no effect for provider 'claude'",
                             file=sys.stderr,
                         )
-                    if existing.provider == "claude":
+                    if existing.harness == "claude":
                         return _followup_path(
                             name=name,
                             message=message,
@@ -1702,7 +1702,7 @@ def dispatch_ask(
                             ),
                             lock_handle=lock_handle,
                         )
-                    if existing.provider == "codex":
+                    if existing.harness == "codex":
                         return _codex_followup_path(
                             name=name,
                             message=message,
@@ -1716,7 +1716,7 @@ def dispatch_ask(
                             ),
                             lock_handle=lock_handle,
                         )
-                    if existing.provider == "gemini":
+                    if existing.harness == "gemini":
                         return _gemini_followup_path(
                             name=name,
                             message=message,
@@ -1731,7 +1731,7 @@ def dispatch_ask(
                             lock_handle=lock_handle,
                         )
                     raise DispatchAskError(
-                        f"follow-up for provider {existing.provider!r} is not implemented",
+                        f"follow-up for provider {existing.harness!r} is not implemented",
                         exit_code=2,
                     )
             finally:
@@ -1836,9 +1836,9 @@ def _is_revival(
     """
     if not resume_session_id or provider != "claude":
         return False
-    if getattr(existing, "provider", None) != "claude":
+    if getattr(existing, "harness", None) != "claude":
         return False
-    if getattr(existing, "claude_session_uuid", None) != resume_session_id:
+    if getattr(existing, "harness_session_id", None) != resume_session_id:
         return False
     from fno.agents.providers import claude as claude_mod
 
@@ -2404,12 +2404,12 @@ def stop_agent(
             _lock_handle,
             existing,
         ):
-            if existing.provider in ("codex", "gemini"):
+            if existing.harness in ("codex", "gemini"):
                 # Locked Decision 5: stop is a no-op between asks for the
                 # synchronous providers. Emit the same event for symmetry
                 # with the claude path so observability stays uniform.
                 print(
-                    f"{existing.provider} agents are synchronous; stop is a "
+                    f"{existing.harness} agents are synchronous; stop is a "
                     "no-op between asks. SIGINT an in-flight ask to "
                     "interrupt.",
                     file=sys.stderr,
@@ -2417,14 +2417,14 @@ def stop_agent(
                 events.emit(
                     "agent_stopped",
                     name=name,
-                    provider=existing.provider,
+                    provider=existing.harness,
                     claude_exit=None,
                 )
-                return StopResult(name=name, provider=existing.provider, claude_exit=None)
+                return StopResult(name=name, provider=existing.harness, claude_exit=None)
 
-            if existing.provider != "claude":
+            if existing.harness != "claude":
                 raise DispatchAskError(
-                    f"stop for provider {existing.provider!r} is not implemented",
+                    f"stop for provider {existing.harness!r} is not implemented",
                     exit_code=2,
                 )
 
@@ -2576,7 +2576,7 @@ def rm_agent(
         ):
             claude_exit: Optional[int] = None
 
-            if existing.provider == "claude":
+            if existing.harness == "claude":
                 short_id = existing.short_id
                 if not short_id:
                     if not force:
@@ -2670,9 +2670,9 @@ def rm_agent(
                             f"{short_id} to clean later.\n"
                         )
 
-            elif existing.provider not in ("codex", "gemini"):
+            elif existing.harness not in ("codex", "gemini"):
                 raise DispatchAskError(
-                    f"rm for provider {existing.provider!r} is not implemented",
+                    f"rm for provider {existing.harness!r} is not implemented",
                     exit_code=2,
                 )
             # codex / gemini: registry-only removal per Locked Decision 1;
@@ -2684,7 +2684,7 @@ def rm_agent(
                 events.emit(
                     "agent_removed",
                     name=name,
-                    provider=existing.provider,
+                    provider=existing.harness,
                     claude_exit=claude_exit,
                     force=force,
                     registry_changed=False,
@@ -2699,7 +2699,7 @@ def rm_agent(
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
             # confirmation. (Sigma-review C3 finding.)
-            if existing.provider == "codex" and existing.codex_session_id:
+            if existing.harness == "codex" and existing.harness_session_id:
                 print(
                     f"removed: {name} (codex session files left on "
                     f"disk; clean via 'rm -rf ~/.codex/sessions/...' if "
@@ -2712,14 +2712,14 @@ def rm_agent(
             events.emit(
                 "agent_removed",
                 name=name,
-                provider=existing.provider,
+                provider=existing.harness,
                 claude_exit=claude_exit,
                 force=force,
                 registry_changed=True,
             )
             return RmResult(
                 name=name,
-                provider=existing.provider,
+                provider=existing.harness,
                 claude_exit=claude_exit,
                 force=force,
                 registry_changed=True,
@@ -2822,7 +2822,7 @@ def reconcile_agents(
     known_codex_ids: set[str] = set()
     claude_path_present: Optional[bool] = None
     for entry in entries:
-        if entry.provider == "codex" and codex_index_state is None:
+        if entry.harness == "codex" and codex_index_state is None:
             # Probing the index path can raise PermissionError on hosts
             # where the parent directory is unreadable. Without this
             # catch a codex-local permission glitch would abort the
@@ -2866,7 +2866,7 @@ def reconcile_agents(
                             f"WARN: codex session index unreadable: {exc.reason}; "
                             "codex agents will be skipped (no reachability data)\n"
                         )
-        if entry.provider == "claude" and claude_path_present is None:
+        if entry.harness == "claude" and claude_path_present is None:
             claude_path_present = is_provider_available("claude")
             if not claude_path_present:
                 sys.stderr.write(
@@ -2876,7 +2876,7 @@ def reconcile_agents(
                 )
 
     for entry in entries:
-        if entry.provider == "gemini":
+        if entry.harness == "gemini":
             # Wave 3.3: gemini reachability via the cwd-pinned chats dir
             # at ~/.gemini/tmp/<cwd-basename>/chats/session-*-<short>.jsonl
             # (Wave 2.0 layout discovery).
@@ -2941,7 +2941,7 @@ def reconcile_agents(
                 continue
             new_status = "live" if reachable else "orphaned"
 
-        elif entry.provider == "codex":
+        elif entry.harness == "codex":
             if codex_index_state != "ready":
                 # AC3-EDGE: cannot probe codex reachability; report as
                 # error but do NOT flip status. The reason discriminator
@@ -2982,7 +2982,7 @@ def reconcile_agents(
             reachable = entry.codex_session_id in known_codex_ids
             new_status = "live" if reachable else "orphaned"
 
-        elif entry.provider == "claude":
+        elif entry.harness == "claude":
             if not claude_path_present:
                 # Mirror the codex-index-missing pattern: when claude is
                 # not installed we cannot probe reachability, so we route
@@ -3084,9 +3084,9 @@ def reconcile_agents(
             errors.append(
                 {
                     "name": entry.name,
-                    "provider": entry.provider,
+                    "provider": entry.harness,
                     "id": None,
-                    "reason": f"unknown-provider-{entry.provider}",
+                    "reason": f"unknown-provider-{entry.harness}",
                 }
             )
             continue
@@ -3103,7 +3103,7 @@ def reconcile_agents(
 
         change = {
             "name": entry.name,
-            "provider": entry.provider,
+            "provider": entry.harness,
             # Codex P2 on PR #317: include gemini_session_id so reconcile
             # records carry an identifier for every provider. Pre-fix
             # gemini agents flipped between live/orphaned with "id": null
@@ -3144,12 +3144,11 @@ def reconcile_agents(
                     # Only stamp a row that STILL matches the row we probed: a
                     # same-name rm+re-register during the probe loop would put this
                     # claude uuid onto a replacement row (misrouting its mail).
-                    if e.provider == "claude" and e.short_id == probed_short:
-                        # Canonical wins: set harness_session_id and sync the legacy
-                        # claude uuid so both readers resolve.
+                    if e.harness == "claude" and e.short_id == probed_short:
+                        # Canonical wins: set harness_session_id; the legacy
+                        # claude uuid is synced from it on the next load's backfill.
                         updates["harness_session_id"] = hsid
-                        updates["harness"] = e.harness or e.provider
-                        updates["claude_session_uuid"] = hsid
+                        updates["harness"] = e.harness
                 out.append(replace(e, **updates) if updates else e)
             return out
 
@@ -3212,9 +3211,9 @@ def attach_agent(name: str) -> AttachResult:
     _validate_lifecycle_name(name)
     existing = _resolve_registry_entry(name)
 
-    if existing.provider in ("codex", "gemini"):
+    if existing.harness in ("codex", "gemini"):
         sys.stderr.write(
-            f"{existing.provider} agents are one-shot; no persistent "
+            f"{existing.harness} agents are one-shot; no persistent "
             "session to attach to. Use 'fno agents logs "
             f"{name} --follow' for live output. Cross-provider attach is "
             "planned for the Phase 6 supervisor.\n"
@@ -3225,14 +3224,14 @@ def attach_agent(name: str) -> AttachResult:
         events.emit(
             "agent_attach_refused",
             name=name,
-            provider=existing.provider,
+            provider=existing.harness,
             reason="one-shot-provider-no-persistent-session",
         )
-        return AttachResult(name=name, provider=existing.provider, exit_code=13)
+        return AttachResult(name=name, provider=existing.harness, exit_code=13)
 
-    if existing.provider != "claude":
+    if existing.harness != "claude":
         raise DispatchAskError(
-            f"attach for provider {existing.provider!r} is not implemented",
+            f"attach for provider {existing.harness!r} is not implemented",
             exit_code=2,
         )
 
@@ -3327,10 +3326,10 @@ def register_mcp_channel(
         _lock_handle,
         entry,
     ):
-        if entry.provider != "claude":
+        if entry.harness != "claude":
             raise DispatchAskError(
                 f"register_mcp_channel: agent {name!r} provider is "
-                f"{entry.provider!r}; MCP channel backend is Claude-only "
+                f"{entry.harness!r}; MCP channel backend is Claude-only "
                 "this release",
                 exit_code=2,
             )
@@ -3958,7 +3957,7 @@ def _mux_followup_path(
     _emit_ev(
         "agent_followup_started",
         name=name,
-        provider=existing.provider,
+        provider=existing.harness,
         short_id=ref,
     )
     wrapped = build_cross_session_container(message, from_name)
@@ -4000,7 +3999,7 @@ def _mux_followup_path(
         "agent_followup_done",
         stage="followup",
         name=name,
-        provider=existing.provider,
+        provider=existing.harness,
         short_id=ref,
         reply_chars=0,
         backend="mux",
@@ -4123,7 +4122,7 @@ def _deliver_live(
     # Route key is the canonical harness, legacy provider as fallback (x-ec59):
     # an unknown harness with no inject lane (e.g. opencode) falls through to the
     # daemon deliver RPC by name and demotes to durable cleanly (never a KeyError).
-    route_harness = entry.harness or entry.provider
+    route_harness = entry.harness
     if route_harness != "claude":
         # Route codex/gemini through the daemon deliver RPC (now <fno_mail>-wrapped).
         result = _daemon_rpc(
@@ -4178,7 +4177,7 @@ def _deliver_live(
         if mail.to:
             relay_ctxs[entry.name] = _MailCtx(
                 from_=mail.to,
-                harness=harness_for_provider(entry.provider),
+                harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
             )
@@ -4221,9 +4220,7 @@ def _deliver_live(
     # recipient, leaving control.sock the sole live path (x-3dac). The mail-inject
     # verb resolves the handle itself via ClaudeRoster (accepts the full session
     # uuid or 8-hex short id) and returns False (-> durable) when not reachable.
-    recipient = (
-        entry.harness_session_id or entry.claude_session_uuid or entry.short_id
-    )
+    recipient = entry.harness_session_id or entry.short_id
     if not recipient:
         return False
     return _mail_inject_claude(recipient, wrapped)
@@ -4353,13 +4350,11 @@ def dispatch_send(
             sender_entry = next((e for e in entries if e.name == from_name), None)
             from_session = provider_from = None
             if sender_entry is not None:
-                provider_from = sender_entry.provider
-                # Defensive getattr so a partial / future / non-claude entry that
-                # lacks one of these fields degrades to None rather than crashing
-                # the send (the fallback chain also stays intact).
+                provider_from = sender_entry.harness
+                # Defensive getattr so a partial / future entry that lacks one of
+                # these fields degrades to None rather than crashing the send.
                 from_session = (
                     getattr(sender_entry, "harness_session_id", None)
-                    or getattr(sender_entry, "claude_session_uuid", None)
                     or getattr(sender_entry, "short_id", None)
                 )
             # A `fno mail send <name>` is always directed -> stamp the recipient's
@@ -4405,7 +4400,7 @@ def dispatch_send(
                         body=durable_body,
                         msg_id=msg_id,
                         to_kind="name",
-                        provider_to=existing.provider,
+                        provider_to=existing.harness,
                         provider_from=provider_from,
                         from_session=from_session,
                     )
@@ -4425,7 +4420,7 @@ def dispatch_send(
             # dispatch_ask pattern introduced in PR #457).
             ctx_for_dispatch = build_context(
                 to_name=name,
-                to_provider=existing.provider,
+                to_provider=existing.harness,
                 transport="direct-cli",
                 from_name_override=from_name,
             )
@@ -4435,7 +4430,7 @@ def dispatch_send(
                 _emit_ev(
                     "agent_send_started",
                     name=name,
-                    provider=existing.provider,
+                    provider=existing.harness,
                     msg_id=msg_id,
                 )
 
@@ -4465,7 +4460,7 @@ def dispatch_send(
                 _emit_ev(
                     "agent_send_done",
                     name=name,
-                    provider=existing.provider,
+                    provider=existing.harness,
                     msg_id=msg_id,
                     delivery=delivery,
                 )
@@ -4718,9 +4713,9 @@ def dispatch_send_to_project(
 
         _se = next((e for e in _load_reg() if e.name == from_name), None)
         if _se is not None:
-            provider_from = _se.provider
+            provider_from = _se.harness
             from_session = (
-                getattr(_se, "claude_session_uuid", None)
+                getattr(_se, "harness_session_id", None)
                 or getattr(_se, "short_id", None)
             )
     except Exception:  # noqa: BLE001 - sender identity is best-effort

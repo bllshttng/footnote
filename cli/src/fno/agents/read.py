@@ -90,7 +90,7 @@ def list_agents(
                 entry_cwd = entry.cwd
             if entry_cwd != resolved_cwd:
                 continue
-        if provider is not None and entry.provider != provider:
+        if provider is not None and entry.harness != provider:
             continue
         if status is not None and entry.status != status:
             continue
@@ -106,7 +106,7 @@ def list_agents(
     # that would also swallow programmer errors (AttributeError /
     # TypeError / ImportError).
     live_map: dict[str, dict] = {}
-    if any(e.provider == "claude" for e in filtered):
+    if any(e.harness == "claude" for e in filtered):
         from fno.agents.providers import claude as claude_mod
 
         live_map, augment_warnings = claude_mod.claude_agents_json()
@@ -122,7 +122,7 @@ def list_agents(
     rows: list[dict] = []
     for entry in filtered:
         live_status: Optional[str] = None
-        if entry.provider == "claude" and entry.short_id:
+        if entry.harness == "claude" and entry.short_id:
             live_status = (live_map.get(entry.short_id) or {}).get(
                 "live_status"
             )
@@ -258,7 +258,7 @@ def read_logs(
         err.write(f"agent not found: {name}\n")
         return LogsResult(exit_code=EXIT_NOT_FOUND)
 
-    if entry.provider == "claude":
+    if entry.harness == "claude":
         warnings: list[str] = []
         if json_out:
             # JSON for claude logs is a future concern (would require
@@ -302,7 +302,7 @@ def read_logs(
     if log_path is None or not log_path.exists():
         where = log_path_str if log_path_str else "(no log_path recorded)"
         err.write(
-            f"no logs for {entry.provider} agent {name}: no log file at {where}\n"
+            f"no logs for {entry.harness} agent {name}: no log file at {where}\n"
         )
         return LogsResult(exit_code=EXIT_NOT_FOUND)
 

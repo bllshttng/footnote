@@ -248,7 +248,7 @@ def census() -> LiveCensus:
         bg_alive = (
             not pid_alive
             and row.pid is None
-            and row.provider == "claude"
+            and row.harness == "claude"
             and bool(row.short_id)
             and row.short_id in roster_live_short_ids
         )
@@ -270,7 +270,7 @@ def census() -> LiveCensus:
             LiveWorker(
                 source="fno",
                 name=row.name,
-                provider=row.provider,
+                provider=row.harness,
                 substrate=substrate,
                 pid=row.pid,
                 status=str(row.status),

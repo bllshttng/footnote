@@ -58,10 +58,11 @@ def _live_codex_registry_entry(session_id: str):
         matches = [
             e
             for e in load_registry()
-            if getattr(e, "provider", None) == "codex"
+            if (getattr(e, "harness", None) or getattr(e, "provider", None)) == "codex"
             and _entry_is_live(e)
             and session_id
             in (
+                getattr(e, "harness_session_id", None),
                 getattr(e, "codex_session_id", None),
                 getattr(e, "claude_session_uuid", None),
             )

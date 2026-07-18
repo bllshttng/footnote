@@ -288,6 +288,19 @@ class AgentEntry:
     # silently dropping a stored verdict.
     screen_state: Optional[dict] = None
 
+    def __post_init__(self) -> None:
+        # Migration bridge (x-880e): a directly-constructed row carrying only the
+        # legacy identity fields resolves the canonical ones from them, mirroring
+        # load_registry's back-fill for on-disk rows so a fixture built without
+        # harness/harness_session_id behaves identically. Removed when the legacy
+        # fields are dropped and harness becomes the required identity field.
+        if not self.harness and self.provider:
+            self.harness = self.provider
+        if not self.harness_session_id:
+            legacy_field = REGISTRY_LEGACY_SESSION_KEYS.get((self.harness or "").lower())
+            if legacy_field:
+                self.harness_session_id = getattr(self, legacy_field, None)
+
     @property
     def session_id(self) -> Optional[str]:
         """The harness-specific resume-target id.
@@ -396,7 +409,7 @@ def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
     if len(distinct) > 1:
         cands = ", ".join(
             f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
-            f"{getattr(e, 'provider', '?')})"
+            f"{getattr(e, 'harness', '?')})"
             for e in distinct.values()
         )
         raise AgentResolutionError(
@@ -796,7 +809,7 @@ def register_existing_session(
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
-            if entry.provider == provider and getattr(entry, session_field) == session_id:
+            if entry.harness == provider and getattr(entry, session_field) == session_id:
                 # Same session re-registering: refresh, do not duplicate.
                 entry.status = _REGISTERED_STATUS
                 entry.cwd = cwd
@@ -812,6 +825,8 @@ def register_existing_session(
         fresh = AgentEntry(
             name=chosen,
             provider=provider,
+            harness=provider,
+            harness_session_id=session_id,
             cwd=cwd,
             log_path=log_path,
             status=_REGISTERED_STATUS,
@@ -822,7 +837,7 @@ def register_existing_session(
 
     persisted = update_registry(_updater, path=registry_path)
     for entry in persisted:
-        if entry.provider == provider and getattr(entry, session_field) == session_id:
+        if entry.harness == provider and getattr(entry, session_field) == session_id:
             return entry
     # update_registry returns the persisted entries list (the updater's
     # output), so the row must be present; a miss means the upsert dropped it.

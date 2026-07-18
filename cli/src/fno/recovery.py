@@ -187,7 +187,7 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
     """
     out: list[Candidate] = []
     for entry in registry_entries:
-        if getattr(entry, "provider", None) != "claude":
+        if (getattr(entry, "harness", None) or getattr(entry, "provider", None)) != "claude":
             continue
         short_id = getattr(entry, "short_id", "") or None
         if not short_id:
