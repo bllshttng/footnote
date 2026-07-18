@@ -150,8 +150,65 @@ def test_deferred_child_shows_streak(graph_env):
     ])
     r = _invoke(["backlog", "epic", "status", "x-epic"])
     assert r.exit_code == 0, r.output
-    assert "2" in r.output
-    assert "streak" in r.output.lower()
+    assert "streak 2" in r.output
+
+
+def test_streak_dedups_mirrored_events(graph_env, monkeypatch):
+    """The loop mirrors each node_* envelope byte-identically to the global log
+    AND the project journal; the union must dedup so a streak isn't doubled."""
+    from fno.graph import failure
+
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic"),
+        _node("x-c3", parent="x-epic", _status="deferred", cwd=str(tmp_path)),
+    ])
+    fails = [
+        {"ts": "2026-07-18T09:00:00Z", "type": "node_failed", "source": "hook",
+         "data": {"node_id": "x-c3"}},
+        {"ts": "2026-07-18T10:00:00Z", "type": "node_failed", "source": "hook",
+         "data": {"node_id": "x-c3"}},
+    ]
+    # Same envelopes in the project journal AND the global mirror.
+    _write_events(tmp_path, fails)
+    gp = tmp_path / "global-events.jsonl"
+    gp.write_text("".join(json.dumps(e) + "\n" for e in fails))
+    monkeypatch.setattr(failure, "events_path", lambda: gp)
+
+    r = _invoke(["backlog", "epic", "status", "x-epic"])
+    assert r.exit_code == 0, r.output
+    assert "streak 2" in r.output  # not 4
+
+
+def test_inherited_json_flag_before_leaf(graph_env):
+    """`--json` at the subtyper position (not just trailing) emits JSON."""
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic", slug="the-epic"),
+        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+    ])
+    r = _invoke(["backlog", "--json", "epic", "status", "x-epic"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["epic"] == "x-epic"
+
+
+def test_null_ts_event_does_not_crash(graph_env):
+    """An explicit ``{"ts": null}`` envelope must not crash the ts-sort."""
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic"),
+        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+    ])
+    _write_events(tmp_path, [
+        {"ts": None, "type": "advance_skipped", "source": "backlog",
+         "data": {"reason": "walker-live", "node_id": "x-c2"}},
+        {"ts": "2026-07-18T10:00:00Z", "type": "advance_failed", "source": "backlog",
+         "data": {"error": "boom", "node_id": "x-c2"}},
+    ])
+    r = _invoke(["backlog", "epic", "status", "x-epic"])
+    assert r.exit_code == 0, r.output
+    assert "boom" in r.output
 
 
 # -- refuse a non-container by name --

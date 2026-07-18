@@ -264,32 +264,48 @@ def _live_worker(node_id: str) -> Optional[str]:
 
 
 def _epic_events(children: list[dict]) -> list[dict]:
-    """Union the events logs that can carry a child's receipt, ts-sorted.
+    """Union the events logs that can carry a child's receipt, deduped + ts-sorted.
 
-    Reads the global mirror (walker node_* events) plus each distinct child
-    project's ``<cwd>/.fno/events.jsonl`` (where advance/reconcile emit their
-    dispatch receipts). Sorted by ``ts`` so newest-wins holds across files.
+    Reads the global mirror (walker node_* events) plus each child project's
+    ``<root>/.fno/events.jsonl`` (where advance/reconcile emit their dispatch
+    receipts). The child root is resolved through the workspace map
+    (``project_root_from_settings``) so a moved checkout whose recorded ``cwd``
+    is stale still finds the live journal, falling back to the recorded cwd.
+
+    The loop runtime writes each node_* envelope byte-identically to BOTH the
+    project journal and the global mirror, so envelopes are deduped by content -
+    otherwise a deferred child's breaker streak would double-count. Sorted by
+    ``ts`` (None-safe) so newest-wins holds across files.
     """
     from fno.graph import failure
+    from fno.graph._intake import project_root_from_settings
 
-    seen: set[str] = set()
+    seen_paths: set[str] = set()
+    seen_env: set[str] = set()
     out: list[dict] = []
 
-    gp = failure.events_path()
-    seen.add(str(gp))
-    out.extend(failure.read_events(gp))
+    def _ingest(path: Path) -> None:
+        if str(path) in seen_paths:
+            return
+        seen_paths.add(str(path))
+        for e in failure.read_events(path):
+            key = json.dumps(e, sort_keys=True, default=str) if isinstance(e, dict) else repr(e)
+            if key in seen_env:
+                continue
+            seen_env.add(key)
+            out.append(e)
+
+    _ingest(failure.events_path())
 
     for c in children:
-        cwd = c.get("_resolved_cwd") or c.get("cwd")
-        if not cwd:
+        proj = c.get("project")
+        root = (project_root_from_settings(proj) if proj else None) \
+            or c.get("_resolved_cwd") or c.get("cwd")
+        if not root:
             continue
-        p = Path(cwd) / ".fno" / "events.jsonl"
-        if str(p) in seen:
-            continue
-        seen.add(str(p))
-        out.extend(failure.read_events(p))
+        _ingest(Path(root) / ".fno" / "events.jsonl")
 
-    out.sort(key=lambda e: e.get("ts", "") if isinstance(e, dict) else "")
+    out.sort(key=lambda e: (e.get("ts") or "") if isinstance(e, dict) else "")
     return out
 
 
@@ -342,6 +358,7 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
 
 @_epic_cli.command("status")
 def cmd_epic_status(
+    ctx: typer.Context,
     epic: str = typer.Argument(..., help="Epic node id or slug."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
 ) -> None:
@@ -350,6 +367,11 @@ def cmd_epic_status(
     silent blank. Refuses a non-container node by name."""
     from fno.graph.store import read_graph
     from fno.graph.fuzzy import resolve_node
+    from fno.handoff.output import merge_json_flag, json_mode
+
+    # Honor --json wherever it appears (top-level, subtyper, or this leaf) - the
+    # parent callbacks merge theirs into ctx.obj; merge this leaf's too.
+    merge_json_flag(ctx, json_output)
 
     entries = read_graph(_graph_path())
     match = resolve_node(epic, entries)
@@ -395,7 +417,7 @@ def cmd_epic_status(
             "receipt": _child_note(c, events, worker),
         })
 
-    if json_output:
+    if json_mode(ctx):
         typer.echo(json.dumps({
             "epic": epic_id,
             "slug": epic_node.get("slug"),
