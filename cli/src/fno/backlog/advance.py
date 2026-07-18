@@ -1932,13 +1932,27 @@ def kickoff_epic(
     for child in children:
         if max_dispatch is not None and total >= max_dispatch:
             break  # overall cap reached; remaining ready children wait for a drain/re-run
-        proj = child.get("project") or _DOMAIN_UNSET
-        # A project with no map entry cannot be capped or launched; surface it by
-        # name AND the exact config key (Boundaries), then continue - one unmapped
-        # project never blocks the others.
+        # A project-less child cannot be capped, mapped, or launched - skip it with
+        # the accurate `no-project` reason (matching _dispatch_one_dependent), not a
+        # misleading `unmapped-project` with an empty detail. Falsy check so an
+        # empty-string project is treated as missing too (gemini).
+        proj = child.get("project")
+        if not proj:
+            _emit(
+                EVENT_SKIPPED,
+                {"reason": "no-project", "node_id": child["id"], "mission": canon},
+                ev_path,
+            )
+            results.append(
+                AdvanceResult("skipped", EVENT_SKIPPED, reason="no-project", node_id=child["id"])
+            )
+            continue
+        # A mapped-but-absent project cannot be launched; surface it by name AND the
+        # exact config key (Boundaries), then continue - one unmapped project never
+        # blocks the others.
         from fno.graph._intake import project_root_from_settings
 
-        root = project_root_from_settings(child.get("project"))
+        root = project_root_from_settings(proj)
         if not root:
             results.append(_converge_skip_unmapped(child, proj, canon, ev_path))
             continue

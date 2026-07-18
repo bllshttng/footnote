@@ -203,6 +203,26 @@ def test_unmapped_project_loud_skip_others_dispatch(iso, tmp_path, monkeypatch):
     assert "config.work.workspaces" in unmapped[0]["data"]["detail"]
 
 
+def test_project_less_child_skips_no_project(iso, tmp_path, monkeypatch):
+    """A child with no project is skipped `no-project` (not a misleading unmapped-project)."""
+    _epic_graph(tmp_path, monkeypatch)
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
+    _patch_max_lanes(monkeypatch, 4)
+    _patch_spawn(monkeypatch)
+    monkeypatch.setattr(
+        adv, "_ready_leaf_children",
+        lambda e: [{"id": "x-none", "slug": "n", "title": "n", "project": ""},
+                   {"id": "x-web", "slug": "w", "title": "w", "project": "web"}],
+    )
+
+    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+
+    assert res.dispatched == ("x-web",)
+    skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
+    reasons = {e["data"]["node_id"]: e["data"]["reason"] for e in skips}
+    assert reasons.get("x-none") == "no-project"
+
+
 def test_spawn_failure_isolated_reservation_released(iso, tmp_path, monkeypatch):
     """AC2-ERR: a spawn failure -> failed receipt, no stale node:<id>, reservation released, others dispatch."""
     _epic_graph(tmp_path, monkeypatch)
