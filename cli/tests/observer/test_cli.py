@@ -216,6 +216,149 @@ def test_sweep_wires_the_gh_cap(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# target sweep (x-6ff0)
+# --------------------------------------------------------------------------- #
+
+def _wire_target(monkeypatch, tmp_path, corpus, meta=None):
+    """Inject the PR-anchored corpus + redirect events/digest into tmp."""
+    events_path = tmp_path / "events.jsonl"
+    monkeypatch.setattr(cli, "_events_paths", lambda: [events_path])
+    monkeypatch.setattr(cli, "_load_target_corpus", lambda since, repo, gh: (corpus, meta or {"repos_scoped": 1, "dropped_repos": 0, "truncated_repos": []}))
+    import fno.paths as paths
+    monkeypatch.setattr(paths, "observer_reports_dir", lambda *a, **k: tmp_path / "reports")
+    return events_path
+
+
+def _target_item(pr_number, node_id, *, outcome="merged_clean", merged=True, ci_reds=0, loop_fires=1, terminal="DonePRGreen"):
+    return {
+        "pr_number": pr_number, "pr_url": f"https://github.com/o/r/pull/{pr_number}", "repo": "o/r",
+        "merged": merged, "graph_node_id": node_id, "session_ids": [f"s{pr_number}"],
+        "signals": {"promises": 1, "loop_fires": loop_fires, "ci_reds": ci_reds,
+                    "terminal_reasons": [terminal] if terminal else [], "tokens_total": None,
+                    "duration_minutes": None, "turns": None, "toolcalls": None},
+        "terminal_reasons": [terminal] if terminal else [],
+        "judgeable": merged and outcome is not None, "outcome": outcome, "attribution_class": None,
+    }
+
+
+def _target_corpus(items, *, unattributed=0, no_pr=0, stop_cause=None, prs_total=None):
+    n = prs_total if prs_total is not None else len(items) + unattributed
+    return {
+        "items": items,
+        "unattributed": [{"pr_number": 900 + i, "pr_url": None, "repo": None, "merged": True, "graph_node_id": None} for i in range(unattributed)],
+        "no_pr": [{"session_ids": [f"np{i}"], "termination_reason": "NoProgress", "graph_node_id": None} for i in range(no_pr)],
+        "coverage": {"prs_total": n, "attributed": len(items), "unattributed_pr": unattributed,
+                     "no_pr_attempts": no_pr, "no_pr_stop_cause": stop_cause or ({"NoProgress": no_pr} if no_pr else {})},
+    }
+
+
+def test_target_no_data_emits_no_run_complete(monkeypatch, tmp_path):
+    corpus = _target_corpus([], prs_total=0)
+    events_path = _wire_target(monkeypatch, tmp_path, corpus)
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    assert r.exit_code == 0
+    assert "no_data" in r.output
+    assert not any(e["type"] == "skill_eval_run_complete" for e in _events(events_path))
+
+
+def test_target_insufficient_below_ten(monkeypatch, tmp_path):
+    items = [_target_item(i, f"x-{i}") for i in range(5)]
+    events_path = _wire_target(monkeypatch, tmp_path, _target_corpus(items))
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    assert r.exit_code == 0
+    assert "insufficient" in r.output and "5" in r.output
+    assert not any(e["type"] == "skill_eval_run_complete" for e in _events(events_path))
+
+
+def test_target_ok_emits_findings_run_complete_digest(monkeypatch, tmp_path):
+    items = [_target_item(i, f"x-{i}") for i in range(10)]
+    events_path = _wire_target(monkeypatch, tmp_path, _target_corpus(items, no_pr=3))
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    assert r.exit_code == 0, r.output
+    assert r.output.startswith("ok:")
+    evs = _events(events_path)
+    assert len([e for e in evs if e["type"] == "skill_eval_run_complete"]) == 1
+    findings = [e for e in evs if e["type"] == "skill_eval_finding"]
+    assert findings and all(f["data"]["skill_id"] == "fno:target" for f in findings)
+    assert all(f["data"]["corpus_item_id"].startswith("pr-") for f in findings)
+    digest = next((tmp_path / "reports").glob("target-*.md")).read_text()
+    # AC3-HP: unconditional no_pr line + attempt->PR formula
+    assert "no_pr_attempts: 3" in digest
+    assert "attempt -> PR:" in digest
+    # AC2-FR: the cross-tab renders in the summary block (above the failure ranking)
+    assert digest.index("Falsifier cross-tab") < digest.index("Failure ranking")
+
+
+def test_target_no_pr_line_renders_even_at_zero(monkeypatch, tmp_path):
+    """AC3-HP bypass guard: the no_pr line + formula print even when count is 0."""
+    items = [_target_item(i, f"x-{i}") for i in range(10)]
+    _wire_target(monkeypatch, tmp_path, _target_corpus(items, no_pr=0))
+    runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    digest = next((tmp_path / "reports").glob("target-*.md")).read_text()
+    assert "no_pr_attempts: 0" in digest
+    assert "attempt -> PR: 100%" in digest  # 10 PRs / 10 attempts
+
+
+def test_target_falsifier_cell_cited(monkeypatch, tmp_path):
+    """AC2-FR: a good-process PR that bounced surfaces as a falsifier, not
+    collapsed into the headline pass counts."""
+    items = [_target_item(i, f"x-{i}") for i in range(9)]
+    # one PR: clean process (0 ci_reds, ship terminal) but bounced outcome
+    items.append(_target_item(99, "x-bad", outcome="bounced", ci_reds=0, terminal="DonePRGreen"))
+    _wire_target(monkeypatch, tmp_path, _target_corpus(items))
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target", "--json"])
+    payload = json.loads(r.output)
+    assert 99 in payload["falsifier_prs"]
+    digest = next((tmp_path / "reports").glob("target-*.md")).read_text()
+    assert "FALSIFIER" in digest and "#99" in digest
+
+
+def test_target_partial_when_unattributed_present(monkeypatch, tmp_path):
+    items = [_target_item(i, f"x-{i}") for i in range(10)]
+    _wire_target(monkeypatch, tmp_path, _target_corpus(items, unattributed=2))
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target", "--json"])
+    payload = json.loads(r.output)
+    assert payload["state"] == "partial"
+    digest = next((tmp_path / "reports").glob("target-*.md")).read_text()
+    assert "unattributed PR" in digest  # AC1-EDGE surfaced as a coverage gap
+
+
+def test_target_fatal_when_canonical_event_unwritable(monkeypatch, tmp_path):
+    items = [_target_item(i, f"x-{i}") for i in range(10)]
+    _wire_target(monkeypatch, tmp_path, _target_corpus(items))
+    monkeypatch.setattr(cli, "_emit_run_complete", lambda summary, paths: False)
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    assert r.exit_code == 5
+    assert "not recorded" in r.output
+    assert not list((tmp_path / "reports").glob("target-*.md"))
+
+
+def test_target_gh_list_windows_and_flags_truncation():
+    """_gh_pr_list windows by merged/closed date and flags a repo that returned
+    exactly the list limit (possible more PRs)."""
+    from datetime import datetime as dt
+    now = dt(2026, 7, 18, 12, 0, 0)
+    cutoff = now - __import__("datetime").timedelta(days=28)
+    in_win = {"number": 1, "headRefName": "feature/x-1", "mergedAt": "2026-07-10T10:00:00Z", "closedAt": None, "url": "https://github.com/o/r/pull/1", "state": "MERGED"}
+    out_win = {"number": 2, "headRefName": "feature/x-2", "mergedAt": "2026-01-01T10:00:00Z", "closedAt": None, "url": "https://github.com/o/r/pull/2", "state": "MERGED"}
+
+    def fake_gh(args):
+        return 0, json.dumps([in_win, out_win]), ""
+
+    prs, truncated = cli._gh_pr_list("o/r", cutoff, now, fake_gh)
+    assert [p["number"] for p in prs] == [1]  # out-of-window dropped
+    assert truncated is False
+
+
+def test_target_gh_failure_is_repo_coverage_gap():
+    """AC1-ERR: a gh failure for a repo yields None (a coverage gap), never a crash."""
+    from datetime import datetime as dt
+    now = dt(2026, 7, 18, 12, 0, 0)
+    prs, truncated = cli._gh_pr_list("o/r", now, now, lambda args: (1, "", "rate limited"))
+    assert prs is None
+
+
+# --------------------------------------------------------------------------- #
 # replay
 # --------------------------------------------------------------------------- #
 
