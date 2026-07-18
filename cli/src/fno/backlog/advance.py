@@ -1671,3 +1671,318 @@ def advance_dependents(
         )
         for dep in deps
     ]
+
+
+# ---------------------------------------------------------------------------
+# Epic kickoff / converge (x-9608 K1): fan out an epic's ready leaf children
+# ---------------------------------------------------------------------------
+#
+# The mission's manual entry point (and, later, K2's per-tick drain reuse the
+# same _converge_one core). A "mission" is an epic node plus its transitive
+# children (the parent EDGE is the mission key; mission_id is untouched -
+# Locked Decision 2). Kickoff marks the mission active (a durable graph field on
+# the epic, readable from Python AND Rust, cleared on cascade-close), then runs
+# converge pass 1: for every currently-ready LEAF child across all projects, it
+# resolves the child's work-map root and converge-dispatches it, one receipt per
+# child, respecting per-project max_lanes + an overall --max. It is idempotent
+# (a re-run dispatches nothing already node:<id>-claimed) and per-child isolated
+# (one child's failure never aborts the pass).
+
+# Mission-activation events (registered in cli/src/fno/events/schema.yaml).
+EVENT_MISSION_ACTIVATED = "mission_activated"
+EVENT_MISSION_DEACTIVATED = "mission_deactivated"
+
+# The graph field kickoff sets on the epic node to mark the mission active.
+# Durable (graph.json), crash-safe, and read by both Python (read_graph) and
+# Rust (K2's drain loop reads graph.json directly). Cleared on cascade-close
+# (_cascade_close_parents) or an explicit `--epic <id> --stop`.
+MISSION_ACTIVE_FIELD = "mission_active"
+
+
+@dataclass(frozen=True)
+class KickoffResult:
+    """Outcome of one kickoff_epic() run."""
+
+    epic_id: str
+    error: Optional[str] = None  # no-such-node | not-a-container | disabled | walker-live
+    activated: bool = False
+    deactivated: bool = False
+    all_done: bool = False
+    dispatched: tuple = ()  # node ids successfully dispatched this pass
+    child_results: tuple = ()  # AdvanceResult per attempted child
+
+
+def _ready_leaf_children(epic_id: str) -> list[dict]:
+    """Ready LEAF children of an epic, across ALL projects.
+
+    Shells the shipped ``fno backlog ready --parent <epic> --all`` surface (the
+    SAME selection `next`/lane-fill use) so kickoff never diverges from it: the
+    result is already container-filtered, claim-filtered, open-PR-filtered,
+    batch-filtered, and rank-sorted. Transitive children via ``--parent``
+    semantics (descendants_of). Raises on a garbled response so the caller skips
+    rather than guessing (Failure Modes: Errors).
+    """
+    cmd = [
+        *_subprocess_util.fno_py_cmd(),
+        "backlog", "ready", "--parent", epic_id, "--all",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno backlog ready --parent {epic_id} exited {proc.returncode}: "
+            f"{proc.stderr.strip()[:200]}"
+        )
+    out = (proc.stdout or "").strip()
+    if not out or out == "null":
+        return []
+    nodes = json.loads(out)
+    if not isinstance(nodes, list):
+        raise RuntimeError(
+            f"fno backlog ready --parent returned an unexpected shape: {out[:200]}"
+        )
+    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+
+
+def _live_workers_by_project() -> dict[str, int]:
+    """Count LIVE node:<id> workers per project, to seed max_lanes.
+
+    max_lanes is a per-project concurrency cap, so a project that already has a
+    live worker occupies a lane and kickoff must count it before deciding how
+    many MORE to dispatch (else a re-run past a still-running first pass would
+    exceed the cap). Best-effort: any read fault degrades to an empty map (no
+    seed), never blocks the pass.
+    """
+    counts: dict[str, int] = {}
+    try:
+        from fno.graph.statuses import live_claimed_node_ids
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        live = live_claimed_node_ids()
+        if not live:
+            return counts
+        by_id = {
+            e["id"]: e for e in read_graph(graph_json())
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
+        for nid in live:
+            proj = (by_id.get(nid) or {}).get("project")
+            if proj:
+                counts[proj] = counts.get(proj, 0) + 1
+    except Exception:  # noqa: BLE001 - a live-count read must never block kickoff
+        return counts
+    return counts
+
+
+def _max_lanes() -> int:
+    """Per-project concurrency cap for kickoff, from ``config.parallel.max_lanes``.
+
+    Default 1 (the conservative single lane). A seam so kickoff's cap read is
+    patchable in tests without stubbing the whole settings object. Fail-safe: any
+    read fault degrades to 1.
+    """
+    try:
+        from fno.config import load_settings
+
+        return int(load_settings().parallel.max_lanes)
+    except Exception:  # noqa: BLE001 - fail-safe to the conservative single lane
+        return 1
+
+
+def _set_mission_active(epic_id: str, active: bool) -> bool:
+    """Set/clear the epic's ``mission_active`` graph field. Returns whether it changed.
+
+    One locked graph mutation via locked_mutate_graph (never a direct Edit/Write -
+    the HARD-GATE). Idempotent: setting an already-active mission (or clearing an
+    inactive one) is a no-op that returns False.
+    """
+    from fno.graph._intake import _find_node
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    changed = [False]
+
+    def mutator(entries):
+        node = _find_node(entries, epic_id)
+        if node is None:
+            return entries
+        if active:
+            if node.get(MISSION_ACTIVE_FIELD) is not True:
+                node[MISSION_ACTIVE_FIELD] = True
+                changed[0] = True
+        elif MISSION_ACTIVE_FIELD in node:
+            node.pop(MISSION_ACTIVE_FIELD, None)
+            changed[0] = True
+        return entries
+
+    locked_mutate_graph(graph_json(), mutator)
+    return changed[0]
+
+
+def kickoff_epic(
+    epic_id: str,
+    *,
+    max_dispatch: Optional[int] = None,
+    project_root: Optional[Path] = None,
+    events_path: Optional[Path] = None,
+    verbose: bool = False,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    stop: bool = False,
+) -> KickoffResult:
+    """Kick off (or stop) an epic mission: mark active + converge pass 1.
+
+    Refuses a non-container node by name (an epic's work is its children, never
+    the box). ``stop`` deactivates the mission and dispatches nothing. Otherwise
+    marks the mission active and fans out every currently-ready LEAF child across
+    all projects via the shared _converge_one core, respecting per-project
+    ``config.parallel.max_lanes`` and an overall ``max_dispatch`` (--max). All
+    children already done -> a no-op receipt + deactivate (verify the cascade
+    closed the epic). Gated on the same auto-continue opt-in and strictly
+    non-fatal; each child's failure is isolated (its own receipt, never aborts
+    the pass). Idempotent: a re-run dispatches nothing already node:<id>-claimed.
+    """
+    ev_path = events_path if events_path is not None else _events_path(project_root)
+
+    from fno.graph._intake import _find_node, descendants_of
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    try:
+        entries = read_graph(graph_json())
+    except Exception as exc:  # noqa: BLE001 - a graph read fault skips cleanly
+        return KickoffResult(epic_id, error=f"graph-error: {str(exc)[:120]}")
+
+    epic = _find_node(entries, epic_id)
+    if epic is None:
+        return KickoffResult(epic_id, error="no-such-node")
+    canon = epic["id"]
+
+    # Refuse a non-container by name: only an epic (some node's parent) is a
+    # mission. A leaf has no children to fan out; kickoff on it is an operator
+    # error, not a silent no-op.
+    from fno.graph.cli import _container_ids
+
+    if canon not in _container_ids(entries):
+        return KickoffResult(canon, error="not-a-container")
+
+    # Explicit stop: deactivate the mission, dispatch nothing.
+    if stop:
+        _set_mission_active(canon, False)
+        _emit(EVENT_MISSION_DEACTIVATED, {"epic_id": canon, "reason": "stop"}, ev_path)
+        return KickoffResult(canon, deactivated=True)
+
+    # Same opt-in gate as advance()/advance_dependents. A live walker owning THIS
+    # repo would pick nodes up itself; kickoff is the explicit converge tool, so a
+    # global walker is a skip. (Per-child, a foreign-repo walker is handled in
+    # _converge_one's own _walker_live_at.)
+    if not auto_continue_enabled(project_root=project_root):
+        return KickoffResult(canon, error="disabled")
+    if _claim_is_live(_walker_key()):
+        return KickoffResult(canon, error="walker-live")
+
+    # All descendants already done -> mission complete: verify the cascade closed
+    # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at
+    # least one child above.)
+    descendants = descendants_of(entries, canon)
+    by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
+    all_done = bool(descendants) and all(
+        (by_id.get(d) or {}).get("completed_at") for d in descendants
+    )
+    if all_done:
+        _set_mission_active(canon, False)
+        epic_done = bool((by_id.get(canon) or {}).get("completed_at"))
+        _emit(
+            EVENT_MISSION_DEACTIVATED,
+            {"epic_id": canon, "reason": "complete", "epic_closed": epic_done},
+            ev_path,
+        )
+        return KickoffResult(canon, deactivated=True, all_done=True)
+
+    # Mark the mission active (durable graph field) before dispatching, so a crash
+    # mid-fanout still leaves the mission drainable by K2. Emit the activation
+    # receipt once, on the first kickoff (a re-run of an already-active mission
+    # skips the event but still runs the converge pass - idempotent recovery).
+    if _set_mission_active(canon, True):
+        _emit(EVENT_MISSION_ACTIVATED, {"epic_id": canon}, ev_path)
+
+    # Ready leaf children across all projects, via the shipped selection surface.
+    try:
+        children = _ready_leaf_children(canon)
+    except Exception as exc:  # noqa: BLE001 - never guess on a read error
+        _emit(
+            EVENT_SKIPPED,
+            {"reason": "children-error", "mission": canon, "detail": str(exc)[:200]},
+            ev_path,
+        )
+        return KickoffResult(
+            canon, activated=True,
+            child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
+        )
+
+    # Per-project cap: config.parallel.max_lanes (default 1), seeded with the
+    # project's already-live workers so the cap counts total concurrency, not just
+    # this pass. An overall --max caps total dispatches this run.
+    max_lanes = _max_lanes()
+    per_project = _live_workers_by_project()
+
+    results: list[AdvanceResult] = []
+    dispatched: list[str] = []
+    total = 0
+    for child in children:
+        if max_dispatch is not None and total >= max_dispatch:
+            break  # overall cap reached; remaining ready children wait for a drain/re-run
+        proj = child.get("project") or _DOMAIN_UNSET
+        # A project with no map entry cannot be capped or launched; surface it by
+        # name AND the exact config key (Boundaries), then continue - one unmapped
+        # project never blocks the others.
+        from fno.graph._intake import project_root_from_settings
+
+        root = project_root_from_settings(child.get("project"))
+        if not root:
+            results.append(_converge_skip_unmapped(child, proj, canon, ev_path))
+            continue
+        # Per-project max_lanes cap (0 = paused project; skip). Counts live workers
+        # + this pass's dispatches.
+        if max_lanes >= 0 and per_project.get(proj, 0) >= max_lanes:
+            _emit(
+                EVENT_SKIPPED,
+                {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
+                 "detail": f"{proj}: max_lanes={max_lanes}"},
+                ev_path,
+            )
+            results.append(
+                AdvanceResult("skipped", EVENT_SKIPPED, reason="lane-cap", node_id=child["id"])
+            )
+            continue
+        res = _converge_one(
+            child, root, ev_path, verbose,
+            cross_project=True, mission=canon, model=model, provider=provider,
+        )
+        results.append(res)
+        if res.decision == "dispatched":
+            dispatched.append(res.node_id or child["id"])
+            per_project[proj] = per_project.get(proj, 0) + 1
+            total += 1
+
+    return KickoffResult(
+        canon, activated=True,
+        dispatched=tuple(dispatched), child_results=tuple(results),
+    )
+
+
+def _converge_skip_unmapped(
+    child: dict, project: str, mission: str, ev_path: Path
+) -> AdvanceResult:
+    """Emit the loud unmapped-project skip for one kickoff child (names the key)."""
+    detail = f"{project} (add config.work.workspaces.<ws>.projects[].path)"
+    _emit(
+        EVENT_SKIPPED,
+        {"reason": "unmapped-project", "node_id": child["id"], "mission": mission,
+         "detail": detail},
+        ev_path,
+    )
+    return AdvanceResult(
+        "skipped", EVENT_SKIPPED, reason="unmapped-project",
+        node_id=child["id"], detail=detail,
+    )
