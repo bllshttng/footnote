@@ -154,26 +154,66 @@ def test_ac7_edge_empty_abilities_dir_degrades_cleanly(tmp_path):
     assert ctx.warnings == []
 
 
+_PROVIDER_ENVS = (
+    "CODEX_THREAD_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "GEMINI_SESSION_ID",
+    "CODEX_PLUGIN_ROOT",
+    "GEMINI_PROJECT_DIR",
+    "CLAUDE_PLUGIN_ROOT",
+)
+
+
+def _clear_provider_env(monkeypatch):
+    for key in _PROVIDER_ENVS:
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_provider_detection_defaults_to_claude(tmp_path, monkeypatch):
     """provider defaults to claude when no provider-specific env var is set."""
-    monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
-    monkeypatch.delenv("GEMINI_PROJECT_DIR", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    _clear_provider_env(monkeypatch)
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.provider == "claude"
 
 
 def test_provider_detection_recognizes_codex(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
     monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/fake/codex")
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.provider == "codex"
 
 
 def test_provider_detection_recognizes_gemini(tmp_path, monkeypatch):
-    monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
+    _clear_provider_env(monkeypatch)
     monkeypatch.setenv("GEMINI_PROJECT_DIR", "/fake/gemini")
     ctx = load_agent_context(project_root_override=tmp_path)
     assert ctx.provider == "gemini"
+
+
+def test_ac1_codex_session_marker_resolves_codex(tmp_path, monkeypatch):
+    """AC1: a real codex session sets CODEX_THREAD_ID but no *_PLUGIN_ROOT;
+    it must resolve codex, not fail open to claude."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-abc")
+    ctx = load_agent_context(project_root_override=tmp_path)
+    assert ctx.provider == "codex"
+
+
+def test_ac1_err_no_markers_defaults_claude(tmp_path, monkeypatch):
+    """AC1-ERR: no marker of any kind still defaults to claude (unchanged)."""
+    _clear_provider_env(monkeypatch)
+    ctx = load_agent_context(project_root_override=tmp_path)
+    assert ctx.provider == "claude"
+
+
+def test_session_marker_beats_conflicting_plugin_root(tmp_path, monkeypatch):
+    """A codex session marker wins over a stale CLAUDE_PLUGIN_ROOT hint."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-abc")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/fake/claude")
+    ctx = load_agent_context(project_root_override=tmp_path)
+    assert ctx.provider == "codex"
 
 
 def test_walker_only_detected_when_file_non_empty(tmp_path):

@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 
+from fno.harness_identity import resolve_harness_identity
+
 Provider = Literal["claude", "gemini", "codex"]
 SessionKind = Literal["target", "session", "override"]
 FleetStatus = Literal["running", "paused"]
@@ -121,13 +123,20 @@ def _detect_project_root(warnings: List[str]) -> Path:
 
 
 def _detect_provider() -> Provider:
-    """Mirror init-target-state.sh's detect_provider; default 'claude'."""
+    """Resolve harness via shared session markers first, plugin-root hints
+    second, default 'claude'. Mirrors init-target-state.sh's detect_provider.
+
+    Session markers win because a real codex/gemini session sets its thread or
+    session env but no ``*_PLUGIN_ROOT``; sniffing plugin roots alone silently
+    mislabeled those sessions as ``claude`` (the fail-open this fixes).
+    """
+    harness = resolve_harness_identity().harness
+    if harness in ("claude", "codex", "gemini"):
+        return harness  # type: ignore[return-value]
     if os.environ.get("CODEX_PLUGIN_ROOT"):
         return "codex"
     if os.environ.get("GEMINI_PROJECT_DIR"):
         return "gemini"
-    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
-        return "claude"
     return "claude"
 
 
