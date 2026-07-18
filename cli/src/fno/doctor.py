@@ -1395,6 +1395,7 @@ def _harness_surface_report() -> dict[str, Any]:
             ["codex", "plugin", "marketplace", "list"],
             capture_output=True,
             text=True,
+            errors="replace",  # localized/non-UTF-8 output must not crash doctor
             timeout=5,
             check=False,
         )
