@@ -13,7 +13,7 @@
 //! fields per node, not the whole model. A malformed document keeps the
 //! last-good cards (a torn concurrent write must not blank the lane).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::proto::{BacklogCard, CardState};
@@ -163,6 +163,160 @@ pub fn derive_pr_map(raw: &str) -> HashMap<String, u64> {
         out.insert(id.to_string(), pr);
     }
     out
+}
+
+/// One active mission (an epic with `mission_active: true`, K1) as the mux
+/// renders it: the epic slug names the squad, and `done`/`total` count its leaf
+/// descendants. The counts are computed HERE (not read) because x-6c2b's
+/// `children_done`/`children_total` counters land on the plan DOC, never on the
+/// graph node - the mux only sees `graph.json`, so it recomputes them with the
+/// same `compute_rollup` semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mission {
+    pub epic_id: String,
+    pub slug: String,
+    pub done: u32,
+    pub total: u32,
+}
+
+/// The active-mission projection of one graph read: the missions to render as
+/// squad headers, plus a `node id -> epic id` index so a live worker row groups
+/// into its mission by ancestor. Only epics whose `mission_active` is true
+/// appear; a node reaches a mission by walking `parent` edges to the nearest
+/// such epic (the epic itself is not one of its own worker members). `None` on
+/// a malformed document so the caller renders workers UNGROUPED rather than
+/// hiding them (AC4); an empty map is the valid "no active mission" state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MissionMap {
+    pub missions: Vec<Mission>,
+    pub node_to_epic: HashMap<String, String>,
+}
+
+/// Ancestor-walk / rollup-recursion depth cap. The mission tree is
+/// mission -> epic -> leaf (`EPIC_NEST_MAX_DEPTH = 2`, x-6c2b); the cap is
+/// generous slack that, with a `seen` set, terminates a malformed
+/// parent/child cycle instead of looping.
+const MISSION_DEPTH_CAP: usize = 8;
+
+/// One node's fields the mission derivation needs (a lightweight parse so the
+/// walks never re-touch the JSON).
+struct MissionNode<'a> {
+    parent: Option<&'a str>,
+    slug: &'a str,
+    is_epic: bool,
+    mission_active: bool,
+    done: bool,
+}
+
+/// Derive the active missions from raw graph JSON (pure; unit-testable without a
+/// file). See [`MissionMap`] for the contract. Mirrors `derive_cards`'s
+/// tolerant `serde_json::Value` access - the FILE is the graph contract.
+pub fn derive_missions(raw: &str) -> Option<MissionMap> {
+    let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let entries = doc
+        .get("entries")
+        .or_else(|| doc.get("nodes"))?
+        .as_array()?;
+
+    let mut nodes: HashMap<&str, MissionNode> = HashMap::with_capacity(entries.len());
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in entries {
+        let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let parent = e.get("parent").and_then(|v| v.as_str());
+        if let Some(p) = parent {
+            children.entry(p).or_default().push(id);
+        }
+        nodes.insert(
+            id,
+            MissionNode {
+                parent,
+                slug: e.get("slug").and_then(|v| v.as_str()).unwrap_or(""),
+                is_epic: e.get("type").and_then(|v| v.as_str()) == Some("epic"),
+                mission_active: e.get("mission_active").and_then(|v| v.as_bool()) == Some(true),
+                done: e.get("_status").and_then(|v| v.as_str()) == Some("done"),
+            },
+        );
+    }
+
+    let active: HashSet<&str> = nodes
+        .iter()
+        .filter(|(_, n)| n.mission_active)
+        .map(|(id, _)| *id)
+        .collect();
+    if active.is_empty() {
+        return Some(MissionMap::default()); // valid graph, nothing active
+    }
+
+    // node -> nearest active-mission epic (ancestor walk; the epic itself is
+    // NOT a member of its own mission, so start at the parent).
+    let mut node_to_epic = HashMap::new();
+    for (&id, node) in &nodes {
+        let mut cur = node.parent;
+        let mut seen: HashSet<&str> = HashSet::new();
+        for _ in 0..MISSION_DEPTH_CAP {
+            let Some(a) = cur else { break };
+            if !seen.insert(a) {
+                break; // cycle
+            }
+            if active.contains(a) {
+                node_to_epic.insert(id.to_string(), a.to_string());
+                break;
+            }
+            cur = nodes.get(a).and_then(|n| n.parent);
+        }
+    }
+
+    let mut missions: Vec<Mission> = active
+        .iter()
+        .map(|&epic| {
+            let (done, total) = rollup(epic, &nodes, &children, &mut HashSet::new(), 0);
+            Mission {
+                epic_id: epic.to_string(),
+                slug: nodes.get(epic).map(|n| n.slug).unwrap_or("").to_string(),
+                done,
+                total,
+            }
+        })
+        .collect();
+    // Stable order for a deterministic sideline (active set iteration is not).
+    missions.sort_by(|a, b| a.epic_id.cmp(&b.epic_id));
+    Some(MissionMap {
+        missions,
+        node_to_epic,
+    })
+}
+
+/// Leaf done/total under `epic`, x-6c2b `compute_rollup` semantics: a leaf child
+/// counts once (done iff `_status == "done"`); an epic child recurses ONE mission
+/// level and folds its leaves in (never counting an epic as a unit). `seen`
+/// bounds an epic-parent cycle; `depth` bounds runaway nesting.
+fn rollup(
+    epic: &str,
+    nodes: &HashMap<&str, MissionNode>,
+    children: &HashMap<&str, Vec<&str>>,
+    seen: &mut HashSet<String>,
+    depth: usize,
+) -> (u32, u32) {
+    if depth >= MISSION_DEPTH_CAP || !seen.insert(epic.to_string()) {
+        return (0, 0);
+    }
+    let (mut done, mut total) = (0u32, 0u32);
+    for &child in children.get(epic).map(Vec::as_slice).unwrap_or(&[]) {
+        let Some(cn) = nodes.get(child) else { continue };
+        if cn.is_epic {
+            let (d, t) = rollup(child, nodes, children, seen, depth + 1);
+            done += d;
+            total += t;
+        } else {
+            total += 1;
+            if cn.done {
+                done += 1;
+            }
+        }
+    }
+    (done, total)
 }
 
 /// Ranked nodes (band 0) sort ahead of unranked ones (band 1).
@@ -547,5 +701,93 @@ mod tests {
         // Unparseable output is None (keep last-good), not an empty map.
         assert!(live_claims_from_sweep("not json").is_none());
         assert!(live_claims_from_sweep(r#"{"no_claims":1}"#).is_none());
+    }
+
+    // ---- mission derivation (x-1a47) -------------------------------------
+
+    #[test]
+    fn active_mission_membership_and_counts() {
+        // AC2/AC3: an active-mission epic's leaf children map to it and its
+        // done/total counts them; the epic is NOT its own member; a node under
+        // an INACTIVE epic is unmapped.
+        let raw = graph(
+            r#"{"id":"x-e","slug":"mission-e","type":"epic","mission_active":true},
+               {"id":"x-c1","slug":"c1","_status":"done","parent":"x-e"},
+               {"id":"x-c2","slug":"c2","_status":"claimed","parent":"x-e"},
+               {"id":"x-off","slug":"off","type":"epic","parent":null},
+               {"id":"x-c3","slug":"c3","_status":"ready","parent":"x-off"}"#,
+        );
+        let m = derive_missions(&raw).unwrap();
+        assert_eq!(m.node_to_epic.get("x-c1"), Some(&"x-e".to_string()));
+        assert_eq!(m.node_to_epic.get("x-c2"), Some(&"x-e".to_string()));
+        assert_eq!(m.node_to_epic.get("x-e"), None, "epic is not its own member");
+        assert_eq!(m.node_to_epic.get("x-c3"), None, "inactive-epic child unmapped");
+        assert_eq!(m.missions.len(), 1);
+        let mission = &m.missions[0];
+        assert_eq!(mission.epic_id, "x-e");
+        assert_eq!(mission.slug, "mission-e");
+        assert_eq!((mission.done, mission.total), (1, 2));
+    }
+
+    #[test]
+    fn empty_active_mission_counts_survivors() {
+        // AC3 (silent-failure): a mission whose only child is done still renders
+        // 1/1 - the mission exists even with no in-flight work.
+        let raw = graph(
+            r#"{"id":"x-e","slug":"m","type":"epic","mission_active":true},
+               {"id":"x-c1","_status":"done","parent":"x-e"}"#,
+        );
+        let m = derive_missions(&raw).unwrap();
+        assert_eq!(m.missions.len(), 1);
+        assert_eq!((m.missions[0].done, m.missions[0].total), (1, 1));
+    }
+
+    #[test]
+    fn no_active_mission_is_empty_not_none() {
+        // A valid graph with nothing active is an empty map, NOT None (None is
+        // reserved for a malformed doc - AC4 fallback).
+        let raw = graph(r#"{"id":"x-e","slug":"m","type":"epic"}"#);
+        let m = derive_missions(&raw).unwrap();
+        assert!(m.missions.is_empty() && m.node_to_epic.is_empty());
+    }
+
+    #[test]
+    fn malformed_document_is_none() {
+        // AC4: a torn/malformed graph yields None so the caller renders workers
+        // ungrouped rather than hiding them.
+        assert!(derive_missions("not json").is_none());
+    }
+
+    #[test]
+    fn epic_child_folds_leaves_one_level() {
+        // x-6c2b: a mission epic over a sub-epic folds the sub-epic's LEAVES in
+        // (mission -> epic -> leaf), never counting the sub-epic as a unit.
+        let raw = graph(
+            r#"{"id":"x-m","slug":"mission","type":"epic","mission_active":true},
+               {"id":"x-sub","slug":"sub","type":"epic","parent":"x-m"},
+               {"id":"x-l1","_status":"done","parent":"x-sub"},
+               {"id":"x-l2","_status":"ready","parent":"x-sub"},
+               {"id":"x-direct","_status":"done","parent":"x-m"}"#,
+        );
+        let m = derive_missions(&raw).unwrap();
+        assert_eq!(m.missions.len(), 1);
+        // 2 done (x-l1, x-direct) of 3 leaves (x-l1, x-l2, x-direct); the
+        // sub-epic itself is not a unit.
+        assert_eq!((m.missions[0].done, m.missions[0].total), (2, 3));
+        // A leaf under the sub-epic walks UP past it to the active mission.
+        assert_eq!(m.node_to_epic.get("x-l1"), Some(&"x-m".to_string()));
+    }
+
+    #[test]
+    fn parent_cycle_terminates() {
+        // A malformed parent cycle must not loop the ancestor walk or the
+        // rollup recursion.
+        let raw = graph(
+            r#"{"id":"x-a","type":"epic","mission_active":true,"parent":"x-b"},
+               {"id":"x-b","type":"epic","parent":"x-a"}"#,
+        );
+        // Terminates (does not hang) and produces a well-formed map.
+        let m = derive_missions(&raw).unwrap();
+        assert_eq!(m.missions.len(), 1, "x-a is the active mission");
     }
 }
