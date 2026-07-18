@@ -5476,6 +5476,32 @@ def cmd_reconcile(
             # closes a node once (AC4-EDGE).
             emit_human_touch_for_record(record)
 
+            # Ledger backstop (x-88df US3): the merge event is the one moment
+            # the system is guaranteed to know (node, pr, project, merged_at),
+            # yet the ledger's only writer is the origin's own finalize - a
+            # killed/reaped origin leaks its row. Stamp a null-pr row or create a
+            # minimal backstop for the transcript-gone tail; the direct-finalize
+            # rung's full row supersedes it via the collapse rule. Best-effort
+            # and non-fatal: a ledger failure must never abort the close (AC1-ERR).
+            try:
+                from fno.cost._register import upsert_ledger_pr
+
+                _led_node = _find_node(post_entries, record.node_id)
+                _led_project = (_led_node or {}).get("project")
+                upsert_ledger_pr(
+                    record.node_id,
+                    record.pr_number,
+                    record.pr_url,
+                    _led_project,
+                    record.merged_at,
+                )
+            except Exception as _led_exc:  # noqa: BLE001 - never abort the close
+                typer.echo(
+                    f"warning: ledger upsert for {record.node_id} (PR "
+                    f"#{record.pr_number}) failed: {_led_exc}; node close unaffected",
+                    err=True,
+                )
+
             # Tier-1 gate_escape (x-f894): a STRICTER subset of the touch above -
             # only when a required review bot never reviewed the oob-merged PR
             # (the #222 boundary). Resolve the repo's required bots (empty on
@@ -5582,6 +5608,7 @@ def cmd_reconcile(
                             (_pm_node or {}).get("source_session_id")
                         ),
                         source_harness=((_pm_node or {}).get("source_harness")),
+                        source_cwd=((_pm_node or {}).get("source_cwd")),
                     )
                     if not json_out:
                         if _pm.outcome == "routed-warm":
@@ -5594,6 +5621,11 @@ def cmd_reconcile(
                                 f"post-merge: dispatched /fno:pr merged "
                                 f"{record.pr_number} (short_id={_pm.short_id}, "
                                 f"{_pm.detail or 'cold'})"
+                            )
+                        elif _pm.outcome == "finalized-origin":
+                            typer.echo(
+                                f"post-merge: direct-finalized dead origin for "
+                                f"PR #{record.pr_number} (full-fidelity ledger row)"
                             )
                         elif _pm.outcome == "already-dispatched":
                             typer.echo(
