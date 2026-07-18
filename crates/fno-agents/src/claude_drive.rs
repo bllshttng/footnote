@@ -372,12 +372,12 @@ mod tests {
             harness: "claude-code",
             model: "opus-4.8",
             node: None,
-            to: Some("ee99ff00"),
+            to: Some("claude-ee99ff00"),
             reply_to: None,
         };
         assert_eq!(
             fno_mail_open(&directed),
-            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"ee99ff00\">"
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"claude-ee99ff00\">"
         );
     }
 
@@ -391,12 +391,12 @@ mod tests {
             harness: "claude-code",
             model: "opus-4.8",
             node: None,
-            to: Some("e5f6a7b8"),
+            to: Some("claude-e5f6a7b8"),
             reply_to: Some("msg-0091f3"),
         };
         assert_eq!(
             fno_mail_open(&reply),
-            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"e5f6a7b8\" reply_to=\"msg-0091f3\">"
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"claude-e5f6a7b8\" reply_to=\"msg-0091f3\">"
         );
     }
 

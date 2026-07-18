@@ -108,13 +108,22 @@ LOCAL_SETTINGS="$REPO_ROOT/.fno/config.toml"
 GLOBAL_SETTINGS="${HOME}/.fno/config.toml"
 
 # ── Provider detection ───────────────────────────────────────────────
+# Mirrors HARNESS_SESSION_MARKERS in cli/src/fno/harness_identity.py: session
+# markers first (non-blank-after-strip, so the *[![:space:]]* glob matches its
+# .strip()), then bare-non-empty plugin-root hints, then the claude default.
 detect_provider() {
-  if [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
+  if [[ "${CODEX_THREAD_ID:-}" == *[![:space:]]* ]]; then
+    echo "codex"
+  elif [[ "${CLAUDE_CODE_SESSION_ID:-}" == *[![:space:]]* ]]; then
+    echo "claude"
+  elif [[ "${CODEX_SESSION_ID:-}" == *[![:space:]]* ]]; then
+    echo "codex"
+  elif [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]]; then
+    echo "gemini"
+  elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
     echo "codex"
   elif [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
     echo "gemini"
-  elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-    echo "claude"
   else
     echo "claude"
   fi

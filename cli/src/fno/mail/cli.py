@@ -403,20 +403,12 @@ def cmd_reply(
             # AC1-FR: the original sender is no longer live -> durable floor
             # addressed to their canonical handle (orig.from_), still drainable.
             prov = orig.from_.split("-", 1)[0] if "-" in orig.from_ else None
-            # Keep the wire `to` attr the 8-hex short even if from_ carries a full
-            # uuid (`claude-<uuid>`): take the first dash-segment after the harness.
-            short = (
-                orig.from_.split("-", 1)[1].split("-")[0]
-                if "-" in orig.from_
-                else orig.from_
-            )
             _name_lane_send(
                 body_text,
                 from_name=from_project,
                 resolved=None,
                 recipient=orig.from_,
                 provider=prov,
-                to_short=short,
                 reply_to=to_msg,
             )
         return
@@ -812,7 +804,6 @@ def _name_lane_send(
     resolved,
     recipient: Optional[str] = None,
     provider: Optional[str] = None,
-    to_short: Optional[str] = None,
     reply_to: Optional[str] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
@@ -832,14 +823,15 @@ def _name_lane_send(
     if resolved is not None:
         recipient = canonical_handle(resolved.agent, resolved.session_id)
         provider = resolved.agent
-        to_short = resolved.short_id
 
+    # Wire `to` carries the canonical handle, matching the durable-bus recipient
+    # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
     wrapped = wrap_fno_mail(
         message,
         from_=stamp_from(from_name),
         harness=infer_invoking_harness() or "cli",
         model=resolve_self_model(),
-        to=to_short,
+        to=recipient,
         reply_to=reply_to,
     )
 
@@ -1070,7 +1062,9 @@ def cmd_send(
             sender = (
                 from_name
                 if from_name is not None
-                else resolve_project(cwd=workdir)
+                else resolve_project(
+                    cwd=workdir, flag_hint="--from-name/--from-self"
+                )
             )
         except ProjectIdentificationError as exc:
             print(f"error: {exc}", file=sys.stderr)

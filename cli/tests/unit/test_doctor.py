@@ -102,6 +102,96 @@ def test_ac1_err_missing_verb_reports_skew_and_exits_nonzero(
     assert "fno update" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# x-3248 Change 5: per-harness surface freshness / dedupe
+# ---------------------------------------------------------------------------
+
+_MARKETPLACE_LIST_ONE = """\
+MARKETPLACE             ROOT
+openai-bundled          /Users/x/.codex/.tmp/bundled-marketplaces/openai-bundled
+footnote-local          /Users/x/code/footnote/footnote
+"""
+
+_MARKETPLACE_LIST_DUP = """\
+MARKETPLACE             ROOT
+footnote-local          /Users/x/code/footnote/footnote
+footnote                /Users/x/.codex/.tmp/footnote-clone
+"""
+
+
+def test_codex_marketplace_duplicates_pure_parser() -> None:
+    # A single legitimate registration is not a duplicate; the header row and
+    # foreign marketplaces never match.
+    assert doctor._codex_marketplace_duplicates(_MARKETPLACE_LIST_ONE) == []
+    assert doctor._codex_marketplace_duplicates("") == []
+    # Two footnote rows -> both names reported.
+    assert doctor._codex_marketplace_duplicates(_MARKETPLACE_LIST_DUP) == [
+        "footnote-local",
+        "footnote",
+    ]
+
+
+def test_ac5_doctor_names_codex_duplicate_and_dedupe_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC5: codex footnote registered twice -> doctor names the duplicate and
+    the dedupe action instead of staying silent."""
+    _stub_signals(
+        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor, "_harness_surface_report",
+        lambda: {"codex_marketplace_duplicates": ["footnote-local", "footnote"]},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "registered 2 times" in result.stdout
+    assert "footnote-local, footnote" in result.stdout
+    assert "codex plugin marketplace remove" in result.stdout
+
+
+def test_doctor_reports_stale_opencode_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor, "_harness_surface_report", lambda: {"opencode": "stale"}
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert "opencode footnote plugin is STALE" in result.stdout
+    assert "fno setup" in result.stdout
+
+
+def test_doctor_main_run_points_at_codex_hooks_dual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4: a plain `fno doctor` (not just --codex-hooks) surfaces codex hooks
+    dual-representation and points at the heal verb."""
+    _stub_signals(
+        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor, "_harness_surface_report", lambda: {"codex_hooks_dual": True}
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert "codex hooks load from both" in result.stdout
+    assert "--migrate-legacy-hooks-json" in result.stdout
+
+
+def test_doctor_quiet_when_surfaces_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(doctor, "_harness_surface_report", lambda: {})
+    result = runner.invoke(app, ["doctor"])
+    assert "opencode" not in result.stdout
+    assert "marketplace" not in result.stdout
+
+
 def test_ac1_err_rev_behind_reports_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC1-ERR variant: marker behind source HEAD => stale, exit nonzero."""
     _stub_signals(
@@ -1102,6 +1192,9 @@ def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
     # subprocess, unrelated to the raw-cargo concern this tripwire guards; stub it
     # so the tripwire isolates cargo, not the probe.
     monkeypatch.setattr(doctor, "_probe_is_mux", lambda p: False)
+    # Same reasoning for the per-harness surface probe (`codex plugin marketplace
+    # list`) - a legit advisory subprocess, not raw cargo.
+    monkeypatch.setattr(doctor, "_harness_surface_report", lambda: {})
 
     from fno import update
 

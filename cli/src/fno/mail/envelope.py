@@ -9,9 +9,10 @@ variant built from :func:`fno_mail_open`). ``test_envelope`` pins these to the
 Rust ``wrap_fno_mail`` output so the two renderers never drift.
 
 Field rule (from G1): a field is a TAG attribute only if the recipient needs it
-AT MESSAGE TIME and cannot cheaply look it up by ``from``. ``from`` is the
-sender's short 8-hex sessionId (the identity, since sessionIds ARE names);
-everything else (cwd, pid, lineage) lives in the registry keyed by ``from``.
+AT MESSAGE TIME and cannot cheaply look it up by ``from``. Both ``from`` and
+``to`` are canonical handles (``<harness>-<short>``) -- the addressable identity;
+the registry stays keyed by ``from``, and everything else (cwd, pid, lineage)
+lives there.
 """
 from __future__ import annotations
 

@@ -94,6 +94,24 @@ def _invoke(runner: CliRunner, *args: str):
     return runner.invoke(mail_app, ["send", *args])
 
 
+def test_ac3_kind_send_projectless_error_names_real_flags(isolated, runner) -> None:
+    """AC3: a --kind send from a project-less repo (no ``project`` key) fails
+    naming ``--from-name``/``--from-self``, the flags ``mail send`` actually
+    has -- never the bare ``--from`` (which lives only on the inbox verbs)."""
+    scratch = isolated / "no-project"
+    scratch.mkdir()
+    result = _invoke(
+        runner,
+        "acme-docs",
+        "--kind", "fyi",
+        "-b", "hi",
+        "--cwd", str(scratch),
+    )
+    assert result.exit_code == 2, result.output
+    assert "--from-name/--from-self" in result.output
+    assert "pass --from\n" not in result.output
+
+
 def test_cmd_send_kind_heads_up_writes_durable_thread(isolated, runner) -> None:
     from fno.inbox.store import read_unread_threads
 
