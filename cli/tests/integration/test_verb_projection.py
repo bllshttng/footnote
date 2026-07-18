@@ -191,6 +191,49 @@ def test_malformed_tag_refused_node_unchanged(tmp_graph, tmp_path):
     assert entries[0].get("tags", []) == []  # unchanged
 
 
+def _epic(nid, slug, parent=None):
+    return {
+        "id": nid, "slug": slug, "title": slug, "_status": "ready",
+        "domain": "code", "project": "fno", "type": "epic", "parent": parent,
+    }
+
+
+def test_epic_under_mission_allowed(tmp_graph, tmp_path):
+    """An epic may nest under a top-level mission (mission -> epic)."""
+    _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic")])
+    res = runner.invoke(app, ["backlog", "update", "x-0e02", "--parent", "x-0a01"])
+    assert res.exit_code == 0, res.output
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-0e02")["parent"] == "x-0a01"
+
+
+def test_epic_depth_cap_refused(tmp_graph, tmp_path):
+    """AC3-ERR: parenting an epic under a nested epic exceeds the 2-level cap."""
+    # mission M -> epic E; now try to nest epic G under E (would be 3rd level).
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+        _epic("x-0c03", "gepic"),
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-0c03", "--parent", "x-0e02"])
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-0c03")["parent"] is None  # unchanged
+
+
+def test_leaf_under_nested_epic_allowed(tmp_graph, tmp_path):
+    """A leaf (feature) under an epic is always allowed - only epics are capped."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+        _node(plan),  # a feature
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--parent", "x-0e02"])
+    assert res.exit_code == 0, res.output
+
+
 def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
     """defer + undefer both project best-effort and never fail on a live doc."""
     plan = _plan(tmp_path)

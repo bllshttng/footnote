@@ -10,11 +10,20 @@ runner = CliRunner()
 
 
 def test_bases_verb_emits_files(tmp_path):
-    """The `backlog bases --out DIR` verb is registered and emits epics.base."""
+    """The `backlog bases --out DIR` verb is registered and emits both bases."""
     res = runner.invoke(app, ["backlog", "bases", "--out", str(tmp_path)])
     assert res.exit_code == 0, res.output
     assert (tmp_path / "epics.base").is_file()
+    assert (tmp_path / "missions.base").is_file()
     assert "written" in res.output
+
+
+def test_missions_base_filters_top_level_epics(tmp_path):
+    """missions.base scopes to top-level epics (type epic AND no parent)."""
+    write_base(tmp_path / "missions.base", BASES["missions.base"])
+    text = (tmp_path / "missions.base").read_text(encoding="utf-8")
+    assert 'type == "epic"' in text
+    assert "parent == null" in text
 
 
 def test_writes_marked_base(tmp_path):

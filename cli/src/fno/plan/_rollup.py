@@ -33,14 +33,37 @@ def _direct_children(entries: list[dict[str, Any]], parent_id: str) -> list[dict
     ]
 
 
-def compute_rollup(epic_id: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return the rollup counters for ``epic_id`` from its DIRECT children.
+def compute_rollup(
+    epic_id: str,
+    entries: list[dict[str, Any]],
+    _seen: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Return the LEAF rollup counters for ``epic_id`` (x-6c2b wave 3).
 
-    Each direct child counts once by its derived ``_status``. A childless epic
-    returns zeros with ``progress: "0/0"`` - never a crash, never absent keys.
+    A direct leaf child counts once by its derived ``_status``; a direct child
+    that is itself an epic recurses ONE level and folds its leaves in (so a
+    mission aggregates its epics' leaves, never counting an epic as a unit).
+    Depth caps at mission -> epic -> leaf; the ``_seen`` guard bounds recursion
+    so a malformed graph with an epic-parent cycle terminates instead of
+    looping. A childless epic returns zeros with ``progress: "0/0"``.
     """
+    seen = _seen or frozenset()
+    if epic_id in seen:
+        return {
+            "children_total": 0, "children_done": 0,
+            "children_in_flight": 0, "children_blocked": 0, "progress": "0/0",
+        }
+    seen = seen | {epic_id}
+
     total = done = in_flight = blocked = 0
     for child in _direct_children(entries, epic_id):
+        if child.get("type") == "epic":
+            sub = compute_rollup(child["id"], entries, seen)
+            total += sub["children_total"]
+            done += sub["children_done"]
+            in_flight += sub["children_in_flight"]
+            blocked += sub["children_blocked"]
+            continue
         total += 1
         st = child.get("_status")
         if st == _DONE:

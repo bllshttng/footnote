@@ -1633,7 +1633,9 @@ def cmd_update(
         _validate_blocker_ids,
         _find_node,
         _would_create_cycle,
+        _would_exceed_epic_depth,
     )
+    from fno.graph._constants import EPIC_NEST_MAX_DEPTH
 
     if not has_node_id_prefix(task_id):
         typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
@@ -1935,6 +1937,15 @@ def cmd_update(
                     typer.echo(
                         f"Error: setting parent of {node['id']} to {target['id']} "
                         f"would create a cycle",
+                        err=True,
+                    )
+                    raise typer.Exit(code=1)
+                if _would_exceed_epic_depth(entries, node, target):
+                    typer.echo(
+                        f"Error: parenting epic {node['id']} under {target['id']} "
+                        f"would exceed the {EPIC_NEST_MAX_DEPTH}-level cap "
+                        f"(mission -> epic -> leaf); an epic may nest only under a "
+                        f"top-level mission",
                         err=True,
                     )
                     raise typer.Exit(code=1)

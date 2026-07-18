@@ -172,9 +172,10 @@ def project_graph_nodes(
 def _expand_repaint_targets(
     entries: list[dict[str, Any]], ids: list[str]
 ) -> list[str]:
-    """Add each projected node's parent so a child transition repaints the epic
-    doc (x-6c2b wave 2: one level up). Order-preserving, deduped. A missing or
-    dangling parent is simply skipped - the epic without a doc is a no-op later.
+    """Add each projected node's ancestors so a child transition repaints the
+    epic AND its mission (x-6c2b: walk up to the mission -> epic -> leaf cap, so
+    two hops). Order-preserving, deduped. A missing/dangling parent just stops
+    the walk - an epic without a doc is a no-op later.
     """
     by_id = {
         n.get("id"): n for n in entries if isinstance(n, dict) and n.get("id")
@@ -182,11 +183,17 @@ def _expand_repaint_targets(
     out = list(ids)
     seen = set(ids)
     for nid in ids:
-        node = by_id.get(nid)
-        parent = node.get("parent") if node else None
-        if parent and parent not in seen:
-            seen.add(parent)
-            out.append(parent)
+        cur = by_id.get(nid)
+        hops = 0
+        while cur and hops < 2:
+            parent = cur.get("parent")
+            if not parent:
+                break
+            if parent not in seen:
+                seen.add(parent)
+                out.append(parent)
+            cur = by_id.get(parent)
+            hops += 1
     return out
 
 

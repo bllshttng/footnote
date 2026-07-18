@@ -45,3 +45,34 @@ def test_childless_epic_zeroes():
         "children_blocked": 0,
         "progress": "0/0",
     }
+
+
+def test_mission_aggregates_child_epic_leaves():
+    """AC3: a mission folds its child epic's leaves plus its own direct leaves."""
+    entries = [
+        _n("M", type_="epic"),                  # mission (parent null)
+        _n("E", parent="M", type_="epic"),      # child epic
+        _n("e1", parent="E", status="done"),    # E's 3 leaves, 1 done
+        _n("e2", parent="E", status="ready"),
+        _n("e3", parent="E", status="ready"),
+        _n("L", parent="M", status="ready"),    # M's direct leaf
+    ]
+    m = compute_rollup("M", entries)
+    assert m["children_total"] == 4  # 3 (E's leaves) + 1 (L), NOT counting E itself
+    assert m["children_done"] == 1
+    assert m["progress"] == "1/4"
+
+    e = compute_rollup("E", entries)
+    assert e["children_total"] == 3
+    assert e["children_done"] == 1
+    assert e["progress"] == "1/3"
+
+
+def test_epic_parent_cycle_terminates():
+    """A malformed epic-parent cycle terminates instead of recursing forever."""
+    entries = [
+        _n("A", parent="B", type_="epic"),
+        _n("B", parent="A", type_="epic"),
+    ]
+    r = compute_rollup("A", entries)  # must return, not hang
+    assert r["progress"] == "0/0"

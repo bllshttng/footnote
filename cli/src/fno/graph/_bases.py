@@ -82,9 +82,53 @@ views:
       - formula.prio
 """
 
+_MISSIONS_BASE = f"""\
+{GENERATED_MARKER} - edits are overwritten. Regenerate: fno backlog bases
+filters:
+  and:
+    - file.inFolder("{_PLANS_FOLDER}")
+    - type == "epic"
+    - parent == null
+formulas:
+  prio: {_PRIO_FORMULA}
+properties:
+  file.name:
+    displayName: Mission
+  progress:
+    displayName: Progress
+  children_done:
+    displayName: Done
+  children_total:
+    displayName: Total
+  children_in_flight:
+    displayName: In flight
+  children_blocked:
+    displayName: Blocked
+  formula.prio:
+    displayName: Priority
+views:
+  - type: table
+    name: Missions
+    order:
+      - file.name
+      - progress
+      - children_done
+      - children_total
+      - children_in_flight
+      - children_blocked
+      - formula.prio
+      - status
+    sort:
+      - property: children_total
+        direction: DESC
+    columnSize:
+      file.name: 380
+"""
+
 # filename -> content. Ordered epics-first for a stable receipt.
 BASES: dict[str, str] = {
     "epics.base": _EPICS_BASE,
+    "missions.base": _MISSIONS_BASE,
 }
 
 

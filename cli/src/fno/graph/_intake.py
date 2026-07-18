@@ -138,6 +138,37 @@ def _would_create_cycle(
     return False
 
 
+def _would_exceed_epic_depth(
+    entries: list[dict], node: dict, parent_node: dict
+) -> bool:
+    """True iff parenting ``node`` under ``parent_node`` breaks the epic-nesting
+    cap (x-6c2b wave 3: mission -> epic -> leaf, two epic levels).
+
+    Fires only when BOTH are epics and the parent already has an epic ancestor -
+    i.e. the parent is a nested epic, not a top-level mission, so ``node`` would
+    be the third epic level. A leaf under any epic, or an epic under a mission,
+    is allowed. Cycle-safe via a ``seen`` set on the ancestor walk.
+    """
+    if node.get("type") != "epic" or parent_node.get("type") != "epic":
+        return False
+    id_to_entry = {
+        e["id"]: e
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    seen: set[str] = set()
+    current = parent_node.get("parent")
+    while current and current not in seen:
+        seen.add(current)
+        ancestor = id_to_entry.get(current)
+        if ancestor is None:
+            break
+        if ancestor.get("type") == "epic":
+            return True
+        current = ancestor.get("parent")
+    return False
+
+
 def descendants_of(entries: list[dict], parent_id: str) -> set[str]:
     """Return the set of node IDs that are transitive children of ``parent_id``.
 
