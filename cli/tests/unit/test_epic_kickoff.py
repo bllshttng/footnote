@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -189,7 +188,7 @@ def test_unmapped_project_loud_skip_others_dispatch(iso, tmp_path, monkeypatch):
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})  # etl unmapped
     _patch_max_lanes(monkeypatch, 4)
-    calls = _patch_spawn(monkeypatch)
+    _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
@@ -209,7 +208,7 @@ def test_spawn_failure_isolated_reservation_released(iso, tmp_path, monkeypatch)
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
     _patch_max_lanes(monkeypatch, 4)
-    calls = _patch_spawn(monkeypatch, fail_on="x-web")
+    _patch_spawn(monkeypatch, fail_on="x-web")
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
@@ -220,9 +219,9 @@ def test_spawn_failure_isolated_reservation_released(iso, tmp_path, monkeypatch)
     failed = [r for r in res.child_results if r.decision == "failed"]
     assert [r.node_id for r in failed] == ["x-web"]
     # no stale node:<id> for the failed child, and its dispatch reservation released
-    assert claim_status(f"node:x-web",
+    assert claim_status("node:x-web",
                         root=adv._claims_root_for("node:x-web")).get("state") != "live"
-    assert claim_status(f"dispatch:x-web",
+    assert claim_status("dispatch:x-web",
                         root=adv._claims_root_for("dispatch:x-web")).get("state") != "live"
     evs = _events(iso)
     fe = [e for e in evs if e["type"] == "advance_failed"]
@@ -355,7 +354,7 @@ def test_per_project_lane_cap(iso, tmp_path, monkeypatch):
     _write_graph(tmp_path, entries, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
     _patch_max_lanes(monkeypatch, 1)
-    calls = _patch_spawn(monkeypatch)
+    _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-a", "web"), ("x-b", "web")))
 
@@ -374,7 +373,7 @@ def test_lane_cap_seeds_live_workers(iso, tmp_path, monkeypatch):
     _patch_max_lanes(monkeypatch, 1)
     # web already has one live worker
     monkeypatch.setattr(adv, "_live_workers_by_project", lambda: {"web": 1})
-    calls = _patch_spawn(monkeypatch)
+    _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
