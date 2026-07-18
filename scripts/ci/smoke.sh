@@ -83,6 +83,7 @@ bash tests/hooks/test_setup_nudge_session_start.sh
 bash tests/hooks/test_init_target_session_id.sh
 bash tests/hooks/test_agy_stop_hook.sh
 bash tests/hooks/test_check_impl_location.sh'
+    step "worktree lifecycle: remove-hook contract + cwd-anchored liveness + ttyless archive + job reap (x-415c)" "." 'bash tests/hooks/test_worktree_remove_lifecycle.sh'
     step "in_review dispatch guard (x-2dc5)" "." 'bash tests/hooks/test_init_in_review_gate.sh'
     step "born-with-why offer inject hook harness" "." 'bash tests/hooks/test_born_with_why_offer_inject.sh'
     step "eval-sweep hygiene harness (x-dbdf: canonical stamp + singleton + timeout)" "." 'bash tests/hooks/test_eval_sweep_session_start.sh'
