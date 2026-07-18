@@ -26,7 +26,6 @@ from fno.scoreboard.fold import (
     _default_read_transcript,
     _default_skill_version,
     _extract_skill_runs,
-    _is_planned_row,
     _is_shipped_reason,
     _node_outcome,
     _parse_ts,
@@ -272,6 +271,15 @@ def score_review_item(
 
 _PR_URL_REPO_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/")
 
+# no-PR class terminals: a run that reached one of these STOPPED without shipping
+# anything (the churny / abandoned / crash-terminated attempts the 84%-green stat
+# silently dropped). The discriminator is the terminal reason, NOT the phase set:
+# a NoProgress that wedged during planning carries phases_completed=[think, plan]
+# yet is a failed attempt, not a clean plan thread - keying on phases would
+# wrongly exclude it. Ship terminals, `None` (incomplete/unknown), `delegated`
+# (handed off, not waste) and `NoWork` (loop found nothing) are all excluded.
+_NO_PR_TERMINALS = _WEDGE_REASONS | {"Interrupted"}
+
 
 def _repo_from_url(url: Optional[str]) -> Optional[str]:
     """`https://github.com/owner/name/pull/149` -> `owner/name`, else None."""
@@ -515,26 +523,27 @@ def build_target_corpus(
         f"PR partition violation: {len(items)} + {len(unattributed)} != {len(prs)}"
     )
 
-    # no-PR class (survivorship correction, US3): window ledger rows that are
-    # build attempts (not plan-only) with a terminal reason, whose sessions do
-    # not belong to any scored PR. The ledger is the honest source for
-    # *attempts* even though it is lossy for *deliveries* - that inversion is the
-    # whole point. ponytail: a tighter fno:target-only filter needs the GC-lossy
-    # transcript scan, which would UNDER-count and reintroduce the survivorship
-    # bias this class exists to correct (Open Question 2); non-plan build rows is
-    # the honest v1 denominator.
+    # no-PR class (survivorship correction, US3): window ledger rows that hit an
+    # abandoned terminal (_NO_PR_TERMINALS) and whose sessions do not belong to
+    # any scored PR - the churny / abandoned / crash-terminated runs the
+    # 84%-green stat silently dropped. A shipped row that does not join a scored
+    # PR is instead a window/truncation coverage gap (not counted here). The
+    # ledger is the honest source for *attempts* even though it is lossy for
+    # *deliveries* - that inversion is the whole point. ponytail: a tighter
+    # fno:target-only filter needs the GC-lossy transcript scan, which would
+    # UNDER-count and reintroduce the survivorship bias this class exists to
+    # correct (Open Question 2); abandoned-terminal rows is the honest v1 class.
     no_pr: list[dict] = []
     for r in rows:
+        if r.get("termination_reason") not in _NO_PR_TERMINALS:
+            continue
         dt = _parse_ts(r.get("completed"))
         if dt is None or not (cutoff <= dt <= now):
-            continue
-        tr = r.get("termination_reason")
-        if not (isinstance(tr, str) and tr) or _is_planned_row(r):
             continue
         sids = _row_session_ids(r)
         if sids & scored_session_ids:
             continue
-        no_pr.append({"session_ids": sorted(sids), "termination_reason": tr, "graph_node_id": r.get("graph_node_id")})
+        no_pr.append({"session_ids": sorted(sids), "termination_reason": r["termination_reason"], "graph_node_id": r.get("graph_node_id")})
 
     stop_cause = dict(Counter(e["termination_reason"] for e in no_pr))
 
