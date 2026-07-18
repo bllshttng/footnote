@@ -1036,6 +1036,32 @@ def _emit_human(
             f"(current v{mb['current']}); re-run `fno setup` to refresh it."
         )
 
+    surf = result.get("harness_surface") or {}
+    oc = surf.get("opencode")
+    if oc == "stale":
+        out(
+            "fno doctor: opencode footnote plugin is STALE (drifted from the "
+            "shipped source); re-run `fno setup` to refresh it."
+        )
+    elif oc == "missing":
+        out(
+            "fno doctor: opencode is set up but its footnote plugin is missing; "
+            "re-run `fno setup` to install it."
+        )
+    dupes = surf.get("codex_marketplace_duplicates") or []
+    if dupes:
+        out(
+            f"fno doctor: codex has footnote registered {len(dupes)} times as a "
+            f"marketplace source ({', '.join(dupes)}); remove the extras with "
+            "`codex plugin marketplace remove <name>`."
+        )
+    if surf.get("codex_hooks_dual"):
+        out(
+            "fno doctor: codex hooks load from both config.toml and hooks.json; "
+            "run `fno setup cli-hooks-codex --migrate-legacy-hooks-json` to "
+            "converge (or `fno doctor --codex-hooks` for detail)."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -1315,6 +1341,82 @@ def _managed_block_report() -> dict:
     return {}
 
 
+# --------------------------------------------------------------------------
+# Per-harness surface freshness (x-3248 Change 5): `fno update` refreshes only
+# the shared CLI/wheel; the codex marketplace plugin and the opencode local
+# plugin are separate surfaces with their own refresh verbs. Report-and-point
+# only (no auto-fix): the refresh action differs per harness and stays manual.
+# --------------------------------------------------------------------------
+
+
+def _codex_marketplace_duplicates(list_output: str) -> list[str]:
+    """Footnote marketplace source names in `codex plugin marketplace list`
+    output, returned ONLY when footnote is registered more than once (the
+    duplicate the user sees as duplicate skills). Pure text parser: the caller
+    feeds it captured stdout, so tests need no live codex. A single legitimate
+    registration returns ``[]``."""
+    names: list[str] = []
+    for line in list_output.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name, root = parts[0], parts[1]
+        if name.upper() == "MARKETPLACE":  # header row
+            continue
+        if "footnote" in f"{name} {root}".lower():
+            names.append(name)
+    return names if len(names) > 1 else []
+
+
+def _harness_surface_report() -> dict[str, Any]:
+    """Advisory per-harness surface findings. Quiet by default: reports only an
+    actionable problem (an opencode plugin present-but-stale, or codex footnote
+    registered twice). Never blocks/exits; a missing harness is simply silent."""
+    report: dict[str, Any] = {}
+    try:
+        from fno.setup.integration import (
+            _opencode_is_installed,
+            _opencode_plugin_dest,
+            _opencode_plugins_dir,
+        )
+
+        # Only when opencode is actually set up (its plugins dir exists), so a
+        # non-opencode user is never nagged.
+        if _opencode_plugins_dir().exists():
+            if not _opencode_plugin_dest().exists():
+                report["opencode"] = "missing"
+            elif not _opencode_is_installed():
+                report["opencode"] = "stale"
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["codex", "plugin", "marketplace", "list"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0:
+            dupes = _codex_marketplace_duplicates(result.stdout)
+            if dupes:
+                report["codex_marketplace_duplicates"] = dupes
+    except (OSError, subprocess.SubprocessError):
+        pass  # codex not installed -> silent
+
+    # Surface codex hooks dual-representation in the MAIN run too, not only the
+    # opt-in `--codex-hooks` mode: a plain `fno doctor` should point at the heal.
+    try:
+        codex = _codex_hooks_report()
+        if codex.get("duplicate_layers") and codex.get("footnote_json_hooks"):
+            report["codex_hooks_dual"] = True
+    except Exception:
+        pass
+
+    return report
+
+
 def doctor_command(
     fix: bool = typer.Option(
         False,
@@ -1415,6 +1517,10 @@ def doctor_command(
     # Advisory managed-block staleness (US8): a host AGENTS.md/CLAUDE.md footnote
     # block older than the current template. Never changes status/exit.
     result["managed_block"] = _managed_block_report()
+
+    # Advisory per-harness surface freshness (x-3248): codex/opencode plugin
+    # surfaces `fno update` does not cover. Never changes status/exit.
+    result["harness_surface"] = _harness_surface_report()
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).
