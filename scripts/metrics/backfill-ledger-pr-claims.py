@@ -63,6 +63,13 @@ _MERGE = re.compile(r"Merge pull request #(\d+) from \S+?/(\S+)")
 _REPO_URL = re.compile(r"github\.com/[^/]+/(?:footnote|abilities)/pull/(\d+)")
 _SAME_REPO_PROJECTS = {"footnote", "abilities", "fno"}
 
+# A merged PR is a delivered node. The scoreboard fold windows every row on
+# `completed` and counts a row as shipped only when `termination_reason` is in
+# its _SHIPPED_TERMINALS allowlist (DonePRGreen | DoneAdvisory | DoneBatched);
+# a row missing either field is invisible to the scoreboard. So each backfilled
+# row must carry `completed` (= the merge time) and the delivered terminal.
+_SHIPPED_REASON = "DonePRGreen"
+
 
 def _entries(data: object) -> list[dict]:
     if isinstance(data, dict) and isinstance(data.get("entries"), list):
@@ -196,6 +203,23 @@ def repo_slug(repo_dir: Path) -> str:
     return m.group(1) if m else "bllshttng/footnote"
 
 
+def _ensure_outcome_fields(row: dict, merged_at: str) -> bool:
+    """Give a backfilled row the two fields the scoreboard folds on.
+
+    `completed` is the timestamp every fold window reads; `termination_reason`
+    is what marks the row as a delivered ship. Returns True iff it changed
+    anything (so an upgrade pass over already-written rows stays idempotent).
+    """
+    changed = False
+    if not row.get("completed") and merged_at:
+        row["completed"] = merged_at
+        changed = True
+    if not row.get("termination_reason"):
+        row["termination_reason"] = _SHIPPED_REASON
+        changed = True
+    return changed
+
+
 def build_rows(merges: list[dict], claimed: set[int], node_ids: set[str],
                nodes_by_id: dict[str, dict], slug: str, project: str) -> list[dict]:
     """One minimal execution row per unclaimed merged PR."""
@@ -215,6 +239,7 @@ def build_rows(merges: list[dict], claimed: set[int], node_ids: set[str],
             "branch": m["branch"],
             "backfilled": True,
         }
+        _ensure_outcome_fields(row, m["merged_at"])
         if node_id:
             row["graph_node_id"] = node_id
             sess = _node_session(nodes_by_id.get(node_id))
@@ -228,7 +253,18 @@ def backfill(ledger_path: Path, merges: list[dict], node_ids: set[str],
              nodes_by_id: dict[str, dict], slug: str, project: str,
              apply: bool) -> int:
     data = json.loads(ledger_path.read_text(encoding="utf-8"))
-    rows = _entries(data)
+    # Bind the mutation target to the LIVE list on disk. _entries returns a
+    # fresh [] when data is a dict lacking a valid "entries" list; extending
+    # that detached list would silently write nothing. Get-or-create instead.
+    if isinstance(data, dict):
+        if not isinstance(data.get("entries"), list):
+            data["entries"] = []
+        rows = data["entries"]
+    elif isinstance(data, list):
+        rows = data
+    else:
+        data = []
+        rows = data
 
     merged_prs = {m["pr"] for m in merges}
     claimed = claimed_prs(rows)
@@ -249,11 +285,21 @@ def backfill(ledger_path: Path, merges: list[dict], node_ids: set[str],
             r["pr_number"] = n
             stamped += 1
 
+    # Heal already-written backfill rows that predate the outcome fields, so a
+    # prior run's rows become visible to the scoreboard on the next --apply.
+    upgraded = 0
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("backfilled"):
+            continue
+        if _ensure_outcome_fields(r, str(r.get("merged_at") or r.get("ts") or "")):
+            upgraded += 1
+
     print(f"merged PRs in window:        {len(merged_prs)}")
     print(f"  already claimed (before):  {before_covered}")
     print(f"  unclaimed -> new rows:     {len(new_rows)} "
           f"({with_node} with node id, {len(new_rows) - with_node} without)")
     print(f"pr_number stamped on url-only rows: {stamped}")
+    print(f"outcome fields healed on prior backfill rows: {upgraded}")
     after_covered = before_covered + len(new_rows)
     print(f"coverage: {before_covered}/{len(merged_prs)} -> "
           f"{after_covered}/{len(merged_prs)}")
@@ -261,7 +307,7 @@ def backfill(ledger_path: Path, merges: list[dict], node_ids: set[str],
     if not apply:
         print("\n[dry-run] pass --apply to write.")
         return 0
-    if not new_rows and not stamped:
+    if not new_rows and not stamped and not upgraded:
         print("nothing to write.")
         return 0
 
@@ -307,10 +353,20 @@ def _self_test() -> int:
     assert r["graph_node_id"] == "x-9c5f" and r["session_id"] == "sess-abc"
     assert r["backfilled"] is True and r["status"] == "merged"
     assert r["pr_url"] == "https://github.com/bllshttng/footnote/pull/458"
+    # scoreboard-visible: windows on `completed`, ships on `termination_reason`.
+    assert r["completed"] == r["merged_at"]
+    assert r["termination_reason"] == _SHIPPED_REASON
 
     # idempotency: once 458 is claimed, a re-run yields no new rows.
     assert build_rows(merges, claimed | {458}, node_ids, nodes_by_id,
                       "bllshttng/footnote", "footnote") == []
+
+    # heal pass: a prior-run row missing the outcome fields is upgraded once,
+    # then stable.
+    old = {"backfilled": True, "merged_at": "2026-07-18T00:00:00-07:00"}
+    assert _ensure_outcome_fields(old, old["merged_at"]) is True
+    assert old["completed"] == old["merged_at"] and old["termination_reason"] == _SHIPPED_REASON
+    assert _ensure_outcome_fields(old, old["merged_at"]) is False  # idempotent
     print("self-test: OK")
     return 0
 
@@ -343,9 +399,12 @@ def main() -> int:
     ledger_path = Path(ledger_path).resolve()
 
     graph = json.loads(Path(graph_path).read_text(encoding="utf-8"))
-    graph_entries = _entries(graph)
-    node_ids = {e.get("id") for e in graph_entries if isinstance(e, dict) and e.get("id")}
-    nodes_by_id = {e["id"]: e for e in graph_entries if isinstance(e, dict) and e.get("id")}
+    node_ids: set[str] = set()
+    nodes_by_id: dict[str, dict] = {}
+    for e in _entries(graph):
+        if isinstance(e, dict) and (nid := e.get("id")):
+            node_ids.add(nid)
+            nodes_by_id[nid] = e
 
     merges = parse_merges(git_merge_lines(args.repo_dir, args.days))
     slug = repo_slug(args.repo_dir)
