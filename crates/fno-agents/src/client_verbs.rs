@@ -519,31 +519,35 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
                     obj.insert("harness".into(), Value::String(p));
                 }
             }
-            // v10 (x-880e) accept-on-read, the raw-Value mirror of Python
-            // sync_harness_aliases: back-fill harness_session_id from a legacy
-            // row's harness-matching per-provider session key so the resume /
-            // resolver path sees the canonical id on a v1..=v9 row too.
-            let hsid_empty = obj
-                .get("harness_session_id")
-                .and_then(Value::as_str)
-                .map(str::is_empty)
-                .unwrap_or(true);
-            if hsid_empty {
-                let legacy_key = match obj.get("harness").and_then(Value::as_str) {
-                    Some("claude") => Some("claude_session_uuid"),
-                    Some("codex") => Some("codex_session_id"),
-                    Some("gemini") => Some("gemini_session_id"),
-                    _ => None,
-                };
-                if let Some(k) = legacy_key {
-                    if let Some(v) = obj
-                        .get(k)
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty() && *s != "null")
+            // v10 (x-880e) accept-on-read, the raw-Value mirror of the typed
+            // backfill_harness_aliases: TWO-WAY sync harness_session_id <-> the
+            // harness-matching legacy per-provider key (canonical wins). A v1..=v9
+            // row's legacy id back-fills the canonical field; a v10 row's canonical
+            // id mirrors BACK into the legacy field so the raw resume/attach helpers
+            // (which still read e.g. claude_session_uuid) resolve a harness-only row.
+            let legacy_key = match obj.get("harness").and_then(Value::as_str) {
+                Some("claude") => Some("claude_session_uuid"),
+                Some("codex") => Some("codex_session_id"),
+                Some("gemini") => Some("gemini_session_id"),
+                _ => None,
+            };
+            if let Some(k) = legacy_key {
+                let nonempty = |v: Option<&str>| {
+                    v.filter(|s| !s.is_empty() && *s != "null")
                         .map(str::to_string)
-                    {
-                        obj.insert("harness_session_id".into(), Value::String(v));
+                };
+                let hsid = nonempty(obj.get("harness_session_id").and_then(Value::as_str));
+                let legacy_val = nonempty(obj.get(k).and_then(Value::as_str));
+                match (hsid, legacy_val) {
+                    // canonical wins: mirror it into the legacy key the helpers read
+                    (Some(h), _) => {
+                        obj.insert(k.into(), Value::String(h));
                     }
+                    // no canonical yet: adopt the legacy id
+                    (None, Some(l)) => {
+                        obj.insert("harness_session_id".into(), Value::String(l));
+                    }
+                    (None, None) => {}
                 }
             }
             let legacy = obj
@@ -3123,6 +3127,10 @@ mod tests {
         let rows = load_registry_entries(&reg).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["provider"], "claude");
+        // v10 two-way sync (codex P2): a harness-only claude row mirrors its
+        // canonical id BACK into claude_session_uuid so the raw resume/attach
+        // helpers (which read that legacy key) resolve it instead of refusing.
+        assert_eq!(rows[0]["claude_session_uuid"], "aaaabbbbccccdddd");
 
         // AC2-ERR: a diverged row (provider != harness) LOADS (warning only).
         fs::write(
