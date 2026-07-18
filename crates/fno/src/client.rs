@@ -2750,10 +2750,24 @@ impl View {
         spans.push(TabSpan {
             text: format!(" {} ", s.name),
             flags: cell_flags::BOLD,
+            fg: Color::Default,
             hit: None,
         });
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_label_text(&t.name, i);
+            // x-df4c US4: a leading max-severity rollup glyph so a background
+            // tab's blocked/working pane reads at the strip without opening it.
+            // `None` (idle / empty / all-exited) prepends nothing, so a stateless
+            // tab renders byte-identically to today (AC2-EDGE); a Blocked rollup
+            // paints the accent on the whole span (label preceded by `▲` amber).
+            let (glyph_prefix, fg) = match tab_rollup_state(&self.layout.agents, s.id, t.id) {
+                Some(st) => {
+                    let style = lattice_style(st);
+                    (format!("{} ", style.glyph), style.fg)
+                }
+                None => (String::new(), Color::Default),
+            };
+            let label = format!("{glyph_prefix}{label}");
             let (text, flags) = if i == s.active_tab {
                 (format!("[{label}]"), cell_flags::INVERSE)
             } else {
@@ -2762,12 +2776,14 @@ impl View {
             spans.push(TabSpan {
                 text,
                 flags,
+                fg,
                 hit: Some(TabHit::Tab(t.id)),
             });
         }
         spans.push(TabSpan {
             text: " + ".to_string(),
             flags: cell_flags::DIM,
+            fg: Color::Default,
             hit: Some(TabHit::NewTab),
         });
         spans
@@ -2787,7 +2803,7 @@ impl View {
                 }
                 cells[c] = Cell {
                     c: ch,
-                    fg: Color::Default,
+                    fg: span.fg,
                     bg: Color::Default,
                     flags: span.flags,
                 };
@@ -3219,6 +3235,9 @@ fn agent_has_subline(a: &AgentRow) -> bool {
 struct TabSpan {
     text: String,
     flags: u8,
+    /// (x-df4c US4) The span's foreground: the accent when the tab's rollup is a
+    /// Blocked pane, else `Color::Default`.
+    fg: Color,
     hit: Option<TabHit>,
 }
 
@@ -3442,6 +3461,24 @@ fn card_lattice_state(s: CardState) -> LatticeState {
         CardState::Ready => LatticeState::Idle,
         CardState::InFlight => LatticeState::Working,
         CardState::Blocked => LatticeState::Blocked,
+    }
+}
+
+/// Fold a tab's panes to their worst live lattice state for the tab-strip
+/// rollup (x-df4c US4). `None` = no glyph: an empty tab, an all-idle tab, or an
+/// all-exited tab (exit folds to `Idle` via [`nav_agent_state`], dropping out of
+/// the worst-first `min`, so the strip ignores exited panes - AC2-EDGE).
+/// Severity is `PaneState`'s Ord (Blocked < Working < DoneUnseen < Idle), the
+/// same fold the squad name-row rollup uses, so a tab and its squad agree.
+fn tab_rollup_state(agents: &[AgentRow], squad: u64, tab: TabId) -> Option<LatticeState> {
+    let worst = agents
+        .iter()
+        .filter(|a| a.squad == Some(squad) && a.tab == Some(tab))
+        .map(nav_agent_state)
+        .min()?;
+    match worst {
+        PaneState::Idle => None,
+        other => Some(pane_to_lattice(other)),
     }
 }
 
@@ -7383,6 +7420,78 @@ mod tests {
         assert_eq!(tab_label_text("1", 0), "1");
         assert_eq!(tab_label_text("2", 0), "1:2", "a RENAME to a digit shows");
         assert_eq!(tab_label_text("debug", 2), "3:debug");
+    }
+
+    // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
+    fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
+        AgentRow {
+            squad: Some(1),
+            name: "worker".into(),
+            pane_id: Some(1),
+            badge,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab,
+            account: None,
+        }
+    }
+
+    #[test]
+    fn tab_rollup_folds_worst_live_state_ignoring_exited() {
+        // Empty tab -> no rollup (AC2-EDGE).
+        assert_eq!(tab_rollup_state(&[], 1, 0), None);
+        // Idle-only -> no rollup, so a stateless tab stays byte-identical.
+        assert_eq!(tab_rollup_state(&[tab_agent(Some(0), None, false)], 1, 0), None);
+        // All-exited -> no rollup: exit folds to Idle and drops out (AC2-EDGE).
+        assert_eq!(
+            tab_rollup_state(&[tab_agent(Some(0), Some(AgentBadge::Blocked), true)], 1, 0),
+            None
+        );
+        // Worst-first: a blocked pane beats a working one in the same tab.
+        assert_eq!(
+            tab_rollup_state(
+                &[
+                    tab_agent(Some(0), Some(AgentBadge::Working), false),
+                    tab_agent(Some(0), Some(AgentBadge::Blocked), false),
+                ],
+                1,
+                0
+            ),
+            Some(LatticeState::Blocked)
+        );
+        // A pane in a DIFFERENT tab never leaks into this tab's rollup.
+        assert_eq!(
+            tab_rollup_state(&[tab_agent(Some(1), Some(AgentBadge::Blocked), false)], 1, 0),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_strip_rollup_surfaces_hidden_attention_with_accent() {
+        // AC2-HP: a background (inactive) tab whose only pane is Blocked shows a
+        // leading `▲` in the accent color at the strip, without opening it.
+        let mut view = two_pane_view();
+        view.layout
+            .agents
+            .push(tab_agent(Some(0), Some(AgentBadge::Blocked), false));
+        let spans = view.tab_bar_spans();
+        // spans[0] = squad name, [1] = tab 0 (blocked, inactive), [2] = tab 1 (active, idle).
+        assert_eq!(spans[1].text, " ▲ 1 ", "blocked tab: label preceded by ▲");
+        assert_eq!(
+            spans[1].fg, LATTICE_ACCENT,
+            "blocked rollup carries the accent"
+        );
+        // AC2-EDGE: the idle active tab shows no rollup glyph and no accent -
+        // byte-identical to a pre-feature stateless tab.
+        assert_eq!(spans[2].text, "[2]");
+        assert_eq!(spans[2].fg, Color::Default);
     }
 
     fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
