@@ -111,14 +111,17 @@ GLOBAL_SETTINGS="${HOME}/.fno/config.toml"
 # Session markers first (a real codex/gemini session sets its thread/session
 # env but no *_PLUGIN_ROOT), plugin-root hints second, claude default last.
 # Ordering mirrors HARNESS_SESSION_MARKERS in cli/src/fno/harness_identity.py.
+# Session markers test non-blank-after-strip (the *[![:space:]]* glob) to match
+# that resolver's .strip(); plugin roots test bare non-empty to match its
+# unstripped os.environ.get, so the shell and Python never disagree.
 detect_provider() {
-  if [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+  if [[ "${CODEX_THREAD_ID:-}" == *[![:space:]]* ]]; then
     echo "codex"
-  elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+  elif [[ "${CLAUDE_CODE_SESSION_ID:-}" == *[![:space:]]* ]]; then
     echo "claude"
-  elif [[ -n "${CODEX_SESSION_ID:-}" ]]; then
+  elif [[ "${CODEX_SESSION_ID:-}" == *[![:space:]]* ]]; then
     echo "codex"
-  elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
+  elif [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]]; then
     echo "gemini"
   elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
     echo "codex"
