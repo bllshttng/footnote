@@ -325,7 +325,13 @@ def _sent_unclaimed_count() -> int:
         handle = canonical_handle(ident.harness, ident.session_id)
         n, _ = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
         return n
-    except Exception:  # noqa: BLE001 - status is advisory; never crash on it
+    except Exception as exc:  # noqa: BLE001 - status is advisory; never crash on it
+        # Advisory-degrade to 0, but leave a breadcrumb (matches _active_session)
+        # so a structural break doesn't render `sent unclaimed: 0` forever silently.
+        print(
+            f"warning: sent-unclaimed count failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return 0
 
 
