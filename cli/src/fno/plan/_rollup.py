@@ -33,6 +33,84 @@ def _direct_children(entries: list[dict[str, Any]], parent_id: str) -> list[dict
     ]
 
 
+def compute_waves(
+    epic_id: str, entries: list[dict[str, Any]]
+) -> tuple[dict[str, int], int]:
+    """Derive topological wave strata for an epic's DIRECT children (x-6c2b AC4).
+
+    A child with no INTRA-epic blocker is wave 0; otherwise its wave is
+    ``1 + max(wave of its intra-epic blockers)`` (longest-path strata). Only
+    ``blocked_by`` edges between siblings of the same epic count - a child blocked
+    solely by an external node is wave 0 within its epic. Edges are the sole
+    ordering authority, so this is a pure view that cannot drift.
+
+    Returns ``(wave_by_child_id, max_wave)`` where ``max_wave`` is -1 for a
+    childless epic (so the caller's ``waves`` summary is ``max_wave + 1`` == 0).
+    Cycle-safe: a blocked_by cycle among siblings resolves those nodes to wave 0
+    rather than recursing forever.
+    """
+    children = _direct_children(entries, epic_id)
+    child_ids = {c["id"] for c in children if c.get("id")}
+    blockers: dict[str, list[str]] = {}
+    for c in children:
+        cid = c.get("id")
+        if not cid:
+            continue
+        blockers[cid] = [
+            b for b in (c.get("blocked_by") or []) if b in child_ids
+        ]
+
+    # Kahn-style leveling: assign a node its wave only once ALL its intra-epic
+    # blockers have waves, so the result is deterministic (independent of dict
+    # order) and a longest-path stratification. When the fixpoint stalls, only
+    # the nodes ON a cycle collapse to wave 0; an acyclic dependent of a cycle
+    # (C blocked by cyclic A) is left to restratify on the next round, so it
+    # still lands at `1 + max(blocker wave)` rather than being flattened.
+    wave: dict[str, int] = {}
+    remaining = set(child_ids)
+    while remaining:
+        progressed = False
+        for cid in list(remaining):
+            bl = blockers[cid]
+            if all(b in wave for b in bl):
+                wave[cid] = 1 + max((wave[b] for b in bl), default=-1)
+                remaining.discard(cid)
+                progressed = True
+        if progressed:
+            continue
+        # Stalled: break the knot. Collapse only the true cycle members (a node
+        # that can reach itself over unresolved blockers) to wave 0, then loop -
+        # their acyclic dependents resolve normally against those zeros.
+        cyclic = {c for c in remaining if _on_cycle(c, blockers, remaining)}
+        if not cyclic:  # defensive: no cycle but still stuck -> flush to 0
+            cyclic = set(remaining)
+        for c in cyclic:
+            wave[c] = 0
+            remaining.discard(c)
+
+    max_wave = max(wave.values()) if wave else -1
+    return wave, max_wave
+
+
+def _on_cycle(
+    start: str, blockers: dict[str, list[str]], scope: set[str]
+) -> bool:
+    """True iff ``start`` can reach itself over unresolved blocker edges within
+    ``scope`` - i.e. it is a member of a blocked_by cycle, not merely a dependent
+    of one. DFS bounded by ``scope`` so it always terminates."""
+    stack = [b for b in blockers.get(start, []) if b in scope]
+    seen: set[str] = set()
+    while stack:
+        cur = stack.pop()
+        if cur == start:
+            return True
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(b for b in blockers.get(cur, []) if b in scope)
+    return False
+
+
 def compute_rollup(
     epic_id: str,
     entries: list[dict[str, Any]],
