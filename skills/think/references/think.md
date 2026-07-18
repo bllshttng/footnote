@@ -230,11 +230,8 @@ DB)" so the reader knows it may be incomplete (AC1-FR).
 
 ### 1f. Deliverable Type Resolution
 
-Classify the work into one of four deliverable types - **feature**, **bug**,
-**investigation**, or **epic** - and record the result as `deliverable_type:` in
-the saved doc's frontmatter. The type drives which sections the contract (Step 8)
-requires, so resolve it before the Step 2 interview: a free-text seed folds its
-type confirmation into the first question batch.
+Classify the work into one of four deliverable types - **feature**, **bug**, **investigation**, or **epic** - and record the result as `deliverable_type:` in the saved doc's frontmatter.
+The type drives which sections the contract (Step 8) requires, so resolve it before the Step 2 interview: a free-text seed folds its type confirmation into the first question batch.
 
 **Resolution order (first match wins):**
 
@@ -651,11 +648,9 @@ Save to the path printed by `fno plan path --slug "<feature-slug>" [--node "<nod
 - **Node-seeded** (`/think <node-id>`): pass `--node` - the canonical node id is the filename suffix so a roadmap base keyed on the node id can find the doc (`/think x-8af8` → `…-x-8af8.md`; the configured prefix/width is preserved verbatim, never re-prefixed). First **reuse if claimed**: if a plans-dir file already carries this node in its frontmatter (`claims:`/`graph_node_id:`) or already ends `-<node-id>.md`, finalize INTO that file instead of minting a second one (a pre-created roadmap stub is the doc's home; a re-dispatch after a slug edit reuses the same doc). An empty slug degrades cleanly (the verb collapses the dangling separator), never a `--<node-id>.md`.
 - **Raw prose** (no node): omit `--node` for the id-less name. If `/blueprint` later intakes it and assigns a node id, its step 3b-bis renames the artifact to carry the id and repoints `plan_path` - so the final invariant (id in both filename and `plan_path`) is reached either way.
 
-Stamp the resolved type into the doc's frontmatter as
-`deliverable_type: feature | bug | investigation | epic` (Step 1f). An **epic**
-additionally stamps `scope: epic` - that second key is `/blueprint`'s auto-group
-trigger; without it an epic silently collapses into the single-PR lean mutation,
-shipping a multi-wave epic as one PR. Stamp both keys on every epic doc.
+Stamp the resolved type into the doc's frontmatter as `deliverable_type: feature | bug | investigation | epic` (Step 1f).
+An **epic** additionally stamps `scope: epic` - that second key is `/blueprint`'s auto-group trigger; without it an epic silently collapses into the single-PR lean mutation, shipping a multi-wave epic as one PR.
+Stamp both keys on every epic doc.
 
 **The required sections scale to `deliverable_type`.** The uniform 12-section
 contract manufactured filler on non-feature work (an investigation verdict was
