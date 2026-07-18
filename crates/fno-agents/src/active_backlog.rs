@@ -497,7 +497,16 @@ fn dispatch_mission(
 ) -> MissionDispatch {
     let out = match retry_etxtbsy(|| {
         abi_cmd(&cfg.abi_bin)
-            .args(["backlog", "advance", "--epic", &cfg.mission, "--json"])
+            // --continuation: never reactivate the mission and retire an inactive
+            // one, so an operator `--stop` between drain ticks is not undone.
+            .args([
+                "backlog",
+                "advance",
+                "--epic",
+                &cfg.mission,
+                "--continuation",
+                "--json",
+            ])
             .current_dir(&cfg.cwd)
             .output()
     }) {

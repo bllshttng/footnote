@@ -107,10 +107,10 @@ fn dispatch_records_pending_and_forwards_epic_seam() {
         "both dispatched children tracked for reconcile"
     );
 
-    // The converge core is invoked as `advance --epic <mission> --json`.
+    // The converge core is invoked as `advance --epic <mission> --continuation --json`.
     let args = fs::read_to_string(&args_file).expect("advance argv recorded");
     assert!(
-        args.contains("advance --epic x-epic --json"),
+        args.contains("advance --epic x-epic --continuation --json"),
         "epic seam not forwarded: {args}"
     );
 
