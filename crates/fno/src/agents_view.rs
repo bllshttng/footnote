@@ -752,9 +752,11 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         // (x-9c5f) The freshest activity stamp: the max of the row's parseable
         // UTC stamps (same fixed-format parser the badge TTL uses). Any
         // unparseable/missing stamp is skipped; all absent -> None (no line).
+        // Bound once and reused by both `updated_at` and the badge match below.
+        let inside_leg = row.get("inside_leg");
         let updated_at = [
             row.get("last_message_at").and_then(|v| v.as_str()),
-            row.get("inside_leg")
+            inside_leg
                 .and_then(|l| l.get("received_at"))
                 .and_then(|v| v.as_str()),
             row.get("screen_state")
@@ -766,7 +768,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         .flatten()
         .filter_map(rfc3339_like_to_secs)
         .max();
-        let (badge, reason, answerable) = match row.get("inside_leg") {
+        let (badge, reason, answerable) = match inside_leg {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
                     leg.get("received_at")

@@ -5992,8 +5992,9 @@ async fn peek_input_keys(
                 0x20..=0x7e => {
                     if let Some((_, buf)) = view.peek_input.as_mut() {
                         // Cap to the server's ceiling so the operator sees exactly
-                        // what will be accepted (server stays authoritative).
-                        if buf.chars().count() < MAX_MAIL_TEXT {
+                        // what will be accepted (server stays authoritative). Only
+                        // printable ASCII is ever pushed, so byte len == char count.
+                        if buf.len() < MAX_MAIL_TEXT {
                             buf.push(b as char);
                         }
                     }

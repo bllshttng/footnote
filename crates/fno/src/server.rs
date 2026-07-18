@@ -1208,10 +1208,17 @@ async fn run_mail_send(name: &str, text: &str) -> String {
 /// pre-existing default, correct for a canonical/default-account worker).
 async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -> String {
     const RESPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+    // Pin `--provider claude`: respawn is definitionally a claude revival (the
+    // uuid is carried only for claude rows), but `fno agents spawn` otherwise
+    // infers the provider from the invoking harness, so a mux server running
+    // under a non-claude context would infer the wrong provider and fail the
+    // claude-only `--resume` guard.
     let mut args: Vec<&str> = vec![
         "agents",
         "spawn",
         name,
+        "--provider",
+        "claude",
         "--resume",
         uuid,
         "--substrate",
