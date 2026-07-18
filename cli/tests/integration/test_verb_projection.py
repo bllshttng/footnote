@@ -222,6 +222,23 @@ def test_epic_depth_cap_refused(tmp_graph, tmp_path):
     assert next(e for e in entries if e["id"] == "x-0c03")["parent"] is None  # unchanged
 
 
+def test_epic_owning_subtree_cannot_nest_under_mission(tmp_graph, tmp_path):
+    """AC3-ERR (down-tree): reparenting an epic that already owns a child epic
+    under a mission would make a 3rd epic level - refused from the other side."""
+    # B is a top-level mission that owns child epic C. Nesting B under mission M
+    # would create M -> B -> C (three epic levels).
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission-m"),
+        _epic("x-0b02", "mission-b"),
+        _epic("x-0c03", "child-epic", parent="x-0b02"),
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-0b02", "--parent", "x-0a01"])
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-0b02")["parent"] is None  # unchanged
+
+
 def test_leaf_under_nested_epic_allowed(tmp_graph, tmp_path):
     """A leaf (feature) under an epic is always allowed - only epics are capped."""
     plan = _plan(tmp_path)

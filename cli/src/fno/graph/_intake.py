@@ -144,10 +144,12 @@ def _would_exceed_epic_depth(
     """True iff parenting ``node`` under ``parent_node`` breaks the epic-nesting
     cap (x-6c2b wave 3: mission -> epic -> leaf, two epic levels).
 
-    Fires only when BOTH are epics and the parent already has an epic ancestor -
-    i.e. the parent is a nested epic, not a top-level mission, so ``node`` would
-    be the third epic level. A leaf under any epic, or an epic under a mission,
-    is allowed. Cycle-safe via a ``seen`` set on the ancestor walk.
+    Fires only when BOTH are epics and either direction would make a third epic
+    level: (a) the parent already has an epic ancestor (it is a nested epic, not
+    a top-level mission), so ``node`` would be the third level below it; or (b)
+    ``node`` already owns an epic subtree, so parenting it under an epic pushes
+    its own child epic to the third level. A leaf under any epic, or a childless
+    epic under a mission, is allowed. Cycle-safe (seen set / descendants_of).
     """
     if node.get("type") != "epic" or parent_node.get("type") != "epic":
         return False
@@ -156,6 +158,7 @@ def _would_exceed_epic_depth(
         for e in entries
         if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
+    # (a) walk UP from the parent: any epic ancestor means the parent is nested.
     seen: set[str] = set()
     current = parent_node.get("parent")
     while current and current not in seen:
@@ -166,6 +169,14 @@ def _would_exceed_epic_depth(
         if ancestor.get("type") == "epic":
             return True
         current = ancestor.get("parent")
+    # (b) walk DOWN from node: an epic descendant means node is itself a
+    # mission, so nesting it under another epic exceeds the cap.
+    nid = node.get("id")
+    if nid:
+        for desc_id in descendants_of(entries, nid):
+            desc = id_to_entry.get(desc_id)
+            if desc and desc.get("type") == "epic":
+                return True
     return False
 
 
