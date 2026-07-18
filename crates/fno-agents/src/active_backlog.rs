@@ -1,60 +1,54 @@
-//! Active backlog dispatcher: the drain-tick core + circuit breaker.
+//! Active backlog dispatcher: the mission drain-tick core + circuit breaker.
 //!
-//! This module is the engine for the always-on backlog drain. One *tick*
-//! claims the project's `walker:<cwd>` singleton, RECONCILES any dispatch it
-//! fired on a prior tick from events, and - when nothing is in flight -
-//! DISPATCHES the next ready node fire-and-forget. The daemon's resident
-//! supervisor ([`run_supervisor`]) drives one independent drain loop PER
-//! enabled project, so a long-running drain in one project never starves
-//! another.
+//! This module is the engine for the always-on backlog drain. Since x-a4dc (K2)
+//! the drain is MISSION-SCOPED: the daemon's resident supervisor
+//! ([`run_supervisor`]) drives one independent drain loop PER ACTIVE MISSION -
+//! an epic with `mission_active=true`, K1's activation record - not per project.
+//! The legacy per-project interval drain is deleted (epic Locked Decision 4);
+//! merge-triggered `fno backlog advance` is the same-project coverage.
 //!
-//! ## Fire-and-forget scheduler (x-0ad6)
+//! ## Mission tick (dispatch + reconcile)
 //!
-//! The tick does NOT own the worker child. Sequential dispatch goes through the
-//! lane machinery (`fno backlog dispatch-lanes --max 1`, itself a `fno agents
-//! spawn`), which self-mints the worker session and re-anchors the `node:<id>`
-//! claim to `target-session:<sid>`. The tick returns immediately; a later tick
-//! RECONCILES the dispatch by reading the worker's session id back from the
-//! claim holder and polling its termination event (`Journal::find_termination`),
-//! then feeding the outcome through [`map_outcome`] - the same policy the old
-//! supervised path used, so the auto-defer streak is identical. A worker that
-//! dies without emitting any termination event is caught by the crash floor
-//! (claim gone past the boot window), which replaces the awaited-exit-code
-//! watchdog the fire-and-forget model can no longer read. See
-//! [`reconcile_pending`] / [`dispatch_one`].
+//! One *tick* first RECONCILES any dispatches fired on a prior tick from events
+//! (feeding [`map_outcome`] -> the auto-defer breaker), then DISPATCHES by
+//! shelling K1's converge core, `fno backlog advance --epic <id> --json`. That
+//! core fans out the epic's ready LEAF children across ALL projects, doing its
+//! own per-dependent-root `walker:<root>` respect, per-project `max_lanes` cap,
+//! and `node:`/`dispatch:` claim dedup - so the mission drain reuses the exact
+//! dispatch logic the merge-advance path uses and never forks it. See
+//! [`dispatch_mission`] / [`mission_drain_tick`] / [`mission_drain_loop`].
 //!
-//! ## Single-owner contract (AC1-FR)
+//! ## Fire-and-forget reconcile (x-0ad6, preserved)
 //!
-//! The tick acquires `walker:<cwd>` (holder `active-backlog:<pid>`) at the
-//! start and RELEASES it at the end. Releasing per-tick is deliberate: it lets
-//! a human `/megawalk` grab the singleton between ticks, after which the
-//! daemon's next acquire fails and the tick YIELDS (`active_backlog_yield`).
-//! The walker-claim commands run with `current_dir` set to the TARGET project's
-//! cwd, so the daemon and a manual `/megawalk` (which runs in that cwd) store
-//! the `walker:<root>` singleton in the SAME claims dir and genuinely contend -
-//! a global daemon launched from elsewhere must still yield.
+//! The tick does NOT own the worker child. `advance --epic` self-mints each
+//! worker session and re-anchors the `node:<id>` claim to `target-session:<sid>`.
+//! A later tick RECONCILES each dispatched node by reading its session id back
+//! from the claim holder and polling its termination event
+//! (`Journal::find_termination`), then feeding the outcome through
+//! [`map_outcome`] - so the auto-defer streak is identical to the supervised
+//! path. A worker that dies without a termination event is caught by the crash
+//! floor (claim gone past the boot window). See [`reconcile_pending`].
 //!
-//! ## One node per tick
+//! ## Circuit-breaker park (recoverable, per mission)
 //!
-//! Sequential mode keeps at most one worker in flight: a tick that finds a
-//! prior dispatch still pending reconciles it and yields without dispatching
-//! another. The in-flight worker's node closes when its termination event is
-//! polled (or at merge via `fno backlog reconcile` for a no-merge dispatch);
-//! only then does the next tick dispatch the next node.
-//!
-//! ## Circuit-breaker park (recoverable)
-//!
-//! When a node fails `failure_limit` consecutive drains the breaker trips and
+//! When a child fails `failure_limit` consecutive drains the breaker trips and
 //! the daemon `fno backlog defer`s the node (graph state), then resets the
-//! in-memory streak. Deferring (not an endlessly-refreshed claim) is what makes
-//! the park recoverable: `fno backlog undefer` returns the node to the ready
-//! pool with a fresh `failure_limit` attempts, exactly as the plan specifies.
+//! in-memory streak. Independent branches keep dispatching while one branch is
+//! parked. Deferring (not an endlessly-refreshed claim) is what makes the park
+//! recoverable: `fno backlog undefer` returns the node with a fresh
+//! `failure_limit` attempts. The breaker is per mission loop.
+//!
+//! ## Mission liveness
+//!
+//! Each tick re-checks the mission: `advance --epic` reporting `deactivated` or
+//! `all_done`, or the epic dropping out of the resolved target set (its
+//! `mission_active` cleared), RETIRES the loop - no zombie ticks.
 //!
 //! ## Events (Journal contract)
 //!
 //! Every transition emits through [`Journal::append`] (project journal fatal,
-//! global mirror best-effort), matching every other loop event:
-//! `active_backlog_dispatched` / `_yield` / `_parked` / `_skip`.
+//! global mirror best-effort): `active_backlog_dispatched` / `_parked` /
+//! `_skip` / `_mission_retired`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -122,287 +116,59 @@ impl CircuitBreaker {
     }
 }
 
-/// Everything one [`drain_tick`] needs, resolved by the caller (the daemon).
+/// Everything one [`mission_drain_tick`] needs, resolved by the daemon per tick.
 ///
-/// The driver-specific bits (`lib_path`, `max_turns`, `budget_usd`, `model`)
-/// mirror what `loop_megawalk::run_inner` resolves before building its
-/// dispatcher; the daemon resolves them once and reuses across ticks.
+/// The dispatch logic lives in `advance --epic` (K1's converge core), so the
+/// daemon carries only what reconcile + the breaker need: the epic id to
+/// converge, the epic's own cwd (roots the journal + node-global `done`/`defer`
+/// reads), the `fno` binary, and the failure limit.
 #[derive(Debug, Clone)]
 pub struct DrainConfig {
-    /// The project's working directory (the walk root).
+    /// The mission's epic project cwd - roots the journal and the node-global
+    /// `backlog done`/`defer` reads (a mission fans out across projects at
+    /// dispatch time via `advance --epic`, not here).
     pub cwd: PathBuf,
-    /// Project name filter for `fno backlog next` (None = auto-detect).
-    pub project: Option<String>,
-    /// Mission scope; when set, only that mission's nodes drain.
-    pub mission: Option<String>,
-    /// Resolved driver lib path (e.g. `scripts/lib/driver-claude-code.sh`).
-    pub lib_path: PathBuf,
     /// The `fno` binary name/path (FNO_BIN override honored by the caller).
     pub abi_bin: String,
-    /// Whether dispatched workers may auto-merge (default false: review-only).
-    pub allow_merge: bool,
-    /// Per-worker turn cap (forwarded to the driver as MAX_TURNS).
-    pub max_turns: u64,
-    /// Per-worker USD budget (forwarded as BUDGET_USD).
-    pub budget_usd: f64,
-    /// Optional model override forwarded as MODEL_FLAG.
-    pub model: Option<String>,
-    /// Iteration ceiling for the single-node walk (generous; see module docs).
-    pub max_iterations: u64,
-    /// In-tick re-dispatch cap before a node is parked as NoProgress.
-    pub per_unit_max_dispatches: u64,
+    /// The active mission's epic id - the `advance --epic <mission>` argument.
+    pub mission: String,
     /// Cross-tick consecutive-failure limit (the circuit breaker).
     pub failure_limit: u32,
-    /// Batch-lane opt-in (config.batch.enabled, x-6cdf). When false the dispatch
-    /// path is byte-for-byte today's one-PR-per-node behavior.
-    pub batch: bool,
-    /// Parallel-mode lane cap (config.parallel.max_lanes, x-42d5 G4). `>= 2`
-    /// fans the tick out into lane-fill; `< 2` runs the sequential fire-and-forget
-    /// drain, which dispatches ONE node via `dispatch-lanes --max 1` and
-    /// reconciles it from events on a later tick (x-0ad6).
-    pub max_lanes: u64,
 }
 
-/// What one [`drain_tick`] did, for the scheduler and tests.
+/// What one [`mission_drain_tick`]'s reconcile did, for tests. Dispatch itself
+/// returns [`MissionDispatch`]; these are the outcomes [`map_outcome`] produces
+/// as it feeds the breaker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrainOutcome {
-    /// A node was selected and closed successfully.
+    /// A node was reconciled and closed successfully.
     Dispatched { node: String },
     /// A node tripped the circuit breaker and was deferred (parked).
     Parked { node: String, failures: u32 },
-    /// The walker singleton is held by another walker (manual /megawalk); the
-    /// tick yielded without dispatching.
-    Yielded,
-    /// Parallel mode (x-42d5 G4): the tick fire-and-forgot `dispatched` bg
-    /// lanes (and `skipped` selected-but-unlaunched ones). Lanes run detached;
-    /// their nodes close at merge via `fno backlog reconcile`, not in-tick.
-    LanesDispatched { dispatched: usize, skipped: usize },
-    /// No ready node in scope; the board (or mission) is drained.
+    /// No node to reconcile / dispatch this tick.
     NoWork,
-    /// The tick could not run to a node close (selection/loop error, or a node
-    /// that failed without yet tripping the breaker).
+    /// The tick could not reconcile a node to a close (a node that failed
+    /// without yet tripping the breaker).
     Skipped { reason: String },
 }
 
-/// The result of a `fno claim acquire` attempt.
-enum ClaimResult {
-    Acquired,
-    Held,
-    Error(String),
-}
-
-/// Acquire a claim, running in `cwd` so a per-repo claim (e.g. `walker:<root>`)
-/// lands in the target project's claims dir - the same one a manual `/megawalk`
-/// (run from that cwd) uses. Without this anchoring a global daemon would store
-/// the walker singleton under its own cwd and never contend with a manual walk
-/// (codex finding: AC1-FR).
-fn acquire_claim(
-    abi_bin: &str,
-    cwd: &Path,
-    key: &str,
-    holder: &str,
-    ttl: &str,
-    reason: &str,
-) -> ClaimResult {
-    match abi_cmd(abi_bin)
-        .current_dir(cwd)
-        .args([
-            "claim", "acquire", key, "--holder", holder, "--ttl", ttl, "--reason", reason,
-        ])
-        .output()
-    {
-        Ok(o) if o.status.success() => ClaimResult::Acquired,
-        Ok(o) => {
-            // Exit 1 = held by a live, different holder. Any non-zero is treated
-            // as "not ours" so we never dispatch without the singleton.
-            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            if o.status.code() == Some(1) {
-                ClaimResult::Held
-            } else {
-                ClaimResult::Error(stderr)
-            }
-        }
-        Err(e) => ClaimResult::Error(e.to_string()),
-    }
-}
-
-fn release_claim(abi_bin: &str, cwd: &Path, key: &str, holder: &str) {
-    let _ = abi_cmd(abi_bin)
-        .current_dir(cwd)
-        .args(["claim", "release", key, "--holder", holder])
-        .output();
+/// Whether the mission is still live after a dispatch, or should retire its loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissionDispatch {
+    /// The mission dispatched (or found nothing new); keep ticking.
+    Continue,
+    /// `advance --epic` reported the mission deactivated / all children done.
+    Retire,
 }
 
 /// Best-effort `fno backlog defer <node>` for the circuit-breaker park. Graph
-/// state, recoverable via `fno backlog undefer`.
+/// state, recoverable via `fno backlog undefer`. Node ids are global, so the
+/// epic's cwd is a valid working dir for the child-node defer.
 fn defer_node(abi_bin: &str, cwd: &Path, node: &str, reason: &str) {
     let _ = abi_cmd(abi_bin)
         .current_dir(cwd)
         .args(["backlog", "defer", node, "--reason", reason])
         .output();
-}
-
-/// The walker singleton key for a project root (canonicalized to match the cwd
-/// each dispatched worker is rooted at - same rule megawalk uses).
-fn walker_key_for(cwd: &Path) -> String {
-    let root = crate::paths::canonical_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    format!("walker:{}", root.display())
-}
-
-/// Run one drain tick: acquire the walker singleton, drain one node to
-/// termination, release the singleton. The `breaker` persists across ticks so
-/// a crash-looping node accumulates failures and is eventually deferred.
-pub fn drain_tick(
-    cfg: &DrainConfig,
-    breaker: &mut CircuitBreaker,
-    pending: &mut Vec<PendingDispatch>,
-    journal: &Journal,
-) -> DrainOutcome {
-    let walker_key = walker_key_for(&cfg.cwd);
-    let walker_holder = format!("active-backlog:{}", std::process::id());
-
-    match acquire_claim(
-        &cfg.abi_bin,
-        &cfg.cwd,
-        &walker_key,
-        &walker_holder,
-        "24h",
-        "active-backlog drain tick",
-    ) {
-        ClaimResult::Acquired => {}
-        ClaimResult::Held => {
-            let _ = journal.append(
-                "active_backlog_yield",
-                json!({"reason": "walker-live", "key": walker_key}),
-            );
-            return DrainOutcome::Yielded;
-        }
-        ClaimResult::Error(e) => {
-            let _ = journal.append(
-                "active_backlog_skip",
-                json!({"reason": "walker-claim-error", "detail": e}),
-            );
-            return DrainOutcome::Skipped {
-                reason: format!("walker-claim-error: {e}"),
-            };
-        }
-    }
-
-    // Parallel mode (x-42d5 G4): with a lane cap >= 2, the tick fills lanes
-    // instead of draining one node in-tick. Running under the walker singleton
-    // is what makes the selection atomic (select_lane_fill's single-dispatcher
-    // contract). Below 2 the sequential path runs, now itself fire-and-forget
-    // (x-0ad6): reconcile prior dispatches from events, then dispatch one more
-    // only when nothing is in flight (sequential = at most one worker at a time).
-    let outcome = if cfg.max_lanes >= 2 {
-        lane_fill_tick(cfg, journal)
-    } else {
-        reconcile_pending(cfg, breaker, pending, journal);
-        if pending.is_empty() {
-            dispatch_one(cfg, pending, journal)
-        } else {
-            // A worker from a prior tick is still in flight; a later tick
-            // reconciles it from events. The tick returns immediately instead of
-            // blocking on the child (the whole point of the retarget).
-            DrainOutcome::Skipped {
-                reason: format!("{} worker(s) in flight", pending.len()),
-            }
-        }
-    };
-
-    // Release the singleton on every exit path so a manual /megawalk can take
-    // over before the next tick (AC1-FR).
-    release_claim(&cfg.abi_bin, &cfg.cwd, &walker_key, &walker_holder);
-    outcome
-}
-
-/// Count lane receipts by status from `fno backlog dispatch-lanes` JSON output
-/// (a list of `{node_id, status: dispatched|skipped, ...}` objects). Pure so the
-/// receipt contract is unit-testable without spawning workers.
-fn count_lane_receipts(stdout: &[u8]) -> Result<(usize, usize), String> {
-    let receipts: Vec<serde_json::Value> =
-        serde_json::from_slice(stdout).map_err(|e| format!("unparseable receipts: {e}"))?;
-    let dispatched = receipts
-        .iter()
-        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched"))
-        .count();
-    Ok((dispatched, receipts.len() - dispatched))
-}
-
-/// One parallel-mode tick: fire-and-forget up to `max_lanes` isolated bg lanes
-/// via the Python dispatcher (`fno backlog dispatch-lanes`, which owns slot
-/// claims, worktree isolation, and spawn - G1-G3). The tick does NOT wait on
-/// lanes: they are detached `claude --bg` workers whose nodes close at merge
-/// (`fno backlog reconcile`), and later ticks fill freed slots. Per-lane
-/// failures are already contained inside dispatch_lanes (skip-and-log, slot
-/// released); a whole-command failure is journaled and skips the tick.
-fn lane_fill_tick(cfg: &DrainConfig, journal: &Journal) -> DrainOutcome {
-    let mut cmd = abi_cmd(&cfg.abi_bin);
-    cmd.args([
-        "backlog",
-        "dispatch-lanes",
-        "--max",
-        &cfg.max_lanes.to_string(),
-    ]);
-    if let Some(ref p) = cfg.project {
-        cmd.args(["--project", p]);
-    }
-    // Mission scope must survive the seam: the sequential path applies it via
-    // MegawalkQueue::with_mission, and dropping it here would let a
-    // mission-scoped daemon lane-fill unrelated same-project nodes (codex P1).
-    if let Some(ref m) = cfg.mission {
-        cmd.args(["--mission", m]);
-    }
-    cmd.current_dir(&cfg.cwd);
-    let out = match retry_etxtbsy(|| cmd.output()) {
-        Ok(o) if o.status.success() => o,
-        Ok(o) => {
-            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            let _ = journal.append(
-                "active_backlog_skip",
-                json!({"reason": "dispatch-lanes-failed", "detail": detail}),
-            );
-            return DrainOutcome::Skipped {
-                reason: format!("dispatch-lanes-failed: {detail}"),
-            };
-        }
-        Err(e) => {
-            let _ = journal.append(
-                "active_backlog_skip",
-                json!({"reason": "dispatch-lanes-failed", "detail": format!("{e}")}),
-            );
-            return DrainOutcome::Skipped {
-                reason: format!("dispatch-lanes-failed: {e}"),
-            };
-        }
-    };
-    match count_lane_receipts(&out.stdout) {
-        Ok((0, 0)) => DrainOutcome::NoWork,
-        Ok((dispatched, skipped)) => {
-            let _ = journal.append(
-                "active_backlog_dispatched",
-                json!({
-                    "lanes": true,
-                    "dispatched": dispatched,
-                    "skipped": skipped,
-                    "max_lanes": cfg.max_lanes,
-                }),
-            );
-            DrainOutcome::LanesDispatched {
-                dispatched,
-                skipped,
-            }
-        }
-        Err(detail) => {
-            let _ = journal.append(
-                "active_backlog_skip",
-                json!({"reason": "dispatch-lanes-unparseable", "detail": detail}),
-            );
-            DrainOutcome::Skipped {
-                reason: format!("dispatch-lanes-unparseable: {detail}"),
-            }
-        }
-    }
 }
 
 /// Map a dispatched node's termination outcome to a [`DrainOutcome`], updating
@@ -525,23 +291,21 @@ fn map_outcome(
     }
 }
 
-// ── fire-and-forget sequential scheduler (x-0ad6) ────────────────────────────
+// ── fire-and-forget reconcile (x-0ad6) ───────────────────────────────────────
 //
-// The retargeted sequential drain: a tick DISPATCHES one ready node
-// fire-and-forget through the proven lane machinery (`fno backlog dispatch-lanes
-// --max 1`, which routes through `fno agents spawn`, self-mints the worker
-// session, and re-anchors the `node:<id>` claim to `target-session:<sid>`), then
-// RECONCILES prior dispatches from events across later ticks - never owning the
-// worker child. This replaces the supervised `run_one_node`/`ShelloutDispatcher`
-// path whose `session.wait()` blocked the whole tick.
+// A tick DISPATCHES the mission's ready children fire-and-forget via K1's
+// converge core (`fno backlog advance --epic`, which routes through `fno agents
+// spawn`, self-mints each worker session, and re-anchors the `node:<id>` claim
+// to `target-session:<sid>`), then RECONCILES prior dispatches from events across
+// later ticks - never owning the worker child.
 //
 // Failure accounting is reconstructed from the worker's own termination event
 // (find_termination on the session id read back from the claim holder) fed
-// through the SAME `map_outcome` policy the supervised path used, so the
-// auto-defer streak is identical by construction. A worker that dies without
-// emitting any termination event is caught by the crash floor (claim gone past
-// the boot window), replacing the awaited-exit-code `node_failed` watchdog the
-// fire-and-forget model can no longer read.
+// through the `map_outcome` policy, so the auto-defer streak is identical by
+// construction. A worker that dies without emitting any termination event is
+// caught by the crash floor (claim gone past the boot window), replacing the
+// awaited-exit-code `node_failed` watchdog the fire-and-forget model can no
+// longer read.
 
 /// A ready node dispatched fire-and-forget in a prior tick, polled to completion
 /// from events.
@@ -703,128 +467,126 @@ fn resolve_crash(
     );
 }
 
-/// Node ids the daemon dispatched fire-and-forget, parsed from a `fno backlog
-/// dispatch-lanes` JSON receipt array (`status == "dispatched"`). Malformed or
-/// empty input yields an empty list (the caller records nothing to reconcile).
-fn dispatched_node_ids(stdout: &[u8]) -> Vec<String> {
-    serde_json::from_slice::<serde_json::Value>(stdout)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched"))
-        .filter_map(|r| {
-            r.get("node_id")
-                .and_then(|n| n.as_str())
-                .map(str::to_string)
-        })
-        .collect()
+/// The `fno backlog advance --epic <id> --json` receipt, the only fields the
+/// mission drain reads. `#[serde(default)]` on every field so a partial or
+/// evolving receipt never fails the parse (a missing field defaults benignly).
+#[derive(Debug, Default, Deserialize)]
+struct AdvanceEpicReceipt {
+    #[serde(default)]
+    deactivated: bool,
+    #[serde(default)]
+    all_done: bool,
+    /// Node ids `advance --epic` dispatched this pass (fire-and-forget), to be
+    /// reconciled from events on later ticks.
+    #[serde(default)]
+    dispatched: Vec<String>,
 }
 
-/// Fire-and-forget dispatch of one ready node through the lane machinery, with
-/// the dispatched node recorded in `pending` for later event reconcile. Used by
-/// the retargeted sequential tick (`max_lanes < 2`) in place of the supervised
-/// `run_one_node`.
-fn dispatch_one(
+/// Dispatch the mission by shelling K1's converge core, recording each dispatched
+/// child in `pending` for later reconcile. Returns [`MissionDispatch::Retire`]
+/// when `advance --epic` reports the mission deactivated / all children done.
+///
+/// The converge core owns ALL dispatch policy (cross-project fan-out, per-root
+/// `walker:` respect, `max_lanes` cap, claim dedup), so this never forks it. A
+/// non-zero exit or unparseable receipt is a transient skip (Continue) - a truly
+/// gone mission is caught by the loop's re-resolve, not guessed at here.
+fn dispatch_mission(
     cfg: &DrainConfig,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
-) -> DrainOutcome {
-    let mut cmd = abi_cmd(&cfg.abi_bin);
-    cmd.args(["backlog", "dispatch-lanes", "--max", "1"]);
-    if let Some(ref p) = cfg.project {
-        cmd.args(["--project", p]);
-    }
-    if let Some(ref m) = cfg.mission {
-        cmd.args(["--mission", m]);
-    }
-    cmd.current_dir(&cfg.cwd);
-    let out = match retry_etxtbsy(|| cmd.output()) {
+) -> MissionDispatch {
+    let out = match retry_etxtbsy(|| {
+        abi_cmd(&cfg.abi_bin)
+            .args(["backlog", "advance", "--epic", &cfg.mission, "--json"])
+            .current_dir(&cfg.cwd)
+            .output()
+    }) {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
             let _ = journal.append(
                 "active_backlog_skip",
-                json!({"reason": "dispatch-one-failed", "detail": detail}),
+                json!({"reason": "advance-epic-failed", "mission": cfg.mission, "detail": detail}),
             );
-            return DrainOutcome::Skipped {
-                reason: format!("dispatch-one-failed: {detail}"),
-            };
+            return MissionDispatch::Continue;
         }
         Err(e) => {
             let _ = journal.append(
                 "active_backlog_skip",
-                json!({"reason": "dispatch-one-failed", "detail": format!("{e}")}),
+                json!({"reason": "advance-epic-failed", "mission": cfg.mission, "detail": format!("{e}")}),
             );
-            return DrainOutcome::Skipped {
-                reason: format!("dispatch-one-failed: {e}"),
-            };
+            return MissionDispatch::Continue;
         }
     };
-    let ids = dispatched_node_ids(&out.stdout);
-    if ids.is_empty() {
-        return DrainOutcome::NoWork;
+    let receipt: AdvanceEpicReceipt = match serde_json::from_slice(&out.stdout) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = journal.append(
+                "active_backlog_skip",
+                json!({"reason": "advance-epic-unparseable", "mission": cfg.mission, "detail": format!("{e}")}),
+            );
+            return MissionDispatch::Continue;
+        }
+    };
+    if receipt.deactivated || receipt.all_done {
+        return MissionDispatch::Retire;
     }
-    for node_id in &ids {
+    let mut new_ids = Vec::new();
+    for node_id in &receipt.dispatched {
+        // Guard against re-recording a still-pending node (a prior tick's
+        // dispatch whose worker has not yet closed): advance already dedups by
+        // live claim, but a boot-window respawn could echo the id.
+        if pending.iter().any(|p| p.node_id == *node_id) {
+            continue;
+        }
         pending.push(PendingDispatch {
             node_id: node_id.clone(),
             session_id: None,
             ticks: 0,
         });
+        new_ids.push(node_id.clone());
     }
-    let node = ids[0].clone();
-    let _ = journal.append(
-        "active_backlog_dispatched",
-        json!({"node_id": node, "fire_and_forget": true}),
-    );
-    DrainOutcome::Dispatched { node }
+    if !new_ids.is_empty() {
+        let _ = journal.append(
+            "active_backlog_dispatched",
+            json!({"mission": cfg.mission, "dispatched": new_ids, "fire_and_forget": true}),
+        );
+    }
+    MissionDispatch::Continue
+}
+
+/// One mission drain tick: reconcile prior dispatches (feeding the breaker), then
+/// dispatch the mission's currently-ready children. Reconcile runs FIRST so a
+/// child that just auto-deferred is excluded from this tick's `advance --epic`
+/// selection. Synchronous (the loop offloads it to a blocking task).
+pub fn mission_drain_tick(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    pending: &mut Vec<PendingDispatch>,
+    journal: &Journal,
+) -> MissionDispatch {
+    reconcile_pending(cfg, breaker, pending, journal);
+    dispatch_mission(cfg, pending, journal)
 }
 
 // ── target resolution + resident supervisor ─────────────────────────────────────
 
-/// One drain target as resolved by the Python `fno config active-backlog --json`
-/// helper (config.active_backlog + the workspace project->path map).
+/// One mission drain target as resolved by the Python `fno config
+/// active-backlog --json` helper (an active mission + the epic's workspace path).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResolvedTarget {
+    /// The mission epic's own project (for keying + cwd resolution).
     pub project: String,
+    /// The epic project's cwd - roots the loop's journal + node-global reads.
     pub cwd: String,
     pub interval_seconds: u64,
     pub failure_limit: u32,
+    /// The active mission's epic id (the drain's `advance --epic` argument).
+    /// Optional only so a malformed receipt deserializes; a target with no
+    /// mission is skipped by the supervisor.
     #[serde(default)]
     pub mission: Option<String>,
-    /// config.batch.enabled for this repo (x-6cdf). Absent in an older emitter
-    /// -> false, so a stale `fno` never accidentally enables batched dispatch.
-    #[serde(default)]
-    pub batch: bool,
-    /// config.parallel.max_lanes for this repo (x-42d5 G4). Absent in an older
-    /// emitter -> 1 (sequential), so a stale `fno` never fans out into lanes.
-    #[serde(default = "default_max_lanes")]
-    pub max_lanes: u64,
 }
-
-fn default_max_lanes() -> u64 {
-    1
-}
-
-/// Per-worker turn cap for daemon-dispatched drains (overridable via env). The
-/// daemon has no `--max-turns` flag like megawalk, so it carries a generous
-/// default; an operator tuning knob lands as config if ever needed.
-fn daemon_max_turns() -> u64 {
-    std::env::var("FNO_ACTIVE_BACKLOG_MAX_TURNS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200)
-}
-
-fn daemon_budget_usd() -> f64 {
-    std::env::var("FNO_ACTIVE_BACKLOG_BUDGET_USD")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20.0)
-}
-
-/// In-tick re-dispatch cap, matching megawalk's `PER_UNIT_MAX_DISPATCHES`.
-const PER_UNIT_MAX_DISPATCHES: u64 = 15;
 
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
@@ -894,19 +656,19 @@ async fn output_with_cap(mut cmd: tokio::process::Command, cap: Duration) -> boo
 
 async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown: Arc<AtomicBool>) {
     let project = target.project.clone();
-    let mut interval = Duration::from_secs(target.interval_seconds.max(1));
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        // Re-resolve between ticks so config changes land without a daemon restart.
-        match resolve_fanout_targets(&abi_bin)
+        // Re-resolve between ticks so config changes land without a daemon
+        // restart; removing this project's sinks EXITS the loop.
+        let interval = match resolve_fanout_targets(&abi_bin)
             .into_iter()
             .find(|t| t.project == project)
         {
-            Some(t) => interval = Duration::from_secs(t.interval_seconds.max(1)),
+            Some(t) => Duration::from_secs(t.interval_seconds.max(1)),
             None => break, // sinks removed for this project -> stop ticking.
-        }
+        };
         let mut cmd = tokio::process::Command::new(&abi_bin);
         cmd.args(["status-fanout", "tick"]).current_dir(&target.cwd);
         // Failure otherwise swallowed (next tick retries; at-least-once cursor
@@ -934,33 +696,17 @@ fn journal_for(cwd: &Path) -> Journal {
     )
 }
 
-/// Resolve a [`DrainConfig`] for a target, or `None` if its driver lib is absent
-/// (a project without `scripts/lib/driver-claude-code.sh` cannot be drained).
+/// Resolve a [`DrainConfig`] for a mission target, or `None` if the target
+/// carries no mission id (a malformed receipt). No driver-lib preflight: the
+/// worker drivers are resolved per CHILD project inside `advance --epic`, not at
+/// the epic's cwd, so the epic project need not itself be drivable.
 fn drain_config_for(target: &ResolvedTarget, abi_bin: &str) -> Option<DrainConfig> {
-    use crate::loop_dispatch::{driver_default_max, preflight};
-    let cwd = PathBuf::from(&target.cwd);
-    let lib_dir = cwd.join("scripts").join("lib");
-    let lib_path = preflight("claude-code", &lib_dir, None).ok()?;
-    let max_iterations = driver_default_max(&lib_path).unwrap_or(PER_UNIT_MAX_DISPATCHES);
-    // x-4391: merge posture per TARGET cwd (not the daemon's own), so one daemon
-    // draining multiple projects honors each project's config.dispatch.auto_merge;
-    // a parse failure in one degrades only that project to no-merge.
-    let allow_merge = crate::agents_config::dispatch_auto_merge(&cwd);
+    let mission = target.mission.clone()?;
     Some(DrainConfig {
-        cwd,
-        project: Some(target.project.clone()),
-        mission: target.mission.clone(),
-        lib_path,
+        cwd: PathBuf::from(&target.cwd),
         abi_bin: abi_bin.to_string(),
-        allow_merge,
-        max_turns: daemon_max_turns(),
-        budget_usd: daemon_budget_usd(),
-        model: None,
-        max_iterations,
-        per_unit_max_dispatches: PER_UNIT_MAX_DISPATCHES,
+        mission,
         failure_limit: target.failure_limit,
-        batch: target.batch,
-        max_lanes: target.max_lanes,
     })
 }
 
@@ -1033,6 +779,7 @@ pub async fn run_supervisor(
     live: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
 ) {
+    // Mission drain loops, keyed by epic id (x-a4dc K2): one per active mission.
     let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     // Sibling loop family (x-2057): status-fanout ticks, keyed by project. A
     // separate enablement set (projects with >=1 status sink) from the drain
@@ -1044,7 +791,7 @@ pub async fn run_supervisor(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        // Drop handles for loops that have exited (e.g. a project was disabled).
+        // Drop handles for loops that have exited (a mission retired / deactivated).
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
@@ -1060,17 +807,21 @@ pub async fn run_supervisor(
         );
 
         for target in targets {
-            if tasks.contains_key(&target.project) {
+            // Key by mission (epic id). A target with no mission is a malformed
+            // receipt; skip it rather than key an unnamed loop.
+            let Some(mission) = target.mission.clone() else {
+                continue;
+            };
+            if tasks.contains_key(&mission) {
                 continue;
             }
-            let project = target.project.clone();
-            let h = tokio::spawn(per_project_drain_loop(
+            let h = tokio::spawn(mission_drain_loop(
                 target,
                 abi_bin.clone(),
                 emitter.clone(),
                 Arc::clone(&shutdown),
             ));
-            tasks.insert(project, h);
+            tasks.insert(mission, h);
         }
 
         for ft in fanout_targets {
@@ -1114,18 +865,21 @@ async fn sleep_interruptible(total: Duration, shutdown: &Arc<AtomicBool>) {
     }
 }
 
-/// One project's independent drain loop: drain a node, wait the poll floor (or an
-/// event nudge), repeat. Owns its own [`CircuitBreaker`] so failure streaks are
-/// per-project. Exits when `shutdown` flips OR the project drops out of
-/// `config.active_backlog` (re-resolved between ticks - AC2-EDGE: a disable
-/// finishes the current dispatch then schedules no more).
-async fn per_project_drain_loop(
+/// One mission's independent drain loop: reconcile + dispatch the mission's ready
+/// children, wait the poll floor (or an event nudge), repeat. Owns its own
+/// [`CircuitBreaker`] so failure streaks are per mission. Exits when `shutdown`
+/// flips, the mission drops out of the resolved target set (its `mission_active`
+/// was cleared), or `advance --epic` reports the mission deactivated / all done.
+async fn mission_drain_loop(
     target: ResolvedTarget,
     abi_bin: String,
     emitter: EventEmitter,
     shutdown: Arc<AtomicBool>,
 ) {
-    let project = target.project.clone();
+    // A malformed target with no mission is filtered by the supervisor before
+    // spawn; default to empty so this never panics if one slips through (the
+    // re-resolve below then finds no match and exits).
+    let mission = target.mission.clone().unwrap_or_default();
     let mut breaker = CircuitBreaker::new(target.failure_limit);
     // In-flight fire-and-forget dispatches, reconciled from events across ticks
     // (x-0ad6). Resident like the breaker so a worker dispatched one tick is
@@ -1139,44 +893,52 @@ async fn per_project_drain_loop(
             break;
         }
 
-        // Re-resolve this project's enablement (config may have changed). If it
-        // is no longer enabled, exit the loop (the supervisor will not respawn).
+        // Re-resolve this mission's liveness. If its epic dropped out of the
+        // target set (mission_active cleared externally), exit the loop (the
+        // supervisor will not respawn it).
         let current = resolve_targets(&abi_bin)
             .into_iter()
-            .find(|t| t.project == project);
+            .find(|t| t.mission.as_deref() == Some(mission.as_str()));
         let Some(t) = current else {
             break;
         };
         let interval = Duration::from_secs(t.interval_seconds.max(1));
 
         let Some(cfg) = drain_config_for(&t, &abi_bin) else {
-            // No driver lib (yet); back off and re-check rather than spin.
+            // Malformed target (no mission id); back off and re-check.
             sleep_interruptible(interval, &shutdown).await;
             continue;
         };
         let journal = journal_for(&cfg.cwd);
 
-        // drain_tick is synchronous; offload so the async runtime is never
-        // stalled. Move the breaker AND pending set in and hand them back so the
-        // streak and in-flight tracking survive the tick.
+        // The tick is synchronous; offload so the async runtime is never stalled.
+        // Move the breaker AND pending set in and hand them back so the streak
+        // and in-flight tracking survive the tick.
         let taken_b = std::mem::take(&mut breaker);
         let taken_p = std::mem::take(&mut pending);
         let handle = tokio::task::spawn_blocking(move || {
             let mut b = taken_b;
             let mut p = taken_p;
-            let outcome = drain_tick(&cfg, &mut b, &mut p, &journal);
+            let outcome = mission_drain_tick(&cfg, &mut b, &mut p, &journal);
             (outcome, b, p)
         });
         match handle.await {
-            Ok((_outcome, b, p)) => {
+            Ok((outcome, b, p)) => {
                 breaker = b;
                 pending = p;
                 backoff = Duration::from_secs(1);
+                if outcome == MissionDispatch::Retire {
+                    let _ = emitter.emit(
+                        "active_backlog_mission_retired",
+                        &json!({"mission": mission}),
+                    );
+                    break;
+                }
             }
             Err(join_err) => {
                 let _ = emitter.emit(
                     "active_backlog_task_crashed",
-                    &json!({"project": project, "error": join_err.to_string()}),
+                    &json!({"mission": mission, "error": join_err.to_string()}),
                 );
                 // The panicked breaker's streak is lost (rare); a fresh one is
                 // safe (a crash-looping node re-accrues failures and re-defers).
@@ -1238,42 +1000,25 @@ mod tests {
     }
 
     #[test]
-    fn lane_receipts_counts_by_status() {
-        let out = br#"[
-            {"node_id": "x-a", "status": "dispatched", "short_id": "s1"},
-            {"node_id": "x-b", "status": "skipped", "error": "spawn rc=127"},
-            {"node_id": "x-c", "status": "dispatched", "short_id": "s2"}
-        ]"#;
-        assert_eq!(count_lane_receipts(out), Ok((2, 1)));
+    fn advance_epic_receipt_parses_dispatched_and_liveness() {
+        // The mission drain reads only dispatched + deactivated + all_done.
+        let r: AdvanceEpicReceipt = serde_json::from_slice(
+            br#"{"epic_id":"x-e","error":null,"activated":true,"deactivated":false,
+                 "all_done":false,"dispatched":["x-a","x-b"],"children":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.dispatched, vec!["x-a", "x-b"]);
+        assert!(!r.deactivated);
+        assert!(!r.all_done);
     }
 
     #[test]
-    fn lane_receipts_empty_list() {
-        assert_eq!(count_lane_receipts(b"[]"), Ok((0, 0)));
-    }
-
-    #[test]
-    fn lane_receipts_garbage_is_error() {
-        assert!(count_lane_receipts(b"wedged traceback").is_err());
-    }
-
-    #[test]
-    fn dispatched_node_ids_keeps_only_dispatched() {
-        let out = br#"[
-            {"node_id": "x-a", "status": "dispatched", "short_id": "s1"},
-            {"node_id": "x-b", "status": "skipped", "error": "no slot"},
-            {"node_id": "x-c", "status": "dispatched", "short_id": "s2"}
-        ]"#;
-        assert_eq!(dispatched_node_ids(out), vec!["x-a", "x-c"]);
-    }
-
-    #[test]
-    fn dispatched_node_ids_empty_on_garbage_or_none() {
-        // Malformed input, an empty receipt, and an all-skipped receipt all
-        // yield nothing to reconcile (never a panic).
-        assert!(dispatched_node_ids(b"wedged traceback").is_empty());
-        assert!(dispatched_node_ids(b"[]").is_empty());
-        assert!(dispatched_node_ids(br#"[{"node_id":"x-a","status":"skipped"}]"#).is_empty());
+    fn advance_epic_receipt_defaults_on_partial_json() {
+        // A minimal / evolving receipt must never fail the parse (every field
+        // defaults benignly): no dispatched nodes, mission still live.
+        let r: AdvanceEpicReceipt = serde_json::from_slice(br#"{"epic_id":"x-e"}"#).unwrap();
+        assert!(r.dispatched.is_empty());
+        assert!(!r.deactivated && !r.all_done);
     }
 
     #[test]
@@ -1318,19 +1063,9 @@ mod tests {
     fn test_cfg(tmp: &std::path::Path, abi_bin: String, failure_limit: u32) -> DrainConfig {
         DrainConfig {
             cwd: tmp.to_path_buf(),
-            project: Some("footnote".to_string()),
-            mission: None,
-            lib_path: tmp.join("lib/driver-claude-code.sh"),
             abi_bin,
-            allow_merge: false,
-            max_turns: 5,
-            budget_usd: 25.0,
-            model: None,
-            max_iterations: 10,
-            per_unit_max_dispatches: 1,
+            mission: "x-epic".to_string(),
             failure_limit,
-            batch: false,
-            max_lanes: 1,
         }
     }
 
@@ -1554,14 +1289,18 @@ mod tests {
     }
 
     #[test]
-    fn resolved_target_max_lanes_defaults_to_sequential() {
-        // A stale emitter (no max_lanes field) must never fan out into lanes.
+    fn resolved_target_parses_mission_target() {
+        // The Python emitter's mission-target shape round-trips; a receipt with
+        // no mission deserializes (mission=None) so the supervisor can skip it.
         let t: ResolvedTarget = serde_json::from_str(
-            r#"{"project":"p","cwd":"/x","interval_seconds":60,"failure_limit":3}"#,
+            r#"{"project":"fno","cwd":"/x","interval_seconds":60,"failure_limit":3,"mission":"x-epic"}"#,
         )
         .unwrap();
-        assert_eq!(t.max_lanes, 1);
-        assert!(!t.batch);
+        assert_eq!(t.mission.as_deref(), Some("x-epic"));
+        let no_mission: ResolvedTarget =
+            serde_json::from_str(r#"{"project":"p","cwd":"/x","interval_seconds":60,"failure_limit":3}"#)
+                .unwrap();
+        assert_eq!(no_mission.mission, None);
     }
 
     #[test]
@@ -1619,9 +1358,112 @@ mod tests {
         assert!(b.record_failure("n1"));
     }
 
+    /// A stub `fno` whose `backlog advance --epic` prints a fixed JSON receipt on
+    /// stdout (exit 0). Any other subcommand is a no-op exit 0.
+    fn stub_fno_advance(dir: &std::path::Path, receipt_json: &str) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
+                 cat <<'JSON'\n{receipt_json}\nJSON\nfi\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
     #[test]
-    fn walker_key_is_canonical_and_prefixed() {
-        let k = walker_key_for(&PathBuf::from("/tmp"));
-        assert!(k.starts_with("walker:"));
+    fn dispatch_mission_records_dispatched_and_continues() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut pending = Vec::new();
+
+        let outcome = dispatch_mission(&cfg, &mut pending, &journal);
+        assert_eq!(outcome, MissionDispatch::Continue);
+        assert_eq!(
+            pending.iter().map(|p| p.node_id.clone()).collect::<Vec<_>>(),
+            vec!["x-a", "x-b"]
+        );
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_dispatched") && l.contains("x-a")));
+    }
+
+    #[test]
+    fn dispatch_mission_retires_on_deactivated() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":true,"all_done":false,"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut pending = Vec::new();
+        assert_eq!(
+            dispatch_mission(&cfg, &mut pending, &journal),
+            MissionDispatch::Retire
+        );
+    }
+
+    #[test]
+    fn dispatch_mission_retires_on_all_done() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":true,"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut pending = Vec::new();
+        assert_eq!(
+            dispatch_mission(&cfg, &mut pending, &journal),
+            MissionDispatch::Retire
+        );
+    }
+
+    #[test]
+    fn dispatch_mission_dedups_already_pending() {
+        // A boot-window re-echo of a still-pending node must not double-record it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","dispatched":["x-a"]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut pending = vec![PendingDispatch {
+            node_id: "x-a".to_string(),
+            session_id: None,
+            ticks: 2,
+        }];
+        dispatch_mission(&cfg, &mut pending, &journal);
+        assert_eq!(pending.len(), 1, "x-a already pending must not be re-added");
+    }
+
+    #[test]
+    fn dispatch_mission_unparseable_receipt_continues() {
+        // A garbled receipt is a transient skip (Continue), never a crash or a
+        // false Retire (the loop's re-resolve catches a truly gone mission).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(&tmp.path().join("bin"), "wedged python traceback");
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut pending = Vec::new();
+        assert_eq!(
+            dispatch_mission(&cfg, &mut pending, &journal),
+            MissionDispatch::Continue
+        );
+        assert!(pending.is_empty());
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("advance-epic-unparseable")));
     }
 }

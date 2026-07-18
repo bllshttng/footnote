@@ -699,12 +699,15 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
     "agent_deliver_demoted",
-    // Active-backlog drain supervisor (daemon-emitted, node x-c070): the drain
-    // tick panicked and the supervisor is restarting it with backoff. The drain
-    // decision events (active_backlog_dispatched / _yield / _parked / _skip) are
+    // Active-backlog mission drain supervisor (daemon-emitted): the drain tick
+    // panicked and the supervisor is restarting it with backoff. The drain
+    // decision events (active_backlog_dispatched / _parked / _skip) are
     // loop-stream events via Journal::append, NOT daemon emits, so they are
     // exempt from this registry by design.
     "active_backlog_task_crashed",
+    // A mission drain loop retired (its epic deactivated / all children done,
+    // x-a4dc K2). An EventEmitter emit, so a first-class registered kind.
+    "active_backlog_mission_retired",
     // Harness-aware dispatch guard (walker-emitted, x-3e70): the shared node
     // chokepoint deferred a node to a foreign harness that owns / is working it
     // (a foreign-tagged claim, a codex/gemini branch, or a foreign worktree)
