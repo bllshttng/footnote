@@ -134,6 +134,37 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
     Some(rows.into_iter().take(CARD_CAP).map(|r| r.5).collect())
 }
 
+/// (x-9c5f) node id -> `pr_number` from the same graph read `derive_cards`
+/// consumes, for the peek header's `PR #N` label (server-joins holder -> node ->
+/// pr at layout time). A sibling of `derive_cards`: parses `entries[].pr_number`
+/// via `.as_u64()`, so a string/float/absent value is skipped (matching
+/// `AgentRow.pr: Option<u64>`). Pure; a malformed doc yields an empty map (the
+/// label simply never appears). `pr_number` is NOT unique across entries, but the
+/// map is keyed by node id, so that is irrelevant.
+pub fn derive_pr_map(raw: &str) -> HashMap<String, u64> {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return HashMap::new();
+    };
+    let Some(entries) = doc
+        .get("entries")
+        .or_else(|| doc.get("nodes"))
+        .and_then(|v| v.as_array())
+    else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for e in entries {
+        let (Some(id), Some(pr)) = (
+            e.get("id").and_then(|v| v.as_str()),
+            e.get("pr_number").and_then(|v| v.as_u64()),
+        ) else {
+            continue;
+        };
+        out.insert(id.to_string(), pr);
+    }
+    out
+}
+
 /// Ranked nodes (band 0) sort ahead of unranked ones (band 1).
 fn rank_band(rank: Option<f64>) -> u8 {
     match rank {
@@ -206,6 +237,13 @@ pub struct ReaderState {
     /// same card states, different/new holder - must republish too, not wait
     /// for a card flip (codex peer review of the v18 routes).
     last_live: Option<HashMap<String, String>>,
+    /// (x-9c5f) node id -> pr_number, recomputed ONLY when the graph read
+    /// refreshes (not per tick), so a second full JSON parse per second is
+    /// avoided. Cloned onto every publish; a pr-only change (a node gets a
+    /// pr_number, same card set + holders) still republishes via the gate below.
+    pr: HashMap<String, u64>,
+    /// The pr map as of the last publish, so a pr-only change is detected.
+    last_pr: Option<HashMap<String, u64>>,
 }
 
 impl ReaderState {
@@ -229,7 +267,7 @@ impl ReaderState {
         stamp: Option<(std::time::SystemTime, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
-    ) -> Option<Vec<BacklogCard>> {
+    ) -> Option<(Vec<BacklogCard>, HashMap<String, u64>)> {
         if stamp != self.cached_stamp {
             match (read_if_changed(), stamp) {
                 // Only commit the new stamp once we have matching content, so a
@@ -239,10 +277,15 @@ impl ReaderState {
                 // improves on the older agents_view reader's advance-anyway).
                 (Some(raw), _) => {
                     self.cached_stamp = stamp;
+                    // (x-9c5f) The pr map derives from the SAME read; recompute it
+                    // only here, not per tick, so we never parse the 4M graph
+                    // twice a second.
+                    self.pr = derive_pr_map(&raw);
                     self.cached_raw = Some(raw);
                 }
                 (None, None) => {
                     self.cached_stamp = stamp;
+                    self.pr = HashMap::new();
                     self.cached_raw = None; // file vanished: empty the lane
                 }
                 (None, Some(_)) => {} // torn read: keep last-good AND retry next tick
@@ -266,9 +309,14 @@ impl ReaderState {
         if live_changed {
             self.last_live = live.cloned();
         }
-        if live_changed || self.last_sent.as_ref() != Some(&cards) {
+        // A pr-only change (a node gains a pr_number while its card + holder stay
+        // put) must republish too, else the `PR #N` label would lag until an
+        // unrelated card/claim flip (x-9c5f).
+        let pr_changed = self.last_pr.as_ref() != Some(&self.pr);
+        if live_changed || pr_changed || self.last_sent.as_ref() != Some(&cards) {
             self.last_sent = Some(cards.clone());
-            Some(cards)
+            self.last_pr = Some(self.pr.clone());
+            Some((cards, self.pr.clone()))
         } else {
             None
         }
@@ -349,7 +397,7 @@ mod tests {
         let mut st = ReaderState::default();
         let good = graph(r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s1 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
-        assert_eq!(st.tick(s1, || Some(good.clone()), None).unwrap().len(), 1);
+        assert_eq!(st.tick(s1, || Some(good.clone()), None).unwrap().0.len(), 1);
         // A changed stamp but a torn (None) read keeps the last-good card AND
         // does not commit the new stamp, so the read is retried next tick.
         let s2 = Some((std::time::SystemTime::UNIX_EPOCH, 999));
@@ -360,7 +408,41 @@ mod tests {
             r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"},
                {"id":"b","slug":"t","priority":"p2","_status":"blocked"}"#,
         );
-        assert_eq!(st.tick(s2, || Some(two.clone()), None).unwrap().len(), 2);
+        assert_eq!(st.tick(s2, || Some(two.clone()), None).unwrap().0.len(), 2);
+    }
+
+    #[test]
+    fn derive_pr_map_takes_only_u64_pr_numbers() {
+        // US8 (x-9c5f): node id -> pr_number, skipping a missing / non-u64 value
+        // (matching AgentRow.pr: Option<u64>). Keyed by node id, not unique pr.
+        let raw = graph(
+            r#"{"id":"x-a","slug":"a","priority":"p1","_status":"claimed","pr_number":385},
+               {"id":"x-b","slug":"b","priority":"p2","_status":"ready"},
+               {"id":"x-c","slug":"c","priority":"p2","_status":"claimed","pr_number":"nope"}"#,
+        );
+        let m = derive_pr_map(&raw);
+        assert_eq!(m.get("x-a"), Some(&385));
+        assert_eq!(m.get("x-b"), None, "no pr_number -> absent");
+        assert_eq!(m.get("x-c"), None, "non-u64 pr_number -> skipped");
+        assert!(derive_pr_map("not json").is_empty());
+    }
+
+    #[test]
+    fn pr_only_change_republishes() {
+        // US8: a node gaining a pr_number (same card set + holders) must
+        // republish so the PR label is not stale until an unrelated flip.
+        let mut st = ReaderState::default();
+        let raw0 = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"claimed"}"#);
+        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, raw0.len() as u64));
+        assert!(st.tick(s0, || Some(raw0.clone()), None).is_some());
+        // Same claimed card, now with a pr_number: a new stamp (mtime bumped),
+        // same card state -> still republishes because the pr map changed.
+        let raw1 =
+            graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"claimed","pr_number":42}"#);
+        let s1 = Some((std::time::SystemTime::UNIX_EPOCH, raw1.len() as u64));
+        let out = st.tick(s1, || Some(raw1.clone()), None);
+        assert!(out.is_some(), "pr-only change republishes");
+        assert_eq!(out.unwrap().1.get("x-a"), Some(&42));
     }
 
     // ---- claims overlay (x-54fa) -----------------------------------------
@@ -404,17 +486,17 @@ mod tests {
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
-        let first = st.tick(s, || Some(raw.clone()), None).unwrap();
+        let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(first[0].state, CardState::Ready);
         // Claim appears: same stamp, no re-read, card republishes InFlight.
         let claimed = live(&[("x-a", "target-session:abc")]);
-        let flipped = st.tick(s, || None, Some(&claimed)).unwrap();
+        let flipped = st.tick(s, || None, Some(&claimed)).unwrap().0;
         assert_eq!(flipped[0].state, CardState::InFlight);
         // Unchanged claim set: no republish.
         assert!(st.tick(s, || None, Some(&claimed)).is_none());
         // Claim released: card reverts to Ready and republishes.
         let released = live(&[]);
-        let reverted = st.tick(s, || None, Some(&released)).unwrap();
+        let reverted = st.tick(s, || None, Some(&released)).unwrap().0;
         assert_eq!(reverted[0].state, CardState::Ready);
     }
 
@@ -427,7 +509,7 @@ mod tests {
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"claimed"}"#);
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
-        let first = st.tick(s, || Some(raw.clone()), None).unwrap();
+        let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(
             first[0].state,
             CardState::InFlight,

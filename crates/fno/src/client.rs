@@ -31,7 +31,7 @@ use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, AnswerablePrompt, BacklogCard,
     BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
     MouseKind, PanePlacement, PaneTarget, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION,
-    MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
+    MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::tree::{Dir, Rect, TabId};
 
@@ -547,6 +547,13 @@ struct View {
     /// (x-c376) Monotonic `PeekAgent` request counter, bumped per open/move so a
     /// body landing after a newer request is dropped by seq (AC1-FR).
     peek_seq: u64,
+    /// (x-9c5f) The peek `m` free-text reply input: (target name captured at
+    /// m-press, buffer). `Some` while typing; input mode wins the key route
+    /// inside peek (digits/j/k/l/r are literal chars). Client-local like `peek`.
+    peek_input: Option<(String, String)>,
+    /// Split-CSI carry for the reply input (its own buffer, like `rename_esc`),
+    /// so an arrow key mid-type never leaks a param byte into the buffer.
+    peek_input_esc: Vec<u8>,
     /// (x-c914) The session-local active claude account: every mux-initiated
     /// worker spawn (leader+g `DispatchNext`, a targeted `DispatchNode`)
     /// appends `--account <id>` while `Some`. Client-local ephemera like
@@ -677,6 +684,9 @@ struct PeekView {
     /// header over the old transcript (codex review): the seq guard covers a
     /// late body under the same request, this covers a changed row identity.
     name: String,
+    /// (x-9c5f) When this row's transcript was last fetched, throttling the
+    /// auto-refresh on Layout pushes to >= `PEEK_REFRESH_INTERVAL` (US9).
+    last_fetch: Instant,
 }
 
 /// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
@@ -976,6 +986,8 @@ impl View {
             peek: None,
             peek_esc: Vec::new(),
             peek_seq: 0,
+            peek_input: None,
+            peek_input_esc: Vec::new(),
             active_account: None,
             connections: None,
             conn_esc: Vec::new(),
@@ -1337,6 +1349,9 @@ impl View {
     fn clear_peek(&mut self) {
         self.peek = None;
         self.peek_esc.clear();
+        // (x-9c5f) The reply input lives inside peek; closing peek drops it too.
+        self.peek_input = None;
+        self.peek_input_esc.clear();
     }
 
     /// Open the which-key keybinds modal (leader+?, x-8ccf US3). Clears peek like
@@ -1491,6 +1506,7 @@ impl View {
             seq: self.peek_seq,
             body: None,
             name,
+            last_fetch: Instant::now(),
         });
         self.peek_esc.clear();
         self.peek_seq
@@ -2150,6 +2166,29 @@ impl View {
         anchored
     }
 
+    /// (x-9c5f US9) Arm a transcript auto-refresh for the peeked row when its
+    /// last fetch is older than [`PEEK_REFRESH_INTERVAL`]: bump the request seq +
+    /// reset the fetch timer but KEEP the current body, so an active row follows
+    /// without the "loading…" flicker a full [`View::open_peek`] would cause. The
+    /// seq bump makes the seq guard drop any out-of-order body. Returns (seq,
+    /// name) to send the fresh `PeekAgent`, or `None` when peek is closed / not
+    /// yet due.
+    fn peek_refresh_due(&mut self) -> Option<(u64, String)> {
+        let due = self
+            .peek
+            .as_ref()
+            .is_some_and(|p| p.last_fetch.elapsed() >= PEEK_REFRESH_INTERVAL);
+        if !due {
+            return None;
+        }
+        self.peek_seq = self.peek_seq.wrapping_add(1);
+        let seq = self.peek_seq;
+        let peek = self.peek.as_mut()?;
+        peek.seq = seq;
+        peek.last_fetch = Instant::now();
+        Some((seq, peek.name.clone()))
+    }
+
     /// Sideline rows the cursor can occupy: the full terminal height (the
     /// sideline owns row 0 since x-cd67 US1) minus the bottom chrome row.
     /// `draw_bottom_row` repaints the last row over the sideline when it is
@@ -2376,7 +2415,12 @@ impl View {
                 DisplayRow::Agent(a) => Some(*a),
                 _ => None,
             });
-            let lines = peek_overlay_lines(agent, peek);
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let reply = self.peek_input.as_ref().map(|(_, buf)| buf.as_str());
+            let lines = peek_overlay_lines(agent, peek, reply, now_secs);
             draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
         } else if let Some(nav) = &self.nav {
             // x-653d navigator: the filtered flat catalog + query/chip line, on
@@ -3650,6 +3694,27 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
 /// `draw_lines_overlay`.
 const PEEK_OVERLAY_W: usize = 72;
 
+/// (x-9c5f US9) Minimum gap between transcript auto-refreshes while peek is open:
+/// a Layout push arriving sooner than this since the last fetch for the same row
+/// is ignored. Working rows push at the 1s registry cadence, so an active
+/// transcript still follows within ~3s; a silent row stops refetching entirely.
+const PEEK_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+
+/// (x-9c5f) Humanize an age in seconds to `Ns`/`Nm`/`Nh`/`Nd` for the peek
+/// header's `changed Ns ago` line (Discretion 3). A future stamp (clock skew)
+/// is clamped by the caller to 0 before this, so `0s` is the floor.
+fn humanize_ago(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
 /// Wrap `s` into lines no wider than `w` display chars, breaking on spaces. A
 /// single word longer than `w` becomes its own line (pad_to ellipsizes it) - a
 /// status sentence has no such words in practice, so the simple greedy pass is
@@ -3678,7 +3743,12 @@ fn wrap_words(s: &str, w: usize) -> Vec<String> {
 /// one, error/timeout text rendered verbatim as body lines) and a footer hint.
 /// `agent` is the LIVE row re-read per frame; `None` means it vanished between
 /// key and frame (a transient single frame - the key handler re-anchors/closes).
-fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> {
+fn peek_overlay_lines(
+    agent: Option<&AgentRow>,
+    peek: &PeekView,
+    reply: Option<&str>,
+    now_secs: u64,
+) -> Vec<String> {
     let Some(a) = agent else {
         return vec![pad_to(" peek · row gone", PEEK_OVERLAY_W)];
     };
@@ -3701,10 +3771,22 @@ fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> 
     };
     // (x-c914) The account glyph rides the peek header next to the name, same
     // vocabulary as the selector row.
-    let header = match a.account.as_deref() {
+    let mut header = match a.account.as_deref() {
         Some(acct) => format!(" {glyph} {}  @{acct}", a.name),
         None => format!(" {glyph} {}", a.name),
     };
+    // (x-9c5f) Additive header labels, each present only when its data exists (no
+    // placeholder dashes): `changed Ns ago` (a future stamp / clock skew clamps
+    // to `0s` via saturating_sub) and `PR #N`.
+    if let Some(updated) = a.updated_at {
+        header.push_str(&format!(
+            " · changed {} ago",
+            humanize_ago(now_secs.saturating_sub(updated))
+        ));
+    }
+    if let Some(pr) = a.pr {
+        header.push_str(&format!(" · PR #{pr}"));
+    }
     let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
         for wl in wrap_words(&sanitize_peek_line(reason), PEEK_OVERLAY_W - 3) {
@@ -3742,10 +3824,23 @@ fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> 
             }
         }
     }
-    lines.push(pad_to(
-        " j/k peek · digit answers · ⏎ attach · esc back",
-        PEEK_OVERLAY_W,
-    ));
+    // (x-9c5f) The reply input (`m`) replaces the footer while open; else the
+    // footer swaps by row state (attach is a dead end on an exited row - the bug
+    // US6 closes - so it becomes `r respawn`; `m reply` shows in both).
+    match reply {
+        Some(buf) => lines.push(pad_to(
+            &format!(" reply: {buf}_ (⏎ send · esc cancel)"),
+            PEEK_OVERLAY_W,
+        )),
+        None => lines.push(pad_to(
+            if a.exited {
+                " j/k peek · m reply · r respawn · esc back"
+            } else {
+                " j/k peek · digit answers · m reply · ⏎ attach · esc back"
+            },
+            PEEK_OVERLAY_W,
+        )),
+    }
     lines
 }
 
@@ -4086,9 +4181,26 @@ async fn attach_and_run(
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
-                    if let Some((cursor, name)) = view.peek_reanchor() {
-                        if let Err(e) = fetch_peek(&mut view, cursor, name, &mut sock_w).await {
-                            break Err(e);
+                    match view.peek_reanchor() {
+                        Some((cursor, name)) => {
+                            if let Err(e) = fetch_peek(&mut view, cursor, name, &mut sock_w).await {
+                                break Err(e);
+                            }
+                        }
+                        // (x-9c5f US9) Same row held: auto-refresh the transcript
+                        // if the interval elapsed. Body is kept until the fresh
+                        // one lands (peek_refresh_due), so no loading flicker.
+                        None => {
+                            if let Some((seq, name)) = view.peek_refresh_due() {
+                                if let Err(e) = write_msg(
+                                    &mut sock_w,
+                                    &ClientMsg::Command(Command::PeekAgent { name, seq }),
+                                )
+                                .await
+                                {
+                                    break Err(format!("peek refresh failed: {e}"));
+                                }
+                            }
                         }
                     }
                     if let Err(e) = compositor.draw(&view.compose()) {
@@ -5644,6 +5756,12 @@ async fn peek_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
+    // (x-9c5f) Input mode wins the key route: while the `m` reply input is open,
+    // every key types into it (digits/j/k/l/r literal), never peek nav. Checked
+    // before the nav fold so the two folders never share a chunk's bytes.
+    if view.peek_input.is_some() {
+        return peek_input_keys(view, bytes, sock_w).await;
+    }
     let mut esc = std::mem::take(&mut view.peek_esc);
     let keys = fold_selector_keys(&mut esc, bytes);
     view.peek_esc = esc;
@@ -5741,6 +5859,41 @@ async fn peek_keys(
                     }
                 }
             }
+            b'm' => {
+                // Open the free-text reply input (US5), capturing the target name
+                // at m-press so a later layout shift can't retarget it. break so
+                // the rest of THIS chunk is swallowed; the next chunk routes to
+                // peek_input_keys.
+                match view.display_rows().get(cursor) {
+                    Some(DisplayRow::Agent(a)) => {
+                        view.peek_input = Some((a.name.clone(), String::new()));
+                        view.peek_input_esc.clear();
+                        break;
+                    }
+                    _ => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
+            b'r' => {
+                // Respawn an exited row (US6). A live row BELs (locked posture);
+                // the server re-validates external/uuid/shape - client gating is
+                // UX, not the guard.
+                let target = match view.display_rows().get(cursor) {
+                    Some(DisplayRow::Agent(a)) => Some((a.name.clone(), a.exited)),
+                    _ => None,
+                };
+                match target {
+                    Some((name, true)) => {
+                        write_msg(sock_w, &ClientMsg::Command(Command::RespawnAgent { name }))
+                            .await
+                            .map_err(|e| format!("respawn send failed: {e}"))?;
+                    }
+                    _ => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
             0x1b | b'q' => {
                 // Close peek. When peek was opened FROM the selector it stays
                 // open underneath, so re-point its cursor to the peeked row
@@ -5756,6 +5909,83 @@ async fn peek_keys(
             // Everything else is swallowed - never a pane leak (leader-layer
             // invariant). h (left-arrow) has no peek action.
             _ => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// (x-9c5f US5) The peek `m` free-text reply input keys, mirroring
+/// [`rename_keys`]' discipline (fold_search_input, Esc drops the buffer,
+/// backspace pops, printable ASCII appends, re-read the mode each key) with two
+/// node-spec divergences: **empty-Enter keeps the input open** (a blank mail is
+/// meaningless, unlike a blank rename's "reset to auto"), and Enter-with-text
+/// sends [`Command::MailAgent`] then closes the input, leaving peek open (the
+/// notice line is the feedback). The buffer caps at [`MAX_MAIL_TEXT`] chars so
+/// the operator sees the same ceiling the server enforces.
+async fn peek_input_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.peek_input_esc);
+    let keys = fold_search_input(&mut esc, bytes);
+    view.peek_input_esc = esc;
+    for key in keys {
+        // Re-read the mode each key: an Esc/Enter mid-chunk closes the input, and
+        // the rest of the chunk must be swallowed, never forwarded.
+        if view.peek_input.is_none() {
+            break;
+        }
+        match key {
+            SearchKey::Esc => {
+                // Drop half-typed text; peek stays open underneath (AC parity
+                // with rename Esc).
+                view.peek_input = None;
+                view.peek_input_esc.clear();
+                break;
+            }
+            SearchKey::Byte(b) => match b {
+                b'\r' | b'\n' => {
+                    // Empty (or whitespace-only) buffer: BEL, input stays open,
+                    // nothing sent (AC3-UI). Otherwise send + close.
+                    let send = view
+                        .peek_input
+                        .as_ref()
+                        .filter(|(_, buf)| !buf.trim().is_empty())
+                        .map(|(name, buf)| (name.clone(), buf.clone()));
+                    match send {
+                        None => {
+                            let _ = raw_out(b"\x07");
+                        }
+                        Some((name, text)) => {
+                            view.peek_input = None;
+                            view.peek_input_esc.clear();
+                            write_msg(
+                                sock_w,
+                                &ClientMsg::Command(Command::MailAgent { name, text }),
+                            )
+                            .await
+                            .map_err(|e| format!("mail send failed: {e}"))?;
+                        }
+                    }
+                    break;
+                }
+                0x7f | 0x08 => {
+                    if let Some((_, buf)) = view.peek_input.as_mut() {
+                        buf.pop();
+                    }
+                }
+                0x20..=0x7e => {
+                    if let Some((_, buf)) = view.peek_input.as_mut() {
+                        // Cap to the server's ceiling so the operator sees exactly
+                        // what will be accepted (server stays authoritative).
+                        if buf.chars().count() < MAX_MAIL_TEXT {
+                            buf.push(b as char);
+                        }
+                    }
+                }
+                _ => {}
+            },
         }
     }
     Ok(StdinFlow::Continue)
@@ -7156,6 +7386,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -7199,6 +7431,8 @@ mod tests {
             tab: None,
             subline: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let ChromeHit::Cmds(c) = agent_hit(&row, 1) else {
             panic!("expected Cmds for a same-workspace watch-only row");
@@ -8006,6 +8240,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         // A watch-only bg row with a claude jobId: a click attaches it.
         let bg_attach = AgentRow {
@@ -8024,6 +8260,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -8042,6 +8280,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
@@ -8083,6 +8323,8 @@ mod tests {
                 subline: None,
                 tab: None,
                 account: None,
+                updated_at: None,
+                pr: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -8359,6 +8601,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -8529,6 +8773,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -8789,6 +9035,8 @@ mod tests {
                     subline: None,
                     tab: None,
                     account: None,
+                    updated_at: None,
+                    pr: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -8806,6 +9054,8 @@ mod tests {
                     subline: None,
                     tab: None,
                     account: None,
+                    updated_at: None,
+                    pr: None,
                 },
                 AgentRow {
                     squad: None,
@@ -8823,6 +9073,8 @@ mod tests {
                     subline: None,
                     tab: None,
                     account: None,
+                    updated_at: None,
+                    pr: None,
                 },
             ],
             focus_node: None,
@@ -8889,6 +9141,8 @@ mod tests {
                 subline: None,
                 tab: None,
                 account: None,
+                updated_at: None,
+                pr: None,
             }
         }
         let mut view = two_pane_view();
@@ -9000,6 +9254,8 @@ mod tests {
                     subline: None,
                     tab: None,
                     account: None,
+                    updated_at: None,
+                    pr: None,
                 },
                 AgentRow {
                     squad: None,
@@ -9017,6 +9273,8 @@ mod tests {
                     subline: None,
                     tab: None,
                     account: None,
+                    updated_at: None,
+                    pr: None,
                 },
                 AgentRow {
                     squad: None,
@@ -9034,6 +9292,8 @@ mod tests {
                     subline: None,
                     tab: None,
                     account: None,
+                    updated_at: None,
+                    pr: None,
                 },
             ],
             focus_node: None,
@@ -9293,6 +9553,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -9528,6 +9790,7 @@ mod tests {
             seq: 5,
             body: None,
             name: String::new(),
+            last_fetch: Instant::now(),
         });
         assert!(
             !v.apply_peek_body(4, vec!["stale".into()]),
@@ -9564,14 +9827,17 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let loading = PeekView {
             cursor: 0,
             seq: 1,
             body: None,
             name: "w".into(),
+            last_fetch: Instant::now(),
         };
-        let out = peek_overlay_lines(Some(&row), &loading).join("\n");
+        let out = peek_overlay_lines(Some(&row), &loading, None, 0).join("\n");
         assert!(
             out.contains("waiting on a menu"),
             "shows the status sentence"
@@ -9586,12 +9852,13 @@ mod tests {
             seq: 1,
             body: Some(vec!["line one".into(), "line two".into()]),
             name: "w".into(),
+            last_fetch: Instant::now(),
         };
-        let out = peek_overlay_lines(Some(&row), &loaded).join("\n");
+        let out = peek_overlay_lines(Some(&row), &loaded, None, 0).join("\n");
         assert!(out.contains("line one") && out.contains("line two"));
         assert!(!out.contains("loading"), "no placeholder once loaded");
         // A vanished row renders a safe placeholder, never a panic.
-        assert!(peek_overlay_lines(None, &loaded)[0].contains("row gone"));
+        assert!(peek_overlay_lines(None, &loaded, None, 0)[0].contains("row gone"));
     }
 
     // x-c376 (codex review): a layout shift that lands a DIFFERENT agent on the
@@ -9621,8 +9888,9 @@ mod tests {
             seq: 1,
             body: Some(vec!["a\x1b[31mred\x1b[0m\tb\rc".into()]),
             name: "w".into(),
+            last_fetch: Instant::now(),
         };
-        let out = peek_overlay_lines(Some(&row), &peek).join("\n");
+        let out = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
         assert!(!out.contains('\x1b'), "ESC stripped");
         assert!(!out.contains('\r'), "CR stripped");
         assert!(!out.contains('\t'), "TAB replaced");
@@ -9643,11 +9911,86 @@ mod tests {
             seq: 1,
             body: None,
             name: "w".into(),
+            last_fetch: Instant::now(),
         };
-        assert!(peek_overlay_lines(Some(&row), &peek)[0].contains("@readyrule"));
+        assert!(peek_overlay_lines(Some(&row), &peek, None, 0)[0].contains("@readyrule"));
 
         row.account = None; // default account -> no glyph
-        assert!(!peek_overlay_lines(Some(&row), &peek)[0].contains('@'));
+        assert!(!peek_overlay_lines(Some(&row), &peek, None, 0)[0].contains('@'));
+    }
+
+    #[test]
+    fn humanize_ago_thresholds() {
+        assert_eq!(humanize_ago(30), "30s");
+        assert_eq!(humanize_ago(90), "1m");
+        assert_eq!(humanize_ago(3700), "1h");
+        assert_eq!(humanize_ago(90_000), "1d");
+    }
+
+    // x-9c5f US7/US8: the peek header shows `changed Ns ago` + `PR #N` when the
+    // data exists, and NEITHER (no placeholder) when absent. AC2-EDGE.
+    #[test]
+    fn peek_header_shows_changed_ago_and_pr_when_present_else_absent() {
+        let peek = PeekView {
+            cursor: 0,
+            seq: 1,
+            body: None,
+            name: "w".into(),
+            last_fetch: Instant::now(),
+        };
+        let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
+        row.updated_at = Some(1_000);
+        row.pr = Some(385);
+        let header = &peek_overlay_lines(Some(&row), &peek, None, 1_090)[0];
+        assert!(header.contains("changed 1m ago"), "header: {header}");
+        assert!(header.contains("PR #385"), "header: {header}");
+
+        row.updated_at = None;
+        row.pr = None;
+        let header = &peek_overlay_lines(Some(&row), &peek, None, 1_090)[0];
+        assert!(!header.contains("changed"), "no changed line: {header}");
+        assert!(!header.contains("PR #"), "no pr label: {header}");
+    }
+
+    // x-9c5f AC2-UI: the footer swaps by row state (exited -> `r respawn`, not
+    // `⏎ attach`; live -> the inverse) and shows `m reply` in both.
+    #[test]
+    fn peek_footer_swaps_on_exited_and_offers_m_reply() {
+        let peek = PeekView {
+            cursor: 0,
+            seq: 1,
+            body: Some(vec![]),
+            name: "w".into(),
+            last_fetch: Instant::now(),
+        };
+        let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
+        let live = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
+        assert!(live.contains("⏎ attach") && live.contains("m reply"));
+        assert!(!live.contains("r respawn"));
+
+        row.exited = true;
+        let exited = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
+        assert!(exited.contains("r respawn") && exited.contains("m reply"));
+        assert!(
+            !exited.contains("⏎ attach"),
+            "attach is a dead end on exited"
+        );
+    }
+
+    // x-9c5f US5: while the reply input is open its line replaces the footer.
+    #[test]
+    fn peek_reply_input_line_replaces_footer() {
+        let peek = PeekView {
+            cursor: 0,
+            seq: 1,
+            body: Some(vec![]),
+            name: "w".into(),
+            last_fetch: Instant::now(),
+        };
+        let row = agent_row("w", 3, Some(AgentBadge::Working), false);
+        let out = peek_overlay_lines(Some(&row), &peek, Some("fix the test"), 0).join("\n");
+        assert!(out.contains("reply: fix the test"), "input line: {out}");
+        assert!(!out.contains("⏎ attach"), "footer hidden while typing");
     }
 
     // x-c376 AC3-HP / AC2-ERR: a digit on a blocked, pane-hosted peeked row sends
@@ -9686,6 +10029,77 @@ mod tests {
         let mut buf2: Vec<u8> = Vec::new();
         peek_keys(&mut v, b"1", &mut buf2).await.unwrap();
         assert!(buf2.is_empty(), "no PaneAnswer for a non-answerable row");
+    }
+
+    // x-9c5f US5 / AC1-UI / AC3-UI: `m` opens the reply input; while open, input
+    // mode wins the key route (digits/j are literal buffer chars, not nav);
+    // Enter-with-text sends MailAgent and keeps peek open; empty-Enter keeps the
+    // input open (nothing sent).
+    #[tokio::test]
+    async fn peek_m_reply_sends_mail_and_input_mode_wins_over_nav() {
+        let mut v = view_with_agents(vec![blocked_row("peer", 4, None)]);
+        let idx = agent_row_at(&v, |a| a.name == "peer");
+        v.open_peek(idx, "peer".into());
+        // `m` opens the input (nothing sent yet).
+        let mut buf: Vec<u8> = Vec::new();
+        peek_keys(&mut v, b"m", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "m alone sends nothing");
+        assert!(v.peek_input.is_some(), "input opened");
+        // Input mode wins: `j` and a digit type into the buffer (no nav/answer).
+        peek_keys(&mut v, b"j1", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.peek_input.as_ref().unwrap().1, "j1");
+        // Enter with text sends MailAgent, closes the input, leaves peek open.
+        let mut buf2: Vec<u8> = Vec::new();
+        peek_keys(&mut v, b"\r", &mut buf2).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf2);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::MailAgent { name, text }) => {
+                assert_eq!(name, "peer");
+                assert_eq!(text, "j1");
+            }
+            other => panic!("expected MailAgent, got {other:?}"),
+        }
+        assert!(v.peek_input.is_none(), "input closed after send");
+        assert!(
+            v.peek.is_some(),
+            "peek stays open (the notice is the feedback)"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_empty_enter_keeps_reply_input_open() {
+        let mut v = view_with_agents(vec![blocked_row("peer", 4, None)]);
+        let idx = agent_row_at(&v, |a| a.name == "peer");
+        v.open_peek(idx, "peer".into());
+        peek_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        peek_keys(&mut v, b"\r", &mut buf).await.unwrap(); // empty Enter
+        assert!(buf.is_empty(), "empty-Enter sends nothing (AC3-UI)");
+        assert!(v.peek_input.is_some(), "input stays open on empty-Enter");
+    }
+
+    // x-9c5f US6 / AC1-EDGE: `r` on an exited row sends RespawnAgent; on a live
+    // row it BELs (nothing sent). The server re-validates uuid/external.
+    #[tokio::test]
+    async fn peek_r_respawns_exited_row_and_bels_live() {
+        let mut dead = blocked_row("dead", 6, None);
+        dead.exited = true;
+        let mut v = view_with_agents(vec![dead, blocked_row("live", 5, None)]);
+        let didx = agent_row_at(&v, |a| a.name == "dead");
+        v.open_peek(didx, "dead".into());
+        let mut buf: Vec<u8> = Vec::new();
+        peek_keys(&mut v, b"r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::RespawnAgent { name }) => assert_eq!(name, "dead"),
+            other => panic!("expected RespawnAgent, got {other:?}"),
+        }
+        // A live row: `r` sends nothing (BEL only).
+        let lidx = agent_row_at(&v, |a| a.name == "live");
+        v.open_peek(lidx, "live".into());
+        let mut buf2: Vec<u8> = Vec::new();
+        peek_keys(&mut v, b"r", &mut buf2).await.unwrap();
+        assert!(buf2.is_empty(), "r on a live row sends nothing");
     }
 
     // x-c376 AC4-HP: Enter on a pane-hosted peeked row focuses its pane and
@@ -9809,6 +10223,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.expanded.insert(1);
@@ -9847,6 +10263,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         }
     }
 
@@ -10429,6 +10847,8 @@ mod tests {
                 subline: None,
                 tab: Some(1),
                 account: None,
+                updated_at: None,
+                pr: None,
             },
             AgentRow {
                 squad: Some(1),
@@ -10446,6 +10866,8 @@ mod tests {
                 subline: None,
                 tab: None,
                 account: None,
+                updated_at: None,
+                pr: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -10480,6 +10902,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         };
         let bare = row("zsh", 10, None);
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
@@ -10537,6 +10961,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -10583,6 +11009,8 @@ mod tests {
                 subline: None,
                 tab: None,
                 account: None,
+                updated_at: None,
+                pr: None,
             },
             AgentRow {
                 squad: Some(2),
@@ -10600,6 +11028,8 @@ mod tests {
                 subline: None,
                 tab: None,
                 account: None,
+                updated_at: None,
+                pr: None,
             },
         ];
         let rows = v.nav_rows();
@@ -10681,6 +11111,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         }];
         let idx = v
             .nav_rows()
@@ -11087,6 +11519,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -11242,6 +11676,8 @@ mod tests {
             subline: None,
             tab: None,
             account: None,
+            updated_at: None,
+            pr: None,
         }
     }
 
