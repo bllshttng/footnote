@@ -108,12 +108,9 @@ LOCAL_SETTINGS="$REPO_ROOT/.fno/config.toml"
 GLOBAL_SETTINGS="${HOME}/.fno/config.toml"
 
 # ── Provider detection ───────────────────────────────────────────────
-# Session markers first (a real codex/gemini session sets its thread/session
-# env but no *_PLUGIN_ROOT), plugin-root hints second, claude default last.
-# Ordering mirrors HARNESS_SESSION_MARKERS in cli/src/fno/harness_identity.py.
-# Session markers test non-blank-after-strip (the *[![:space:]]* glob) to match
-# that resolver's .strip(); plugin roots test bare non-empty to match its
-# unstripped os.environ.get, so the shell and Python never disagree.
+# Mirrors HARNESS_SESSION_MARKERS in cli/src/fno/harness_identity.py: session
+# markers first (non-blank-after-strip, so the *[![:space:]]* glob matches its
+# .strip()), then bare-non-empty plugin-root hints, then the claude default.
 detect_provider() {
   if [[ "${CODEX_THREAD_ID:-}" == *[![:space:]]* ]]; then
     echo "codex"
