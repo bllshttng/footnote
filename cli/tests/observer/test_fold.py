@@ -175,6 +175,32 @@ def test_target_outcome_is_reused_classifier():
     assert fold.score_target_item(item)["shipped_outcome"] == "degraded"  # attribution unknown -> middle
 
 
+def test_target_resolves_via_additional_prs():
+    """A node's secondary PR (additional_prs) resolves to that node - not indexing
+    it would wrongly count the delivery as unattributed."""
+    nodes = [{"id": "x-multi", "reverted": False, "pr_number": 40,
+              "pr_url": "https://github.com/o/r/pull/40",
+              "additional_prs": [{"number": 41, "note": "wave 2"}]}]
+    prs = [_pr(41, head="chore/no-node-id", repo="o/r")]  # branch has no id; only additional_prs links it
+    corpus = fold.build_target_corpus(prs, nodes, [], {}, since_days=28, now=T_NOW)
+    assert corpus["coverage"]["attributed"] == 1
+    assert corpus["items"][0]["graph_node_id"] == "x-multi"
+
+
+def test_target_legacy_string_sessions_resolve():
+    """An older graph node whose `sessions` is a list of bare strings (not phase
+    dicts) still joins its events - the dict-only path would silently drop it."""
+    nodes = [{"id": "x-leg", "reverted": False, "pr_number": 50,
+              "pr_url": "https://github.com/o/r/pull/50", "sessions": ["legacy-sid"]}]
+    prs = [_pr(50, "x-leg")]
+    events = {"legacy-sid": [
+        {"type": "loop_check", "ts": "2026-07-10T08:00:00Z", "data": {"session_id": "legacy-sid", "ci": "SUCCESS", "intent": "promise"}},
+    ]}
+    item = fold.build_target_corpus(prs, nodes, [], events, since_days=28, now=T_NOW)["items"][0]
+    assert item["session_ids"] == ["legacy-sid"]
+    assert item["signals"]["loop_fires"] == 1  # the legacy string session joined its event
+
+
 def test_target_no_w4_outcome_stays_none():
     """AC2-ERR: no causal telemetry graph-wide -> shipped_outcome None; the PR's
     own merged state is never promoted to merged_clean."""

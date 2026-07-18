@@ -261,6 +261,37 @@ def test_target_no_data_emits_no_run_complete(monkeypatch, tmp_path):
     assert not any(e["type"] == "skill_eval_run_complete" for e in _events(events_path))
 
 
+def test_target_all_repo_gh_outage_is_not_no_data(monkeypatch, tmp_path):
+    """An outage where every scoped repo's gh call failed must NOT report no_data
+    (exit 0) - the denominator was never observed; exit non-zero so automation
+    sees the coverage failure."""
+    corpus = _target_corpus([], prs_total=0)
+    _wire_target(monkeypatch, tmp_path, corpus, meta={"repos_scoped": 2, "dropped_repos": 2, "truncated_repos": []})
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    assert r.exit_code == 1
+    assert "gh unavailable" in r.output and "no_data" not in r.output
+
+
+def test_target_genuine_empty_window_is_no_data(monkeypatch, tmp_path):
+    corpus = _target_corpus([], prs_total=0)
+    _wire_target(monkeypatch, tmp_path, corpus, meta={"repos_scoped": 1, "dropped_repos": 0, "truncated_repos": []})
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    assert r.exit_code == 0
+    assert "no_data" in r.output
+
+
+def test_target_corpus_item_id_is_repo_unique(monkeypatch, tmp_path):
+    """PR numbers are repo-local: two repos' #42 must emit distinct corpus_item_ids."""
+    items = [_target_item(i, f"x-{i}") for i in range(8)]
+    a = {**_target_item(42, "x-a42"), "repo": "owner/a", "pr_url": "https://github.com/owner/a/pull/42"}
+    b = {**_target_item(42, "x-b42"), "repo": "owner/b", "pr_url": "https://github.com/owner/b/pull/42"}
+    items += [a, b]
+    events_path = _wire_target(monkeypatch, tmp_path, _target_corpus(items))
+    runner.invoke(cli.observer_app, ["sweep", "--skill", "target"])
+    ids = {e["data"]["corpus_item_id"] for e in _events(events_path) if e["type"] == "skill_eval_finding"}
+    assert "pr-owner/a#42" in ids and "pr-owner/b#42" in ids  # distinct, not collapsed
+
+
 def test_target_insufficient_below_ten(monkeypatch, tmp_path):
     items = [_target_item(i, f"x-{i}") for i in range(5)]
     events_path = _wire_target(monkeypatch, tmp_path, _target_corpus(items))

@@ -451,10 +451,19 @@ def build_target_corpus(
         url = n.get("pr_url")
         if url:
             by_pr_url[url] = n
-        num = n.get("pr_number")
         repo = _repo_from_url(url)
+        num = n.get("pr_number")
         if num is not None and repo is not None:
             by_pr_num_repo[(repo, num)] = n
+        # additional_prs: a node's secondary PRs (34 nodes carry these), numbered
+        # in the node's own repo. Without indexing them a non-primary PR resolves
+        # to no node and is wrongly counted unattributed. setdefault so a node's
+        # PRIMARY (pr_number) claim always wins a collision over a secondary.
+        if repo is not None:
+            for ap in n.get("additional_prs") or []:
+                apn = ap.get("number") if isinstance(ap, dict) else None
+                if apn is not None:
+                    by_pr_num_repo.setdefault((repo, apn), n)
 
     pm_by_node: dict[str, str] = {}
     for pm in postmortems:
@@ -490,9 +499,11 @@ def build_target_corpus(
         nid = node.get("id")
         node_rows = rows_by_node.get(nid, [])
         session_ids: set[str] = set()
-        for s in node.get("sessions") or []:  # x-b6e4 phase stamps: list of dicts
+        for s in node.get("sessions") or []:  # x-b6e4 phase stamps: dicts, or legacy bare strings
             if isinstance(s, dict) and isinstance(s.get("session_id"), str) and s["session_id"]:
                 session_ids.add(s["session_id"])
+            elif isinstance(s, str) and s:  # older graph rows stored sessions as [str]
+                session_ids.add(s)
         for r in node_rows:
             session_ids |= _row_session_ids(r)
         scored_session_ids |= session_ids

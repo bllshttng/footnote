@@ -472,8 +472,11 @@ def _gh_pr_list(repo: str, cutoff, now, gh_runner) -> "tuple[Optional[list[dict]
     gap for the whole repo, never a crash). ``truncated`` is True when the repo
     returned exactly the list limit (there may be more PRs - no silent
     truncation)."""
+    # `--state` is a SCALAR flag (open|closed|merged|all): repeating it is not a
+    # documented union, so use `--state all` and let the merged/closed timestamp
+    # filter below drop OPEN PRs (they carry neither mergedAt nor closedAt).
     args = [
-        "pr", "list", "--repo", repo, "--state", "merged", "--state", "closed",
+        "pr", "list", "--repo", repo, "--state", "all",
         "--limit", str(_PR_LIST_LIMIT),
         "--json", "number,headRefName,mergedAt,closedAt,url,state",
     ]
@@ -685,9 +688,20 @@ def _sweep_target(*, since: int, repo: Optional[str], json_out: bool) -> None:
     items = corpus["items"]
     coverage = corpus["coverage"]
 
-    # Boundary: 0 merged/closed PRs in window -> no_data, no run_complete.
+    # Boundary: 0 merged/closed PRs. Distinguish a genuine empty window (exit 0,
+    # legitimately nothing to do) from an outage where every scoped repo's gh
+    # call failed - the denominator was never OBSERVED, so reporting `no_data`
+    # would hide a coverage failure from operators/automation (exit non-zero).
     if coverage["prs_total"] == 0:
-        typer.echo(f"no_data: 0 merged/closed PR(s) for {coverage.get('prs_total', 0)} repo(s) "
+        if meta["repos_scoped"] > 0 and meta["dropped_repos"] >= meta["repos_scoped"]:
+            typer.echo(
+                f"partial: gh unavailable for all {meta['repos_scoped']} scoped repo(s) "
+                f"(fan-out cap / rate-limit / outage); the PR denominator was never observed, "
+                f"NOT an empty window. No skill_eval_run_complete emitted.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        typer.echo(f"no_data: 0 merged/closed PR(s) across {meta['repos_scoped']} repo(s) "
                    f"in the last {since}d. No skill_eval_run_complete emitted.")
         raise typer.Exit(0)
 
@@ -712,9 +726,13 @@ def _sweep_target(*, since: int, repo: Optional[str], json_out: bool) -> None:
     for item in items:
         scores = fold.score_target_item(item)
         scored_pairs.append((item, scores))
+        # corpus_item_id must be unique across repos: PR numbers are repo-local,
+        # so a bare `pr-42` collides between owner/a#42 and owner/b#42 and would
+        # collapse distinct deliveries for any consumer joining on (run_id, id).
         emit_item = {
             **item, "skill_id": skill_id,
-            "session_id": f"pr-{item.get('pr_number')}", "skill_version": skill_version,
+            "session_id": f"pr-{item.get('repo')}#{item.get('pr_number')}",
+            "skill_version": skill_version,
         }
         item_scored = False
         for dimension, verdict in scores.items():
