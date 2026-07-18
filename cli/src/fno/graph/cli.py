@@ -4186,6 +4186,11 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         _apply_completion_fields(parent)
         if not parent.get("completion_note"):
             parent["completion_note"] = "auto-closed: all children complete"
+        # Deactivate the mission (x-9608 K1): a kicked-off epic carries
+        # mission_active=true for K2's drain loop; its last child landing closes
+        # the epic here, so clear the marker in the same mutation. Durable
+        # deactivation - the drain never keeps looping a done mission.
+        parent.pop("mission_active", None)
         closed.append(pid)
         cur = parent  # cascade up to the grandparent
     return closed
@@ -4717,12 +4722,89 @@ def cmd_done(
 
 # -- reconcile (close merged-PR drift) --
 
+def _run_advance_epic(
+    epic: str,
+    *,
+    stop: bool,
+    max_dispatch: Optional[int],
+    json_out: bool,
+    verbose: bool,
+    model: Optional[str],
+    provider: Optional[str],
+) -> None:
+    """Run the epic advance and render its receipt (x-9608 K1).
+
+    Refusals (no-such-node / not-a-container) exit non-zero: unlike the
+    merge-advance path (a dispatch decision is never an error), an operator naming
+    a bad node to --epic wants a clear failure. Everything else exits 0.
+    """
+    from fno.backlog.advance import advance_epic
+
+    try:
+        result = advance_epic(
+            epic, stop=stop, max_dispatch=max_dispatch,
+            verbose=verbose, model=model, provider=provider,
+        )
+    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
+        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
+        raise typer.Exit(code=0)
+
+    if json_out:
+        typer.echo(json.dumps({
+            "epic_id": result.epic_id,
+            "error": result.error,
+            "activated": result.activated,
+            "deactivated": result.deactivated,
+            "all_done": result.all_done,
+            "dispatched": list(result.dispatched),
+            "children": [
+                {"node_id": r.node_id, "decision": r.decision, "reason": r.reason,
+                 "short_id": r.short_id}
+                for r in result.child_results
+            ],
+        }, indent=2))
+    else:
+        if result.error:
+            typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
+        elif result.deactivated:
+            reason = "complete" if result.all_done else "stopped"
+            typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
+        else:
+            n = len(result.dispatched)
+            skips = [r for r in result.child_results if r.decision == "skipped"]
+            fails = [r for r in result.child_results if r.decision == "failed"]
+            typer.echo(
+                f"epic {result.epic_id}: dispatched {n}"
+                + (f", skipped {len(skips)}" if skips else "")
+                + (f", failed {len(fails)}" if fails else "")
+            )
+
+    # A refusal (bad node) is the only non-zero exit; a per-child failure is a
+    # loud receipt, not a verb error.
+    if result.error in ("no-such-node", "not-a-container"):
+        raise typer.Exit(code=1)
+
+
 @cli.command("advance", hidden=True)
 def cmd_advance(
     closed: Optional[str] = typer.Option(
         None,
         "--closed",
         help="The just-merged node id whose close triggered this advance (AC1-RACE keying).",
+    ),
+    epic: Optional[str] = typer.Option(
+        None,
+        "--epic",
+        help="Advance (converge) an epic mission: fan out its ready leaf children across all projects (x-9608 K1). Mutually exclusive with --closed.",
+    ),
+    stop: bool = typer.Option(
+        False,
+        "--stop",
+        help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
+    ),
+    max_dispatch: Optional[int] = typer.Option(
+        None, "--max",
+        help="With --epic: cap the total workers this epic advance dispatches (per-project cap is config.parallel.max_lanes).",
     ),
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Restrict next-node selection to this project."
@@ -4749,6 +4831,11 @@ def cmd_advance(
     nothing. Driven by the merge event (reconcile / post-merge), so megawalk,
     /target, and /megatron all inherit it without driver-specific code. Always
     exits 0 (a dispatch decision is never an error to the host op).
+
+    ``--epic <id>`` switches to the epic advance / converge path (x-9608 K1):
+    mark the epic's mission active and fan out every currently-ready LEAF child
+    across all projects. Idempotent; respects config.parallel.max_lanes per
+    project + ``--max`` overall. ``--stop`` deactivates instead.
     """
     from fno.agents.provider_resolve import (
         DispatchFlagError,
@@ -4765,6 +4852,21 @@ def cmd_advance(
         provider = resolve_dispatch_provider(provider)[0] if provider is not None else None
     except DispatchFlagError as exc:
         typer.echo(f"advance: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    # --epic routes to the epic-advance path; it is a distinct trigger from the
+    # merge-advance --closed path (they never combine on one call).
+    if epic is not None:
+        if closed is not None:
+            typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
+            raise typer.Exit(code=2)
+        _run_advance_epic(
+            epic, stop=stop, max_dispatch=max_dispatch, json_out=json_out,
+            verbose=verbose, model=model, provider=provider,
+        )
+        return
+    if stop or max_dispatch is not None:
+        typer.echo("advance: --stop / --max require --epic", err=True)
         raise typer.Exit(code=2)
 
     # RC2 (x-33b2): closed_project is the CLOSED NODE's own project, read from the

@@ -1425,18 +1425,142 @@ def _walker_live_at(project_root: str) -> bool:
         return False
 
 
+def _converge_one(
+    node_meta: dict,
+    root: str,
+    ev_path: Path,
+    verbose: bool,
+    *,
+    cross_project: bool = False,
+    mission: Optional[str] = None,
+    closed_node_id: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> AdvanceResult:
+    """The one shared converge-dispatch core: dedup, reserve, spawn, one receipt.
+
+    Extracted from ``_dispatch_one_dependent`` (x-9608 K1) so the two triggers -
+    merge-advance's per-dependent dispatch and the epic advance / mission-drain
+    fan-out - run the IDENTICAL claim choreography + spawn + single decision event
+    and can never fork. The caller owns root resolution (same-project cwd vs
+    cross-project work-map vs epic-advance work-map) and passes the resolved ``root``;
+    everything downstream is common. ``mission`` (the epic id, epic-advance/drain only)
+    tags each receipt so a mission dispatch is attributable in the event stream;
+    ``closed_node_id`` (merge-advance only) keys the AC1-RACE trigger. The two are
+    mutually exclusive in practice but both are optional here.
+
+    Emits exactly one of advance_dispatched / advance_skipped / advance_failed
+    (LD#12) and returns the matching AdvanceResult. Never raises: a spawn failure
+    releases the reservation (node stays re-dispatchable) and resolves to failed.
+    """
+    node_id = node_meta["id"]
+    slug = node_meta.get("slug") or node_meta.get("title")
+
+    def _tag(data: dict) -> dict:
+        # Common receipt fields: the trigger key (closed_node_id) and/or the
+        # mission tag ride every event this converge emits. Omitted when unset so
+        # a merge-advance receipt stays byte-identical to pre-K1.
+        if closed_node_id:
+            data["closed_node_id"] = closed_node_id
+        if mission:
+            data["mission"] = mission
+        return data
+
+    def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
+        data = _tag({"reason": reason, "node_id": node_id})
+        if detail:
+            data["detail"] = detail[:200]
+        _emit(EVENT_SKIPPED, data, ev_path)
+        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
+
+    def failed(error: str) -> AdvanceResult:
+        _emit(EVENT_FAILED, _tag({"node_id": node_id, "error": error[:200]}), ev_path)
+        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
+
+    # The spawned worker runs in the target repo, not this one. If that project
+    # already has a live walker, let it claim the node - spawning here would launch
+    # a second target into that repo (codex P2). Checked at the target root because
+    # its walker claim lives under that root's .fno/claims.
+    if _walker_live_at(root):
+        return skip("walker-live")
+
+    # Already being worked? Same liveness gate as advance() step 4. This is what
+    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
+    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
+    # dispatch TTL still being live.
+    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+        return skip("already-claimed")
+
+    from fno.claims.core import ClaimHeldByOther, acquire_claim
+
+    dispatch_key = f"dispatch:{node_id}"
+    holder = f"advance:{os.getpid()}"
+    dispatch_root = _claims_root_for(dispatch_key)
+    try:
+        acquire_claim(
+            dispatch_key,
+            holder,
+            ttl_ms=_DISPATCH_TTL_MS,
+            reason=f"converge dispatch for {node_id}"
+            + (f" (mission {mission})" if mission else "")
+            + (f" (dep of {closed_node_id})" if closed_node_id else ""),
+            root=dispatch_root,
+        )
+    except ClaimHeldByOther:
+        return skip("already-claimed")
+    except Exception as exc:  # noqa: BLE001
+        return skip("claim-error", detail=str(exc))
+
+    try:
+        eff_provider = provider if provider is not None else node_meta.get("provider")
+        short_id = _spawn_worker(
+            node_id, root, slug,
+            model=_route_resolve.node_model(node_meta, explicit=model, provider=eff_provider),
+            provider=eff_provider,
+            verb=node_meta.get("dispatch_verb"),
+            brief=node_meta.get("dispatch_brief"),
+        )
+    except SpawnAlreadyRunning:
+        _safe_release(dispatch_key, holder, dispatch_root)
+        return skip("already-claimed")
+    except Exception as exc:  # noqa: BLE001
+        _safe_release(dispatch_key, holder, dispatch_root)
+        return failed(str(exc))
+
+    _emit(
+        EVENT_DISPATCHED,
+        _tag({
+            "node_id": node_id,
+            "short_id": short_id,
+            "agent_name": _worker_agent_name(node_id, slug),
+            "cross_project": cross_project,
+        }),
+        ev_path,
+    )
+    if verbose:
+        _scope = f"mission {mission} " if mission else ""
+        _kind = "cross-project" if cross_project else "same-project"
+        print(
+            f"advance: dispatched {_scope}{_kind} {node_id} -> "
+            f"target worker {short_id} (--cwd {root})",
+            file=sys.stderr,
+        )
+    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+
+
 def _dispatch_one_dependent(
     dep: dict, closed_node_id: str, ev_path: Path, verbose: bool,
     *, model: Optional[str] = None, provider: Optional[str] = None,
 ) -> AdvanceResult:
-    """Resolve one dependent's own project root, dedup, and spawn its worker.
+    """Resolve one dependent's own project root, then converge-dispatch it.
 
-    Reuses advance()'s claim + spawn + event machinery. The ``--cwd`` root
-    differs by route (RC1 / LD#2): a CROSS-project dependent launches in its
-    work-map root; a SAME-project dependent launches in the node's OWN recorded
-    ``cwd`` (NEVER the work-map root, which for a foreign-shaped record could land
-    it on a protected branch where the bg worker dies). Everything downstream of
-    root resolution - dedup, spawn, single decision event - is identical.
+    Reuses advance()'s claim + spawn + event machinery via :func:`_converge_one`.
+    The ``--cwd`` root differs by route (RC1 / LD#2): a CROSS-project dependent
+    launches in its work-map root; a SAME-project dependent launches in the node's
+    OWN recorded ``cwd`` (NEVER the work-map root, which for a foreign-shaped record
+    could land it on a protected branch where the bg worker dies). Everything
+    downstream of root resolution - dedup, spawn, single decision event - is
+    ``_converge_one`` and is identical to the epic-advance path.
     """
     node_id = dep["id"]
     cross_project = bool(dep.get("cross_project"))
@@ -1447,14 +1571,6 @@ def _dispatch_one_dependent(
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
         return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
-
-    def failed(error: str) -> AdvanceResult:
-        _emit(
-            EVENT_FAILED,
-            {"node_id": node_id, "closed_node_id": closed_node_id, "error": error[:200]},
-            ev_path,
-        )
-        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
 
     project = dep.get("project")
     if not project:
@@ -1481,70 +1597,11 @@ def _dispatch_one_dependent(
         if not root:
             return skip("no-cwd")
 
-    # The spawned worker runs in the DEPENDENT's repo, not this one. If that
-    # project already has a live walker, let it claim the node - spawning here
-    # would launch a second target into that repo (codex P2). Checked at the
-    # dependent root because its walker claim lives under that root's .fno/claims.
-    if _walker_live_at(root):
-        return skip("walker-live")
-
-    # Already being worked? Same liveness gate as advance() step 4.
-    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
-        return skip("already-claimed")
-
-    from fno.claims.core import ClaimHeldByOther, acquire_claim
-
-    dispatch_key = f"dispatch:{node_id}"
-    holder = f"advance:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
-    try:
-        acquire_claim(
-            dispatch_key,
-            holder,
-            ttl_ms=_DISPATCH_TTL_MS,
-            reason=f"dependent dispatch for {node_id} (dep of {closed_node_id})",
-            root=dispatch_root,
-        )
-    except ClaimHeldByOther:
-        return skip("already-claimed")
-    except Exception as exc:  # noqa: BLE001
-        return skip("claim-error", detail=str(exc))
-
-    try:
-        eff_provider = provider if provider is not None else dep.get("provider")
-        short_id = _spawn_worker(
-            node_id, root, dep.get("slug"),
-            model=_route_resolve.node_model(dep, explicit=model, provider=eff_provider),
-            provider=eff_provider,
-            verb=dep.get("dispatch_verb"),
-            brief=dep.get("dispatch_brief"),
-        )
-    except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return skip("already-claimed")
-    except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return failed(str(exc))
-
-    _emit(
-        EVENT_DISPATCHED,
-        {
-            "node_id": node_id,
-            "short_id": short_id,
-            "closed_node_id": closed_node_id,
-            "agent_name": _worker_agent_name(node_id, dep.get("slug")),
-            "cross_project": cross_project,
-        },
-        ev_path,
+    return _converge_one(
+        dep, root, ev_path, verbose,
+        cross_project=cross_project, closed_node_id=closed_node_id,
+        model=model, provider=provider,
     )
-    if verbose:
-        _kind = "cross-project" if cross_project else "same-project"
-        print(
-            f"advance: dispatched {_kind} dependent {node_id} -> "
-            f"target worker {short_id} (--cwd {root})",
-            file=sys.stderr,
-        )
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
 
 
 def advance_dependents(
@@ -1614,3 +1671,348 @@ def advance_dependents(
         )
         for dep in deps
     ]
+
+
+# ---------------------------------------------------------------------------
+# Epic advance / converge (x-9608 K1): fan out an epic's ready leaf children
+# ---------------------------------------------------------------------------
+#
+# The mission's manual entry point (and, later, K2's per-tick drain reuse the
+# same _converge_one core). A "mission" is an epic node plus its transitive
+# children (the parent EDGE is the mission key; mission_id is untouched -
+# Locked Decision 2). Epic advance marks the mission active (a durable graph field on
+# the epic, readable from Python AND Rust, cleared on cascade-close), then runs
+# converge pass 1: for every currently-ready LEAF child across all projects, it
+# resolves the child's work-map root and converge-dispatches it, one receipt per
+# child, respecting per-project max_lanes + an overall --max. It is idempotent
+# (a re-run dispatches nothing already node:<id>-claimed) and per-child isolated
+# (one child's failure never aborts the pass).
+
+# Mission-activation events (registered in cli/src/fno/events/schema.yaml).
+EVENT_MISSION_ACTIVATED = "mission_activated"
+EVENT_MISSION_DEACTIVATED = "mission_deactivated"
+
+# The graph field epic advance sets on the epic node to mark the mission active.
+# Durable (graph.json), crash-safe, and read by both Python (read_graph) and
+# Rust (K2's drain loop reads graph.json directly). Cleared on cascade-close
+# (_cascade_close_parents) or an explicit `--epic <id> --stop`.
+MISSION_ACTIVE_FIELD = "mission_active"
+
+
+@dataclass(frozen=True)
+class AdvanceEpicResult:
+    """Outcome of one advance_epic() run."""
+
+    epic_id: str
+    error: Optional[str] = None  # no-such-node | not-a-container | disabled | walker-live
+    activated: bool = False
+    deactivated: bool = False
+    all_done: bool = False
+    dispatched: tuple = ()  # node ids successfully dispatched this pass
+    child_results: tuple = ()  # AdvanceResult per attempted child
+
+
+def _ready_leaf_children(epic_id: str) -> list[dict]:
+    """Ready LEAF children of an epic, across ALL projects.
+
+    Shells the shipped ``fno backlog ready --parent <epic> --all`` surface (the
+    SAME selection `next`/lane-fill use) so the epic advance never diverges from it: the
+    result is already container-filtered, claim-filtered, open-PR-filtered,
+    batch-filtered, and rank-sorted. Transitive children via ``--parent``
+    semantics (descendants_of). Raises on a garbled response so the caller skips
+    rather than guessing (Failure Modes: Errors).
+    """
+    cmd = [
+        *_subprocess_util.fno_py_cmd(),
+        "backlog", "ready", "--parent", epic_id, "--all",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno backlog ready --parent {epic_id} exited {proc.returncode}: "
+            f"{proc.stderr.strip()[:200]}"
+        )
+    out = (proc.stdout or "").strip()
+    if not out or out == "null":
+        return []
+    nodes = json.loads(out)
+    if not isinstance(nodes, list):
+        raise RuntimeError(
+            f"fno backlog ready --parent returned an unexpected shape: {out[:200]}"
+        )
+    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+
+
+def _live_workers_by_project() -> dict[str, int]:
+    """Count occupied per-project lanes to seed max_lanes.
+
+    max_lanes is a per-project concurrency cap, so a project that already has a
+    worker occupies a lane and the epic advance must count it before deciding how many
+    MORE to dispatch. Counts BOTH live/suspect ``node:<id>`` claims (a running
+    worker) AND live/suspect ``dispatch:<id>`` reservations (the boot-window
+    bridge a just-dispatched worker holds before it owns node:<id>) - else an
+    immediate rerun during that boot window would under-count the lane and
+    over-dispatch a second same-project child past the cap (codex P2). Deduped by
+    node id so a child holding both claims counts once. Best-effort: any read
+    fault degrades to an empty map (no seed), never blocks the pass.
+    """
+    counts: dict[str, int] = {}
+    try:
+        from fno.claims.core import list_claims
+        from fno.claims.io import global_claims_root
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        root = global_claims_root()
+        occupied: set[str] = set()
+        for prefix in ("node:", "dispatch:"):
+            for claim in list_claims(prefix=prefix, include_stale=False, root=root):
+                key = claim.get("key")
+                if isinstance(key, str):
+                    occupied.add(key.removeprefix(prefix))
+        if not occupied:
+            return counts
+        by_id = {
+            e["id"]: e for e in read_graph(graph_json())
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
+        for nid in occupied:
+            proj = (by_id.get(nid) or {}).get("project")
+            if proj:
+                counts[proj] = counts.get(proj, 0) + 1
+    except Exception:  # noqa: BLE001 - a live-count read must never block the epic advance
+        return counts
+    return counts
+
+
+def _max_lanes() -> int:
+    """Per-project concurrency cap for the epic advance, from ``config.parallel.max_lanes``.
+
+    Default 1 (the conservative single lane). A seam so the cap read is
+    patchable in tests without stubbing the whole settings object. Fail-safe: any
+    read fault degrades to 1.
+    """
+    try:
+        from fno.config import load_settings
+
+        return int(load_settings().parallel.max_lanes)
+    except Exception:  # noqa: BLE001 - fail-safe to the conservative single lane
+        return 1
+
+
+def _set_mission_active(epic_id: str, active: bool) -> bool:
+    """Set/clear the epic's ``mission_active`` graph field. Returns whether it changed.
+
+    One locked graph mutation via locked_mutate_graph (never a direct Edit/Write -
+    the HARD-GATE). Idempotent: setting an already-active mission (or clearing an
+    inactive one) is a no-op that returns False.
+    """
+    from fno.graph._intake import _find_node
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    changed = [False]
+
+    def mutator(entries):
+        node = _find_node(entries, epic_id)
+        if node is None:
+            return entries
+        if active:
+            if node.get(MISSION_ACTIVE_FIELD) is not True:
+                node[MISSION_ACTIVE_FIELD] = True
+                changed[0] = True
+        elif MISSION_ACTIVE_FIELD in node:
+            node.pop(MISSION_ACTIVE_FIELD, None)
+            changed[0] = True
+        return entries
+
+    locked_mutate_graph(graph_json(), mutator)
+    return changed[0]
+
+
+def advance_epic(
+    epic_id: str,
+    *,
+    max_dispatch: Optional[int] = None,
+    project_root: Optional[Path] = None,
+    events_path: Optional[Path] = None,
+    verbose: bool = False,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    stop: bool = False,
+) -> AdvanceEpicResult:
+    """Advance (or stop) an epic mission: mark active + converge pass 1.
+
+    Refuses a non-container node by name (an epic's work is its children, never
+    the box). ``stop`` deactivates the mission and dispatches nothing. Otherwise
+    marks the mission active and fans out every currently-ready LEAF child across
+    all projects via the shared _converge_one core, respecting per-project
+    ``config.parallel.max_lanes`` and an overall ``max_dispatch`` (--max). All
+    children already done -> a no-op receipt + deactivate (verify the cascade
+    closed the epic). Gated on the same auto-continue opt-in and strictly
+    non-fatal; each child's failure is isolated (its own receipt, never aborts
+    the pass). Idempotent: a re-run dispatches nothing already node:<id>-claimed.
+    """
+    ev_path = events_path if events_path is not None else _events_path(project_root)
+
+    from fno.graph._intake import _find_node, descendants_of
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    try:
+        entries = read_graph(graph_json())
+    except Exception as exc:  # noqa: BLE001 - a graph read fault skips cleanly
+        return AdvanceEpicResult(epic_id, error=f"graph-error: {str(exc)[:120]}")
+
+    epic = _find_node(entries, epic_id)
+    if epic is None:
+        return AdvanceEpicResult(epic_id, error="no-such-node")
+    canon = epic["id"]
+
+    # Refuse a non-container by name: only an epic (some node's parent) is a
+    # mission. A leaf has no children to fan out; an epic advance on it is an operator
+    # error, not a silent no-op.
+    from fno.graph.cli import _container_ids
+
+    if canon not in _container_ids(entries):
+        return AdvanceEpicResult(canon, error="not-a-container")
+
+    # Explicit stop: deactivate the mission, dispatch nothing.
+    if stop:
+        _set_mission_active(canon, False)
+        _emit(EVENT_MISSION_DEACTIVATED, {"epic_id": canon, "reason": "stop"}, ev_path)
+        return AdvanceEpicResult(canon, deactivated=True)
+
+    # Same opt-in gate as advance()/advance_dependents. A live walker owning THIS
+    # repo would pick nodes up itself; the epic-advance verb is the explicit converge tool, so a
+    # global walker is a skip. (Per-child, a foreign-repo walker is handled in
+    # _converge_one's own _walker_live_at.) Unlike the merge-advance path, this
+    # standalone epic verb has no paired advance() call to record the decision, so
+    # emit the skip receipt here or a gated epic advance is silent in the event stream
+    # (codex P2 - LD#12 parity).
+    if not auto_continue_enabled(project_root=project_root):
+        _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon}, ev_path)
+        return AdvanceEpicResult(canon, error="disabled")
+    if _claim_is_live(_walker_key()):
+        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon}, ev_path)
+        return AdvanceEpicResult(canon, error="walker-live")
+
+    # All descendants already done -> mission complete: verify the cascade closed
+    # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at
+    # least one child above.)
+    descendants = descendants_of(entries, canon)
+    by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
+    all_done = bool(descendants) and all(
+        (by_id.get(d) or {}).get("completed_at") for d in descendants
+    )
+    if all_done:
+        _set_mission_active(canon, False)
+        epic_done = bool((by_id.get(canon) or {}).get("completed_at"))
+        _emit(
+            EVENT_MISSION_DEACTIVATED,
+            {"epic_id": canon, "reason": "complete", "epic_closed": epic_done},
+            ev_path,
+        )
+        return AdvanceEpicResult(canon, deactivated=True, all_done=True)
+
+    # Mark the mission active (durable graph field) before dispatching, so a crash
+    # mid-fanout still leaves the mission drainable by K2. Emit the activation
+    # receipt once, on the first epic advance (a re-run of an already-active mission
+    # skips the event but still runs the converge pass - idempotent recovery).
+    if _set_mission_active(canon, True):
+        _emit(EVENT_MISSION_ACTIVATED, {"epic_id": canon}, ev_path)
+
+    # Ready leaf children across all projects, via the shipped selection surface.
+    try:
+        children = _ready_leaf_children(canon)
+    except Exception as exc:  # noqa: BLE001 - never guess on a read error
+        _emit(
+            EVENT_SKIPPED,
+            {"reason": "children-error", "mission": canon, "detail": str(exc)[:200]},
+            ev_path,
+        )
+        return AdvanceEpicResult(
+            canon, activated=True,
+            child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
+        )
+
+    # Per-project cap: config.parallel.max_lanes (default 1), seeded with the
+    # project's already-live workers so the cap counts total concurrency, not just
+    # this pass. An overall --max caps total dispatches this run.
+    max_lanes = _max_lanes()
+    per_project = _live_workers_by_project()
+
+    results: list[AdvanceResult] = []
+    dispatched: list[str] = []
+    total = 0
+    for child in children:
+        if max_dispatch is not None and total >= max_dispatch:
+            break  # overall cap reached; remaining ready children wait for a drain/re-run
+        # A project-less child cannot be capped, mapped, or launched - skip it with
+        # the accurate `no-project` reason (matching _dispatch_one_dependent), not a
+        # misleading `unmapped-project` with an empty detail. Falsy check so an
+        # empty-string project is treated as missing too (gemini).
+        proj = child.get("project")
+        if not proj:
+            _emit(
+                EVENT_SKIPPED,
+                {"reason": "no-project", "node_id": child["id"], "mission": canon},
+                ev_path,
+            )
+            results.append(
+                AdvanceResult("skipped", EVENT_SKIPPED, reason="no-project", node_id=child["id"])
+            )
+            continue
+        # A mapped-but-absent project cannot be launched; surface it by name AND the
+        # exact config key (Boundaries), then continue - one unmapped project never
+        # blocks the others.
+        from fno.graph._intake import project_root_from_settings
+
+        root = project_root_from_settings(proj)
+        if not root:
+            results.append(_converge_skip_unmapped(child, proj, canon, ev_path))
+            continue
+        # Per-project max_lanes cap (0 = paused project; skip). Counts live workers
+        # + this pass's dispatches.
+        if max_lanes >= 0 and per_project.get(proj, 0) >= max_lanes:
+            _emit(
+                EVENT_SKIPPED,
+                {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
+                 "detail": f"{proj}: max_lanes={max_lanes}"},
+                ev_path,
+            )
+            results.append(
+                AdvanceResult("skipped", EVENT_SKIPPED, reason="lane-cap", node_id=child["id"])
+            )
+            continue
+        res = _converge_one(
+            child, root, ev_path, verbose,
+            cross_project=True, mission=canon, model=model, provider=provider,
+        )
+        results.append(res)
+        if res.decision == "dispatched":
+            dispatched.append(res.node_id or child["id"])
+            per_project[proj] = per_project.get(proj, 0) + 1
+            total += 1
+
+    return AdvanceEpicResult(
+        canon, activated=True,
+        dispatched=tuple(dispatched), child_results=tuple(results),
+    )
+
+
+def _converge_skip_unmapped(
+    child: dict, project: str, mission: str, ev_path: Path
+) -> AdvanceResult:
+    """Emit the loud unmapped-project skip for one epic-advance child (names the key)."""
+    detail = f"{project} (add config.work.workspaces.<ws>.projects[].path)"
+    _emit(
+        EVENT_SKIPPED,
+        {"reason": "unmapped-project", "node_id": child["id"], "mission": mission,
+         "detail": detail},
+        ev_path,
+    )
+    return AdvanceResult(
+        "skipped", EVENT_SKIPPED, reason="unmapped-project",
+        node_id=child["id"], detail=detail,
+    )
