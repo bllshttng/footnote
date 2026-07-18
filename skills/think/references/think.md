@@ -299,7 +299,7 @@ Cover:
 
 ### 5. Multi-Perspective Challenge
 
-**Applies to:** feature (all three perspectives) · bug (Pessimist + Silent-Failure Hunter only) · investigation (skip - the Evidence Chain section replaces it).
+**Applies to:** feature (all three perspectives) · bug (Pessimist + Silent-Failure Hunter only) · investigation (skip - the Evidence Chain section replaces it) · epic (optional - strategic lenses only; hand off deep stress-testing to `/think what-if` or `panel`).
 
 Before finalizing the design, stress-test it from three angles. Present findings to the user for each:
 
@@ -333,7 +333,7 @@ Present a summary table:
 
 ### 6. CRITICAL: UI State Machine Audit (gated on UI surface)
 
-**Applies to:** feature / bug **only when a UI surface is present** · investigation (skip unconditionally).
+**Applies to:** feature / bug **only when a UI surface is present** · investigation (skip unconditionally) · epic (skip unconditionally - children carry their own UI rigor).
 
 Detect the surface with the same helper Step 6.5 uses, then decide:
 
@@ -584,7 +584,7 @@ tasks while the plan default stays `executor: do`.
 
 ### 7. Generate BDD Acceptance Criteria
 
-**Applies to:** feature (all 5 types) · bug (AC-HP + AC-ERR + AC-FR + AC-EDGE; AC-UI only when the Step 6 gate found a UI surface) · investigation (skip - a verdict has no ACs; the Evidence Chain and Re-open Conditions sections carry its rigor).
+**Applies to:** feature (all 5 types) · bug (AC-HP + AC-ERR + AC-FR + AC-EDGE; AC-UI only when the Step 6 gate found a UI surface) · investigation (skip - a verdict has no ACs; the Evidence Chain and Re-open Conditions sections carry its rigor) · epic (skip - `## Success Definition` replaces ACs; children carry their own AC rigor in their own design passes).
 
 **Load the `/bdd-acceptance-criteria` skill** for comprehensive patterns.
 
