@@ -1014,10 +1014,12 @@ def _origin_transcript_path(
         return None
     try:
         from fno.agents.discover import _candidate_dir_names, default_projects_dir
-    except Exception:  # noqa: BLE001 - discover unavailable -> no probe
+
+        projects = default_projects_dir()
+        names = list(_candidate_dir_names(cwd))
+    except Exception:  # noqa: BLE001 - discover unavailable/erroring -> no probe
         return None
-    projects = default_projects_dir()
-    for name in _candidate_dir_names(cwd):
+    for name in names:
         candidate = projects / name / f"{session_id}.jsonl"
         if candidate.is_file():
             return candidate
