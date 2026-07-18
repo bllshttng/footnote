@@ -65,17 +65,36 @@ def test_upsert_stamps_null_pr_row_without_clobbering(tmp_path):
     assert r["completed"] == "2026-07-18T01:00:00Z"
 
 
-def test_upsert_noops_when_pr_already_present(tmp_path):
+def test_upsert_noops_when_this_pr_already_present(tmp_path):
     ledger = _point_ledger_at(tmp_path)
     ledger.write_text(json.dumps({"entries": [{
         "type": "execution", "graph_node_id": "x-cccc", "pr_number": 303,
         "pr_url": "http://pr/303",
     }]}))
-    out = register_task.upsert_ledger_pr("x-cccc", 999, "http://pr/999", "fno", "2026-07-18T00:00:00Z")
+    out = register_task.upsert_ledger_pr("x-cccc", 303, "http://pr/303", "fno", "2026-07-18T00:00:00Z")
     assert out == "already-present"
     rows = _rows(ledger)
     assert len(rows) == 1
     assert rows[0]["pr_number"] == 303  # unchanged
+
+
+def test_upsert_never_stamps_a_failed_attempt(tmp_path):
+    # codex P2: a resumed node whose earlier attempt finalized Budget/NoProgress
+    # (null pr) and whose real delivery lost its ledger write. The merged PR must
+    # NOT be stamped onto the failed attempt - a fresh delivery backstop is made.
+    ledger = _point_ledger_at(tmp_path)
+    ledger.write_text(json.dumps({"entries": [{
+        "type": "execution", "graph_node_id": "x-gggg", "pr_number": None,
+        "termination_reason": "Budget", "cost_usd": 5.0,
+    }]}))
+    out = register_task.upsert_ledger_pr("x-gggg", 707, "http://pr/707", "fno", "2026-07-18T00:00:00Z")
+    assert out == "created"
+    rows = _rows(ledger)
+    assert len(rows) == 2  # failed attempt preserved, delivery backstop added
+    failed = next(r for r in rows if r.get("termination_reason") == "Budget")
+    delivery = next(r for r in rows if r.get("backstop"))
+    assert failed["pr_number"] is None  # NOT stamped
+    assert delivery["pr_number"] == 707
 
 
 # --- US2: collapse rule in append_to_tasks_json ---------------------------

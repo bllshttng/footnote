@@ -562,6 +562,16 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
     print(f"Appended entry #{len(data['entries'])} to {tasks_path}", file=sys.stderr)
 
 
+# Terminal reasons that mark a NON-delivery ledger row (a failed/aborted
+# attempt). A resumed node can carry one of these from an earlier attempt whose
+# shipping successor later lost its ledger write; the merged PR must never be
+# stamped onto such a row (it would corrupt ship attribution keyed on
+# termination_reason). upsert_ledger_pr stamps only a delivery-eligible row.
+_NON_DELIVERY_TERMINALS = frozenset(
+    {"Budget", "NoProgress", "Interrupted", "Aborted", "NoWork"}
+)
+
+
 def upsert_ledger_pr(
     node_id: str,
     pr_number: int,
@@ -594,16 +604,27 @@ def upsert_ledger_pr(
 
         data = _load_ledger_data(ledger_path)
 
+        rows = [
+            e for e in data["entries"]
+            if e.get("type") == "execution" and e.get("graph_node_id") == node_id
+        ]
+        # Already correctly attributed to THIS merge.
+        if any(e.get("pr_number") == pr_number for e in rows):
+            return "already-present"
+        # Stamp a DELIVERY row that finalized without resolving its PR - never a
+        # failed attempt. A resumed node can carry an earlier Budget/NoProgress
+        # row plus the real (ledger-lost) delivery; stamping the merged PR onto
+        # the failed attempt would mis-key ship metrics, so those rows are
+        # excluded and the delivery gets a fresh backstop instead.
         row = next(
             (
-                e for e in data["entries"]
-                if e.get("type") == "execution" and e.get("graph_node_id") == node_id
+                e for e in rows
+                if not e.get("pr_number")
+                and e.get("termination_reason") not in _NON_DELIVERY_TERMINALS
             ),
             None,
         )
         if row is not None:
-            if row.get("pr_number"):
-                return "already-present"
             # Stamp the PR only; the finalize record's cost/phases/completed
             # stay untouched (AC2-EDGE: the stamp adds the PR, never clobbers).
             row["pr_number"] = pr_number
