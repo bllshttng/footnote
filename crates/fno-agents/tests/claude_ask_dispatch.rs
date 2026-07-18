@@ -209,7 +209,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     let v: serde_json::Value = serde_json::from_str(&reg).unwrap();
     let row = &v["agents"][0];
     assert_eq!(row["short_id"], "7c5dcf5d");
-    assert_eq!(row["provider"], "claude");
+    assert_eq!(row["harness"], "claude");
     assert_eq!(row["status"], "live");
     assert!(
         row.get("project_root").is_none(),

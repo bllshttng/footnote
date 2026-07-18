@@ -77,7 +77,7 @@ def test_resolve_parent_by_identity_not_display_name(monkeypatch) -> None:
 
     class FakeEntry:
         name = "tgt-prj0001-claude-g1"  # caller-provided display name, NOT the handle
-        provider = "claude"
+        harness = "claude"
         short_id = "03401fb3"    # the stored short id
         spawned_by_session = "parentsess123"
         spawned_by_harness = "claude"
