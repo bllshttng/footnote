@@ -231,3 +231,39 @@ def test_edge_edit_restratifies_siblings(tmp_path):
     project_graph_nodes(entries, ["x-d"], root=str(tmp_path))
     assert read_plan_file(d_doc)[1]["wave"] == "0"
     assert read_plan_file(epic_doc)[1]["waves"] == "1"
+
+
+def test_orphaning_child_clears_stale_wave(tmp_path):
+    """codex: after --parent null, the child's stale `wave` is cleared, not left."""
+    child_doc = _plan(tmp_path, "child.md", _CHILD.format(nid="c") + "wave: 2\n")
+    # Seed a child under an epic; project so it carries a wave.
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": str(child_doc), "blocked_by": []},
+    ]
+    project_graph_nodes(entries, ["x-c"], root=str(tmp_path))
+    assert read_plan_file(child_doc)[1]["wave"] == "0"
+    # Orphan it: no epic parent -> wave must be cleared.
+    entries[1]["parent"] = None
+    project_graph_nodes(entries, ["x-c"], root=str(tmp_path))
+    assert "wave" not in read_plan_file(child_doc)[1]
+
+
+def test_epic_demotion_clears_stale_waves_and_rollup(tmp_path):
+    """codex: demoting an epic to a feature clears its stale waves/rollup keys."""
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": None, "blocked_by": []},
+    ]
+    project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
+    fields = read_plan_file(epic_doc)[1]
+    assert fields.get("waves") == "1" and fields.get("children_total") == "1"
+    # Demote to feature -> derived epic keys clear.
+    entries[0]["type"] = "feature"
+    project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
+    fields2 = read_plan_file(epic_doc)[1]
+    assert "waves" not in fields2
+    assert "children_total" not in fields2
+    assert "progress" not in fields2

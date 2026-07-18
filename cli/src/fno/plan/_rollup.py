@@ -62,12 +62,13 @@ def compute_waves(
 
     # Kahn-style leveling: assign a node its wave only once ALL its intra-epic
     # blockers have waves, so the result is deterministic (independent of dict
-    # order) and a longest-path stratification. Any node still unassigned after
-    # a fixpoint is on a blocked_by cycle and collapses to wave 0.
+    # order) and a longest-path stratification. When the fixpoint stalls, only
+    # the nodes ON a cycle collapse to wave 0; an acyclic dependent of a cycle
+    # (C blocked by cyclic A) is left to restratify on the next round, so it
+    # still lands at `1 + max(blocker wave)` rather than being flattened.
     wave: dict[str, int] = {}
     remaining = set(child_ids)
-    progressed = True
-    while remaining and progressed:
+    while remaining:
         progressed = False
         for cid in list(remaining):
             bl = blockers[cid]
@@ -75,11 +76,39 @@ def compute_waves(
                 wave[cid] = 1 + max((wave[b] for b in bl), default=-1)
                 remaining.discard(cid)
                 progressed = True
-    for cid in remaining:  # cycle members: no valid stratum -> wave 0
-        wave[cid] = 0
+        if progressed:
+            continue
+        # Stalled: break the knot. Collapse only the true cycle members (a node
+        # that can reach itself over unresolved blockers) to wave 0, then loop -
+        # their acyclic dependents resolve normally against those zeros.
+        cyclic = {c for c in remaining if _on_cycle(c, blockers, remaining)}
+        if not cyclic:  # defensive: no cycle but still stuck -> flush to 0
+            cyclic = set(remaining)
+        for c in cyclic:
+            wave[c] = 0
+            remaining.discard(c)
 
     max_wave = max(wave.values()) if wave else -1
     return wave, max_wave
+
+
+def _on_cycle(
+    start: str, blockers: dict[str, list[str]], scope: set[str]
+) -> bool:
+    """True iff ``start`` can reach itself over unresolved blocker edges within
+    ``scope`` - i.e. it is a member of a blocked_by cycle, not merely a dependent
+    of one. DFS bounded by ``scope`` so it always terminates."""
+    stack = [b for b in blockers.get(start, []) if b in scope]
+    seen: set[str] = set()
+    while stack:
+        cur = stack.pop()
+        if cur == start:
+            return True
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(b for b in blockers.get(cur, []) if b in scope)
+    return False
 
 
 def compute_rollup(

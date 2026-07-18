@@ -154,4 +154,18 @@ def test_waves_sibling_cycle_terminates():
         _n("B", parent="E", blocked_by=["A"]),
     ]
     wave, _ = compute_waves("E", entries)  # must return
-    assert wave["A"] == 0 or wave["B"] == 0
+    assert wave["A"] == 0 and wave["B"] == 0
+
+
+def test_waves_acyclic_dependent_of_cycle_restratifies():
+    """codex: only cycle members collapse to 0; an acyclic dependent (C blocked
+    by cyclic A) still lands at 1 + max(blocker wave)."""
+    entries = [
+        _n("E", type_="epic"),
+        _n("A", parent="E", blocked_by=["B"]),
+        _n("B", parent="E", blocked_by=["A"]),
+        _n("C", parent="E", blocked_by=["A"]),  # depends on the cycle, not in it
+    ]
+    wave, max_wave = compute_waves("E", entries)
+    assert wave == {"A": 0, "B": 0, "C": 1}
+    assert max_wave + 1 == 2  # the cycle no longer undercounts the summary
