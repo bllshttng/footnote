@@ -3832,16 +3832,11 @@ fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> 
             .filter(|c| !c.is_control())
             .collect()
     }
-    // x-df4c: the peek header glyph is lattice-sourced (no hand-picked literal).
-    // It keeps its own exit check rather than reusing `agent_lattice_state`
-    // because the peek is `seen`-aware (x-4328): a seen-Done agent reads `○`,
-    // not `✓`, and `pane_state` carries that bit while `agent_lattice_state`
-    // (badge-only, matching the sideline row) does not.
-    let glyph = if a.exited {
-        lattice_style(LatticeState::Exited).glyph
-    } else {
-        nav_glyph(pane_state(a.badge, a.seen))
-    };
+    // x-df4c: the peek header reuses the sideline row's lattice state.
+    // `agent_lattice_state` is both exit- and seen-aware (it routes the non-exit
+    // case through `pane_state`), so the peek, the row, and the rollups agree
+    // and no call site re-derives the precedence.
+    let glyph = lattice_style(agent_lattice_state(a)).glyph;
     // (x-c914) The account glyph rides the peek header next to the name, same
     // vocabulary as the selector row.
     let header = match a.account.as_deref() {
