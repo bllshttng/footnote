@@ -89,16 +89,18 @@ def _active_missions() -> list[dict]:
         from fno.paths import graph_json
 
         entries = read_graph(graph_json())
-    except Exception:  # noqa: BLE001 - a graph read fault yields no missions
+        if not isinstance(entries, list):
+            return []
+        return [
+            e
+            for e in entries
+            if isinstance(e, dict)
+            and e.get("mission_active") is True
+            and e.get("id")
+            and e.get("project")
+        ]
+    except Exception:  # noqa: BLE001 - a graph read/iterate fault yields no missions
         return []
-    return [
-        e
-        for e in entries
-        if isinstance(e, dict)
-        and e.get("mission_active") is True
-        and e.get("id")
-        and e.get("project")
-    ]
 
 
 def resolve_drain_targets() -> list[DrainTarget]:

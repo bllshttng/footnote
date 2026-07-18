@@ -126,6 +126,15 @@ def test_active_missions_read_fault_yields_empty(monkeypatch):
     assert ab._active_missions() == []
 
 
+def test_active_missions_non_list_graph_yields_empty(monkeypatch):
+    # A malformed graph that read_graph returns as a non-iterable (e.g. None)
+    # must degrade to no missions, never raise on the comprehension.
+    import fno.graph.store as store
+
+    monkeypatch.setattr(store, "read_graph", lambda *_a, **_k: None)
+    assert ab._active_missions() == []
+
+
 def test_as_dicts_shape(monkeypatch):
     _patch(
         monkeypatch,

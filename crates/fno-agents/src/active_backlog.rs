@@ -812,16 +812,16 @@ pub async fn run_supervisor(
             let Some(mission) = target.mission.clone() else {
                 continue;
             };
-            if tasks.contains_key(&mission) {
-                continue;
+            // Entry API (single lookup): only spawn when this mission has no live
+            // loop yet, mirroring the fanout family below.
+            if let std::collections::hash_map::Entry::Vacant(slot) = tasks.entry(mission) {
+                slot.insert(tokio::spawn(mission_drain_loop(
+                    target,
+                    abi_bin.clone(),
+                    emitter.clone(),
+                    Arc::clone(&shutdown),
+                )));
             }
-            let h = tokio::spawn(mission_drain_loop(
-                target,
-                abi_bin.clone(),
-                emitter.clone(),
-                Arc::clone(&shutdown),
-            ));
-            tasks.insert(mission, h);
         }
 
         for ft in fanout_targets {
