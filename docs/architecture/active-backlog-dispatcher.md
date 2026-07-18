@@ -5,7 +5,7 @@ supervisor daemon that continuously converges ACTIVE MISSIONS - epics with
 `mission_active=true` - by dispatching their ready leaf children across all
 projects, sleeping between drains. Config-gated, default-off, fail-safe.
 
-> **x-a4dc (K2) - mission-scoped drains.** The daemon originally ran one drain
+> **Mission-scoped drains (K2).** The daemon originally ran one drain
 > loop **per enabled project**, each acquiring `walker:<cwd>` and dispatching one
 > node per tick through a local `drain_tick`. That per-project interval arm is
 > **deleted** (epic Locked Decision 4); merge-triggered `fno backlog advance` is
