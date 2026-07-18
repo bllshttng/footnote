@@ -1425,18 +1425,142 @@ def _walker_live_at(project_root: str) -> bool:
         return False
 
 
+def _converge_one(
+    node_meta: dict,
+    root: str,
+    ev_path: Path,
+    verbose: bool,
+    *,
+    cross_project: bool = False,
+    mission: Optional[str] = None,
+    closed_node_id: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> AdvanceResult:
+    """The one shared converge-dispatch core: dedup, reserve, spawn, one receipt.
+
+    Extracted from ``_dispatch_one_dependent`` (x-9608 K1) so the two triggers -
+    merge-advance's per-dependent dispatch and the epic kickoff / mission-drain
+    fan-out - run the IDENTICAL claim choreography + spawn + single decision event
+    and can never fork. The caller owns root resolution (same-project cwd vs
+    cross-project work-map vs kickoff work-map) and passes the resolved ``root``;
+    everything downstream is common. ``mission`` (the epic id, kickoff/drain only)
+    tags each receipt so a mission dispatch is attributable in the event stream;
+    ``closed_node_id`` (merge-advance only) keys the AC1-RACE trigger. The two are
+    mutually exclusive in practice but both are optional here.
+
+    Emits exactly one of advance_dispatched / advance_skipped / advance_failed
+    (LD#12) and returns the matching AdvanceResult. Never raises: a spawn failure
+    releases the reservation (node stays re-dispatchable) and resolves to failed.
+    """
+    node_id = node_meta["id"]
+    slug = node_meta.get("slug") or node_meta.get("title")
+
+    def _tag(data: dict) -> dict:
+        # Common receipt fields: the trigger key (closed_node_id) and/or the
+        # mission tag ride every event this converge emits. Omitted when unset so
+        # a merge-advance receipt stays byte-identical to pre-K1.
+        if closed_node_id:
+            data["closed_node_id"] = closed_node_id
+        if mission:
+            data["mission"] = mission
+        return data
+
+    def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
+        data = _tag({"reason": reason, "node_id": node_id})
+        if detail:
+            data["detail"] = detail[:200]
+        _emit(EVENT_SKIPPED, data, ev_path)
+        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
+
+    def failed(error: str) -> AdvanceResult:
+        _emit(EVENT_FAILED, _tag({"node_id": node_id, "error": error[:200]}), ev_path)
+        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
+
+    # The spawned worker runs in the target repo, not this one. If that project
+    # already has a live walker, let it claim the node - spawning here would launch
+    # a second target into that repo (codex P2). Checked at the target root because
+    # its walker claim lives under that root's .fno/claims.
+    if _walker_live_at(root):
+        return skip("walker-live")
+
+    # Already being worked? Same liveness gate as advance() step 4. This is what
+    # makes kickoff idempotent (AC1-EDGE): a re-run finds the first pass's workers
+    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
+    # dispatch TTL still being live.
+    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+        return skip("already-claimed")
+
+    from fno.claims.core import ClaimHeldByOther, acquire_claim
+
+    dispatch_key = f"dispatch:{node_id}"
+    holder = f"advance:{os.getpid()}"
+    dispatch_root = _claims_root_for(dispatch_key)
+    try:
+        acquire_claim(
+            dispatch_key,
+            holder,
+            ttl_ms=_DISPATCH_TTL_MS,
+            reason=f"converge dispatch for {node_id}"
+            + (f" (mission {mission})" if mission else "")
+            + (f" (dep of {closed_node_id})" if closed_node_id else ""),
+            root=dispatch_root,
+        )
+    except ClaimHeldByOther:
+        return skip("already-claimed")
+    except Exception as exc:  # noqa: BLE001
+        return skip("claim-error", detail=str(exc))
+
+    try:
+        eff_provider = provider if provider is not None else node_meta.get("provider")
+        short_id = _spawn_worker(
+            node_id, root, slug,
+            model=_route_resolve.node_model(node_meta, explicit=model, provider=eff_provider),
+            provider=eff_provider,
+            verb=node_meta.get("dispatch_verb"),
+            brief=node_meta.get("dispatch_brief"),
+        )
+    except SpawnAlreadyRunning:
+        _safe_release(dispatch_key, holder, dispatch_root)
+        return skip("already-claimed")
+    except Exception as exc:  # noqa: BLE001
+        _safe_release(dispatch_key, holder, dispatch_root)
+        return failed(str(exc))
+
+    _emit(
+        EVENT_DISPATCHED,
+        _tag({
+            "node_id": node_id,
+            "short_id": short_id,
+            "agent_name": _worker_agent_name(node_id, slug),
+            "cross_project": cross_project,
+        }),
+        ev_path,
+    )
+    if verbose:
+        _scope = f"mission {mission} " if mission else ""
+        _kind = "cross-project" if cross_project else "same-project"
+        print(
+            f"advance: dispatched {_scope}{_kind} {node_id} -> "
+            f"target worker {short_id} (--cwd {root})",
+            file=sys.stderr,
+        )
+    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+
+
 def _dispatch_one_dependent(
     dep: dict, closed_node_id: str, ev_path: Path, verbose: bool,
     *, model: Optional[str] = None, provider: Optional[str] = None,
 ) -> AdvanceResult:
-    """Resolve one dependent's own project root, dedup, and spawn its worker.
+    """Resolve one dependent's own project root, then converge-dispatch it.
 
-    Reuses advance()'s claim + spawn + event machinery. The ``--cwd`` root
-    differs by route (RC1 / LD#2): a CROSS-project dependent launches in its
-    work-map root; a SAME-project dependent launches in the node's OWN recorded
-    ``cwd`` (NEVER the work-map root, which for a foreign-shaped record could land
-    it on a protected branch where the bg worker dies). Everything downstream of
-    root resolution - dedup, spawn, single decision event - is identical.
+    Reuses advance()'s claim + spawn + event machinery via :func:`_converge_one`.
+    The ``--cwd`` root differs by route (RC1 / LD#2): a CROSS-project dependent
+    launches in its work-map root; a SAME-project dependent launches in the node's
+    OWN recorded ``cwd`` (NEVER the work-map root, which for a foreign-shaped record
+    could land it on a protected branch where the bg worker dies). Everything
+    downstream of root resolution - dedup, spawn, single decision event - is
+    ``_converge_one`` and is identical to the kickoff path.
     """
     node_id = dep["id"]
     cross_project = bool(dep.get("cross_project"))
@@ -1447,14 +1571,6 @@ def _dispatch_one_dependent(
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
         return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
-
-    def failed(error: str) -> AdvanceResult:
-        _emit(
-            EVENT_FAILED,
-            {"node_id": node_id, "closed_node_id": closed_node_id, "error": error[:200]},
-            ev_path,
-        )
-        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
 
     project = dep.get("project")
     if not project:
@@ -1481,70 +1597,11 @@ def _dispatch_one_dependent(
         if not root:
             return skip("no-cwd")
 
-    # The spawned worker runs in the DEPENDENT's repo, not this one. If that
-    # project already has a live walker, let it claim the node - spawning here
-    # would launch a second target into that repo (codex P2). Checked at the
-    # dependent root because its walker claim lives under that root's .fno/claims.
-    if _walker_live_at(root):
-        return skip("walker-live")
-
-    # Already being worked? Same liveness gate as advance() step 4.
-    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
-        return skip("already-claimed")
-
-    from fno.claims.core import ClaimHeldByOther, acquire_claim
-
-    dispatch_key = f"dispatch:{node_id}"
-    holder = f"advance:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
-    try:
-        acquire_claim(
-            dispatch_key,
-            holder,
-            ttl_ms=_DISPATCH_TTL_MS,
-            reason=f"dependent dispatch for {node_id} (dep of {closed_node_id})",
-            root=dispatch_root,
-        )
-    except ClaimHeldByOther:
-        return skip("already-claimed")
-    except Exception as exc:  # noqa: BLE001
-        return skip("claim-error", detail=str(exc))
-
-    try:
-        eff_provider = provider if provider is not None else dep.get("provider")
-        short_id = _spawn_worker(
-            node_id, root, dep.get("slug"),
-            model=_route_resolve.node_model(dep, explicit=model, provider=eff_provider),
-            provider=eff_provider,
-            verb=dep.get("dispatch_verb"),
-            brief=dep.get("dispatch_brief"),
-        )
-    except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return skip("already-claimed")
-    except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return failed(str(exc))
-
-    _emit(
-        EVENT_DISPATCHED,
-        {
-            "node_id": node_id,
-            "short_id": short_id,
-            "closed_node_id": closed_node_id,
-            "agent_name": _worker_agent_name(node_id, dep.get("slug")),
-            "cross_project": cross_project,
-        },
-        ev_path,
+    return _converge_one(
+        dep, root, ev_path, verbose,
+        cross_project=cross_project, closed_node_id=closed_node_id,
+        model=model, provider=provider,
     )
-    if verbose:
-        _kind = "cross-project" if cross_project else "same-project"
-        print(
-            f"advance: dispatched {_kind} dependent {node_id} -> "
-            f"target worker {short_id} (--cwd {root})",
-            file=sys.stderr,
-        )
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
 
 
 def advance_dependents(
