@@ -592,13 +592,13 @@ For each testable behavior, write Given/When/Then using patterns from `bdd-accep
 
 **The required AC types per deliverable type:**
 
-| Type | Code | Tests | feature | bug | investigation |
-|------|------|-------|---------|-----|---------------|
-| Happy path | AC-HP | Expected behavior works (bug: the repro now passes) | yes | yes | none |
-| Error/validation | AC-ERR | Invalid input, API errors | yes | yes | none |
-| UI state changes | AC-UI | Loading, disabled, feedback | yes | only if UI surface | none |
-| Edge cases | AC-EDGE | Boundaries, empty state, concurrency | yes | yes | none |
-| **Failure recovery** | **AC-FR** | **Silent failures, state recovery, interrupted operations** | yes | yes | none |
+| Type | Code | Tests | feature | bug | investigation | epic |
+|------|------|-------|---------|-----|---------------|------|
+| Happy path | AC-HP | Expected behavior works (bug: the repro now passes) | yes | yes | none | none |
+| Error/validation | AC-ERR | Invalid input, API errors | yes | yes | none | none |
+| UI state changes | AC-UI | Loading, disabled, feedback | yes | only if UI surface | none | none |
+| Edge cases | AC-EDGE | Boundaries, empty state, concurrency | yes | yes | none | none |
+| **Failure recovery** | **AC-FR** | **Silent failures, state recovery, interrupted operations** | yes | yes | none | none |
 
 The AC-FR type is new and catches the bugs that slip through:
 
@@ -727,7 +727,7 @@ feature ACs and UI rigor):
   Scope creep is the canonical epic failure mode; naming the out-of-scope surfaces
   is the cheapest guard against it.
 
-**`## Failure Modes` stays mandatory for all three types** with all four bold
+**`## Failure Modes` stays mandatory for all four types** with all four bold
 labels (Boundaries / Errors / Invariants / Concurrency), using the "Not
 applicable: <reason>" bullet rule where a label genuinely does not apply. The
 `/blueprint` parser seam is frozen: it greps for exactly `^## Failure Modes$` and
