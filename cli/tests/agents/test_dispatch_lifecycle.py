@@ -570,9 +570,8 @@ def test_reconcile_backfills_null_harness_session_id(tmp_path: Path, monkeypatch
     assert result.backfilled[0]["name"] == "worker-claude"
     assert result.backfilled[0]["harness_session_id"] == "FULL-UUID-7c5dcf5d"
 
-    # The row gains BOTH the canonical field and the synced legacy alias.
+    # The row gains the canonical harness_session_id field.
     e = load_registry()[0]
-    assert e.harness_session_id == "FULL-UUID-7c5dcf5d"
     assert e.harness_session_id == "FULL-UUID-7c5dcf5d"
 
     events = _read_events(tmp_path)

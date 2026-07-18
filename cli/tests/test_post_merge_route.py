@@ -115,18 +115,10 @@ class TestInjectPrMerged:
 
 
 class _FakeEntry:
-    def __init__(
-        self,
-        provider,
-        codex_session_id=None,
-        status="live",
-        claude_session_uuid=None,
-        mux=None,
-    ):
-        self.provider = provider
-        self.codex_session_id = codex_session_id
+    def __init__(self, harness, harness_session_id=None, status="live", mux=None):
+        self.harness = harness
+        self.harness_session_id = harness_session_id
         self.status = status
-        self.claude_session_uuid = claude_session_uuid
         self.mux = mux
 
 
@@ -193,11 +185,11 @@ class TestCodexWarmRoute:
         assert reason.startswith("unsupported-harness")
 
     def test_resolve_codex_pane_row_via_uuid(self, monkeypatch):
-        # A codex pane row (mux_spawn) holds its id in claude_session_uuid + a
-        # mux ref and has NO codex_session_id; it must still resolve (PR #328).
+        # A codex pane row (mux_spawn) holds its id in harness_session_id + a
+        # mux ref; it must still resolve (PR #328).
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         pane = _FakeEntry(
-            "codex", None, "live", claude_session_uuid="cx-p",
+            "codex", "cx-p", "live",
             mux={"session": "m", "pane_id": 1},
         )
         _patch_registry(monkeypatch, [pane])
@@ -207,9 +199,9 @@ class TestCodexWarmRoute:
         # Both a transportless id-row and a mux pane row match the same id;
         # inject must pick the mux row so _deliver_live PaneSends into the panel
         # instead of falling through to the daemon path (codex peer P2).
-        idle = _FakeEntry("codex", "cx-x", "live")  # codex_session_id, no mux
+        idle = _FakeEntry("codex", "cx-x", "live")  # harness_session_id, no mux
         pane = _FakeEntry(
-            "codex", None, "live", claude_session_uuid="cx-x",
+            "codex", "cx-x", "live",
             mux={"session": "m", "pane_id": 1},
         )
         _patch_registry(monkeypatch, [idle, pane])
