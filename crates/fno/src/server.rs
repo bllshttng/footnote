@@ -730,12 +730,10 @@ fn tab_label(
 /// land in chrome cells). Never an ordinal - a plain pane is `shell`, not a
 /// number the operator cannot map back.
 fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
-    for cand in [cmd, node] {
-        if let Some(c) = cand {
-            let clean = sanitize_tab_name(c);
-            if !clean.is_empty() {
-                return clean;
-            }
+    for c in [cmd, node].into_iter().flatten() {
+        let clean = sanitize_tab_name(c);
+        if !clean.is_empty() {
+            return clean;
         }
     }
     let base = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
@@ -4764,8 +4762,8 @@ impl Core {
                         .and_then(|s| self.session.squad(s))
                         .map(|s| s.canonical_cwd().to_string())
                         .unwrap_or_default();
-                    let (acct, cd) = self.attach_account_ctx(&id);
-                    let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
+                    let (acct, cd) = self.attach_account_ctx(id);
+                    let argv = attach_argv(id, acct.as_deref(), cd.as_deref());
                     let pid = match self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
                         Ok(p) => p,
                         Err(e) => {
@@ -5602,7 +5600,7 @@ async fn run_wait(
                 // baseline captured at subscribe time.
                 if done_watch.enabled {
                     if let Some((seq, exit)) = tick.last_done {
-                        if done_watch.baseline.map_or(true, |b| seq > b) {
+                        if done_watch.baseline.is_none_or(|b| seq > b) {
                             break WaitOutcome::CommandDone { exit };
                         }
                     }

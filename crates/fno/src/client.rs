@@ -9871,9 +9871,9 @@ mod tests {
         let frame = view.compose();
         let cols = frame.cols as usize;
         // In-area content cell.
-        assert_eq!(frame.cells[1 * cols + 28].c, 'a');
+        assert_eq!(frame.cells[cols + 28].c, 'a');
         // One column beyond the area: filler, dim.
-        let beyond_col = &frame.cells[1 * cols + 28 + 50];
+        let beyond_col = &frame.cells[cols + 28 + 50];
         assert_eq!(beyond_col.c, '·', "beyond-area column must be filler");
         assert!(beyond_col.flags & cell_flags::DIM != 0);
         // One row beyond the area (content row 20): filler too.

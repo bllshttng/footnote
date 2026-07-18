@@ -574,7 +574,7 @@ mod tests {
         std::process::Command::new("zsh")
             .arg("--version")
             .output()
-            .map_or(false, |o| o.status.success())
+            .is_ok_and(|o| o.status.success())
     }
 
     #[test]

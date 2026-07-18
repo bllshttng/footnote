@@ -1754,7 +1754,7 @@ mod tests {
         // AC1-ERR: a garbage payload past the length cap flushes as inert bytes,
         // records no phantom marker, does not panic or buffer unbounded.
         let mut hostile = b"\x1b]133;".to_vec();
-        hostile.extend(std::iter::repeat(b'X').take(500));
+        hostile.extend(std::iter::repeat_n(b'X', 500));
         hostile.push(0x07);
         hostile.extend_from_slice(b"tail");
         let (markers, pass) = scan(&hostile);
