@@ -326,7 +326,7 @@ def _latest_receipt(node_id: str, events: list[dict]) -> Optional[str]:
     return _format_receipt(latest["type"], latest["data"])
 
 
-def _child_note(child: dict, events: list[dict]) -> str:
+def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     """The inline note for a child row: streak (deferred), receipt (idle ready),
     or ``-`` (working / done). Never blank for an idle ready child."""
     from fno.graph import failure
@@ -335,7 +335,7 @@ def _child_note(child: dict, events: list[dict]) -> str:
     status = child.get("_status") or child.get("status")
     if status == "deferred":
         return f"streak {failure.consecutive_failures(node_id, events)}"
-    if status == "ready" and not _live_worker(node_id):
+    if status == "ready" and not worker:
         return _latest_receipt(node_id, events) or "no receipt found"
     return "-"
 
@@ -359,7 +359,10 @@ def cmd_epic_status(
     epic_id = match.id
     epic_node = match.candidates[0]
 
-    if epic_id not in _container_ids(entries):
+    # A container is a node with children OR an `epic`-typed node not yet
+    # decomposed (childless but legitimately queryable -> shows "(no children)").
+    # A genuine leaf (feature/bug/... with no children) is refused by name.
+    if epic_id not in _container_ids(entries) and epic_node.get("type") != "epic":
         typer.echo(
             f"epic status: {epic_id} is a leaf, not a container "
             f"(an epic's work lives in its children).",
@@ -389,7 +392,7 @@ def cmd_epic_status(
             "status": _status_of(c) or "",
             "worker": worker,
             "pr_number": pr,
-            "receipt": _child_note(c, events),
+            "receipt": _child_note(c, events, worker),
         })
 
     if json_output:

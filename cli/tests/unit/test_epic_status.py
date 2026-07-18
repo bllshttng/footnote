@@ -175,6 +175,15 @@ def test_unknown_id_errors(graph_env):
     assert r.exit_code != 0
 
 
+def test_childless_epic_shows_no_children(graph_env):
+    """An `epic`-typed node with no children yet is queryable, not refused."""
+    tmp_path, write = graph_env
+    write([_node("x-epic", type="epic", slug="the-epic")])
+    r = _invoke(["backlog", "epic", "status", "x-epic"])
+    assert r.exit_code == 0, r.output
+    assert "no children" in r.output.lower()
+
+
 # -- accepts a slug --
 
 
