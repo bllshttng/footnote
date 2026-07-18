@@ -78,7 +78,12 @@ def _agents_rows() -> list[dict[str, Any]]:
         data = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError:
         return []
-    rows = data if isinstance(data, list) else data.get("agents", [])
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = data.get("agents", [])
+    else:
+        rows = []
     return [r for r in rows if isinstance(r, dict)]
 
 
@@ -112,7 +117,15 @@ def _revive_orphans(
                 err=True,
             )
             continue
-        cmd = [fno, "agents", "spawn", name, "--resume", str(session)]
+        # Pin the provider explicitly: a bare spawn inherits
+        # config.agents.defaults.provider, and a non-claude default makes the
+        # spawn seam inject --provider <that>, which the --resume guard then
+        # rejects - every revive would fail in such an environment. --substrate
+        # bg is what --resume implies; naming it is belt-and-suspenders.
+        cmd = [
+            fno, "agents", "spawn", name,
+            "--provider", "claude", "--substrate", "bg", "--resume", str(session),
+        ]
         if row.get("cwd"):
             cmd += ["--cwd", str(row["cwd"])]
         try:

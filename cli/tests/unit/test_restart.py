@@ -242,7 +242,8 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
     assert [
-        "/cargo/bin/fno", "agents", "spawn", "worker1", "--resume", "uuid-1", "--cwd", "/w1",
+        "/cargo/bin/fno", "agents", "spawn", "worker1",
+        "--provider", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
     ] in calls
     assert not any("spawn" in c and "bgw" in c for c in calls), "survivor must not be respawned"
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
@@ -295,6 +296,18 @@ def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["agents_revive_failed"] == ["worker1"]
     assert payload["ok"] is True
+
+
+def test_agents_rows_tolerates_non_dict_non_list_json(monkeypatch) -> None:
+    """`fno agents list --json` returning a scalar (string/int/null) must yield []
+    not an AttributeError crash (gemini medium on PR #454)."""
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout='"a string"', stderr=""),
+    )
+    assert restart._agents_rows() == []
 
 
 def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
