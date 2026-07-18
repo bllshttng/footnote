@@ -468,6 +468,48 @@ def build_entry(
     return entry
 
 
+def _load_ledger_data(tasks_path: Path) -> dict:
+    """Load a ledger.json into the canonical ``{"entries": [...]}`` shape.
+
+    Caller must already hold the ledger flock. A missing file yields an empty
+    ledger; a corrupt file or any shape that can't satisfy the append contract
+    (non-dict, or a dict whose ``entries`` isn't a list) is backed up and reset.
+    A bare-list legacy ledger is normalized into the wrapper. We recover rather
+    than raise on purpose — a raised exception on the stop-hook completion path
+    is exactly the silent-skip-registration failure this module exists to remove.
+    """
+    if not tasks_path.exists():
+        return {"entries": []}
+    try:
+        data = json.loads(tasks_path.read_text())
+    except json.JSONDecodeError:
+        print(f"Warning: {tasks_path} corrupt, creating backup", file=sys.stderr)
+        tasks_path.rename(tasks_path.with_suffix(".json.bak"))
+        return {"entries": []}
+    if isinstance(data, list):
+        return {"entries": data}
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+        print(f"Warning: {tasks_path} unexpected shape, creating backup", file=sys.stderr)
+        tasks_path.rename(tasks_path.with_suffix(".json.bak"))
+        return {"entries": []}
+    return data
+
+
+def _write_ledger_data(tasks_path: Path, data: dict) -> None:
+    """Atomically replace tasks_path with data. Caller holds the ledger flock."""
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=tasks_path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp_path, tasks_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
     """Append entry to a ledger.json file atomically with flock."""
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
@@ -477,36 +519,7 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-        if tasks_path.exists():
-            try:
-                data = json.loads(tasks_path.read_text())
-            except json.JSONDecodeError:
-                print(f"Warning: {tasks_path} corrupt, creating backup", file=sys.stderr)
-                backup = tasks_path.with_suffix(".json.bak")
-                tasks_path.rename(backup)
-                data = {"entries": []}
-            else:
-                # A bare JSON list `[...]` parses cleanly (no JSONDecodeError),
-                # so the guard above never fires, but `data.get("entries")`
-                # below would then crash with 'list' object has no attribute
-                # 'get' and silently skip registration. Normalize the legacy
-                # bare-list shape into the canonical wrapper. Any other shape
-                # that can't satisfy the `data["entries"].append(...)` contract
-                # below (non-dict, or a dict whose `entries` isn't a list) is
-                # treated like the corrupt-JSON case above: back it up and
-                # reset. We recover rather than raise on purpose — this runs on
-                # the stop-hook completion path, and a raised exception here is
-                # exactly the silent-skip-registration failure this fix exists
-                # to remove. Mirrors the lenient read in _sync_to_graph.
-                if isinstance(data, list):
-                    data = {"entries": data}
-                elif not isinstance(data, dict) or not isinstance(data.get("entries"), list):
-                    print(f"Warning: {tasks_path} unexpected shape, creating backup", file=sys.stderr)
-                    backup = tasks_path.with_suffix(".json.bak")
-                    tasks_path.rename(backup)
-                    data = {"entries": []}
-        else:
-            data = {"entries": []}
+        data = _load_ledger_data(tasks_path)
 
         # Same-session race dedupe under flock. The four-tier hook
         # pre-check (ledger-dedup-lookup.py) handles legacy / cross-shape
@@ -527,27 +540,97 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
                     )
                     return
 
-        data["entries"].append(entry)
+        # Collapse rule (x-88df): a full-fidelity row supersedes reconcile's
+        # backstop floor for the same node. Before appending a row that carries a
+        # graph_node_id, drop any existing `backstop: true` row with that id so a
+        # node never carries both. The backstop has no fno_id, so finalize's
+        # scalar dedup above can't catch it — this graph_node_id-keyed drop is the
+        # only guard against a double-counted cost rollup.
+        node_id = entry.get("graph_node_id")
+        if node_id:
+            data["entries"] = [
+                e for e in data["entries"]
+                if not (e.get("backstop") and e.get("graph_node_id") == node_id)
+            ]
 
-        # Atomic write
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=tasks_path.parent, suffix=".tmp"
-        )
-        try:
-            with os.fdopen(tmp_fd, "w") as f:
-                f.write(json.dumps(data, indent=2) + "\n")
-            os.replace(tmp_path, tasks_path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        data["entries"].append(entry)
+        _write_ledger_data(tasks_path, data)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
     print(f"Appended entry #{len(data['entries'])} to {tasks_path}", file=sys.stderr)
+
+
+def upsert_ledger_pr(
+    node_id: str,
+    pr_number: int,
+    pr_url: str | None,
+    project: str | None,
+    merged_at: str | None,
+) -> str:
+    """Stamp or create a ledger row for a merged node, keyed on ``graph_node_id``.
+
+    Reconcile-side backstop (x-88df Part 2) for the transcript-gone tail: the
+    merge event knows ``(node, pr, project, merged_at)`` but no ``finalize`` ran.
+    Under the SAME ``/tmp/abilities-ledger.lock`` flock the register path uses:
+
+    - existing execution row with ``pr_number`` null -> stamp pr_number/pr_url
+      WITHOUT touching its full-fidelity fields -> returns ``"stamped"``
+    - existing execution row with a ``pr_number``     -> no-op -> ``"already-present"``
+    - no row for the node                             -> minimal backstop row
+      (``backstop: true``, ``termination_reason: reconcile-backstop``) -> ``"created"``
+
+    A ``"created"`` backstop is dropped by :func:`append_to_tasks_json`'s collapse
+    rule if a full finalize row later lands for the node.
+    """
+    ledger_path = _paths.ledger_json()
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = Path("/tmp/abilities-ledger.lock")
+
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        data = _load_ledger_data(ledger_path)
+
+        row = next(
+            (
+                e for e in data["entries"]
+                if e.get("type") == "execution" and e.get("graph_node_id") == node_id
+            ),
+            None,
+        )
+        if row is not None:
+            if row.get("pr_number"):
+                return "already-present"
+            # Stamp the PR only; the finalize record's cost/phases/completed
+            # stay untouched (AC2-EDGE: the stamp adds the PR, never clobbers).
+            row["pr_number"] = pr_number
+            if pr_url:
+                row["pr_url"] = pr_url
+            outcome = "stamped"
+        else:
+            data["entries"].append({
+                "type": "execution",
+                "status": "done",
+                "graph_node_id": node_id,
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "project": project,
+                "completed": merged_at,
+                "backstop": True,
+                "termination_reason": "reconcile-backstop",
+                "session_id": None,
+            })
+            outcome = "created"
+
+        _write_ledger_data(ledger_path, data)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    return outcome
 
 
 def render_tasks_md(tasks_json_path: Path, tasks_md_path: Path) -> None:
