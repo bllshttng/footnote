@@ -3818,8 +3818,10 @@ fn peek_overlay_lines(agent: Option<&AgentRow>, peek: &PeekView) -> Vec<String> 
             .filter(|c| !c.is_control())
             .collect()
     }
+    // x-df4c: the peek header glyph sources from the one lattice too (exit beats
+    // badge, same as the sideline row), so no call site hand-picks a state glyph.
     let glyph = if a.exited {
-        '✗'
+        lattice_style(LatticeState::Exited).glyph
     } else {
         nav_glyph(pane_state(a.badge, a.seen))
     };
