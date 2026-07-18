@@ -1365,6 +1365,143 @@ def cmd_drain_self(
         advance_cursor(handle, msgs[-1].id)
 
 
+# ---------------------------------------------------------------------------
+# notify-self engine (x-39a4): stat-only turn-boundary nudge helpers, shared
+# with `fno mail status` (the sent-unclaimed count).
+# ---------------------------------------------------------------------------
+
+# The nudge text is embedded inside a hook-owned <system-reminder> wrapper, so a
+# sender/recipient handle carrying a literal </system-reminder> could break out
+# and inject context. Defang the delimiter (open/close, case- + whitespace-
+# insensitive) in every interpolated field, mirroring born-with-why-offer-inject.sh.
+_REMINDER_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
+
+
+def _defang_reminder(s: str) -> str:
+    return _REMINDER_TAG.sub(r"[\1system-reminder]", s)
+
+
+def _bounded_names(names: list[str], cap: int = 3) -> str:
+    """De-dupe (first-seen), defang, then cap at ``cap`` names + ``+K more``."""
+    seen: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.append(n)
+    shown = [_defang_reminder(n) for n in seen[:cap]]
+    extra = len(seen) - cap
+    return ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
+
+
+def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
+    """True iff ``ts`` (bus ISO ``%Y-%m-%dT%H:%M:%SZ``) is strictly older than TTL.
+
+    Unparseable ts -> False (never flag): degrade to quiet, never to a crash.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    try:
+        sent_at = _dt.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
+    except (ValueError, TypeError):
+        return False
+    return (now - sent_at).total_seconds() > ttl_seconds
+
+
+def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
+    """Count + distinct recipients (first-seen) of my sent mail unclaimed past TTL.
+
+    Unclaimed = still returned by ``scan_unread(recipient)`` (the recipient's
+    consume cursor has not passed it) AND strictly older than ``ttl_seconds``.
+    Computed live every call (recipient cursors read fresh, never cached), so a
+    just-consumed message stops being flagged immediately. Stat-only: reads
+    cursors, advances none.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    from fno.bus.cursor import scan_unread
+    from fno.bus.log import iter_messages
+
+    now = _dt.now(tz=_tz.utc)
+    sent = [m for m in iter_messages() if m.from_ == handle]
+    if not sent:
+        return 0, []
+    # Read each recipient's cursor once. A recipient name that scan_unread
+    # rejects (path-traversal guard) or that errors is skipped with an empty
+    # set -> its messages read as "claimed" and are not flagged: fail-open
+    # toward quiet, never a crashed turn (a sent-unclaimed line is advisory).
+    unread_ids: dict[str, set[str]] = {}
+    for r in {m.to for m in sent}:
+        try:
+            unread_ids[r] = {e.id for e in scan_unread(r)}
+        except (ValueError, OSError):
+            unread_ids[r] = set()
+    count = 0
+    recipients: list[str] = []
+    for m in sent:
+        if m.id not in unread_ids.get(m.to, ()):  # recipient's cursor passed it
+            continue
+        if not _age_exceeds(m.ts, ttl_seconds, now):  # still fresh (strict >)
+            continue
+        count += 1
+        if m.to not in recipients:
+            recipients.append(m.to)
+    return count, recipients
+
+
+@mail_app.command("notify-self", hidden=True)
+def cmd_notify_self() -> None:
+    """Stat-only turn-boundary nudge: unread inbound + unclaimed sent (x-39a4).
+
+    The push half of push-first delivery, wired into every session's
+    ``UserPromptSubmit`` hook. Unlike ``drain-self`` it NEVER advances the
+    consume cursor -- a nudge is a notice, not a consume, so SessionStart's
+    ``drain-self`` and the sender-side check still see un-acted mail (the
+    load-bearing invariant: notify never eats delivery). Two stats over the one
+    global bus:
+
+      1. inbound: unread mail addressed to my handle -> one line "N unread fno
+         mail from <senders>: run `fno mail unread`". Persistent: the wrapping
+         hook fires each turn, so the line re-injects while unread and clears
+         the moment the consume cursor advances (no notify-cursor exists).
+      2. sent-unclaimed: my own sent mail still past the recipient's cursor and
+         strictly older than ``config.inbox.unclaimed_ttl`` -> "N sent fno mail
+         unclaimed (to <recipients>, >Nm)". Closes the "queued (durable)" ==
+         "delivered" silent gap.
+
+    No harness identity in env -> silent no-op (mirror ``drain-self``).
+    """
+    from fno.bus.cursor import scan_unread
+    from fno.config import load_settings
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        return
+
+    handle = canonical_handle(ident.harness, ident.session_id)
+    lines: list[str] = []
+
+    unread = scan_unread(handle)
+    if unread:
+        senders = _bounded_names([m.from_ for m in unread])
+        lines.append(
+            f"{len(unread)} unread fno mail from {senders}: run `fno mail unread`"
+        )
+
+    ttl = load_settings().inbox.unclaimed_ttl
+    n_sent, recipients = _sent_unclaimed(handle, ttl)
+    if n_sent:
+        who = _bounded_names(recipients)
+        lines.append(
+            f"{n_sent} sent fno mail unclaimed (to {who}, >{ttl // 60}m): "
+            "recipient has not picked it up"
+        )
+
+    if lines:
+        print("\n".join(lines))
+
+
 @mail_app.command("rebuild-render", hidden=True)
 def cmd_rebuild_render(
     recipient: Optional[str] = typer.Argument(
