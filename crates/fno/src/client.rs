@@ -2808,24 +2808,48 @@ impl View {
         spans.push(TabSpan {
             text: format!(" {} ", s.name),
             flags: cell_flags::BOLD,
+            fg: Color::Default,
             hit: None,
         });
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_label_text(&t.name, i);
-            let (text, flags) = if i == s.active_tab {
-                (format!("[{label}]"), cell_flags::INVERSE)
+            // x-df4c US4: a leading max-severity rollup glyph so a background
+            // tab's blocked/working pane reads at the strip without opening it,
+            // carrying the lattice's weight and color. `None` (no live panes:
+            // empty or all-exited) prepends nothing, so a stateless tab renders
+            // byte-identically to today (AC2-EDGE); a live-idle tab shows `○`; a
+            // Blocked rollup paints the amber accent on the span (label preceded
+            // by `▲`), and the working/blocked/done glyphs keep their BOLD.
+            let (glyph_prefix, fg, glyph_flags) =
+                match tab_rollup_state(&self.layout.agents, s.id, t.id) {
+                    Some(st) => {
+                        let style = lattice_style(st);
+                        (format!("{} ", style.glyph), style.fg, style.flags)
+                    }
+                    None => (String::new(), Color::Default, 0),
+                };
+            let label = format!("{glyph_prefix}{label}");
+            let base_flags = if i == s.active_tab {
+                cell_flags::INVERSE
             } else {
-                (format!(" {label} "), 0)
+                0
+            };
+            let text = if i == s.active_tab {
+                format!("[{label}]")
+            } else {
+                format!(" {label} ")
             };
             spans.push(TabSpan {
                 text,
-                flags,
+                flags: base_flags | glyph_flags,
+                fg,
                 hit: Some(TabHit::Tab(t.id)),
             });
         }
         spans.push(TabSpan {
             text: " + ".to_string(),
             flags: cell_flags::DIM,
+            fg: Color::Default,
             hit: Some(TabHit::NewTab),
         });
         spans
@@ -2845,7 +2869,7 @@ impl View {
                 }
                 cells[c] = Cell {
                     c: ch,
-                    fg: Color::Default,
+                    fg: span.fg,
                     bg: Color::Default,
                     flags: span.flags,
                 };
@@ -2986,12 +3010,15 @@ impl View {
                 break;
             }
             let is_inert = row_is_inert(&drow);
-            let (text, mut flags) = match drow {
+            // (x-df4c) The row tuple carries `fg` now: most rows are
+            // `Color::Default`, but a needs-attention (Blocked) agent row or card
+            // paints the accent, so the color must reach the cells below.
+            let (text, mut flags, fg) = match drow {
                 DisplayRow::Sel(row) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
                     let Some(squad) = squad else { continue };
                     let is_active_squad = squad.id == self.layout.active_squad;
-                    let (text, flags) = match row.tab {
+                    let (text, flags, fg) = match row.tab {
                         None => {
                             let expanded = self.expanded.contains(&squad.id);
                             let caret = if expanded { '▾' } else { '▸' };
@@ -3036,7 +3063,16 @@ impl View {
                                 }
                                 _ => base,
                             };
-                            (text, flags)
+                            // x-df4c: a collapsed squad whose worst pane is
+                            // Blocked carries the accent too, so `▲` reads amber
+                            // here exactly as on an agent row or a tab rollup -
+                            // one system, no grey-vs-amber split.
+                            let fg = if state == PaneState::Blocked {
+                                LATTICE_ACCENT
+                            } else {
+                                Color::Default
+                            };
+                            (text, flags, fg)
                         }
                         Some(t) => {
                             let marker = if is_active_squad && t == squad.active_tab {
@@ -3050,25 +3086,19 @@ impl View {
                                 Some(tm) => tab_label_text(&tm.name, t),
                                 None => (t + 1).to_string(),
                             };
-                            (format!("  {marker}{label}"), 0)
+                            (format!("  {marker}{label}"), 0, Color::Default)
                         }
                     };
-                    (text, flags)
+                    (text, flags, fg)
                 }
                 DisplayRow::Agent(a) => {
-                    // Fact-badge lattice glyphs (brief US2 state machine):
-                    // exited beats badge beats liveness; a report reason
-                    // rides inline while width allows.
-                    let glyph = if a.exited {
-                        '✗'
-                    } else {
-                        match a.badge {
-                            Some(AgentBadge::Working) => '●',
-                            Some(AgentBadge::Blocked) => '▲',
-                            Some(AgentBadge::Done) => '✓',
-                            None => '·',
-                        }
-                    };
+                    // The unified icon lattice (x-df4c): exit beats badge beats
+                    // liveness (row precedence, unchanged), mapped onto the one
+                    // state->style mapping. Idle is now the outline `○`, not the
+                    // near-invisible `·` this node exists to kill.
+                    let st = agent_lattice_state(a);
+                    let style = lattice_style(st);
+                    let glyph = style.glyph;
                     // A recruit mark (x-8f11) replaces the leading space with a
                     // `*`, keeping the row width unchanged (same vocabulary as
                     // the active-squad/tab marker).
@@ -3109,36 +3139,33 @@ impl View {
                         text.push_str(": ");
                         text.push_str(reason);
                     }
-                    // Fact-badge lattice + roster provenance (x-0a2e, AC1-UI):
-                    // `✗`+DIM = exited, `·`+DIM = external (roster-surfaced live),
-                    // `·` bright = fno-owned live. Exit keeps its glyph; external
-                    // only dims a live `·` row, staying pairwise-distinct.
-                    let flags = if a.exited || a.external {
-                        cell_flags::DIM
-                    } else {
-                        0
-                    };
-                    (text, flags)
+                    // External (roster-surfaced) is a MODIFIER, not a state
+                    // (x-df4c AC1-UI): the row keeps its lattice style and ORs
+                    // DIM on top - EXCEPT on Blocked, where the accent wins and
+                    // DIM is withheld (attention must never be dimmed). Exit's
+                    // DIM already rides `style.flags`.
+                    let mut flags = style.flags;
+                    if a.external && st != LatticeState::Blocked {
+                        flags |= cell_flags::DIM;
+                    }
+                    (text, flags, style.fg)
                 }
                 DisplayRow::Card(c) => {
-                    // Ready hollow, in-flight filled, blocked triangle - a glyph
-                    // vocabulary distinct from the agent badges above.
-                    let glyph = match c.state {
-                        CardState::Ready => '○',
-                        CardState::InFlight => '●',
-                        CardState::Blocked => '▲',
-                    };
+                    // The same icon lattice as the agent rows (x-df4c US3): a
+                    // Ready card IS the hollow waiting state, InFlight IS the
+                    // filled running state, so the card vocabulary and the agent
+                    // lattice are literally one mapping. Blocked now carries the
+                    // accent instead of the old bare DIM (attention, not muted).
+                    let style = lattice_style(card_lattice_state(c.state));
+                    let glyph = style.glyph;
                     let label = if c.slug.is_empty() { &c.id } else { &c.slug };
-                    // Blocked cards read dim; ready/in-flight are the actionable
-                    // foreground of the queue.
-                    let flags = if c.state == CardState::Blocked {
-                        cell_flags::DIM
-                    } else {
-                        0
-                    };
-                    (format!("  {glyph} {label} {}", c.priority), flags)
+                    (
+                        format!("  {glyph} {label} {}", c.priority),
+                        style.flags,
+                        style.fg,
+                    )
                 }
-                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM),
+                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, Color::Default),
                 DisplayRow::NewSquad => {
                     // The recruit-mark footer count rides the create affordance
                     // (x-8f11): `space` marks, `R` recruits the marked set.
@@ -3154,17 +3181,17 @@ impl View {
                         Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
                         None => base,
                     };
-                    (label, cell_flags::DIM)
+                    (label, cell_flags::DIM, Color::Default)
                 }
                 DisplayRow::Sub(a) => {
                     // (x-cd67 US2) The dim line-2 subline, indented 4 cells to sit
                     // under the agent name (` {mark}{glyph} ` is 4 cells wide). The
                     // later `.take(text_w)` truncates it to the panel width.
                     let sub = a.subline.as_deref().unwrap_or("");
-                    (format!("    {sub}"), cell_flags::DIM)
+                    (format!("    {sub}"), cell_flags::DIM, Color::Default)
                 }
                 // (x-cd67 US3) A blank section spacer paints nothing.
-                DisplayRow::Blank => (String::new(), 0),
+                DisplayRow::Blank => (String::new(), 0, Color::Default),
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -3188,7 +3215,7 @@ impl View {
                 }
                 cells[r * cols + col] = Cell {
                     c: ch,
-                    fg: Color::Default,
+                    fg,
                     bg: Color::Default,
                     flags,
                 };
@@ -3283,6 +3310,9 @@ fn agent_has_subline(a: &AgentRow) -> bool {
 struct TabSpan {
     text: String,
     flags: u8,
+    /// (x-df4c US4) The span's foreground: the accent when the tab's rollup is a
+    /// Blocked pane, else `Color::Default`.
+    fg: Color,
     hit: Option<TabHit>,
 }
 
@@ -3487,6 +3517,49 @@ fn nav_agent_state(a: &AgentRow) -> PaneState {
     }
 }
 
+/// An agent row's icon-lattice state (x-df4c US2): exit beats badge beats
+/// liveness. Unlike [`nav_agent_state`] this keeps `Exited` distinct (`✗`)
+/// rather than folding it to `Idle` - a row shows its own exit, but a squad/tab
+/// rollup ignores it. The non-exit case goes through `pane_state`, so the row
+/// respects the `seen` bit (x-4328) exactly as the nav/tab rollups do: a Done
+/// pane the operator has already viewed folds to `Idle` (`○`) instead of holding
+/// a stale bold `✓` needs-attention marker - one system across every surface.
+fn agent_lattice_state(a: &AgentRow) -> LatticeState {
+    if a.exited {
+        LatticeState::Exited
+    } else {
+        pane_to_lattice(pane_state(a.badge, a.seen))
+    }
+}
+
+/// A queue card's icon-lattice state (x-df4c US3): Ready unifies with `Idle`
+/// (hollow waiting), InFlight with `Working` (filled running), Blocked stays
+/// the accent state - so cards and agent rows render the identical vocabulary.
+fn card_lattice_state(s: CardState) -> LatticeState {
+    match s {
+        CardState::Ready => LatticeState::Idle,
+        CardState::InFlight => LatticeState::Working,
+        CardState::Blocked => LatticeState::Blocked,
+    }
+}
+
+/// Fold a tab's LIVE panes to their worst lattice state for the tab-strip
+/// rollup (x-df4c US4). Exited panes are filtered BEFORE the fold, so `None`
+/// (no glyph) means "no live panes" - an empty tab or an all-exited tab, which
+/// both render byte-identically to a stateless tab (AC2-EDGE). A tab with live
+/// panes always rolls up, so a live-idle tab yields `Some(Idle)` -> the outline
+/// `○` (the tab state machine distinguishes a live-idle tab from a dead one).
+/// Severity is `PaneState`'s Ord (Blocked < Working < DoneUnseen < Idle), so
+/// `.min()` is the worst pane.
+fn tab_rollup_state(agents: &[AgentRow], squad: u64, tab: TabId) -> Option<LatticeState> {
+    let worst = agents
+        .iter()
+        .filter(|a| a.squad == Some(squad) && a.tab == Some(tab) && !a.exited)
+        .map(nav_agent_state)
+        .min()?;
+    Some(pane_to_lattice(worst))
+}
+
 /// The navigator state of a work-queue card: blocked/in-flight map onto
 /// `Blocked`/`Working` so the state filter surfaces stuck and running work
 /// uniformly with agents; a ready card is neutral (`Idle`).
@@ -3668,15 +3741,80 @@ fn needs_overlay_lines(
 /// to it so the inverse block is a clean rectangle, like the answer overlay.
 const NAV_OVERLAY_W: usize = 54;
 
-/// The leading state glyph for a navigator row (x-653d), reusing the sideline's
-/// agent-badge lattice: blocked `▲`, working `●`, done `✓`, idle `·`.
-fn nav_glyph(s: PaneState) -> char {
+/// The unified icon lattice (x-df4c): ONE state->style mapping every renderer
+/// (sideline rows, queue cards, tab rollups, overlays) calls, so glyph, weight,
+/// and accent read as one system. Outline `○` = waiting/idle, filled `●` =
+/// active, `▲` = needs-attention (the sole accent state). Exhaustive by design:
+/// a new variant is a compile error at every call site, never a silent glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LatticeState {
+    Working,
+    Idle,
+    Blocked,
+    DoneUnseen,
+    Exited,
+}
+
+/// The one accent color, reserved for the needs-attention (`Blocked`) state.
+/// `Indexed` so it follows the user's terminal palette (index 3 = amber/yellow)
+/// rather than a hardcoded RGB that would fight light themes.
+const LATTICE_ACCENT: Color = Color::Indexed(3);
+
+struct LatticeStyle {
+    glyph: char,
+    flags: u8,
+    fg: Color,
+}
+
+/// The single source of glyph/weight/color per state. Every state differs from
+/// every other by GLYPH alone (BOLD/DIM/accent are reinforcement, never the
+/// sole discriminator), so a weak-BOLD or monochrome terminal still reads.
+fn lattice_style(s: LatticeState) -> LatticeStyle {
     match s {
-        PaneState::Blocked => '▲',
-        PaneState::Working => '●',
-        PaneState::DoneUnseen => '✓',
-        PaneState::Idle => '·',
+        LatticeState::Working => LatticeStyle {
+            glyph: '●',
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+        },
+        LatticeState::Idle => LatticeStyle {
+            glyph: '○',
+            flags: 0,
+            fg: Color::Default,
+        },
+        LatticeState::Blocked => LatticeStyle {
+            glyph: '▲',
+            flags: cell_flags::BOLD,
+            fg: LATTICE_ACCENT,
+        },
+        LatticeState::DoneUnseen => LatticeStyle {
+            glyph: '✓',
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+        },
+        LatticeState::Exited => LatticeStyle {
+            glyph: '✗',
+            flags: cell_flags::DIM,
+            fg: Color::Default,
+        },
     }
+}
+
+/// The sideline/nav fold state maps 1:1 onto the lattice (no `Exited` - a folded
+/// pane's exit is already flattened to `Idle` by `nav_agent_state`).
+fn pane_to_lattice(s: PaneState) -> LatticeState {
+    match s {
+        PaneState::Blocked => LatticeState::Blocked,
+        PaneState::Working => LatticeState::Working,
+        PaneState::DoneUnseen => LatticeState::DoneUnseen,
+        PaneState::Idle => LatticeState::Idle,
+    }
+}
+
+/// The leading state glyph for a navigator row (x-653d), sourced from the one
+/// icon lattice (x-df4c) so nav and sideline read identically: blocked `▲`,
+/// working `●`, done `✓`, idle `○`.
+fn nav_glyph(s: PaneState) -> char {
+    lattice_style(pane_to_lattice(s)).glyph
 }
 
 /// Build the navigator overlay lines (x-653d): a top `find › <query>  [chip]`
@@ -3784,11 +3922,11 @@ fn peek_overlay_lines(
             .filter(|c| !c.is_control())
             .collect()
     }
-    let glyph = if a.exited {
-        '✗'
-    } else {
-        nav_glyph(pane_state(a.badge, a.seen))
-    };
+    // x-df4c: the peek header reuses the sideline row's lattice state.
+    // `agent_lattice_state` is both exit- and seen-aware (it routes the non-exit
+    // case through `pane_state`), so the peek, the row, and the rollups agree
+    // and no call site re-derives the precedence.
+    let glyph = lattice_style(agent_lattice_state(a)).glyph;
     // (x-c914) The account glyph rides the peek header next to the name, same
     // vocabulary as the selector row.
     let mut header = match a.account.as_deref() {
@@ -7380,6 +7518,64 @@ mod tests {
     }
 
     #[test]
+    fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
+        use LatticeState::*;
+        let states = [Working, Idle, Blocked, DoneUnseen, Exited];
+        let glyphs: Vec<char> = states.iter().map(|&s| lattice_style(s).glyph).collect();
+        // Pairwise distinct: every state pair reads differently by GLYPH alone,
+        // so a monochrome/weak-BOLD terminal never collapses two states
+        // (AC1-ERR / AC1-EDGE).
+        for (i, a) in glyphs.iter().enumerate() {
+            for b in &glyphs[i + 1..] {
+                assert_ne!(a, b, "lattice glyphs must be pairwise distinct");
+            }
+        }
+        // Single-cell width (AC1-EDGE): `glyph_cols` is the renderer's own width
+        // authority, and the codepoint stays out of the astral/emoji planes so
+        // no terminal renders it double-width (row alignment can never break).
+        for g in &glyphs {
+            assert_eq!(glyph_cols(*g), 1, "lattice glyph {g:?} must be single-cell");
+            assert!(
+                (*g as u32) < 0x1F000,
+                "lattice glyph {g:?} must not be an astral emoji"
+            );
+        }
+    }
+
+    #[test]
+    fn lattice_accent_only_on_blocked() {
+        use LatticeState::*;
+        // The accent is reserved for needs-attention (Blocked); every other
+        // state stays default-colored (US6 invariant).
+        assert_eq!(lattice_style(Blocked).fg, LATTICE_ACCENT);
+        for s in [Working, Idle, DoneUnseen, Exited] {
+            assert_eq!(
+                lattice_style(s).fg,
+                Color::Default,
+                "{s:?} must not carry the accent"
+            );
+        }
+        // Attention is never dimmed (AC1-UI): Blocked is BOLD, not DIM.
+        assert_eq!(lattice_style(Blocked).flags & cell_flags::DIM, 0);
+    }
+
+    #[test]
+    fn agent_row_done_respects_seen_bit() {
+        // A Done pane the operator has NOT viewed holds the bold `✓`; once seen
+        // (x-4328) it folds to Idle `○`, matching the nav/tab rollup paths, so a
+        // viewed-done row never shows a stale needs-attention marker.
+        let unseen = tab_agent(None, Some(AgentBadge::Done), false);
+        assert_eq!(agent_lattice_state(&unseen), LatticeState::DoneUnseen);
+        assert_eq!(lattice_style(agent_lattice_state(&unseen)).glyph, '✓');
+        let seen = AgentRow {
+            seen: true,
+            ..tab_agent(None, Some(AgentBadge::Done), false)
+        };
+        assert_eq!(agent_lattice_state(&seen), LatticeState::Idle);
+        assert_eq!(lattice_style(agent_lattice_state(&seen)).glyph, '○');
+    }
+
+    #[test]
     fn pane_state_derives_worst_first_from_badge_and_seen() {
         // The x-653d state vocabulary: badge + seen -> PaneState. x-4328 flips
         // the seen bit later; today every Done is called with seen=false.
@@ -7531,6 +7727,134 @@ mod tests {
         assert_eq!(tab_label_text("1", 0), "1");
         assert_eq!(tab_label_text("2", 0), "1:2", "a RENAME to a digit shows");
         assert_eq!(tab_label_text("debug", 2), "3:debug");
+    }
+
+    // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
+    fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
+        AgentRow {
+            squad: Some(1),
+            name: "worker".into(),
+            pane_id: Some(1),
+            badge,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab,
+            account: None,
+        }
+    }
+
+    #[test]
+    fn tab_rollup_folds_worst_live_state_ignoring_exited() {
+        // Empty tab -> no rollup (AC2-EDGE).
+        assert_eq!(tab_rollup_state(&[], 1, 0), None);
+        // Live-idle -> the outline `○`: the tab state machine distinguishes a
+        // live-idle tab from a dead one (only "no live panes" omits the glyph).
+        assert_eq!(
+            tab_rollup_state(&[tab_agent(Some(0), None, false)], 1, 0),
+            Some(LatticeState::Idle)
+        );
+        // All-exited -> no rollup: exited panes are filtered before the fold,
+        // leaving no live panes, so the tab renders stateless (AC2-EDGE).
+        assert_eq!(
+            tab_rollup_state(&[tab_agent(Some(0), Some(AgentBadge::Blocked), true)], 1, 0),
+            None
+        );
+        // Worst-first: a blocked pane beats a working one in the same tab.
+        assert_eq!(
+            tab_rollup_state(
+                &[
+                    tab_agent(Some(0), Some(AgentBadge::Working), false),
+                    tab_agent(Some(0), Some(AgentBadge::Blocked), false),
+                ],
+                1,
+                0
+            ),
+            Some(LatticeState::Blocked)
+        );
+        // A pane in a DIFFERENT tab never leaks into this tab's rollup.
+        assert_eq!(
+            tab_rollup_state(
+                &[tab_agent(Some(1), Some(AgentBadge::Blocked), false)],
+                1,
+                0
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_strip_rollup_surfaces_hidden_attention_with_accent() {
+        // AC2-HP: a background (inactive) tab whose only pane is Blocked shows a
+        // leading `▲` in the accent color at the strip, without opening it.
+        let mut view = two_pane_view();
+        view.layout
+            .agents
+            .push(tab_agent(Some(0), Some(AgentBadge::Blocked), false));
+        let spans = view.tab_bar_spans();
+        // spans[0] = squad name, [1] = tab 0 (blocked, inactive), [2] = tab 1 (no live panes).
+        assert_eq!(spans[1].text, " ▲ 1 ", "blocked tab: label preceded by ▲");
+        assert_eq!(
+            spans[1].fg, LATTICE_ACCENT,
+            "blocked rollup carries the accent"
+        );
+        assert_eq!(
+            spans[1].flags & cell_flags::BOLD,
+            cell_flags::BOLD,
+            "blocked rollup carries BOLD"
+        );
+        // AC2-EDGE: a tab with no live panes shows no rollup glyph and no accent -
+        // byte-identical to a pre-feature stateless tab.
+        assert_eq!(spans[2].text, "[2]");
+        assert_eq!(spans[2].fg, Color::Default);
+    }
+
+    #[test]
+    fn active_blocked_tab_keeps_accent_and_inverse_in_composed_cells() {
+        // Domain pitfall + AC2-HP under selection: the ACTIVE (INVERSE) tab whose
+        // pane is Blocked must keep the amber fg on every composed cell, so the
+        // accent survives the fg/bg swap rather than washing out. tab 1 is the
+        // active tab in two_pane_view's squad 1.
+        let mut view = two_pane_view();
+        view.layout
+            .agents
+            .push(tab_agent(Some(1), Some(AgentBadge::Blocked), false));
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        // The tab strip lives on row 0, right of the sideline. Find the active
+        // tab's `▲` cell and assert its whole bracketed span carries the accent
+        // and INVERSE.
+        let glyph_col = (0..cols)
+            .find(|&c| frame.cells[c].c == '\u{25b2}')
+            .expect("active blocked tab renders ▲ on the strip");
+        let glyph = frame.cells[glyph_col];
+        assert_eq!(
+            glyph.fg, LATTICE_ACCENT,
+            "active-blocked ▲: amber under INVERSE"
+        );
+        assert_eq!(
+            glyph.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "active tab keeps INVERSE"
+        );
+        assert_eq!(
+            glyph.flags & cell_flags::BOLD,
+            cell_flags::BOLD,
+            "blocked rollup keeps BOLD"
+        );
+        // The label cells inside the same `[...]` span carry the accent too
+        // (whole-span amber, deliberate): the cell just after `▲ ` is the label.
+        let label_cell = frame.cells[glyph_col + 2];
+        assert_eq!(
+            label_cell.fg, LATTICE_ACCENT,
+            "the blocked active tab's label shares the accent span"
+        );
     }
 
     fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
@@ -9340,6 +9664,26 @@ mod tests {
                     updated_at: None,
                     pr: None,
                 },
+                // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
+                // load-bearing "attention is never dimmed" branch. The accent
+                // must win over the external DIM modifier.
+                AgentRow {
+                    squad: None,
+                    name: "z-extblocked".into(),
+                    pane_id: None,
+                    badge: Some(AgentBadge::Blocked),
+                    reason: None,
+                    exited: false,
+                    answerable: None,
+                    attach_id: Some("ff99ff99".into()),
+                    external: true,
+                    seen: false,
+                    cwd_base: None,
+                    tombstone: false,
+                    subline: None,
+                    tab: None,
+                    account: None,
+                },
             ],
             focus_node: None,
             backlog: Vec::new(),
@@ -9354,12 +9698,33 @@ mod tests {
             let cell = frame.cells[r * cols + 2];
             (cell.c, cell.flags & cell_flags::DIM == cell_flags::DIM)
         };
+        // x-df4c: idle is now the outline `○` (was the near-invisible `·`); the
+        // external DIM modifier and the exited `✗` precedence are unchanged.
         assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
-        assert_eq!(probe("z-external"), ('\u{00b7}', true), "external: · + DIM");
+        assert_eq!(probe("z-external"), ('\u{25cb}', true), "external: ○ + DIM");
         assert_eq!(
             probe("z-fnolive"),
-            ('\u{00b7}', false),
-            "fno-live: · + bright"
+            ('\u{25cb}', false),
+            "fno-live: ○ + bright"
+        );
+        // AC1-UI: external + Blocked renders the amber `▲`, BOLD, and NOT dimmed
+        // even though it is external - the accent beats the external DIM.
+        let eb_row = lines
+            .iter()
+            .position(|l| l.contains("z-extblocked"))
+            .unwrap();
+        let eb = frame.cells[eb_row * cols + 2];
+        assert_eq!(eb.c, '\u{25b2}', "external-blocked: ▲");
+        assert_eq!(eb.fg, LATTICE_ACCENT, "external-blocked: amber accent");
+        assert_eq!(
+            eb.flags & cell_flags::DIM,
+            0,
+            "external-blocked: attention is never dimmed"
+        );
+        assert_eq!(
+            eb.flags & cell_flags::BOLD,
+            cell_flags::BOLD,
+            "external-blocked: BOLD"
         );
     }
 
