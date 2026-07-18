@@ -91,13 +91,16 @@ def _active_missions() -> list[dict]:
         entries = read_graph(graph_json())
         if not isinstance(entries, list):
             return []
+        # Require str id + project: a non-str id would pass a truthy check but
+        # raise when resolve_drain_targets sorts by id, which would disable ALL
+        # target resolution on one malformed record (fail-safe: skip it instead).
         return [
             e
             for e in entries
             if isinstance(e, dict)
             and e.get("mission_active") is True
-            and e.get("id")
-            and e.get("project")
+            and isinstance(e.get("id"), str)
+            and isinstance(e.get("project"), str)
         ]
     except Exception:  # noqa: BLE001 - a graph read/iterate fault yields no missions
         return []
@@ -134,12 +137,18 @@ def resolve_drain_targets() -> list[DrainTarget]:
     paths = _workspace_paths()
     targets: list[DrainTarget] = []
     for epic in sorted(_active_missions(), key=lambda e: e["id"]):
-        cwd = paths.get(epic["project"])
+        project = epic["project"]
+        # Respect the per-project enable contract: with enabled={proj: bool} an
+        # explicitly-disabled project's mission does not drain, even though
+        # any_enabled() is true for the daemon as a whole.
+        if not cfg.is_enabled_for(project):
+            continue
+        cwd = paths.get(project)
         if not cwd:
             continue
         targets.append(
             DrainTarget(
-                project=epic["project"],
+                project=project,
                 cwd=cwd,
                 interval_seconds=interval,
                 failure_limit=cfg.failure_limit,

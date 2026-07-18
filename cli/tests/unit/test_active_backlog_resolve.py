@@ -79,6 +79,20 @@ def test_mission_epic_without_workspace_path_is_skipped(monkeypatch):
     assert targets[0].cwd == "/repo/footnote"
 
 
+def test_per_project_disabled_mission_is_skipped(monkeypatch):
+    # enabled={proj: bool}: a mission whose epic lives in an explicitly-disabled
+    # project does not drain, even though any_enabled() is true for the daemon.
+    _patch(
+        monkeypatch,
+        enabled={"footnote": True, "readyrule": False},
+        missions=[_mission("x-fno", "footnote"), _mission("x-rr", "readyrule")],
+        paths={"footnote": "/repo/footnote", "readyrule": "/repo/readyrule"},
+    )
+    targets = ab.resolve_drain_targets()
+    assert [t.mission for t in targets] == ["x-fno"]
+    assert [t.project for t in targets] == ["footnote"]
+
+
 def test_invalid_interval_disables_everything(monkeypatch):
     _patch(
         monkeypatch,
