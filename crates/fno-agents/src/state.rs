@@ -596,6 +596,19 @@ impl RegistryEntry {
         (!self.short_id.is_empty()).then_some(self.short_id.as_str())
     }
 
+    /// The row's harness name as a required-string view (x-880e). The single
+    /// accessor every RegistryEntry consumer uses instead of the raw identity
+    /// field, so the provider->harness migration touches one place. `harness` is
+    /// set on load by [`RegistryEntry::backfill_harness_aliases`]; during the
+    /// migration window a not-yet-backfilled fresh row falls back to the legacy
+    /// `provider`. Collapses to `harness`-only once `provider` is removed.
+    pub fn harness_name(&self) -> &str {
+        match self.harness.as_deref() {
+            Some(h) if !h.is_empty() => h,
+            _ => &self.provider,
+        }
+    }
+
     /// The hosting mode with the absent==exec rule applied in one place.
     /// `None` on disk (and the legacy rows that predate the field) read as
     /// [`HOST_MODE_EXEC`]; an explicit value passes through. Reconcile/liveness

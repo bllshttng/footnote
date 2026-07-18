@@ -694,7 +694,7 @@ pub fn maybe_run_agy_ask(home: &AgentsHome, params: &serde_json::Value, name: &s
     };
     // Borrow the provider string (lives until the function returns) instead of
     // cloning it (gemini review).
-    let existing_provider = registry.find(name).map(|e| e.provider.as_str());
+    let existing_provider = registry.find(name).map(|e| e.harness_name());
     let resolved = existing_provider.or(provider_param);
     if resolved != Some("agy") {
         return None; // not an agy target; fall through

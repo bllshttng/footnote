@@ -595,7 +595,7 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
 
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     let registry = load_registry(&home.registry_json()).unwrap_or_default();
-    let existing_provider = registry.find(name).map(|e| e.provider.clone());
+    let existing_provider = registry.find(name).map(|e| e.harness_name().to_string());
 
     // Provider mismatch: an existing claude agent plus a conflicting --provider
     // flag. Python's select_provider rejects this as a mismatch; without the
@@ -785,7 +785,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // dispatch_claude_spawn / dispatch_*_once, which surface a corrupt
     // registry as exit 12.
     let registry = load_registry(&home.registry_json()).unwrap_or_default();
-    let existing_provider = registry.find(name).map(|e| e.provider.clone());
+    let existing_provider = registry.find(name).map(|e| e.harness_name().to_string());
 
     // Collision check: name already exists -> error.
     // Python: f"agent {name!r} already exists; ..." -> py_repr, not {:?}.

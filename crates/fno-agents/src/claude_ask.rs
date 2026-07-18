@@ -2185,7 +2185,7 @@ fn followup(
         "agent_followup_started",
         &[
             ("name", name.into()),
-            ("provider", entry.provider.clone().into()),
+            ("provider", entry.harness_name().to_string().into()),
             ("short_id", short_id.clone().into()),
         ],
     );
@@ -2236,7 +2236,7 @@ fn followup(
                 &[
                     ("stage", "followup".into()),
                     ("name", name.into()),
-                    ("provider", entry.provider.clone().into()),
+                    ("provider", entry.harness_name().to_string().into()),
                     ("short_id", short_id.clone().into()),
                     ("reply_chars", (reply.chars().count() as u64).into()),
                     ("backend", "socket".into()),

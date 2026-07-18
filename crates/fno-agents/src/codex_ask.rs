@@ -1450,7 +1450,7 @@ pub fn maybe_run_codex_ask(
             return Some(12);
         }
     };
-    let existing_provider = registry.find(name).map(|e| e.provider.clone());
+    let existing_provider = registry.find(name).map(|e| e.harness_name().to_string());
 
     // Provider mismatch guard (mirrors claude path).
     if let (Some(ep), Some(pp)) = (existing_provider.as_deref(), provider_param) {
