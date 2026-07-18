@@ -218,6 +218,216 @@ def cmd_relatedness_get(
 cli.add_typer(_relatedness_cli, name="relatedness", hidden=True)
 
 
+# -- epic status (`fno backlog epic status <id>`) --
+# One cross-project table over an epic's children: id/slug, project, status,
+# live worker (node:<id> claim holder), PR (node stamp). A `ready` child with no
+# live worker prints its most recent dispatch/skip/failure receipt inline -
+# never a blank cell (the silent failure this verb exists to kill). A `deferred`
+# child prints its consecutive-failure breaker streak so a tripped breaker is
+# diagnosable from this one screen. Reads only; no graph mutation.
+
+_epic_cli = typer.Typer(
+    name="epic",
+    help="Epic (container) status across projects.",
+    no_args_is_help=True,
+)
+
+# Node-keyed dispatch receipts (all carry data.node_id). termination keys on
+# session_id, not node_id, so it never matches a child row and is left out.
+_RECEIPT_TYPES = {
+    "advance_dispatched",
+    "advance_skipped",
+    "advance_failed",
+    "quota_deferred",
+    "dispatch_deferred",
+}
+
+
+def _live_worker(node_id: str) -> Optional[str]:
+    """The holder of a live/suspect ``node:<id>`` claim, else None.
+
+    A suspect claim (TTL-unexpired, pid dead) still belongs to its session, so
+    it counts as a worker here (x-ba4b). Routes through the global claims root
+    that node ids key on, so it reads the same lockfile the dispatcher wrote.
+    """
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+
+    key = f"node:{node_id}"
+    try:
+        info = claim_status(key, root=claims_root_for(key))
+    except Exception:  # noqa: BLE001 - a status read must never crash the table
+        return None
+    if info.get("state") in ("live", "suspect"):
+        return info.get("holder")
+    return None
+
+
+def _epic_events(children: list[dict]) -> list[dict]:
+    """Union the events logs that can carry a child's receipt, ts-sorted.
+
+    Reads the global mirror (walker node_* events) plus each distinct child
+    project's ``<cwd>/.fno/events.jsonl`` (where advance/reconcile emit their
+    dispatch receipts). Sorted by ``ts`` so newest-wins holds across files.
+    """
+    from fno.graph import failure
+
+    seen: set[str] = set()
+    out: list[dict] = []
+
+    gp = failure.events_path()
+    seen.add(str(gp))
+    out.extend(failure.read_events(gp))
+
+    for c in children:
+        cwd = c.get("_resolved_cwd") or c.get("cwd")
+        if not cwd:
+            continue
+        p = Path(cwd) / ".fno" / "events.jsonl"
+        if str(p) in seen:
+            continue
+        seen.add(str(p))
+        out.extend(failure.read_events(p))
+
+    out.sort(key=lambda e: e.get("ts", "") if isinstance(e, dict) else "")
+    return out
+
+
+def _format_receipt(etype: str, data: dict) -> str:
+    if etype == "advance_dispatched":
+        who = data.get("agent_name") or data.get("short_id") or "worker"
+        return f"dispatched {who}"
+    if etype == "advance_skipped":
+        return f"skipped: {data.get('reason', '?')}"
+    if etype == "advance_failed":
+        err = (data.get("error") or "").strip()
+        return f"failed: {err[:80]}" if err else "failed"
+    # quota_deferred / dispatch_deferred
+    prov = data.get("provider") or data.get("owner_harness") or ""
+    return f"deferred: {prov}" if prov else "deferred"
+
+
+def _latest_receipt(node_id: str, events: list[dict]) -> Optional[str]:
+    """The most recent dispatch/skip/failure receipt for ``node_id``, or None.
+
+    ``events`` is ts-sorted (oldest -> newest) by ``_epic_events``, so the last
+    matching envelope is the newest receipt.
+    """
+    latest: Optional[dict] = None
+    for e in events:
+        if not isinstance(e, dict) or e.get("type") not in _RECEIPT_TYPES:
+            continue
+        data = e.get("data")
+        if not isinstance(data, dict) or data.get("node_id") != node_id:
+            continue
+        latest = e
+    if latest is None:
+        return None
+    return _format_receipt(latest["type"], latest["data"])
+
+
+def _child_note(child: dict, events: list[dict]) -> str:
+    """The inline note for a child row: streak (deferred), receipt (idle ready),
+    or ``-`` (working / done). Never blank for an idle ready child."""
+    from fno.graph import failure
+
+    node_id = child["id"]
+    status = child.get("_status") or child.get("status")
+    if status == "deferred":
+        return f"streak {failure.consecutive_failures(node_id, events)}"
+    if status == "ready" and not _live_worker(node_id):
+        return _latest_receipt(node_id, events) or "no receipt found"
+    return "-"
+
+
+@_epic_cli.command("status")
+def cmd_epic_status(
+    epic: str = typer.Argument(..., help="Epic node id or slug."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
+) -> None:
+    """One table over an epic's children: status, worker, PR, and an inline
+    dispatch receipt (or breaker streak) so an idle/deferred child is never a
+    silent blank. Refuses a non-container node by name."""
+    from fno.graph.store import read_graph
+    from fno.graph.fuzzy import resolve_node
+
+    entries = read_graph(_graph_path())
+    match = resolve_node(epic, entries)
+    if match.kind != "exact" or not match.id:
+        typer.echo(f"epic status: no node matches '{epic}'", err=True)
+        raise typer.Exit(code=1)
+    epic_id = match.id
+    epic_node = match.candidates[0]
+
+    if epic_id not in _container_ids(entries):
+        typer.echo(
+            f"epic status: {epic_id} is a leaf, not a container "
+            f"(an epic's work lives in its children).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    children = [e for e in entries if isinstance(e, dict) and e.get("parent") == epic_id]
+    children.sort(key=lambda c: c.get("id", ""))
+    events = _epic_events(children)
+
+    def _status_of(c: dict) -> Optional[str]:
+        return c.get("_status") or c.get("status")
+
+    total = len(children)
+    done = sum(1 for c in children if _status_of(c) == "done")
+
+    rows = []
+    for c in children:
+        node_id = c["id"]
+        worker = _live_worker(node_id)
+        pr = c.get("pr_number")
+        rows.append({
+            "id": node_id,
+            "slug": c.get("slug") or "",
+            "project": c.get("project") or "",
+            "status": _status_of(c) or "",
+            "worker": worker,
+            "pr_number": pr,
+            "receipt": _child_note(c, events),
+        })
+
+    if json_output:
+        typer.echo(json.dumps({
+            "epic": epic_id,
+            "slug": epic_node.get("slug"),
+            "children_total": total,
+            "children_done": done,
+            "children": rows,
+        }, indent=2))
+        return
+
+    typer.echo(f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done")
+    if not rows:
+        typer.echo("  (no children)")
+        return
+    headers = ("child", "project", "status", "worker", "PR", "note")
+
+    def _cells(r: dict) -> tuple[str, ...]:
+        ident = r["slug"] or r["id"]
+        return (
+            f"{ident} ({r['id']})" if r["slug"] else r["id"],
+            r["project"],
+            r["status"],
+            r["worker"] or "-",
+            f"#{r['pr_number']}" if r["pr_number"] else "-",
+            r["receipt"],
+        )
+
+    table = [headers] + [_cells(r) for r in rows]
+    widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+    for row in table:
+        typer.echo("  " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+
+
+cli.add_typer(_epic_cli, name="epic", hidden=True)
+
+
 # -- shared node construction --
 
 _NodeFields = dict
