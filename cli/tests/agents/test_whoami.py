@@ -23,7 +23,7 @@ from fno.paths_testing import use_tmpdir
 def _claude(**kw) -> AgentEntry:
     base = dict(
         name="spawn-x-301a-whoami",
-        provider="claude",
+        harness="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/spawn-x-301a-whoami/output.jsonl",
         short_id="4a1f9c2b",
@@ -75,7 +75,7 @@ class TestResolveSelf:
         assert result.exit_code == 0
 
     def test_session_fallback_matches_by_uuid(self):
-        reg = [_claude(claude_session_uuid="11111111-2222-3333-4444-555555555555")]
+        reg = [_claude(harness_session_id="11111111-2222-3333-4444-555555555555")]
         result = whoami_mod.resolve_self(
             env={},  # no FNO_AGENT_SELF
             registry=reg,
@@ -90,7 +90,7 @@ class TestResolveSelf:
         # codex P2: an older claude row may carry ONLY the 8-hex short id (a
         # 32-bit prefix of the full session UUID). The full CLAUDE_CODE_SESSION_ID
         # must still resolve it on the fallback path.
-        reg = [_claude(short_id="3410f056", claude_session_uuid=None)]
+        reg = [_claude(short_id="3410f056", harness_session_id=None)]
         result = whoami_mod.resolve_self(
             env={},
             registry=reg,
@@ -104,9 +104,9 @@ class TestResolveSelf:
         # The exact full-id pass runs across every row first, so a shared 8-hex
         # prefix never steals a real full-UUID match.
         prefix_row = _claude(name="prefix-collision", short_id="3410f056",
-                             claude_session_uuid=None)
+                             harness_session_id=None)
         exact_row = _claude(name="exact-match", short_id="ffffffff",
-                            claude_session_uuid="3410f056-d832-480c-9b55-09d1842a39b1")
+                            harness_session_id="3410f056-d832-480c-9b55-09d1842a39b1")
         result = whoami_mod.resolve_self(
             env={},
             registry=[prefix_row, exact_row],

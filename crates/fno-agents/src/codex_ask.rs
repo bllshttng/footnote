@@ -1155,7 +1155,7 @@ fn dispatch_create(
     let new_entry = RegistryEntry {
         name: name.to_string(),
         short_id: String::new(),
-        provider: "codex".to_string(),
+        legacy_provider: String::new(),
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),
         cwd: cwd.to_string_lossy().to_string(),
@@ -1450,7 +1450,7 @@ pub fn maybe_run_codex_ask(
             return Some(12);
         }
     };
-    let existing_provider = registry.find(name).map(|e| e.provider.clone());
+    let existing_provider = registry.find(name).map(|e| e.harness_name().to_string());
 
     // Provider mismatch guard (mirrors claude path).
     if let (Some(ep), Some(pp)) = (existing_provider.as_deref(), provider_param) {

@@ -58,10 +58,10 @@ def _seed_gemini(
 ) -> AgentEntry:
     entry = AgentEntry(
         name=name,
-        provider="gemini",
+        harness="gemini",
         cwd=str(cwd),
         log_path=str(cwd / f"{name}.log"),
-        gemini_session_id=session_id,
+        harness_session_id=session_id,
         status=status,
     )
     update_registry(lambda entries: entries + [entry])
@@ -292,10 +292,10 @@ def test_reconcile_gemini_missing_session_id_is_inconsistent(
     work.mkdir()
     entry = AgentEntry(
         name="corrupt",
-        provider="gemini",
+        harness="gemini",
         cwd=str(work),
         log_path=str(work / "log.jsonl"),
-        gemini_session_id=None,  # corruption
+        harness_session_id=None,  # corruption
         status="live",
     )
     update_registry(lambda entries: entries + [entry])
@@ -349,21 +349,21 @@ def test_reconcile_cross_provider_batched_write(
     # 1 codex live, 1 claude live, 1 gemini live (all unchanged).
     update_registry(lambda entries: entries + [
         AgentEntry(
-            name="codex-a", provider="codex", cwd=str(work),
+            name="codex-a", harness="codex", cwd=str(work),
             log_path=str(work / "codex-a.log"),
-            codex_session_id="11111111-1111-1111-1111-111111111111",
+            harness_session_id="11111111-1111-1111-1111-111111111111",
             status="live",
         ),
         AgentEntry(
-            name="claude-a", provider="claude", cwd=str(work),
+            name="claude-a", harness="claude", cwd=str(work),
             log_path=str(work / "claude-a.log"),
             short_id="aaaaaaaa",
             status="live",
         ),
         AgentEntry(
-            name="gemini-a", provider="gemini", cwd=str(work),
+            name="gemini-a", harness="gemini", cwd=str(work),
             log_path=str(work / "gemini-a.log"),
-            gemini_session_id="bbbbbbbb-1111-2222-3333-444444444444",
+            harness_session_id="bbbbbbbb-1111-2222-3333-444444444444",
             status="live",
         ),
     ])
@@ -416,15 +416,15 @@ def test_reconcile_cross_provider_mixed_flips_writes_once(
 
     update_registry(lambda entries: entries + [
         AgentEntry(
-            name="codex-orphan", provider="codex", cwd=str(work),
+            name="codex-orphan", harness="codex", cwd=str(work),
             log_path=str(work / "codex-orphan.log"),
-            codex_session_id="dddddddd-1111-2222-3333-444444444444",
+            harness_session_id="dddddddd-1111-2222-3333-444444444444",
             status="live",  # but session NOT in known_codex_ids -> orphan
         ),
         AgentEntry(
-            name="gemini-recover", provider="gemini", cwd=str(work),
+            name="gemini-recover", harness="gemini", cwd=str(work),
             log_path=str(work / "gemini-recover.log"),
-            gemini_session_id="eeeeeeee-1111-2222-3333-444444444444",
+            harness_session_id="eeeeeeee-1111-2222-3333-444444444444",
             status="orphaned",  # but probe says reachable -> recover
         ),
     ])

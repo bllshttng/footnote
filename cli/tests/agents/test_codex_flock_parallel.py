@@ -232,7 +232,7 @@ def test_parallel_codex_asks_serialize_via_flock(
             f"expected exactly one registry row, got {len(entries)}: "
             f"{entries}"
         )
-        assert entries[0].provider == "codex"
+        assert entries[0].harness == "codex"
 
         # Both workers should exit 0 - first creates, second resumes.
         exits = {p_a.exitcode, p_b.exitcode}

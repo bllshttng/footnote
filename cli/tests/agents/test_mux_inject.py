@@ -20,7 +20,7 @@ def _mux_entry(name: str = "muxed", provider: str = "claude"):
 
     return AgentEntry(
         name=name,
-        provider=provider,
+        harness=provider,
         cwd="/w",
         log_path="",
         status="live",
@@ -124,7 +124,7 @@ def test_deliver_live_dispatches_on_mux_ref_before_legacy_lanes(
     from fno.agents.registry import AgentEntry
 
     worker = AgentEntry(
-        name="wk", provider="codex", cwd="/w", log_path="", short_id="wk-1"
+        name="wk", harness="codex", cwd="/w", log_path="", short_id="wk-1"
     )
     assert dispatch_mod._deliver_live(worker, "hi", "fno") is True
     assert calls, "worker row keeps the legacy daemon lane during dual-run"

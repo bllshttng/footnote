@@ -120,7 +120,7 @@ def test_select_provider_returns_registered_when_no_request(tmp_path: Path, monk
     from fno.agents.registry import AgentEntry, write_registry
 
     write_registry(
-        [AgentEntry(name="existing", provider="codex", cwd="/tmp", log_path="/tmp/x.log")]
+        [AgentEntry(name="existing", harness="codex", cwd="/tmp", log_path="/tmp/x.log")]
     )
 
     chosen = select_provider(name="existing", requested_provider=None)
@@ -134,7 +134,7 @@ def test_select_provider_rejects_mismatch_on_follow_up(tmp_path: Path, monkeypat
     from fno.agents.registry import AgentEntry, write_registry
 
     write_registry(
-        [AgentEntry(name="locked", provider="claude", cwd="/tmp", log_path="/tmp/y.log")]
+        [AgentEntry(name="locked", harness="claude", cwd="/tmp", log_path="/tmp/y.log")]
     )
 
     with pytest.raises(ProviderMismatchError) as exc_info:
@@ -152,7 +152,7 @@ def test_select_provider_accepts_matching_request(tmp_path: Path, monkeypatch) -
     from fno.agents.registry import AgentEntry, write_registry
 
     write_registry(
-        [AgentEntry(name="match", provider="gemini", cwd="/tmp", log_path="/tmp/m.log")]
+        [AgentEntry(name="match", harness="gemini", cwd="/tmp", log_path="/tmp/m.log")]
     )
 
     chosen = select_provider(name="match", requested_provider="gemini")

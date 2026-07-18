@@ -81,8 +81,8 @@ class TestClassify:
 # ---------------------------------------------------------------------------
 
 class _Entry:
-    def __init__(self, provider, short_id):
-        self.provider = provider
+    def __init__(self, harness, short_id):
+        self.harness = harness
         self.short_id = short_id
 
 

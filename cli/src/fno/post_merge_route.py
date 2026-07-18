@@ -45,26 +45,22 @@ def _live_codex_registry_entry(session_id: str):
     """A live codex registry row addressable as ``session_id``, PREFERRING one
     that carries a live transport (``mux``), or ``None``.
 
-    A codex pane row (``mux_spawn``) holds the pane's id in ``claude_session_uuid``
-    plus a ``mux`` ref but NO ``codex_session_id``, while a SessionStart-registered
-    row has ``codex_session_id`` but no transport. Matching only ``codex_session_id``
-    would select the transportless row, and ``_deliver_live`` on a row with no
-    ``mux`` falls through to the daemon path and cold-spawns instead of PaneSending
-    into the panel (codex peer P2, PR #328). So match EITHER id field and prefer
-    the transport-bearing row. Function-local import keeps this a leaf."""
+    v10 (x-880e): every codex row records its id in the canonical
+    ``harness_session_id`` (a mux_spawn pane row carries it plus a ``mux`` ref; a
+    SessionStart-registered row carries it with no transport). Both match on that
+    one field, so the transportless row alone would make ``_deliver_live`` fall
+    through to the daemon path and cold-spawn instead of PaneSending into the
+    panel (codex peer P2, PR #328). So prefer the transport-bearing (``mux``) row.
+    Function-local import keeps this a leaf."""
     try:
         from fno.agents.registry import load_registry
 
         matches = [
             e
             for e in load_registry()
-            if getattr(e, "provider", None) == "codex"
+            if getattr(e, "harness", None) == "codex"
             and _entry_is_live(e)
-            and session_id
-            in (
-                getattr(e, "codex_session_id", None),
-                getattr(e, "claude_session_uuid", None),
-            )
+            and session_id == getattr(e, "harness_session_id", None)
         ]
     except Exception:
         return None

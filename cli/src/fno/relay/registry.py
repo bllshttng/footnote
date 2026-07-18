@@ -198,7 +198,7 @@ def _live_agents_workers() -> dict[str, RegistryEntry]:
     for e in rows:
         if not isinstance(e, dict):
             continue
-        provider = e.get("provider")
+        provider = e.get("harness") or e.get("provider")
         if provider in (None, "claude"):
             continue  # claude rides the discover + session-uuid lane, not this bridge
         if e.get("host_mode") != "interactive":

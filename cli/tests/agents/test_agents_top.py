@@ -38,7 +38,7 @@ def _seed(tmp_path, monkeypatch):
     rows = [
         AgentEntry(
             name="think-x1",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/l",
             status="busy",
@@ -78,7 +78,7 @@ def test_malformed_roster_degrades_per_source(tmp_path, monkeypatch, runner):
     rows = [
         AgentEntry(
             name="ok-worker",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/l",
             status="idle",
@@ -99,7 +99,7 @@ def test_dead_pids_excluded(monkeypatch, runner):
     rows = [
         AgentEntry(
             name="ghost",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/l",
             status="live",

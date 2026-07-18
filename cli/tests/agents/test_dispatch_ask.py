@@ -175,10 +175,8 @@ def test_claude_create_path_happy_path(tmp_path: Path, monkeypatch) -> None:
     assert len(entries) == 1
     entry = entries[0]
     assert entry.name == "frontend-worker"
-    assert entry.provider == "claude"
+    assert entry.harness == "claude"
     assert entry.short_id == "7c5dcf5d"
-    assert entry.codex_session_id is None
-    assert entry.gemini_session_id is None
     assert entry.cwd == str(cwd)
 
     events_log = paths.state_dir() / "events.jsonl"
@@ -330,7 +328,7 @@ def test_dispatch_ask_existing_name_routes_to_followup(tmp_path: Path, monkeypat
         [
             AgentEntry(
                 name="already-there",
-                provider="claude",
+                harness="claude",
                 cwd="/tmp",
                 log_path="/tmp/a.log",
                 short_id="abc12345",
@@ -693,7 +691,7 @@ def test_dispatch_ask_select_provider_inside_flock(
     write_registry([
         AgentEntry(
             name="ordered",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/a.log",
             short_id="abc12345",
@@ -904,7 +902,7 @@ def _seed_followup_target(tmp_path: Path, name: str = "frontend-worker") -> None
     write_registry([
         AgentEntry(
             name=name,
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path=f"/tmp/{name}.log",
             short_id="abc12345",

@@ -68,11 +68,10 @@ def _write_existing_entry(name: str, provider: str, session_id: str) -> None:
     write_registry([
         AgentEntry(
             name=name,
-            provider=provider,
+            harness=provider,
             cwd="/tmp",
             log_path="/tmp/a.log",
-            codex_session_id=session_id if provider == "codex" else None,
-            gemini_session_id=session_id if provider == "gemini" else None,
+            harness_session_id=session_id if provider in ("codex", "gemini") else None,
             short_id=session_id if provider == "claude" else "",
         )
     ])
@@ -239,7 +238,7 @@ def test_spawn_collision_refuses(workdir) -> None:
     entries = load_registry()
     existing = next((e for e in entries if e.name == "existing-agent"), None)
     assert existing is not None, "existing row must not be deleted on collision"
-    assert existing.codex_session_id == "oldses-123"
+    assert existing.harness_session_id == "oldses-123"
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +330,7 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     entries = load_registry()
     entry = next((e for e in entries if e.name == "myagent-c"), None)
     assert entry is not None, "registry row must exist after claude spawn"
-    assert entry.provider == "claude"
+    assert entry.harness == "claude"
     assert entry.short_id == receipt["short_id"]
 
 

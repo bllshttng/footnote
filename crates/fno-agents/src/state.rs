@@ -61,7 +61,15 @@ use std::path::{Path, PathBuf};
 // providers. A legacy row's `claude_short_id` backfills into `short_id` on load
 // (see `backfill_short_id`); a pre-v9 reader must reject a v9 store rather than
 // drop the jobId on a read-modify-write. Accepted set widens to 1..=9.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 9;
+//
+// v10 (x-880e) removes the on-disk `provider` field and the legacy per-provider
+// session-id trio (`codex_session_id`, `gemini_session_id`, `claude_session_uuid`):
+// `harness` is the sole identity axis and `harness_session_id` the sole session id.
+// A legacy row's `provider` backfills `legacy_provider` -> `harness`, and each
+// per-provider key backfills `harness_session_id`, at load (accept-on-read); those
+// keys are `skip_serializing` so they never round-trip. A pre-v10 reader must reject
+// a v10 store rather than mis-read a harness-only row. Accepted set widens to 1..=10.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 10;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -332,7 +340,13 @@ pub struct RegistryEntry {
     /// a `"short_id": null` would fail this `String` field's deserialize.)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub short_id: String,
-    pub provider: String,
+    /// v10 backfill-only (x-880e): the removed on-disk `provider` key. Deserialized
+    /// under its old name so a legacy row's identity survives the read, but NEVER
+    /// serialized -- [`RegistryEntry::backfill_harness_aliases`] moves it into
+    /// `harness` at load. This is the Rust mirror of Python's `load_registry`
+    /// popping `provider`. `harness` is the sole on-disk identity axis.
+    #[serde(default, rename = "provider", skip_serializing)]
+    pub legacy_provider: String,
     pub cwd: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `project_root: str = ""` (ab-b946b59c; see `short_id`): default on read,
@@ -348,13 +362,13 @@ pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// The FULL claude session UUID -- the stream-json `--resume` target,
-    /// distinct from the 8-hex jobId in `short_id` (a 32-bit prefix, not
-    /// collision-proof as a resume key). Shared field with Python's `AgentEntry`
-    /// (`#[serde(default)]`, always emitted as null when absent, matching the
-    /// sibling provider-id fields), so a row round-trips between the two
-    /// languages. The daemon reads it to build the resume argv for the
-    /// stream-json host lane. [stream-json host lane node]
-    #[serde(default)]
+    /// distinct from the 8-hex jobId in `short_id`. v10 (x-880e): a load-derived
+    /// in-memory alias only. `skip_serializing` keeps it off disk (harness_session_id
+    /// is the sole persisted session id); `backfill_harness_aliases` populates it
+    /// from `harness_session_id` on load, so the ~30 daemon read sites need no churn.
+    /// A post-load mutation of this field is synced back into `harness_session_id`
+    /// at the write choke point (AC6-FR). [stream-json host lane node]
+    #[serde(default, skip_serializing)]
     pub claude_session_uuid: Option<String>,
     /// Canonical harness identity (x-ec59), mirroring Python's `AgentEntry`:
     /// `harness` is the harness name (identity only -- `provider` stays
@@ -373,9 +387,13 @@ pub struct RegistryEntry {
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messaging_socket_path: Option<String>,
-    #[serde(default)]
+    // v10 (x-880e): load-derived in-memory aliases only; skip_serializing keeps
+    // them off disk (harness_session_id is the sole persisted session id) and
+    // backfill_harness_aliases populates them on load, so daemon read sites need
+    // no churn. A post-load mutation syncs back at the write choke point (AC6-FR).
+    #[serde(default, skip_serializing)]
     pub codex_session_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub gemini_session_id: Option<String>,
     #[serde(default)]
     pub mcp_channel_id: Option<String>,
@@ -530,8 +548,8 @@ impl RegistryEntry {
     /// The claude legacy key is `claude_session_uuid` (the registry's identity),
     /// NOT the manifest's `claude_session_id`.
     pub fn backfill_harness_aliases(&mut self) {
-        if self.harness.is_none() && !self.provider.is_empty() {
-            self.harness = Some(self.provider.clone());
+        if self.harness.is_none() && !self.legacy_provider.is_empty() {
+            self.harness = Some(self.legacy_provider.clone());
         }
         match self.harness_session_id.clone() {
             Some(hsid) if !hsid.is_empty() => match self.harness.as_deref() {
@@ -596,6 +614,21 @@ impl RegistryEntry {
         (!self.short_id.is_empty()).then_some(self.short_id.as_str())
     }
 
+    /// The row's harness name as a required-string view (x-880e). The single
+    /// accessor every RegistryEntry consumer uses instead of the raw identity
+    /// field, so the provider->harness migration touches one place. `harness` is
+    /// set on load by [`RegistryEntry::backfill_harness_aliases`]; during the
+    /// migration window a not-yet-backfilled fresh row falls back to the legacy
+    /// `provider`. Collapses to `harness`-only once `provider` is removed.
+    pub fn harness_name(&self) -> &str {
+        match self.harness.as_deref() {
+            Some(h) if !h.is_empty() => h,
+            // A not-yet-backfilled fresh row falls back to the load-only
+            // legacy_provider (empty for a v10 row); backfill sets harness on load.
+            _ => &self.legacy_provider,
+        }
+    }
+
     /// The hosting mode with the absent==exec rule applied in one place.
     /// `None` on disk (and the legacy rows that predate the field) read as
     /// [`HOST_MODE_EXEC`]; an explicit value passes through. Reconcile/liveness
@@ -631,7 +664,7 @@ impl RegistryEntry {
         // row has no daemon PTY, so its surviving session file is a resumability
         // artifact, not "running" -- without this it would fall through to the
         // reachability probe and be kept falsely `live` forever.
-        let is_claude_shellout = self.provider == "claude" && !self.is_interactive();
+        let is_claude_shellout = self.harness_name() == "claude" && !self.is_interactive();
         // A mux-hosted row (4a-G2) also has an empty short_id and may lack a
         // pid (the pane-child lookup is best-effort), but it is a LIVE hosted
         // agent, never a finished ask - without this exclusion the reconcile
@@ -884,6 +917,15 @@ where
     let lock = acquire_exclusive(&lock_path(path))?;
     let mut registry = read_existing_registry(path)?;
     let out = f(&mut registry);
+    // Write-path harness sync (x-880e, AC6-FR): a closure that mutated a legacy
+    // session-id field (the stream-json adopt path writes claude_session_uuid on a
+    // uuid-less bg row) must land the value in harness_session_id before serde
+    // drops the now-skip_serializing legacy key. backfill adopts legacy->canonical
+    // when harness_session_id is unset -- and the only such mutation fires on rows
+    // whose harness_session_id is None -- so no post-load mutation is lost.
+    for entry in &mut registry.entries {
+        entry.backfill_harness_aliases();
+    }
     // One-live-ref invariant (4a-G2), enforced at the single Rust write choke
     // point so no closure can persist a double-ref row. The lock guard drops
     // on the early return, so a violation never wedges the registry.
@@ -1101,7 +1143,7 @@ mod tests {
         RegistryEntry {
             name: name.into(),
             short_id: format!("{name}-id"),
-            provider: "codex".into(),
+            legacy_provider: "codex".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp/x".into(),
@@ -1197,7 +1239,7 @@ mod tests {
         // A canonical-only row (post-migration mint): the legacy alias is synced
         // so an old reader still resolves the session.
         let mut e = sample_entry("w");
-        e.provider = "claude".into();
+        e.legacy_provider = "claude".into();
         e.codex_session_id = None;
         e.session_id = None;
         e.claude_session_uuid = None;
@@ -1211,7 +1253,7 @@ mod tests {
     fn harness_backfill_conflict_is_canonical_wins() {
         // AC2-EDGE (Rust side): a conflicting legacy value is overwritten.
         let mut e = sample_entry("w");
-        e.provider = "claude".into();
+        e.legacy_provider = "claude".into();
         e.harness = Some("claude".into());
         e.harness_session_id = Some("CANON".into());
         e.claude_session_uuid = Some("STALE".into());
@@ -1225,7 +1267,7 @@ mod tests {
         // A claude row carrying a stale codex id must NOT adopt it: only the
         // row's own harness key is consulted when harness is known.
         let mut e = sample_entry("w");
-        e.provider = "claude".into();
+        e.legacy_provider = "claude".into();
         e.harness = Some("claude".into());
         e.harness_session_id = None;
         e.claude_session_uuid = None;
@@ -1285,7 +1327,7 @@ mod tests {
         // and keep the row falsely `live` off its surviving (resumability-only)
         // session file -- the exact defect recover() already had to fix.
         let mut ask = sample_entry("cc-ask");
-        ask.provider = "claude".into();
+        ask.legacy_provider = "claude".into();
         ask.short_id = "7c5dcf5d".into(); // v9: jobId lives here now
         ask.host_mode = None; // exec (shellout), not interactive
         ask.pid = None;
@@ -1410,7 +1452,7 @@ mod tests {
         let reg = load_registry(&path).unwrap();
         assert_eq!(reg.entries.len(), 1, "Python-written row must be read");
         let e = reg.find("worker-claude").unwrap();
-        assert_eq!(e.provider, "claude");
+        assert_eq!(e.harness_name(), "claude");
         assert_eq!(e.status, AgentStatus::Live);
         // v9: the legacy claude_short_id backfills into short_id on load.
         assert_eq!(e.short_id, "abc123");
@@ -1429,11 +1471,12 @@ mod tests {
         // must (a) use `agents`, not `entries`, and (b) omit every Rust-only
         // field that a Python row lacks (short_id/project_root/session_id/
         // messaging_socket_path/cc_session_id/pid/last_reconciled_at).
-        let python_json = r#"{"schema_version":3,"agents":[
-            {"name":"w","provider":"codex","cwd":"/p","log_path":"/l",
-             "claude_short_id":null,"codex_session_id":"sid","gemini_session_id":null,
-             "created_at":"2026-05-26T00:00:00Z","status":"live","last_message_at":null,
-             "mcp_channel_id":null}]}"#;
+        // v10 (x-880e): a Python-authored row is harness-shaped -- harness +
+        // harness_session_id, no provider or per-provider session keys.
+        let python_json = r#"{"schema_version":10,"agents":[
+            {"name":"w","harness":"codex","cwd":"/p","log_path":"/l",
+             "harness_session_id":"sid","created_at":"2026-05-26T00:00:00Z",
+             "status":"live","last_message_at":null,"mcp_channel_id":null}]}"#;
         let reg: Registry = serde_json::from_str(python_json).unwrap();
         let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
 
@@ -1455,9 +1498,22 @@ mod tests {
                 "Python-authored row must omit Rust-only field `{rust_only}`"
             );
         }
-        // Python's known fields survive.
+        // v10: the removed identity keys never re-serialize (skip_serializing).
+        for removed in [
+            "provider",
+            "codex_session_id",
+            "gemini_session_id",
+            "claude_session_uuid",
+        ] {
+            assert!(
+                row.get(removed).is_none(),
+                "v10 row must omit removed key `{removed}`"
+            );
+        }
+        // The canonical identity fields survive.
         assert_eq!(row["name"], "w");
-        assert_eq!(row["codex_session_id"], "sid");
+        assert_eq!(row["harness"], "codex");
+        assert_eq!(row["harness_session_id"], "sid");
     }
 
     #[test]
@@ -1835,10 +1891,10 @@ mod tests {
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":10,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":11,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 10);
+                assert_eq!(found, 11);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

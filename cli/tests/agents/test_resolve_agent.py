@@ -21,11 +21,9 @@ from fno.agents.registry import (
 def _claude(name: str, short: str, uuid: str) -> AgentEntry:
     return AgentEntry(
         name=name,
-        provider="claude",
         cwd="/w",
         log_path=f"/tmp/{name}.log",
         short_id=short,
-        claude_session_uuid=uuid,
         harness="claude",
         harness_session_id=uuid,
     )
@@ -62,11 +60,9 @@ def test_ac2_hp_daemon_short_and_derived_short_both_resolve(tmp_path: Path) -> N
     codex_uuid = "a1b2c3d4-1111-2222-3333-444455556666"
     codex = AgentEntry(
         name="reviewer",
-        provider="codex",
         cwd="/w",
         log_path="/tmp/r.log",
         short_id="billingf",  # daemon name-derived key (not hex)
-        codex_session_id=codex_uuid,
         harness="codex",
         harness_session_id=codex_uuid,
     )
@@ -157,7 +153,6 @@ def test_opencode_style_row_resolves_by_name_and_full_id_only(tmp_path: Path) ->
     ses = "ses_7f3a9b2c1d0e"
     row = AgentEntry(
         name="oc-worker",
-        provider="opencode",
         cwd="/w",
         log_path="/tmp/oc.log",
         harness="opencode",

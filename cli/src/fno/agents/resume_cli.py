@@ -61,7 +61,7 @@ def _session_id_for(entry: Any) -> Optional[str]:
     """
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
-    key = getattr(entry, "harness", None) or getattr(entry, "provider", None)
+    key = getattr(entry, "harness", None)
     field_name = HARNESS_SESSION_ID_FIELDS.get(key)
     return getattr(entry, field_name, None) if field_name else None
 
@@ -153,7 +153,7 @@ def resume_logic(
 
     # Identity is one axis (x-8dfc): resume keys on harness (provider fallback
     # for a not-yet-backfilled row); harness == provider on every current row.
-    harness = getattr(entry, "harness", None) or getattr(entry, "provider", None)
+    harness = getattr(entry, "harness", None)
     cwd = getattr(entry, "cwd", None)
     session_id = _session_id_for(entry)
 

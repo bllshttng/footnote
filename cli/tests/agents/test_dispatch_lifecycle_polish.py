@@ -38,6 +38,12 @@ def _seed_registry(*entries):
     for kwargs in entries:
         kwargs.setdefault("cwd", "/tmp")
         kwargs.setdefault("log_path", "/tmp/x.log")
+        # v10 (x-880e): map legacy identity kwargs to the canonical fields.
+        if "provider" in kwargs:
+            kwargs["harness"] = kwargs.pop("provider")
+        for _k in ("codex_session_id", "gemini_session_id", "claude_session_uuid"):
+            if _k in kwargs:
+                kwargs.setdefault("harness_session_id", kwargs.pop(_k))
         out.append(AgentEntry(**kwargs))
     write_registry(out)
     return out

@@ -83,7 +83,7 @@ pub fn scrape_targets(reg: &Registry) -> Vec<ScrapeTarget> {
         .filter_map(|e| {
             e.mux.as_ref().map(|m| ScrapeTarget {
                 name: e.name.clone(),
-                provider: e.provider.clone(),
+                provider: e.harness_name().to_string(),
                 session: m.session.clone(),
                 pane_id: m.pane_id,
                 last: e.screen_state.clone(),
@@ -437,7 +437,7 @@ pub fn run_detect(args: &[String]) -> i32 {
             None => format!("unparseable stamp {stamp:?}"),
         }
     };
-    println!("agent: {} (provider {})", entry.name, entry.provider);
+    println!("agent: {} (provider {})", entry.name, entry.harness_name());
     // Mirrors the reader lattice: pane-exit > hook (capability) >
     // screen-manifest > liveness.
     if matches!(
@@ -504,7 +504,7 @@ mod tests {
         state::RegistryEntry {
             name: name.into(),
             short_id: String::new(),
-            provider: provider.into(),
+            legacy_provider: provider.into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp/x".into(),

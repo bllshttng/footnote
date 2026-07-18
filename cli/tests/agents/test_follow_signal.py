@@ -34,10 +34,10 @@ from fno.agents.registry import AgentEntry, write_registry
 def _codex(**kw) -> AgentEntry:
     base = dict(
         name="follow-target",
-        provider="codex",
+        harness="codex",
         cwd="/tmp",
         log_path="",
-        codex_session_id="codex-followtest",
+        harness_session_id="codex-followtest",
         created_at="2026-05-21T00:00:00Z",
         status="live",
         last_message_at=None,

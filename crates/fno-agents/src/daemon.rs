@@ -178,7 +178,7 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
         //      lane the daemon PTY-manages (and writes a state.json for) is the
         //      interactive stream-json worker, so a non-interactive claude row is
         //      a shellout/adopted row with no state dir.
-        let is_claude_shellout = entry.provider == "claude"
+        let is_claude_shellout = entry.harness_name() == "claude"
             && entry.host_mode_or_default() != crate::state::HOST_MODE_INTERACTIVE;
         if entry.short_id.is_empty() || is_claude_shellout {
             continue;
@@ -1379,7 +1379,7 @@ fn build_claude_stream_entry(
     RegistryEntry {
         name: name.into(),
         short_id: short_id.into(),
-        provider: "claude".into(),
+        legacy_provider: String::new(),
         harness: Some("claude".into()),
         harness_session_id: Some(uuid.into()),
         cwd: cwd_s.clone(),
@@ -1563,7 +1563,7 @@ async fn spawn_claude_stream_lane(
     // (AC1-EDGE). Matches a LIVE claude row already carrying this UUID; an
     // orphaned/exited row (dead child, claim released) is re-adoptable (AC1-FR).
     if let Some(h) = registry.entries.iter().rev().find(|e| {
-        e.provider == "claude"
+        e.harness_name() == "claude"
             && e.claude_session_uuid.as_deref() == Some(uuid)
             && is_live_writer(e.status)
     }) {
@@ -1730,7 +1730,7 @@ async fn spawn_claude_stream_lane(
             return false;
         }
         if r.entries.iter().any(|e| {
-            e.provider == "claude"
+            e.harness_name() == "claude"
                 && e.claude_session_uuid.as_deref() == Some(&uuid_for_lock)
                 && is_live_writer(e.status)
         }) {
@@ -2066,7 +2066,7 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
         .get("timeout")
         .and_then(|v| v.as_u64())
         .unwrap_or(600);
-    let detector = provider_readiness_detector(&entry.provider);
+    let detector = provider_readiness_detector(entry.harness_name());
     let sock_path = sock.clone();
     let fetcher = move || {
         let p = sock_path.clone();
@@ -2410,7 +2410,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
     // B must be a held stream-json thread. A non-claude peer (PTY lane) or a
     // claude session with no live stream worker demotes to the durable path.
     let to_sock = ctx.home.worker_sock(&to_entry.short_id);
-    if to_entry.provider != "claude" || !is_live_stream_thread(&to_sock).await {
+    if to_entry.harness_name() != "claude" || !is_live_stream_thread(&to_sock).await {
         return Response::ok(
             req.id,
             json!({"delivered": false, "reason": "not-a-live-stream-thread"}),
@@ -2462,7 +2462,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         let fresh = load_registry_offloaded(ctx.home.registry_json()).await;
         if let Some(from_entry) = fresh.find(&from) {
             let from_sock = ctx.home.worker_sock(&from_entry.short_id);
-            if from_entry.provider == "claude" && is_live_stream_thread(&from_sock).await {
+            if from_entry.harness_name() == "claude" && is_live_stream_thread(&from_sock).await {
                 match mirror_into(&from_sock, &outcome.reply).await {
                     Ok(()) => mirrored = true,
                     Err(e) => {
@@ -2611,7 +2611,7 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
                 }
             }
             if let Some(ref prov) = filter_provider {
-                if &e.provider != prov {
+                if e.harness_name() != prov.as_str() {
                     return false;
                 }
             }
@@ -2646,7 +2646,7 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
             // resolution + the resolve_session_id helper below; gemini-code-assist
             // medium on PR #361 — without the fallback a row with only the generic
             // session_id set would report null here).
-            let resume_id: Option<String> = match e.provider.as_str() {
+            let resume_id: Option<String> = match e.harness_name() {
                 "claude" => e
                     .transport_short()
                     .map(str::to_string)
@@ -2667,7 +2667,7 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
                 .unwrap_or(Value::Null);
             json!({
                 "name": e.name,
-                "provider": e.provider,
+                "provider": e.harness_name(),
                 "short_id": short_id,
                 "session_id": session_id,
                 "cwd": e.cwd,
@@ -2834,7 +2834,7 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     }
     // Claude agents are not PTY-managed (LD8): there is no worker to shut down.
     // Shell out to the claude supervisor and propagate its outcome.
-    if entry.provider == "claude" {
+    if entry.harness_name() == "claude" {
         return stop_claude(ctx, req, &name, &entry).await;
     }
     // A non-PTY row (empty short_id == Python-authored; the daemon's create path
@@ -2848,11 +2848,11 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     if entry.short_id.is_empty() {
         let _ = ctx.emitter.emit(
             "agent_stopped",
-            &json!({"name": name, "provider": entry.provider, "claude_exit": Value::Null}),
+            &json!({"name": name, "provider": entry.harness_name(), "claude_exit": Value::Null}),
         );
         return Response::ok(
             req.id,
-            json!({"stopped": true, "provider": entry.provider, "no_op": true}),
+            json!({"stopped": true, "provider": entry.harness_name(), "no_op": true}),
         );
     }
     // Ask the worker to shut down its PTY child gracefully, then CONFIRM it
@@ -3320,7 +3320,7 @@ fn inside_leg_state_str(state: state::InsideLegState) -> &'static str {
 /// Build the lean provider-probe projection from a registry row, preferring the
 /// provider-specific session id over the generic one.
 fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
-    let session_id = match e.provider.as_str() {
+    let session_id = match e.harness_name() {
         "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
         "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
         "claude" => e
@@ -3331,7 +3331,7 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
     };
     crate::provider::AgentEntry {
         name: e.name.clone(),
-        provider: e.provider.clone(),
+        provider: e.harness_name().to_string(),
         session_id,
         cwd: PathBuf::from(&e.cwd),
     }
@@ -3379,10 +3379,10 @@ fn run_reconcile_sweep(
             return Ok(true);
         }
         // No live worker: ask the provider's session store (tri-state).
-        match crate::provider::for_name(&e.provider) {
+        match crate::provider::for_name(e.harness_name()) {
             Some(p) => p.reachability(&to_agent_entry(e), RECONCILE_PROBE_TIMEOUT),
             None => Err(ReachabilityProbeError::new(
-                &e.provider,
+                e.harness_name(),
                 "unknown provider; cannot probe reachability",
             )),
         }
@@ -3498,7 +3498,7 @@ fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
     let skipped_py: Vec<Value> = entries
         .iter()
         .skip(probed)
-        .map(|e| json!({"name": e.name, "provider": e.provider}))
+        .map(|e| json!({"name": e.name, "provider": e.harness_name()}))
         .collect();
     let orphaned_py: Vec<Value> = outcome
         .orphans
@@ -3508,7 +3508,7 @@ fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
                 .entries
                 .iter()
                 .find(|e| &e.name == n)
-                .map(|e| e.provider.as_str())
+                .map(|e| e.harness_name())
                 .unwrap_or("unknown");
             json!({"name": n, "provider": prov})
         })
@@ -3521,7 +3521,7 @@ fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
                 .entries
                 .iter()
                 .find(|e| &e.name == n)
-                .map(|e| e.provider.as_str())
+                .map(|e| e.harness_name())
                 .unwrap_or("unknown");
             json!({"name": n, "provider": prov})
         })
@@ -3714,7 +3714,7 @@ fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBac
     for (i, e) in entries.iter().enumerate() {
         // Only a claude bg row owns a jobId + uuid identity; skip any other
         // provider so a malformed foreign row can't adopt a claude uuid.
-        if e.provider != "claude" || e.claude_session_uuid.is_some() {
+        if e.harness_name() != "claude" || e.claude_session_uuid.is_some() {
             continue;
         }
         let Some(short) = e.transport_short() else {
@@ -4244,7 +4244,7 @@ mod tests {
         RegistryEntry {
             name: name.into(),
             short_id: String::new(),
-            provider: "claude".into(),
+            legacy_provider: "claude".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),
@@ -4352,7 +4352,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "worker-A".into(),
                 short_id: "wkA".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4419,7 +4419,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "ghost".into(),
                 short_id: "ghost".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4530,7 +4530,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "dead".into(),
                 short_id: "dead".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4646,7 +4646,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "recycled".into(),
                 short_id: "recycled".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4734,7 +4734,7 @@ mod tests {
         reg.entries.push(RegistryEntry {
             name: "x".into(),
             short_id: "workerA".into(),
-            provider: "codex".into(),
+            legacy_provider: "codex".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/".into(),
@@ -4769,7 +4769,7 @@ mod tests {
         RegistryEntry {
             name: name.into(),
             short_id: name.into(),
-            provider: "codex".into(),
+            legacy_provider: "codex".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),
@@ -4806,7 +4806,7 @@ mod tests {
     /// A `claude --bg` row: jobId in `short_id`, `claude_session_uuid` null.
     fn bg_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = rentry(name, AgentStatus::Live, None);
-        e.provider = "claude".into();
+        e.legacy_provider = "claude".into();
         e.short_id = short_id.into();
         e.claude_session_uuid = None;
         e
@@ -4852,7 +4852,7 @@ mod tests {
         // codex P2: a foreign-provider row carrying a short must not
         // adopt a claude uuid.
         let mut row = bg_claude_row("w", "3228ccad");
-        row.provider = "codex".into();
+        row.legacy_provider = "codex".into();
         assert!(matches!(
             find_uuid_backfill_row(&[row], "3228ccad-c078-4b53-a8c9-7199b831eae4"),
             UuidBackfill::None
@@ -5226,7 +5226,7 @@ mod tests {
 
         // A registered claude row (inside_leg None) + a buffered report for it.
         let mut row = rentry("pane", AgentStatus::Live, None);
-        row.provider = "claude".into();
+        row.legacy_provider = "claude".into();
         row.claude_session_uuid = Some("uuid-x".into());
         state::update_registry(&home.registry_json(), |r| r.entries.push(row)).unwrap();
         ctx.pending_inside_leg
@@ -5519,7 +5519,7 @@ done
             r.entries.push(RegistryEntry {
                 name: name.into(),
                 short_id: short_id.into(),
-                provider: "claude".into(),
+                legacy_provider: "claude".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -5714,7 +5714,7 @@ done
             Some(99),
             PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
         );
-        assert_eq!(e.provider, "claude");
+        assert_eq!(e.harness_name(), "claude");
         assert_eq!(
             e.host_mode.as_deref(),
             Some(crate::state::HOST_MODE_INTERACTIVE)
@@ -5831,7 +5831,7 @@ done
 
         let reg = load_registry_offloaded(home.registry_json()).await;
         let row = reg.find("cl").expect("adopted row missing");
-        assert_eq!(row.provider, "claude");
+        assert_eq!(row.harness_name(), "claude");
         assert_eq!(row.host_mode.as_deref(), Some("interactive"));
         assert_eq!(row.claude_session_uuid.as_deref(), Some("uuid-e2e"));
         assert_eq!(row.status, AgentStatus::Live);

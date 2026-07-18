@@ -1594,7 +1594,7 @@ def cmd_register(
 
     events.emit(
         "session_registered",
-        provider=entry.provider,
+        provider=entry.harness,
         name=entry.name,
         session_id=session_id,
         cwd=entry.cwd,
@@ -1603,7 +1603,7 @@ def cmd_register(
         import json as _json
 
         sys.stdout.write(
-            _json.dumps({"registered": True, "name": entry.name, "provider": entry.provider}) + "\n"
+            _json.dumps({"registered": True, "name": entry.name, "provider": entry.harness}) + "\n"
         )
     else:
         sys.stdout.write(

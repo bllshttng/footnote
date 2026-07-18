@@ -86,19 +86,15 @@ KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 # target". Consumed by both AgentEntry.session_id (real entries) and
 # resume_cli._session_id_for (duck-typed against test fakes), so the
 # harness -> field mapping lives in exactly one place and cannot drift
-# between the two. Keyed on the row's harness now (x-8dfc): identity is one
-# axis, and the mapping answers "which stored field is the resume target"
-# (claude attaches by short_id, codex resumes by codex_session_id, gemini by
-# gemini_session_id) -- a per-harness truth, not a dispatch capability.
+# between the two. Keyed on the row's harness (x-8dfc): identity is one axis.
+# At v10 (x-880e) the legacy per-provider id fields are gone, so codex/gemini
+# resume off the canonical harness_session_id; claude still attaches by the
+# 8-hex jobId in short_id (a distinct transport key, not removed).
 HARNESS_SESSION_ID_FIELDS = {
     "claude": "short_id",
-    "codex": "codex_session_id",
-    "gemini": "gemini_session_id",
+    "codex": "harness_session_id",
+    "gemini": "harness_session_id",
 }
-# Deprecated alias kept for one release: test fixtures and out-of-tree callers
-# still import the old name. harness == provider on every current row, so the
-# alias is a free rename bridge until they migrate.
-PROVIDER_SESSION_ID_FIELDS = HARNESS_SESSION_ID_FIELDS
 
 from fno import paths
 from fno.harness_identity import canonical_handle, sync_harness_aliases
@@ -130,7 +126,14 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # UUID) now lives in `short_id`, unifying the transport-key field across
 # providers. Legacy rows backfill on load (see load_registry); a pre-v9 reader
 # must reject a v9 store rather than drop the jobId on write-back.
-SCHEMA_VERSION = 9
+# v10 (x-880e) removes the on-disk `provider` field and the legacy per-provider
+# session-id trio (`codex_session_id`, `gemini_session_id`, `claude_session_uuid`):
+# `harness` is the sole identity axis and `harness_session_id` the sole session
+# id. A legacy row's `provider` back-fills `harness`, and each per-provider key
+# back-fills `harness_session_id`, at load (the accept-on-read pattern) and the
+# key dies there. A pre-v10 reader must reject a v10 store rather than mis-read
+# a harness-only row.
+SCHEMA_VERSION = 10
 
 
 class RegistryVersionError(RuntimeError):
@@ -170,11 +173,14 @@ class AgentEntry:
     """
 
     name: str
-    provider: str
     cwd: str
     log_path: str
-    codex_session_id: Optional[str] = None
-    gemini_session_id: Optional[str] = None
+    # Canonical identity axis (x-880e, v10). The harness name is the SOLE on-disk
+    # identity; the legacy ``provider`` and per-provider session-id fields are gone.
+    # ``harness_session_id`` (below) is the worker's own session id in its harness's
+    # store (claude full UUID, codex thread id, gemini session id). load_registry
+    # back-fills both from a legacy row's ``provider`` / per-provider keys on read.
+    harness: str
     created_at: str = field(default_factory=_utc_now_iso)
     status: AgentStatus = "live"
     last_message_at: Optional[str] = None
@@ -188,26 +194,10 @@ class AgentEntry:
     # round-trips between the two languages: Rust omits the key for exec rows and
     # Python's coercion maps the absence back to "exec". [interactive-drive node]
     host_mode: Optional[str] = None
-    # The FULL claude session UUID, the stream-json `--resume` target. Distinct
-    # from the 8-hex jobId in `short_id` (a 32-bit prefix used by `claude
-    # attach` + the jobs-dir, not collision-proof as a resume key). None until a
-    # claude session is adopted into the daemon stream-json host lane, which
-    # resolves it via `_claude_session_registry.resolve_session_uuid` and
-    # persists it here. Additive-optional (no schema bump): an absent key reads
-    # as None, and the Rust RegistryEntry mirrors it with `#[serde(default)]`, so
-    # a row round-trips between the two languages. [stream-json host lane node]
-    claude_session_uuid: Optional[str] = None
-    # Canonical harness identity (x-ec59), the successor to the per-provider
-    # identity fields. ``harness`` is the harness name (identity only; ``provider``
-    # stays load-bearing for dispatch + the KNOWN_PROVIDERS gate), and
-    # ``harness_session_id`` is the worker's own session id in its harness's store
-    # (claude full UUID, codex thread id, gemini session id). Both additive-optional
-    # like ``claude_session_uuid`` (no schema bump): load_registry back-fills them
-    # from the legacy fields via the shared ``sync_harness_aliases`` rule, and the
-    # Rust RegistryEntry mirrors them with ``#[serde(default)]``, so a row
-    # round-trips between the two languages. Routing (dispatch.py) reads these
-    # first, legacy fields as fallback during the migration window.
-    harness: Optional[str] = None
+    # The worker's own session id in its harness's store (claude full UUID, codex
+    # thread id, gemini session id) -- the canonical successor to the removed
+    # per-provider session-id fields (x-880e). load_registry back-fills it from a
+    # legacy row's per-provider key on read; the Rust RegistryEntry mirrors it.
     harness_session_id: Optional[str] = None
     # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
     # SPAWNING session's environment; never required of a caller. All three
@@ -299,13 +289,11 @@ class AgentEntry:
 
         The harness -> field mapping comes from the module-level
         :data:`HARNESS_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
-        also reads, so the two cannot drift. Keyed on ``harness`` (x-8dfc,
-        identity is one axis) with ``provider`` as belt-and-braces fallback for
-        a not-yet-backfilled in-memory row (load always backfills). As a
-        ``@property`` this is excluded from ``asdict`` serialization and never
-        becomes an on-disk storage field.
+        also reads, so the two cannot drift. Keyed on ``harness`` (x-880e, the
+        sole identity axis). As a ``@property`` this is excluded from ``asdict``
+        serialization and never becomes an on-disk storage field.
         """
-        field_name = HARNESS_SESSION_ID_FIELDS.get(self.harness or self.provider)
+        field_name = HARNESS_SESSION_ID_FIELDS.get(self.harness)
         # `short_id` is a str defaulting to "" (never None); normalize the
         # empty transport key to None so callers keep their `is None` checks.
         return (getattr(self, field_name) or None) if field_name else None
@@ -360,18 +348,13 @@ class ResolvedAgent:
 
 
 def _full_session_ids(entry: object) -> list[str]:
-    """The canonical id plus the legacy per-provider full-id fields, lowercased.
+    """The canonical full session id, lowercased (x-880e: the per-provider
+    full-id fields are gone; harness_session_id is their single successor).
 
-    Mirrors the read order dispatch.py uses during the migration window
-    (canonical first, legacy as fallback). ``getattr`` so the resolver core also
-    accepts a duck-typed registry row (e.g. a test's SimpleNamespace)."""
-    ids = [
-        getattr(entry, "harness_session_id", None),
-        getattr(entry, "claude_session_uuid", None),
-        getattr(entry, "codex_session_id", None),
-        getattr(entry, "gemini_session_id", None),
-    ]
-    return [i.lower() for i in ids if i]
+    ``getattr`` so the resolver core also accepts a duck-typed registry row
+    (e.g. a test's SimpleNamespace)."""
+    hsid = getattr(entry, "harness_session_id", None)
+    return [hsid.lower()] if hsid else []
 
 
 def _derived_short(entry: object) -> Optional[str]:
@@ -396,7 +379,7 @@ def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
     if len(distinct) > 1:
         cands = ", ".join(
             f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
-            f"{getattr(e, 'provider', '?')})"
+            f"{getattr(e, 'harness', '?')})"
             for e in distinct.values()
         )
         raise AgentResolutionError(
@@ -687,25 +670,24 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                 f"{sorted(KNOWN_STATUSES)}. "
                 "Upgrade or downgrade fno to match."
             )
-        # Lockstep alias fill (x-ec59 + x-8dfc): provider and harness are the
-        # same identity in the skew window, so fill whichever is absent from the
-        # other. harness adopts provider (x-ec59: a legacy-only row gains the
-        # canonical field, and an alien harness degrades to durable routing
-        # rather than bricking). provider adopts harness (x-8dfc): a provider-less
-        # row -- the post-v10 writer shape -- reads with provider treated as its
-        # harness value, so AgentEntry's required `provider` is always populated
-        # (AC1-EDGE). Then the shared rule syncs harness_session_id <-> the legacy
-        # per-harness key.
-        # Heal on invalid, not just absent: a truthy-but-corrupt token (whitespace
-        # or uppercase) in one field is replaced from the valid sibling, so the
-        # `self.harness or self.provider` resolution never lands on a corrupt
-        # harness (which would silently resolve session_id to None). The gate
-        # above guarantees at least one field is a valid token.
+        # Accept-on-read backfill (x-880e, v10): the removed identity keys
+        # (provider + the per-provider session-id trio) populate the canonical
+        # harness / harness_session_id and then die, so a legacy row round-trips
+        # losslessly and asdict never re-emits them. harness adopts provider when
+        # absent OR truthy-but-corrupt (whitespace/uppercase); the gate above
+        # guarantees at least one of provider/harness is a valid token, so the
+        # healed harness is always valid.
         if not _is_identity_token(row.get("harness")) and _is_identity_token(row.get("provider")):
             row = {**row, "harness": row["provider"]}
-        elif not _is_identity_token(row.get("provider")) and _is_identity_token(row.get("harness")):
-            row = {**row, "provider": row["harness"]}
+        # sync_harness_aliases reads the per-provider session keys still present in
+        # the raw row and back-fills harness_session_id from the harness-matching
+        # one (canonical wins on divergence). Runs BEFORE the pop below.
         row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
+        # Drop the removed identity keys now that their values have back-filled
+        # harness / harness_session_id, so they never reach AgentEntry(**row)
+        # (which no longer defines them) and never round-trip through asdict.
+        for _dead in ("provider", "codex_session_id", "gemini_session_id", "claude_session_uuid"):
+            row.pop(_dead, None)
         # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
         # READ only -- a legacy row's jobId moves into `short_id` (the unified
         # transport key) and the key dies here, so asdict never re-emits it.
@@ -726,8 +708,8 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         # `session_id` is a computed @property on AgentEntry, not an init field.
         # A Rust PTY row may serialize it (Rust skips it when None, so this only
         # fires for a row that recorded one); passing it to AgentEntry(**row)
-        # would TypeError. Drop it -- Python recomputes it from provider + the
-        # *_session_id fields (the identical projection Rust uses), so nothing
+        # would TypeError. Drop it -- Python recomputes it from harness +
+        # harness_session_id (the identical projection Rust uses), so nothing
         # recoverable is lost, and asdict re-omits it on write-back. (ab-b946b59c)
         if "session_id" in row:
             row = {k: v for k, v in row.items() if k != "session_id"}
@@ -796,7 +778,7 @@ def register_existing_session(
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
-            if entry.provider == provider and getattr(entry, session_field) == session_id:
+            if entry.harness == provider and getattr(entry, session_field) == session_id:
                 # Same session re-registering: refresh, do not duplicate.
                 entry.status = _REGISTERED_STATUS
                 entry.cwd = cwd
@@ -811,7 +793,8 @@ def register_existing_session(
             suffix += 1
         fresh = AgentEntry(
             name=chosen,
-            provider=provider,
+            harness=provider,
+            harness_session_id=session_id,
             cwd=cwd,
             log_path=log_path,
             status=_REGISTERED_STATUS,
@@ -822,7 +805,7 @@ def register_existing_session(
 
     persisted = update_registry(_updater, path=registry_path)
     for entry in persisted:
-        if entry.provider == provider and getattr(entry, session_field) == session_id:
+        if entry.harness == provider and getattr(entry, session_field) == session_id:
             return entry
     # update_registry returns the persisted entries list (the updater's
     # output), so the row must be present; a miss means the upsert dropped it.

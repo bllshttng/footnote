@@ -138,8 +138,8 @@ def test_create_codex_routes_to_provider_and_registers(workdir, fake_codex_creat
     assert len(entries) == 1
     e = entries[0]
     assert e.name == "worker-X"
-    assert e.provider == "codex"
-    assert e.codex_session_id == "codex-sid-abc"
+    assert e.harness == "codex"
+    assert e.harness_session_id == "codex-sid-abc"
     assert e.cwd == str(workdir)
     assert e.status == "live"
 
@@ -218,10 +218,10 @@ def test_followup_codex_propagates_provider_specific_exit_code(workdir, fake_cod
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id="sid",
+            harness_session_id="sid",
         )
     ])
     fake_codex_resume.side_effect = CodexInvocationError(12)
@@ -301,10 +301,10 @@ def test_followup_codex_routes_to_resume_and_bumps_last_message_at(
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd="/Users/foo/proj",
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id="real-uuid",
+            harness_session_id="real-uuid",
             created_at="2026-05-21T00:00:00Z",
             status="live",
             last_message_at=None,
@@ -333,7 +333,7 @@ def test_followup_codex_routes_to_resume_and_bumps_last_message_at(
     assert len(entries) == 1
     assert entries[0].last_message_at is not None
     # codex_session_id preserved (never re-minted).
-    assert entries[0].codex_session_id == "real-uuid"
+    assert entries[0].harness_session_id == "real-uuid"
 
 
 def test_followup_codex_provider_mismatch_rejected(workdir, fake_codex_resume):
@@ -341,10 +341,10 @@ def test_followup_codex_provider_mismatch_rejected(workdir, fake_codex_resume):
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id="sid",
+            harness_session_id="sid",
         )
     ])
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
@@ -366,10 +366,10 @@ def test_followup_codex_empty_log_path_rejected_at_dispatch(workdir, fake_codex_
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd=str(workdir),
             log_path="",  # corrupted
-            codex_session_id="sid",
+            harness_session_id="sid",
         )
     ])
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
@@ -392,10 +392,10 @@ def test_followup_codex_empty_cwd_rejected_at_dispatch(workdir, fake_codex_resum
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd="",  # corrupted
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id="sid",
+            harness_session_id="sid",
         )
     ])
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
@@ -416,10 +416,10 @@ def test_followup_codex_no_session_id_in_registry_rejected(workdir, fake_codex_r
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id=None,  # corrupted state
+            harness_session_id=None,  # corrupted state
         )
     ])
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
@@ -439,10 +439,10 @@ def test_followup_codex_timeout_maps_to_exit_15(workdir, fake_codex_resume):
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id="sid",
+            harness_session_id="sid",
         )
     ])
     fake_codex_resume.side_effect = CodexTimeoutError(2.0)
@@ -464,10 +464,10 @@ def test_followup_codex_invocation_error_maps_to_exit_1(workdir, fake_codex_resu
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id="invalid",
+            harness_session_id="invalid",
         )
     ])
     fake_codex_resume.side_effect = CodexInvocationError(1)
@@ -489,10 +489,10 @@ def test_followup_codex_emits_yolo_flag_in_events(workdir, fake_codex_resume):
     write_registry([
         AgentEntry(
             name="worker-X",
-            provider="codex",
+            harness="codex",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            codex_session_id="sid",
+            harness_session_id="sid",
         )
     ])
     from fno.agents.dispatch import dispatch_ask
@@ -558,7 +558,7 @@ def test_yolo_on_claude_followup_emits_stderr_note(workdir, capsys, monkeypatch)
     write_registry([
         AgentEntry(
             name="worker-Y",
-            provider="claude",
+            harness="claude",
             cwd=str(workdir),
             log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
             short_id="7c5dcf5d",

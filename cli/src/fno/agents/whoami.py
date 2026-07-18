@@ -75,9 +75,9 @@ def _find_by_name(registry: list[AgentEntry], name: str) -> Optional[AgentEntry]
 
 
 def _row_harness(entry: AgentEntry) -> str:
-    """This row's harness for matching: canonical ``harness``, legacy ``provider``
-    as fallback (a pre-migration row has only ``provider``)."""
-    return (getattr(entry, "harness", None) or entry.provider or "").lower()
+    """This row's harness for matching (x-880e: harness is the sole identity axis;
+    a legacy row's provider is back-filled into harness at load)."""
+    return (getattr(entry, "harness", None) or "").lower()
 
 
 def _find_by_session(
@@ -108,13 +108,12 @@ def _find_by_session(
         for entry in registry:
             if _row_harness(entry) != h:
                 continue
+            # harness_session_id is canonical (backfilled from every legacy
+            # per-harness id on load); cc_session_id is a distinct claude field
+            # the canonical does not cover, so it stays an extra match candidate.
             fields = [entry.harness_session_id]
             if h == "claude":
-                fields += [entry.claude_session_uuid, entry.cc_session_id]
-            elif h == "codex":
-                fields.append(entry.codex_session_id)
-            elif h == "gemini":
-                fields.append(entry.gemini_session_id)
+                fields.append(entry.cc_session_id)
             if session_uuid in fields:
                 return entry
         if h == "claude":
@@ -136,7 +135,6 @@ def _find_by_session(
     for entry in registry:
         if session_uuid in (
             entry.harness_session_id,
-            entry.claude_session_uuid,
             entry.cc_session_id,
         ):
             return entry
@@ -144,7 +142,7 @@ def _find_by_session(
     for entry in registry:
         # The prefix rule holds only for claude jobIds (a uuid prefix); a
         # daemon worker's name-derived short must never prefix-match a uuid.
-        if entry.provider != "claude":
+        if entry.harness != "claude":
             continue
         sid = (entry.short_id or "").replace("-", "").lower()
         if sid and norm.startswith(sid):
@@ -209,7 +207,7 @@ def resolve_self(
             exit_code=EXIT_NOT_REGISTERED,
         )
 
-    provider = env_provider or (row.provider if row else None)
+    provider = env_provider or (row.harness if row else None)
     session = env_session or (row.session_id if row else None)
     short_id = (row.short_id or None) if row else None
     status = row.status if row else None

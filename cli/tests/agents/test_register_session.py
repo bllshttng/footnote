@@ -42,7 +42,7 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
         cwd="/home/user/project",
     )
 
-    assert entry.provider == "claude"
+    assert entry.harness == "claude"
     assert entry.short_id == "ef9982cc-2543-4cea-9a20-081cca7119f6"
     # Registered NON-live: a hand-started session has no live transport, so it
     # must not be a resolve_to_project anycast target (else default sends

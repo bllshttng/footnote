@@ -86,7 +86,7 @@ def _write_registry_json(tmp: Path, rows: list[dict]) -> Path:
 def _row(**over) -> dict:
     base = dict(
         name="w1",
-        provider="claude",
+        harness="claude",
         cwd="/x",
         log_path="/x/l",
         status="live",
@@ -98,12 +98,11 @@ def _row(**over) -> dict:
 
 
 def test_reads_rust_minted_canonical_row(tmp_path):
-    """A canonical-only row (the Rust mint shape) resolves, and the legacy alias
-    is synced so an old reader still resolves it."""
+    """A canonical-only row (the Rust mint shape) resolves off harness_session_id
+    (v10: the legacy per-provider alias is gone from Python's AgentEntry)."""
     p = _write_registry_json(tmp_path, [_row(harness="claude", harness_session_id="H")])
     e = load_registry(p)[0]
     assert e.harness_session_id == "H"
-    assert e.claude_session_uuid == "H"
 
 
 def test_legacy_row_backfills_canonical(tmp_path):
@@ -121,7 +120,6 @@ def test_conflict_resolves_canonical_wins(tmp_path):
     )
     e = load_registry(p)[0]
     assert e.harness_session_id == "CANON"
-    assert e.claude_session_uuid == "CANON"
 
 
 def test_alien_harness_row_loads_without_bricking(tmp_path):
@@ -176,12 +174,10 @@ def test_whoami_resolves_codex_via_harness_session_id():
 
     row = AgentEntry(
         name="c1",
-        provider="codex",
         cwd="/x",
         log_path="/x/l",
         harness="codex",
         harness_session_id="THREAD-1",
-        codex_session_id="THREAD-1",
     )
     res = whoami.resolve_self(
         env={}, registry=[row], session_uuid="THREAD-1", harness="codex"
@@ -197,12 +193,10 @@ def test_whoami_does_not_cross_match_another_harness():
 
     claude_row = AgentEntry(
         name="cl",
-        provider="claude",
         cwd="/x",
         log_path="/x/l",
         harness="claude",
         harness_session_id="SHARED",
-        claude_session_uuid="SHARED",
     )
     res = whoami.resolve_self(
         env={}, registry=[claude_row], session_uuid="SHARED", harness="codex"

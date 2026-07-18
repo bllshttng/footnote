@@ -21,7 +21,7 @@ from fno.agents.registry import AgentEntry
 def _claude_entry(**overrides) -> AgentEntry:
     base = dict(
         name="worker-frontend",
-        provider="claude",
+        harness="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/worker-frontend/output.jsonl",
         short_id="abc12345",
@@ -36,10 +36,10 @@ def _claude_entry(**overrides) -> AgentEntry:
 def _codex_entry(**overrides) -> AgentEntry:
     base = dict(
         name="worker-migration",
-        provider="codex",
+        harness="codex",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/worker-migration/output.jsonl",
-        codex_session_id="codex-sess-xyz",
+        harness_session_id="codex-sess-xyz",
         created_at="2026-05-20T17:15:00Z",
         status="live",
         last_message_at="2026-05-20T17:15:43Z",
@@ -96,7 +96,7 @@ def test_serialize_entry_session_id_is_claude_short_id_for_claude() -> None:
 
 def test_serialize_entry_session_id_none_when_uncaptured() -> None:
     """A codex entry whose session id was never captured reports None."""
-    row = serialize_entry(_codex_entry(codex_session_id=None), live_status=None)
+    row = serialize_entry(_codex_entry(harness_session_id=None), live_status=None)
 
     assert row["session_id"] is None
 

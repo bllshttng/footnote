@@ -87,7 +87,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
         r.entries.push(state::RegistryEntry {
             name: "stale-ask".into(),
             short_id: String::new(),
-            provider: "codex".into(),
+            legacy_provider: "codex".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),
@@ -249,7 +249,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
         r.entries.push(fno_agents::state::RegistryEntry {
             name: name.into(),
             short_id: String::new(),
-            provider: "codex".into(),
+            legacy_provider: "codex".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),

@@ -54,12 +54,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     events.emit(
         "session_registered",
-        provider=entry.provider,
+        provider=entry.harness,
         name=entry.name,
         session_id=args.session_id,
         cwd=entry.cwd,
     )
-    print(f"register_session: registered {entry.name} ({entry.provider})", file=sys.stderr)
+    print(f"register_session: registered {entry.name} ({entry.harness})", file=sys.stderr)
     return 0
 
 

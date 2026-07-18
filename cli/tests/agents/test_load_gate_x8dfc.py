@@ -194,5 +194,5 @@ def test_ac1_edge_provider_less_row_loads(tmp_path: Path, monkeypatch) -> None:
     )
     entries = load_registry(path=reg)
     assert len(entries) == 1
-    assert entries[0].provider == "claude"
+    assert entries[0].harness == "claude"
     assert entries[0].harness == "claude"

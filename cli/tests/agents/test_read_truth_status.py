@@ -21,7 +21,7 @@ from fno.paths_testing import use_tmpdir
 def _claude(name, short_id="abc12345", **kw) -> AgentEntry:
     base = dict(
         name=name,
-        provider="claude",
+        harness="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/x/output.jsonl",
         short_id=short_id,

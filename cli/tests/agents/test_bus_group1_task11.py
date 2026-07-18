@@ -34,12 +34,11 @@ def _write_existing_entry(name: str, provider: str, short_id: str) -> None:
     write_registry([
         AgentEntry(
             name=name,
-            provider=provider,
+            harness=provider,
             cwd="/tmp",
             log_path="/tmp/a.log",
             short_id=short_id if provider == "claude" else "",
-            codex_session_id=short_id if provider == "codex" else None,
-            gemini_session_id=short_id if provider == "gemini" else None,
+            harness_session_id=short_id if provider in ("codex", "gemini") else None,
         )
     ])
 

@@ -33,7 +33,7 @@ pub fn maybe_run_opencode_ask(
             return Some(12);
         }
     };
-    let existing_provider = registry.find(name).map(|e| e.provider.as_str());
+    let existing_provider = registry.find(name).map(|e| e.harness_name());
     let resolved = existing_provider.or(provider_param);
     if resolved != Some("opencode") {
         return None; // not an opencode target; fall through

@@ -51,11 +51,10 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
 
     entry = AgentEntry(
         name="my-agent",
-        provider="claude",
+        harness="claude",
         cwd="/home/user/project",
         short_id="abc123",
-        codex_session_id=None,
-        gemini_session_id=None,
+        harness_session_id=None,
         log_path="/tmp/my-agent.log",
     )
 
@@ -66,12 +65,15 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
     assert len(loaded) == 1
     e = loaded[0]
     assert e.name == "my-agent"
-    assert e.provider == "claude"
+    assert e.harness == "claude"
     assert e.cwd == "/home/user/project"
     assert e.short_id == "abc123"
-    assert e.codex_session_id is None
-    assert e.gemini_session_id is None
+    assert e.harness_session_id is None
     assert e.log_path == "/tmp/my-agent.log"
+    # AC1-HP: the removed identity keys never round-trip to disk.
+    raw_row = json.loads(registry_path.read_text())["agents"][0]
+    for dead in ("provider", "codex_session_id", "gemini_session_id", "claude_session_uuid"):
+        assert dead not in raw_row
     # created_at must be ISO8601 UTC
     assert e.created_at.endswith("Z") or "+" in e.created_at
 
@@ -84,9 +86,9 @@ def test_ac1_hp_optional_session_ids(tmp_path: Path, monkeypatch) -> None:
 
     entry = AgentEntry(
         name="codex-agent",
-        provider="codex",
+        harness="codex",
         cwd="/tmp",
-        codex_session_id="sess-xyz",
+        harness_session_id="sess-xyz",
         log_path="/tmp/codex-agent.log",
     )
 
@@ -94,9 +96,9 @@ def test_ac1_hp_optional_session_ids(tmp_path: Path, monkeypatch) -> None:
     write_registry([entry], path=registry_path)
     loaded = load_registry(path=registry_path)
 
-    assert loaded[0].codex_session_id == "sess-xyz"
+    assert loaded[0].harness_session_id == "sess-xyz"
     assert loaded[0].short_id == ""
-    assert loaded[0].gemini_session_id is None
+    assert loaded[0].session_id == "sess-xyz"
 
 
 def test_ac1_hp_schema_version_in_file(tmp_path: Path, monkeypatch) -> None:
@@ -107,7 +109,7 @@ def test_ac1_hp_schema_version_in_file(tmp_path: Path, monkeypatch) -> None:
 
     entry = AgentEntry(
         name="v-agent",
-        provider="gemini",
+        harness="gemini",
         cwd="/tmp",
         log_path="/tmp/v-agent.log",
     )
@@ -136,7 +138,7 @@ def test_ac2_err_atomic_write_on_exception(tmp_path: Path, monkeypatch) -> None:
     # Write an initial valid registry
     initial_entry = AgentEntry(
         name="safe-agent",
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/safe.log",
     )
@@ -155,7 +157,7 @@ def test_ac2_err_atomic_write_on_exception(tmp_path: Path, monkeypatch) -> None:
 
     new_entry = AgentEntry(
         name="corrupt-agent",
-        provider="codex",
+        harness="codex",
         cwd="/tmp",
         log_path="/tmp/corrupt.log",
     )
@@ -193,7 +195,7 @@ def _write_agent_with_held_lock(
         time.sleep(hold_seconds)
         entry = AgentEntry(
             name=agent_name,
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/holder.log",
         )
@@ -251,7 +253,7 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
 def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> None:
     """AC4-ERR: loading a file with a future schema_version raises RegistryVersionError.
 
-    SCHEMA_VERSION is now 9 (claude_short_id removal); v10 is the future-drift case.
+    SCHEMA_VERSION is now 10 (provider removal); v11 is the future-drift case.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -260,15 +262,15 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
-        json.dumps({"schema_version": 10, "agents": []}), encoding="utf-8"
+        json.dumps({"schema_version": 11, "agents": []}), encoding="utf-8"
     )
 
     with pytest.raises(RegistryVersionError) as exc_info:
         load_registry(path=registry_path)
 
     msg = str(exc_info.value)
-    assert "10" in msg  # read version present
-    assert "9" in msg  # expected version present
+    assert "11" in msg  # read version present
+    assert "10" in msg  # expected version present
 
 
 def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatch) -> None:
@@ -328,7 +330,7 @@ def test_x8dfc_unknown_provider_loads_undispatchable(tmp_path: Path, monkeypatch
     )
     entries = load_registry(path=registry_path)
     assert len(entries) == 1
-    assert entries[0].provider == "calude"
+    assert entries[0].harness == "calude"
     # ...but it is NOT dispatchable: the spawn/ask seam still refuses it.
     with pytest.raises(ValueError, match="calude"):
         _check_known_provider("calude")
@@ -367,7 +369,7 @@ def test_load_registry_tolerates_agy_provider(tmp_path: Path, monkeypatch) -> No
 
     entries = load_registry(path=registry_path)
     assert len(entries) == 1
-    assert entries[0].provider == "agy"
+    assert entries[0].harness == "agy"
 
 
 def test_dispatch_still_refuses_agy_provider() -> None:
@@ -490,7 +492,7 @@ def _concurrent_update_worker(worker_id: int, registry_path_str: str) -> None:
         entries.append(
             AgentEntry(
                 name=f"worker-{worker_id}",
-                provider="claude",
+                harness="claude",
                 cwd="/tmp",
                 log_path=f"/tmp/w{worker_id}.log",
             )
@@ -554,7 +556,7 @@ def test_write_registry_cleans_orphan_tmp_on_failure(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(reg_module.os, "replace", _explode_replace)
 
-    entry = AgentEntry(name="t", provider="claude", cwd="/tmp", log_path="/tmp/t.log")
+    entry = AgentEntry(name="t", harness="claude", cwd="/tmp", log_path="/tmp/t.log")
     with pytest.raises(OSError, match="simulated disk full"):
         write_registry([entry], path=registry_path)
 
@@ -592,7 +594,7 @@ def test_ac5_hp_write_registry_uses_paths_default(tmp_path: Path, monkeypatch) -
 
     entry = AgentEntry(
         name="default-path-agent",
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/default.log",
     )
@@ -618,7 +620,7 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 9
+    assert SCHEMA_VERSION == 10
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -627,7 +629,7 @@ def test_us2_agent_entry_has_status_and_last_message_at() -> None:
 
     entry = AgentEntry(
         name="x",
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/x.log",
     )
@@ -642,7 +644,7 @@ def test_us2_v2_round_trip_preserves_new_fields(tmp_path: Path, monkeypatch) -> 
 
     entry = AgentEntry(
         name="busy",
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/busy.log",
         status="orphaned",
@@ -741,7 +743,7 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 9
+    assert SCHEMA_VERSION == 10
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -854,7 +856,7 @@ def test_inside_leg_round_trips_across_registry_boundary(
         encoding="utf-8",
     )
     assert load_registry(path=registry_path)[0].inside_leg is None
-    assert AgentEntry(name="x", provider="claude", cwd="/t", log_path="/t/x.log").inside_leg is None
+    assert AgentEntry(name="x", harness="claude", cwd="/t", log_path="/t/x.log").inside_leg is None
 
 
 def test_screen_state_round_trips_across_registry_boundary(
@@ -914,7 +916,7 @@ def test_screen_state_round_trips_across_registry_boundary(
     assert reloaded[0].screen_state == verdict
 
     # (c) Absent defaults to None (pre-bump rows need no migration).
-    assert AgentEntry(name="x", provider="claude", cwd="/t", log_path="/t/x.log").screen_state is None
+    assert AgentEntry(name="x", harness="claude", cwd="/t", log_path="/t/x.log").screen_state is None
 
 
 def test_us2_v1_entries_synthesized_at_read(tmp_path: Path, monkeypatch) -> None:
@@ -1043,7 +1045,7 @@ def test_phase5_agent_entry_has_mcp_channel_id_default_none() -> None:
     from fno.agents.registry import AgentEntry
 
     entry = AgentEntry(
-        name="x", provider="claude", cwd="/tmp", log_path="/tmp/x.log"
+        name="x", harness="claude", cwd="/tmp", log_path="/tmp/x.log"
     )
     assert entry.mcp_channel_id is None
 
@@ -1055,7 +1057,7 @@ def test_phase5_v3_round_trip_preserves_mcp_channel_id(tmp_path: Path, monkeypat
 
     entry = AgentEntry(
         name="mcp-backed",
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/x.log",
         mcp_channel_id="ch-abc-123",
@@ -1112,16 +1114,16 @@ def test_session_id_property_resolves_provider_specific_id() -> None:
     from fno.agents.registry import AgentEntry
 
     claude = AgentEntry(
-        name="c", provider="claude", cwd="/tmp", log_path="/tmp/c.log",
+        name="c", harness="claude", cwd="/tmp", log_path="/tmp/c.log",
         short_id="abc12345",
     )
     codex = AgentEntry(
-        name="x", provider="codex", cwd="/tmp", log_path="/tmp/x.log",
-        codex_session_id="019e51db-a995-75e1-a3bb-3dde6b207661",
+        name="x", harness="codex", cwd="/tmp", log_path="/tmp/x.log",
+        harness_session_id="019e51db-a995-75e1-a3bb-3dde6b207661",
     )
     gemini = AgentEntry(
-        name="g", provider="gemini", cwd="/tmp", log_path="/tmp/g.log",
-        gemini_session_id="gem-sess-1",
+        name="g", harness="gemini", cwd="/tmp", log_path="/tmp/g.log",
+        harness_session_id="gem-sess-1",
     )
 
     assert claude.session_id == "abc12345"
@@ -1134,8 +1136,8 @@ def test_session_id_property_none_when_uncaptured() -> None:
     from fno.agents.registry import AgentEntry
 
     entry = AgentEntry(
-        name="x", provider="codex", cwd="/tmp", log_path="/tmp/x.log",
-        codex_session_id=None,
+        name="x", harness="codex", cwd="/tmp", log_path="/tmp/x.log",
+        harness_session_id=None,
     )
     assert entry.session_id is None
 
@@ -1153,8 +1155,8 @@ def test_session_id_property_excluded_from_asdict_serialization(
     from fno.agents.registry import AgentEntry, load_registry, write_registry
 
     entry = AgentEntry(
-        name="x", provider="codex", cwd="/tmp", log_path="/tmp/x.log",
-        codex_session_id="sess-1",
+        name="x", harness="codex", cwd="/tmp", log_path="/tmp/x.log",
+        harness_session_id="sess-1",
     )
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     write_registry([entry], path=registry_path)
@@ -1180,12 +1182,12 @@ def test_session_id_property_matches_resume_cli_session_id_for() -> None:
 
     cases = [
         ("claude", "short_id", "abc12345"),
-        ("codex", "codex_session_id", "019e51db-a995-75e1-a3bb-3dde6b207661"),
-        ("gemini", "gemini_session_id", "gem-sess-1"),
+        ("codex", "harness_session_id", "019e51db-a995-75e1-a3bb-3dde6b207661"),
+        ("gemini", "harness_session_id", "gem-sess-1"),
     ]
     for provider, field_name, value in cases:
         entry = AgentEntry(
-            name="t", provider=provider, cwd="/t", log_path="/t.log",
+            name="t", harness=provider, cwd="/t", log_path="/t.log",
             **{field_name: value},
         )
         assert entry.session_id == _session_id_for(entry) == value, provider
@@ -1196,9 +1198,8 @@ def test_harness_session_id_fields_covers_known_providers() -> None:
 
     Guards against adding a provider to KNOWN_PROVIDERS without teaching
     session_id / _session_id_for how to resolve its resume id (which
-    would silently return None for the new harness). Keyed on
-    HARNESS_SESSION_ID_FIELDS now (x-8dfc); the old PROVIDER_SESSION_ID_FIELDS
-    name is a free alias, so the dispatchable set still round-trips.
+    would silently return None for the new harness). Keyed on the sole
+    HARNESS_SESSION_ID_FIELDS map (x-880e removed the provider alias).
     """
     from fno.agents.providers import KNOWN_PROVIDERS
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
@@ -1219,9 +1220,9 @@ def test_host_mode_interactive_round_trips(tmp_path: Path, monkeypatch) -> None:
 
     entry = AgentEntry(
         name="bot2",
-        provider="codex",
+        harness="codex",
         cwd="/tmp",
-        codex_session_id="019e7157-4236-7bb1-b274-ebbac6040ace",
+        harness_session_id="019e7157-4236-7bb1-b274-ebbac6040ace",
         log_path="/tmp/bot2.log",
         host_mode="interactive",
     )
@@ -1238,7 +1239,7 @@ def test_host_mode_default_entry_reads_as_exec(tmp_path: Path, monkeypatch) -> N
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, load_registry, write_registry
 
-    entry = AgentEntry(name="a", provider="codex", cwd="/tmp", log_path="/tmp/a.log")
+    entry = AgentEntry(name="a", harness="codex", cwd="/tmp", log_path="/tmp/a.log")
     assert entry.host_mode is None  # default before persistence
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     write_registry([entry], path=registry_path)
@@ -1342,7 +1343,7 @@ def test_host_mode_rust_written_interactive_row_reads_in_python(
     )
     loaded = load_registry(path=registry_path)
     assert loaded[0].host_mode == "interactive"
-    assert loaded[0].codex_session_id == "019e7157-4236-7bb1-b274-ebbac6040ace"
+    assert loaded[0].harness_session_id == "019e7157-4236-7bb1-b274-ebbac6040ace"
 
 
 def test_host_mode_alien_value_rejected(tmp_path: Path, monkeypatch) -> None:
@@ -1422,31 +1423,31 @@ def test_claude_session_uuid_round_trips(tmp_path: Path, monkeypatch) -> None:
 
     entry = AgentEntry(
         name="claude-peer",
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/claude-peer.log",
         short_id="7c5dcf5d",
-        claude_session_uuid="019e7157-4236-7bb1-b274-ebbac6040ace",
+        harness_session_id="019e7157-4236-7bb1-b274-ebbac6040ace",
     )
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     write_registry([entry], path=registry_path)
 
     loaded = load_registry(path=registry_path)
     assert loaded[0].short_id == "7c5dcf5d"
-    assert loaded[0].claude_session_uuid == "019e7157-4236-7bb1-b274-ebbac6040ace"
+    assert loaded[0].harness_session_id == "019e7157-4236-7bb1-b274-ebbac6040ace"
 
 
 def test_claude_session_uuid_defaults_to_none(tmp_path: Path, monkeypatch) -> None:
-    """A new entry without the UUID defaults to None (it is captured later, at
-    adopt time, by the daemon host lane)."""
+    """A new entry without the session id defaults to None (it is captured later,
+    at adopt time, by the daemon host lane)."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry
 
     entry = AgentEntry(
-        name="c", provider="claude", cwd="/tmp", log_path="/tmp/c.log",
+        name="c", harness="claude", cwd="/tmp", log_path="/tmp/c.log",
         short_id="7c5dcf5d",
     )
-    assert entry.claude_session_uuid is None
+    assert entry.harness_session_id is None
 
 
 def test_claude_session_uuid_absent_key_reads_as_none(tmp_path: Path, monkeypatch) -> None:
@@ -1478,7 +1479,7 @@ def test_claude_session_uuid_absent_key_reads_as_none(tmp_path: Path, monkeypatc
         encoding="utf-8",
     )
     loaded = load_registry(path=registry_path)
-    assert loaded[0].claude_session_uuid is None
+    assert loaded[0].harness_session_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -1615,10 +1616,10 @@ def test_python_write_emits_rust_readable_values(tmp_path: Path, monkeypatch) ->
 
     entry = AgentEntry(
         name="py-ask",
-        provider="codex",
+        harness="codex",
         cwd="/p",
         log_path="/l",
-        codex_session_id="sid",
+        harness_session_id="sid",
     )
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     write_registry([entry], path=registry_path)
@@ -1650,7 +1651,7 @@ def test_mux_ref_roundtrips_and_reaches_rust_shape(tmp_path: Path, monkeypatch) 
 
     entry = AgentEntry(
         name="mux-agent",
-        provider="claude",
+        harness="claude",
         cwd="/p",
         log_path="/l",
         mux={"session": "work", "pane_id": 7},
@@ -1664,7 +1665,7 @@ def test_mux_ref_roundtrips_and_reaches_rust_shape(tmp_path: Path, monkeypatch) 
     loaded = load_registry(path=registry_path)
     assert loaded[0].mux == {"session": "work", "pane_id": 7}
     # Non-mux rows carry an explicit null (Rust reads it as None).
-    entry_plain = AgentEntry(name="plain", provider="claude", cwd="/p", log_path="/l")
+    entry_plain = AgentEntry(name="plain", harness="claude", cwd="/p", log_path="/l")
     assert entry_plain.mux is None
 
 
@@ -1677,13 +1678,13 @@ def test_write_registry_rejects_double_ref_rows(tmp_path: Path, monkeypatch) -> 
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     write_registry(
-        [AgentEntry(name="ok", provider="claude", cwd="/p", log_path="/l")],
+        [AgentEntry(name="ok", harness="claude", cwd="/p", log_path="/l")],
         path=registry_path,
     )
 
     worker_double = AgentEntry(
         name="w",
-        provider="codex",
+        harness="codex",
         cwd="/p",
         log_path="/l",
         short_id="wk-1",
@@ -1694,7 +1695,7 @@ def test_write_registry_rejects_double_ref_rows(tmp_path: Path, monkeypatch) -> 
 
     bg_double = AgentEntry(
         name="b",
-        provider="claude",
+        harness="claude",
         cwd="/p",
         log_path="/l",
         short_id="abcd1234",
@@ -1719,7 +1720,7 @@ def test_v9_agent_entry_has_no_claude_short_id_field() -> None:
 
     with pytest.raises(TypeError):
         AgentEntry(
-            name="c", provider="claude", cwd="/tmp", log_path="/l",
+            name="c", harness="claude", cwd="/tmp", log_path="/l",
             claude_short_id="deadbeef",  # type: ignore[call-arg]
         )
 
@@ -1761,7 +1762,7 @@ def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
     # Write-back drops the legacy key and carries short_id at the current schema.
     write_registry(loaded, path=registry_path)
     raw = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 9
+    assert raw["schema_version"] == 10
     row = raw["agents"][0]
     assert "claude_short_id" not in row
     assert row["short_id"] == "7c5dcf5d"
