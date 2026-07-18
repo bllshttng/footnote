@@ -1,6 +1,6 @@
-"""Tests for the epic kickoff / converge verb (x-9608 K1).
+"""Tests for the epic advance / converge verb (x-9608 K1).
 
-Covers the mission fan-out (kickoff_epic), the shared converge core reuse, the
+Covers the mission fan-out (advance_epic), the shared converge core reuse, the
 mission-activation graph field, per-project + overall caps, per-child isolation,
 idempotence (not TTL-dependent), and cascade-close deactivation.
 
@@ -114,14 +114,14 @@ def _ready(*ids_projects):
 def test_refuse_non_container(iso, tmp_path, monkeypatch):
     """A leaf node named to --epic is refused by name (AC: refuse non-container)."""
     _write_graph(tmp_path, [{"id": "x-leaf", "title": "leaf", "project": "fno"}], monkeypatch)
-    res = adv.kickoff_epic("x-leaf", events_path=iso)
+    res = adv.advance_epic("x-leaf", events_path=iso)
     assert res.error == "not-a-container"
     assert res.dispatched == () and _events(iso) == []
 
 
 def test_refuse_no_such_node(iso, tmp_path, monkeypatch):
     _write_graph(tmp_path, [{"id": "x-EPIC", "parent": None}], monkeypatch)
-    res = adv.kickoff_epic("x-nope", events_path=iso)
+    res = adv.advance_epic("x-nope", events_path=iso)
     assert res.error == "no-such-node"
 
 
@@ -130,9 +130,9 @@ def test_disabled_dispatches_nothing(iso, tmp_path, monkeypatch):
     _epic_graph(tmp_path, monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: pytest.fail("must not enumerate"))
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
     assert res.error == "disabled"
-    # a gated kickoff still records its decision (no paired advance() to do it)
+    # a gated epic advance still records its decision (no paired advance() to do it)
     skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
     assert len(skips) == 1 and skips[0]["data"]["reason"] == "disabled"
     assert skips[0]["data"]["mission"] == "x-EPIC"
@@ -145,7 +145,7 @@ def test_walker_live_gate_emits_skip(iso, tmp_path, monkeypatch):
                   root=adv._claims_root_for(_hold_walker))
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: pytest.fail("must not enumerate"))
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
     assert res.error == "walker-live"
     skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
     assert skips and skips[0]["data"]["reason"] == "walker-live"
@@ -157,7 +157,7 @@ def test_walker_live_gate_emits_skip(iso, tmp_path, monkeypatch):
 
 
 def test_fans_out_one_per_mapped_project(iso, tmp_path, monkeypatch):
-    """AC1-HP: kickoff dispatches exactly one worker per ready child in each mapped project."""
+    """AC1-HP: epic advance dispatches exactly one worker per ready child in each mapped project."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
     _patch_max_lanes(monkeypatch, 4)
@@ -165,7 +165,7 @@ def test_fans_out_one_per_mapped_project(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     assert res.activated is True
     assert set(res.dispatched) == {"x-web", "x-etl"}
@@ -190,7 +190,7 @@ def test_mission_active_field_set(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    adv.kickoff_epic("x-EPIC", events_path=iso)
+    adv.advance_epic("x-EPIC", events_path=iso)
 
     assert _read_epic().get("mission_active") is True
 
@@ -209,7 +209,7 @@ def test_unmapped_project_loud_skip_others_dispatch(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     assert res.dispatched == ("x-web",)
     skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
@@ -232,7 +232,7 @@ def test_project_less_child_skips_no_project(iso, tmp_path, monkeypatch):
                    {"id": "x-web", "slug": "w", "title": "w", "project": "web"}],
     )
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     assert res.dispatched == ("x-web",)
     skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
@@ -249,7 +249,7 @@ def test_spawn_failure_isolated_reservation_released(iso, tmp_path, monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     # etl still dispatched despite web failing
     assert res.dispatched == ("x-etl",)
@@ -279,11 +279,11 @@ def test_rerun_dispatches_nothing_already_claimed(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    first = adv.kickoff_epic("x-EPIC", events_path=iso)
+    first = adv.advance_epic("x-EPIC", events_path=iso)
     assert set(first.dispatched) == {"x-web", "x-etl"}
     calls.clear()
 
-    second = adv.kickoff_epic("x-EPIC", events_path=iso)
+    second = adv.advance_epic("x-EPIC", events_path=iso)
     assert second.dispatched == ()  # both children still claimed
     assert calls == []
     # every second-pass child result is a skip (already-claimed)
@@ -304,7 +304,7 @@ def test_idempotence_not_ttl_dependent(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    first = adv.kickoff_epic("x-EPIC", events_path=iso)
+    first = adv.advance_epic("x-EPIC", events_path=iso)
     assert first.dispatched == ("x-web",)
     calls.clear()
 
@@ -314,7 +314,7 @@ def test_idempotence_not_ttl_dependent(iso, tmp_path, monkeypatch):
                         root=adv._claims_root_for("dispatch:x-etl")).get("state") != "live"
 
     _patch_spawn(monkeypatch)  # etl now succeeds on retry
-    second = adv.kickoff_epic("x-EPIC", events_path=iso)
+    second = adv.advance_epic("x-EPIC", events_path=iso)
     assert second.dispatched == ("x-etl",)  # web skipped (claimed), etl dispatched
 
 
@@ -324,7 +324,7 @@ def test_idempotence_not_ttl_dependent(iso, tmp_path, monkeypatch):
 
 
 def test_all_done_epic_noop_deactivates(iso, tmp_path, monkeypatch):
-    """AC2-EDGE: kickoff on an all-done epic -> no dispatch, mission deactivated."""
+    """AC2-EDGE: epic advance on an all-done epic -> no dispatch, mission deactivated."""
     _epic_graph(tmp_path, monkeypatch, children_done=True)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
     monkeypatch.setattr(adv, "_ready_leaf_children",
@@ -332,7 +332,7 @@ def test_all_done_epic_noop_deactivates(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_spawn_worker",
                         lambda *a, **k: pytest.fail("must not spawn"))
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     assert res.deactivated is True and res.all_done is True
     assert res.dispatched == ()
@@ -353,7 +353,7 @@ def test_stop_deactivates_mission(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_spawn_worker",
                         lambda *a, **k: pytest.fail("must not spawn on stop"))
 
-    res = adv.kickoff_epic("x-EPIC", stop=True, events_path=iso)
+    res = adv.advance_epic("x-EPIC", stop=True, events_path=iso)
 
     assert res.deactivated is True
     assert "mission_active" not in _read_epic()
@@ -375,7 +375,7 @@ def test_overall_max_caps_dispatch(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    res = adv.kickoff_epic("x-EPIC", max_dispatch=1, events_path=iso)
+    res = adv.advance_epic("x-EPIC", max_dispatch=1, events_path=iso)
 
     assert len(res.dispatched) == 1
     assert len(calls) == 1
@@ -395,7 +395,7 @@ def test_per_project_lane_cap(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-a", "web"), ("x-b", "web")))
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     assert len(res.dispatched) == 1  # max_lanes=1 for project web
     lane_caps = [e for e in _events(iso)
@@ -421,7 +421,7 @@ def test_lane_cap_counts_boot_window_reservation(iso, tmp_path, monkeypatch):
     # only x-b is offered as ready (x-a is filtered out by the real ready surface)
     monkeypatch.setattr(adv, "_ready_leaf_children", lambda e: _ready(("x-b", "web")))
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     assert res.dispatched == ()  # web lane already held by x-a's reservation
     lane_caps = [e for e in _events(iso)
@@ -440,7 +440,7 @@ def test_lane_cap_seeds_live_workers(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
-    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    res = adv.advance_epic("x-EPIC", events_path=iso)
 
     # web is capped by the pre-existing live worker; only etl dispatches
     assert res.dispatched == ("x-etl",)

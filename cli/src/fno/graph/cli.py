@@ -4722,7 +4722,7 @@ def cmd_done(
 
 # -- reconcile (close merged-PR drift) --
 
-def _run_epic_kickoff(
+def _run_advance_epic(
     epic: str,
     *,
     stop: bool,
@@ -4732,21 +4732,21 @@ def _run_epic_kickoff(
     model: Optional[str],
     provider: Optional[str],
 ) -> None:
-    """Run the epic mission kickoff and render its receipt (x-9608 K1).
+    """Run the epic advance and render its receipt (x-9608 K1).
 
     Refusals (no-such-node / not-a-container) exit non-zero: unlike the
     merge-advance path (a dispatch decision is never an error), an operator naming
     a bad node to --epic wants a clear failure. Everything else exits 0.
     """
-    from fno.backlog.advance import kickoff_epic
+    from fno.backlog.advance import advance_epic
 
     try:
-        result = kickoff_epic(
+        result = advance_epic(
             epic, stop=stop, max_dispatch=max_dispatch,
             verbose=verbose, model=model, provider=provider,
         )
-    except Exception as exc:  # noqa: BLE001 - the kickoff itself is non-fatal per-child
-        typer.echo(f"advance: epic kickoff unexpected error (non-fatal): {exc}", err=True)
+    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
+        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
         raise typer.Exit(code=0)
 
     if json_out:
@@ -4795,7 +4795,7 @@ def cmd_advance(
     epic: Optional[str] = typer.Option(
         None,
         "--epic",
-        help="Kick off (converge) an epic mission: fan out its ready leaf children across all projects (x-9608 K1). Mutually exclusive with --closed.",
+        help="Advance (converge) an epic mission: fan out its ready leaf children across all projects (x-9608 K1). Mutually exclusive with --closed.",
     ),
     stop: bool = typer.Option(
         False,
@@ -4804,7 +4804,7 @@ def cmd_advance(
     ),
     max_dispatch: Optional[int] = typer.Option(
         None, "--max",
-        help="With --epic: cap the total workers this kickoff dispatches (per-project cap is config.parallel.max_lanes).",
+        help="With --epic: cap the total workers this epic advance dispatches (per-project cap is config.parallel.max_lanes).",
     ),
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Restrict next-node selection to this project."
@@ -4832,7 +4832,7 @@ def cmd_advance(
     /target, and /megatron all inherit it without driver-specific code. Always
     exits 0 (a dispatch decision is never an error to the host op).
 
-    ``--epic <id>`` switches to the mission kickoff/converge path (x-9608 K1):
+    ``--epic <id>`` switches to the epic advance / converge path (x-9608 K1):
     mark the epic's mission active and fan out every currently-ready LEAF child
     across all projects. Idempotent; respects config.parallel.max_lanes per
     project + ``--max`` overall. ``--stop`` deactivates instead.
@@ -4854,13 +4854,13 @@ def cmd_advance(
         typer.echo(f"advance: {exc}", err=True)
         raise typer.Exit(code=2)
 
-    # --epic routes to the mission kickoff path; it is a distinct trigger from the
+    # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
     if epic is not None:
         if closed is not None:
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        _run_epic_kickoff(
+        _run_advance_epic(
             epic, stop=stop, max_dispatch=max_dispatch, json_out=json_out,
             verbose=verbose, model=model, provider=provider,
         )

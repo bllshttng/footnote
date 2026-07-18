@@ -1440,11 +1440,11 @@ def _converge_one(
     """The one shared converge-dispatch core: dedup, reserve, spawn, one receipt.
 
     Extracted from ``_dispatch_one_dependent`` (x-9608 K1) so the two triggers -
-    merge-advance's per-dependent dispatch and the epic kickoff / mission-drain
+    merge-advance's per-dependent dispatch and the epic advance / mission-drain
     fan-out - run the IDENTICAL claim choreography + spawn + single decision event
     and can never fork. The caller owns root resolution (same-project cwd vs
-    cross-project work-map vs kickoff work-map) and passes the resolved ``root``;
-    everything downstream is common. ``mission`` (the epic id, kickoff/drain only)
+    cross-project work-map vs epic-advance work-map) and passes the resolved ``root``;
+    everything downstream is common. ``mission`` (the epic id, epic-advance/drain only)
     tags each receipt so a mission dispatch is attributable in the event stream;
     ``closed_node_id`` (merge-advance only) keys the AC1-RACE trigger. The two are
     mutually exclusive in practice but both are optional here.
@@ -1485,7 +1485,7 @@ def _converge_one(
         return skip("walker-live")
 
     # Already being worked? Same liveness gate as advance() step 4. This is what
-    # makes kickoff idempotent (AC1-EDGE): a re-run finds the first pass's workers
+    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
     # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
     # dispatch TTL still being live.
     if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
@@ -1560,7 +1560,7 @@ def _dispatch_one_dependent(
     OWN recorded ``cwd`` (NEVER the work-map root, which for a foreign-shaped record
     could land it on a protected branch where the bg worker dies). Everything
     downstream of root resolution - dedup, spawn, single decision event - is
-    ``_converge_one`` and is identical to the kickoff path.
+    ``_converge_one`` and is identical to the epic-advance path.
     """
     node_id = dep["id"]
     cross_project = bool(dep.get("cross_project"))
@@ -1674,13 +1674,13 @@ def advance_dependents(
 
 
 # ---------------------------------------------------------------------------
-# Epic kickoff / converge (x-9608 K1): fan out an epic's ready leaf children
+# Epic advance / converge (x-9608 K1): fan out an epic's ready leaf children
 # ---------------------------------------------------------------------------
 #
 # The mission's manual entry point (and, later, K2's per-tick drain reuse the
 # same _converge_one core). A "mission" is an epic node plus its transitive
 # children (the parent EDGE is the mission key; mission_id is untouched -
-# Locked Decision 2). Kickoff marks the mission active (a durable graph field on
+# Locked Decision 2). Epic advance marks the mission active (a durable graph field on
 # the epic, readable from Python AND Rust, cleared on cascade-close), then runs
 # converge pass 1: for every currently-ready LEAF child across all projects, it
 # resolves the child's work-map root and converge-dispatches it, one receipt per
@@ -1692,7 +1692,7 @@ def advance_dependents(
 EVENT_MISSION_ACTIVATED = "mission_activated"
 EVENT_MISSION_DEACTIVATED = "mission_deactivated"
 
-# The graph field kickoff sets on the epic node to mark the mission active.
+# The graph field epic advance sets on the epic node to mark the mission active.
 # Durable (graph.json), crash-safe, and read by both Python (read_graph) and
 # Rust (K2's drain loop reads graph.json directly). Cleared on cascade-close
 # (_cascade_close_parents) or an explicit `--epic <id> --stop`.
@@ -1700,8 +1700,8 @@ MISSION_ACTIVE_FIELD = "mission_active"
 
 
 @dataclass(frozen=True)
-class KickoffResult:
-    """Outcome of one kickoff_epic() run."""
+class AdvanceEpicResult:
+    """Outcome of one advance_epic() run."""
 
     epic_id: str
     error: Optional[str] = None  # no-such-node | not-a-container | disabled | walker-live
@@ -1716,7 +1716,7 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
     """Ready LEAF children of an epic, across ALL projects.
 
     Shells the shipped ``fno backlog ready --parent <epic> --all`` surface (the
-    SAME selection `next`/lane-fill use) so kickoff never diverges from it: the
+    SAME selection `next`/lane-fill use) so the epic advance never diverges from it: the
     result is already container-filtered, claim-filtered, open-PR-filtered,
     batch-filtered, and rank-sorted. Transitive children via ``--parent``
     semantics (descendants_of). Raises on a garbled response so the caller skips
@@ -1747,7 +1747,7 @@ def _live_workers_by_project() -> dict[str, int]:
     """Count occupied per-project lanes to seed max_lanes.
 
     max_lanes is a per-project concurrency cap, so a project that already has a
-    worker occupies a lane and kickoff must count it before deciding how many
+    worker occupies a lane and the epic advance must count it before deciding how many
     MORE to dispatch. Counts BOTH live/suspect ``node:<id>`` claims (a running
     worker) AND live/suspect ``dispatch:<id>`` reservations (the boot-window
     bridge a just-dispatched worker holds before it owns node:<id>) - else an
@@ -1780,15 +1780,15 @@ def _live_workers_by_project() -> dict[str, int]:
             proj = (by_id.get(nid) or {}).get("project")
             if proj:
                 counts[proj] = counts.get(proj, 0) + 1
-    except Exception:  # noqa: BLE001 - a live-count read must never block kickoff
+    except Exception:  # noqa: BLE001 - a live-count read must never block the epic advance
         return counts
     return counts
 
 
 def _max_lanes() -> int:
-    """Per-project concurrency cap for kickoff, from ``config.parallel.max_lanes``.
+    """Per-project concurrency cap for the epic advance, from ``config.parallel.max_lanes``.
 
-    Default 1 (the conservative single lane). A seam so kickoff's cap read is
+    Default 1 (the conservative single lane). A seam so the cap read is
     patchable in tests without stubbing the whole settings object. Fail-safe: any
     read fault degrades to 1.
     """
@@ -1830,7 +1830,7 @@ def _set_mission_active(epic_id: str, active: bool) -> bool:
     return changed[0]
 
 
-def kickoff_epic(
+def advance_epic(
     epic_id: str,
     *,
     max_dispatch: Optional[int] = None,
@@ -1840,8 +1840,8 @@ def kickoff_epic(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     stop: bool = False,
-) -> KickoffResult:
-    """Kick off (or stop) an epic mission: mark active + converge pass 1.
+) -> AdvanceEpicResult:
+    """Advance (or stop) an epic mission: mark active + converge pass 1.
 
     Refuses a non-container node by name (an epic's work is its children, never
     the box). ``stop`` deactivates the mission and dispatches nothing. Otherwise
@@ -1862,40 +1862,40 @@ def kickoff_epic(
     try:
         entries = read_graph(graph_json())
     except Exception as exc:  # noqa: BLE001 - a graph read fault skips cleanly
-        return KickoffResult(epic_id, error=f"graph-error: {str(exc)[:120]}")
+        return AdvanceEpicResult(epic_id, error=f"graph-error: {str(exc)[:120]}")
 
     epic = _find_node(entries, epic_id)
     if epic is None:
-        return KickoffResult(epic_id, error="no-such-node")
+        return AdvanceEpicResult(epic_id, error="no-such-node")
     canon = epic["id"]
 
     # Refuse a non-container by name: only an epic (some node's parent) is a
-    # mission. A leaf has no children to fan out; kickoff on it is an operator
+    # mission. A leaf has no children to fan out; an epic advance on it is an operator
     # error, not a silent no-op.
     from fno.graph.cli import _container_ids
 
     if canon not in _container_ids(entries):
-        return KickoffResult(canon, error="not-a-container")
+        return AdvanceEpicResult(canon, error="not-a-container")
 
     # Explicit stop: deactivate the mission, dispatch nothing.
     if stop:
         _set_mission_active(canon, False)
         _emit(EVENT_MISSION_DEACTIVATED, {"epic_id": canon, "reason": "stop"}, ev_path)
-        return KickoffResult(canon, deactivated=True)
+        return AdvanceEpicResult(canon, deactivated=True)
 
     # Same opt-in gate as advance()/advance_dependents. A live walker owning THIS
-    # repo would pick nodes up itself; kickoff is the explicit converge tool, so a
+    # repo would pick nodes up itself; the epic-advance verb is the explicit converge tool, so a
     # global walker is a skip. (Per-child, a foreign-repo walker is handled in
     # _converge_one's own _walker_live_at.) Unlike the merge-advance path, this
     # standalone epic verb has no paired advance() call to record the decision, so
-    # emit the skip receipt here or a gated kickoff is silent in the event stream
+    # emit the skip receipt here or a gated epic advance is silent in the event stream
     # (codex P2 - LD#12 parity).
     if not auto_continue_enabled(project_root=project_root):
         _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon}, ev_path)
-        return KickoffResult(canon, error="disabled")
+        return AdvanceEpicResult(canon, error="disabled")
     if _claim_is_live(_walker_key()):
         _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon}, ev_path)
-        return KickoffResult(canon, error="walker-live")
+        return AdvanceEpicResult(canon, error="walker-live")
 
     # All descendants already done -> mission complete: verify the cascade closed
     # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at
@@ -1913,11 +1913,11 @@ def kickoff_epic(
             {"epic_id": canon, "reason": "complete", "epic_closed": epic_done},
             ev_path,
         )
-        return KickoffResult(canon, deactivated=True, all_done=True)
+        return AdvanceEpicResult(canon, deactivated=True, all_done=True)
 
     # Mark the mission active (durable graph field) before dispatching, so a crash
     # mid-fanout still leaves the mission drainable by K2. Emit the activation
-    # receipt once, on the first kickoff (a re-run of an already-active mission
+    # receipt once, on the first epic advance (a re-run of an already-active mission
     # skips the event but still runs the converge pass - idempotent recovery).
     if _set_mission_active(canon, True):
         _emit(EVENT_MISSION_ACTIVATED, {"epic_id": canon}, ev_path)
@@ -1931,7 +1931,7 @@ def kickoff_epic(
             {"reason": "children-error", "mission": canon, "detail": str(exc)[:200]},
             ev_path,
         )
-        return KickoffResult(
+        return AdvanceEpicResult(
             canon, activated=True,
             child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
         )
@@ -1995,7 +1995,7 @@ def kickoff_epic(
             per_project[proj] = per_project.get(proj, 0) + 1
             total += 1
 
-    return KickoffResult(
+    return AdvanceEpicResult(
         canon, activated=True,
         dispatched=tuple(dispatched), child_results=tuple(results),
     )
@@ -2004,7 +2004,7 @@ def kickoff_epic(
 def _converge_skip_unmapped(
     child: dict, project: str, mission: str, ev_path: Path
 ) -> AdvanceResult:
-    """Emit the loud unmapped-project skip for one kickoff child (names the key)."""
+    """Emit the loud unmapped-project skip for one epic-advance child (names the key)."""
     detail = f"{project} (add config.work.workspaces.<ws>.projects[].path)"
     _emit(
         EVENT_SKIPPED,
