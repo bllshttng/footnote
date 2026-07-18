@@ -164,7 +164,11 @@ fn all_done_retires_the_mission() {
     let mut pending = Vec::new();
 
     let out = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
-    assert_eq!(out, MissionDispatch::Retire, "all_done must retire the loop");
+    assert_eq!(
+        out,
+        MissionDispatch::Retire,
+        "all_done must retire the loop"
+    );
 }
 
 // ── failure ─────────────────────────────────────────────────────────────────────

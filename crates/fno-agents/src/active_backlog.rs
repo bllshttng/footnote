@@ -1297,9 +1297,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.mission.as_deref(), Some("x-epic"));
-        let no_mission: ResolvedTarget =
-            serde_json::from_str(r#"{"project":"p","cwd":"/x","interval_seconds":60,"failure_limit":3}"#)
-                .unwrap();
+        let no_mission: ResolvedTarget = serde_json::from_str(
+            r#"{"project":"p","cwd":"/x","interval_seconds":60,"failure_limit":3}"#,
+        )
+        .unwrap();
         assert_eq!(no_mission.mission, None);
     }
 
@@ -1389,7 +1390,10 @@ mod tests {
         let outcome = dispatch_mission(&cfg, &mut pending, &journal);
         assert_eq!(outcome, MissionDispatch::Continue);
         assert_eq!(
-            pending.iter().map(|p| p.node_id.clone()).collect::<Vec<_>>(),
+            pending
+                .iter()
+                .map(|p| p.node_id.clone())
+                .collect::<Vec<_>>(),
             vec!["x-a", "x-b"]
         );
         assert!(journal_lines(&project_journal)
