@@ -1423,53 +1423,64 @@ def _bounded_names(names: list[str], cap: int = 3) -> str:
 
 
 def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
-    """True iff ``ts`` (bus ISO ``%Y-%m-%dT%H:%M:%SZ``) is strictly older than TTL.
+    """True iff bus ISO ``ts`` (``...Z`` UTC) is strictly older than TTL.
 
     Unparseable ts -> False (never flag): degrade to quiet, never to a crash.
+    ``fromisoformat`` is lock-free (unlike ``strptime``, which grabs a global
+    locale lock) and pre-3.11-safe once the trailing ``Z`` is normalized -- it
+    runs once per sent message on the every-turn hook path, so the lock matters.
     """
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
     try:
-        sent_at = _dt.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
-    except (ValueError, TypeError):
+        sent_at = _dt.fromisoformat(ts.replace("Z", "+00:00") if ts.endswith("Z") else ts)
+        return (now - sent_at).total_seconds() > ttl_seconds
+    except (ValueError, TypeError, AttributeError):
         return False
-    return (now - sent_at).total_seconds() > ttl_seconds
 
 
 def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
     """Count + distinct recipients (first-seen) of my sent mail unclaimed past TTL.
 
-    Unclaimed = still returned by ``scan_unread(recipient)`` (the recipient's
-    consume cursor has not passed it) AND strictly older than ``ttl_seconds``.
-    Computed live every call (recipient cursors read fresh, never cached), so a
-    just-consumed message stops being flagged immediately. Stat-only: reads
-    cursors, advances none.
+    Unclaimed = still past the recipient's consume cursor AND strictly older than
+    ``ttl_seconds``. Reads the bus ONCE (a single ``iter_messages`` snapshot) and
+    compares each recipient's cursor position against that snapshot, so cost is
+    ``O(bus + recipients)`` not ``O(recipients x bus)`` -- a per-recipient
+    ``scan_unread`` reparse could cross the hook's 2s timeout and silently drop
+    the nudge. Stat-only: recipient cursors are read fresh every call (never
+    cached), so a just-consumed message stops being flagged immediately; no
+    cursor is advanced.
     """
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
-    from fno.bus.cursor import scan_unread
+    from fno.bus.cursor import read_cursor
     from fno.bus.log import iter_messages
 
     now = _dt.now(tz=_tz.utc)
-    sent = [m for m in iter_messages() if m.from_ == handle]
+    all_msgs = list(iter_messages())
+    sent = [m for m in all_msgs if m.from_ == handle]
     if not sent:
         return 0, []
-    # Read each recipient's cursor once. A recipient name that scan_unread
-    # rejects (path-traversal guard) or that errors is skipped with an empty
-    # set -> its messages read as "claimed" and are not flagged: fail-open
-    # toward quiet, never a crashed turn (a sent-unclaimed line is advisory).
-    unread_ids: dict[str, set[str]] = {}
+    pos = {m.id: i for i, m in enumerate(all_msgs)}
+    # Per recipient, its consume-cursor position in the single snapshot. A
+    # message to r is unread iff it sits AFTER that position; an absent, corrupt,
+    # or rotated-out cursor means "nothing consumed" (-1 -> all unread), matching
+    # scan_unread's fail-open. A recipient name read_cursor rejects (path-
+    # traversal guard) or that errors -> sentinel len(all_msgs) so nothing is
+    # "after" it -> fully claimed / skipped: fail-open to quiet, never a crash.
+    cursor_pos: dict[str, int] = {}
     for r in {m.to for m in sent}:
         try:
-            unread_ids[r] = {e.id for e in scan_unread(r)}
+            cid = read_cursor(r)
         except (ValueError, OSError):
-            unread_ids[r] = set()
+            cursor_pos[r] = len(all_msgs)
+            continue
+        cursor_pos[r] = pos.get(cid, -1) if cid else -1
     count = 0
     recipients: list[str] = []
     for m in sent:
-        if m.id not in unread_ids.get(m.to, ()):  # recipient's cursor passed it
+        if pos[m.id] <= cursor_pos.get(m.to, len(all_msgs)):  # claimed / unresolvable
             continue
         if not _age_exceeds(m.ts, ttl_seconds, now):  # still fresh (strict >)
             continue
@@ -1491,9 +1502,13 @@ def cmd_notify_self() -> None:
     global bus:
 
       1. inbound: unread mail addressed to my handle -> one line "N unread fno
-         mail from <senders>: run `fno mail unread`". Persistent: the wrapping
-         hook fires each turn, so the line re-injects while unread and clears
-         the moment the consume cursor advances (no notify-cursor exists).
+         mail from <senders>: run `fno mail drain-self`". It points at
+         ``drain-self``, NOT ``fno mail unread``: only ``drain-self`` self-
+         resolves this session's handle and advances its consume cursor; ``fno
+         mail unread`` defaults ``--name`` to the project ("fno"), so it would
+         read the wrong inbox and never clear the nudge. Persistent: the
+         wrapping hook fires each turn, so the line re-injects while unread and
+         clears the moment ``drain-self`` advances the consume cursor.
       2. sent-unclaimed: my own sent mail still past the recipient's cursor and
          strictly older than ``config.inbox.unclaimed_ttl`` -> "N sent fno mail
          unclaimed (to <recipients>, >Nm)". Closes the "queued (durable)" ==
@@ -1516,7 +1531,7 @@ def cmd_notify_self() -> None:
     if unread:
         senders = _bounded_names([m.from_ for m in unread])
         lines.append(
-            f"{len(unread)} unread fno mail from {senders}: run `fno mail unread`"
+            f"{len(unread)} unread fno mail from {senders}: run `fno mail drain-self`"
         )
 
     ttl = load_settings().inbox.unclaimed_ttl

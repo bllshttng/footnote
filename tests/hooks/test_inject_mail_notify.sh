@@ -41,9 +41,12 @@ OUT="$(FNO_STUB_OUT='2 unread fno mail from alice, bob: run `fno mail unread`' r
 [[ $RC -eq 0 ]] && pass "unread: exit 0" || fail "unread rc=$RC"
 echo "$OUT" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1 \
   && pass "unread: emits UserPromptSubmit hookSpecificOutput" || fail "unread: bad envelope: $OUT"
-echo "$OUT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep -q "2 unread fno mail" \
+# grep, not grep -q: under `set -o pipefail` grep -q exits on first match and
+# SIGPIPEs upstream jq (exit 141), which would flake the pipeline. Redirecting
+# to /dev/null consumes the whole stream.
+echo "$OUT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep "2 unread fno mail" >/dev/null \
   && pass "unread: additionalContext carries the nudge" || fail "unread: nudge missing: $OUT"
-echo "$OUT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep -q "system-reminder" \
+echo "$OUT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep "system-reminder" >/dev/null \
   && pass "unread: wrapped in a system-reminder" || fail "unread: no wrapper: $OUT"
 
 # 2. Empty notify-self -> nothing injected (no blank <system-reminder>).

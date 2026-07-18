@@ -18,7 +18,7 @@ Stat-only. It reuses `drain-self`'s identity path (`resolve_harness_identity` ->
 A nudge is a notice, not a consume: `SessionStart`'s `drain-self` and the sender-side check must still see un-acted mail.
 There is no notify-cursor; the consume cursor is the sole delivery marker, and its non-advancement is exactly what keeps the nudge persistent (re-injecting each turn while unread) and self-clearing the instant the agent drains.
 
-- **Inbound:** unread envelopes addressed to my handle -> `N unread fno mail from <senders>: run \`fno mail unread\``. Senders are deterministic (first-seen), defanged, bounded (`X, Y, Z, +K more`).
+- **Inbound:** unread envelopes addressed to my handle -> `N unread fno mail from <senders>: run \`fno mail drain-self\``. It points at `drain-self`, not `fno mail unread`: only `drain-self` self-resolves this session's handle and advances its consume cursor, so the nudge clears; `fno mail unread` defaults `--name` to the project and would read the wrong inbox and never clear. Senders are deterministic (first-seen), defanged, bounded (`X, Y, Z, +K more`).
 - **Sent-unclaimed:** my sent mail still returned by `scan_unread(recipient)` (recipient's cursor has not passed it) AND strictly older than `config.inbox.unclaimed_ttl` (default 1800s) -> `N sent fno mail unclaimed (to <recipients>, >30m): recipient has not picked it up`. Computed live every call, so a just-consumed message stops being flagged immediately.
 
 ## Failure posture

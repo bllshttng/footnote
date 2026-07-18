@@ -55,7 +55,10 @@ def test_ac1_hp_inbound_nudge_count_and_senders(env, capsys):
     out = _run(capsys)
     assert "2 unread fno mail from" in out
     assert "alice" in out and "bob" in out
-    assert "run `fno mail unread`" in out
+    # Points at the self-resolving consume verb, NOT `fno mail unread` (which
+    # defaults --name to the project and would read the wrong inbox).
+    assert "run `fno mail drain-self`" in out
+    assert "fno mail unread" not in out
 
 
 def test_ac1_hp_senders_deterministic_order(env, capsys):
