@@ -875,11 +875,11 @@ def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
         [
             AgentEntry(
                 name="x-foo",
-                provider="claude",
+                harness="claude",
                 cwd="/Users/x/code/proj",
                 log_path="/tmp/x-foo.log",
                 short_id="9a063cd3",
-                claude_session_uuid="9a063cd3-69d4-415a-ada5-649b0164189c",
+                harness_session_id="9a063cd3-69d4-415a-ada5-649b0164189c",
             )
         ],
         path=reg,
@@ -911,11 +911,11 @@ def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
         [
             AgentEntry(
                 name="x-foo",
-                provider="claude",
+                harness="claude",
                 cwd="/x",
                 log_path="/tmp/x.log",
                 short_id="9a063cd3",
-                claude_session_uuid=sid,
+                harness_session_id=sid,
             )
         ],
         path=reg,
@@ -933,8 +933,8 @@ def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
     write_registry(
         [
             AgentEntry(
-                name="x-dead", provider="claude", cwd="/x", log_path="/tmp/d.log",
-                short_id="deadd00d", claude_session_uuid="deadd00d-1111-2222-3333-444444444444",
+                name="x-dead", harness="claude", cwd="/x", log_path="/tmp/d.log",
+                short_id="deadd00d", harness_session_id="deadd00d-1111-2222-3333-444444444444",
                 status="orphaned",
             )
         ],
@@ -957,9 +957,9 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     write_registry(
         [
             AgentEntry(
-                name="x-foo", provider="claude", cwd="/x", log_path="/tmp/f.log",
+                name="x-foo", harness="claude", cwd="/x", log_path="/tmp/f.log",
                 short_id="j0b1d001",  # jobId
-                claude_session_uuid="aaaabbbb-1111-2222-3333-444444444444",  # uuid[:8]=aaaabbbb
+                harness_session_id="aaaabbbb-1111-2222-3333-444444444444",  # uuid[:8]=aaaabbbb
             )
         ],
         path=reg,

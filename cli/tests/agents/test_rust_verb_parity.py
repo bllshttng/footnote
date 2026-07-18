@@ -211,11 +211,11 @@ def test_resume_print_command_parity(tmp_path) -> None:
         {
             "name": "cx",
             "short_id": "cx",
-            "provider": "codex",
+            "harness": "codex",
             "cwd": "/tmp/proj space",
             "project_root": "/tmp/proj space",
             "log_path": "/tmp/proj space/l.jsonl",
-            "codex_session_id": "uuid-1",
+            "harness_session_id": "uuid-1",
             "status": "live",
             "created_at": "2026-05-26T09:00:00Z",
         }
@@ -244,11 +244,10 @@ def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
         {
             "name": "cx",
             "short_id": "cxworker",  # daemon name-derived key (not the uuid prefix)
-            "provider": "codex",
+            "harness": "codex",
             "cwd": "/tmp/proj",
             "project_root": "/tmp/proj",
             "log_path": "/tmp/proj/l.jsonl",
-            "codex_session_id": full,
             "harness_session_id": full,
             "status": "live",
             "created_at": "2026-05-26T09:00:00Z",
@@ -281,8 +280,8 @@ def test_resume_error_parity(tmp_path, name, expected_exit) -> None:
     from fno.agents import resume_cli
 
     entries = [
-        {"name": "no-cwd", "provider": "codex", "cwd": "", "log_path": "/x/l", "codex_session_id": "u", "short_id": "a", "project_root": "/x", "status": "live", "created_at": "t"},
-        {"name": "no-sid", "provider": "gemini", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "b", "project_root": "/x", "status": "live", "created_at": "t"},
+        {"name": "no-cwd", "harness": "codex", "cwd": "", "log_path": "/x/l", "harness_session_id": "u", "short_id": "a", "project_root": "/x", "status": "live", "created_at": "t"},
+        {"name": "no-sid", "harness": "gemini", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "b", "project_root": "/x", "status": "live", "created_at": "t"},
     ]
     agents = tmp_path / "agents"
     _seed_registry(agents, entries)
@@ -365,7 +364,7 @@ def test_logs_codex_oneshot_parity(tmp_path, tail) -> None:
     # Python side: read_logs with load_registry pointed at the fixture.
     def fake_registry():
         return [
-            AgentEntry(name=e["name"], provider=e["provider"], cwd=e["cwd"], log_path=e["log_path"], created_at=e["created_at"], status=e["status"])
+            AgentEntry(name=e["name"], harness=e["provider"], cwd=e["cwd"], log_path=e["log_path"], created_at=e["created_at"], status=e["status"])
             for e in entries
         ]
 
@@ -399,7 +398,7 @@ def test_logs_missing_file_parity(tmp_path) -> None:
     # Python side: read_logs against the same fixture row.
     def fake_registry():
         return [
-            AgentEntry(name=e["name"], provider=e["provider"], cwd=e["cwd"], log_path=e["log_path"], created_at=e["created_at"], status=e["status"])
+            AgentEntry(name=e["name"], harness=e["provider"], cwd=e["cwd"], log_path=e["log_path"], created_at=e["created_at"], status=e["status"])
             for e in entries
         ]
 
@@ -451,10 +450,10 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
         [
             AgentEntry(
                 name="cx",
-                provider="codex",
+                harness="codex",
                 cwd="/tmp/proj",
                 log_path=str(agents / "cx.jsonl"),
-                codex_session_id="uuid-9",
+                harness_session_id="uuid-9",
             )
         ],
         agents / "registry.json",

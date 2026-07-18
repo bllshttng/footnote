@@ -382,13 +382,12 @@ const KNOWN_STATUSES: &[&str] = &[
     "exited",
     "permanent_dead",
 ];
-/// Registry schema versions Python's `load_registry` reads (current v4 plus
-/// the older shapes it synthesizes in memory). v4 is the host_mode forward-compat
-/// bump (ab-a171ceb2) and v5 the inside_leg one (inside-out E3.1); back-compat
-/// reads of v1..=v4 are retained. Anything else is a hard error - which is the
-/// point of each bump: a pre-inside-leg reader pinned to {1,2,3,4} rejects a v5
-/// store instead of silently dropping the inside-leg report.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
+/// Registry schema versions this fno reads (current write version plus the older
+/// shapes it back-fills in memory). Each bump is forward-compat: a stale reader
+/// pinned to a lower set rejects a newer store instead of silently dropping a
+/// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
+/// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -518,6 +517,33 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
                     .map(str::to_string)
                 {
                     obj.insert("harness".into(), Value::String(p));
+                }
+            }
+            // v10 (x-880e) accept-on-read, the raw-Value mirror of Python
+            // sync_harness_aliases: back-fill harness_session_id from a legacy
+            // row's harness-matching per-provider session key so the resume /
+            // resolver path sees the canonical id on a v1..=v9 row too.
+            let hsid_empty = obj
+                .get("harness_session_id")
+                .and_then(Value::as_str)
+                .map(str::is_empty)
+                .unwrap_or(true);
+            if hsid_empty {
+                let legacy_key = match obj.get("harness").and_then(Value::as_str) {
+                    Some("claude") => Some("claude_session_uuid"),
+                    Some("codex") => Some("codex_session_id"),
+                    Some("gemini") => Some("gemini_session_id"),
+                    _ => None,
+                };
+                if let Some(k) = legacy_key {
+                    if let Some(v) = obj
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty() && *s != "null")
+                        .map(str::to_string)
+                    {
+                        obj.insert("harness_session_id".into(), Value::String(v));
+                    }
                 }
             }
             let legacy = obj
@@ -865,17 +891,17 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 // Shared helpers for the subprocess-exec verbs (attach, resume).
 // ---------------------------------------------------------------------------
 
-/// Provider -> session-id registry field, mirroring Python
-/// `registry.PROVIDER_SESSION_ID_FIELDS`. v9 (x-1b1e): claude resolves to the
-/// unified `short_id` transport key (was `claude_short_id`). This is the ONLY
-/// place a verb touches a provider-specific identity field; every session-
-/// connecting verb reaches a row via [`find_agent_entry`] instead of its own
-/// name-only `.find`.
-fn session_id_field(provider: &str) -> Option<&'static str> {
-    match provider {
+/// Harness -> session-id registry field, mirroring Python
+/// `registry.HARNESS_SESSION_ID_FIELDS`. claude resolves to the unified `short_id`
+/// transport key (the jobId); v10 (x-880e) resolves codex/gemini to the canonical
+/// `harness_session_id` (their per-provider fields are gone -- load_registry_entries
+/// back-fills it from a legacy row's per-provider key). This is the ONLY place a
+/// verb touches a session-id field; every session-connecting verb reaches a row via
+/// [`find_agent_entry`] instead of its own name-only `.find`.
+fn session_id_field(harness: &str) -> Option<&'static str> {
+    match harness {
         "claude" => Some("short_id"),
-        "codex" => Some("codex_session_id"),
-        "gemini" => Some("gemini_session_id"),
+        "codex" | "gemini" => Some("harness_session_id"),
         _ => None,
     }
 }
@@ -919,19 +945,16 @@ impl ResolveError {
     }
 }
 
-/// The canonical id plus the legacy per-provider full-id fields, lowercased.
+/// The canonical full session id, lowercased (x-880e: the per-provider full-id
+/// fields are gone; harness_session_id -- back-filled from a legacy row's
+/// per-provider key in `load_registry_entries` -- is their single successor).
 fn full_session_ids(entry: &Value) -> Vec<String> {
-    [
-        "harness_session_id",
-        "claude_session_uuid",
-        "codex_session_id",
-        "gemini_session_id",
-    ]
-    .iter()
-    .filter_map(|k| entry.get(*k).and_then(Value::as_str))
-    .filter(|s| !s.is_empty())
-    .map(|s| s.to_ascii_lowercase())
-    .collect()
+    entry
+        .get("harness_session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.to_ascii_lowercase()])
+        .unwrap_or_default()
 }
 
 /// The derived canonical short: the first hex group of `harness_session_id`
@@ -2624,8 +2647,8 @@ mod tests {
     #[test]
     fn session_id_field_and_resume_argv_match_python() {
         assert_eq!(session_id_field("claude"), Some("short_id"));
-        assert_eq!(session_id_field("codex"), Some("codex_session_id"));
-        assert_eq!(session_id_field("gemini"), Some("gemini_session_id"));
+        assert_eq!(session_id_field("codex"), Some("harness_session_id"));
+        assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
         assert_eq!(
@@ -2980,10 +3003,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v10 is the future-drift case a pre-bump reader would have on v9.
+        // v11 is the future-drift case a pre-bump reader would have on v10.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":10,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":11,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // x-8dfc: an unknown provider no longer bricks the read -- it loads as

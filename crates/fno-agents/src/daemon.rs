@@ -1379,7 +1379,7 @@ fn build_claude_stream_entry(
     RegistryEntry {
         name: name.into(),
         short_id: short_id.into(),
-        provider: "claude".into(),
+        legacy_provider: String::new(),
         harness: Some("claude".into()),
         harness_session_id: Some(uuid.into()),
         cwd: cwd_s.clone(),
@@ -4244,7 +4244,7 @@ mod tests {
         RegistryEntry {
             name: name.into(),
             short_id: String::new(),
-            provider: "claude".into(),
+            legacy_provider: "claude".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),
@@ -4352,7 +4352,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "worker-A".into(),
                 short_id: "wkA".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4419,7 +4419,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "ghost".into(),
                 short_id: "ghost".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4530,7 +4530,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "dead".into(),
                 short_id: "dead".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4646,7 +4646,7 @@ mod tests {
             r.entries.push(RegistryEntry {
                 name: "recycled".into(),
                 short_id: "recycled".into(),
-                provider: "codex".into(),
+                legacy_provider: "codex".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -4734,7 +4734,7 @@ mod tests {
         reg.entries.push(RegistryEntry {
             name: "x".into(),
             short_id: "workerA".into(),
-            provider: "codex".into(),
+            legacy_provider: "codex".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/".into(),
@@ -4769,7 +4769,7 @@ mod tests {
         RegistryEntry {
             name: name.into(),
             short_id: name.into(),
-            provider: "codex".into(),
+            legacy_provider: "codex".into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),
@@ -4806,7 +4806,7 @@ mod tests {
     /// A `claude --bg` row: jobId in `short_id`, `claude_session_uuid` null.
     fn bg_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = rentry(name, AgentStatus::Live, None);
-        e.provider = "claude".into();
+        e.legacy_provider = "claude".into();
         e.short_id = short_id.into();
         e.claude_session_uuid = None;
         e
@@ -4852,7 +4852,7 @@ mod tests {
         // codex P2: a foreign-provider row carrying a short must not
         // adopt a claude uuid.
         let mut row = bg_claude_row("w", "3228ccad");
-        row.provider = "codex".into();
+        row.legacy_provider = "codex".into();
         assert!(matches!(
             find_uuid_backfill_row(&[row], "3228ccad-c078-4b53-a8c9-7199b831eae4"),
             UuidBackfill::None
@@ -5226,7 +5226,7 @@ mod tests {
 
         // A registered claude row (inside_leg None) + a buffered report for it.
         let mut row = rentry("pane", AgentStatus::Live, None);
-        row.provider = "claude".into();
+        row.legacy_provider = "claude".into();
         row.claude_session_uuid = Some("uuid-x".into());
         state::update_registry(&home.registry_json(), |r| r.entries.push(row)).unwrap();
         ctx.pending_inside_leg
@@ -5519,7 +5519,7 @@ done
             r.entries.push(RegistryEntry {
                 name: name.into(),
                 short_id: short_id.into(),
-                provider: "claude".into(),
+                legacy_provider: "claude".into(),
                 harness: None,
                 harness_session_id: None,
                 cwd: "/tmp".into(),
@@ -5714,7 +5714,7 @@ done
             Some(99),
             PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
         );
-        assert_eq!(e.provider, "claude");
+        assert_eq!(e.harness_name(), "claude");
         assert_eq!(
             e.host_mode.as_deref(),
             Some(crate::state::HOST_MODE_INTERACTIVE)
@@ -5831,7 +5831,7 @@ done
 
         let reg = load_registry_offloaded(home.registry_json()).await;
         let row = reg.find("cl").expect("adopted row missing");
-        assert_eq!(row.provider, "claude");
+        assert_eq!(row.harness_name(), "claude");
         assert_eq!(row.host_mode.as_deref(), Some("interactive"));
         assert_eq!(row.claude_session_uuid.as_deref(), Some("uuid-e2e"));
         assert_eq!(row.status, AgentStatus::Live);

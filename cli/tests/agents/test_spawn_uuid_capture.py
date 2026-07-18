@@ -131,7 +131,7 @@ def test_spawn_claude_persists_resolved_uuid(workdir_claude, monkeypatch) -> Non
     entry = next((e for e in load_registry() if e.name == "uuid-agent"), None)
     assert entry is not None, "registry row must exist after claude spawn"
     assert entry.short_id == "7c5dcf5d"
-    assert entry.claude_session_uuid == full_uuid
+    assert entry.harness_session_id == full_uuid
 
 
 def test_spawn_claude_unresolved_uuid_still_launches(workdir_claude) -> None:
@@ -150,4 +150,4 @@ def test_spawn_claude_unresolved_uuid_still_launches(workdir_claude) -> None:
     entry = next((e for e in load_registry() if e.name == "nouuid-agent"), None)
     assert entry is not None
     assert entry.short_id == "7c5dcf5d"  # short-id still reported
-    assert entry.claude_session_uuid is None  # uuid is a tolerated miss
+    assert entry.harness_session_id is None  # uuid is a tolerated miss

@@ -2497,7 +2497,7 @@ fn create(
         // v9: the claude jobId is the unified transport key (was claude_short_id);
         // follow-up/logs read it via `transport_short()`.
         short_id: short_id.clone(),
-        provider: "claude".to_string(),
+        legacy_provider: String::new(),
         // Canonical identity at birth (x-ec59); harness_session_id mirrors the
         // (possibly None-on-race) resolved uuid, healed later like the legacy field.
         harness: Some("claude".to_string()),

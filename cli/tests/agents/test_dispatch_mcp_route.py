@@ -27,7 +27,7 @@ def _seed_mcp_agent(name: str = "mcp-worker", *, mcp_channel_id: str = "abc12345
         [
             AgentEntry(
                 name=name,
-                provider="claude",
+                harness="claude",
                 cwd="/tmp",
                 log_path=f"/tmp/{name}.log",
                 short_id="abc12345",
@@ -46,7 +46,7 @@ def _seed_socket_only_agent(name: str = "socket-worker") -> None:
         [
             AgentEntry(
                 name=name,
-                provider="claude",
+                harness="claude",
                 cwd="/tmp",
                 log_path=f"/tmp/{name}.log",
                 short_id="abc12345",

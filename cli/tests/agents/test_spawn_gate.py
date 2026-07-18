@@ -37,7 +37,7 @@ def _write_roster(tmp_path, workers: dict) -> None:
 def _row(name: str, *, status="live", pid=None, short_id=""):
     return AgentEntry(
         name=name,
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/log",
         status=status,

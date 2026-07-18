@@ -295,7 +295,7 @@ def _discover_from_registry(
         # alien harness stays excluded here (no live transport exists for it)
         # while remaining durably mail-routable -- the live/durable split the
         # relay peer table depends on, preserved, not widened.
-        harness = getattr(e, "harness", None) or getattr(e, "provider", None)
+        harness = getattr(e, "harness", None)
         if harness not in HARNESS_SESSION_ID_FIELDS:
             continue
         # A dead/orphaned row must never resolve as a live recipient: mail would
@@ -312,11 +312,7 @@ def _discover_from_registry(
             # identity is the canonical field (a heal-backfilled bg row) resolves
             # here, where before it fell through to durable-only forever.
             short_val = getattr(e, "short_id", "") or None
-            sid = (
-                getattr(e, "harness_session_id", None)
-                or getattr(e, "claude_session_uuid", None)
-                or short_val
-            )
+            sid = getattr(e, "harness_session_id", None) or short_val
             short = short_val or (sid[:8] if sid else None)
         else:
             sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)

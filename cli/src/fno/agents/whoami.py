@@ -75,9 +75,9 @@ def _find_by_name(registry: list[AgentEntry], name: str) -> Optional[AgentEntry]
 
 
 def _row_harness(entry: AgentEntry) -> str:
-    """This row's harness for matching: canonical ``harness``, legacy ``provider``
-    as fallback (a pre-migration row has only ``provider``)."""
-    return (getattr(entry, "harness", None) or entry.provider or "").lower()
+    """This row's harness for matching (x-880e: harness is the sole identity axis;
+    a legacy row's provider is back-filled into harness at load)."""
+    return (getattr(entry, "harness", None) or "").lower()
 
 
 def _find_by_session(

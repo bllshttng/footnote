@@ -104,7 +104,7 @@ def _register_self(name: str, cwd: str) -> None:
     from fno.agents.registry import AgentEntry, write_registry
     write_registry([
         AgentEntry(
-            name=name, provider="claude", cwd=cwd,
+            name=name, harness="claude", cwd=cwd,
             log_path=f"/tmp/{name}.log", short_id=f"id-{name}", status="live",
         )
     ])

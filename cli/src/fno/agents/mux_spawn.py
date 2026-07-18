@@ -736,10 +736,10 @@ def dispatch_spawn_pane(
             rows.append(
                 AgentEntry(
                     name=name,
-                    provider=provider,
+                    harness=provider,
                     cwd=str(cwd),
                     log_path="",
-                    claude_session_uuid=session_uuid,
+                    harness_session_id=session_uuid,
                     status="live",
                     pid=child_pid,
                     mux={"session": session, "pane_id": pane_id},

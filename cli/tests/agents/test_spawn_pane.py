@@ -108,7 +108,7 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     assert len(rows) == 1
     row = rows[0]
     assert row.mux == {"session": "main", "pane_id": 7}
-    assert row.claude_session_uuid == result.session_uuid
+    assert row.harness_session_id == result.session_uuid
     assert row.pid == 4242
     assert row.status == "live"
     assert row.short_id == ""  # one live ref: mux only
@@ -169,7 +169,7 @@ def test_collision_refused_before_any_pane_spawn(tmp_path: Path, monkeypatch) ->
     from fno.agents.registry import AgentEntry, write_registry
 
     write_registry(
-        [AgentEntry(name="peer", provider="claude", cwd="/p", log_path="/l")]
+        [AgentEntry(name="peer", harness="claude", cwd="/p", log_path="/l")]
     )
     runner = FakeRunner()
     with pytest.raises(DispatchAskError, match="already exists") as exc_info:
@@ -383,11 +383,11 @@ def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     rows = {row.name: row for row in load_registry()}
     assert set(rows) == {"peer", "oc"}
     agy_row = rows["peer"]
-    assert agy_row.provider == "agy"
+    assert agy_row.harness == "agy"
     assert agy_row.mux == {"session": "main", "pane_id": 7}  # FakeRunner default
     assert agy_row.status == "live"
     oc_row = rows["oc"]
-    assert oc_row.provider == "opencode"
+    assert oc_row.harness == "opencode"
     assert oc_row.mux == {"session": "main", "pane_id": 7}
     assert oc_row.status == "live"
 

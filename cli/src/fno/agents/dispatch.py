@@ -828,10 +828,8 @@ def _codex_create_path(
 
     new_entry = AgentEntry(
         name=name,
-        provider="codex",
         cwd=str(cwd),
         log_path=str(output_path),
-        codex_session_id=session_id,
         harness="codex",
         harness_session_id=session_id,
     )
@@ -1098,10 +1096,8 @@ def _gemini_create_path(
 
     new_entry = AgentEntry(
         name=name,
-        provider="gemini",
         cwd=str(cwd),
         log_path=str(output_path),
-        gemini_session_id=session_id,
         harness="gemini",
         harness_session_id=session_id,
     )
@@ -1435,14 +1431,12 @@ def _claude_create_path(
     log_path = _derive_log_path(name)
     new_entry = AgentEntry(
         name=name,
-        provider=chosen,
         cwd=str(cwd),
         log_path=str(log_path),
         short_id=short_id,
-        claude_session_uuid=session_uuid,
         # Canonical identity at birth (x-ec59): a bg claude row is born routable
-        # by name. A raced uuid-resolution miss leaves harness_session_id None
-        # (same as claude_session_uuid); reconcile / send-time heal backfills it.
+        # by name. A raced uuid-resolution miss leaves harness_session_id None;
+        # reconcile / send-time heal backfills it.
         harness="claude",
         harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
@@ -2394,7 +2388,7 @@ def stop_agent(
     # because we do NOT call ``hold_agent_lock`` directly in this function
     # body — the helper encapsulates the lock acquisition.
     pre_existing = _resolve_registry_entry(name)
-    pre_provider = pre_existing.provider
+    pre_provider = pre_existing.harness
 
     def _on_wait() -> None:
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
@@ -2564,7 +2558,7 @@ def rm_agent(
     # body does NOT call ``hold_agent_lock`` directly — that lives inside
     # ``with_agent_lock_and_entry``, which the lint script allowlists.
     pre_existing = _resolve_registry_entry(name)
-    pre_provider = pre_existing.provider
+    pre_provider = pre_existing.harness
 
     def _on_wait() -> None:
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
@@ -2880,7 +2874,7 @@ def reconcile_agents(
             # Wave 3.3: gemini reachability via the cwd-pinned chats dir
             # at ~/.gemini/tmp/<cwd-basename>/chats/session-*-<short>.jsonl
             # (Wave 2.0 layout discovery).
-            if not entry.gemini_session_id:
+            if not entry.harness_session_id:
                 events.emit(
                     "agent_inconsistent",
                     name=entry.name,
@@ -2907,7 +2901,7 @@ def reconcile_agents(
                     {
                         "name": entry.name,
                         "provider": "gemini",
-                        "id": entry.gemini_session_id,
+                        "id": entry.harness_session_id,
                         "reason": "missing-gemini-cwd",
                     }
                 )
@@ -2917,7 +2911,7 @@ def reconcile_agents(
 
             try:
                 reachable = gemini_mod.gemini_session_reachable(
-                    entry.gemini_session_id, Path(entry.cwd)
+                    entry.harness_session_id, Path(entry.cwd)
                 )
             except ReachabilityProbeError as exc:
                 # Tri-state inconclusive (AC8-FR): preserve status, route
@@ -2934,7 +2928,7 @@ def reconcile_agents(
                     {
                         "name": entry.name,
                         "provider": "gemini",
-                        "id": entry.gemini_session_id,
+                        "id": entry.harness_session_id,
                         "reason": f"gemini-probe-failed: {exc.reason}",
                     }
                 )
@@ -2955,12 +2949,12 @@ def reconcile_agents(
                     {
                         "name": entry.name,
                         "provider": "codex",
-                        "id": entry.codex_session_id,
+                        "id": entry.harness_session_id,
                         "reason": reason,
                     }
                 )
                 continue
-            if not entry.codex_session_id:
+            if not entry.harness_session_id:
                 # Registry corruption: a codex row should always carry its
                 # session id (US4-codex AC1-HP invariant). Surface but do
                 # not mutate - mark as inconsistent for manual triage.
@@ -2979,7 +2973,7 @@ def reconcile_agents(
                 )
                 continue
 
-            reachable = entry.codex_session_id in known_codex_ids
+            reachable = entry.harness_session_id in known_codex_ids
             new_status = "live" if reachable else "orphaned"
 
         elif entry.harness == "claude":
@@ -3109,7 +3103,7 @@ def reconcile_agents(
             # gemini agents flipped between live/orphaned with "id": null
             # which rendered as "?" in human output and broke follow-up
             # tooling.
-            "id": (entry.short_id or entry.codex_session_id or entry.gemini_session_id),
+            "id": (entry.short_id or entry.harness_session_id),
         }
         if new_status == "orphaned":
             orphaned.append(change)

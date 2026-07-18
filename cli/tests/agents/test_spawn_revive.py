@@ -42,11 +42,11 @@ def workdir_claude(tmp_path, monkeypatch):
 def _seed_row(name: str, short_id: str, uuid) -> None:
     row = AgentEntry(
         name=name,
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/rev.log",
         short_id=short_id,
-        claude_session_uuid=uuid,
+        harness_session_id=uuid,
     )
     update_registry(lambda entries: entries + [row])
 
@@ -59,11 +59,11 @@ def _seed_row(name: str, short_id: str, uuid) -> None:
 def _mk(**kw) -> AgentEntry:
     base = dict(
         name="w",
-        provider="claude",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/rev.log",
         short_id="deadbeef",
-        claude_session_uuid=DEAD_UUID,
+        harness_session_id=DEAD_UUID,
     )
     base.update(kw)
     return AgentEntry(**base)
@@ -80,7 +80,7 @@ def test_is_revival_gate(monkeypatch) -> None:
     assert dispatch._is_revival(row, "claude", OTHER_UUID) is False  # uuid mismatch
     assert dispatch._is_revival(row, "codex", DEAD_UUID) is False  # non-claude spawn
     assert (
-        dispatch._is_revival(_mk(provider="codex"), "claude", DEAD_UUID) is False
+        dispatch._is_revival(_mk(harness="codex"), "claude", DEAD_UUID) is False
     )  # non-claude row
 
     # A live supervisor is a collision, never a revival - even with a uuid match.
@@ -113,7 +113,7 @@ def test_spawn_resume_revives_in_place(workdir_claude, monkeypatch) -> None:
     rows = [e for e in load_registry() if e.name == "rev-agent"]
     assert len(rows) == 1  # revived in place, not a same-name duplicate
     assert rows[0].short_id == "7c5dcf5d"  # fresh short_id from the new spawn
-    assert rows[0].claude_session_uuid == DEAD_UUID  # same conversation preserved
+    assert rows[0].harness_session_id == DEAD_UUID  # same conversation preserved
 
 
 def test_spawn_resume_uuid_mismatch_is_collision(workdir_claude, monkeypatch) -> None:

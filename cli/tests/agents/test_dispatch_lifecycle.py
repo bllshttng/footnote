@@ -37,9 +37,20 @@ def _seed_registry(*entries):
     for kwargs in entries:
         kwargs.setdefault("cwd", "/tmp")
         kwargs.setdefault("log_path", "/tmp/x.log")
+        _canonize_identity_kwargs(kwargs)
         out.append(AgentEntry(**kwargs))
     write_registry(out)
     return out
+
+
+def _canonize_identity_kwargs(kwargs: dict) -> None:
+    """Map legacy identity kwargs to the v10 canonical fields (x-880e), mirroring
+    what load_registry back-fills for on-disk rows, so terse test dicts still build."""
+    if "provider" in kwargs:
+        kwargs["harness"] = kwargs.pop("provider")
+    for _k in ("codex_session_id", "gemini_session_id", "claude_session_uuid"):
+        if _k in kwargs:
+            kwargs.setdefault("harness_session_id", kwargs.pop(_k))
 
 
 def _force_claude_on_path(monkeypatch, tmp_path: Path) -> None:
@@ -562,7 +573,7 @@ def test_reconcile_backfills_null_harness_session_id(tmp_path: Path, monkeypatch
     # The row gains BOTH the canonical field and the synced legacy alias.
     e = load_registry()[0]
     assert e.harness_session_id == "FULL-UUID-7c5dcf5d"
-    assert e.claude_session_uuid == "FULL-UUID-7c5dcf5d"
+    assert e.harness_session_id == "FULL-UUID-7c5dcf5d"
 
     events = _read_events(tmp_path)
     done = [ev for ev in events if ev.get("kind") == "reconcile_done"]
@@ -1047,7 +1058,7 @@ def test_rm_uses_locked_short_id_after_concurrent_recreate(
         if call_count["n"] == 1:
             # Stale entry — pretends short_id was aaaaaaaa pre-flock.
             return AgentEntry(
-                name=name, provider="claude", cwd="/tmp", log_path="/tmp/x",
+                name=name, harness="claude", cwd="/tmp", log_path="/tmp/x",
                 short_id="aaaaaaaa",
             )
         return real_resolve(name, **kwargs)

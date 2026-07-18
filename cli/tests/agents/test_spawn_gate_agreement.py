@@ -64,7 +64,7 @@ def test_slot_count_agrees_with_rust_gate_fixture(name, sc, tmp_path, monkeypatc
     rows = [
         AgentEntry(
             name=row["name"],
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/log",
             status=row["status"],
@@ -92,9 +92,9 @@ def test_slot_count_excludes_roster_while_count_includes_it(tmp_path, monkeypatc
     }
     (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))
     rows = [
-        AgentEntry(name="w1", provider="claude", cwd="/tmp", log_path="/l",
+        AgentEntry(name="w1", harness="claude", cwd="/tmp", log_path="/l",
                    status="busy", pid=alive, short_id=""),
-        AgentEntry(name="w2", provider="claude", cwd="/tmp", log_path="/l",
+        AgentEntry(name="w2", harness="claude", cwd="/tmp", log_path="/l",
                    status="busy", pid=alive, short_id=""),
     ]
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
@@ -115,7 +115,7 @@ def test_run_gate_passes_under_cap_despite_large_roster(tmp_path, monkeypatch, c
     }
     (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))
     rows = [
-        AgentEntry(name=f"w{i}", provider="claude", cwd="/tmp", log_path="/l",
+        AgentEntry(name=f"w{i}", harness="claude", cwd="/tmp", log_path="/l",
                    status="busy", pid=alive, short_id="")
         for i in range(2)
     ]

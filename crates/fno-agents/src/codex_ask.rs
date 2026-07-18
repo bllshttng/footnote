@@ -1155,7 +1155,7 @@ fn dispatch_create(
     let new_entry = RegistryEntry {
         name: name.to_string(),
         short_id: String::new(),
-        provider: "codex".to_string(),
+        legacy_provider: String::new(),
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),
         cwd: cwd.to_string_lossy().to_string(),

@@ -104,10 +104,10 @@ def fake_gemini_resume(monkeypatch):
 def _seed_gemini(name: str, *, session_id: str, cwd: Path) -> AgentEntry:
     entry = AgentEntry(
         name=name,
-        provider="gemini",
+        harness="gemini",
         cwd=str(cwd),
         log_path=str(cwd / "log.jsonl"),
-        gemini_session_id=session_id,
+        harness_session_id=session_id,
         status="live",
     )
     update_registry(lambda entries: entries + [entry])
@@ -157,8 +157,8 @@ def test_dispatch_creates_gemini_agent_when_no_existing(
     from fno.agents.registry import load_registry
     entries = load_registry()
     assert len(entries) == 1
-    assert entries[0].provider == "gemini"
-    assert entries[0].gemini_session_id == "cedb6b44-d140-4fa4-86f1-3b3e7aed339d"
+    assert entries[0].harness == "gemini"
+    assert entries[0].harness_session_id == "cedb6b44-d140-4fa4-86f1-3b3e7aed339d"
 
 
 def test_dispatch_create_routes_yolo_flag(
@@ -299,10 +299,10 @@ def test_dispatch_followup_raises_when_session_id_missing(
     -> exit 11 with rm-and-recreate hint."""
     entry = AgentEntry(
         name="broken",
-        provider="gemini",
+        harness="gemini",
         cwd=str(tmp_path),
         log_path=str(tmp_path / "log.jsonl"),
-        gemini_session_id=None,  # corruption
+        harness_session_id=None,  # corruption
         status="live",
     )
     update_registry(lambda entries: entries + [entry])
@@ -316,7 +316,7 @@ def test_dispatch_followup_raises_when_session_id_missing(
             from_name="orchestrator",
         )
     assert exc_info.value.exit_code == 11
-    assert "no gemini_session_id" in str(exc_info.value)
+    assert "no harness_session_id" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

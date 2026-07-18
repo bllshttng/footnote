@@ -17,7 +17,7 @@ def _seed_claude_agent(name: str = "claude-bot", *, short_id: str = "abc12345") 
         [
             AgentEntry(
                 name=name,
-                provider="claude",
+                harness="claude",
                 cwd="/tmp",
                 log_path=f"/tmp/{name}.log",
                 short_id=short_id,
@@ -34,10 +34,10 @@ def _seed_codex_agent(name: str = "codex-bot") -> None:
         [
             AgentEntry(
                 name=name,
-                provider="codex",
+                harness="codex",
                 cwd="/tmp",
                 log_path=f"/tmp/{name}.log",
-                codex_session_id="codex-sess-1",
+                harness_session_id="codex-sess-1",
                 status="live",
             )
         ]
@@ -145,7 +145,7 @@ class TestReconcileMCPProbeSlot:
             [
                 AgentEntry(
                     name="mcp-bot",
-                    provider="claude",
+                    harness="claude",
                     cwd="/tmp",
                     log_path="/tmp/mcp-bot.log",
                     short_id="ch-xyz12345",

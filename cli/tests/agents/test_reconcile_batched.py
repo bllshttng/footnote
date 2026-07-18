@@ -44,10 +44,10 @@ def isolated_registry(tmp_path: Path, monkeypatch) -> Path:
 def _seed_codex(name: str, *, status: str, session_id: str) -> AgentEntry:
     entry = AgentEntry(
         name=name,
-        provider="codex",
+        harness="codex",
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / f"{name}.log"),
-        codex_session_id=session_id,
+        harness_session_id=session_id,
         status=status,
         last_message_at="2026-05-21T00:00:00Z",
     )
@@ -58,7 +58,7 @@ def _seed_codex(name: str, *, status: str, session_id: str) -> AgentEntry:
 def _seed_claude(name: str, *, status: str, short_id: str) -> AgentEntry:
     entry = AgentEntry(
         name=name,
-        provider="claude",
+        harness="claude",
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / f"{name}.log"),
         short_id=short_id,

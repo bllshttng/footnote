@@ -38,11 +38,11 @@ def _seed_entry(name: str, provider: str = "claude") -> AgentEntry:
     """Insert a minimal AgentEntry into the registry for the test."""
     entry = AgentEntry(
         name=name,
-        provider=provider,
+        harness=provider,
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / f"{name}.log"),
         short_id="aaaaaaaa" if provider == "claude" else "",
-        codex_session_id=(
+        harness_session_id=(
             "deadbeef-dead-beef-dead-beefdeadbeef"
             if provider == "codex" else None
         ),
@@ -75,7 +75,7 @@ def test_yields_post_lock_entry(isolated_registry: Path) -> None:
     with with_agent_lock_and_entry("worker-A") as (lock_handle, existing):
         assert lock_handle.is_held() is True
         assert existing.name == "worker-A"
-        assert existing.provider == "claude"
+        assert existing.harness == "claude"
         # The helper does NOT yield the pre-flock snapshot — proven by the
         # fact that the seeded object's identity is not shared. Both
         # values are fresh AgentEntry instances loaded from the registry.
@@ -121,11 +121,10 @@ def test_staged_resolve_pattern_proves_post_lock_value_is_used(
     real_entry = _seed_entry("worker-A", provider="claude")
     stale_entry = AgentEntry(
         name="worker-A",
-        provider="claude",
+        harness="claude",
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / "worker-A.log"),
         short_id="00000000",  # stale short-id
-        codex_session_id=None,
         created_at="2026-01-01T00:00:00Z",
         last_message_at="2026-01-01T00:00:00Z",
         status="orphaned",
@@ -206,7 +205,7 @@ def test_registry_path_override_routes_both_lock_and_entry_reads(
     update_registry(lambda entries: entries + [
         AgentEntry(
             name="worker-A",
-            provider="claude",
+            harness="claude",
             cwd=str(tmp_path),
             log_path=str(tmp_path / "default-w.log"),
             short_id="ddddffff",  # default-registry short_id
@@ -221,7 +220,7 @@ def test_registry_path_override_routes_both_lock_and_entry_reads(
         lambda entries: entries + [
             AgentEntry(
                 name="worker-A",
-                provider="claude",
+                harness="claude",
                 cwd=str(tmp_path),
                 log_path=str(tmp_path / "override-w.log"),
                 short_id="0fffff11",  # override-registry short_id

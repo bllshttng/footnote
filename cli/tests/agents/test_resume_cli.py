@@ -22,12 +22,11 @@ import pytest
 @dataclass
 class _FakeAgentEntry:
     name: str
-    provider: str
+    harness: str
     cwd: str
     log_path: str = "/tmp/log.jsonl"
     short_id: Optional[str] = None
-    codex_session_id: Optional[str] = None
-    gemini_session_id: Optional[str] = None
+    harness_session_id: Optional[str] = None
 
 
 def _allow_all_path(_bin: str) -> bool:
@@ -52,9 +51,9 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
 
     entry = _FakeAgentEntry(
         name="alpha",
-        provider="codex",
+        harness="codex",
         cwd="/path/to/workdir",
-        codex_session_id="00000000-1111-2222-3333-444444444444",
+        harness_session_id="00000000-1111-2222-3333-444444444444",
     )
 
     events_seen: list[dict] = []
@@ -75,8 +74,8 @@ def test_agent_resumed_event_emitted_before_execvp() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="codex",
-        cwd="/path/x", codex_session_id="sess-1",
+        name="alpha", harness="codex",
+        cwd="/path/x", harness_session_id="sess-1",
     )
     order: list[str] = []
     resume_logic(
@@ -98,9 +97,9 @@ def test_missing_cwd_exits_13_with_rm_hint() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="codex",
+        name="alpha", harness="codex",
         cwd="",  # explicit empty
-        codex_session_id="sess-1",
+        harness_session_id="sess-1",
     )
     res = resume_logic(
         name="alpha",
@@ -122,9 +121,9 @@ def test_print_command_emits_one_liner() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="codex",
+        name="alpha", harness="codex",
         cwd="/path/with space",
-        codex_session_id="sess-abc",
+        harness_session_id="sess-abc",
     )
     res = resume_logic(
         name="alpha",
@@ -154,7 +153,7 @@ def test_claude_path_uses_attach_substrate() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="claude",
+        name="alpha", harness="claude",
         cwd="/cwd",
         short_id="deadbeef",
     )
@@ -177,9 +176,9 @@ def test_missing_session_id_exits_13() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="codex",
+        name="alpha", harness="codex",
         cwd="/cwd",
-        codex_session_id=None,  # explicit absent
+        harness_session_id=None,  # explicit absent
     )
     res = resume_logic(
         name="alpha",
@@ -200,9 +199,9 @@ def test_provider_cli_not_on_path_exits_14() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="codex",
+        name="alpha", harness="codex",
         cwd="/cwd",
-        codex_session_id="sess-1",
+        harness_session_id="sess-1",
     )
     res = resume_logic(
         name="alpha",
@@ -245,7 +244,7 @@ def test_unsupported_provider_exits_13_not_14() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="unknown_provider",
+        name="alpha", harness="unknown_provider",
         cwd="/cwd",
     )
     res = resume_logic(
@@ -267,9 +266,9 @@ def test_gemini_argv_uses_resume_flag_not_session() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="gemini",
+        name="alpha", harness="gemini",
         cwd="/cwd",
-        gemini_session_id="00000000-1111-2222-3333-444444444444",
+        harness_session_id="00000000-1111-2222-3333-444444444444",
     )
     res = resume_logic(
         name="alpha",
@@ -298,9 +297,9 @@ def test_print_command_uses_shlex_quote_for_special_chars() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="codex",
+        name="alpha", harness="codex",
         cwd="/tmp/~tilde-suffix",
-        codex_session_id="sess-1",
+        harness_session_id="sess-1",
     )
     res = resume_logic(
         name="alpha",
@@ -325,9 +324,9 @@ def test_stale_cwd_exits_13_with_rm_hint() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
-        name="alpha", provider="codex",
+        name="alpha", harness="codex",
         cwd="/this/path/almost/certainly/does/not/exist/" + ("x" * 40),
-        codex_session_id="sess-1",
+        harness_session_id="sess-1",
     )
     events_seen: list[dict] = []
 

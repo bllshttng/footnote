@@ -74,11 +74,11 @@ def _seed_agent_entry(tmp_path: Path, name: str, provider: str = "claude") -> No
     write_registry([
         AgentEntry(
             name=name,
-            provider=provider,
+            harness=provider,
             cwd=str(tmp_path),
             log_path=str(tmp_path / f"{name}.log"),
             short_id="abc12345" if provider == "claude" else "",
-            codex_session_id="sess-abc" if provider == "codex" else None,
+            harness_session_id="sess-abc" if provider in ("codex", "gemini") else None,
         )
     ])
 
@@ -250,7 +250,7 @@ def test_context_var_resets_between_dispatches(
     write_registry(existing + [
         AgentEntry(
             name="d2",
-            provider="claude",
+            harness="claude",
             cwd=str(tmp_path),
             log_path=str(tmp_path / "d2.log"),
             short_id="abc12345",

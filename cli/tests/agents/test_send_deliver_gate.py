@@ -44,10 +44,10 @@ def _register_codex_peer(name: str = "codex-agent") -> None:
     write_registry([
         AgentEntry(
             name=name,
-            provider="codex",
+            harness="codex",
             cwd="/tmp",
             log_path="/tmp/codex-agent.log",
-            codex_session_id="deadbeef-0000-0000-0000-000000000001",
+            harness_session_id="deadbeef-0000-0000-0000-000000000001",
             status="live",
         )
     ])
@@ -59,10 +59,10 @@ def _register_gemini_peer(name: str = "gemini-agent") -> None:
     write_registry([
         AgentEntry(
             name=name,
-            provider="gemini",
+            harness="gemini",
             cwd="/tmp",
             log_path="/tmp/gemini-agent.log",
-            gemini_session_id="gemini-session-001",
+            harness_session_id="gemini-session-001",
             status="live",
         )
     ])
@@ -357,7 +357,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
     write_registry([
         AgentEntry(
             name="claude-peer",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/claude-peer.log",
             short_id="abcd1234",
@@ -418,11 +418,11 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
     write_registry([
         AgentEntry(
             name="claude-stream",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/claude-stream.log",
             short_id="abcd1234",
-            claude_session_uuid="11111111-2222-3333-4444-555555555555",
+            harness_session_id="11111111-2222-3333-4444-555555555555",
             status="live",
         )
     ])
@@ -985,7 +985,7 @@ def test_deliver_live_claude_mcp_send_only_no_reply_wait(
     write_registry([
         AgentEntry(
             name="claude-mcp",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/claude-mcp.log",
             short_id="abcd1234",
@@ -1040,7 +1040,7 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
     write_registry([
         AgentEntry(
             name="claude-mcp2",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/claude-mcp2.log",
             short_id="efgh5678",
@@ -1100,10 +1100,10 @@ def test_deliver_live_claude_no_live_lane_queues_durable(
     write_registry([
         AgentEntry(
             name="offline-claude",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/offline-claude.log",
-            claude_session_uuid="bbbb0002-1111-2222-3333-444444444444",
+            harness_session_id="bbbb0002-1111-2222-3333-444444444444",
             status="live",
         )
     ])
@@ -1141,18 +1141,18 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     write_registry([
         AgentEntry(
             name="sender",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/sender.log",
-            claude_session_uuid="5e9de401-1111-2222-3333-444444444444",
+            harness_session_id="5e9de401-1111-2222-3333-444444444444",
             status="live",
         ),
         AgentEntry(
             name="adopted-bg",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/adopted-bg.log",
-            claude_session_uuid="cccc0003-1111-2222-3333-444444444444",
+            harness_session_id="cccc0003-1111-2222-3333-444444444444",
             status="live",
         ),
     ])

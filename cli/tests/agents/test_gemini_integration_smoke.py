@@ -229,8 +229,8 @@ def test_create_persists_registry_with_gemini_provider_field(
     entries = load_registry()
     assert len(entries) == 1
     entry = entries[0]
-    assert entry.provider == "gemini"
-    assert entry.gemini_session_id == "aaaaaaaa-1111-2222-3333-444444444444"
+    assert entry.harness == "gemini"
+    assert entry.harness_session_id == "aaaaaaaa-1111-2222-3333-444444444444"
     assert entry.cwd == str(work_dir)
     assert entry.status == "live"
 

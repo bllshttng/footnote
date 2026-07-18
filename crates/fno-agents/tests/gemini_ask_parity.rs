@@ -553,7 +553,7 @@ fn gemini_registry_entry(name: &str, cwd: &str, sid: &str, log_path: &str) -> Re
     RegistryEntry {
         name: name.to_string(),
         short_id: String::new(),
-        provider: "gemini".to_string(),
+        legacy_provider: "gemini".to_string(),
         harness: None,
         harness_session_id: None,
         cwd: cwd.to_string(),
@@ -672,7 +672,7 @@ write_registry([e], Path(os.environ["REG"]))
     // Rust load_registry must read the Python-authored row and recover fields.
     let reg = load_registry(&reg_path).expect("rust load_registry");
     let e = reg.find("rt-agent2").expect("row present");
-    assert_eq!(e.provider, "gemini");
+    assert_eq!(e.harness_name(), "gemini");
     assert_eq!(e.cwd, cwd);
     assert_eq!(e.gemini_session_id.as_deref(), Some(sid));
 }

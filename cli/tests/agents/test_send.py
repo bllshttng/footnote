@@ -47,7 +47,7 @@ def _register_claude_peer(name: str = "red", short_id: str = "abcd1234") -> None
     write_registry([
         AgentEntry(
             name=name,
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id=short_id,
@@ -62,10 +62,10 @@ def _register_codex_peer(name: str = "codex-agent") -> None:
     write_registry([
         AgentEntry(
             name=name,
-            provider="codex",
+            harness="codex",
             cwd="/tmp",
             log_path="/tmp/codex-agent.log",
-            codex_session_id="deadbeef-0000-0000-0000-000000000001",
+            harness_session_id="deadbeef-0000-0000-0000-000000000001",
             status="live",
         )
     ])
@@ -318,7 +318,7 @@ def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
     write_registry([
         AgentEntry(
             name="red",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id="abcd1234",
@@ -350,7 +350,7 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
     write_registry([
         AgentEntry(
             name="red",
-            provider="claude",
+            harness="claude",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id="abcd1234",

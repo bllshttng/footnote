@@ -22,7 +22,7 @@ from fno.paths_testing import use_tmpdir
 def _claude(**kw) -> AgentEntry:
     base = dict(
         name="worker-frontend",
-        provider="claude",
+        harness="claude",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/worker-frontend/output.jsonl",
         short_id="abc12345",
@@ -37,10 +37,10 @@ def _claude(**kw) -> AgentEntry:
 def _codex(**kw) -> AgentEntry:
     base = dict(
         name="worker-migration",
-        provider="codex",
+        harness="codex",
         cwd="/Users/foo/code/proj",
         log_path="/Users/foo/.fno/agents/worker-migration/output.jsonl",
-        codex_session_id="codex-sess-xyz",
+        harness_session_id="codex-sess-xyz",
         created_at="2026-05-20T17:15:00Z",
         status="live",
         last_message_at="2026-05-20T17:15:43Z",

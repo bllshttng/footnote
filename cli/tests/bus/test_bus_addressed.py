@@ -111,7 +111,7 @@ def _register(name, project_cwd, *, status="live"):
         existing = []
     existing.append(
         AgentEntry(
-            name=name, provider="claude", cwd=str(project_cwd),
+            name=name, harness="claude", cwd=str(project_cwd),
             log_path=f"/tmp/{name}.log", short_id=f"id-{name}", status=status,
         )
     )

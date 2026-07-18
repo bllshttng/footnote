@@ -504,7 +504,7 @@ mod tests {
         state::RegistryEntry {
             name: name.into(),
             short_id: String::new(),
-            provider: provider.into(),
+            legacy_provider: provider.into(),
             harness: None,
             harness_session_id: None,
             cwd: "/tmp/x".into(),
