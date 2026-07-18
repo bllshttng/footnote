@@ -31,7 +31,11 @@ new_sandbox() {
     (
         cd "$tmp"
         git init -q
-        git -c user.email=t@t -c user.name=t commit --allow-empty -qm init
+        # Real repos gitignore .fno/, so a manifest under a worktree never makes
+        # it untracked-dirty (which would make `git worktree remove` refuse).
+        printf '.fno/\n' > .gitignore
+        git -c user.email=t@t -c user.name=t add .gitignore
+        git -c user.email=t@t -c user.name=t commit -qm init
     ) >/dev/null 2>&1
     echo "$tmp"
 }
@@ -65,6 +69,29 @@ S=$(new_sandbox)
 ( cd "$S" && git worktree add -q wt >/dev/null 2>&1 && echo dirty > "wt/uncommitted.txt" )
 out=$(cd "$S" && echo "{\"worktree_path\":\"$S/wt\"}" | bash "$HOOK" 2>&1); rc=$?
 if [[ $rc -eq 1 && -d "$S/wt" ]]; then pass "dirty worktree refused (exit 1, kept)"; else fail "dirty refuse" "rc=$rc wt-exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=$out"; fi
+rm -rf "$S"
+
+# 1e. Modern manifest (no status field) with a LIVE owner_pid -> preserved
+# (exit 0, kept). Guards the P1 where a running claimed target's cwd would be
+# removed because the status-only guard missed the modern liveness signal.
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+mkdir -p "$S/wt/.fno"
+( exec sleep 30 ) & LIVE=$!
+printf 'graph_node_id: x-live\nowner_pid: %s\n' "$LIVE" > "$S/wt/.fno/target-state.md"
+out=$(cd "$S" && echo "{\"worktree_path\":\"$S/wt\"}" | bash "$HOOK" 2>&1); rc=$?
+if [[ $rc -eq 0 && -d "$S/wt" ]] && echo "$out" | grep -q 'preserving'; then pass "live owner_pid (modern manifest) preserved (exit 0, kept)"; else fail "live owner_pid preserve" "rc=$rc wt-exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=$out"; fi
+kill "$LIVE" 2>/dev/null
+rm -rf "$S"
+
+# 1f. Modern manifest with a DEAD owner_pid -> not preserved (removed, exit 0).
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+mkdir -p "$S/wt/.fno"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
+printf 'graph_node_id: x-dead\nowner_pid: %s\n' "$DEAD" > "$S/wt/.fno/target-state.md"
+out=$(cd "$S" && echo "{\"worktree_path\":\"$S/wt\"}" | bash "$HOOK" 2>&1); rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" ]]; then pass "dead owner_pid not preserved (removed, exit 0)"; else fail "dead owner_pid remove" "rc=$rc wt-exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=$out"; fi
 rm -rf "$S"
 
 echo "== 2. _wt_pids keys on cwd, not open files =="

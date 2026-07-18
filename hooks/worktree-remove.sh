@@ -45,12 +45,22 @@ if [[ ! -d "$WORKTREE_PATH" ]]; then
     exit 0
 fi
 
-# Check for active target session in the worktree
-if [[ -f "$WORKTREE_PATH/.fno/target-state.md" ]]; then
-    STATUS=$(grep '^status:' "$WORKTREE_PATH/.fno/target-state.md" 2>/dev/null | awk '{print $2}')
-    if [[ "$STATUS" == "IN_PROGRESS" ]]; then
+# Check for an active target session in the worktree. Legacy manifests carried
+# status: IN_PROGRESS; the modern immutable manifest has no status field and
+# signals liveness with a live owner_pid instead - so a status-only guard would
+# fall through and `git worktree remove` a running claimed target's cwd. Mirror
+# _wt_live / archive-worktree.sh: preserve on IN_PROGRESS OR a live owner_pid.
+ST="$WORKTREE_PATH/.fno/target-state.md"
+if [[ -f "$ST" ]]; then
+    PRESERVE=""
+    grep -qE '^status:[[:space:]]*IN_PROGRESS' "$ST" 2>/dev/null && PRESERVE="active_target"
+    if [[ -z "$PRESERVE" ]]; then
+        OWNER_PID="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$ST" 2>/dev/null)"
+        [[ -n "$OWNER_PID" ]] && kill -0 "$OWNER_PID" 2>/dev/null && PRESERVE="live_owner_pid"
+    fi
+    if [[ -n "$PRESERVE" ]]; then
         echo "Active target session in worktree, preserving" >&2
-        log_event "skip_remove" "\"reason\":\"active_target\""
+        log_event "skip_remove" "\"reason\":\"$PRESERVE\""
         exit 0
     fi
 fi
