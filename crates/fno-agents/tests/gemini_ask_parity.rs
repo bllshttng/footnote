@@ -613,7 +613,7 @@ from pathlib import Path
 from fno.agents.registry import load_registry
 rows = load_registry(Path(os.environ["REG"]))
 e = next(r for r in rows if r.name == "rt-agent")
-sys.stdout.write(f"{e.provider}|{e.cwd}|{e.gemini_session_id}")
+sys.stdout.write(f"{e.harness}|{e.cwd}|{e.harness_session_id}")
 "#;
     let out = Command::new("python3")
         .arg("-c")
@@ -650,8 +650,8 @@ import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from pathlib import Path
 from fno.agents.registry import write_registry, AgentEntry
-e = AgentEntry(name="rt-agent2", provider="gemini", cwd=os.environ["CWD"],
-               log_path="/tmp/out2.jsonl", gemini_session_id=os.environ["SID"])
+e = AgentEntry(name="rt-agent2", harness="gemini", cwd=os.environ["CWD"],
+               log_path="/tmp/out2.jsonl", harness_session_id=os.environ["SID"])
 write_registry([e], Path(os.environ["REG"]))
 "#;
     let out = Command::new("python3")
