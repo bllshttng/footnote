@@ -174,3 +174,60 @@ def test_leaf_doc_has_no_rollup_keys(tmp_path):
     assert fields["priority"] == "p0"
     assert "children_total" not in fields
     assert "progress" not in fields
+
+
+# ---------------------------------------------------------------------------
+# Derived wave projection (x-6c2b wave 4, AC4)
+# ---------------------------------------------------------------------------
+
+_CHILD = """\
+---
+node: {nid}
+status: ready
+type: feature
+---
+
+# {nid}
+"""
+
+
+def test_wave_painted_on_children_and_epic(tmp_path):
+    """AC4 end-to-end: children carry derived `wave`, the epic carries `waves`."""
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
+    docs = {}
+    for nid in ("a", "b", "d"):
+        docs[nid] = _plan(tmp_path, f"{nid}.md", _CHILD.format(nid=nid))
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-a", "slug": "a", "type": "feature", "parent": "x-epic", "plan_path": str(docs["a"]), "blocked_by": []},
+        {"id": "x-b", "slug": "b", "type": "feature", "parent": "x-epic", "plan_path": str(docs["b"]), "blocked_by": ["x-a"]},
+        {"id": "x-d", "slug": "d", "type": "feature", "parent": "x-epic", "plan_path": str(docs["d"]), "blocked_by": ["x-b"]},
+    ]
+    # A single child mutation (x-b) repaints the whole epic family via the
+    # sibling+ancestor expansion, so every stratum lands without a full sweep.
+    project_graph_nodes(entries, ["x-b"], root=str(tmp_path))
+    assert read_plan_file(docs["a"])[1]["wave"] == "0"
+    assert read_plan_file(docs["b"])[1]["wave"] == "1"
+    assert read_plan_file(docs["d"])[1]["wave"] == "2"
+    assert read_plan_file(epic_doc)[1]["waves"] == "3"
+
+
+def test_edge_edit_restratifies_siblings(tmp_path):
+    """Projecting only the edited child still repaints its siblings' waves
+    (one child's blocked_by change shifts the whole epic's strata)."""
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
+    a_doc = _plan(tmp_path, "a.md", _CHILD.format(nid="a"))
+    d_doc = _plan(tmp_path, "d.md", _CHILD.format(nid="d"))
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-a", "slug": "a", "type": "feature", "parent": "x-epic", "plan_path": str(a_doc), "blocked_by": []},
+        {"id": "x-d", "slug": "d", "type": "feature", "parent": "x-epic", "plan_path": str(d_doc), "blocked_by": ["x-a"]},
+    ]
+    project_graph_nodes(entries, ["x-d"], root=str(tmp_path))
+    assert read_plan_file(d_doc)[1]["wave"] == "1"
+    # Drop x-d's blocker; project only x-d, but x-a must also repaint (it stays 0)
+    # and x-d drops to 0 - and the epic waves shrink from 2 to 1.
+    entries[2]["blocked_by"] = []
+    project_graph_nodes(entries, ["x-d"], root=str(tmp_path))
+    assert read_plan_file(d_doc)[1]["wave"] == "0"
+    assert read_plan_file(epic_doc)[1]["waves"] == "1"

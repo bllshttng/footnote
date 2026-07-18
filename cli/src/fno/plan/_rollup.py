@@ -33,6 +33,55 @@ def _direct_children(entries: list[dict[str, Any]], parent_id: str) -> list[dict
     ]
 
 
+def compute_waves(
+    epic_id: str, entries: list[dict[str, Any]]
+) -> tuple[dict[str, int], int]:
+    """Derive topological wave strata for an epic's DIRECT children (x-6c2b AC4).
+
+    A child with no INTRA-epic blocker is wave 0; otherwise its wave is
+    ``1 + max(wave of its intra-epic blockers)`` (longest-path strata). Only
+    ``blocked_by`` edges between siblings of the same epic count - a child blocked
+    solely by an external node is wave 0 within its epic. Edges are the sole
+    ordering authority, so this is a pure view that cannot drift.
+
+    Returns ``(wave_by_child_id, max_wave)`` where ``max_wave`` is -1 for a
+    childless epic (so the caller's ``waves`` summary is ``max_wave + 1`` == 0).
+    Cycle-safe: a blocked_by cycle among siblings resolves those nodes to wave 0
+    rather than recursing forever.
+    """
+    children = _direct_children(entries, epic_id)
+    child_ids = {c["id"] for c in children if c.get("id")}
+    blockers: dict[str, list[str]] = {}
+    for c in children:
+        cid = c.get("id")
+        if not cid:
+            continue
+        blockers[cid] = [
+            b for b in (c.get("blocked_by") or []) if b in child_ids
+        ]
+
+    # Kahn-style leveling: assign a node its wave only once ALL its intra-epic
+    # blockers have waves, so the result is deterministic (independent of dict
+    # order) and a longest-path stratification. Any node still unassigned after
+    # a fixpoint is on a blocked_by cycle and collapses to wave 0.
+    wave: dict[str, int] = {}
+    remaining = set(child_ids)
+    progressed = True
+    while remaining and progressed:
+        progressed = False
+        for cid in list(remaining):
+            bl = blockers[cid]
+            if all(b in wave for b in bl):
+                wave[cid] = 1 + max((wave[b] for b in bl), default=-1)
+                remaining.discard(cid)
+                progressed = True
+    for cid in remaining:  # cycle members: no valid stratum -> wave 0
+        wave[cid] = 0
+
+    max_wave = max(wave.values()) if wave else -1
+    return wave, max_wave
+
+
 def compute_rollup(
     epic_id: str,
     entries: list[dict[str, Any]],
