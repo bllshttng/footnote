@@ -66,7 +66,7 @@ class DaemonState(str, Enum):
 class StatusSnapshot(TypedDict):
     """Public --json contract returned by `fno mail status`.
 
-    Eight keys; field names are part of the CLI surface that downstream
+    Nine keys; field names are part of the CLI surface that downstream
     tooling reads by name, so additions/removals are breaking changes.
     """
 
@@ -78,6 +78,7 @@ class StatusSnapshot(TypedDict):
     active_session: str
     wake_signals: int
     errors_24h: int
+    sent_unclaimed: int
 
 
 mail_app = typer.Typer(
@@ -307,6 +308,27 @@ def _active_session(repo_root: Path) -> str:
         return "unknown"
 
 
+def _sent_unclaimed_count() -> int:
+    """Count of THIS session's sent mail unclaimed past config.inbox.unclaimed_ttl.
+
+    Session-scoped (keyed on my canonical handle), so a no-identity surface
+    honestly reports 0 rather than a project-wide figure. Shares the notify-self
+    predicate; never raises (a broken read degrades to 0).
+    """
+    from fno.config import load_settings
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        return 0
+    try:
+        handle = canonical_handle(ident.harness, ident.session_id)
+        n, _ = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
+        return n
+    except Exception:  # noqa: BLE001 - status is advisory; never crash on it
+        return 0
+
+
 def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
     threads = read_all_threads(project)
     unread = sum(1 for h in threads if h.is_unread)
@@ -322,6 +344,7 @@ def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
         active_session=_active_session(repo_root),
         wake_signals=_count_wake_signals(repo_root),
         errors_24h=_count_errors_24h(repo_root),
+        sent_unclaimed=_sent_unclaimed_count(),
     )
 
 
@@ -681,6 +704,7 @@ def cmd_status(
     typer.echo(f"active session: {snapshot['active_session']}")
     typer.echo(f"wake signals: {snapshot['wake_signals']}")
     typer.echo(f"errors_24h: {snapshot['errors_24h']}")
+    typer.echo(f"sent unclaimed: {snapshot['sent_unclaimed']}")
 
 
 @mail_app.command("lint", hidden=True)
