@@ -22,17 +22,86 @@ _wt_live() {
     return 1
 }
 
-# PIDs with an open fd under the worktree OR whose cmdline references it.
-# Mirrors archive-worktree.sh's enumeration (escaped regex so path metachars
-# are literal); drops our own PID.
+# PIDs actually rooted in the worktree (cwd under it) OR whose cmdline
+# references it. Mirrors archive-worktree.sh's enumeration (escaped regex so
+# path metachars are literal); drops our own PID and our own tooling.
+#
+# `lsof -a -d cwd +D` (NOT bare `+D`) keys on the cwd fd so uv-hardlinked venv
+# `.so` files mmapped by long-lived daemons - the same inode under every
+# worktree - never count as "rooted here". The pgrep lane still catches bg
+# processes carrying the path in argv.
 _wt_pids() {
     local wt="$1" pids="" pids_f="" re
     if command -v lsof >/dev/null 2>&1; then
-        pids="$(lsof +D "$wt" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)"
+        pids="$(lsof -a -d cwd +D "$wt" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)"
     fi
     re="$(printf '%s' "$wt" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g')"
     pids_f="$(pgrep -f -- "$re" 2>/dev/null || true)"
-    printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u
+    # Drop our own PID and any live pid running the sweep/archive tooling: a
+    # concurrent sweep carries the worktree path in its argv (a different PGID,
+    # so pgrep -f matches it), and it is our own machinery, never a squatter.
+    # `|| true`: a mid-pipeline `grep -v` with no match exits 1, which pipefail
+    # would surface as the function's status even though the pids printed fine.
+    printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u \
+        | while IFS= read -r pid; do
+            case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+                *archive-worktree.sh*|*worktree-lifecycle.sh*) continue ;;
+            esac
+            printf '%s\n' "$pid"
+        done || true
+}
+
+# Print bg-job ids (~/.claude/jobs/<id>/) safe to retire: state in
+# done/stopped/failed, cwd matching the selector, cwd NOT the canonical
+# checkout. Selector is either an exact worktree path or the literal
+# "__MISSING__" (cwd no longer exists on disk - the final-pass mode). This
+# closes the pr-watch loop: the sweep that archives a pr-merged-<n> worktree
+# is the same sweep that retires its now-dangling job record.
+_reap_job_candidates() {
+    local selector="$1" canonical="$2"
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$selector" "$canonical" <<'PY' 2>/dev/null
+import glob, json, os, sys
+selector, canonical = sys.argv[1], sys.argv[2]
+DEAD = {"done", "stopped", "failed"}
+canon = os.path.abspath(canonical) if canonical else ""
+for sj in glob.glob(os.path.expanduser("~/.claude/jobs/*/state.json")):
+    try:
+        with open(sj) as f:
+            d = json.load(f)
+    except Exception:
+        continue
+    if d.get("state") not in DEAD:
+        continue
+    cwd = d.get("cwd") or ""
+    if not cwd:
+        continue
+    acwd = os.path.abspath(cwd)
+    if canon and acwd == canon:          # never reap a job pointed at canonical
+        continue
+    if selector == "__MISSING__":
+        if os.path.isdir(cwd):
+            continue
+    elif acwd != os.path.abspath(selector):
+        continue
+    print(os.path.basename(os.path.dirname(sj)))
+PY
+}
+
+# Best-effort retire the dead job records for a selector. Never fails the sweep
+# (claude rm is now unblocked by the fixed WorktreeRemove hook); logs one line
+# per reap. A missing `claude` binary is a silent no-op.
+_reap_jobs() {
+    local selector="$1" canonical="$2" job
+    command -v claude >/dev/null 2>&1 || return 0
+    while IFS= read -r job; do
+        [[ -z "$job" ]] && continue
+        if claude rm "$job" >/dev/null 2>&1; then
+            echo "  reaped bg-job record $job (worktree archived)" >&2
+        else
+            echo "  reap: claude rm $job failed (non-fatal)" >&2
+        fi
+    done < <(_reap_job_candidates "$selector" "$canonical")
 }
 
 # All given PIDs reparented to pid 1 (orphans)? Unreadable ppid -> not-orphan
@@ -102,6 +171,10 @@ case "${1:-status}" in
                 exit 1
             fi
             ARCHIVE="$MAIN_DIR/scripts/setup/archive-worktree.sh"
+            # True canonical checkout (first --porcelain entry), robust even when
+            # the sweep runs from a worktree where --show-toplevel is the worktree.
+            # Used only to guard job-record reaping off the canonical path.
+            CANONICAL_MAIN="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1{sub(/^worktree /,"");print}')"
 
             # One fetch up front. A failure aborts loudly rather than reaping
             # against stale refs (silently keeping everything looks identical
@@ -116,7 +189,7 @@ case "${1:-status}" in
             fi
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
-            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0
+            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0
 
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
@@ -185,13 +258,22 @@ case "${1:-status}" in
                 bash "$ARCHIVE" "$wt" $YES >&2
                 rc=$?
                 case "$rc" in
-                    0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1)) ;;
+                    0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1))
+                       _reap_jobs "$wt" "$CANONICAL_MAIN" ;;
+                    3) printf '%-18s %-34s %s\n' "kept (needs-confirmation)" "$branch" "$wt"; N_NEEDCONF=$((N_NEEDCONF + 1)) ;;
                     5) printf '%-18s %-34s %s\n' "kept (salvage-failed)" "$branch" "$wt"; N_SALVAGE=$((N_SALVAGE + 1)) ;;
                     *) printf '%-18s %-34s %s\n' "failed (rc=$rc)" "$branch" "$wt"; N_FAIL=$((N_FAIL + 1)) ;;
                 esac
             done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
 
-            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE))
+            # Final pass (apply only): retire dead job records whose worktree
+            # path is already gone - e.g. a pr-merged-<n> worktree archived by
+            # an EARLIER sweep, leaving the job row dangling in the agents view.
+            if [[ -n "$APPLY" && -z "$DRY_RUN" ]]; then
+                _reap_jobs "__MISSING__" "$CANONICAL_MAIN"
+            fi
+
+            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF))
             echo ""
             if [[ "$N_TOTAL" -eq 0 ]]; then
                 echo "No non-canonical worktrees found."
@@ -199,8 +281,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed), %d failed%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_FAIL" "$SUFFIX"
+                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation), %d failed%s\n' \
+                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_FAIL" "$SUFFIX"
             fi
             exit 0
         fi

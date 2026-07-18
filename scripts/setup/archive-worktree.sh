@@ -205,13 +205,16 @@ if [[ "$FORCE" -eq 0 ]]; then
 fi
 
 # ---- Process cleanup -----------------------------------------------------
-# Collect PIDs that have files open under TARGET *and* PIDs whose cmdline
+# Collect PIDs rooted in TARGET (cwd under it) *and* PIDs whose cmdline
 # references TARGET. Both surfaces matter: lsof catches editors and shells
 # with cwd inside the worktree; pgrep -f catches background processes that
 # may have changed directory after launch.
+# `lsof -a -d cwd +D` (NOT bare `+D`) keys on the cwd fd: uv hardlinks the same
+# venv `.so` inodes into every worktree, so a daemon mmapping one shows up under
+# every worktree's path with bare `+D`. Anchoring on cwd drops those phantoms.
 PIDS=""
 if command -v lsof >/dev/null 2>&1; then
-  PIDS="$(lsof +D "$TARGET" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)"
+  PIDS="$(lsof -a -d cwd +D "$TARGET" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)"
 fi
 # `pgrep -f` matches its pattern as an extended regex against the full
 # cmdline. Pass TARGET unescaped and any `.`/`+`/`[` in the path matches
@@ -241,6 +244,12 @@ while IFS= read -r pid; do
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     [[ "$pgid" == "$MY_PGID" ]] && continue
   fi
+  # Concurrent-sweep race: another archive-worktree.sh / worktree-lifecycle.sh
+  # run carries TARGET in its argv but lives in a DIFFERENT PGID, so the check
+  # above misses it. It is our own tooling, never a squatter - never SIGTERM it.
+  case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+    *archive-worktree.sh*|*worktree-lifecycle.sh*) continue ;;
+  esac
   ALL_PIDS+="$pid"$'\n'
 done < <(printf '%s\n%s\n' "$PIDS" "$PIDS_F" | grep -v '^$' | sort -u)
 ALL_PIDS="$(printf '%s' "$ALL_PIDS" | grep -v '^$' | sort -u || true)"
@@ -254,8 +263,26 @@ if [[ -n "$ALL_PIDS" ]]; then
   done <<< "$ALL_PIDS"
 
   if [[ "$ASSUME_YES" -ne 1 ]]; then
+    # No controlling tty (a non-interactive sweep): decline cleanly with one
+    # line instead of letting `read </dev/tty` spew "/dev/tty: Device not
+    # configured" and decline anyway. Same rc=3; SIGTERMing live processes
+    # stays opt-in via --yes / --kill-orphans, never a headless default.
+    # `-r /dev/tty` only tests the perm bits, so actually open it - on macOS a
+    # session with no controlling terminal fails the open, not the test.
+    # Probe the open in a SUBSHELL first: `exec` is a POSIX special built-in and
+    # a redirection failure on it can exit a non-interactive shell outright
+    # (a rule distinct from set -e, not reliably suppressed by the `if`), which
+    # would bypass this clean exit 3 on Linux bash. The subshell's exit can't
+    # kill us; its stderr goes to /dev/null. Only once it proves openable do we
+    # apply fd 3 to THIS shell (guaranteed to succeed, so no exit risk).
+    if ! ( exec 3</dev/tty ) 2>/dev/null; then
+      echo "archive-worktree: processes present and no tty for confirmation; re-run with --yes or interactively" >&2
+      exit 3
+    fi
+    exec 3</dev/tty
     printf '    Send SIGTERM to these processes? [y/N] ' >&2
-    read -r REPLY </dev/tty || REPLY="n"
+    read -r REPLY <&3 || REPLY="n"
+    exec 3<&-
     case "$REPLY" in
       y|Y|yes|YES) ;;
       *) echo "archive-worktree: declined; not archiving." >&2; exit 3 ;;
