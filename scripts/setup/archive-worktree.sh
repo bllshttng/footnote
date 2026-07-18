@@ -267,16 +267,19 @@ if [[ -n "$ALL_PIDS" ]]; then
     # line instead of letting `read </dev/tty` spew "/dev/tty: Device not
     # configured" and decline anyway. Same rc=3; SIGTERMing live processes
     # stays opt-in via --yes / --kill-orphans, never a headless default.
-    # `-r /dev/tty` only tests the perm bits, so actually open it (fd 3) - on
-    # macOS a session with no controlling terminal fails the open, not the test.
-    # The brace group redirects the open's own failure message ("/dev/tty:
-    # Device not configured") to /dev/null while still applying fd 3 to THIS
-    # shell (a plain `exec 3</dev/tty 2>/dev/null` leaks the error, since bash
-    # opens fd 3 before the 2>/dev/null takes effect).
-    if ! { exec 3</dev/tty; } 2>/dev/null; then
+    # `-r /dev/tty` only tests the perm bits, so actually open it - on macOS a
+    # session with no controlling terminal fails the open, not the test.
+    # Probe the open in a SUBSHELL first: `exec` is a POSIX special built-in and
+    # a redirection failure on it can exit a non-interactive shell outright
+    # (a rule distinct from set -e, not reliably suppressed by the `if`), which
+    # would bypass this clean exit 3 on Linux bash. The subshell's exit can't
+    # kill us; its stderr goes to /dev/null. Only once it proves openable do we
+    # apply fd 3 to THIS shell (guaranteed to succeed, so no exit risk).
+    if ! ( exec 3</dev/tty ) 2>/dev/null; then
       echo "archive-worktree: processes present and no tty for confirmation; re-run with --yes or interactively" >&2
       exit 3
     fi
+    exec 3</dev/tty
     printf '    Send SIGTERM to these processes? [y/N] ' >&2
     read -r REPLY <&3 || REPLY="n"
     exec 3<&-

@@ -40,13 +40,15 @@ _wt_pids() {
     # Drop our own PID and any live pid running the sweep/archive tooling: a
     # concurrent sweep carries the worktree path in its argv (a different PGID,
     # so pgrep -f matches it), and it is our own machinery, never a squatter.
+    # `|| true`: a mid-pipeline `grep -v` with no match exits 1, which pipefail
+    # would surface as the function's status even though the pids printed fine.
     printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u \
         | while IFS= read -r pid; do
             case "$(ps -o command= -p "$pid" 2>/dev/null)" in
                 *archive-worktree.sh*|*worktree-lifecycle.sh*) continue ;;
             esac
             printf '%s\n' "$pid"
-        done
+        done || true
 }
 
 # Print bg-job ids (~/.claude/jobs/<id>/) safe to retire: state in
@@ -65,7 +67,8 @@ DEAD = {"done", "stopped", "failed"}
 canon = os.path.abspath(canonical) if canonical else ""
 for sj in glob.glob(os.path.expanduser("~/.claude/jobs/*/state.json")):
     try:
-        d = json.load(open(sj))
+        with open(sj) as f:
+            d = json.load(f)
     except Exception:
         continue
     if d.get("state") not in DEAD:
