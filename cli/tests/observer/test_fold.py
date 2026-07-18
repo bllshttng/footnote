@@ -121,6 +121,154 @@ def test_postmortem_reader_tolerates_malformed(tmp_path):
     assert all(isinstance(p, dict) for p in out)
 
 
+# --------------------------------------------------------------------------- #
+# target: PR-anchored corpus (x-6ff0)
+# --------------------------------------------------------------------------- #
+
+T_NOW = datetime(2026, 7, 18, 12, 0, 0)
+
+
+def _pr(number, node_id=None, merged="2026-07-10T10:00:00Z", closed=None, repo="o/r", head=None):
+    url = f"https://github.com/{repo}/pull/{number}"
+    if head is None:
+        head = f"feature/{node_id}" if node_id else "hotfix/manual"
+    return {"number": number, "headRefName": head, "mergedAt": merged, "closedAt": closed,
+            "url": url, "state": "MERGED" if merged else "CLOSED"}
+
+
+def test_target_partition_and_denominator():
+    """AC1-HP: items + unattributed strictly partition the PR list; denominator
+    is the PR count, not the ledger row count."""
+    nodes = [{"id": "x-a", "reverted": False, "pr_number": 1, "pr_url": "https://github.com/o/r/pull/1"}]
+    prs = [_pr(1, "x-a"), _pr(2, None)]  # one attributed, one unattributable
+    corpus = fold.build_target_corpus(prs, nodes, [], {}, since_days=28, now=T_NOW)
+    cov = corpus["coverage"]
+    assert cov["prs_total"] == 2
+    assert cov["attributed"] == 1 and cov["unattributed_pr"] == 1
+    assert cov["attributed"] + cov["unattributed_pr"] == cov["prs_total"]
+    # AC1-EDGE: the unattributable PR is counted with an all-None vector, not dropped
+    assert corpus["unattributed"][0]["pr_number"] == 2
+    assert corpus["unattributed"][0]["graph_node_id"] is None
+
+
+def test_target_resolves_via_graph_pr_number_when_branch_absent():
+    """Squash-merge drops the branch (headRefName empty): the reverse graph
+    pr_number/pr_url lookup recovers the node - branch name alone re-creates the
+    52% loss (Domain Pitfall)."""
+    nodes = [{"id": "x-sq", "reverted": False, "pr_number": 7, "pr_url": "https://github.com/o/r/pull/7"}]
+    prs = [_pr(7, head="")]  # branch gone
+    corpus = fold.build_target_corpus(prs, nodes, [], {}, since_days=28, now=T_NOW)
+    assert corpus["coverage"]["attributed"] == 1
+    assert corpus["items"][0]["graph_node_id"] == "x-sq"
+
+
+def test_target_outcome_is_reused_classifier():
+    """AC2-HP: a fix-node created 5 days post-ship -> bounced, byte-identical to
+    what _node_outcome produces (no reimplemented merged/bounced rule)."""
+    nodes = [
+        {"id": "x-b", "reverted": False, "pr_number": 11, "pr_url": "https://github.com/o/r/pull/11"},
+        {"id": "x-fix", "caused_by": "x-b", "created_at": "2026-07-15T10:00:00"},
+    ]
+    prs = [_pr(11, "x-b", merged="2026-07-11T10:00:00Z")]
+    item = fold.build_target_corpus(prs, nodes, [], {}, since_days=28, now=T_NOW)["items"][0]
+    assert item["outcome"] == "bounced"
+    assert fold.score_target_item(item)["shipped_outcome"] == "degraded"  # attribution unknown -> middle
+
+
+def test_target_no_w4_outcome_stays_none():
+    """AC2-ERR: no causal telemetry graph-wide -> shipped_outcome None; the PR's
+    own merged state is never promoted to merged_clean."""
+    nodes = [{"id": "x-d", "pr_number": 30, "pr_url": "https://github.com/o/r/pull/30"}]  # no reverted key, no caused_by
+    prs = [_pr(30, "x-d")]
+    item = fold.build_target_corpus(prs, nodes, [], {}, since_days=28, now=T_NOW)["items"][0]
+    assert item["outcome"] is None
+    assert fold.score_target_item(item)["shipped_outcome"] is None
+
+
+def test_target_first_try_green_and_converged_from_structured_signals():
+    nodes = [{"id": "x-a", "reverted": False, "pr_number": 1, "pr_url": "https://github.com/o/r/pull/1",
+              "sessions": [{"session_id": "sa", "phase": "ship"}]}]
+    prs = [_pr(1, "x-a")]
+    events = {"sa": [
+        {"type": "loop_check", "ts": "2026-07-10T08:00:00Z", "data": {"session_id": "sa", "ci": "SUCCESS", "intent": "promise"}},
+        {"type": "termination", "ts": "2026-07-10T09:00:00Z", "data": {"session_id": "sa", "reason": "DonePRGreen"}},
+    ]}
+    item = fold.build_target_corpus(prs, nodes, [], events, since_days=28, now=T_NOW)["items"][0]
+    scores = fold.score_target_item(item)
+    assert scores["first_try_green"] == "pass"  # 0 red episodes
+    assert scores["converged"] == "pass"        # ship terminal reason
+    assert item["signals"]["promises"] == 1 and item["signals"]["loop_fires"] == 1
+
+
+def test_target_ci_red_episode_fails_first_try_green():
+    nodes = [{"id": "x-r", "reverted": False, "pr_number": 5, "pr_url": "https://github.com/o/r/pull/5",
+              "sessions": [{"session_id": "sr", "phase": "ship"}]}]
+    prs = [_pr(5, "x-r")]
+    events = {"sr": [
+        {"type": "loop_check", "ts": "2026-07-10T08:00:00Z", "data": {"session_id": "sr", "ci": "FAILURE:unit"}},
+        {"type": "loop_check", "ts": "2026-07-10T08:05:00Z", "data": {"session_id": "sr", "ci": "SUCCESS"}},
+    ]}
+    item = fold.build_target_corpus(prs, nodes, [], events, since_days=28, now=T_NOW)["items"][0]
+    assert fold.score_target_item(item)["first_try_green"] == "fail"
+
+
+def test_target_gc_transcript_no_events_stays_none_no_fabrication():
+    """AC2-EDGE: no loop_check joined -> first_try_green None, converged None; no
+    process dimension back-filled from the merge; tool-error/permission signals
+    absent (not 0)."""
+    nodes = [{"id": "x-c", "reverted": False, "caused_by": None, "pr_number": 20,
+              "pr_url": "https://github.com/o/r/pull/20"}]
+    prs = [_pr(20, "x-c")]
+    item = fold.build_target_corpus(prs, nodes, [], {}, since_days=28, now=T_NOW)["items"][0]
+    sig = item["signals"]
+    assert sig["loop_fires"] is None and sig["ci_reds"] is None and sig["promises"] is None
+    assert "tool_errors" not in sig and "permission_denials" not in sig  # absent, never 0
+    scores = fold.score_target_item(item)
+    assert scores["first_try_green"] is None
+    assert scores["converged"] is None  # merged, but no terminal-reason signal -> None
+    assert scores["shipped_outcome"] == "pass"  # w4 available (caused_by key) + clean
+
+
+def test_target_no_pr_class_corrects_survivorship():
+    """AC3-HP: a churny build attempt with no PR becomes its own labeled class,
+    bucketed by stop-cause; a plan-only thread is excluded."""
+    nodes = [{"id": "x-a", "reverted": False, "pr_number": 1, "pr_url": "https://github.com/o/r/pull/1"}]
+    prs = [_pr(1, "x-a")]
+    rows = [
+        {"completed": "2026-07-14T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["do"], "sessions": ["snope"]},
+        {"completed": "2026-07-14T11:00:00", "termination_reason": "Aborted", "phases_completed": ["review"], "sessions": ["sabort"]},
+        {"completed": "2026-07-14T12:00:00", "termination_reason": "DoneAdvisory", "phases_completed": ["think"], "sessions": ["splan"]},  # plan-only, excluded
+    ]
+    corpus = fold.build_target_corpus(prs, nodes, rows, {}, since_days=28, now=T_NOW)
+    cov = corpus["coverage"]
+    assert cov["no_pr_attempts"] == 2
+    assert cov["no_pr_stop_cause"] == {"NoProgress": 1, "Aborted": 1}
+
+
+def test_target_no_pr_excludes_scored_pr_sessions():
+    """A ledger row whose session belongs to a scored PR is NOT double-counted as
+    a no-PR attempt."""
+    nodes = [{"id": "x-a", "reverted": False, "pr_number": 1, "pr_url": "https://github.com/o/r/pull/1",
+              "sessions": [{"session_id": "sa", "phase": "ship"}]}]
+    prs = [_pr(1, "x-a")]
+    rows = [{"completed": "2026-07-14T10:00:00", "termination_reason": "DonePRGreen", "phases_completed": ["ship"], "sessions": ["sa"]}]
+    corpus = fold.build_target_corpus(prs, nodes, rows, {}, since_days=28, now=T_NOW)
+    assert corpus["coverage"]["no_pr_attempts"] == 0  # sa is the scored PR's own session
+
+
+def test_target_closed_unmerged_pr_has_no_outcome_label():
+    """A closed-but-unmerged PR is a non-delivery: shipped_outcome None (merge
+    state is the anchor, and it did not merge), still counted in the denominator."""
+    nodes = [{"id": "x-x", "reverted": False, "pr_number": 9, "pr_url": "https://github.com/o/r/pull/9"}]
+    prs = [_pr(9, "x-x", merged=None, closed="2026-07-10T10:00:00Z")]
+    corpus = fold.build_target_corpus(prs, nodes, [], {}, since_days=28, now=T_NOW)
+    item = corpus["items"][0]
+    assert item["merged"] is False
+    assert item["judgeable"] is False
+    assert fold.score_target_item(item)["shipped_outcome"] is None
+    assert corpus["coverage"]["attributed"] == 1  # still in the denominator
+
+
 def test_isolation_violation_detected(tmp_path):
     leaked = "20260704T999999Z-leak"
     real_ledger = tmp_path / "ledger.json"
