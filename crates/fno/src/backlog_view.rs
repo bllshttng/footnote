@@ -165,12 +165,9 @@ pub fn derive_pr_map(raw: &str) -> HashMap<String, u64> {
     out
 }
 
-/// One active mission (an epic with `mission_active: true`, K1) as the mux
-/// renders it: the epic slug names the squad, and `done`/`total` count its leaf
-/// descendants. The counts are computed HERE (not read) because x-6c2b's
-/// `children_done`/`children_total` counters land on the plan DOC, never on the
-/// graph node - the mux only sees `graph.json`, so it recomputes them with the
-/// same `compute_rollup` semantics.
+/// One active mission (an epic with `mission_active: true`): its slug names the
+/// squad, `done`/`total` count its leaf descendants. Counts are recomputed here,
+/// not read - the graph node never carries them (they land on the plan doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mission {
     pub epic_id: String,
@@ -179,27 +176,22 @@ pub struct Mission {
     pub total: u32,
 }
 
-/// The active-mission projection of one graph read: the missions to render as
-/// squad headers, plus a `node id -> epic id` index so a live worker row groups
-/// into its mission by ancestor. Only epics whose `mission_active` is true
-/// appear; a node reaches a mission by walking `parent` edges to the nearest
-/// such epic (the epic itself is not one of its own worker members). `None` on
-/// a malformed document so the caller renders workers UNGROUPED rather than
-/// hiding them (AC4); an empty map is the valid "no active mission" state.
+/// Active missions from one graph read: the headers to render, plus a
+/// `node id -> epic id` index that groups a worker row into its mission by
+/// ancestor (an epic is never its own member). `None` on a malformed document,
+/// so the caller renders workers ungrouped rather than hiding them; an empty map
+/// is the valid "nothing active" state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MissionMap {
     pub missions: Vec<Mission>,
     pub node_to_epic: HashMap<String, String>,
 }
 
-/// Ancestor-walk / rollup-recursion depth cap. The mission tree is
-/// mission -> epic -> leaf (`EPIC_NEST_MAX_DEPTH = 2`, x-6c2b); the cap is
-/// generous slack that, with a `seen` set, terminates a malformed
-/// parent/child cycle instead of looping.
+/// Depth cap for the ancestor walk and the rollup recursion. The mission tree is
+/// only mission -> epic -> leaf; the slack plus a `seen` set terminates a
+/// malformed parent cycle instead of looping.
 const MISSION_DEPTH_CAP: usize = 8;
 
-/// One node's fields the mission derivation needs (a lightweight parse so the
-/// walks never re-touch the JSON).
 struct MissionNode<'a> {
     parent: Option<&'a str>,
     slug: &'a str,
@@ -208,9 +200,7 @@ struct MissionNode<'a> {
     done: bool,
 }
 
-/// Derive the active missions from raw graph JSON (pure; unit-testable without a
-/// file). See [`MissionMap`] for the contract. Mirrors `derive_cards`'s
-/// tolerant `serde_json::Value` access - the FILE is the graph contract.
+/// Derive the active missions from raw graph JSON. Pure; see [`MissionMap`].
 pub fn derive_missions(raw: &str) -> Option<MissionMap> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let entries = doc
@@ -246,11 +236,11 @@ pub fn derive_missions(raw: &str) -> Option<MissionMap> {
         .map(|(id, _)| *id)
         .collect();
     if active.is_empty() {
-        return Some(MissionMap::default()); // valid graph, nothing active
+        return Some(MissionMap::default());
     }
 
-    // node -> nearest active-mission epic (ancestor walk; the epic itself is
-    // NOT a member of its own mission, so start at the parent).
+    // Nearest active-mission ancestor; start at the parent so the epic is never
+    // its own member.
     let mut node_to_epic = HashMap::new();
     for (&id, node) in &nodes {
         let mut cur = node.parent;
@@ -280,7 +270,7 @@ pub fn derive_missions(raw: &str) -> Option<MissionMap> {
             }
         })
         .collect();
-    // Stable order for a deterministic sideline (active set iteration is not).
+    // Deterministic sideline order (the active set iterates arbitrarily).
     missions.sort_by(|a, b| a.epic_id.cmp(&b.epic_id));
     Some(MissionMap {
         missions,
@@ -288,10 +278,9 @@ pub fn derive_missions(raw: &str) -> Option<MissionMap> {
     })
 }
 
-/// Leaf done/total under `epic`, x-6c2b `compute_rollup` semantics: a leaf child
-/// counts once (done iff `_status == "done"`); an epic child recurses ONE mission
-/// level and folds its leaves in (never counting an epic as a unit). `seen`
-/// bounds an epic-parent cycle; `depth` bounds runaway nesting.
+/// Leaf done/total under `epic`: a leaf child counts once (done iff `_status ==
+/// "done"`); an epic child recurses and folds its leaves in, never counting an
+/// epic as a unit. `seen`/`depth` bound a malformed parent cycle.
 fn rollup(
     epic: &str,
     nodes: &HashMap<&str, MissionNode>,
@@ -703,13 +692,13 @@ mod tests {
         assert!(live_claims_from_sweep(r#"{"no_claims":1}"#).is_none());
     }
 
-    // ---- mission derivation (x-1a47) -------------------------------------
+    // ---- mission derivation ----------------------------------------------
 
     #[test]
     fn active_mission_membership_and_counts() {
-        // AC2/AC3: an active-mission epic's leaf children map to it and its
-        // done/total counts them; the epic is NOT its own member; a node under
-        // an INACTIVE epic is unmapped.
+        // An active-mission epic's leaf children map to it and its done/total
+        // count them; the epic is not its own member; a node under an inactive
+        // epic is unmapped.
         let raw = graph(
             r#"{"id":"x-e","slug":"mission-e","type":"epic","mission_active":true},
                {"id":"x-c1","slug":"c1","_status":"done","parent":"x-e"},
@@ -731,8 +720,8 @@ mod tests {
 
     #[test]
     fn empty_active_mission_counts_survivors() {
-        // AC3 (silent-failure): a mission whose only child is done still renders
-        // 1/1 - the mission exists even with no in-flight work.
+        // A mission whose only child is done still renders 1/1 - it exists even
+        // with no in-flight work.
         let raw = graph(
             r#"{"id":"x-e","slug":"m","type":"epic","mission_active":true},
                {"id":"x-c1","_status":"done","parent":"x-e"}"#,
@@ -744,8 +733,8 @@ mod tests {
 
     #[test]
     fn no_active_mission_is_empty_not_none() {
-        // A valid graph with nothing active is an empty map, NOT None (None is
-        // reserved for a malformed doc - AC4 fallback).
+        // A valid graph with nothing active is an empty map, not None (None is
+        // reserved for a malformed doc).
         let raw = graph(r#"{"id":"x-e","slug":"m","type":"epic"}"#);
         let m = derive_missions(&raw).unwrap();
         assert!(m.missions.is_empty() && m.node_to_epic.is_empty());
@@ -753,14 +742,14 @@ mod tests {
 
     #[test]
     fn malformed_document_is_none() {
-        // AC4: a torn/malformed graph yields None so the caller renders workers
+        // A torn/malformed graph yields None so the caller renders workers
         // ungrouped rather than hiding them.
         assert!(derive_missions("not json").is_none());
     }
 
     #[test]
     fn epic_child_folds_leaves_one_level() {
-        // x-6c2b: a mission epic over a sub-epic folds the sub-epic's LEAVES in
+        // A mission epic over a sub-epic folds the sub-epic's leaves in
         // (mission -> epic -> leaf), never counting the sub-epic as a unit.
         let raw = graph(
             r#"{"id":"x-m","slug":"mission","type":"epic","mission_active":true},
