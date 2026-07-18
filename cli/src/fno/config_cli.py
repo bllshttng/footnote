@@ -361,7 +361,7 @@ def active_backlog_cmd(
         typer.echo(_json.dumps(targets))
         return
     if not targets:
-        typer.echo("active-backlog: disabled (no enabled projects)")
+        typer.echo("active-backlog: no active missions to drain")
         return
     for t in targets:
         mission = f" mission={t['mission']}" if t["mission"] else ""

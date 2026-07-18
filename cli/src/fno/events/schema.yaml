@@ -2607,6 +2607,15 @@ event_types:
         error:
           type: string
 
+  - name: active_backlog_mission_retired
+    description: "A mission drain loop retired: its epic mission was deactivated (operator --stop) or all children are done, so the daemon stops ticking that mission (x-a4dc K2)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        mission:
+          type: string
+
   - name: daemon_exe_fingerprint_unavailable
     description: "The daemon could not read its own executable fingerprint (staleness self-check degraded to fail-open)."
     sources: [daemon]

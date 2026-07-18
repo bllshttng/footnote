@@ -1,19 +1,20 @@
-"""Active-backlog drain-target resolution (node x-c070).
+"""Active-backlog drain-target resolution.
 
-Resolves which projects the always-on backlog dispatcher daemon should drain,
-from ``config.active_backlog`` plus the workspace project->path map. The daemon
-is a per-user global process with no inherent project, so it shells
+Resolves which ACTIVE MISSIONS the always-on backlog dispatcher daemon should
+drain (x-a4dc K2): one target per epic with ``mission_active=true``, from the
+graph plus the workspace project->path map, gated by ``config.active_backlog``.
+The daemon is a per-user global process with no inherent project, so it shells
 ``fno config active-backlog --json`` once on entering Serving to learn its drain
-targets (cwd + cadence + failure limit + mission) - keeping all config logic in
-Python, the single source of truth, exactly like the rest of the daemon's
-config-ish reads.
+targets (mission epic + cwd + cadence + failure limit) - keeping all config logic
+in Python, the single source of truth, exactly like the rest of the daemon's
+config-ish reads. It drains each mission by shelling K1's converge core
+(``advance --epic``); the legacy per-project interval drain is deleted.
 
-Pure + best-effort: a malformed settings file yields no targets rather than
-raising, so the daemon never crashes on an operator config typo.
+Pure + best-effort: a malformed settings file or graph yields no targets rather
+than raising, so the daemon never crashes on an operator config typo.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -51,7 +52,12 @@ def touch_nudge() -> None:
 
 @dataclass(frozen=True)
 class DrainTarget:
-    """One project the daemon should continuously drain."""
+    """One active mission the daemon should continuously drain (x-a4dc K2).
+
+    ``mission`` is the epic id the daemon converges (``advance --epic``); ``project``/
+    ``cwd`` are the epic's own project, rooting the loop's journal + close/defer reads
+    (all node-global operations - a mission fans out across projects at dispatch time).
+    """
 
     project: str
     cwd: str
@@ -74,17 +80,46 @@ def _workspace_paths() -> dict[str, str]:
         return {}
 
 
-def resolve_drain_targets() -> list[DrainTarget]:
-    """The projects the active-backlog daemon should drain, in name order.
+def _active_missions() -> list[dict]:
+    """Epic nodes with ``mission_active=true`` (K1's durable activation record),
+    across all projects. The field ``fno backlog advance --epic`` sets/clears; a
+    graph read fault yields none (fail-safe, never raises)."""
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
 
-    - ``enabled: true`` (bool) -> every project in the workspace map. With no
-      workspace map there is no project to root a drain at, so the result is
-      empty (fail-safe, never a guessed cwd).
-    - ``enabled: {<project>: bool}`` -> only the truthy keys, each resolved to
-      its workspace path. A name with no workspace path is skipped (cannot drain
-      without a cwd).
-    - An invalid interval disables everything (``any_enabled`` already returns
-      False via the fail-closed accessor).
+        entries = read_graph(graph_json())
+        if not isinstance(entries, list):
+            return []
+        # Require str id + project: a non-str id would pass a truthy check but
+        # raise when resolve_drain_targets sorts by id, which would disable ALL
+        # target resolution on one malformed record (fail-safe: skip it instead).
+        return [
+            e
+            for e in entries
+            if isinstance(e, dict)
+            and e.get("mission_active") is True
+            and isinstance(e.get("id"), str)
+            and isinstance(e.get("project"), str)
+        ]
+    except Exception:  # noqa: BLE001 - a graph read/iterate fault yields no missions
+        return []
+
+
+def resolve_drain_targets() -> list[DrainTarget]:
+    """One drain target per ACTIVE mission, in epic-id order (x-a4dc K2).
+
+    A mission is an epic with ``mission_active=true`` (K1's activation record).
+    The daemon drains each by shelling K1's converge core (``advance --epic``),
+    which fans out the epic's ready leaf children across ALL projects; the epic id
+    rides on the target's ``mission``. The legacy per-project interval drain and
+    its opt-in escape env are deleted (epic Locked Decision 4) - merge-triggered
+    ``fno backlog advance`` is the same-project coverage, and no per-project drain
+    ever comes back.
+
+    ``config.active_backlog`` stays the daemon's master switch: an unenabled
+    config or invalid interval yields no targets. A mission whose epic project has
+    no workspace path is skipped (cannot root the loop). Fail-safe throughout.
     """
     try:
         from fno.config import load_settings
@@ -99,77 +134,28 @@ def resolve_drain_targets() -> list[DrainTarget]:
     if interval is None:
         return []
 
-    # Locked Decision 2 (x-0ad6): the same-project interval drain is RETIRED.
-    # Reaching here means the config WOULD resolve interval-drain targets, but
-    # that drain is retired: merge-triggered `fno backlog advance` (SessionStart
-    # reconcile + /pr merged) and manual dispatch are the same-project coverage.
-    # The daemon binary and its status-fanout loop are unaffected (neither uses
-    # this resolver). The legacy per-project interval drain stays reachable ONLY
-    # behind an explicit opt-in env, for a deliberate operator override during
-    # the transition - never by default. A cross-project orchestrator (its own
-    # epic) will add its own resolution path rather than resurrect this one.
-    if os.environ.get("FNO_ACTIVE_BACKLOG_LEGACY_DRAIN") != "1":
-        return []
-
     paths = _workspace_paths()
-    enabled = cfg.enabled
-    if isinstance(enabled, dict):
-        names = [p for p, on in enabled.items() if on]
-    else:
-        # bool True -> every workspace project.
-        names = list(paths.keys())
-
     targets: list[DrainTarget] = []
-    for name in sorted(names):
-        cwd = paths.get(name)
+    for epic in sorted(_active_missions(), key=lambda e: e["id"]):
+        project = epic["project"]
+        # Respect the per-project enable contract: with enabled={proj: bool} an
+        # explicitly-disabled project's mission does not drain, even though
+        # any_enabled() is true for the daemon as a whole.
+        if not cfg.is_enabled_for(project):
+            continue
+        cwd = paths.get(project)
         if not cwd:
             continue
         targets.append(
             DrainTarget(
-                project=name,
+                project=project,
                 cwd=cwd,
                 interval_seconds=interval,
                 failure_limit=cfg.failure_limit,
-                mission=cfg.mission,
+                mission=epic["id"],
             )
         )
     return targets
-
-
-def _batch_enabled_for(cwd: str) -> bool:
-    """config.batch.enabled for a target repo (batch-lane Wave 2, x-6cdf).
-
-    Read per-repo so a project opts into batched dispatch independently. Fail-
-    safe to False (the daemon then dispatches normal /target no-merge workers).
-    """
-    try:
-        from pathlib import Path as _P
-
-        from fno.config import load_settings_for_repo
-
-        return bool(load_settings_for_repo(_P(cwd)).batch.enabled)
-    except Exception:  # noqa: BLE001 - a bad/absent settings must not enable
-        return False
-
-
-def _max_lanes_for(cwd: str) -> int:
-    """config.parallel.max_lanes for a target repo (parallel mode x-42d5, G4).
-
-    Read per-repo like ``_batch_enabled_for`` so a project opts into parallel
-    lane-fill independently. Fail-safe to 1 (today's sequential single-lane
-    path): a bad/absent settings read must never fan a repo out into lanes.
-    """
-    try:
-        from pathlib import Path as _P
-
-        from fno.config import load_settings_for_repo
-
-        # Clamp at 0: the schema already rejects negatives (ge=0), but a
-        # negative escaping here would fail the Rust daemon's u64 deserialize
-        # for the WHOLE target list, silently disabling the drain (gemini).
-        return max(0, int(load_settings_for_repo(_P(cwd)).parallel.max_lanes))
-    except Exception:  # noqa: BLE001 - a bad/absent settings must not go parallel
-        return 1
 
 
 @dataclass
@@ -221,7 +207,11 @@ def fanout_targets_as_dicts() -> list[dict]:
 
 
 def drain_targets_as_dicts() -> list[dict]:
-    """JSON-serializable form of :func:`resolve_drain_targets` for the daemon."""
+    """JSON-serializable form of :func:`resolve_drain_targets` for the daemon.
+
+    The mission drain shells ``advance --epic``, which resolves each child
+    project's ``batch`` / ``max_lanes`` itself - so, unlike the deleted per-project
+    arm, the target carries no per-repo dispatch config."""
     return [
         {
             "project": t.project,
@@ -229,8 +219,6 @@ def drain_targets_as_dicts() -> list[dict]:
             "interval_seconds": t.interval_seconds,
             "failure_limit": t.failure_limit,
             "mission": t.mission,
-            "batch": _batch_enabled_for(t.cwd),
-            "max_lanes": _max_lanes_for(t.cwd),
         }
         for t in resolve_drain_targets()
     ]

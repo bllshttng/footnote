@@ -497,3 +497,48 @@ def test_cli_stop_requires_epic(iso, tmp_path, monkeypatch):
     r = CliRunner().invoke(app, ["backlog", "advance", "--stop"])
     assert r.exit_code == 2
     assert "require --epic" in _cli_output(r)
+
+
+# ---------------------------------------------------------------------------
+# Continuation mode (x-a4dc K2 daemon drain): never reactivate; retire inactive
+# ---------------------------------------------------------------------------
+
+
+def test_continuation_refuses_inactive_mission(iso, tmp_path, monkeypatch):
+    """An operator --stop sticks: a continuation pass on an inactive epic
+    dispatches nothing, never reactivates, and reports deactivated (so the K2
+    drain loop retires)."""
+    _epic_graph(tmp_path, monkeypatch)  # x-EPIC has no mission_active -> inactive
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
+    _patch_max_lanes(monkeypatch, 4)
+    calls = _patch_spawn(monkeypatch)
+    monkeypatch.setattr(adv, "_ready_leaf_children",
+                        lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
+
+    res = adv.advance_epic("x-EPIC", events_path=iso, continuation=True)
+
+    assert res.deactivated is True
+    assert res.dispatched == ()
+    assert calls == []  # nothing dispatched
+    assert _read_epic().get("mission_active") is not True  # never (re)activated
+    assert not any(e["type"] == "mission_activated" for e in _events(iso))
+
+
+def test_continuation_drains_active_without_reactivating(iso, tmp_path, monkeypatch):
+    """An already-active mission drains under continuation, but the mode never
+    emits a (re)activation - activation is the operator kickoff's job."""
+    entries = _epic_graph(tmp_path, monkeypatch)
+    entries[0]["mission_active"] = True  # operator kickoff already activated it
+    _write_graph(tmp_path, entries, monkeypatch)
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
+    _patch_max_lanes(monkeypatch, 4)
+    calls = _patch_spawn(monkeypatch)
+    monkeypatch.setattr(adv, "_ready_leaf_children",
+                        lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
+
+    res = adv.advance_epic("x-EPIC", events_path=iso, continuation=True)
+
+    assert {c["node"] for c in calls} == {"x-web", "x-etl"}  # drained across projects
+    assert res.deactivated is False
+    assert _read_epic().get("mission_active") is True  # still active
+    assert not any(e["type"] == "mission_activated" for e in _events(iso))

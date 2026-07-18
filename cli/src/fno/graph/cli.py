@@ -5105,12 +5105,16 @@ def _run_advance_epic(
     verbose: bool,
     model: Optional[str],
     provider: Optional[str],
+    continuation: bool = False,
 ) -> None:
     """Run the epic advance and render its receipt (x-9608 K1).
 
     Refusals (no-such-node / not-a-container) exit non-zero: unlike the
     merge-advance path (a dispatch decision is never an error), an operator naming
     a bad node to --epic wants a clear failure. Everything else exits 0.
+
+    ``continuation`` is the K2 daemon-drain mode (never reactivate; retire an
+    inactive mission).
     """
     from fno.backlog.advance import advance_epic
 
@@ -5118,6 +5122,7 @@ def _run_advance_epic(
         result = advance_epic(
             epic, stop=stop, max_dispatch=max_dispatch,
             verbose=verbose, model=model, provider=provider,
+            continuation=continuation,
         )
     except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
         typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
@@ -5175,6 +5180,12 @@ def cmd_advance(
         False,
         "--stop",
         help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
+    ),
+    continuation: bool = typer.Option(
+        False,
+        "--continuation",
+        hidden=True,
+        help="With --epic: K2 daemon-drain mode - never (re)activate the mission; retire an already-inactive one (dispatches nothing, reports deactivated).",
     ),
     max_dispatch: Optional[int] = typer.Option(
         None, "--max",
@@ -5237,10 +5248,11 @@ def cmd_advance(
         _run_advance_epic(
             epic, stop=stop, max_dispatch=max_dispatch, json_out=json_out,
             verbose=verbose, model=model, provider=provider,
+            continuation=continuation,
         )
         return
-    if stop or max_dispatch is not None:
-        typer.echo("advance: --stop / --max require --epic", err=True)
+    if stop or max_dispatch is not None or continuation:
+        typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
         raise typer.Exit(code=2)
 
     # RC2 (x-33b2): closed_project is the CLOSED NODE's own project, read from the

@@ -7747,6 +7747,8 @@ mod tests {
             subline: None,
             tab,
             account: None,
+            updated_at: None,
+            pr: None,
         }
     }
 
@@ -9683,6 +9685,8 @@ mod tests {
                     subline: None,
                     tab: None,
                     account: None,
+                    updated_at: None,
+                    pr: None,
                 },
             ],
             focus_node: None,

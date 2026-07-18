@@ -1840,6 +1840,7 @@ def advance_epic(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     stop: bool = False,
+    continuation: bool = False,
 ) -> AdvanceEpicResult:
     """Advance (or stop) an epic mission: mark active + converge pass 1.
 
@@ -1852,6 +1853,12 @@ def advance_epic(
     closed the epic). Gated on the same auto-continue opt-in and strictly
     non-fatal; each child's failure is isolated (its own receipt, never aborts
     the pass). Idempotent: a re-run dispatches nothing already node:<id>-claimed.
+
+    ``continuation`` is the K2 daemon-drain mode: NEVER (re)activate the mission,
+    and refuse (retire) an already-inactive one. Activation is the operator's
+    kickoff act; a daemon tick that raced an operator ``--stop`` must not undo it,
+    so a continuation pass on an inactive epic dispatches nothing and returns
+    ``deactivated`` (the drain loop then retires).
     """
     ev_path = events_path if events_path is not None else _events_path(project_root)
 
@@ -1919,7 +1926,12 @@ def advance_epic(
     # mid-fanout still leaves the mission drainable by K2. Emit the activation
     # receipt once, on the first epic advance (a re-run of an already-active mission
     # skips the event but still runs the converge pass - idempotent recovery).
-    if _set_mission_active(canon, True):
+    # CONTINUATION (K2 daemon drain): never reactivate; refuse an inactive epic so
+    # an operator --stop between drain ticks sticks (the loop retires next tick).
+    if continuation:
+        if not (by_id.get(canon) or {}).get("mission_active"):
+            return AdvanceEpicResult(canon, deactivated=True)
+    elif _set_mission_active(canon, True):
         _emit(EVENT_MISSION_ACTIVATED, {"epic_id": canon}, ev_path)
 
     # Ready leaf children across all projects, via the shipped selection surface.

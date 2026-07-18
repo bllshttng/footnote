@@ -1,26 +1,27 @@
-//! Integration tests for the active-backlog drain tick.
+//! Integration tests for the mission drain tick (x-a4dc K2).
 //!
-//! These exercise `drain_tick`'s real IO branches against a stub `fno` binary
-//! (passed directly as `DrainConfig.abi_bin`) with the loop Journal pointed at a
-//! tempdir so no real `~/.fno` state is touched. Since x-0ad6 the sequential
-//! path is fire-and-forget: a tick dispatches via `fno backlog dispatch-lanes
-//! --max 1` and reconciles the dispatch from events on a later tick. The
-//! reconcile POLICY (event -> breaker success/park, crash floor, in-flight
-//! skip) needs seeded `node:<id>` claims and lives in the src module's unit
-//! tests (`FNO_CLAIMS_ROOT`-hermetic); this file covers the tick's IO wiring.
+//! These exercise `mission_drain_tick`'s real IO branches against a stub `fno`
+//! binary (passed directly as `DrainConfig.abi_bin`) with the loop Journal
+//! pointed at a tempdir so no real `~/.fno` state is touched. The mission drain
+//! dispatches by shelling K1's converge core (`fno backlog advance --epic <id>
+//! --json`) and reconciles the dispatched nodes from events on later ticks. The
+//! reconcile POLICY (event -> breaker success/park, crash floor) needs seeded
+//! `node:<id>` claims and lives in the src module's unit tests
+//! (`FNO_CLAIMS_ROOT`-hermetic); this file covers the tick's IO wiring + the
+//! `advance --epic` argv seam. Pending starts empty here, so the reconcile pass
+//! at the top of the tick is a harmless no-op.
 //!
 //! Coverage map:
-//!   AC1-FR   yield to a live manual /megawalk (walker claim held) -> Yielded
-//!   (skip)   a walker-claim ERROR (non-1 exit) -> Skipped, never dispatches
-//!   AC3-HP   sequential dispatch goes through `dispatch-lanes` (a spawn), no
-//!            ShelloutDispatcher child -> Dispatched + one pending recorded
-//!   AC1-EDGE empty scope (dispatch-lanes -> []) -> NoWork, no dispatch
-//!   parallel mode lane-fill (max_lanes >= 2) is unchanged by the retarget
+//!   dispatch  advance --epic returns ids -> pending recorded, Continue, event
+//!   seam      the `advance --epic <mission> --json` argv is forwarded verbatim
+//!   empty     advance dispatches nothing -> no pending, no dispatched event
+//!   retire    advance reports all_done / deactivated -> Retire
+//!   failure   advance exits non-zero -> Continue, skip journaled, no pending
 
-#![allow(unused_imports)]
-
-use fno_agents::active_backlog::{drain_tick, CircuitBreaker, DrainConfig, DrainOutcome};
-use fno_agents::loop_runtime::{GlobalJournalPath, Journal, ProjectJournalPath};
+use fno_agents::active_backlog::{
+    mission_drain_tick, CircuitBreaker, DrainConfig, MissionDispatch,
+};
+use fno_agents::loop_runtime::Journal;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -32,21 +33,6 @@ fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
     fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n").as_bytes()).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     path
-}
-
-/// A driver lib that does nothing (the retargeted sequential path never invokes
-/// it - dispatch goes through `dispatch-lanes` - but DrainConfig still requires a
-/// path).
-fn driver_lib_noop(dir: &Path) -> PathBuf {
-    fs::create_dir_all(dir).unwrap();
-    let p = dir.join("driver-claude-code.sh");
-    fs::write(
-        &p,
-        b"#!/usr/bin/env bash\ndriver_default_max() { echo 10; }\ndriver_invoke() { exit 0; }\n",
-    )
-    .unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-    p
 }
 
 fn journal_in(tmp: &Path) -> (Journal, PathBuf) {
@@ -68,280 +54,147 @@ fn journal_events(project_journal: &Path) -> Vec<String> {
         .collect()
 }
 
-fn base_cfg(tmp: &Path, abi_bin: PathBuf, lib_path: PathBuf, failure_limit: u32) -> DrainConfig {
+fn cfg_for(tmp: &Path, abi_bin: PathBuf, mission: &str) -> DrainConfig {
     DrainConfig {
         cwd: tmp.to_path_buf(),
-        project: Some("footnote".to_string()),
-        mission: None,
-        lib_path,
         abi_bin: abi_bin.display().to_string(),
-        allow_merge: false,
-        max_turns: 5,
-        budget_usd: 25.0,
-        model: None,
-        max_iterations: 10,
-        per_unit_max_dispatches: 1,
-        failure_limit,
-        batch: false,
-        max_lanes: 1,
+        mission: mission.to_string(),
+        failure_limit: 3,
     }
 }
 
-// ── AC1-FR: yield to a live manual /megawalk ────────────────────────────────────
-
-#[test]
-fn ac1_fr_yields_when_walker_claim_held() {
-    let tmp = TempDir::new().unwrap();
-    let bin = tmp.path().join("bin");
-    // Every `claim acquire` exits 1 (held by another walker).
-    let fno = write_stub(
-        &bin,
-        "fno",
-        r#"if [[ "$1" == "claim" && "$2" == "acquire" ]]; then exit 1; fi
-exit 0"#,
-    );
-    let lib = driver_lib_noop(&tmp.path().join("lib"));
-    let (journal, project_journal) = journal_in(tmp.path());
-    let cfg = base_cfg(tmp.path(), fno, lib, 3);
-    let mut breaker = CircuitBreaker::new(3);
-    let mut pending = Vec::new();
-
-    let out = drain_tick(&cfg, &mut breaker, &mut pending, &journal);
-    assert_eq!(out, DrainOutcome::Yielded);
-    let events = journal_events(&project_journal);
-    assert!(
-        events
-            .iter()
-            .any(|e| e.contains("active_backlog_yield") && e.contains("walker-live")),
-        "expected active_backlog_yield event, got: {events:?}"
-    );
-    assert!(!events
-        .iter()
-        .any(|e| e.contains("active_backlog_dispatched")));
-    assert!(pending.is_empty(), "a yield must not record a dispatch");
-}
-
-// ── skip: walker-claim error (non-1 exit) ───────────────────────────────────────
-
-#[test]
-fn walker_claim_error_skips_without_dispatch() {
-    let tmp = TempDir::new().unwrap();
-    let bin = tmp.path().join("bin");
-    // claim acquire exits 2 (a real error, not "held"): the tick must skip, never
-    // dispatch.
-    let fno = write_stub(
-        &bin,
-        "fno",
-        r#"if [[ "$1" == "claim" && "$2" == "acquire" ]]; then exit 2; fi
-exit 0"#,
-    );
-    let lib = driver_lib_noop(&tmp.path().join("lib"));
-    let (journal, project_journal) = journal_in(tmp.path());
-    let cfg = base_cfg(tmp.path(), fno, lib, 3);
-    let mut breaker = CircuitBreaker::new(3);
-    let mut pending = Vec::new();
-
-    let out = drain_tick(&cfg, &mut breaker, &mut pending, &journal);
-    assert!(matches!(out, DrainOutcome::Skipped { .. }), "got {out:?}");
-    let events = journal_events(&project_journal);
-    assert!(events.iter().any(|e| e.contains("active_backlog_skip")));
-    assert!(!events
-        .iter()
-        .any(|e| e.contains("active_backlog_dispatched")));
-    assert!(pending.is_empty());
-}
-
-// ── AC3-HP: sequential dispatch goes through dispatch-lanes (a spawn) ────────────
-
-#[test]
-fn ac3_hp_sequential_dispatch_via_lanes_records_pending() {
-    let tmp = TempDir::new().unwrap();
-    let bin = tmp.path().join("bin");
-    // The retargeted sequential tick fire-and-forgets ONE node via
-    // `dispatch-lanes --max 1` (a `fno agents spawn`, no ShelloutDispatcher
-    // child). The stub records its argv so the --max/--project seam is checked.
-    let args_file = tmp.path().join("dispatch-args.txt");
-    let fno = write_stub(
-        &bin,
+/// A stub `fno` whose `backlog advance` records its argv and prints `receipt` on
+/// stdout (exit 0); every other subcommand is a no-op exit 0.
+fn stub_advance(dir: &Path, args_file: &Path, receipt: &str) -> PathBuf {
+    write_stub(
+        dir,
         "fno",
         &format!(
-            r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then
+            r#"if [[ "$1" == "backlog" && "$2" == "advance" ]]; then
   echo "$@" > "{a}"
-  echo '[{{"node_id":"x-seq0001","status":"dispatched","short_id":"s1"}}]'
+  cat <<'JSON'
+{receipt}
+JSON
   exit 0
 fi
 exit 0"#,
             a = args_file.display()
         ),
+    )
+}
+
+// ── dispatch + argv seam ────────────────────────────────────────────────────────
+
+#[test]
+fn dispatch_records_pending_and_forwards_epic_seam() {
+    let tmp = TempDir::new().unwrap();
+    let args_file = tmp.path().join("advance-args.txt");
+    let fno = stub_advance(
+        &tmp.path().join("bin"),
+        &args_file,
+        r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"]}"#,
     );
-    let lib = driver_lib_noop(&tmp.path().join("lib"));
     let (journal, project_journal) = journal_in(tmp.path());
-    let cfg = base_cfg(tmp.path(), fno, lib, 3);
+    let cfg = cfg_for(tmp.path(), fno, "x-epic");
     let mut breaker = CircuitBreaker::new(3);
     let mut pending = Vec::new();
 
-    let out = drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+    let out = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+    assert_eq!(out, MissionDispatch::Continue);
     assert_eq!(
-        out,
-        DrainOutcome::Dispatched {
-            node: "x-seq0001".to_string()
-        },
-        "got {out:?}"
+        pending.len(),
+        2,
+        "both dispatched children tracked for reconcile"
     );
-    // The dispatch is recorded for a later reconcile tick.
-    assert_eq!(pending.len(), 1, "one in-flight dispatch must be tracked");
-    // Sequential cap crosses the seam.
-    let args = fs::read_to_string(&args_file).expect("dispatch-lanes argv recorded");
+
+    // The converge core is invoked as `advance --epic <mission> --continuation --json`.
+    let args = fs::read_to_string(&args_file).expect("advance argv recorded");
     assert!(
-        args.contains("--max 1"),
-        "sequential cap not forwarded: {args}"
+        args.contains("advance --epic x-epic --continuation --json"),
+        "epic seam not forwarded: {args}"
     );
-    assert!(
-        args.contains("--project footnote"),
-        "project scope not forwarded: {args}"
-    );
+
     let events = journal_events(&project_journal);
     assert!(
         events
             .iter()
-            .any(|e| e.contains("active_backlog_dispatched") && e.contains("fire_and_forget")),
-        "expected a fire-and-forget dispatch event, got: {events:?}"
+            .any(|e| e.contains("active_backlog_dispatched") && e.contains("x-epic")),
+        "expected a mission dispatch event, got: {events:?}"
     );
 }
 
-// ── AC1-EDGE: empty scope ───────────────────────────────────────────────────────
+// ── empty scope ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn ac1_edge_no_work_when_nothing_to_dispatch() {
+fn empty_dispatch_records_no_pending() {
     let tmp = TempDir::new().unwrap();
-    let bin = tmp.path().join("bin");
-    // dispatch-lanes selects nothing (drained board) -> NoWork, nothing pending.
-    let fno = write_stub(
-        &bin,
-        "fno",
-        r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then echo '[]'; exit 0; fi
-exit 0"#,
+    let args_file = tmp.path().join("advance-args.txt");
+    let fno = stub_advance(
+        &tmp.path().join("bin"),
+        &args_file,
+        r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":[]}"#,
     );
-    let lib = driver_lib_noop(&tmp.path().join("lib"));
     let (journal, project_journal) = journal_in(tmp.path());
-    let cfg = base_cfg(tmp.path(), fno, lib, 3);
+    let cfg = cfg_for(tmp.path(), fno, "x-epic");
     let mut breaker = CircuitBreaker::new(3);
     let mut pending = Vec::new();
 
-    let out = drain_tick(&cfg, &mut breaker, &mut pending, &journal);
-    assert_eq!(out, DrainOutcome::NoWork);
+    let out = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+    assert_eq!(out, MissionDispatch::Continue);
     assert!(pending.is_empty());
-    let events = journal_events(&project_journal);
-    assert!(!events
+    assert!(!journal_events(&project_journal)
         .iter()
         .any(|e| e.contains("active_backlog_dispatched")));
 }
 
-// ── parallel mode (x-42d5 G4): lane-fill tick (unchanged by the retarget) ────────
+// ── retire ──────────────────────────────────────────────────────────────────────
 
 #[test]
-fn parallel_tick_dispatches_lanes_and_journals() {
+fn all_done_retires_the_mission() {
     let tmp = TempDir::new().unwrap();
-    let bin = tmp.path().join("bin");
-    let args_file = tmp.path().join("dispatch-args.txt");
-    let fno = write_stub(
-        &bin,
-        "fno",
-        &format!(
-            r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then
-  echo "$@" > "{a}"
-  echo '[{{"node_id":"x-a","status":"dispatched","short_id":"s1"}},{{"node_id":"x-b","status":"skipped","error":"spawn rc=127"}}]'
-  exit 0
-fi
-exit 0"#,
-            a = args_file.display()
-        ),
+    let args_file = tmp.path().join("advance-args.txt");
+    let fno = stub_advance(
+        &tmp.path().join("bin"),
+        &args_file,
+        r#"{"epic_id":"x-epic","deactivated":false,"all_done":true,"dispatched":[]}"#,
     );
-    let lib = driver_lib_noop(&tmp.path().join("lib"));
-    let (journal, project_journal) = journal_in(tmp.path());
-    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
-    cfg.max_lanes = 3;
-    cfg.mission = Some("m-7".to_string());
+    let (journal, _pj) = journal_in(tmp.path());
+    let cfg = cfg_for(tmp.path(), fno, "x-epic");
     let mut breaker = CircuitBreaker::new(3);
     let mut pending = Vec::new();
 
-    let out = drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+    let out = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
     assert_eq!(
         out,
-        DrainOutcome::LanesDispatched {
-            dispatched: 1,
-            skipped: 1
-        }
+        MissionDispatch::Retire,
+        "all_done must retire the loop"
     );
-    // Parallel lanes close at merge via reconcile, not through the sequential
-    // pending set.
+}
+
+// ── failure ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn advance_failure_skips_journaled_without_pending() {
+    let tmp = TempDir::new().unwrap();
+    let fno = write_stub(
+        &tmp.path().join("bin"),
+        "fno",
+        r#"if [[ "$1" == "backlog" && "$2" == "advance" ]]; then echo 'wedged' >&2; exit 3; fi
+exit 0"#,
+    );
+    let (journal, project_journal) = journal_in(tmp.path());
+    let cfg = cfg_for(tmp.path(), fno, "x-epic");
+    let mut breaker = CircuitBreaker::new(3);
+    let mut pending = Vec::new();
+
+    // A non-zero advance is a transient skip (Continue), never a false Retire.
+    let out = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+    assert_eq!(out, MissionDispatch::Continue);
     assert!(pending.is_empty());
-    let events = journal_events(&project_journal);
     assert!(
-        events
+        journal_events(&project_journal)
             .iter()
-            .any(|e| e.contains("active_backlog_dispatched") && e.contains("max_lanes")),
-        "expected a lanes dispatch event, got: {events:?}"
-    );
-    let args = fs::read_to_string(&args_file).expect("dispatch-lanes argv recorded");
-    assert!(args.contains("--max 3"), "cap not forwarded: {args}");
-    assert!(
-        args.contains("--project footnote"),
-        "project scope not forwarded: {args}"
-    );
-    assert!(
-        args.contains("--mission m-7"),
-        "mission scope not forwarded: {args}"
-    );
-}
-
-#[test]
-fn parallel_tick_empty_selection_is_no_work() {
-    let tmp = TempDir::new().unwrap();
-    let bin = tmp.path().join("bin");
-    let fno = write_stub(
-        &bin,
-        "fno",
-        r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then echo '[]'; exit 0; fi
-exit 0"#,
-    );
-    let lib = driver_lib_noop(&tmp.path().join("lib"));
-    let (journal, project_journal) = journal_in(tmp.path());
-    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
-    cfg.max_lanes = 2;
-    let mut breaker = CircuitBreaker::new(3);
-    let mut pending = Vec::new();
-
-    let out = drain_tick(&cfg, &mut breaker, &mut pending, &journal);
-    assert_eq!(out, DrainOutcome::NoWork);
-    let events = journal_events(&project_journal);
-    assert!(!events
-        .iter()
-        .any(|e| e.contains("active_backlog_dispatched")));
-}
-
-#[test]
-fn parallel_tick_dispatch_failure_skips_and_journals() {
-    let tmp = TempDir::new().unwrap();
-    let bin = tmp.path().join("bin");
-    let fno = write_stub(
-        &bin,
-        "fno",
-        r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then echo 'wedged' >&2; exit 3; fi
-exit 0"#,
-    );
-    let lib = driver_lib_noop(&tmp.path().join("lib"));
-    let (journal, project_journal) = journal_in(tmp.path());
-    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
-    cfg.max_lanes = 2;
-    let mut breaker = CircuitBreaker::new(3);
-    let mut pending = Vec::new();
-
-    let out = drain_tick(&cfg, &mut breaker, &mut pending, &journal);
-    assert!(matches!(out, DrainOutcome::Skipped { .. }), "got {out:?}");
-    let events = journal_events(&project_journal);
-    assert!(
-        events.iter().any(|e| e.contains("dispatch-lanes-failed")),
-        "expected a dispatch-lanes-failed skip event, got: {events:?}"
+            .any(|e| e.contains("advance-epic-failed")),
+        "expected an advance-epic-failed skip event"
     );
 }
