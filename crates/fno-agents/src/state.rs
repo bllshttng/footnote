@@ -1499,7 +1499,12 @@ mod tests {
             );
         }
         // v10: the removed identity keys never re-serialize (skip_serializing).
-        for removed in ["provider", "codex_session_id", "gemini_session_id", "claude_session_uuid"] {
+        for removed in [
+            "provider",
+            "codex_session_id",
+            "gemini_session_id",
+            "claude_session_uuid",
+        ] {
             assert!(
                 row.get(removed).is_none(),
                 "v10 row must omit removed key `{removed}`"
