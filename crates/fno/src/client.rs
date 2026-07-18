@@ -3454,19 +3454,17 @@ fn nav_agent_state(a: &AgentRow) -> PaneState {
 }
 
 /// An agent row's icon-lattice state (x-df4c US2): exit beats badge beats
-/// liveness, mapped onto the one lattice. Unlike [`nav_agent_state`] this keeps
-/// `Exited` distinct (`✗`) rather than folding it to `Idle` - a row shows its
-/// own exit, but a squad/tab rollup ignores it.
+/// liveness. Unlike [`nav_agent_state`] this keeps `Exited` distinct (`✗`)
+/// rather than folding it to `Idle` - a row shows its own exit, but a squad/tab
+/// rollup ignores it. The non-exit case goes through `pane_state`, so the row
+/// respects the `seen` bit (x-4328) exactly as the nav/tab rollups do: a Done
+/// pane the operator has already viewed folds to `Idle` (`○`) instead of holding
+/// a stale bold `✓` needs-attention marker - one system across every surface.
 fn agent_lattice_state(a: &AgentRow) -> LatticeState {
     if a.exited {
         LatticeState::Exited
     } else {
-        match a.badge {
-            Some(AgentBadge::Working) => LatticeState::Working,
-            Some(AgentBadge::Blocked) => LatticeState::Blocked,
-            Some(AgentBadge::Done) => LatticeState::DoneUnseen,
-            None => LatticeState::Idle,
-        }
+        pane_to_lattice(pane_state(a.badge, a.seen))
     }
 }
 
@@ -7291,6 +7289,22 @@ mod tests {
         }
         // Attention is never dimmed (AC1-UI): Blocked is BOLD, not DIM.
         assert_eq!(lattice_style(Blocked).flags & cell_flags::DIM, 0);
+    }
+
+    #[test]
+    fn agent_row_done_respects_seen_bit() {
+        // A Done pane the operator has NOT viewed holds the bold `✓`; once seen
+        // (x-4328) it folds to Idle `○`, matching the nav/tab rollup paths, so a
+        // viewed-done row never shows a stale needs-attention marker.
+        let unseen = tab_agent(None, Some(AgentBadge::Done), false);
+        assert_eq!(agent_lattice_state(&unseen), LatticeState::DoneUnseen);
+        assert_eq!(lattice_style(agent_lattice_state(&unseen)).glyph, '✓');
+        let seen = AgentRow {
+            seen: true,
+            ..tab_agent(None, Some(AgentBadge::Done), false)
+        };
+        assert_eq!(agent_lattice_state(&seen), LatticeState::Idle);
+        assert_eq!(lattice_style(agent_lattice_state(&seen)).glyph, '○');
     }
 
     #[test]
