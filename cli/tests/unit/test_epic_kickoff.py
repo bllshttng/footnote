@@ -132,6 +132,23 @@ def test_disabled_dispatches_nothing(iso, tmp_path, monkeypatch):
                         lambda e: pytest.fail("must not enumerate"))
     res = adv.kickoff_epic("x-EPIC", events_path=iso)
     assert res.error == "disabled"
+    # a gated kickoff still records its decision (no paired advance() to do it)
+    skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
+    assert len(skips) == 1 and skips[0]["data"]["reason"] == "disabled"
+    assert skips[0]["data"]["mission"] == "x-EPIC"
+
+
+def test_walker_live_gate_emits_skip(iso, tmp_path, monkeypatch):
+    _epic_graph(tmp_path, monkeypatch)
+    _hold_walker = adv._walker_key()
+    acquire_claim(_hold_walker, "test-walker", ttl_ms=60_000,
+                  root=adv._claims_root_for(_hold_walker))
+    monkeypatch.setattr(adv, "_ready_leaf_children",
+                        lambda e: pytest.fail("must not enumerate"))
+    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+    assert res.error == "walker-live"
+    skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
+    assert skips and skips[0]["data"]["reason"] == "walker-live"
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +398,32 @@ def test_per_project_lane_cap(iso, tmp_path, monkeypatch):
     res = adv.kickoff_epic("x-EPIC", events_path=iso)
 
     assert len(res.dispatched) == 1  # max_lanes=1 for project web
+    lane_caps = [e for e in _events(iso)
+                 if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
+    assert len(lane_caps) == 1
+
+
+def test_lane_cap_counts_boot_window_reservation(iso, tmp_path, monkeypatch):
+    """A live dispatch:<id> reservation (boot window, no node claim yet) occupies a
+    lane: a same-project child is lane-capped (codex P2), not over-dispatched."""
+    entries = [
+        {"id": "x-EPIC", "title": "mission", "project": "fno"},
+        {"id": "x-a", "parent": "x-EPIC", "project": "web", "slug": "a"},
+        {"id": "x-b", "parent": "x-EPIC", "project": "web", "slug": "b"},
+    ]
+    _write_graph(tmp_path, entries, monkeypatch)
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
+    _patch_max_lanes(monkeypatch, 1)
+    # x-a is mid boot-window: it holds ONLY a dispatch:<id> reservation, no node claim.
+    acquire_claim("dispatch:x-a", "advance:999", ttl_ms=60_000,
+                  root=adv._claims_root_for("dispatch:x-a"))
+    _patch_spawn(monkeypatch)
+    # only x-b is offered as ready (x-a is filtered out by the real ready surface)
+    monkeypatch.setattr(adv, "_ready_leaf_children", lambda e: _ready(("x-b", "web")))
+
+    res = adv.kickoff_epic("x-EPIC", events_path=iso)
+
+    assert res.dispatched == ()  # web lane already held by x-a's reservation
     lane_caps = [e for e in _events(iso)
                  if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
     assert len(lane_caps) == 1

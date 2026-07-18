@@ -1744,28 +1744,39 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
 
 
 def _live_workers_by_project() -> dict[str, int]:
-    """Count LIVE node:<id> workers per project, to seed max_lanes.
+    """Count occupied per-project lanes to seed max_lanes.
 
     max_lanes is a per-project concurrency cap, so a project that already has a
-    live worker occupies a lane and kickoff must count it before deciding how
-    many MORE to dispatch (else a re-run past a still-running first pass would
-    exceed the cap). Best-effort: any read fault degrades to an empty map (no
-    seed), never blocks the pass.
+    worker occupies a lane and kickoff must count it before deciding how many
+    MORE to dispatch. Counts BOTH live/suspect ``node:<id>`` claims (a running
+    worker) AND live/suspect ``dispatch:<id>`` reservations (the boot-window
+    bridge a just-dispatched worker holds before it owns node:<id>) - else an
+    immediate rerun during that boot window would under-count the lane and
+    over-dispatch a second same-project child past the cap (codex P2). Deduped by
+    node id so a child holding both claims counts once. Best-effort: any read
+    fault degrades to an empty map (no seed), never blocks the pass.
     """
     counts: dict[str, int] = {}
     try:
-        from fno.graph.statuses import live_claimed_node_ids
+        from fno.claims.core import list_claims
+        from fno.claims.io import global_claims_root
         from fno.graph.store import read_graph
         from fno.paths import graph_json
 
-        live = live_claimed_node_ids()
-        if not live:
+        root = global_claims_root()
+        occupied: set[str] = set()
+        for prefix in ("node:", "dispatch:"):
+            for claim in list_claims(prefix=prefix, include_stale=False, root=root):
+                key = claim.get("key")
+                if isinstance(key, str):
+                    occupied.add(key.removeprefix(prefix))
+        if not occupied:
             return counts
         by_id = {
             e["id"]: e for e in read_graph(graph_json())
             if isinstance(e, dict) and isinstance(e.get("id"), str)
         }
-        for nid in live:
+        for nid in occupied:
             proj = (by_id.get(nid) or {}).get("project")
             if proj:
                 counts[proj] = counts.get(proj, 0) + 1
@@ -1875,10 +1886,15 @@ def kickoff_epic(
     # Same opt-in gate as advance()/advance_dependents. A live walker owning THIS
     # repo would pick nodes up itself; kickoff is the explicit converge tool, so a
     # global walker is a skip. (Per-child, a foreign-repo walker is handled in
-    # _converge_one's own _walker_live_at.)
+    # _converge_one's own _walker_live_at.) Unlike the merge-advance path, this
+    # standalone epic verb has no paired advance() call to record the decision, so
+    # emit the skip receipt here or a gated kickoff is silent in the event stream
+    # (codex P2 - LD#12 parity).
     if not auto_continue_enabled(project_root=project_root):
+        _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon}, ev_path)
         return KickoffResult(canon, error="disabled")
     if _claim_is_live(_walker_key()):
+        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon}, ev_path)
         return KickoffResult(canon, error="walker-live")
 
     # All descendants already done -> mission complete: verify the cascade closed
