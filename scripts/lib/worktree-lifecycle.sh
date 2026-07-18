@@ -49,6 +49,58 @@ _wt_pids() {
         done
 }
 
+# Print bg-job ids (~/.claude/jobs/<id>/) safe to retire: state in
+# done/stopped/failed, cwd matching the selector, cwd NOT the canonical
+# checkout. Selector is either an exact worktree path or the literal
+# "__MISSING__" (cwd no longer exists on disk - the final-pass mode). This
+# closes the pr-watch loop: the sweep that archives a pr-merged-<n> worktree
+# is the same sweep that retires its now-dangling job record.
+_reap_job_candidates() {
+    local selector="$1" canonical="$2"
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$selector" "$canonical" <<'PY' 2>/dev/null
+import glob, json, os, sys
+selector, canonical = sys.argv[1], sys.argv[2]
+DEAD = {"done", "stopped", "failed"}
+canon = os.path.abspath(canonical) if canonical else ""
+for sj in glob.glob(os.path.expanduser("~/.claude/jobs/*/state.json")):
+    try:
+        d = json.load(open(sj))
+    except Exception:
+        continue
+    if d.get("state") not in DEAD:
+        continue
+    cwd = d.get("cwd") or ""
+    if not cwd:
+        continue
+    acwd = os.path.abspath(cwd)
+    if canon and acwd == canon:          # never reap a job pointed at canonical
+        continue
+    if selector == "__MISSING__":
+        if os.path.isdir(cwd):
+            continue
+    elif acwd != os.path.abspath(selector):
+        continue
+    print(os.path.basename(os.path.dirname(sj)))
+PY
+}
+
+# Best-effort retire the dead job records for a selector. Never fails the sweep
+# (claude rm is now unblocked by the fixed WorktreeRemove hook); logs one line
+# per reap. A missing `claude` binary is a silent no-op.
+_reap_jobs() {
+    local selector="$1" canonical="$2" job
+    command -v claude >/dev/null 2>&1 || return 0
+    while IFS= read -r job; do
+        [[ -z "$job" ]] && continue
+        if claude rm "$job" >/dev/null 2>&1; then
+            echo "  reaped bg-job record $job (worktree archived)" >&2
+        else
+            echo "  reap: claude rm $job failed (non-fatal)" >&2
+        fi
+    done < <(_reap_job_candidates "$selector" "$canonical")
+}
+
 # All given PIDs reparented to pid 1 (orphans)? Unreadable ppid -> not-orphan
 # (keep, never kill), preserving the under-reap bias.
 _wt_all_orphans() {
@@ -116,6 +168,10 @@ case "${1:-status}" in
                 exit 1
             fi
             ARCHIVE="$MAIN_DIR/scripts/setup/archive-worktree.sh"
+            # True canonical checkout (first --porcelain entry), robust even when
+            # the sweep runs from a worktree where --show-toplevel is the worktree.
+            # Used only to guard job-record reaping off the canonical path.
+            CANONICAL_MAIN="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1{sub(/^worktree /,"");print}')"
 
             # One fetch up front. A failure aborts loudly rather than reaping
             # against stale refs (silently keeping everything looks identical
@@ -199,12 +255,20 @@ case "${1:-status}" in
                 bash "$ARCHIVE" "$wt" $YES >&2
                 rc=$?
                 case "$rc" in
-                    0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1)) ;;
+                    0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1))
+                       _reap_jobs "$wt" "$CANONICAL_MAIN" ;;
                     3) printf '%-18s %-34s %s\n' "kept (needs-confirmation)" "$branch" "$wt"; N_NEEDCONF=$((N_NEEDCONF + 1)) ;;
                     5) printf '%-18s %-34s %s\n' "kept (salvage-failed)" "$branch" "$wt"; N_SALVAGE=$((N_SALVAGE + 1)) ;;
                     *) printf '%-18s %-34s %s\n' "failed (rc=$rc)" "$branch" "$wt"; N_FAIL=$((N_FAIL + 1)) ;;
                 esac
             done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
+
+            # Final pass (apply only): retire dead job records whose worktree
+            # path is already gone - e.g. a pr-merged-<n> worktree archived by
+            # an EARLIER sweep, leaving the job row dangling in the agents view.
+            if [[ -n "$APPLY" && -z "$DRY_RUN" ]]; then
+                _reap_jobs "__MISSING__" "$CANONICAL_MAIN"
+            fi
 
             KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF))
             echo ""
