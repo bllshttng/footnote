@@ -22,9 +22,15 @@ def _fake_daemon_binary(monkeypatch, path: str = "/cargo/bin/fno-agents") -> Non
 def _record_run(calls: list) -> object:
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
-        return types.SimpleNamespace(returncode=0)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return _run
+
+
+def _rows_seq(monkeypatch, seq: list[list[dict]]) -> None:
+    """_agents_rows returns each list in `seq` in turn (last one repeats)."""
+    it = iter(seq)
+    monkeypatch.setattr(restart, "_agents_rows", lambda: next(it, seq[-1]))
 
 
 def test_restart_restarts_daemon_and_reports_mux(monkeypatch) -> None:
@@ -170,7 +176,7 @@ def test_restart_mux_kill_timeout_names_the_session(monkeypatch) -> None:
     def _run(cmd, **kwargs):
         if "kill-server" in cmd:
             raise sp.TimeoutExpired(cmd, 10)
-        return types.SimpleNamespace(returncode=0)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(restart.subprocess, "run", _run)
 
@@ -197,6 +203,111 @@ def test_restart_wedged_row_fails_and_names_session_and_log(monkeypatch) -> None
     assert "WEDGED" in result.output
     assert "stuck" in result.output
     assert "/tmp/mux/stuck.log" in result.output
+
+
+def _revive_setup(monkeypatch, calls: list) -> None:
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(restart, "_REVIVE_SETTLE_SECS", 0)
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
+
+
+def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
+    """After --mux kills a server, a claude worker that died with it is respawned
+    onto its recorded session; a worker still live after the kill (bg substrate)
+    is left alone."""
+    calls: list = []
+    _revive_setup(monkeypatch, calls)
+    orphan = {
+        "name": "worker1",
+        "status": "live",
+        "provider": "claude",
+        "session_id": "uuid-1",
+        "cwd": "/w1",
+    }
+    survivor = {
+        "name": "bgw",
+        "status": "live",
+        "provider": "claude",
+        "session_id": "uuid-2",
+        "cwd": "/w2",
+    }
+    _rows_seq(
+        monkeypatch,
+        [[orphan, survivor], [dict(orphan, status="exited"), survivor]],
+    )
+
+    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    assert result.exit_code == 0
+    assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
+    assert [
+        "/cargo/bin/fno", "agents", "spawn", "worker1",
+        "--provider", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
+    ] in calls
+    assert not any("spawn" in c and "bgw" in c for c in calls), "survivor must not be respawned"
+    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
+    assert payload["agents_revived"] == ["worker1"]
+
+
+def test_restart_no_revive_flag_skips_revival(monkeypatch) -> None:
+    calls: list = []
+    _revive_setup(monkeypatch, calls)
+    monkeypatch.setattr(restart, "_agents_rows", lambda: [{"name": "w", "status": "live"}])
+
+    result = runner.invoke(app, ["restart", "--mux", "--no-revive"])
+    assert result.exit_code == 0
+    assert not any("spawn" in c or "reconcile" in c for c in calls)
+
+
+def test_restart_revive_skips_worker_without_resumable_session(monkeypatch) -> None:
+    """A dead worker with no claude session (or a non-claude provider) is
+    reported as skipped, never spawned blind."""
+    calls: list = []
+    _revive_setup(monkeypatch, calls)
+    row = {"name": "codexw", "status": "live", "provider": "codex", "session_id": None}
+    _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
+
+    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    assert result.exit_code == 0
+    assert not any("spawn" in c for c in calls)
+    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
+    assert payload["agents_revive_skipped"] == ["codexw"]
+
+
+def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
+    """A failed revive names the worker and the manual fallback but does not fail
+    the restart (which already succeeded)."""
+    calls: list = []
+    _revive_setup(monkeypatch, calls)
+
+    def _run(cmd, **kwargs):
+        calls.append(list(cmd))
+        rc = 1 if "spawn" in cmd else 0
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
+
+    monkeypatch.setattr(restart.subprocess, "run", _run)
+    row = {"name": "worker1", "status": "live", "provider": "claude", "session_id": "uuid-1"}
+    _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
+
+    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    assert result.exit_code == 0
+    assert "fno agents resume worker1" in result.output
+    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
+    assert payload["agents_revive_failed"] == ["worker1"]
+    assert payload["ok"] is True
+
+
+def test_agents_rows_tolerates_non_dict_non_list_json(monkeypatch) -> None:
+    """`fno agents list --json` returning a scalar (string/int/null) must yield []
+    not an AttributeError crash (gemini medium on PR #454)."""
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout='"a string"', stderr=""),
+    )
+    assert restart._agents_rows() == []
 
 
 def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
