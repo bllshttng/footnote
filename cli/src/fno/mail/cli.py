@@ -66,7 +66,7 @@ class DaemonState(str, Enum):
 class StatusSnapshot(TypedDict):
     """Public --json contract returned by `fno mail status`.
 
-    Eight keys; field names are part of the CLI surface that downstream
+    Nine keys; field names are part of the CLI surface that downstream
     tooling reads by name, so additions/removals are breaking changes.
     """
 
@@ -78,6 +78,7 @@ class StatusSnapshot(TypedDict):
     active_session: str
     wake_signals: int
     errors_24h: int
+    sent_unclaimed: int
 
 
 mail_app = typer.Typer(
@@ -307,6 +308,33 @@ def _active_session(repo_root: Path) -> str:
         return "unknown"
 
 
+def _sent_unclaimed_count() -> int:
+    """Count of THIS session's sent mail unclaimed past config.inbox.unclaimed_ttl.
+
+    Session-scoped (keyed on my canonical handle), so a no-identity surface
+    honestly reports 0 rather than a project-wide figure. Shares the notify-self
+    predicate; never raises (a broken read degrades to 0).
+    """
+    from fno.config import load_settings
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        return 0
+    try:
+        handle = canonical_handle(ident.harness, ident.session_id)
+        n, _ = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
+        return n
+    except Exception as exc:  # noqa: BLE001 - status is advisory; never crash on it
+        # Advisory-degrade to 0, but leave a breadcrumb (matches _active_session)
+        # so a structural break doesn't render `sent unclaimed: 0` forever silently.
+        print(
+            f"warning: sent-unclaimed count failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 0
+
+
 def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
     threads = read_all_threads(project)
     unread = sum(1 for h in threads if h.is_unread)
@@ -322,6 +350,7 @@ def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
         active_session=_active_session(repo_root),
         wake_signals=_count_wake_signals(repo_root),
         errors_24h=_count_errors_24h(repo_root),
+        sent_unclaimed=_sent_unclaimed_count(),
     )
 
 
@@ -681,6 +710,7 @@ def cmd_status(
     typer.echo(f"active session: {snapshot['active_session']}")
     typer.echo(f"wake signals: {snapshot['wake_signals']}")
     typer.echo(f"errors_24h: {snapshot['errors_24h']}")
+    typer.echo(f"sent unclaimed: {snapshot['sent_unclaimed']}")
 
 
 @mail_app.command("lint", hidden=True)
@@ -1363,6 +1393,158 @@ def cmd_drain_self(
     # the bodies are out, so a crash re-surfaces rather than drops.
     if msgs:
         advance_cursor(handle, msgs[-1].id)
+
+
+# ---------------------------------------------------------------------------
+# notify-self engine (x-39a4): stat-only turn-boundary nudge helpers, shared
+# with `fno mail status` (the sent-unclaimed count).
+# ---------------------------------------------------------------------------
+
+# The nudge text is embedded inside a hook-owned <system-reminder> wrapper, so a
+# sender/recipient handle carrying a literal </system-reminder> could break out
+# and inject context. Defang the delimiter (open/close, case- + whitespace-
+# insensitive) in every interpolated field, mirroring born-with-why-offer-inject.sh.
+_REMINDER_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
+
+
+def _defang_reminder(s: str) -> str:
+    return _REMINDER_TAG.sub(r"[\1system-reminder]", s)
+
+
+def _bounded_names(names: list[str], cap: int = 3) -> str:
+    """De-dupe (first-seen), defang, then cap at ``cap`` names + ``+K more``."""
+    seen: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.append(n)
+    shown = [_defang_reminder(n) for n in seen[:cap]]
+    extra = len(seen) - cap
+    return ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
+
+
+def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
+    """True iff bus ISO ``ts`` (``...Z`` UTC) is strictly older than TTL.
+
+    Unparseable ts -> False (never flag): degrade to quiet, never to a crash.
+    ``fromisoformat`` is lock-free (unlike ``strptime``, which grabs a global
+    locale lock) and pre-3.11-safe once the trailing ``Z`` is normalized -- it
+    runs once per sent message on the every-turn hook path, so the lock matters.
+    """
+    from datetime import datetime as _dt
+
+    try:
+        sent_at = _dt.fromisoformat(ts.replace("Z", "+00:00") if ts.endswith("Z") else ts)
+        return (now - sent_at).total_seconds() > ttl_seconds
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
+    """Count + distinct recipients (first-seen) of my sent mail unclaimed past TTL.
+
+    Unclaimed = still past the recipient's consume cursor AND strictly older than
+    ``ttl_seconds``. Reads the bus ONCE (a single ``iter_messages`` snapshot) and
+    compares each recipient's cursor position against that snapshot, so cost is
+    ``O(bus + recipients)`` not ``O(recipients x bus)`` -- a per-recipient
+    ``scan_unread`` reparse could cross the hook's 2s timeout and silently drop
+    the nudge. Stat-only: recipient cursors are read fresh every call (never
+    cached), so a just-consumed message stops being flagged immediately; no
+    cursor is advanced.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    from fno.bus.cursor import read_cursor
+    from fno.bus.log import iter_messages
+
+    now = _dt.now(tz=_tz.utc)
+    all_msgs = list(iter_messages())
+    sent = [m for m in all_msgs if m.from_ == handle]
+    if not sent:
+        return 0, []
+    pos = {m.id: i for i, m in enumerate(all_msgs)}
+    # Per recipient, its consume-cursor position in the single snapshot. A
+    # message to r is unread iff it sits AFTER that position; an absent, corrupt,
+    # or rotated-out cursor means "nothing consumed" (-1 -> all unread), matching
+    # scan_unread's fail-open. A recipient name read_cursor rejects (path-
+    # traversal guard) or that errors -> sentinel len(all_msgs) so nothing is
+    # "after" it -> fully claimed / skipped: fail-open to quiet, never a crash.
+    cursor_pos: dict[str, int] = {}
+    for r in {m.to for m in sent}:
+        try:
+            cid = read_cursor(r)
+        except (ValueError, OSError):
+            cursor_pos[r] = len(all_msgs)
+            continue
+        cursor_pos[r] = pos.get(cid, -1) if cid else -1
+    count = 0
+    recipients: list[str] = []
+    for m in sent:
+        if pos[m.id] <= cursor_pos.get(m.to, len(all_msgs)):  # claimed / unresolvable
+            continue
+        if not _age_exceeds(m.ts, ttl_seconds, now):  # still fresh (strict >)
+            continue
+        count += 1
+        if m.to not in recipients:
+            recipients.append(m.to)
+    return count, recipients
+
+
+@mail_app.command("notify-self", hidden=True)
+def cmd_notify_self() -> None:
+    """Stat-only turn-boundary nudge: unread inbound + unclaimed sent (x-39a4).
+
+    The push half of push-first delivery, wired into every session's
+    ``UserPromptSubmit`` hook. Unlike ``drain-self`` it NEVER advances the
+    consume cursor -- a nudge is a notice, not a consume, so SessionStart's
+    ``drain-self`` and the sender-side check still see un-acted mail (the
+    load-bearing invariant: notify never eats delivery). Two stats over the one
+    global bus:
+
+      1. inbound: unread mail addressed to my handle -> one line "N unread fno
+         mail from <senders>: run `fno mail drain-self`". It points at
+         ``drain-self``, NOT ``fno mail unread``: only ``drain-self`` self-
+         resolves this session's handle and advances its consume cursor; ``fno
+         mail unread`` defaults ``--name`` to the project ("fno"), so it would
+         read the wrong inbox and never clear the nudge. Persistent: the
+         wrapping hook fires each turn, so the line re-injects while unread and
+         clears the moment ``drain-self`` advances the consume cursor.
+      2. sent-unclaimed: my own sent mail still past the recipient's cursor and
+         strictly older than ``config.inbox.unclaimed_ttl`` -> "N sent fno mail
+         unclaimed (to <recipients>, >Nm)". Closes the "queued (durable)" ==
+         "delivered" silent gap.
+
+    No harness identity in env -> silent no-op (mirror ``drain-self``).
+    """
+    from fno.bus.cursor import scan_unread
+    from fno.config import load_settings
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        return
+
+    handle = canonical_handle(ident.harness, ident.session_id)
+    lines: list[str] = []
+
+    unread = scan_unread(handle)
+    if unread:
+        senders = _bounded_names([m.from_ for m in unread])
+        lines.append(
+            f"{len(unread)} unread fno mail from {senders}: run `fno mail drain-self`"
+        )
+
+    ttl = load_settings().inbox.unclaimed_ttl
+    n_sent, recipients = _sent_unclaimed(handle, ttl)
+    if n_sent:
+        who = _bounded_names(recipients)
+        lines.append(
+            f"{n_sent} sent fno mail unclaimed (to {who}, >{ttl // 60}m): "
+            "recipient has not picked it up"
+        )
+
+    if lines:
+        print("\n".join(lines))
 
 
 @mail_app.command("rebuild-render", hidden=True)

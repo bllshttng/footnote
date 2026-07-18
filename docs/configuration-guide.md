@@ -31,6 +31,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
 | `project.vision` | str (optional) | _(none)_ | always | One-paragraph statement of what this codebase is and why. |
+| `inbox.unclaimed_ttl` | int | `1800` | advanced | Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno mail status`). |
 | `blueprint.max_prs_per_epic` | int | `4` | advanced | Cap on group PRs per decomposed epic. |
 | `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
 | `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |

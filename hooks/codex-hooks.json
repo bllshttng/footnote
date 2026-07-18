@@ -54,6 +54,10 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh"
+          },
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/inject-mail-notify.sh"
           }
         ]
       }

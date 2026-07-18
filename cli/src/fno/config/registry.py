@@ -62,6 +62,12 @@ FIELD_META: dict[str, Meta] = {
     "paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),
     "paths.loops_paused_json": Meta("never", "Override path to the loops pause-all sentinel."),
     "paths.observer_reports_dir": Meta("never", "Override path to the observer harness digest dir."),
+    # --- config.inbox.* ---
+    "inbox.unclaimed_ttl": Meta(
+        "advanced",
+        "Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno mail status`).",
+        default_source="default",
+    ),
     # --- config.obsidian.* (a real decision) ---
     "obsidian.enabled": Meta(
         "always", "Whether this project uses an Obsidian vault for plans/docs.",

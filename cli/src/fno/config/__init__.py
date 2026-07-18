@@ -995,6 +995,29 @@ class TargetConfig(BaseModel):
         return {}
 
 
+class InboxBlock(BaseModel):
+    """Cross-session mail delivery-honesty settings (nested under 'config.inbox').
+
+    ``unclaimed_ttl`` is the age (seconds) past which a sent-but-unclaimed bus
+    message is surfaced back to its sender (turn-boundary nudge + ``fno mail
+    status``). Advisory-only, so a short default is low-harm; 1800s (30m) is the
+    locked default (x-39a4). Non-negative.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    unclaimed_ttl: int = 1800
+
+    @field_validator("unclaimed_ttl")
+    @classmethod
+    def ttl_is_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"config.inbox.unclaimed_ttl must be >= 0; got {v}"
+            )
+        return v
+
+
 class A2aBlock(BaseModel):
     """Agent-to-agent switchboard settings (nested under 'config.agents.a2a').
 
@@ -2535,6 +2558,7 @@ class ConfigBlock(BaseModel):
     paths: PathsBlock = Field(default_factory=PathsBlock)
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
     project: ProjectBlock = Field(default_factory=ProjectBlock)
+    inbox: InboxBlock = Field(default_factory=InboxBlock)
     blueprint: BlueprintBlock = Field(default_factory=BlueprintBlock)
     backlog: BacklogBlock = Field(default_factory=BacklogBlock)
     batch: BatchBlock = Field(default_factory=BatchBlock)
