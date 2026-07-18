@@ -2762,7 +2762,7 @@ impl View {
             let marker = if sid == picker.target { '›' } else { ' ' };
             lines.push(pad_to(&format!(" {marker} {} {name}", i + 1), W));
         }
-        lines.push(pad_to(" h left · j down · k up · l right", W));
+        lines.push(pad_to(" h/← left · j/↓ down · k/↑ up · l/→ right", W));
         lines.push(pad_to(" t/enter new tab · esc/q cancel", W));
         lines
     }
@@ -3311,6 +3311,17 @@ enum ChromeHit {
         row: u16,
         col: u16,
     },
+    /// (x-9c5f) Open the placement picker for a not-yet-spawned watch-only row:
+    /// the operator picks the split direction (h/j/k/l or arrows) or a new tab
+    /// before it attaches, instead of a hardcoded split/tab. `squad` is the
+    /// row's owning squad (the picker's preferred target); `apply_hit` resolves
+    /// the live workspace list and default target. Every deliberate attach
+    /// gesture (sideline click, selector Enter, navigator goto, peek Enter)
+    /// routes through here, so placement is chosen the same way everywhere.
+    OpenAttachPlace {
+        id: String,
+        squad: Option<u64>,
+    },
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else attach a paneless
@@ -3318,24 +3329,19 @@ enum ChromeHit {
 /// ([`View::row_action`]) and the navigator's goto ([`View::nav_rows`]) so the
 /// two inputs resolve the same entity identically (x-653d). Pure - the agent's
 /// own fields decide, so no `&self` needed.
-fn agent_hit(a: &AgentRow, active_squad: u64) -> ChromeHit {
+fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
         None => match &a.attach_id {
-            // Watch-only attachable row (x-9f75 row-kind default): a same-workspace sibling (its squad is the
-            // active one) splits the current tab so siblings sit side by side; a cross-workspace / orphan row
-            // keeps the new-tab-in-owner default. Peek stays an explicit gesture, never a click default.
-            Some(id) if a.squad == Some(active_squad) => {
-                ChromeHit::Cmds(vec![Command::AttachAgent {
-                    id: id.clone(),
-                    placement: PanePlacement {
-                        target: PaneTarget::CurrentRoute,
-                        split: Some(Dir::Right),
-                        here: false,
-                    },
-                }])
-            }
-            Some(id) => ChromeHit::Cmds(vec![Command::attach_agent(id)]),
+            // A not-yet-spawned watch-only attachable row opens the placement
+            // picker (x-9c5f) so the operator chooses the split direction
+            // (h/j/k/l or arrows) or a new tab, rather than a hardcoded
+            // same-workspace Right split / cross-workspace new tab. An exited row
+            // carries no attach_id, so it falls through to the notice.
+            Some(id) => ChromeHit::OpenAttachPlace {
+                id: id.clone(),
+                squad: a.squad,
+            },
             None => ChromeHit::Notice("agent has no pane here".into()),
         },
     }
@@ -4967,6 +4973,28 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
+        // (x-9c5f) A not-yet-spawned watch-only row: open the placement picker so
+        // the operator picks the split direction. Resolve the live workspace list
+        // and default target (the row's own squad if still present, else the
+        // active one, else the first) here, where `&mut View` + the layout are in
+        // hand. `open_attach_place` closes peek/the selector; the picker owns the
+        // rest of the attach.
+        ChromeHit::OpenAttachPlace { id, squad } => {
+            let squads: Vec<u64> = view.layout.squads.iter().map(|s| s.id).take(9).collect();
+            if squads.is_empty() {
+                view.set_notice("no workspace to attach into".into());
+            } else {
+                let target = squad
+                    .filter(|sid| squads.contains(sid))
+                    .or_else(|| {
+                        squads
+                            .contains(&view.layout.active_squad)
+                            .then_some(view.layout.active_squad)
+                    })
+                    .unwrap_or(squads[0]);
+                view.open_attach_place(id, target, squads);
+            }
+        }
     }
     Ok(())
 }
@@ -5850,51 +5878,24 @@ async fn peek_keys(
                 }
             }
             b'l' | b'\r' | b'\n' => {
-                // Attach from peek (US4). A NOT-yet-spawned watch-only attachable
-                // row (paneless, live, has an attach target) opens the placement
-                // picker so the operator picks the split direction (h/j/k/l ->
-                // left/down/up/right) or a new tab, instead of the default
-                // Right-split attach (x-9c5f follow-up). A pane-hosted row is
-                // already spawned - it just focuses (agent_hit -> FocusPane); a
-                // paneless row with no attach target keeps its notice (both
-                // overlays stay open, x-260a locked 3). Right-arrow folds to `l`.
-                let row = match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => Some(a.clone()),
+                // Attach from peek (US4) through the shared agent_hit -> apply_hit
+                // path a click / selector Enter uses: a pane-hosted row focuses;
+                // a not-yet-spawned watch-only row resolves to OpenAttachPlace, so
+                // apply_hit opens the placement picker (choose split direction /
+                // tab, x-9c5f) - open_attach_place closes both overlays. A Notice
+                // refusal (a paneless row with no attach target) keeps BOTH
+                // overlays open (x-260a locked 3). Right-arrow folds to `l`.
+                let hit = match view.display_rows().get(cursor) {
+                    Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
                     _ => None,
                 };
-                match row {
-                    Some(a) if a.pane_id.is_none() && !a.exited && a.attach_id.is_some() => {
-                        let id = a.attach_id.clone().unwrap();
-                        // Mirror the sideline placement path's target resolution
-                        // (the row's own squad, else the active one, else the
-                        // first): pick a real, still-present workspace.
-                        let squads: Vec<u64> =
-                            view.layout.squads.iter().map(|s| s.id).take(9).collect();
-                        if squads.is_empty() {
-                            let _ = raw_out(b"\x07");
-                        } else {
-                            let target = a
-                                .squad
-                                .filter(|sid| squads.contains(sid))
-                                .or_else(|| {
-                                    squads
-                                        .contains(&view.layout.active_squad)
-                                        .then_some(view.layout.active_squad)
-                                })
-                                .unwrap_or(squads[0]);
-                            // open_attach_place closes peek + the selector; the
-                            // picker owns the rest of the attach gesture.
-                            view.open_attach_place(id, target, squads);
-                        }
+                match hit {
+                    Some(ChromeHit::Notice(msg)) => view.set_notice(msg.to_string()),
+                    Some(hit) => {
+                        view.clear_peek();
+                        view.selector = None;
+                        apply_hit(view, hit, sock_w).await?;
                     }
-                    Some(a) => match agent_hit(&a, view.layout.active_squad) {
-                        ChromeHit::Notice(msg) => view.set_notice(msg),
-                        hit => {
-                            view.clear_peek();
-                            view.selector = None;
-                            apply_hit(view, hit, sock_w).await?;
-                        }
-                    },
                     None => {
                         let _ = raw_out(b"\x07");
                     }
@@ -7435,16 +7436,17 @@ mod tests {
         assert!(
             matches!(agent_hit(&hosted, 2), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
         );
-        // A watch-only row whose squad is NOT the active one keeps the new-tab
-        // default (cross-workspace / owner-routed).
+        // A watch-only attachable row (any workspace) now resolves to the
+        // placement picker (x-9c5f), carrying its owning squad as the target.
         let bg = AgentRow {
             pane_id: None,
             attach_id: Some("job1".into()),
             ..hosted.clone()
         };
-        assert!(
-            matches!(agent_hit(&bg, 2), ChromeHit::Cmds(c) if c == vec![Command::attach_agent("job1")])
-        );
+        assert!(matches!(
+            agent_hit(&bg, 2),
+            ChromeHit::OpenAttachPlace { id, squad } if id == "job1" && squad == bg.squad
+        ));
         let orphan = AgentRow {
             pane_id: None,
             attach_id: None,
@@ -7454,9 +7456,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_hit_same_workspace_watch_only_splits_current_tab() {
-        // AC2-UI (x-9f75): a watch-only attachable row whose squad IS the active squad attaches as a Right
-        // split of the current tab (siblings sit side by side), not a new tab.
+    fn agent_hit_watch_only_opens_placement_picker() {
+        // x-9c5f: a watch-only attachable row (any workspace) resolves to the
+        // placement picker carrying its owning squad, instead of a hardcoded
+        // split/tab - the operator picks the direction in the picker.
         let row = AgentRow {
             squad: Some(1),
             name: "sib".into(),
@@ -7476,17 +7479,15 @@ mod tests {
             updated_at: None,
             pr: None,
         };
-        let ChromeHit::Cmds(c) = agent_hit(&row, 1) else {
-            panic!("expected Cmds for a same-workspace watch-only row");
-        };
-        match c.as_slice() {
-            [Command::AttachAgent { id, placement }] => {
+        match agent_hit(&row, 1) {
+            ChromeHit::OpenAttachPlace { id, squad } => {
                 assert_eq!(id, "job1");
-                assert_eq!(placement.split, Some(Dir::Right));
-                assert!(!placement.here);
-                assert!(matches!(placement.target, PaneTarget::CurrentRoute));
+                assert_eq!(squad, Some(1));
             }
-            other => panic!("expected one AttachAgent, got {other:?}"),
+            other => panic!(
+                "expected OpenAttachPlace, got {}",
+                chrome_hit_label(&Some(other))
+            ),
         }
     }
 
@@ -8026,6 +8027,7 @@ mod tests {
             Some(ChromeHit::OpenCreate) => "OpenCreate",
             Some(ChromeHit::ToggleExpand(_)) => "ToggleExpand",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
+            Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
         }
     }
 
@@ -8285,7 +8287,8 @@ mod tests {
             updated_at: None,
             pr: None,
         };
-        // A watch-only bg row with a claude jobId: a click attaches it.
+        // A watch-only bg row with a claude jobId: a click opens the placement
+        // picker (x-9c5f) so the operator chooses the split direction.
         let bg_attach = AgentRow {
             squad: None,
             name: "bg-claude".into(),
@@ -8332,10 +8335,10 @@ mod tests {
         // (4), "+ new workspace" footer (5), Blank (6), "~ elsewhere" header (7),
         // orphan "bg-claude" (8), orphan "bg-other" (9).
         assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::FocusPane(10)]);
-        assert_eq!(
-            cmds(view.chrome_hit(8, 4)),
-            vec![Command::attach_agent("c19cd2c3")]
-        );
+        assert!(matches!(
+            view.chrome_hit(8, 4),
+            Some(ChromeHit::OpenAttachPlace { id, squad }) if id == "c19cd2c3" && squad.is_none()
+        ));
         assert!(matches!(view.chrome_hit(9, 4), Some(ChromeHit::Notice(_))));
         // The "~ elsewhere" header row is inert.
         assert!(view.chrome_hit(7, 4).is_none());
@@ -10626,22 +10629,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_enter_attaches_bg_agent() {
-        // AC1-EDGE: Enter on a claude bg row with an attach id sends
-        // AttachAgent.
+    async fn selector_enter_opens_placement_for_bg_agent() {
+        // x-9c5f: Enter on a not-yet-spawned claude bg row opens the placement
+        // picker (choose the split direction) instead of a default-placement
+        // attach; a direction key then sends AttachAgent with that split.
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
-        let mut cur = std::io::Cursor::new(buf);
-        match crate::proto::read_msg_sync(&mut cur).unwrap() {
+        assert!(buf.is_empty(), "nothing sent until a direction is chosen");
+        assert!(v.attach_place.is_some(), "Enter opens the placement picker");
+        assert_eq!(v.selector, None, "the picker replaces the selector");
+        // Choosing a direction sends the AttachAgent with that split.
+        let mut buf2: Vec<u8> = Vec::new();
+        attach_place_keys(&mut v, b"j", &mut buf2).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf2);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
                 assert_eq!(id, "c19cd2c3");
-                assert_eq!(placement, crate::proto::PanePlacement::default());
+                assert_eq!(placement.split, Some(Dir::Down));
             }
             other => panic!("expected AttachAgent, got {other:?}"),
         }
-        assert_eq!(v.selector, None);
     }
 
     #[tokio::test]
