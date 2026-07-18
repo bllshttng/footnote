@@ -5850,24 +5850,51 @@ async fn peek_keys(
                 }
             }
             b'l' | b'\r' | b'\n' => {
-                // Attach from peek (US4): resolve the peeked row through the same
-                // agent_hit -> apply_hit path a selector Enter / sideline click
-                // uses (FocusPane for a pane-hosted row, AttachAgent for a
-                // watch-only row with an attach_id). A Notice refusal (a paneless
-                // row with no attach target here) keeps BOTH overlays open
-                // (x-260a locked 3); a real hit closes peek AND the selector
-                // underneath. Right-arrow is already folded to `l`.
-                let hit = match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
+                // Attach from peek (US4). A NOT-yet-spawned watch-only attachable
+                // row (paneless, live, has an attach target) opens the placement
+                // picker so the operator picks the split direction (h/j/k/l ->
+                // left/down/up/right) or a new tab, instead of the default
+                // Right-split attach (x-9c5f follow-up). A pane-hosted row is
+                // already spawned - it just focuses (agent_hit -> FocusPane); a
+                // paneless row with no attach target keeps its notice (both
+                // overlays stay open, x-260a locked 3). Right-arrow folds to `l`.
+                let row = match view.display_rows().get(cursor) {
+                    Some(DisplayRow::Agent(a)) => Some(a.clone()),
                     _ => None,
                 };
-                match hit {
-                    Some(ChromeHit::Notice(msg)) => view.set_notice(msg.to_string()),
-                    Some(hit) => {
-                        view.clear_peek();
-                        view.selector = None;
-                        apply_hit(view, hit, sock_w).await?;
+                match row {
+                    Some(a) if a.pane_id.is_none() && !a.exited && a.attach_id.is_some() => {
+                        let id = a.attach_id.clone().unwrap();
+                        // Mirror the sideline placement path's target resolution
+                        // (the row's own squad, else the active one, else the
+                        // first): pick a real, still-present workspace.
+                        let squads: Vec<u64> =
+                            view.layout.squads.iter().map(|s| s.id).take(9).collect();
+                        if squads.is_empty() {
+                            let _ = raw_out(b"\x07");
+                        } else {
+                            let target = a
+                                .squad
+                                .filter(|sid| squads.contains(sid))
+                                .or_else(|| {
+                                    squads
+                                        .contains(&view.layout.active_squad)
+                                        .then_some(view.layout.active_squad)
+                                })
+                                .unwrap_or(squads[0]);
+                            // open_attach_place closes peek + the selector; the
+                            // picker owns the rest of the attach gesture.
+                            view.open_attach_place(id, target, squads);
+                        }
                     }
+                    Some(a) => match agent_hit(&a, view.layout.active_squad) {
+                        ChromeHit::Notice(msg) => view.set_notice(msg),
+                        hit => {
+                            view.clear_peek();
+                            view.selector = None;
+                            apply_hit(view, hit, sock_w).await?;
+                        }
+                    },
                     None => {
                         let _ = raw_out(b"\x07");
                     }
@@ -10126,9 +10153,10 @@ mod tests {
     }
 
     // x-c376 AC4-HP: Enter on a pane-hosted peeked row focuses its pane and
-    // closes BOTH overlays; right-arrow (folds to l) on a watch-only row attaches
-    // it; AC2-EDGE: a row with no pane and no attach target refuses with a notice
-    // and keeps both overlays open.
+    // closes BOTH overlays; right-arrow (folds to l) on a NOT-yet-spawned
+    // watch-only row opens the placement picker (x-9c5f), which then sends the
+    // AttachAgent with the chosen split; AC2-EDGE: a row with no pane and no
+    // attach target refuses with a notice and keeps both overlays open.
     #[tokio::test]
     async fn peek_attaches_and_refuses_a_paneless_row() {
         // Pane-hosted "worker" (pane_id 10): Enter -> FocusPane, both close.
@@ -10145,17 +10173,33 @@ mod tests {
             ClientMsg::Command(Command::FocusPane(p)) => assert_eq!(p, 10),
             other => panic!("expected FocusPane, got {other:?}"),
         }
-        // Watch-only "bg-claude" (attach_id): right-arrow folds to l -> AttachAgent.
+        // Watch-only "bg-claude" (attach_id, not yet spawned): right-arrow folds
+        // to l -> opens the placement picker (no command yet); a direction key
+        // then sends AttachAgent with the chosen split (x-9c5f).
         let mut v = unified_rows_view();
         let mut buf2: Vec<u8> = Vec::new();
         let bg = agent_row_at(&v, |a| a.name == "bg-claude");
         v.selector = Some(bg);
         v.open_peek(bg, "bg-claude".into());
         peek_keys(&mut v, b"\x1b[C", &mut buf2).await.unwrap();
-        assert!(v.peek.is_none() && v.selector.is_none());
-        let mut cur = std::io::Cursor::new(buf2);
+        assert!(
+            v.peek.is_none() && v.selector.is_none(),
+            "the picker replaces peek"
+        );
+        assert!(
+            v.attach_place.is_some(),
+            "a not-yet-spawned watch-only peek attach opens the placement picker"
+        );
+        assert!(buf2.is_empty(), "nothing sent until a direction is chosen");
+        // Choose a right split -> AttachAgent with split Right.
+        let mut buf2b: Vec<u8> = Vec::new();
+        attach_place_keys(&mut v, b"l", &mut buf2b).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf2b);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-            ClientMsg::Command(Command::AttachAgent { id, .. }) => assert_eq!(id, "c19cd2c3"),
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert_eq!(placement.split, Some(Dir::Right));
+            }
             other => panic!("expected AttachAgent, got {other:?}"),
         }
         // Orphan "bg-other" (no pane, no attach_id): Enter refuses, overlays stay.
