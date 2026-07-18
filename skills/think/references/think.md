@@ -795,14 +795,24 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      without `## Repro`; an `investigation` without `## Evidence Chain` or
      `## Re-open Conditions`; a cross-repo feature/bug without a
      `## Interface Contract` carrying `contract_version` and a Locked Decision
-     referencing it (unless the omission is explained in Open Questions).
+     referencing it (unless the omission is explained in Open Questions); an
+     `epic` missing ANY of `## Vision`, `## Success Definition`,
+     `## Gaps / Candidate Children`, `## Decomposition Guidance`, or
+     `## Operator Intent` - **or carrying one as a bare heading with no content
+     under it** (the empty-section rule, same substrate as the empty-stories check
+     below) - or missing the `scope: epic` frontmatter key, or with `## User
+     Stories` absent or empty.
    - **Anti-filler check (new):** a section the resolved type EXCLUDES that is
-     present anyway - AC blocks or UI-state tables on an `investigation`, an
-     `## Evidence Chain` on a `feature` or `bug` - is flagged **for removal, not
-     approved**. This is the
+     present anyway - AC blocks or UI-state tables on an `investigation` **or an
+     `epic`**, an `## Evidence Chain` on a `feature` or `bug` - is flagged **for
+     removal, not approved**. This is the
      x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
      fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
      is now a finding.
+   - **Empty-stories check (new, all buildable types):** a `## User Stories`
+     heading with no story content under it is a finding on `feature`, `bug`, AND
+     `epic` - `/blueprint` silently degrades to one empty "implement feature" task
+     otherwise. This is a reviewer-prompt line, not a parser change.
    - **AC adequacy attack (new):** for each AC in the doc, try to name one
      concrete implementation or input that satisfies the AC as written while
      violating the design's intent - a wrong-but-passing implementation, a
@@ -812,7 +822,9 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      per AC maximum; none-case ("Not applicable") ACs and Failure Mode bullets
      are out of scope, do not invent bugs for them. A rated critique ("this AC is
      weak") is not a finding; only a named bug is - vague criteria, vague
-     critiques.
+     critiques. On an `epic` this attack is a natural no-op: the epic contract
+     excludes ACs, and the anti-filler check already flags any AC block that
+     sneaks in.
    - General quality: missing error states, contradictions between sections,
      vague implementation details.
 3. If issues found: fix them, re-dispatch reviewer (max 3 iterations). Resolve an
