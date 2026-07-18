@@ -1171,8 +1171,10 @@ fn first_line_or(s: &str, fallback: &str) -> String {
 /// (Locked Decision 6). Uses the `fno` porcelain; argv array only.
 async fn run_mail_send(name: &str, text: &str) -> String {
     const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
+    // `--` ends option parsing so operator text starting with `-` (e.g. a reply
+    // of `--help`) is delivered as the message, not consumed as a CLI flag.
     let fut = tokio::process::Command::new(fno_bin())
-        .args(["mail", "send", name, text])
+        .args(["mail", "send", "--", name, text])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
@@ -1197,18 +1199,34 @@ async fn run_mail_send(name: &str, text: &str) -> String {
 /// notice is advisory. Uses the `fno` porcelain, NOT `fno-agents`: the Rust
 /// runtime intercepts `agents spawn` and routes it (unlike stop/rm, which use
 /// the `fno-agents` binary deliberately).
-async fn run_respawn(name: &str, uuid: &str) -> String {
+///
+/// `cwd` + `account` come from the registry row, NOT the `--resume` uuid:
+/// `fno agents spawn` defaults `--cwd` to the CANONICAL checkout (x-85fe), so a
+/// worker revived from a feature worktree would land in main without `--cwd`;
+/// an isolated-account session's uuid lives in that account's config dir, so it
+/// needs `--account` to be found. Both are omitted when empty/absent (the
+/// pre-existing default, correct for a canonical/default-account worker).
+async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -> String {
     const RESPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+    let mut args: Vec<&str> = vec![
+        "agents",
+        "spawn",
+        name,
+        "--resume",
+        uuid,
+        "--substrate",
+        "bg",
+    ];
+    if !cwd.is_empty() {
+        args.push("--cwd");
+        args.push(cwd);
+    }
+    if let Some(acct) = account.filter(|a| !a.is_empty()) {
+        args.push("--account");
+        args.push(acct);
+    }
     let fut = tokio::process::Command::new(fno_bin())
-        .args([
-            "agents",
-            "spawn",
-            name,
-            "--resume",
-            uuid,
-            "--substrate",
-            "bg",
-        ])
+        .args(&args)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
@@ -2218,10 +2236,17 @@ impl Core {
     /// OFF the core loop: the advisory outcome routes back as a `DispatchResult`
     /// notice; the 1s registry poll owns the row flipping live. `uuid` was
     /// shape-validated by the caller.
-    fn respawn_agent(&self, id: u64, name: String, uuid: String) {
+    fn respawn_agent(
+        &self,
+        id: u64,
+        name: String,
+        uuid: String,
+        cwd: String,
+        account: Option<String>,
+    ) {
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_respawn(&name, &uuid).await;
+            let notice = run_respawn(&name, &uuid, &cwd, account.as_deref()).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -4958,19 +4983,30 @@ impl Core {
                 // row, a uuid-less row (also covers non-claude - derive_rows only
                 // carries the uuid for claude), and a malformed uuid (shape gate
                 // before argv); else shell `fno agents spawn --resume` off-loop.
-                let resolved = self
-                    .resolve_lifecycle_target(&name)
-                    .map(|a| (a.exited, a.claude_session_uuid.clone()));
+                // Carry the row's cwd + account too: `fno agents spawn` defaults
+                // to the CANONICAL checkout (x-85fe), NOT the row's worktree, so a
+                // cross-worktree revival must pass `--cwd <recorded>` or it comes
+                // back in main; an isolated-account session needs `--account`
+                // (its uuid lives in that account's config dir). The row is the
+                // only source of these - they are not on the `--resume` uuid.
+                let resolved = self.resolve_lifecycle_target(&name).map(|a| {
+                    (
+                        a.exited,
+                        a.claude_session_uuid.clone(),
+                        a.cwd.clone(),
+                        a.account.clone(),
+                    )
+                });
                 match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok((false, _)) => self.notice(client_id, format!("{name} is still live")),
-                    Ok((true, None)) => self.notice(
+                    Ok((false, ..)) => self.notice(client_id, format!("{name} is still live")),
+                    Ok((true, None, ..)) => self.notice(
                         client_id,
                         format!("{name}: no claude session recorded - cannot respawn"),
                     ),
-                    Ok((true, Some(uuid))) => {
+                    Ok((true, Some(uuid), cwd, account)) => {
                         if valid_session_uuid(&uuid) {
-                            self.respawn_agent(client_id, name, uuid);
+                            self.respawn_agent(client_id, name, uuid, cwd, account);
                         } else {
                             self.notice(
                                 client_id,

@@ -687,6 +687,12 @@ struct PeekView {
     /// (x-9c5f) When this row's transcript was last fetched, throttling the
     /// auto-refresh on Layout pushes to >= `PEEK_REFRESH_INTERVAL` (US9).
     last_fetch: Instant,
+    /// (x-9c5f) An auto-refresh request is in flight (armed, body not yet
+    /// landed). Guards against stacking a new refresh every Layout push while a
+    /// slow `fno agents peek` is still running - without it a >3s peek read on a
+    /// busy row would supersede each response before it arrives and never settle.
+    /// Cleared when any body lands (`apply_peek_body`).
+    refresh_pending: bool,
 }
 
 /// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
@@ -1488,6 +1494,9 @@ impl View {
         match self.peek.as_mut().filter(|p| p.seq == seq) {
             Some(peek) => {
                 peek.body = Some(lines);
+                // A body landed: any in-flight auto-refresh is settled, so the
+                // next Layout push may arm a new one (x-9c5f US9).
+                peek.refresh_pending = false;
                 true
             }
             None => false,
@@ -1507,6 +1516,7 @@ impl View {
             body: None,
             name,
             last_fetch: Instant::now(),
+            refresh_pending: false,
         });
         self.peek_esc.clear();
         self.peek_seq
@@ -2174,10 +2184,13 @@ impl View {
     /// name) to send the fresh `PeekAgent`, or `None` when peek is closed / not
     /// yet due.
     fn peek_refresh_due(&mut self) -> Option<(u64, String)> {
+        // Skip while a prior refresh is still in flight: stacking a new request
+        // every push would supersede each response before it lands on a slow peek
+        // read, so the transcript would never settle (never re-arm mid-flight).
         let due = self
             .peek
             .as_ref()
-            .is_some_and(|p| p.last_fetch.elapsed() >= PEEK_REFRESH_INTERVAL);
+            .is_some_and(|p| !p.refresh_pending && p.last_fetch.elapsed() >= PEEK_REFRESH_INTERVAL);
         if !due {
             return None;
         }
@@ -2186,6 +2199,7 @@ impl View {
         let peek = self.peek.as_mut()?;
         peek.seq = seq;
         peek.last_fetch = Instant::now();
+        peek.refresh_pending = true;
         Some((seq, peek.name.clone()))
     }
 
@@ -9791,6 +9805,7 @@ mod tests {
             body: None,
             name: String::new(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         });
         assert!(
             !v.apply_peek_body(4, vec!["stale".into()]),
@@ -9836,6 +9851,7 @@ mod tests {
             body: None,
             name: "w".into(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         };
         let out = peek_overlay_lines(Some(&row), &loading, None, 0).join("\n");
         assert!(
@@ -9853,6 +9869,7 @@ mod tests {
             body: Some(vec!["line one".into(), "line two".into()]),
             name: "w".into(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         };
         let out = peek_overlay_lines(Some(&row), &loaded, None, 0).join("\n");
         assert!(out.contains("line one") && out.contains("line two"));
@@ -9889,6 +9906,7 @@ mod tests {
             body: Some(vec!["a\x1b[31mred\x1b[0m\tb\rc".into()]),
             name: "w".into(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         };
         let out = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
         assert!(!out.contains('\x1b'), "ESC stripped");
@@ -9912,6 +9930,7 @@ mod tests {
             body: None,
             name: "w".into(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         };
         assert!(peek_overlay_lines(Some(&row), &peek, None, 0)[0].contains("@readyrule"));
 
@@ -9937,6 +9956,7 @@ mod tests {
             body: None,
             name: "w".into(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         };
         let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
         row.updated_at = Some(1_000);
@@ -9962,6 +9982,7 @@ mod tests {
             body: Some(vec![]),
             name: "w".into(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         };
         let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
         let live = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
@@ -9986,6 +10007,7 @@ mod tests {
             body: Some(vec![]),
             name: "w".into(),
             last_fetch: Instant::now(),
+            refresh_pending: false,
         };
         let row = agent_row("w", 3, Some(AgentBadge::Working), false);
         let out = peek_overlay_lines(Some(&row), &peek, Some("fix the test"), 0).join("\n");
