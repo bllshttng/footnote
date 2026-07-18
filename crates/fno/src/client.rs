@@ -2928,7 +2928,10 @@ impl View {
                 break;
             }
             let is_inert = row_is_inert(&drow);
-            let (text, mut flags) = match drow {
+            // (x-df4c) The row tuple carries `fg` now: most rows are
+            // `Color::Default`, but a needs-attention (Blocked) agent row or card
+            // paints the accent, so the color must reach the cells below.
+            let (text, mut flags, fg) = match drow {
                 DisplayRow::Sel(row) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
                     let Some(squad) = squad else { continue };
@@ -2995,22 +2998,16 @@ impl View {
                             (format!("  {marker}{label}"), 0)
                         }
                     };
-                    (text, flags)
+                    (text, flags, Color::Default)
                 }
                 DisplayRow::Agent(a) => {
-                    // Fact-badge lattice glyphs (brief US2 state machine):
-                    // exited beats badge beats liveness; a report reason
-                    // rides inline while width allows.
-                    let glyph = if a.exited {
-                        '✗'
-                    } else {
-                        match a.badge {
-                            Some(AgentBadge::Working) => '●',
-                            Some(AgentBadge::Blocked) => '▲',
-                            Some(AgentBadge::Done) => '✓',
-                            None => '·',
-                        }
-                    };
+                    // The unified icon lattice (x-df4c): exit beats badge beats
+                    // liveness (row precedence, unchanged), mapped onto the one
+                    // state->style mapping. Idle is now the outline `○`, not the
+                    // near-invisible `·` this node exists to kill.
+                    let st = agent_lattice_state(a);
+                    let style = lattice_style(st);
+                    let glyph = style.glyph;
                     // A recruit mark (x-8f11) replaces the leading space with a
                     // `*`, keeping the row width unchanged (same vocabulary as
                     // the active-squad/tab marker).
@@ -3051,36 +3048,33 @@ impl View {
                         text.push_str(": ");
                         text.push_str(reason);
                     }
-                    // Fact-badge lattice + roster provenance (x-0a2e, AC1-UI):
-                    // `✗`+DIM = exited, `·`+DIM = external (roster-surfaced live),
-                    // `·` bright = fno-owned live. Exit keeps its glyph; external
-                    // only dims a live `·` row, staying pairwise-distinct.
-                    let flags = if a.exited || a.external {
-                        cell_flags::DIM
-                    } else {
-                        0
-                    };
-                    (text, flags)
+                    // External (roster-surfaced) is a MODIFIER, not a state
+                    // (x-df4c AC1-UI): the row keeps its lattice style and ORs
+                    // DIM on top - EXCEPT on Blocked, where the accent wins and
+                    // DIM is withheld (attention must never be dimmed). Exit's
+                    // DIM already rides `style.flags`.
+                    let mut flags = style.flags;
+                    if a.external && st != LatticeState::Blocked {
+                        flags |= cell_flags::DIM;
+                    }
+                    (text, flags, style.fg)
                 }
                 DisplayRow::Card(c) => {
-                    // Ready hollow, in-flight filled, blocked triangle - a glyph
-                    // vocabulary distinct from the agent badges above.
-                    let glyph = match c.state {
-                        CardState::Ready => '○',
-                        CardState::InFlight => '●',
-                        CardState::Blocked => '▲',
-                    };
+                    // The same icon lattice as the agent rows (x-df4c US3): a
+                    // Ready card IS the hollow waiting state, InFlight IS the
+                    // filled running state, so the card vocabulary and the agent
+                    // lattice are literally one mapping. Blocked now carries the
+                    // accent instead of the old bare DIM (attention, not muted).
+                    let style = lattice_style(card_lattice_state(c.state));
+                    let glyph = style.glyph;
                     let label = if c.slug.is_empty() { &c.id } else { &c.slug };
-                    // Blocked cards read dim; ready/in-flight are the actionable
-                    // foreground of the queue.
-                    let flags = if c.state == CardState::Blocked {
-                        cell_flags::DIM
-                    } else {
-                        0
-                    };
-                    (format!("  {glyph} {label} {}", c.priority), flags)
+                    (
+                        format!("  {glyph} {label} {}", c.priority),
+                        style.flags,
+                        style.fg,
+                    )
                 }
-                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM),
+                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, Color::Default),
                 DisplayRow::NewSquad => {
                     // The recruit-mark footer count rides the create affordance
                     // (x-8f11): `space` marks, `R` recruits the marked set.
@@ -3096,17 +3090,17 @@ impl View {
                         Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
                         None => base,
                     };
-                    (label, cell_flags::DIM)
+                    (label, cell_flags::DIM, Color::Default)
                 }
                 DisplayRow::Sub(a) => {
                     // (x-cd67 US2) The dim line-2 subline, indented 4 cells to sit
                     // under the agent name (` {mark}{glyph} ` is 4 cells wide). The
                     // later `.take(text_w)` truncates it to the panel width.
                     let sub = a.subline.as_deref().unwrap_or("");
-                    (format!("    {sub}"), cell_flags::DIM)
+                    (format!("    {sub}"), cell_flags::DIM, Color::Default)
                 }
                 // (x-cd67 US3) A blank section spacer paints nothing.
-                DisplayRow::Blank => (String::new(), 0),
+                DisplayRow::Blank => (String::new(), 0, Color::Default),
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -3130,7 +3124,7 @@ impl View {
                 }
                 cells[r * cols + col] = Cell {
                     c: ch,
-                    fg: Color::Default,
+                    fg,
                     bg: Color::Default,
                     flags,
                 };
@@ -3420,6 +3414,34 @@ fn nav_agent_state(a: &AgentRow) -> PaneState {
         PaneState::Idle
     } else {
         pane_state(a.badge, a.seen)
+    }
+}
+
+/// An agent row's icon-lattice state (x-df4c US2): exit beats badge beats
+/// liveness, mapped onto the one lattice. Unlike [`nav_agent_state`] this keeps
+/// `Exited` distinct (`✗`) rather than folding it to `Idle` - a row shows its
+/// own exit, but a squad/tab rollup ignores it.
+fn agent_lattice_state(a: &AgentRow) -> LatticeState {
+    if a.exited {
+        LatticeState::Exited
+    } else {
+        match a.badge {
+            Some(AgentBadge::Working) => LatticeState::Working,
+            Some(AgentBadge::Blocked) => LatticeState::Blocked,
+            Some(AgentBadge::Done) => LatticeState::DoneUnseen,
+            None => LatticeState::Idle,
+        }
+    }
+}
+
+/// A queue card's icon-lattice state (x-df4c US3): Ready unifies with `Idle`
+/// (hollow waiting), InFlight with `Working` (filled running), Blocked stays
+/// the accent state - so cards and agent rows render the identical vocabulary.
+fn card_lattice_state(s: CardState) -> LatticeState {
+    match s {
+        CardState::Ready => LatticeState::Idle,
+        CardState::InFlight => LatticeState::Working,
+        CardState::Blocked => LatticeState::Blocked,
     }
 }
 
@@ -9156,12 +9178,14 @@ mod tests {
             let cell = frame.cells[r * cols + 2];
             (cell.c, cell.flags & cell_flags::DIM == cell_flags::DIM)
         };
+        // x-df4c: idle is now the outline `○` (was the near-invisible `·`); the
+        // external DIM modifier and the exited `✗` precedence are unchanged.
         assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
-        assert_eq!(probe("z-external"), ('\u{00b7}', true), "external: · + DIM");
+        assert_eq!(probe("z-external"), ('\u{25cb}', true), "external: ○ + DIM");
         assert_eq!(
             probe("z-fnolive"),
-            ('\u{00b7}', false),
-            "fno-live: · + bright"
+            ('\u{25cb}', false),
+            "fno-live: ○ + bright"
         );
     }
 
