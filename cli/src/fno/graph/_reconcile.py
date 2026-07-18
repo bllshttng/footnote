@@ -978,7 +978,8 @@ _POST_MERGE_DISPATCH_SUBDIR = "post-merge-dispatched"
 @dataclass
 class PostMergeDispatchResult:
     outcome: Literal[
-        "dispatched", "routed-warm", "already-dispatched", "disabled", "spawn-failed"
+        "dispatched", "routed-warm", "finalized-origin",
+        "already-dispatched", "disabled", "spawn-failed",
     ]
     pr_number: int
     short_id: Optional[str] = None
@@ -995,6 +996,84 @@ def _dispatch_marker(canonical: Path, key: str) -> Path:
 _POST_MERGE_DISPATCH_TTL_MS = 15 * 60 * 1000
 
 
+def _origin_transcript_path(
+    session_id: Optional[str], cwd: Optional[str], harness: Optional[str]
+) -> Optional[Path]:
+    """The on-disk claude transcript for a ``(session, cwd)`` origin, or None.
+
+    Liveness-independent: pure filesystem existence, deliberately NOT
+    ``discover_live_sessions`` (which keys on a live process — exactly what a
+    dead origin lacks). Reuses discover's cwd->projects-subdir encoding rather
+    than re-deriving the ``~/.claude/projects/<enc>`` path (the encoding is
+    non-obvious, the classic silent-miss). Claude-first: a non-claude harness
+    yields None, so a codex/gemini origin falls through to cold + the backstop.
+    """
+    if not session_id or not cwd:
+        return None
+    if harness and harness != "claude":
+        return None
+    try:
+        from fno.agents.discover import _candidate_dir_names, default_projects_dir
+    except Exception:  # noqa: BLE001 - discover unavailable -> no probe
+        return None
+    projects = default_projects_dir()
+    for name in _candidate_dir_names(cwd):
+        candidate = projects / name / f"{session_id}.jsonl"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def origin_transcript_exists(
+    session_id: Optional[str], cwd: Optional[str], harness: Optional[str]
+) -> bool:
+    """True iff the origin's transcript AND its ``target-state.md`` both survive.
+
+    The direct-finalize rung's gate (x-88df US4): finalize reads the manifest
+    and the transcript entirely from disk, so both must exist for the rung to
+    produce a full-fidelity row. A missing manifest (archived worktree) returns
+    False and dispatch falls to cold + the reconcile backstop.
+    """
+    if _origin_transcript_path(session_id, cwd, harness) is None:
+        return False
+    return (Path(cwd) / ".fno" / "target-state.md").is_file()
+
+
+def _finalize_origin_ledger(
+    source_cwd: str, transcript: str, harness: Optional[str]
+) -> bool:
+    """Invoke ``fno-agents finalize`` against a dead origin's manifest+transcript.
+
+    Writes the full-fidelity ledger row (cost/tokens/phases/provider) + repairs
+    ``pr_number``, with no session revival. ``--reason DoneAwaitingMerge`` is
+    load-bearing: it is NOT a SHIP_REASON, so finalize runs the always-branch
+    ledger row only, never re-running plan-stamp/handoff/verify_advise against
+    the dead origin. Returns True on exit 0; any failure returns False so
+    dispatch degrades to the cold spawn.
+    """
+    try:
+        from fno.agents.rust_runtime import resolve_binary
+
+        binary = resolve_binary()
+    except Exception:  # noqa: BLE001 - runtime resolver unavailable
+        binary = None
+    if binary is None:
+        return False
+    state = Path(source_cwd) / ".fno" / "target-state.md"
+    cmd = [
+        str(binary), "finalize",
+        "--state", str(state),
+        "--cwd", str(source_cwd),
+        "--reason", "DoneAwaitingMerge",
+        "--transcript", str(transcript),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def dispatch_post_merge_ritual(
     pr_number: int,
     *,
@@ -1005,7 +1084,9 @@ def dispatch_post_merge_ritual(
     spawn: Optional[Callable[[int, str], str]] = None,
     source_session_id: Optional[str] = None,
     source_harness: Optional[str] = None,
+    source_cwd: Optional[str] = None,
     warm_inject: Optional[Callable[[str, int, Optional[str]], "tuple[bool, str]"]] = None,
+    finalize_origin: Optional[Callable[[str, str, Optional[str]], bool]] = None,
     notify_origin: Optional[Callable[[str, int, Optional[str], str], None]] = None,
 ) -> PostMergeDispatchResult:
     """Dispatch a bg ``/fno:pr merged <n>`` worker at most once per merge.
@@ -1132,10 +1213,15 @@ def dispatch_post_merge_ritual(
         # session, inject error) degrades to the cold path below; a queued-
         # but-unconfirmed inject is handled separately below (not a miss).
         cold_reason = "no-live-source-session"
+        # Gate for the direct-finalize rung below: only a CLEAN dead (None)
+        # resolution reaches it, so a live origin is never direct-finalized
+        # (AC1-EDGE). A warm-route exception leaves this False -> straight to cold.
+        origin_dead = False
         try:
             from fno.post_merge_route import inject_pr_merged, resolve_warm_session
 
             warm_sid = resolve_warm_session(source_session_id, source_harness)
+            origin_dead = warm_sid is None
             if warm_sid is not None:
                 _inject = warm_inject if warm_inject is not None else inject_pr_merged
                 delivered, reason = _inject(warm_sid, pr_number, source_harness)
@@ -1157,6 +1243,31 @@ def dispatch_post_merge_ritual(
                 cold_reason = reason
         except Exception as exc:  # noqa: BLE001 - warm routing must never break dispatch
             cold_reason = f"warm-error: {exc}"[:120]
+
+        # Direct-finalize middle rung (x-88df): the origin is dead but its
+        # manifest + transcript survive on disk. Finalize them directly - the
+        # SAME writer the stop hook would have run, reached deterministically
+        # (no session revival, no dependency on the stop hook's foreign-session
+        # guard). Writes the origin's OWN full-fidelity row (its real cost/
+        # phases/provider), higher fidelity than any fresh ceremony thread. A
+        # non-zero finalize degrades to the cold spawn exactly as a warm miss
+        # does; the marker is written only on exit 0 (AC2-ERR).
+        if origin_dead and origin_transcript_exists(source_session_id, source_cwd, source_harness):
+            _tpath = _origin_transcript_path(source_session_id, source_cwd, source_harness)
+            if _tpath is not None:
+                _finalize = finalize_origin if finalize_origin is not None else _finalize_origin_ledger
+                try:
+                    _ok = _finalize(source_cwd, str(_tpath), source_harness)
+                except Exception as exc:  # noqa: BLE001 - degrade to cold, never break dispatch
+                    _ok = False
+                    cold_reason = f"finalize-error: {exc}"[:120]
+                if _ok:
+                    _persist_marker()
+                    return PostMergeDispatchResult(
+                        "finalized-origin", pr_number, detail="direct-finalize"
+                    )
+                if cold_reason == "no-live-source-session":
+                    cold_reason = "finalize-nonzero"
 
         if spawn is None:
             spawn = _spawn_post_merge_worker
