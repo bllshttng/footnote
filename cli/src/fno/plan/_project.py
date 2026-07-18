@@ -18,6 +18,7 @@ from typing import Any
 
 from fno.plan._stamp import read_plan_file, write_plan_file
 from fno.plan._status import project_plan_status
+from fno.plan._rollup import ROLLUP_KEYS, compute_rollup
 
 # Graph-authoritative fields mirrored into frontmatter. `type` is usually
 # already present; the projection keeps it in sync with the node. `parent_slug`
@@ -83,6 +84,18 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
             fields[key] = value
             changed = True
 
+    # Epic rollup counters (x-6c2b): epic-only, injected by the converger. A key
+    # present => write it; absent (every leaf doc) => skip, so leaf frontmatter
+    # stays clean. The frontmatter reader returns every scalar as a str, so
+    # compare (and store) the str form or an int counter re-writes forever.
+    # `children_total: 2` still serializes bareword, so Obsidian reads a number.
+    for key in ROLLUP_KEYS:
+        if key in node:
+            value = str(node[key])
+            if fields.get(key) != value:
+                fields[key] = value
+                changed = True
+
     # Status projection (x-f34f): map the graph derived `_status` onto the plan,
     # forward-only. Kept out of MIRROR_KEYS because it is a mapped, monotonic
     # write (not a straight mirror) and stamps done_at on the terminal write.
@@ -126,6 +139,10 @@ def project_graph_nodes(
         return 0
     from fno.graph._intake import _find_node, repo_root
 
+    # Parent-repaint hop (x-6c2b wave 2): a child mutation must also repaint its
+    # parent epic's doc so its rollup counters stay live. Walk one level up.
+    ids = _expand_repaint_targets(entries, ids)
+
     slug_by_id = {
         n.get("id"): n.get("slug") for n in entries if isinstance(n, dict)
     }
@@ -142,11 +159,35 @@ def project_graph_nodes(
                 p = Path(root) / p
             if not p.is_file():
                 continue
-            if project_node_to_plan(_with_parent_slug(node, slug_by_id), p):
+            augmented = _with_parent_slug(node, slug_by_id)
+            if node.get("type") == "epic":
+                augmented.update(compute_rollup(node["id"], entries))
+            if project_node_to_plan(augmented, p):
                 rewritten += 1
         except Exception as e:  # noqa: BLE001 - per-node best-effort
             sys.stderr.write(f"warning: plan projection failed for {nid}: {e}\n")
     return rewritten
+
+
+def _expand_repaint_targets(
+    entries: list[dict[str, Any]], ids: list[str]
+) -> list[str]:
+    """Add each projected node's parent so a child transition repaints the epic
+    doc (x-6c2b wave 2: one level up). Order-preserving, deduped. A missing or
+    dangling parent is simply skipped - the epic without a doc is a no-op later.
+    """
+    by_id = {
+        n.get("id"): n for n in entries if isinstance(n, dict) and n.get("id")
+    }
+    out = list(ids)
+    seen = set(ids)
+    for nid in ids:
+        node = by_id.get(nid)
+        parent = node.get("parent") if node else None
+        if parent and parent not in seen:
+            seen.add(parent)
+            out.append(parent)
+    return out
 
 
 def _with_parent_slug(

@@ -3005,6 +3005,34 @@ def cmd_view() -> None:
         typer.echo(f"Could not launch opener: {e}", err=True)
 
 
+# -- bases (canonical epic/mission progress Bases) --
+
+@cli.command("bases", hidden=True)
+def cmd_bases(
+    out: Optional[str] = typer.Option(
+        None,
+        "--out",
+        help="Directory to emit the .base files into (default: internal/fno/backlog/).",
+    ),
+) -> None:
+    """Emit the canonical epic/mission progress Base files (x-6c2b).
+
+    Regenerable: refreshes a file carrying the generated marker, refuses to
+    clobber a hand-authored base (one prints `refused:`). Prints one line per
+    file: written | unchanged | refused.
+    """
+    from fno.graph._bases import BASES, write_base
+    from fno.graph._intake import repo_root
+
+    out_dir = (
+        Path(out) if out else Path(repo_root()) / "internal" / "fno" / "backlog"
+    )
+    for name, content in BASES.items():
+        target = out_dir / name
+        action = write_base(target, content)
+        typer.echo(f"{action}: {target}")
+
+
 # -- roadmap (public, curated) --
 
 @cli.command("roadmap", hidden=True)
