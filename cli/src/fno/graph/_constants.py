@@ -251,6 +251,30 @@ PRIORITY_ORDER: dict[str, int] = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 PRIORITY_MIGRATION: dict[str, str] = {"high": "p1", "medium": "p2", "low": "p3"}
 DEFAULT_PRIORITY: str = "p2"
 
+# Tags (x-6c2b wave 1): lowercase-kebab only, so they mirror cleanly into
+# Obsidian frontmatter `tags:` and stay legible as Base/tag-search filters.
+TAG_CHARSET_RE = re.compile(r"^[a-z0-9-]+$")
+
+# Epic nesting cap (x-6c2b wave 3): mission -> epic -> leaf. Two epic levels
+# keep rollup O(children) and the mental model flat; deeper nesting refuses.
+EPIC_NEST_MAX_DEPTH: int = 2
+
+
+def normalize_tag(raw: str) -> str:
+    """Lowercase-trim a tag and validate its charset.
+
+    Returns the normalized tag ([a-z0-9-]). Raises ValueError naming the
+    allowed charset on anything else, so callers refuse malformed input rather
+    than storing garbage the frontmatter mirror would carry.
+    """
+    tag = raw.strip().lower()
+    if not tag or not TAG_CHARSET_RE.match(tag):
+        raise ValueError(
+            f"invalid tag {raw!r}: tags must be lowercase-kebab [a-z0-9-] "
+            "(letters, digits, hyphens)"
+        )
+    return tag
+
 
 def _rank_band(entry: dict) -> tuple:
     """Rank band shared by the board lane key and the walker selection key.

@@ -322,6 +322,7 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
             e["priority"] = PRIORITY_MIGRATION[old_priority]
     for e in entries:
         e.setdefault("parent", None)
+        e.setdefault("tags", [])
         e.setdefault("type", "feature")
         e.setdefault("project", None)
         e.setdefault("cwd", None)

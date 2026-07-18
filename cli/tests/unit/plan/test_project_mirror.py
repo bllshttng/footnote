@@ -196,3 +196,28 @@ def test_non_clearable_none_never_deletes(tmp_path):
     assert project_node_to_plan(node, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert fields["priority"] == "p1"  # untouched
+
+
+# ---------------------------------------------------------------------------
+# tags mirror (x-6c2b wave 1) - same list semantics as blocked_by
+# ---------------------------------------------------------------------------
+
+
+def test_tags_mirror_reaches_doc(tmp_path):
+    """AC1: a node's tags list mirrors into the plan frontmatter."""
+    plan = _write_plan(tmp_path)
+    node = {"tags": ["mux"]}
+
+    assert project_node_to_plan(node, plan) is True
+    _, fields, _ = read_plan_file(plan)
+    assert fields["tags"] == ["mux"]
+
+
+def test_empty_tags_clears_stale_mirror(tmp_path):
+    """An empty tags list clears a stale doc mirror (like blocked_by)."""
+    plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: M\ntags: [old]"))
+    node = {"tags": []}
+
+    assert project_node_to_plan(node, plan) is True
+    _, fields, _ = read_plan_file(plan)
+    assert fields["tags"] == []

@@ -154,6 +154,196 @@ def test_missing_plan_file_never_fails_verb(tmp_graph, tmp_path):
     assert entries[0]["priority"] == "p0"
 
 
+def test_tag_roundtrip_reaches_doc(tmp_graph, tmp_path):
+    """AC1: `update --tag mux --tag mux` stores one tag and repaints the doc."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [_node(plan)])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--tag", "mux", "--tag", "mux"])
+    assert res.exit_code == 0, res.output
+
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert entries[0]["tags"] == ["mux"]  # dedup, idempotent
+    _, fields, _ = read_plan_file(plan)
+    assert fields["tags"] == ["mux"]
+
+
+def test_untag_removes_tag(tmp_graph, tmp_path):
+    """--untag removes a tag; absent tag is a no-op, not an error."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [_node(plan, tags=["mux", "ui"])])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--untag", "mux", "--untag", "gone"])
+    assert res.exit_code == 0, res.output
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert entries[0]["tags"] == ["ui"]
+
+
+def test_malformed_tag_refused_node_unchanged(tmp_graph, tmp_path):
+    """AC1-ERR: a malformed tag exits non-zero and leaves the node unchanged."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [_node(plan)])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--tag", "Mux UX!"])
+    assert res.exit_code != 0
+    assert "lowercase-kebab" in res.output
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert entries[0].get("tags", []) == []  # unchanged
+
+
+def _epic(nid, slug, parent=None):
+    return {
+        "id": nid, "slug": slug, "title": slug, "_status": "ready",
+        "domain": "code", "project": "fno", "type": "epic", "parent": parent,
+    }
+
+
+def test_epic_under_mission_allowed(tmp_graph, tmp_path):
+    """An epic may nest under a top-level mission (mission -> epic)."""
+    _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic")])
+    res = runner.invoke(app, ["backlog", "update", "x-0e02", "--parent", "x-0a01"])
+    assert res.exit_code == 0, res.output
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-0e02")["parent"] == "x-0a01"
+
+
+def test_epic_depth_cap_refused(tmp_graph, tmp_path):
+    """AC3-ERR: parenting an epic under a nested epic exceeds the 2-level cap."""
+    # mission M -> epic E; now try to nest epic G under E (would be 3rd level).
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+        _epic("x-0c03", "gepic"),
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-0c03", "--parent", "x-0e02"])
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-0c03")["parent"] is None  # unchanged
+
+
+def test_epic_owning_subtree_cannot_nest_under_mission(tmp_graph, tmp_path):
+    """AC3-ERR (down-tree): reparenting an epic that already owns a child epic
+    under a mission would make a 3rd epic level - refused from the other side."""
+    # B is a top-level mission that owns child epic C. Nesting B under mission M
+    # would create M -> B -> C (three epic levels).
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission-m"),
+        _epic("x-0b02", "mission-b"),
+        _epic("x-0c03", "child-epic", parent="x-0b02"),
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-0b02", "--parent", "x-0a01"])
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-0b02")["parent"] is None  # unchanged
+
+
+def test_leaf_under_nested_epic_allowed(tmp_graph, tmp_path):
+    """A leaf (feature) under an epic is always allowed - only epics are capped."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+        _node(plan),  # a feature
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--parent", "x-0e02"])
+    assert res.exit_code == 0, res.output
+
+
+def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
+    """AC3-ERR (create path): `add --type epic --parent <nested-epic>` is capped
+    too, or the guard cmd_update applies would be bypassable at creation."""
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+    ])
+    res = runner.invoke(
+        app, ["backlog", "add", "Third level epic", "--type", "epic", "--parent", "x-0e02"]
+    )
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    # No new node was appended.
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert len(entries) == 2
+
+
+def test_add_leaf_under_epic_still_allowed(tmp_graph, tmp_path):
+    """A non-epic child under an epic is unaffected by the create-path cap."""
+    _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic", parent="x-0a01")])
+    res = runner.invoke(
+        app, ["backlog", "add", "A feature", "--type", "feature", "--parent", "x-0e02"]
+    )
+    assert res.exit_code == 0, res.output
+
+
+_EPIC_DOC = """\
+---
+node: {nid}
+status: ready
+type: epic
+---
+
+# {nid} epic
+"""
+
+
+def _epic_with_plan(tmp_path, nid, slug, parent=None):
+    p = tmp_path / f"{nid}.md"
+    p.write_text(_EPIC_DOC.format(nid=nid), encoding="utf-8")
+    e = _epic(nid, slug, parent)
+    e["plan_path"] = str(p)
+    return e, p
+
+
+def test_type_change_to_epic_respects_depth_cap(tmp_graph, tmp_path):
+    """codex P1: promoting a feature to epic under a nested epic is capped too,
+    even though --parent is not passed."""
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [
+        _epic("x-0a01", "mission"),
+        _epic("x-0e02", "epic", parent="x-0a01"),
+        _node(plan, parent="x-0e02"),  # a feature under the nested epic
+    ])
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--type", "epic"])
+    assert res.exit_code != 0
+    assert "cap" in res.output.lower()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    assert next(e for e in entries if e["id"] == "x-1234")["type"] == "feature"  # unchanged
+
+
+def test_reparent_repaints_old_epic(tmp_graph, tmp_path):
+    """codex P2: moving a child off epic A onto epic B repaints A's rollup too
+    (A no longer counts the moved child)."""
+    epic_a, a_doc = _epic_with_plan(tmp_path, "x-0a0a", "epic-a")
+    epic_b, b_doc = _epic_with_plan(tmp_path, "x-0b0b", "epic-b")
+    child_plan = tmp_path / "child.md"
+    child_plan.write_text(_PLAN, encoding="utf-8")
+    child = _node(child_plan, id="x-0c0c", slug="child", parent="x-0a0a")
+    _seed(tmp_graph, [epic_a, epic_b, child])
+    # Converge the initial state so A shows its child.
+    runner.invoke(app, ["backlog", "update", "x-0a0a", "--priority", "p1"])
+    _, fa, _ = read_plan_file(a_doc)
+    assert fa["children_total"] == "1"
+    # Move the child from A to B.
+    res = runner.invoke(app, ["backlog", "update", "x-0c0c", "--parent", "x-0b0b"])
+    assert res.exit_code == 0, res.output
+    _, fa2, _ = read_plan_file(a_doc)
+    _, fb2, _ = read_plan_file(b_doc)
+    assert fa2["children_total"] == "0"  # A repainted: lost the child
+    assert fb2["children_total"] == "1"  # B repainted: gained the child
+
+
+def test_add_child_repaints_parent_epic(tmp_graph, tmp_path):
+    """codex P2: creating a child via `add --parent <epic>` repaints the epic."""
+    epic, e_doc = _epic_with_plan(tmp_path, "x-0e0e", "epic")
+    _seed(tmp_graph, [epic])
+    res = runner.invoke(app, ["backlog", "add", "A child", "--parent", "x-0e0e"])
+    assert res.exit_code == 0, res.output
+    _, fe, _ = read_plan_file(e_doc)
+    assert fe["children_total"] == "1"
+
+
 def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
     """defer + undefer both project best-effort and never fail on a live doc."""
     plan = _plan(tmp_path)

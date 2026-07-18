@@ -316,6 +316,7 @@ def _build_backlog_node(
     size: Optional[str] = None,
     batch: Optional[str] = None,
     plan_path: Optional[str] = None,
+    tags: Optional[list[str]] = None,
 ) -> _NodeFields:
     """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
 
@@ -332,6 +333,7 @@ def _build_backlog_node(
     return {
         "id": None,  # caller fills inside locked mutator
         "parent": parent,
+        "tags": list(tags or []),
         "title": title,
         "type": type_,
         "project": project,
@@ -379,6 +381,7 @@ def _create_node_impl(
     description: Optional[str] = None,
     size: Optional[str] = None,
     batch: Optional[str] = None,
+    tags: Optional[list[str]] = None,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
@@ -407,6 +410,13 @@ def _create_node_impl(
         typer.echo("Error: pass --details or --description, not both", err=True)
         raise typer.Exit(code=1)
     resolved_details = details if details is not None else description
+
+    from fno.graph._constants import normalize_tag
+    try:
+        resolved_tags = list(dict.fromkeys(normalize_tag(t) for t in (tags or [])))
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
     # Store an absolute path so downstream `detect_project()` (which compares
     # against `repo_root()` via normpath) finds matches. No explicit --cwd:
@@ -446,8 +456,27 @@ def _create_node_impl(
             details=resolved_details,
             size=size,
             batch=batch,
+            tags=resolved_tags,
         )
         node["id"] = new_id
+        # Enforce the epic-nesting cap on the create path too, or `add --type
+        # epic --parent <nested-epic>` would slip a 3rd epic level past the same
+        # guard cmd_update applies (x-6c2b). Scoped to a real cap violation: a
+        # non-epic, or a parent that does not resolve, keeps the existing lenient
+        # pass-through (add/idea has never hard-validated --parent).
+        if parent:
+            from fno.graph._intake import _find_node, _would_exceed_epic_depth
+            from fno.graph._constants import EPIC_NEST_MAX_DEPTH
+
+            target = _find_node(entries, parent)
+            if target is not None and _would_exceed_epic_depth(entries, node, target):
+                typer.echo(
+                    f"Error: parenting epic {new_id} under {target['id']} would "
+                    f"exceed the {EPIC_NEST_MAX_DEPTH}-level cap (mission -> epic "
+                    f"-> leaf); an epic may nest only under a top-level mission",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
         entries.append(node)
         node_holder[0] = node
         return entries
@@ -464,6 +493,12 @@ def _create_node_impl(
             on_node_born(node_holder[0])
         except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
             pass
+
+    # Repaint the new child's ancestors so a parent epic/mission rollup reflects
+    # the birth immediately (a plan-less idea still counts toward children_total).
+    # The converger walks up from the child id to the epic + mission (codex P2).
+    if node_holder[0] is not None and node_holder[0].get("parent"):
+        _project_plans_from_graph([new_id_holder[0]])
 
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
@@ -504,6 +539,9 @@ def cmd_add(
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
+    ),
 ) -> None:
     _create_node_impl(
         title=title,
@@ -520,6 +558,7 @@ def cmd_add(
         description=description,
         size=size,
         batch=batch,
+        tags=tag,
     )
 
 
@@ -559,6 +598,9 @@ def cmd_idea(
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -584,6 +626,7 @@ def cmd_idea(
         description=description,
         size=size,
         batch=batch,
+        tags=tag,
     )
 
 
@@ -1600,15 +1643,23 @@ def cmd_update(
         "--reverted/--no-reverted",
         help="Mark this node's ship as reverted (manual fallback for reconcile's best-effort revert detection).",
     ),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", hidden=True, help="Add a tag (repeatable, idempotent, lowercase-kebab)."
+    ),
+    untag: Optional[List[str]] = typer.Option(
+        None, "--untag", hidden=True, help="Remove a tag (repeatable, no-op if absent)."
+    ),
 ) -> None:
-    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix
+    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, normalize_tag
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
         _parse_blocker_list,
         _validate_blocker_ids,
         _find_node,
         _would_create_cycle,
+        _would_exceed_epic_depth,
     )
+    from fno.graph._constants import EPIC_NEST_MAX_DEPTH
 
     if not has_node_id_prefix(task_id):
         typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
@@ -1658,6 +1709,18 @@ def cmd_update(
         )
         raise typer.Exit(code=1)
 
+    # Normalize + validate tags OUTSIDE the lock so a malformed tag refuses
+    # before any mutation (the node is unchanged on a bad --tag).
+    add_tags: list[str] = []
+    remove_tags: list[str] = []
+    try:
+        add_tags = [normalize_tag(t) for t in (tag or [])]
+        remove_tags = [normalize_tag(t) for t in (untag or [])]
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+    has_tag_edit = bool(add_tags or remove_tags)
+
     # Derive cwd from the work-map when --project is explicit but --cwd was
     # not given. Do this OUTSIDE the mutator so settings reads never happen
     # under the graph lock.
@@ -1700,6 +1763,7 @@ def cmd_update(
 
     projected_node: list = [None]
     cascade_closed_update: list = []
+    reparent_old_parent: list = [None]
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
     # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
@@ -1877,7 +1941,20 @@ def cmd_update(
             node["fixes_pr"] = None if fixes_pr == 0 else int(fixes_pr)
         if reverted is not None:
             node["reverted"] = reverted
+        if has_tag_edit:
+            # Idempotent set semantics, order-preserving: adds skip dupes,
+            # removes are no-ops if absent. Normalization happened above.
+            current_tags = list(node.get("tags") or [])
+            for t in add_tags:
+                if t not in current_tags:
+                    current_tags.append(t)
+            current_tags = [t for t in current_tags if t not in remove_tags]
+            node["tags"] = current_tags
         if parent is not None:
+            # Remember the outgoing parent so its rollup can be repainted too:
+            # a reparent (or --parent null) leaves the OLD epic/mission counting
+            # a child it no longer owns until it is projected (codex P2).
+            reparent_old_parent[0] = node.get("parent")
             if parent.lower() == "null":
                 node["parent"] = None
             else:
@@ -1892,7 +1969,33 @@ def cmd_update(
                         err=True,
                     )
                     raise typer.Exit(code=1)
+                if _would_exceed_epic_depth(entries, node, target):
+                    typer.echo(
+                        f"Error: parenting epic {node['id']} under {target['id']} "
+                        f"would exceed the {EPIC_NEST_MAX_DEPTH}-level cap "
+                        f"(mission -> epic -> leaf); an epic may nest only under a "
+                        f"top-level mission",
+                        err=True,
+                    )
+                    raise typer.Exit(code=1)
                 node["parent"] = target["id"]
+
+        # The depth cap must also hold when a --type change alone promotes a node
+        # to epic under an already-nested epic (the --parent guard above never
+        # fires without --parent). Checked against the FINAL parent edge (codex
+        # P1), so a combined --type epic --parent <x> is covered by whichever ran.
+        if type_ is not None and node.get("type") == "epic" and node.get("parent"):
+            parent_node = _find_node(entries, node["parent"])
+            if parent_node is not None and _would_exceed_epic_depth(
+                entries, node, parent_node
+            ):
+                typer.echo(
+                    f"Error: making {node['id']} an epic under {parent_node['id']} "
+                    f"would exceed the {EPIC_NEST_MAX_DEPTH}-level cap (mission -> "
+                    f"epic -> leaf); an epic may nest only under a top-level mission",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
 
         # Completion runs LAST so it sees the FINAL parent edge (codex P2): a
         # combined `--completed --parent <epic>` must cascade against the new
@@ -1926,9 +2029,17 @@ def cmd_update(
         or plan_path is not None
         or size is not None
         or parent is not None
+        or has_tag_edit
     ):
+        # Include the OLD parent on a reparent so its now-stale rollup repaints
+        # alongside the new parent's (the converger walks each id's ancestors in
+        # the post-mutation graph, so the old chain is only reachable via this id).
         _project_plans_from_graph(
-            [projected_node[0]["id"], *cascade_closed_update]
+            [
+                projected_node[0]["id"],
+                *cascade_closed_update,
+                *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
+            ]
         )
 
 
@@ -2956,6 +3067,34 @@ def cmd_view() -> None:
                 )
     except OSError as e:
         typer.echo(f"Could not launch opener: {e}", err=True)
+
+
+# -- bases (canonical epic/mission progress Bases) --
+
+@cli.command("bases", hidden=True)
+def cmd_bases(
+    out: Optional[str] = typer.Option(
+        None,
+        "--out",
+        help="Directory to emit the .base files into (default: internal/fno/backlog/).",
+    ),
+) -> None:
+    """Emit the canonical epic/mission progress Base files (x-6c2b).
+
+    Regenerable: refreshes a file carrying the generated marker, refuses to
+    clobber a hand-authored base (one prints `refused:`). Prints one line per
+    file: written | unchanged | refused.
+    """
+    from fno.graph._bases import BASES, write_base
+    from fno.graph._intake import repo_root
+
+    out_dir = (
+        Path(out) if out else Path(repo_root()) / "internal" / "fno" / "backlog"
+    )
+    for name, content in BASES.items():
+        target = out_dir / name
+        action = write_base(target, content)
+        typer.echo(f"{action}: {target}")
 
 
 # -- roadmap (public, curated) --

@@ -114,3 +114,63 @@ def test_idempotent_second_run_zero(tmp_path):
 
     assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 1
     assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Epic rollup + parent-repaint hop (x-6c2b wave 2)
+# ---------------------------------------------------------------------------
+
+_EPIC_PLAN = """\
+---
+node: x-epic
+status: ready
+type: epic
+---
+
+# epic plan
+"""
+
+
+def test_epic_doc_gets_rollup_counters(tmp_path):
+    """An epic node's own doc carries the computed rollup counters."""
+    epic_plan = _plan(tmp_path, "epic.md", _EPIC_PLAN)
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_plan), "_status": "ready"},
+        {"id": "c1", "parent": "x-epic", "_status": "done"},
+        {"id": "c2", "parent": "x-epic", "_status": "ready"},
+    ]
+    assert project_graph_nodes(entries, ["x-epic"], root=str(tmp_path)) == 1
+    _, fields, _ = read_plan_file(epic_plan)
+    # Frontmatter scalars round-trip as strings (still bareword on disk).
+    assert fields["children_total"] == "2"
+    assert fields["children_done"] == "1"
+    assert fields["progress"] == "1/2"
+    # Idempotent: a second pass over a converged epic rewrites nothing.
+    assert project_graph_nodes(entries, ["x-epic"], root=str(tmp_path)) == 0
+
+
+def test_child_transition_repaints_parent_epic(tmp_path):
+    """AC2: projecting a child also repaints its parent epic's rollup (one hop up)."""
+    epic_plan = _plan(tmp_path, "epic.md", _EPIC_PLAN)
+    child_plan = _plan(tmp_path, "child.md")
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_plan), "_status": "ready"},
+        {"id": "x-child", "slug": "child", "parent": "x-epic", "plan_path": str(child_plan), "_status": "done"},
+    ]
+    # Only the child id is passed; the epic doc must still be repainted.
+    assert project_graph_nodes(entries, ["x-child"], root=str(tmp_path)) == 2
+    _, fields, _ = read_plan_file(epic_plan)
+    assert fields["children_done"] == "1"
+    assert fields["progress"] == "1/1"
+
+
+def test_leaf_doc_has_no_rollup_keys(tmp_path):
+    """A non-epic leaf doc never gains rollup keys (they stay clean)."""
+    plan = _plan(tmp_path, "child.md")
+    # priority p0 differs from the doc's p2, so the projection rewrites the doc.
+    entries = [{"id": "x-c", "slug": "c", "type": "feature", "plan_path": str(plan), "priority": "p0", "_status": "ready"}]
+    assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 1
+    _, fields, _ = read_plan_file(plan)
+    assert fields["priority"] == "p0"
+    assert "children_total" not in fields
+    assert "progress" not in fields
