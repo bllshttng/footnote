@@ -4007,6 +4007,13 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
             LatticeState::Idle => 3,
             LatticeState::Exited => 4,
         };
+        // The match is exhaustive (a new state breaks the build), but the index
+        // mapping is coupled by hand to SEVERITY_ORDER's order; this catches a
+        // reorder that would silently miscount (gemini review).
+        debug_assert_eq!(
+            SEVERITY_ORDER[idx], st,
+            "SEVERITY_ORDER and section_rollup indices are out of sync"
+        );
         counts[idx] += 1;
     }
     SEVERITY_ORDER
@@ -4038,8 +4045,9 @@ fn header_band_flags(active: bool) -> u8 {
 /// compact `{glyph}{n}` pairs; when the panel is too narrow, whole pairs drop
 /// from the least-severe (`✗`) end - a glyph never renders without its count
 /// (AC11) - and the label truncates (via `pad_to`) only after every pair is
-/// gone. Header glyphs are all single display-width, so char count is the
-/// display width here.
+/// gone. Widths are measured in DISPLAY columns via `glyph_cols` (matching the
+/// painter), so a double-width char in a squad name aligns the band instead of
+/// overflowing it.
 fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> String {
     let mut pairs: Vec<String> = rollup
         .iter()
@@ -4050,8 +4058,8 @@ fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> 
             return pad_to(label, w);
         }
         let counts = pairs.join(" ");
-        let label_w = label.chars().count();
-        let counts_w = counts.chars().count();
+        let label_w: usize = label.chars().map(glyph_cols).sum();
+        let counts_w: usize = counts.chars().map(glyph_cols).sum();
         if label_w + 1 + counts_w <= w {
             let gap = w - label_w - counts_w;
             return format!("{label}{}{counts}", " ".repeat(gap));
