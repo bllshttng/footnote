@@ -436,7 +436,7 @@ fn global_claims_dir() -> PathBuf {
 
 /// `target-<node-id>-<slug>` -> node id. Loose on purpose: a mis-parse yields a
 /// key that does not resolve -> no badge (fail-quiet), never a wrong badge.
-fn parse_node_id_from_name(name: &str) -> Option<String> {
+pub(crate) fn parse_node_id_from_name(name: &str) -> Option<String> {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re =

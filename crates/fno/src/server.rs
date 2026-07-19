@@ -747,6 +747,27 @@ fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
     }
 }
 
+/// High bit set, so a mission squad id never collides with a real squad id
+/// (those start at 1 and increment by one - see `next_squad_id`).
+const MISSION_SQUAD_BASE: u64 = 1 << 63;
+
+/// FNV-1a over bytes: tiny, dependency-free, deterministic - exactly what a
+/// stable-per-epic synthetic id needs (no crypto property required).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// The synthetic squad id for a mission's `SquadMeta` header, deterministic
+/// per epic id so the same mission maps to the same id across ticks (x-1a47).
+fn mission_sid(epic_id: &str) -> u64 {
+    MISSION_SQUAD_BASE | (fnv1a(epic_id.as_bytes()) & (MISSION_SQUAD_BASE - 1))
+}
+
 /// Sanitize a wire-supplied name: strip control characters (they would corrupt
 /// chrome cells), trim, cap at `cap` chars. The cap lives HERE and not only in
 /// the overlay: `Command` is a wire surface, and the TUI is not the only
@@ -2980,7 +3001,7 @@ impl Core {
             .map(|s| s.canonical_cwd().to_string())
             .collect();
         let derived = squad::display_names(&cwds);
-        let squads = self
+        let mut squads: Vec<SquadMeta> = self
             .session
             .squads
             .iter()
@@ -3043,6 +3064,18 @@ impl Core {
                 panes: s.tabs.iter().map(|t| tree::leaves(&t.root).len()).sum(),
             })
             .collect();
+        // Synthetic "mission squad" headers (x-1a47): one per active mission,
+        // done/total baked into the name so no proto bump is needed. Renders
+        // even with zero tagged workers - "nothing running" must stay visible,
+        // never vanish (empty-but-active).
+        squads.extend(self.missions.missions.iter().map(|m| SquadMeta {
+            id: mission_sid(&m.epic_id),
+            name: format!("{}  {}/{}", m.slug, m.done, m.total),
+            canonical_cwd: String::new(),
+            tabs: vec![],
+            active_tab: 0,
+            panes: 0,
+        }));
         ServerMsg::Layout {
             squads,
             active_squad: view.0,
@@ -3189,6 +3222,17 @@ impl Core {
             .iter()
             .filter_map(|(node, holder)| self.backlog_pr.get(node).map(|pr| (holder.as_str(), *pr)))
             .collect();
+        // (x-1a47) A paneless row whose name resolves to a node inside an
+        // active mission is grouped under that mission's synthetic squad,
+        // taking precedence over the owns_path fallback below. A pane-hosted
+        // row keeps its real session squad (it lives in an actual tab tree).
+        let mission_squad_for = |name: &str| -> Option<u64> {
+            let node_id = agents_view::parse_node_id_from_name(name)?;
+            self.missions
+                .node_to_epic
+                .get(&node_id)
+                .map(|epic| mission_sid(epic))
+        };
 
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
@@ -3325,12 +3369,13 @@ impl Core {
                     // Truly paneless (bg/headless/daemon/roster). Its attach map
                     // pointed at no live pane (else a pane row claimed it), so it
                     // stays watch-only attachable - the AC1-FR revert.
-                    let squad = self
-                        .session
-                        .squads
-                        .iter()
-                        .find(|s| s.owns_path(&a.cwd))
-                        .map(|s| s.id);
+                    let squad = mission_squad_for(&a.name).or_else(|| {
+                        self.session
+                            .squads
+                            .iter()
+                            .find(|s| s.owns_path(&a.cwd))
+                            .map(|s| s.id)
+                    });
                     // (x-6851 US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (x-0090 AC2-UI), a squad-matched row for the foreign-cwd
@@ -3428,12 +3473,13 @@ impl Core {
                 S::Stopping => (false, Some("stopping…".to_string())),
                 S::Removing => (false, Some("removing…".to_string())),
             };
-            let squad = self
-                .session
-                .squads
-                .iter()
-                .find(|s| s.owns_path(&r.cwd))
-                .map(|s| s.id);
+            let squad = mission_squad_for(&r.name).or_else(|| {
+                self.session
+                    .squads
+                    .iter()
+                    .find(|s| s.owns_path(&r.cwd))
+                    .map(|s| s.id)
+            });
             // (x-6851 US3) Every row carries its cwd basename - including a
             // squad-matched external-lifecycle row, so its foreign-cwd subline
             // still renders (the "every row" wire contract; codex review).
