@@ -189,9 +189,39 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return true;
     };
-    ["pr_number", "pr_url"]
+    if ["pr_number", "pr_url"]
         .iter()
         .any(|k| v.get(*k).is_some_and(|x| !x.is_null()))
+    {
+        return true;
+    }
+    // Union `additional_prs` too, matching the CLI's own node_pr_refs - else the
+    // two "does this node have a PR" predicates disagree on a node whose only
+    // ref lives there.
+    v.get("additional_prs")
+        .and_then(|a| a.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// Grace before a suspected zero-artifact close is confirmed. `finalize` stamps
+/// `pr_number` AFTER loop-check emits the termination event, so a drain tick can
+/// land in that window and read a healthy ship as ref-less.
+const PR_STAMP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Is this close the dead-dispatch signature? Only `DonePRGreen` qualifies (it
+/// asserts a PR; `DoneAdvisory` has none by design), and a ref-less first read is
+/// CONFIRMED by a second one after the stamp grace - `resolve_dispatch` retires
+/// the pending entry, so a single mistimed poll would otherwise park a shipped
+/// node for good. The healthy path never sleeps: its first read finds the ref.
+fn is_zero_artifact(cfg: &DrainConfig, node_id: &str, reason: &TerminationReason) -> bool {
+    if !matches!(reason, TerminationReason::DonePRGreen) {
+        return false;
+    }
+    if node_has_pr_ref(cfg, node_id) {
+        return false;
+    }
+    std::thread::sleep(PR_STAMP_GRACE);
+    !node_has_pr_ref(cfg, node_id)
 }
 
 /// Map a dispatched node's termination outcome to a [`DrainOutcome`], updating
@@ -431,17 +461,10 @@ fn resolve_dispatch(
     // closes at the human merge via reconcile - map_outcome's keep-set counts
     // it as a successful dispatch. DoneBatched/DoneAwaitingMerge close at merge
     // via reconcile and are NOT marked here - map_outcome recognizes them too.
-    // Zero-artifact dispatch: a DonePRGreen terminal ASSERTS a PR exists
-    // (loop-check gates it on PR + CI + review), so a node carrying no PR ref
-    // means the terminal lied and the worker died leaving an empty worktree.
-    // Park BEFORE `fno backlog done` - its merged-PR cross-check only runs when
-    // refs already exist, so a ref-less node would close exit 0 and score the
-    // dead dispatch as a win. DoneAdvisory is excluded: a doc terminal has no PR
-    // by design.
-    let zero_artifact =
-        matches!(ev.reason, TerminationReason::DonePRGreen) && !node_has_pr_ref(cfg, node_id);
-
-    let close = if zero_artifact {
+    // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
+    // only runs when refs already exist, so a ref-less node would otherwise
+    // close exit 0 and score the dead dispatch as a win.
+    let close = if is_zero_artifact(cfg, node_id, &ev.reason) {
         CloseOutcome::Parked(
             "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
         )
@@ -1272,6 +1295,54 @@ mod tests {
         assert!(
             node_has_pr_ref(&cfg, "x-unknown1"),
             "unreadable node must fail open"
+        );
+    }
+
+    #[test]
+    fn pr_ref_read_unions_additional_prs() {
+        // The CLI's node_pr_refs unions additional_prs; if this predicate did not,
+        // a node whose only ref lives there would read as a dead dispatch.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-addl0001","additional_prs":[{"number":12}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+
+        assert!(node_has_pr_ref(&cfg, "x-addl0001"));
+    }
+
+    #[test]
+    fn zero_artifact_is_confirmed_by_a_second_read() {
+        // finalize stamps pr_number AFTER loop-check emits termination, so a tick
+        // landing in that window sees a healthy ship as ref-less. The confirm
+        // re-read must clear it: this stub answers ref-less first, then stamped.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let flag = tmp.path().join("stamped");
+        let p = bin.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 if [ \"$2\" = \"get\" ]; then\n\
+                   if [ -f \"{f}\" ]; then printf '{{\"pr_number\":9}}'; \
+                   else touch \"{f}\"; printf '{{\"id\":\"x-race0001\"}}'; fi\n\
+                   exit 0\n\
+                 fi\nexit 0\n",
+                f = flag.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = test_cfg(tmp.path(), p.display().to_string(), 3);
+
+        assert!(
+            !is_zero_artifact(&cfg, "x-race0001", &TerminationReason::DonePRGreen),
+            "a PR stamped during the grace window must not park a shipped node"
         );
     }
 
