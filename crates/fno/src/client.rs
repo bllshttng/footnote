@@ -380,16 +380,6 @@ fn is_blocked_row(a: &AgentRow) -> bool {
     !a.exited && a.badge == Some(AgentBadge::Blocked)
 }
 
-/// The squad-row rollup glyph for a folded `PaneState` (x-d140). Idle yields
-/// `None` (the row renders byte-identically to a pre-rollup row); the rest
-/// reuse the navigator's `nav_glyph` so a squad reads in its members' language.
-fn rollup_glyph(state: PaneState) -> Option<char> {
-    match state {
-        PaneState::Idle => None,
-        PaneState::Blocked | PaneState::Working | PaneState::DoneUnseen => Some(nav_glyph(state)),
-    }
-}
-
 /// Everything the client renders from. Pure state - `compose` turns it into
 /// one full-terminal `Frame` the row-diffing `Compositor` draws.
 struct View {
@@ -1175,8 +1165,8 @@ impl View {
     }
 
     /// The roster row a fold item joins to: a name / node / session-id match
-    /// against a layout row's name or cwd basename (the identity a sideline
-    /// orphan row carries).
+    /// against a layout row's name or its cwd basename (`cwd_base`, now carried
+    /// on every row since x-6851 US3, not only orphans).
     fn join_fold_row(&self, item: &crate::needs_overlay::FoldItem) -> Option<&AgentRow> {
         let keys: Vec<&str> = [
             item.name.as_deref(),
@@ -1785,7 +1775,7 @@ impl View {
             // same resolver the navigator uses (x-653d).
             DisplayRow::Card(c) => Some(self.card_hit(c)),
             // Inert rows (label, subline, spacer) resolve to no action (x-cd67).
-            DisplayRow::Header(_) | DisplayRow::Sub(_) | DisplayRow::Blank => None,
+            DisplayRow::Header { .. } | DisplayRow::Sub(_) | DisplayRow::Blank => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -3053,12 +3043,14 @@ impl View {
             // rollup is the sole signal there - no more agent rows rendering
             // unconditionally under a folded squad.
             if self.expanded.contains(&s.id) {
+                let section_base = section_project_base(&s.canonical_cwd);
                 for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
                     out.push(DisplayRow::Agent(a));
-                    // (x-cd67 US2) A dim line-2 subline follows the agent row
-                    // whenever the server composed one; a `None`/empty subline
-                    // emits no Sub row (AC1-EDGE: no blank gap).
-                    if agent_has_subline(a) {
+                    // (x-6851 US3) Exception-based subline: a Sub row follows the
+                    // agent ONLY when its cwd_base differs from the squad's
+                    // project basename - the foreign-cwd join worth flagging. A
+                    // same-project agent stays one clean row.
+                    if agent_is_foreign(a, section_base) {
                         out.push(DisplayRow::Sub(a));
                     }
                 }
@@ -3090,12 +3082,16 @@ impl View {
             if multi_squad {
                 out.push(DisplayRow::Blank);
             }
-            out.push(DisplayRow::Header("~ elsewhere"));
+            let rollup = section_rollup(orphans.iter().map(|&a| agent_lattice_state(a)));
+            out.push(DisplayRow::Header {
+                label: "~ elsewhere",
+                rollup,
+            });
+            // Orphans keep their line-1 ` (basename)` suffix (every orphan is
+            // foreign by definition); a Sub row would double it, so the
+            // `~ elsewhere` section emits no sublines (x-6851 US3).
             for a in orphans {
                 out.push(DisplayRow::Agent(a));
-                if agent_has_subline(a) {
-                    out.push(DisplayRow::Sub(a));
-                }
             }
         }
         // The work-queue lane (x-6f77): board-ordered ready/blocked/in-flight
@@ -3105,7 +3101,16 @@ impl View {
             if multi_squad {
                 out.push(DisplayRow::Blank);
             }
-            out.push(DisplayRow::Header("~ work queue"));
+            let rollup = section_rollup(
+                self.layout
+                    .backlog
+                    .iter()
+                    .map(|c| card_lattice_state(c.state)),
+            );
+            out.push(DisplayRow::Header {
+                label: "~ work queue",
+                rollup,
+            });
             out.extend(self.layout.backlog.iter().map(DisplayRow::Card));
         }
         out
@@ -3138,6 +3143,10 @@ impl View {
                 DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) => (false, true),
                 _ => (false, false),
             };
+            // (x-6851 US1) A header band (squad name row or a section header)
+            // paints its INVERSE flags across the FULL panel width, not just its
+            // text.
+            let is_band = matches!(&drow, DisplayRow::Sel(_) | DisplayRow::Header { .. });
             // (x-df4c) The row tuple carries `fg` now: most rows are
             // `Color::Default`, but a needs-attention (Blocked) agent row or card
             // paints the accent, so the color must reach the cells below.
@@ -3156,51 +3165,25 @@ impl View {
                             // width is unchanged. Same vocabulary as the
                             // active-tab marker below.
                             let mark = if is_active_squad { '*' } else { ' ' };
-                            let flags = if is_active_squad { cell_flags::BOLD } else { 0 };
-                            let base = format!("{caret}{mark}{}", squad.name);
-                            // Roll the squad's worst agent state onto its
-                            // COLLAPSED name row so a blocked pane is visible
-                            // without expanding (x-d140). An expanded squad
-                            // already shows each agent's glyph on its own row, so
-                            // it folds to Idle here (no duplicate glyph, name row
-                            // byte-identical to today). Reuses x-653d's
-                            // `nav_agent_state` fold (exited -> Idle; the x-4328
-                            // seen bit not yet wired); worst = Ord-min per
-                            // PaneState's ordering.
-                            let state = if expanded {
-                                PaneState::Idle
-                            } else {
+                            let label = format!("{caret}{mark}{}", squad.name);
+                            // (x-6851 US1+US2) The squad name row is a header
+                            // band: a full-width INVERSE band (active BOLD /
+                            // inactive DIM) carrying always-on per-state rollup
+                            // counts folded from THIS squad's live rows every
+                            // paint (never cached - the x-df4c drift posture).
+                            // Subsumes x-d140's collapsed-only worst-state glyph:
+                            // the counts read in every view state, so a blocked
+                            // pane shows as `▲N` whether the squad is folded or
+                            // open.
+                            let rollup = section_rollup(
                                 self.layout
                                     .agents
                                     .iter()
                                     .filter(|a| a.squad == Some(squad.id))
-                                    .map(nav_agent_state)
-                                    .min()
-                                    .unwrap_or(PaneState::Idle)
-                            };
-                            let text = match rollup_glyph(state) {
-                                // Reserve the last 2 cells for ` {glyph}` at the
-                                // right edge, truncating the name into
-                                // `text_w - 2` FIRST so the later `.take(text_w)`
-                                // can never clip the signal. Guarded on width so
-                                // a narrow panel skips the reservation instead of
-                                // underflowing the subtraction.
-                                Some(glyph) if text_w >= 3 => {
-                                    let body: String = base.chars().take(text_w - 2).collect();
-                                    format!("{body:<width$} {glyph}", width = text_w - 2)
-                                }
-                                _ => base,
-                            };
-                            // x-df4c: a collapsed squad whose worst pane is
-                            // Blocked carries the accent too, so `▲` reads amber
-                            // here exactly as on an agent row or a tab rollup -
-                            // one system, no grey-vs-amber split.
-                            let fg = if state == PaneState::Blocked {
-                                LATTICE_ACCENT
-                            } else {
-                                Color::Default
-                            };
-                            (text, flags, fg)
+                                    .map(agent_lattice_state),
+                            );
+                            let text = header_band_text(&label, &rollup, text_w);
+                            (text, header_band_flags(is_active_squad), Color::Default)
                         }
                         Some(t) => {
                             let marker = if is_active_squad && t == squad.active_tab {
@@ -3256,15 +3239,18 @@ impl View {
                         Some(TabContext::Named(name)) => text.push_str(&format!(" ·{name}")),
                         Some(TabContext::Ordinal(ord)) => text.push_str(&format!(" ·{ord}")),
                         None => {
-                            if let Some(base) = a
-                                .cwd_base
-                                .as_deref()
-                                // (x-cd67 US2) When a subline carries the cwd on
-                                // line 2, the orphan basename suffix is suppressed
-                                // on line 1 so it does not duplicate.
-                                .filter(|_| !agent_has_subline(a))
-                            {
-                                text.push_str(&format!(" ({base})"));
+                            // (x-0090) An ORPHAN (no squad) names its repo with a
+                            // ` (basename)` line-1 suffix so two same-named
+                            // workers in different repos are distinguishable. A
+                            // squad-matched paneless row is NOT an orphan - now
+                            // that every row carries `cwd_base` (x-6851 US3), the
+                            // `squad.is_none()` guard keeps the suffix orphan-only;
+                            // a matched row's foreign cwd surfaces as the exception
+                            // subline instead.
+                            if a.squad.is_none() {
+                                if let Some(base) = a.cwd_base.as_deref() {
+                                    text.push_str(&format!(" ({base})"));
+                                }
                             }
                         }
                     }
@@ -3298,7 +3284,14 @@ impl View {
                         style.fg,
                     )
                 }
-                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, Color::Default),
+                DisplayRow::Header { label, rollup } => (
+                    header_band_text(label, &rollup, text_w),
+                    // A section header is never the active squad, so it is the
+                    // inactive band (INVERSE+DIM) - one grammar with the squad
+                    // rows above.
+                    header_band_flags(false),
+                    Color::Default,
+                ),
                 DisplayRow::NewSquad => {
                     // The recruit-mark footer count rides the create affordance
                     // (x-8f11): `space` marks, `R` recruits the marked set.
@@ -3317,10 +3310,12 @@ impl View {
                     (label, cell_flags::DIM, Color::Default)
                 }
                 DisplayRow::Sub(a) => {
-                    // (x-cd67 US2) The dim line-2 subline, indented 4 cells to sit
-                    // under the agent name (` {mark}{glyph} ` is 4 cells wide). The
-                    // later `.take(text_w)` truncates it to the panel width.
-                    let sub = a.subline.as_deref().unwrap_or("");
+                    // (x-6851 US3) The dim line-2 subline is the FOREIGN cwd_base
+                    // alone (no branch), indented 4 cells to sit under the agent
+                    // name (` {mark}{glyph} ` is 4 cells wide). A Sub row is only
+                    // emitted for a foreign-cwd row, so cwd_base is present. The
+                    // server-composed `subline` is no longer consumed here.
+                    let sub = a.cwd_base.as_deref().unwrap_or("");
                     (format!("    {sub}"), cell_flags::DIM, Color::Default)
                 }
                 // (x-cd67 US3) A blank section spacer paints nothing.
@@ -3333,8 +3328,13 @@ impl View {
             // hover check here keeps a label from reading as actionable -
             // gemini review).
             let highlit = !is_inert && (self.selector == Some(i) || self.hover_row == Some(i));
+            // Selection/hover TOGGLES the INVERSE bit: an agent row (no INVERSE)
+            // gains the cursor bar exactly as before, while a header band (which
+            // already carries INVERSE) de-inverts under the cursor so the
+            // selection still reads instead of vanishing into the band (x-6851
+            // US1; the you-are-here highlight proper lands in x-5a52).
             if highlit {
-                flags |= cell_flags::INVERSE;
+                flags ^= cell_flags::INVERSE;
             }
             // Advance by DISPLAY columns, not char index: a double-width glyph
             // (the menu trigram) claims two columns and marks its right half a
@@ -3362,8 +3362,15 @@ impl View {
                 }
                 col += w;
             }
-            // Pad the highlight across the row so the cursor reads as a bar.
-            if highlit {
+            // Fill the row remainder so a band spans the full panel width and a
+            // (non-band) highlight reads as a bar. A band pads with its own
+            // final flags (INVERSE band, de-inverted under the cursor); a plain
+            // highlight pads INVERSE only, the legacy cursor-bar look.
+            if is_band {
+                for j in col..text_w {
+                    cells[r * cols + j].flags = flags;
+                }
+            } else if highlit {
                 for j in col..text_w {
                     cells[r * cols + j].flags |= cell_flags::INVERSE;
                 }
@@ -3406,7 +3413,14 @@ enum DisplayRow<'a> {
     /// A work-queue backlog card (x-6f77); a Ready card dispatches via the
     /// confirm (x-a496), by click or selector Enter (x-260a).
     Card(&'a BacklogCard),
-    Header(&'static str),
+    /// (x-6851 US1+US2) A section header: a full-width INVERSE band with a
+    /// right-aligned per-state rollup strip. `rollup` is folded at
+    /// `display_rows` time from the section's own rows (orphans / cards), so the
+    /// painter renders it without re-deriving section membership.
+    Header {
+        label: &'static str,
+        rollup: Vec<(LatticeState, usize)>,
+    },
     /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
@@ -3440,15 +3454,29 @@ fn glyph_cols(ch: char) -> usize {
 fn row_is_inert(drow: &DisplayRow) -> bool {
     matches!(
         drow,
-        DisplayRow::Header(_) | DisplayRow::Sub(_) | DisplayRow::Blank
+        DisplayRow::Header { .. } | DisplayRow::Sub(_) | DisplayRow::Blank
     )
 }
 
-/// (x-cd67 US2) Whether an agent row carries a non-empty server-composed subline
-/// (a `Sub` display row follows it). An empty string is treated as absent so a
-/// blank actionable-looking gap can never paint.
-fn agent_has_subline(a: &AgentRow) -> bool {
-    a.subline.as_deref().is_some_and(|s| !s.is_empty())
+/// (x-6851 US3) The project basename a section is keyed by (the squad's
+/// canonical repo root), for the foreign-cwd subline comparison. `None` for a
+/// squad whose canonical cwd has no final component (degenerate; no subline).
+fn section_project_base(canonical_cwd: &str) -> Option<&str> {
+    Path::new(canonical_cwd)
+        .file_name()
+        .and_then(|b| b.to_str())
+}
+
+/// (x-6851 US3) Whether an agent's cwd is FOREIGN to its section: its `cwd_base`
+/// is present AND differs from the section's project basename. A missing
+/// `cwd_base` (absent on the wire, AC4-EDGE) or a match yields false - no
+/// subline. This is the exception predicate that replaced x-cd67's
+/// always-on server subline.
+fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
+    match (a.cwd_base.as_deref(), section_base) {
+        (Some(cwd), Some(base)) => cwd != base,
+        _ => false,
+    }
 }
 
 /// One clickable span in the tab bar (label + render flags + what a click does;
@@ -3951,6 +3979,92 @@ fn lattice_style(s: LatticeState) -> LatticeStyle {
             flags: cell_flags::DIM,
             fg: Color::Default,
         },
+    }
+}
+
+/// (x-6851 US2) Severity order for the header rollup strip: most-severe first,
+/// so the strip reads `▲ ✓ ● ○ ✗` and narrow-panel truncation drops from the
+/// least-severe (`✗`) end. The single ordering authority the fold and the
+/// truncation share.
+const SEVERITY_ORDER: [LatticeState; 5] = [
+    LatticeState::Blocked,
+    LatticeState::DoneUnseen,
+    LatticeState::Working,
+    LatticeState::Idle,
+    LatticeState::Exited,
+];
+
+/// (x-6851 US2) Fold a section's rows into per-state counts, nonzero only, in
+/// severity order. Exhaustive over `LatticeState` (the x-df4c lock-3 posture):
+/// a new state is a compile error here, never a silently uncounted glyph.
+fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeState, usize)> {
+    let mut counts = [0usize; SEVERITY_ORDER.len()];
+    for st in states {
+        let idx = match st {
+            LatticeState::Blocked => 0,
+            LatticeState::DoneUnseen => 1,
+            LatticeState::Working => 2,
+            LatticeState::Idle => 3,
+            LatticeState::Exited => 4,
+        };
+        // The match is exhaustive (a new state breaks the build), but the index
+        // mapping is coupled by hand to SEVERITY_ORDER's order; this catches a
+        // reorder that would silently miscount (gemini review).
+        debug_assert_eq!(
+            SEVERITY_ORDER[idx], st,
+            "SEVERITY_ORDER and section_rollup indices are out of sync"
+        );
+        counts[idx] += 1;
+    }
+    SEVERITY_ORDER
+        .iter()
+        .zip(counts)
+        .filter(|&(_, n)| n > 0)
+        .map(|(&s, n)| (s, n))
+        .collect()
+}
+
+/// (x-6851 US1) The flag set for a section-header band: a full-panel-width
+/// INVERSE band so every section header (squad, `~ elsewhere`, `~ work queue`)
+/// reads visually dominant over the agent rows below it. The active squad adds
+/// BOLD, every inactive section adds DIM - the text is identical, only weight
+/// differs, so a weak-BOLD theme still separates active from inactive by the
+/// band alone.
+fn header_band_flags(active: bool) -> u8 {
+    cell_flags::INVERSE
+        | if active {
+            cell_flags::BOLD
+        } else {
+            cell_flags::DIM
+        }
+}
+
+/// (x-6851 US1+US2) Compose one section header band: the label at the left, the
+/// rollup counts right-aligned, spaces between so the whole string is exactly
+/// the panel width `w` (the caller paints it as one INVERSE band). Counts are
+/// compact `{glyph}{n}` pairs; when the panel is too narrow, whole pairs drop
+/// from the least-severe (`✗`) end - a glyph never renders without its count
+/// (AC11) - and the label truncates (via `pad_to`) only after every pair is
+/// gone. Widths are measured in DISPLAY columns via `glyph_cols` (matching the
+/// painter), so a double-width char in a squad name aligns the band instead of
+/// overflowing it.
+fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> String {
+    let mut pairs: Vec<String> = rollup
+        .iter()
+        .map(|(s, n)| format!("{}{}", lattice_style(*s).glyph, n))
+        .collect();
+    loop {
+        if pairs.is_empty() {
+            return pad_to(label, w);
+        }
+        let counts = pairs.join(" ");
+        let label_w: usize = label.chars().map(glyph_cols).sum();
+        let counts_w: usize = counts.chars().map(glyph_cols).sum();
+        if label_w + 1 + counts_w <= w {
+            let gap = w - label_w - counts_w;
+            return format!("{label}{}{counts}", " ".repeat(gap));
+        }
+        pairs.pop(); // drop the least-severe pair and retry
     }
 }
 
@@ -8136,10 +8250,12 @@ mod tests {
             .push(tab_agent(Some(1), Some(AgentBadge::Blocked), false));
         let frame = view.compose();
         let cols = frame.cols as usize;
-        // The tab strip lives on row 0, right of the sideline. Find the active
-        // tab's `▲` cell and assert its whole bracketed span carries the accent
-        // and INVERSE.
-        let glyph_col = (0..cols)
+        // The tab strip lives on row 0, right of the sideline. Scope the search
+        // to the strip columns (>= panel_w): the sideline's own header band now
+        // carries `▲N` rollup counts (x-6851 US2), so an unscoped row-0 scan
+        // would hit the band glyph first.
+        let panel_w = view.panel_w() as usize;
+        let glyph_col = (panel_w..cols)
             .find(|&c| frame.cells[c].c == '\u{25b2}')
             .expect("active blocked tab renders ▲ on the strip");
         let glyph = frame.cells[glyph_col];
@@ -10042,25 +10158,29 @@ mod tests {
         assert_eq!(dead_cell.flags & cell_flags::DIM, cell_flags::DIM);
         // The selector indexes display rows directly (x-260a): index 4 = the
         // notes squad row (after footnote, its two agent rows, and the spacer).
+        let notes_row = 4usize;
+        let unsel_cell = frame.cells[notes_row * cols + 2];
         let mut sel_view = view;
         sel_view.selector = Some(4);
         let sel_frame = sel_view.compose();
-        let notes_row = 4usize;
         let sel_cell = sel_frame.cells[notes_row * cols + 2];
-        assert_eq!(
+        // (x-6851 US1) The notes squad is an inactive header band (INVERSE+DIM);
+        // the selector TOGGLES INVERSE, so the cursor row must render DIFFERENTLY
+        // from the unselected band rather than simply carrying INVERSE.
+        assert_ne!(
             sel_cell.flags & cell_flags::INVERSE,
-            cell_flags::INVERSE,
-            "selector highlight must land on the selectable notes row"
+            unsel_cell.flags & cell_flags::INVERSE,
+            "selector highlight must visibly toggle the notes band"
         );
     }
 
     #[test]
-    fn squad_rollup_glyph_on_collapsed_row() {
-        // x-d140: a COLLAPSED squad's name row carries a trailing rollup glyph
-        // for its worst agent state, so a blocked pane is visible without
-        // expanding; an EXPANDED squad shows no rollup (its agent rows already
-        // carry the glyphs). `seen: false` here (done == unseen); the real bit
-        // is x-4328's, exercised elsewhere.
+    fn squad_header_rollup_counts_in_every_view_state() {
+        // x-6851 US2 (AC2-HP): each squad header carries always-on per-state
+        // rollup counts (nonzero only, severity order), folded from its live rows
+        // every paint - subsuming x-d140's collapsed-only worst-state glyph. The
+        // counts read whether the squad is collapsed OR expanded, and an
+        // all-exited squad keeps its ✗ count so dead agents stay discoverable.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
                 squad: Some(squad),
@@ -10084,24 +10204,21 @@ mod tests {
         }
         let mut view = two_pane_view();
         let panes = view.layout.panes.clone();
-        let long = "this-is-a-very-long-squad-name-xyz";
         view.set_layout(LayoutView {
             squads: vec![
                 meta(1, "footnote", 1, 0),
                 meta(2, "notes", 1, 0),
                 meta(3, "quiet", 1, 0),
-                meta(4, long, 1, 0),
             ],
-            active_squad: 1, // only footnote auto-expands; 2/3/4 stay collapsed
+            active_squad: 1, // only footnote auto-expands; 2/3 stay collapsed
             panes,
             focus: 11,
             area: (29, 72),
             agents: vec![
-                ar(1, "lb", Some(AgentBadge::Blocked), false), // squad 1 is active -> expanded
+                ar(1, "lb", Some(AgentBadge::Blocked), false), // active + expanded
                 ar(2, "w", Some(AgentBadge::Working), false),
-                ar(2, "b", Some(AgentBadge::Blocked), false), // worst-of -> Blocked
-                ar(3, "gone", Some(AgentBadge::Blocked), true), // exited -> Idle
-                ar(4, "b2", Some(AgentBadge::Blocked), false),
+                ar(2, "b", Some(AgentBadge::Blocked), false),
+                ar(3, "gone", Some(AgentBadge::Blocked), true), // exited -> ✗
             ],
             focus_node: None,
             backlog: Vec::new(),
@@ -10118,46 +10235,137 @@ mod tests {
                 .unwrap_or_else(|| panic!("row {needle:?} not found in {lines:#?}"))
         };
 
-        // AC1-HP + AC2-HP: collapsed `notes` shows ▲ (blocked outranks working)
-        // even though it is neither active nor expanded.
+        // Collapsed inactive `notes`: 1 blocked + 1 working -> `▲1 ●1`, with the
+        // ▲ (more severe) ahead of the ● in the strip.
         let notes = find("\u{25b8} notes");
         assert!(
-            notes.contains('\u{25b2}'),
-            "notes rollup \u{25b2}: {notes:?}"
+            notes.contains("\u{25b2}1") && notes.contains("\u{25cf}1"),
+            "notes counts \u{25b2}1 \u{25cf}1: {notes:?}"
+        );
+        assert!(
+            notes.find('\u{25b2}').unwrap() < notes.find('\u{25cf}').unwrap(),
+            "severity order (\u{25b2} before \u{25cf}): {notes:?}"
         );
 
-        // AC1-ERR + AC2-EDGE: `quiet`'s only agent is exited -> Idle -> the name
-        // row is the pre-feature render, no rollup glyph.
+        // Collapsed `quiet`: its only agent is exited -> `✗1` (dead stays counted,
+        // never silently dropped).
         let quiet = find("\u{25b8} quiet");
         assert!(
-            !quiet.contains('\u{25b2}')
-                && !quiet.contains('\u{25cf}')
-                && !quiet.contains('\u{2713}'),
-            "quiet has no rollup glyph: {quiet:?}"
+            quiet.contains("\u{2717}1"),
+            "quiet keeps its exited count \u{2717}1: {quiet:?}"
         );
 
-        // AC1-EDGE: a name longer than text_w-2 is truncated but the trailing
-        // ▲ survives at the right edge (reserve-then-truncate).
-        let long_row = find("this-is-a-very-long");
-        assert!(
-            long_row.contains('\u{25b2}'),
-            "long name keeps \u{25b2}: {long_row:?}"
-        );
-        assert!(
-            !long_row.contains(long),
-            "long name is truncated: {long_row:?}"
-        );
-
-        // Collapsed-only: `footnote` is the active (auto-expanded) squad and
-        // holds a live blocked agent, but its EXPANDED name row shows no rollup
-        // glyph - the blocked `lb` agent's own row carries the ▲ instead.
+        // Always-on: the ACTIVE, EXPANDED `footnote` header ALSO shows its count
+        // (`▲1`) - counts read in every view state, unlike the old collapsed-only
+        // glyph which suppressed on expand.
         let footnote = find("\u{25be}*footnote"); // ▾*footnote (expanded caret)
         assert!(
-            !footnote.contains('\u{25b2}')
-                && !footnote.contains('\u{25cf}')
-                && !footnote.contains('\u{2713}'),
-            "expanded squad has no rollup glyph: {footnote:?}"
+            footnote.contains("\u{25b2}1"),
+            "expanded squad still shows counts: {footnote:?}"
         );
+    }
+
+    #[test]
+    fn section_rollup_folds_nonzero_states_in_severity_order() {
+        // x-6851 US2 (AC2-HP): the fold counts each state, drops zeros, and
+        // orders most-severe-first (▲ ✓ ● ○ ✗).
+        use LatticeState::*;
+        let states = [Working, Blocked, Working, Exited, Blocked, Working];
+        let rollup = section_rollup(states.into_iter());
+        assert_eq!(rollup, vec![(Blocked, 2), (Working, 3), (Exited, 1)]);
+        // No zero pairs leak in (no Idle / DoneUnseen here).
+        assert!(rollup.iter().all(|&(_, n)| n > 0));
+        // An empty section yields an empty strip.
+        assert!(section_rollup(std::iter::empty()).is_empty());
+    }
+
+    #[test]
+    fn header_band_text_truncates_least_severe_first_then_name() {
+        // x-6851 US2 (AC11-EDGE): pairs drop atomically from the least-severe
+        // (✗) end when the panel is too narrow; a glyph never renders without its
+        // count; the name truncates only after every pair is gone.
+        use LatticeState::*;
+        let rollup = [(Blocked, 2), (Working, 3), (Exited, 1)];
+        // Wide enough for everything: label left, counts right, exact width.
+        let wide = header_band_text("sq", &rollup, 20);
+        assert_eq!(wide.chars().count(), 20);
+        assert!(wide.starts_with("sq") && wide.ends_with("\u{25b2}2 \u{25cf}3 \u{2717}1"));
+        // Room for the two most-severe pairs only: the ✗ pair drops whole (no
+        // orphan glyph), ▲ and ● survive. (All three need width 11; at 10 the ✗
+        // pair must go.)
+        let mid = header_band_text("sq", &rollup, 10);
+        assert!(mid.contains("\u{25b2}2") && mid.contains("\u{25cf}3"));
+        assert!(
+            !mid.contains('\u{2717}'),
+            "least-severe pair dropped whole: {mid:?}"
+        );
+        // Too narrow for any pair: all drop, the name renders (truncated by
+        // pad_to only once every pair is gone).
+        let narrow = header_band_text("a-very-long-section-name", &rollup, 8);
+        assert!(!narrow.contains('\u{25b2}') && !narrow.contains('\u{2717}'));
+        assert_eq!(narrow.chars().count(), 8);
+    }
+
+    #[test]
+    fn header_band_is_inverse_and_agent_rows_are_not() {
+        // x-6851 US1 (AC1-HP): every section header paints an INVERSE band
+        // (active squad +BOLD, inactive +DIM); agent rows never carry INVERSE, so
+        // a flag diff cleanly separates header cells from row cells.
+        let mut view = two_pane_view();
+        let panes = view.layout.panes.clone();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 1, 1), meta(2, "notes", 1, 0)],
+            active_squad: 1,
+            panes,
+            focus: 11,
+            area: (29, 72),
+            agents: vec![blocked_row("lb", 7, None)], // under active squad 1
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        view.draw_sideline(&mut cells, rows, cols, panel_w);
+        // Row 0 = active squad band: INVERSE + BOLD.
+        assert_eq!(cells[0].flags & cell_flags::INVERSE, cell_flags::INVERSE);
+        assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
+        // The band spans the full width (a right-edge cell is still INVERSE).
+        assert_eq!(
+            cells[panel_w - 2].flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "band fills the panel width"
+        );
+        // Row 1 = the agent row: NOT a band (no INVERSE).
+        assert_eq!(cells[cols].flags & cell_flags::INVERSE, 0);
+        // Row 2 = the Blank spacer between squads (inert, no INVERSE). Row 3 =
+        // inactive `notes` band: INVERSE + DIM.
+        assert_eq!(cells[2 * cols].flags & cell_flags::INVERSE, 0);
+        assert_eq!(
+            cells[3 * cols].flags & cell_flags::INVERSE,
+            cell_flags::INVERSE
+        );
+        assert_eq!(cells[3 * cols].flags & cell_flags::DIM, cell_flags::DIM);
+    }
+
+    #[test]
+    fn zero_agent_squad_band_has_no_counts() {
+        // x-6851 US1 (AC4-EDGE): a squad with no agents renders its band with no
+        // count glyphs and no rows.
+        let view = two_pane_view(); // squad 1/2 have no agents
+        let lines: Vec<String> = frame_text(&view.compose())
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let footnote = lines
+            .iter()
+            .find(|l| l.contains("\u{25be}*footnote"))
+            .unwrap();
+        for g in ['\u{25b2}', '\u{2713}', '\u{25cf}', '\u{25cb}', '\u{2717}'] {
+            assert!(
+                !footnote.contains(g),
+                "empty squad has no count glyph: {footnote:?}"
+            );
+        }
     }
 
     #[test]
@@ -10358,11 +10566,16 @@ mod tests {
             !lines.iter().any(|l| l.contains("*2")),
             "no active-tab row renders in the sideline"
         );
-        // The selector row (squad 2, display index 2 -> frame row 2) carries INVERSE.
+        // The selector row (squad 2, display index 2 -> frame row 2). squad 2 is
+        // an inactive header band (INVERSE+DIM); the selector TOGGLES INVERSE
+        // (x-6851 US1), so it must render DIFFERENTLY from the same row
+        // unselected rather than simply carrying INVERSE.
         let cols = frame.cols as usize;
-        assert!(
-            frame.cells[2 * cols].flags & cell_flags::INVERSE != 0,
-            "selector cursor row must be highlighted"
+        let unsel_frame = two_pane_view().compose();
+        assert_ne!(
+            frame.cells[2 * cols].flags & cell_flags::INVERSE,
+            unsel_frame.cells[2 * cols].flags & cell_flags::INVERSE,
+            "selector cursor row must be visibly toggled"
         );
         // While the selector is open the terminal cursor hides.
         assert!(!frame.cursor_visible);
@@ -10621,7 +10834,7 @@ mod tests {
         );
         // A spacer precedes every trailing header.
         for (i, r) in rows.iter().enumerate() {
-            if matches!(r, DisplayRow::Header(_)) {
+            if matches!(r, DisplayRow::Header { .. }) {
                 assert!(
                     matches!(rows[i - 1], DisplayRow::Blank),
                     "a spacer precedes the header at {i}"
@@ -10712,7 +10925,7 @@ mod tests {
         let header = v
             .display_rows()
             .iter()
-            .position(|r| matches!(r, DisplayRow::Header(_)))
+            .position(|r| matches!(r, DisplayRow::Header { .. }))
             .expect("a header row exists");
         v.selector = Some(header);
         selector_keys(&mut v, b" ", &mut buf).await.unwrap();
@@ -12739,24 +12952,25 @@ mod tests {
         }
     }
 
-    // (x-cd67 US2) AC2-HP + AC1-UI + line-1 suppression: an agent with a subline
-    // gets a dim, inert Sub row under it; the selector skips it; and the orphan
-    // basename suffix is dropped from line 1 (the cwd now lives on line 2).
+    // (x-6851 US3) AC3-HP: a squad-matched agent whose cwd is FOREIGN to the
+    // squad's project gets a dim, inert Sub row carrying the foreign cwd_base
+    // alone (no branch); the selector skips it; and line 1 carries no
+    // ` (basename)` suffix (that is orphan-only now).
     #[test]
-    fn sub_row_is_dim_inert_and_suppresses_line1_basename() {
+    fn foreign_cwd_agent_gets_dim_inert_subline() {
         let mut agent = blocked_row("worker", 4, None);
-        agent.subline = Some("main · footnote".into());
-        agent.cwd_base = Some("footnote".into()); // would suffix line 1 without a subline
+        // squad 1 is "footnote" (/code/footnote); a "regready" cwd is foreign.
+        agent.cwd_base = Some("regready".into());
+        agent.subline = Some("main · regready".into()); // server subline is ignored now
         let mut v = view_with_agents(vec![agent]);
         let rows = v.display_rows();
         let ai = rows
             .iter()
             .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "worker"))
             .unwrap();
-        // AC2-HP: a Sub row immediately follows the agent.
         assert!(
             matches!(rows[ai + 1], DisplayRow::Sub(_)),
-            "sub row follows the agent"
+            "foreign-cwd agent gets a sub row"
         );
         // AC1-UI: inert - no row action, and the selector steps over it.
         assert!(v.row_action(ai + 1).is_none(), "sub row is not actionable");
@@ -12769,13 +12983,19 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[ai].contains("worker"));
         assert!(
-            !lines[ai].contains("(footnote)"),
-            "line-1 basename suffix suppressed when a subline exists: {:?}",
+            !lines[ai].contains("(regready)"),
+            "no line-1 basename suffix on a squad-matched row: {:?}",
             lines[ai]
         );
+        // The subline is the foreign cwd_base alone - no branch, no ` · `.
         assert!(
-            lines[ai + 1].contains("main · footnote"),
-            "subline on line 2: {:?}",
+            lines[ai + 1].contains("regready"),
+            "foreign cwd on line 2: {:?}",
+            lines[ai + 1]
+        );
+        assert!(
+            !lines[ai + 1].contains('\u{b7}'),
+            "no branch on the subline: {:?}",
             lines[ai + 1]
         );
         // The sub row paints DIM.
@@ -12791,12 +13011,45 @@ mod tests {
         );
     }
 
-    // (x-cd67 US5, AC4-EDGE) A pathologically narrow panel (text_w < 3) must
-    // truncate the subline via `.take(text_w)` without underflow or panic.
+    // (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and
+    // a foreign agent B - A is one clean row, B gets exactly one Sub row.
+    #[test]
+    fn exception_subline_only_for_foreign_agent() {
+        let mut a = blocked_row("A", 4, None);
+        a.cwd_base = Some("footnote".into()); // same project as squad 1
+        let mut b = blocked_row("B", 5, None);
+        b.cwd_base = Some("regready".into()); // foreign
+        let v = view_with_agents(vec![a, b]);
+        let rows = v.display_rows();
+        let subs = rows
+            .iter()
+            .filter(|r| matches!(r, DisplayRow::Sub(_)))
+            .count();
+        assert_eq!(subs, 1, "exactly one subline (the foreign agent's)");
+        let bi = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == "B"))
+            .unwrap();
+        assert!(
+            matches!(rows[bi + 1], DisplayRow::Sub(_)),
+            "the sub row follows the foreign agent B"
+        );
+        let ai = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == "A"))
+            .unwrap();
+        assert!(
+            !matches!(rows[ai + 1], DisplayRow::Sub(_)),
+            "same-project agent A has no sub row"
+        );
+    }
+
+    // (x-6851 US3, AC4-EDGE) A pathologically narrow panel (text_w < 3) must
+    // truncate a foreign-cwd sub row without underflow or panic.
     #[test]
     fn draw_sideline_narrow_panel_truncates_subline_without_panic() {
         let mut agent = blocked_row("worker", 4, None);
-        agent.subline = Some("main · footnote".into());
+        agent.cwd_base = Some("regready".into()); // foreign -> a Sub row exists to truncate
         let v = view_with_agents(vec![agent]);
         let (rows, cols, panel_w) = (10usize, 40usize, 2usize); // text_w = 1
         let mut cells = vec![Cell::default(); rows * cols];
@@ -12806,17 +13059,26 @@ mod tests {
         assert_eq!(cells[cols + (panel_w - 1)].c, '│');
     }
 
-    // (x-cd67 US2, AC1-EDGE) An agent with no subline emits no Sub row - no blank
-    // gap under it - and its line-1 grammar is unchanged.
+    // (x-6851 US3) AC3-HP negative + AC4-EDGE: a same-project agent (cwd matches
+    // the squad basename) and a cwd-less agent both emit NO Sub row.
     #[test]
-    fn no_subline_emits_no_sub_row() {
-        let agent = blocked_row("worker", 4, None); // subline: None
-        let v = view_with_agents(vec![agent]);
+    fn same_project_or_absent_cwd_emits_no_sub_row() {
+        let bare = blocked_row("worker", 4, None); // cwd_base None (AC4-EDGE)
         assert!(
-            !v.display_rows()
+            !view_with_agents(vec![bare])
+                .display_rows()
                 .iter()
                 .any(|r| matches!(r, DisplayRow::Sub(_))),
-            "no subline -> no Sub row"
+            "absent cwd -> no sub row"
+        );
+        let mut same = blocked_row("worker", 4, None);
+        same.cwd_base = Some("footnote".into()); // matches squad 1 "footnote"
+        assert!(
+            !view_with_agents(vec![same])
+                .display_rows()
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Sub(_))),
+            "same-project cwd -> no sub row"
         );
     }
 

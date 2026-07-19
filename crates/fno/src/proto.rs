@@ -546,13 +546,15 @@ pub struct AgentRow {
     /// keeps a v23 reader wire-tolerant (`None` -> no ordinal suffix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab: Option<TabId>,
-    /// (v24, x-0090) The cwd basename of an ORPHAN watch-only row (matched no
-    /// squad), rendered as a ` (basename)` suffix under the `~ elsewhere`
-    /// header so two same-named workers in different repos are distinguishable.
-    /// The client can't derive it (an orphan matches no squad, so its cwd is
-    /// not among the `Layout`'s squads), hence the wire carries it. `None` for
-    /// any pane-hosted or squad-matched row. `#[serde(default)]` keeps a v23
-    /// reader wire-tolerant.
+    /// (v24, x-0090; x-6851 US3) The cwd basename of this row. An ORPHAN
+    /// (squad-unmatched) row renders it as a ` (basename)` suffix under the
+    /// `~ elsewhere` header (x-0090 AC2-UI); a squad-matched row uses it for the
+    /// foreign-cwd exception subline - the sideline compares it to the squad's
+    /// project basename and shows a subline only when they differ. Now carried
+    /// on every row (was orphan-only): the client can't derive it for a matched
+    /// row either, since the wire never sends a row's full cwd. `None` for an
+    /// empty cwd (no subline fabricated) and for a synthesized tombstone row.
+    /// `#[serde(default)]` keeps a v23 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_base: Option<String>,
     /// (v25, x-8f11) True for a SYNTHESIZED dead-member row: a tombstoned
