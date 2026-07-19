@@ -176,11 +176,15 @@ fn defer_node(abi_bin: &str, cwd: &Path, node: &str, reason: &str) {
 /// unparseable answer reports `true`, so a flaky read can never auto-defer a
 /// healthy node.
 fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
-    let Ok(out) = abi_cmd(&cfg.abi_bin)
-        .args(["backlog", "get", node_id])
-        .current_dir(&cfg.cwd)
-        .output()
-    else {
+    // retry_etxtbsy like every other shellout here: a transient busy binary
+    // (a concurrent `fno update`) must not read as "healthy, has PR" and quietly
+    // disable the guard.
+    let Ok(out) = retry_etxtbsy(|| {
+        abi_cmd(&cfg.abi_bin)
+            .args(["backlog", "get", node_id])
+            .current_dir(&cfg.cwd)
+            .output()
+    }) else {
         return true;
     };
     if !out.status.success() {
@@ -189,40 +193,30 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return true;
     };
-    if ["pr_number", "pr_url"]
-        .iter()
-        .any(|k| v.get(*k).is_some_and(|x| !x.is_null()))
+    // A ref must be USABLE, not merely present: `pr_number` an integer and
+    // `pr_url` a non-empty string, matching what the CLI's node_pr_refs can
+    // actually derive a ref from. An empty pr_url is not evidence of a ship.
+    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
+        return true;
+    }
+    if v.get("pr_url")
+        .and_then(|u| u.as_str())
+        .is_some_and(|u| !u.trim().is_empty())
     {
         return true;
     }
-    // Union `additional_prs` too, matching the CLI's own node_pr_refs - else the
-    // two "does this node have a PR" predicates disagree on a node whose only
-    // ref lives there.
     v.get("additional_prs")
         .and_then(|a| a.as_array())
         .is_some_and(|a| !a.is_empty())
 }
 
-/// Grace before a suspected zero-artifact close is confirmed. `finalize` stamps
-/// `pr_number` AFTER loop-check emits the termination event, so a drain tick can
-/// land in that window and read a healthy ship as ref-less.
-const PR_STAMP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Is this close the dead-dispatch signature? Only `DonePRGreen` qualifies (it
-/// asserts a PR; `DoneAdvisory` has none by design), and a ref-less first read is
-/// CONFIRMED by a second one after the stamp grace - `resolve_dispatch` retires
-/// the pending entry, so a single mistimed poll would otherwise park a shipped
-/// node for good. The healthy path never sleeps: its first read finds the ref.
-fn is_zero_artifact(cfg: &DrainConfig, node_id: &str, reason: &TerminationReason) -> bool {
-    if !matches!(reason, TerminationReason::DonePRGreen) {
-        return false;
-    }
-    if node_has_pr_ref(cfg, node_id) {
-        return false;
-    }
-    std::thread::sleep(PR_STAMP_GRACE);
-    !node_has_pr_ref(cfg, node_id)
-}
+/// Reconcile passes a ref-less `DonePRGreen` must persist across before it counts
+/// as a dead dispatch. `finalize` stamps `pr_number` AFTER loop-check emits the
+/// termination event, and its tail (plan stamp, handoff, verifier) has no bounded
+/// duration - so a single poll landing in that window would read a healthy ship
+/// as ref-less. Re-checking on a later tick costs nothing and never blocks the
+/// drain thread, which a sleep here would.
+const PR_STAMP_GRACE_TICKS: u32 = 3;
 
 /// Map a dispatched node's termination outcome to a [`DrainOutcome`], updating
 /// the breaker and emitting the decision event. Fed by [`reconcile_pending`]
@@ -373,6 +367,9 @@ pub struct PendingDispatch {
     /// not yet taken the node claim holds none, which must not read as a death
     /// until `BOOT_GRACE_TICKS` have elapsed.
     ticks: u32,
+    /// Passes this entry has read a ref-less `DonePRGreen`. Lets the PR stamp land
+    /// before a zero-artifact verdict sticks (see `PR_STAMP_GRACE_TICKS`).
+    stamp_waits: u32,
 }
 
 /// Reconcile passes to wait for a dispatched worker to take its `node:<id>`
@@ -422,6 +419,15 @@ fn reconcile_pending(
         if let Some(sid) = p.session_id.clone() {
             match journal.find_termination(&sid) {
                 Ok(Some(ev)) => {
+                    // A ref-less DonePRGreen may just be racing finalize's stamp;
+                    // keep the entry and re-read on a later tick before deciding.
+                    if matches!(ev.reason, TerminationReason::DonePRGreen)
+                        && !node_has_pr_ref(cfg, &p.node_id)
+                        && p.stamp_waits < PR_STAMP_GRACE_TICKS
+                    {
+                        p.stamp_waits += 1;
+                        return true;
+                    }
                     resolve_dispatch(cfg, breaker, journal, &p.node_id, ev);
                     return false;
                 }
@@ -464,7 +470,9 @@ fn resolve_dispatch(
     // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
     // only runs when refs already exist, so a ref-less node would otherwise
     // close exit 0 and score the dead dispatch as a win.
-    let close = if is_zero_artifact(cfg, node_id, &ev.reason) {
+    let close = if matches!(ev.reason, TerminationReason::DonePRGreen)
+        && !node_has_pr_ref(cfg, node_id)
+    {
         CloseOutcome::Parked(
             "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
         )
@@ -612,6 +620,7 @@ fn dispatch_mission(
             node_id: node_id.clone(),
             session_id: None,
             ticks: 0,
+            stamp_waits: 0,
         });
         new_ids.push(node_id.clone());
     }
@@ -1315,35 +1324,19 @@ mod tests {
     }
 
     #[test]
-    fn zero_artifact_is_confirmed_by_a_second_read() {
-        // finalize stamps pr_number AFTER loop-check emits termination, so a tick
-        // landing in that window sees a healthy ship as ref-less. The confirm
-        // re-read must clear it: this stub answers ref-less first, then stamped.
+    fn empty_pr_url_is_not_a_ref() {
+        // A ref must be usable: `--pr-url ""` is present-but-empty and the CLI
+        // can derive no ref from it, so it must not read as evidence of a ship.
         let tmp = tempfile::TempDir::new().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let flag = tmp.path().join("stamped");
-        let p = bin.join("fno");
-        std::fs::write(
-            &p,
-            format!(
-                "#!/usr/bin/env bash\n\
-                 if [ \"$2\" = \"get\" ]; then\n\
-                   if [ -f \"{f}\" ]; then printf '{{\"pr_number\":9}}'; \
-                   else touch \"{f}\"; printf '{{\"id\":\"x-race0001\"}}'; fi\n\
-                   exit 0\n\
-                 fi\nexit 0\n",
-                f = flag.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let cfg = test_cfg(tmp.path(), p.display().to_string(), 3);
-
-        assert!(
-            !is_zero_artifact(&cfg, "x-race0001", &TerminationReason::DonePRGreen),
-            "a PR stamped during the grace window must not park a shipped node"
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-empt0001","pr_url":"  "}"#,
         );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+
+        assert!(!node_has_pr_ref(&cfg, "x-empt0001"));
     }
 
     #[test]
@@ -1526,6 +1519,7 @@ mod tests {
             node_id: "x-bootgrace-never-real".to_string(),
             session_id: None,
             ticks: 0,
+            stamp_waits: 0,
         }];
 
         // Passes before the grace expires keep the dispatch and record nothing.
@@ -1545,6 +1539,52 @@ mod tests {
             "the never-booted dispatch is retired as a crash"
         );
         assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 1);
+    }
+
+    #[test]
+    fn refless_done_pr_green_waits_for_the_stamp_before_parking() {
+        // finalize stamps pr_number after loop-check emits termination, and its
+        // tail is unbounded - so a ref-less read is held across ticks rather than
+        // decided on the spot. Only a dispatch still ref-less after the grace is
+        // a dead dispatch.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-grace-never-real"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        std::fs::write(
+            &project_journal,
+            "{\"type\":\"termination\",\"data\":{\"session_id\":\"sid-grace\",\"reason\":\"DonePRGreen\"}}\n",
+        )
+        .unwrap();
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = vec![PendingDispatch {
+            node_id: "x-grace-never-real".to_string(),
+            session_id: Some("sid-grace".to_string()),
+            ticks: 0,
+            stamp_waits: 0,
+        }];
+
+        for _ in 0..PR_STAMP_GRACE_TICKS {
+            reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+            assert_eq!(pending.len(), 1, "held while the stamp may still land");
+            assert_eq!(breaker.consecutive_failures("x-grace-never-real"), 0);
+        }
+
+        reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+        assert!(
+            pending.is_empty(),
+            "grace exhausted: the dispatch is retired"
+        );
+        assert_eq!(
+            breaker.consecutive_failures("x-grace-never-real"),
+            1,
+            "a still-ref-less DonePRGreen counts toward the streak"
+        );
     }
 
     #[test]
@@ -1706,6 +1746,7 @@ mod tests {
             node_id: "x-a".to_string(),
             session_id: None,
             ticks: 2,
+            stamp_waits: 0,
         }];
         dispatch_mission(&cfg, &mut pending, &journal);
         assert_eq!(pending.len(), 1, "x-a already pending must not be re-added");
