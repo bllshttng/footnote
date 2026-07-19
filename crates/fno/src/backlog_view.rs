@@ -709,8 +709,16 @@ mod tests {
         let m = derive_missions(&raw).unwrap();
         assert_eq!(m.node_to_epic.get("x-c1"), Some(&"x-e".to_string()));
         assert_eq!(m.node_to_epic.get("x-c2"), Some(&"x-e".to_string()));
-        assert_eq!(m.node_to_epic.get("x-e"), None, "epic is not its own member");
-        assert_eq!(m.node_to_epic.get("x-c3"), None, "inactive-epic child unmapped");
+        assert_eq!(
+            m.node_to_epic.get("x-e"),
+            None,
+            "epic is not its own member"
+        );
+        assert_eq!(
+            m.node_to_epic.get("x-c3"),
+            None,
+            "inactive-epic child unmapped"
+        );
         assert_eq!(m.missions.len(), 1);
         let mission = &m.missions[0];
         assert_eq!(mission.epic_id, "x-e");
