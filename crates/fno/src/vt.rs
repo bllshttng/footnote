@@ -869,6 +869,9 @@ impl Pane {
     /// Read a command block. `Err(())` is `BLOCK_UNAVAILABLE`: an evicted or
     /// nonexistent block, or a specific `seq` on a markerless pane. A markerless
     /// pane's `Last` degrades to ONE implicit block (whole output), flagged.
+    // Err(()) is a documented BLOCK_UNAVAILABLE sentinel, not an error type; a
+    // real error enum would ripple through every caller for no signal gained.
+    #[allow(clippy::result_unit_err)]
     pub fn read_block(&self, sel: BlockSel) -> Result<BlockRead, ()> {
         match sel {
             BlockSel::Last => {
@@ -1754,7 +1757,7 @@ mod tests {
         // AC1-ERR: a garbage payload past the length cap flushes as inert bytes,
         // records no phantom marker, does not panic or buffer unbounded.
         let mut hostile = b"\x1b]133;".to_vec();
-        hostile.extend(std::iter::repeat(b'X').take(500));
+        hostile.extend(std::iter::repeat_n(b'X', 500));
         hostile.push(0x07);
         hostile.extend_from_slice(b"tail");
         let (markers, pass) = scan(&hostile);

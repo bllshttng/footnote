@@ -82,7 +82,7 @@ fn run_pane(scratch: &Scratch, cwd: &Path, placement: PanePlacement) -> Result<u
 /// `stty size` in the FOCUSED pane must report `rows cols`. Wire-level proof
 /// that the kernel winsize followed the layout rect (items 1 and 3).
 fn assert_focused_winsize(c: &mut FakeClient, pane: u64, rows: u16, cols: u16) {
-    c.input(format!("echo sz=$(stty size)#\r").as_bytes());
+    c.input(b"echo sz=$(stty size)#\r");
     let want = format!("sz={rows} {cols}#");
     c.wait_pane_text(15, pane, |t| t.contains(&want));
 }

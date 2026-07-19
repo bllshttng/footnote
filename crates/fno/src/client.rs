@@ -590,6 +590,7 @@ struct View {
     /// clears this. `(argv, child-env, is_login)`: `is_login` runs `fno mux pane
     /// run` (opens the login pane, keeps the pending notice), else a single-flight
     /// mutation guarded by `ConnectionsView::acting`.
+    #[allow(clippy::type_complexity)]
     conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
 }
 
@@ -2214,9 +2215,7 @@ impl View {
     /// agent row (down first, then up); close peek when none remain. Returns the
     /// name to re-fetch when it re-anchored, `None` when it held or closed.
     fn peek_reanchor(&mut self) -> Option<(usize, String)> {
-        let Some((cursor, peeked)) = self.peek.as_ref().map(|p| (p.cursor, p.name.clone())) else {
-            return None;
-        };
+        let (cursor, peeked) = self.peek.as_ref().map(|p| (p.cursor, p.name.clone()))?;
         // One `display_rows()` snapshot for the whole check: the identity test,
         // both direction scans, and the re-anchored name all read it (gemini
         // review).
@@ -10650,9 +10649,9 @@ mod tests {
         let frame = view.compose();
         let cols = frame.cols as usize;
         // In-area content cell.
-        assert_eq!(frame.cells[1 * cols + 28].c, 'a');
+        assert_eq!(frame.cells[cols + 28].c, 'a');
         // One column beyond the area: filler, dim.
-        let beyond_col = &frame.cells[1 * cols + 28 + 50];
+        let beyond_col = &frame.cells[cols + 28 + 50];
         assert_eq!(beyond_col.c, '·', "beyond-area column must be filler");
         assert!(beyond_col.flags & cell_flags::DIM != 0);
         // One row beyond the area (content row 20): filler too.

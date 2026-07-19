@@ -730,12 +730,10 @@ fn tab_label(
 /// land in chrome cells). Never an ordinal - a plain pane is `shell`, not a
 /// number the operator cannot map back.
 fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
-    for cand in [cmd, node] {
-        if let Some(c) = cand {
-            let clean = sanitize_tab_name(c);
-            if !clean.is_empty() {
-                return clean;
-            }
+    for c in [cmd, node].into_iter().flatten() {
+        let clean = sanitize_tab_name(c);
+        if !clean.is_empty() {
+            return clean;
         }
     }
     let base = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
@@ -1853,6 +1851,7 @@ impl Core {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_pane(
         &mut self,
         squad_key: String,
@@ -2794,6 +2793,7 @@ impl Core {
         // smallest-client clamp (Locked 1/5). The applied area is cached so
         // the tab keeps it when its last viewer leaves.
         let viewed: HashSet<TabId> = self.clients.iter().map(|c| c.view.1).collect();
+        #[allow(clippy::type_complexity)]
         let mut tab_rects: HashMap<TabId, (Vec<(u64, Rect)>, u64, (u16, u16))> = HashMap::new();
         for tid in viewed {
             let Some((sid, idx)) = self.session.find_tab(tid) else {
@@ -2863,6 +2863,7 @@ impl Core {
         // Per-client messages, precomputed so the send loop can borrow
         // clients mutably. A dangling view yields an empty layout, never a
         // panic (re-anchor upstream is the real guarantee).
+        #[allow(clippy::type_complexity)]
         let per: Vec<(ServerMsg, Modes, Vec<(u64, Rect)>)> = self
             .clients
             .iter()
@@ -4897,8 +4898,8 @@ impl Core {
                         .and_then(|s| self.session.squad(s))
                         .map(|s| s.canonical_cwd().to_string())
                         .unwrap_or_default();
-                    let (acct, cd) = self.attach_account_ctx(&id);
-                    let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
+                    let (acct, cd) = self.attach_account_ctx(id);
+                    let argv = attach_argv(id, acct.as_deref(), cd.as_deref());
                     let pid = match self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
                         Ok(p) => p,
                         Err(e) => {
@@ -5755,7 +5756,7 @@ async fn run_wait(
                 // baseline captured at subscribe time.
                 if done_watch.enabled {
                     if let Some((seq, exit)) = tick.last_done {
-                        if done_watch.baseline.map_or(true, |b| seq > b) {
+                        if done_watch.baseline.is_none_or(|b| seq > b) {
                             break WaitOutcome::CommandDone { exit };
                         }
                     }
@@ -6816,19 +6817,14 @@ async fn client_writer(
                     // otherwise pin the writer inside this arm, and the
                     // biased select only prioritizes at the select point -
                     // not while an arm is running.
-                    loop {
-                        match reliable_rx.try_recv() {
-                            Ok(msg) => {
-                                let is_bye = matches!(msg, ServerMsg::Bye { .. });
-                                if write_msg(&mut w, &msg).await.is_err() {
-                                    let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                                    return;
-                                }
-                                if is_bye {
-                                    return;
-                                }
-                            }
-                            Err(_) => break,
+                    while let Ok(msg) = reliable_rx.try_recv() {
+                        let is_bye = matches!(msg, ServerMsg::Bye { .. });
+                        if write_msg(&mut w, &msg).await.is_err() {
+                            let _ = core_tx.send(CoreMsg::Gone(id)).await;
+                            return;
+                        }
+                        if is_bye {
+                            return;
                         }
                     }
                     let next = {
@@ -10233,10 +10229,17 @@ mod tests {
             )
             .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A loaded CI runner can take several seconds just to spawn the PTY +
+        // start the shell; 15s matches the PTY-wait convention elsewhere and
+        // keeps this off the flake list.
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !marker.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
+        assert!(
+            marker.exists(),
+            "pane shell never wrote cwd.txt within 15s (spawn slow or failed)"
+        );
         let reported = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
             std::fs::canonicalize(reported.trim()).unwrap(),
@@ -10351,10 +10354,17 @@ mod tests {
 
         core.command(client_id, Command::attach_agent("deadbee2"));
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A loaded CI runner can take several seconds just to spawn the PTY +
+        // start the shell; 15s matches the PTY-wait convention elsewhere and
+        // keeps this off the flake list.
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !marker.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
+        assert!(
+            marker.exists(),
+            "pane shell never wrote cwd.txt within 15s (spawn slow or failed)"
+        );
         let reported = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
             std::fs::canonicalize(reported.trim()).unwrap(),
