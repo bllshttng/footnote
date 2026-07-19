@@ -1165,8 +1165,8 @@ impl View {
     }
 
     /// The roster row a fold item joins to: a name / node / session-id match
-    /// against a layout row's name or cwd basename (the identity a sideline
-    /// orphan row carries).
+    /// against a layout row's name or its cwd basename (`cwd_base`, now carried
+    /// on every row since x-6851 US3, not only orphans).
     fn join_fold_row(&self, item: &crate::needs_overlay::FoldItem) -> Option<&AgentRow> {
         let keys: Vec<&str> = [
             item.name.as_deref(),
@@ -3043,12 +3043,14 @@ impl View {
             // rollup is the sole signal there - no more agent rows rendering
             // unconditionally under a folded squad.
             if self.expanded.contains(&s.id) {
+                let section_base = section_project_base(&s.canonical_cwd);
                 for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
                     out.push(DisplayRow::Agent(a));
-                    // (x-cd67 US2) A dim line-2 subline follows the agent row
-                    // whenever the server composed one; a `None`/empty subline
-                    // emits no Sub row (AC1-EDGE: no blank gap).
-                    if agent_has_subline(a) {
+                    // (x-6851 US3) Exception-based subline: a Sub row follows the
+                    // agent ONLY when its cwd_base differs from the squad's
+                    // project basename - the foreign-cwd join worth flagging. A
+                    // same-project agent stays one clean row.
+                    if agent_is_foreign(a, section_base) {
                         out.push(DisplayRow::Sub(a));
                     }
                 }
@@ -3085,11 +3087,11 @@ impl View {
                 label: "~ elsewhere",
                 rollup,
             });
+            // Orphans keep their line-1 ` (basename)` suffix (every orphan is
+            // foreign by definition); a Sub row would double it, so the
+            // `~ elsewhere` section emits no sublines (x-6851 US3).
             for a in orphans {
                 out.push(DisplayRow::Agent(a));
-                if agent_has_subline(a) {
-                    out.push(DisplayRow::Sub(a));
-                }
             }
         }
         // The work-queue lane (x-6f77): board-ordered ready/blocked/in-flight
@@ -3233,15 +3235,18 @@ impl View {
                         Some(TabContext::Named(name)) => text.push_str(&format!(" ·{name}")),
                         Some(TabContext::Ordinal(ord)) => text.push_str(&format!(" ·{ord}")),
                         None => {
-                            if let Some(base) = a
-                                .cwd_base
-                                .as_deref()
-                                // (x-cd67 US2) When a subline carries the cwd on
-                                // line 2, the orphan basename suffix is suppressed
-                                // on line 1 so it does not duplicate.
-                                .filter(|_| !agent_has_subline(a))
-                            {
-                                text.push_str(&format!(" ({base})"));
+                            // (x-0090) An ORPHAN (no squad) names its repo with a
+                            // ` (basename)` line-1 suffix so two same-named
+                            // workers in different repos are distinguishable. A
+                            // squad-matched paneless row is NOT an orphan - now
+                            // that every row carries `cwd_base` (x-6851 US3), the
+                            // `squad.is_none()` guard keeps the suffix orphan-only;
+                            // a matched row's foreign cwd surfaces as the exception
+                            // subline instead.
+                            if a.squad.is_none() {
+                                if let Some(base) = a.cwd_base.as_deref() {
+                                    text.push_str(&format!(" ({base})"));
+                                }
                             }
                         }
                     }
@@ -3301,10 +3306,12 @@ impl View {
                     (label, cell_flags::DIM, Color::Default)
                 }
                 DisplayRow::Sub(a) => {
-                    // (x-cd67 US2) The dim line-2 subline, indented 4 cells to sit
-                    // under the agent name (` {mark}{glyph} ` is 4 cells wide). The
-                    // later `.take(text_w)` truncates it to the panel width.
-                    let sub = a.subline.as_deref().unwrap_or("");
+                    // (x-6851 US3) The dim line-2 subline is the FOREIGN cwd_base
+                    // alone (no branch), indented 4 cells to sit under the agent
+                    // name (` {mark}{glyph} ` is 4 cells wide). A Sub row is only
+                    // emitted for a foreign-cwd row, so cwd_base is present. The
+                    // server-composed `subline` is no longer consumed here.
+                    let sub = a.cwd_base.as_deref().unwrap_or("");
                     (format!("    {sub}"), cell_flags::DIM, Color::Default)
                 }
                 // (x-cd67 US3) A blank section spacer paints nothing.
@@ -3447,11 +3454,23 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
     )
 }
 
-/// (x-cd67 US2) Whether an agent row carries a non-empty server-composed subline
-/// (a `Sub` display row follows it). An empty string is treated as absent so a
-/// blank actionable-looking gap can never paint.
-fn agent_has_subline(a: &AgentRow) -> bool {
-    a.subline.as_deref().is_some_and(|s| !s.is_empty())
+/// (x-6851 US3) The project basename a section is keyed by (the squad's
+/// canonical repo root), for the foreign-cwd subline comparison. `None` for a
+/// squad whose canonical cwd has no final component (degenerate; no subline).
+fn section_project_base(canonical_cwd: &str) -> Option<&str> {
+    Path::new(canonical_cwd).file_name().and_then(|b| b.to_str())
+}
+
+/// (x-6851 US3) Whether an agent's cwd is FOREIGN to its section: its `cwd_base`
+/// is present AND differs from the section's project basename. A missing
+/// `cwd_base` (absent on the wire, AC4-EDGE) or a match yields false - no
+/// subline. This is the exception predicate that replaced x-cd67's
+/// always-on server subline.
+fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
+    match (a.cwd_base.as_deref(), section_base) {
+        (Some(cwd), Some(base)) => cwd != base,
+        _ => false,
+    }
 }
 
 /// One clickable span in the tab bar (label + render flags + what a click does;
@@ -12913,24 +12932,25 @@ mod tests {
         }
     }
 
-    // (x-cd67 US2) AC2-HP + AC1-UI + line-1 suppression: an agent with a subline
-    // gets a dim, inert Sub row under it; the selector skips it; and the orphan
-    // basename suffix is dropped from line 1 (the cwd now lives on line 2).
+    // (x-6851 US3) AC3-HP: a squad-matched agent whose cwd is FOREIGN to the
+    // squad's project gets a dim, inert Sub row carrying the foreign cwd_base
+    // alone (no branch); the selector skips it; and line 1 carries no
+    // ` (basename)` suffix (that is orphan-only now).
     #[test]
-    fn sub_row_is_dim_inert_and_suppresses_line1_basename() {
+    fn foreign_cwd_agent_gets_dim_inert_subline() {
         let mut agent = blocked_row("worker", 4, None);
-        agent.subline = Some("main · footnote".into());
-        agent.cwd_base = Some("footnote".into()); // would suffix line 1 without a subline
+        // squad 1 is "footnote" (/code/footnote); a "regready" cwd is foreign.
+        agent.cwd_base = Some("regready".into());
+        agent.subline = Some("main · regready".into()); // server subline is ignored now
         let mut v = view_with_agents(vec![agent]);
         let rows = v.display_rows();
         let ai = rows
             .iter()
             .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "worker"))
             .unwrap();
-        // AC2-HP: a Sub row immediately follows the agent.
         assert!(
             matches!(rows[ai + 1], DisplayRow::Sub(_)),
-            "sub row follows the agent"
+            "foreign-cwd agent gets a sub row"
         );
         // AC1-UI: inert - no row action, and the selector steps over it.
         assert!(v.row_action(ai + 1).is_none(), "sub row is not actionable");
@@ -12943,13 +12963,19 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[ai].contains("worker"));
         assert!(
-            !lines[ai].contains("(footnote)"),
-            "line-1 basename suffix suppressed when a subline exists: {:?}",
+            !lines[ai].contains("(regready)"),
+            "no line-1 basename suffix on a squad-matched row: {:?}",
             lines[ai]
         );
+        // The subline is the foreign cwd_base alone - no branch, no ` · `.
         assert!(
-            lines[ai + 1].contains("main · footnote"),
-            "subline on line 2: {:?}",
+            lines[ai + 1].contains("regready"),
+            "foreign cwd on line 2: {:?}",
+            lines[ai + 1]
+        );
+        assert!(
+            !lines[ai + 1].contains('\u{b7}'),
+            "no branch on the subline: {:?}",
             lines[ai + 1]
         );
         // The sub row paints DIM.
@@ -12965,12 +12991,45 @@ mod tests {
         );
     }
 
-    // (x-cd67 US5, AC4-EDGE) A pathologically narrow panel (text_w < 3) must
-    // truncate the subline via `.take(text_w)` without underflow or panic.
+    // (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and
+    // a foreign agent B - A is one clean row, B gets exactly one Sub row.
+    #[test]
+    fn exception_subline_only_for_foreign_agent() {
+        let mut a = blocked_row("A", 4, None);
+        a.cwd_base = Some("footnote".into()); // same project as squad 1
+        let mut b = blocked_row("B", 5, None);
+        b.cwd_base = Some("regready".into()); // foreign
+        let v = view_with_agents(vec![a, b]);
+        let rows = v.display_rows();
+        let subs = rows
+            .iter()
+            .filter(|r| matches!(r, DisplayRow::Sub(_)))
+            .count();
+        assert_eq!(subs, 1, "exactly one subline (the foreign agent's)");
+        let bi = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == "B"))
+            .unwrap();
+        assert!(
+            matches!(rows[bi + 1], DisplayRow::Sub(_)),
+            "the sub row follows the foreign agent B"
+        );
+        let ai = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == "A"))
+            .unwrap();
+        assert!(
+            !matches!(rows[ai + 1], DisplayRow::Sub(_)),
+            "same-project agent A has no sub row"
+        );
+    }
+
+    // (x-6851 US3, AC4-EDGE) A pathologically narrow panel (text_w < 3) must
+    // truncate a foreign-cwd sub row without underflow or panic.
     #[test]
     fn draw_sideline_narrow_panel_truncates_subline_without_panic() {
         let mut agent = blocked_row("worker", 4, None);
-        agent.subline = Some("main · footnote".into());
+        agent.cwd_base = Some("regready".into()); // foreign -> a Sub row exists to truncate
         let v = view_with_agents(vec![agent]);
         let (rows, cols, panel_w) = (10usize, 40usize, 2usize); // text_w = 1
         let mut cells = vec![Cell::default(); rows * cols];
@@ -12980,17 +13039,26 @@ mod tests {
         assert_eq!(cells[cols + (panel_w - 1)].c, '│');
     }
 
-    // (x-cd67 US2, AC1-EDGE) An agent with no subline emits no Sub row - no blank
-    // gap under it - and its line-1 grammar is unchanged.
+    // (x-6851 US3) AC3-HP negative + AC4-EDGE: a same-project agent (cwd matches
+    // the squad basename) and a cwd-less agent both emit NO Sub row.
     #[test]
-    fn no_subline_emits_no_sub_row() {
-        let agent = blocked_row("worker", 4, None); // subline: None
-        let v = view_with_agents(vec![agent]);
+    fn same_project_or_absent_cwd_emits_no_sub_row() {
+        let bare = blocked_row("worker", 4, None); // cwd_base None (AC4-EDGE)
         assert!(
-            !v.display_rows()
+            !view_with_agents(vec![bare])
+                .display_rows()
                 .iter()
                 .any(|r| matches!(r, DisplayRow::Sub(_))),
-            "no subline -> no Sub row"
+            "absent cwd -> no sub row"
+        );
+        let mut same = blocked_row("worker", 4, None);
+        same.cwd_base = Some("footnote".into()); // matches squad 1 "footnote"
+        assert!(
+            !view_with_agents(vec![same])
+                .display_rows()
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Sub(_))),
+            "same-project cwd -> no sub row"
         );
     }
 

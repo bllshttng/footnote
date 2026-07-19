@@ -3228,7 +3228,9 @@ impl Core {
                                 external: a.external,
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
-                                cwd_base: None,
+                                // (x-6851 US3) cwd basename on every row so the
+                                // sideline can flag a foreign-cwd join.
+                                cwd_base: cwd_basename(&a.cwd),
                                 tombstone: false,
                                 subline: self.compose_subline(&a.cwd),
                                 // Structural roster-dir tag wins (Locked
@@ -3262,7 +3264,7 @@ impl Core {
                                 external: false,
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
-                                cwd_base: None,
+                                cwd_base: cwd_basename(e.map(|e| e.cwd.as_str()).unwrap_or("")),
                                 tombstone: false,
                                 subline: self
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
@@ -3305,7 +3307,7 @@ impl Core {
                         external: a.external,
                         tab: None,
                         seen: self.seen.contains(pane),
-                        cwd_base: None,
+                        cwd_base: cwd_basename(&a.cwd),
                         tombstone: false,
                         subline: self.compose_subline(&a.cwd),
                         account: a.account.clone(),
@@ -3323,16 +3325,11 @@ impl Core {
                         .iter()
                         .find(|s| s.owns_path(&a.cwd))
                         .map(|s| s.id);
-                    // An orphan (no squad) carries its cwd basename so the client
-                    // can disambiguate same-named workers under `~ elsewhere`
-                    // (AC2-UI); a squad-matched row needs none.
-                    let cwd_base = squad.is_none().then(|| {
-                        Path::new(&a.cwd)
-                            .file_name()
-                            .and_then(|b| b.to_str())
-                            .unwrap_or(a.cwd.as_str())
-                            .to_string()
-                    });
+                    // (x-6851 US3) Every row carries its cwd basename: an orphan
+                    // uses it for the `~ elsewhere` disambiguation suffix
+                    // (x-0090 AC2-UI), a squad-matched row for the foreign-cwd
+                    // exception subline.
+                    let cwd_base = cwd_basename(&a.cwd);
                     out.push(AgentRow {
                         squad,
                         name: a.name.clone(),
@@ -5653,6 +5650,24 @@ fn subline_from(branch: Option<&str>, cwd: &str) -> Option<String> {
         (None, Some(t)) => Some(t.to_string()),
         (None, None) => None,
     }
+}
+
+/// (x-6851 US3) The cwd basename carried on EVERY agent row (not just orphans),
+/// so the sideline can flag a foreign-cwd join client-side by comparing it to
+/// the squad's project basename. `None` for an empty cwd (no subline is
+/// fabricated - the AC4-EDGE "absent cwd" case); a path with no final component
+/// falls back to the whole cwd, matching the pre-x-6851 orphan extraction.
+fn cwd_basename(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    Some(
+        Path::new(cwd)
+            .file_name()
+            .and_then(|b| b.to_str())
+            .unwrap_or(cwd)
+            .to_string(),
+    )
 }
 
 /// The canonical `Err` for a pane id no live pane owns (read/send/wait/kill).
@@ -9023,6 +9038,16 @@ mod tests {
     }
 
     #[test]
+    fn cwd_basename_extracts_tail_and_handles_empty() {
+        // x-6851 US3: the basename every row carries; empty -> None (AC4-EDGE:
+        // no fabricated subline); trailing slash trimmed.
+        assert_eq!(cwd_basename("/code/footnote"), Some("footnote".into()));
+        assert_eq!(cwd_basename("/code/footnote/"), Some("footnote".into()));
+        assert_eq!(cwd_basename("footnote"), Some("footnote".into()));
+        assert_eq!(cwd_basename(""), None);
+    }
+
+    #[test]
     fn agent_rows_composes_subline_from_branch_map() {
         // A paneless orphan row joins the off-loop branch map on its cwd; a cwd
         // absent from the map degrades to the tail alone (US4 wire composition).
@@ -9037,12 +9062,15 @@ mod tests {
         let rows = core.agent_rows();
         let footnote = rows.iter().find(|r| r.name == "worker").unwrap();
         assert_eq!(footnote.subline.as_deref(), Some("main · footnote"));
+        // (x-6851 US3) Every row now carries its cwd basename on the wire.
+        assert_eq!(footnote.cwd_base.as_deref(), Some("footnote"));
         let regready = rows.iter().find(|r| r.name == "other").unwrap();
         assert_eq!(
             regready.subline.as_deref(),
             Some("regready"),
             "no branch in map -> tail only"
         );
+        assert_eq!(regready.cwd_base.as_deref(), Some("regready"));
     }
 
     #[test]
