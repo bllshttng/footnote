@@ -1064,7 +1064,11 @@ fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
         // Bare `opencode --session <id>` is the interactive TUI attach (the
         // `codex resume <id>` precedent). The provider's headless
         // `opencode run ... --session <id>` argv is a separate lane.
-        "opencode" => Some(vec!["opencode".into(), "--session".into(), session_id.into()]),
+        "opencode" => Some(vec![
+            "opencode".into(),
+            "--session".into(),
+            session_id.into(),
+        ]),
         _ => None,
     }
 }
