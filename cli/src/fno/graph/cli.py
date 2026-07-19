@@ -6124,6 +6124,12 @@ def cmd_maintain(
     rescope_fixes = _maintain.detect_rescope_fixes(entries, workspaces)
     prune_ids = _maintain.detect_temp_leaks(entries)
     dup_groups = _maintain.detect_dup_groups(entries)
+    # Propose-only in v1 even under --apply: a bulk reparent has no human
+    # reading a receipt the way intake's one-at-a-time auto-link does.
+    try:
+        rollup_cands = _maintain.detect_rollup_candidates(entries)
+    except Exception:  # noqa: BLE001 - advisory leg; maintain must not break
+        rollup_cands = []
 
     try:
         from fno.config import load_settings
@@ -6360,6 +6366,7 @@ def cmd_maintain(
         "rescoped": len(applied_rescope) if apply else len(rescope_fixes),
         "pruned": len(applied_prune) if apply else len(prune_ids),
         "dedup_groups": len(dup_groups),
+        "rollup_candidates": len(rollup_cands),
         "stale_ideas": len(stale),
         "now_overflow": list(overflow) if overflow else None,
         "skipped_claimed": len(skipped_claimed),
@@ -6402,6 +6409,9 @@ def cmd_maintain(
                 "candidates": prune_ids,
             },
             "dedup_groups": dup_groups,
+            "rollup_candidates": [
+                {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
+            ],
             "stale_ideas": [{"node_id": s.node_id, "age_days": s.age_days} for s in stale],
             "now_overflow": list(overflow) if overflow else None,
             "skipped_claimed": skipped_claimed,
@@ -6441,7 +6451,8 @@ def cmd_maintain(
             f"re-scoped {len(applied_rescope)} | pruned {len(applied_prune)} | "
             f"auto-deferred {len(applied_defers)} | "
             f"stale-ready-deferred {len(applied_stale_ready)} | "
-            f"dedup-groups {len(dup_groups)} | stale-ideas {len(stale)} | "
+            f"dedup-groups {len(dup_groups)} | rollup-candidates "
+            f"{len(rollup_cands)} | stale-ideas {len(stale)} | "
             f"now-overflow {'yes' if overflow else 'no'} | "
             f"skipped-claimed {len(skipped_claimed)}"
         )
@@ -6450,7 +6461,8 @@ def cmd_maintain(
             f"re-scope candidates {len(rescope_fixes)} | prune candidates "
             f"{len(prune_ids)} | auto-defer candidates {len(defer_cands)} | "
             f"stale-ready candidates {len(stale_ready_cands)} | "
-            f"dedup-groups {len(dup_groups)} | stale-ideas "
+            f"dedup-groups {len(dup_groups)} | rollup-candidates "
+            f"{len(rollup_cands)} | stale-ideas "
             f"{len(stale)} | now-overflow {'yes' if overflow else 'no'}  "
             f"(run with --apply to apply the deterministic legs)"
         )
@@ -6500,6 +6512,11 @@ def cmd_maintain(
         )
     for group in dup_groups:
         typer.echo(f"  near-duplicate ideas (merge/supersede by hand): {', '.join(group)}")
+    for nid, epic_id, score in rollup_cands:
+        typer.echo(
+            f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
+            f"fno backlog update {nid} --parent {epic_id}"
+        )
     for s in stale:
         typer.echo(
             f"  stale idea {s.node_id} ({s.age_days}d): "
