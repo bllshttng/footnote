@@ -102,6 +102,32 @@ def test_opencode_spawn_stamps_the_captured_session_id(
     assert [r.harness_session_id for r in rows] == [ses]
 
 
+def test_opencode_spawn_never_claims_another_rows_session_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two panes racing in one cwd must not both stamp the same session id.
+
+    The second pane's session may not exist yet when both backfills query, so
+    each sees the SAME lone candidate and the ambiguity rule cannot fire. The
+    loser drops to live-only rather than pointing resume at the other pane.
+    """
+    from fno.agents.registry import load_registry
+
+    ses = "ses_09679f284ffeJv7NdBAoLQLnLZ"
+    _spawn(
+        monkeypatch, tmp_path, name="oc-a",
+        provider="opencode", runner=FakeRunner(db_stdout=f"{ses}\n"),
+    )
+    # Second pane, same cwd, backfill returns the SAME id (the race).
+    _spawn(
+        monkeypatch, tmp_path, name="oc-b",
+        provider="opencode", runner=FakeRunner(db_stdout=f"{ses}\n"),
+    )
+    rows = {r.name: r.harness_session_id for r in load_registry()}
+    assert rows["oc-a"] == ses, "the first pane to land owns the id"
+    assert rows["oc-b"] is None, "the loser must not share the id"
+
+
 def test_opencode_spawn_without_capture_stays_live_only(
     tmp_path: Path, monkeypatch
 ) -> None:

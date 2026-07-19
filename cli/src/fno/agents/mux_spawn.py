@@ -833,13 +833,22 @@ def dispatch_spawn_pane(
                 )
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
+            # Claim check, inside the registry write lock so it is atomic with
+            # the stamp. Two panes racing in one cwd can each see the SAME lone
+            # candidate (the second pane's session may not exist yet when both
+            # query), and the ambiguity rule cannot catch that - it only sees one
+            # row. Whichever append lands first owns the id; the loser drops to
+            # live-only rather than pointing resume at another pane's session.
+            claimed = session_uuid is not None and any(
+                r.harness_session_id == session_uuid for r in rows
+            )
             rows.append(
                 AgentEntry(
                     name=name,
                     harness=provider,
                     cwd=str(cwd),
                     log_path="",
-                    harness_session_id=session_uuid,
+                    harness_session_id=None if claimed else session_uuid,
                     status="live",
                     pid=child_pid,
                     mux={"session": session, "pane_id": pane_id},
