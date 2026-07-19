@@ -9743,10 +9743,17 @@ mod tests {
             )
             .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A loaded CI runner can take several seconds just to spawn the PTY +
+        // start the shell; 15s matches the PTY-wait convention elsewhere and
+        // keeps this off the flake list.
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !marker.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
+        assert!(
+            marker.exists(),
+            "pane shell never wrote cwd.txt within 15s (spawn slow or failed)"
+        );
         let reported = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
             std::fs::canonicalize(reported.trim()).unwrap(),
@@ -9861,10 +9868,17 @@ mod tests {
 
         core.command(client_id, Command::attach_agent("deadbee2"));
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A loaded CI runner can take several seconds just to spawn the PTY +
+        // start the shell; 15s matches the PTY-wait convention elsewhere and
+        // keeps this off the flake list.
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !marker.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
+        assert!(
+            marker.exists(),
+            "pane shell never wrote cwd.txt within 15s (spawn slow or failed)"
+        );
         let reported = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
             std::fs::canonicalize(reported.trim()).unwrap(),
