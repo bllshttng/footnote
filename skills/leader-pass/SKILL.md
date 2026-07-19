@@ -14,22 +14,29 @@ The core loop is **keep-map-true + promote-next-wave**.
 It is never dispatch-ordering: you do not hand work to workers, you make the graph say what should run next and let the existing hands do their job.
 If you find yourself wanting to watch a worker, the pass is already over.
 
-## Who runs this
+## Who runs this: tag, you're it
 
-Two roles, one ritual.
-The steps below are identical for both; only the scope changes.
+Orchestrator authority is not a role you infer from what you were asked to do.
+It is granted, it is explicit, and you know you hold it.
 
-- **Mega pass** (`--mega`): cross-epic. Decides which epics are live, spawns one leader per live epic, owns nothing inside any epic.
-- **Epic leader** (`<epic-id>`): exactly one epic. Runs the ritual on that epic's children. Spawns workers.
+**A tag is three things: who granted it, what level you are, and what scope you own.**
 
-**Lane discipline is the invariant, not a depth counter.**
-An orchestrator may spawn a leader only for an epic it does not itself own, and an epic leader spawns workers only.
-That single rule caps the hierarchy at two levels on its own: depth three would require an epic nested inside an epic, which is the supervision tree this design exists to avoid.
+- **Level 0** is granted by a human. Its scope is whatever the human named.
+- **Level N+1** is granted by a level-N orchestrator, and *only* by one.
+- **No tag means you are a worker.** That is the default and it fails closed: a session that cannot point at its grantor does not hold the authority.
+
+Two rules keep the tree from growing:
+
+1. **A tag's scope must be a strict subset of the grantor's scope.** You cannot hand out authority you do not hold, and you cannot hand out all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
+2. **Level 1 is the current ceiling.** A level-1 orchestrator spawns workers, not orchestrators. Nothing in the model forbids level 2; there is simply no evidence yet that a third tier earns its translation layer, and the scope-subset rule means it can be raised later without changing anything else.
+
+State your level and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
 **Spawn and exit.**
-A mega pass that stays alive to watch its epic leaders is an always-on supervisor wearing a different word, and that shape is already rejected.
+This is orthogonal to the tag and equally load-bearing.
+An orchestrator that tags a subordinate and then stays alive to watch it is an always-on supervisor wearing a different word, and that shape is already rejected.
 Fan out, record what you fanned out, exit.
-If a leader dies, the next mega pass sees it in the graph and re-spawns; that is the recovery path, not a babysitter.
+If a tagged pass dies, the next pass sees it in the graph and re-tags; that is the recovery path, not a babysitter.
 
 **Run leaders on a frontier model at high effort.**
 A pass makes judgment calls (which wave, what to park, what to supersede) and those are the calls not to cheap out on.
@@ -168,6 +175,7 @@ Re-planning is a *new* pass with fresh context reading the map, which is the poi
 ## What a pass is not
 
 - **Not a supervisor.** Guards narrow what the daemon may select; they never add a second dispatch path. A leader encodes and leaves.
+- **Not self-appointed.** Being handed an epic to work on is not a tag. If nobody granted you orchestrator authority with a level and a scope, you are a worker on that epic, and spawning subordinates is out of bounds.
 - **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A leader promotes and wires. Grooming may quarantine; only humans and grooming supersede.
 - **Not a driver.** You may `peek` at anything. Attaching and steering a worker is someone else's job, and doing it means you are burning frontier tokens on work a builder already owns.
 - **Not a decider of unknowns.** A question you cannot answer from the track goes to the triage pile (`fno backlog defer <id> -R "<question>"`), not into a guessed edge. A day of latency beats a wrong forced decision.
