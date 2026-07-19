@@ -259,12 +259,29 @@ impl Scanner {
         self.repeat_until.is_some_and(|until| now < until)
     }
 
-    /// Open (or extend) the repeat window iff the just-emitted event is a
-    /// resize; every resize emission funnels through here so the window arms
-    /// the same way whether it fired from a letter chord or a Ctrl-arrow.
+    /// Open (or extend) the repeat window to `now + REPEAT_WINDOW`. Public so a
+    /// resize dispatched OUTSIDE `scan` (the which-key modal executes chords
+    /// through its own path) arms the window the same as a typed resize would,
+    /// keeping the modal's execution parity with directly-typed chords.
+    pub fn arm_repeat(&mut self, now: Instant) {
+        self.repeat_until = Some(now + REPEAT_WINDOW);
+    }
+
+    /// Close the repeat window now. Public so an input path that bypasses `scan`
+    /// (a mouse click/scroll is stripped before the scanner sees it) can disarm
+    /// the same as a non-resize keystroke does - otherwise a click that may have
+    /// refocused a pane could be followed by a bare `H/J/K/L` that silently
+    /// resizes.
+    pub fn disarm_repeat(&mut self) {
+        self.repeat_until = None;
+    }
+
+    /// Open the repeat window iff the just-emitted event is a resize; every
+    /// resize emission funnels through here so the window arms the same way
+    /// whether it fired from a letter chord or a Ctrl-arrow.
     fn arm_if_resize(&mut self, ev: &Event, now: Instant) {
         if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
-            self.repeat_until = Some(now + REPEAT_WINDOW);
+            self.arm_repeat(now);
         }
     }
 }
@@ -951,6 +968,26 @@ mod tests {
             s.scan(b"L", t0 + Duration::from_millis(40)),
             vec![Event::Forward(b"L".to_vec())],
             "focus chord does not open a resize repeat window"
+        );
+    }
+
+    #[test]
+    fn repeat_window_public_arm_and_disarm_drive_the_window() {
+        // arm_repeat opens a window a bare resize key repeats in (the modal
+        // dispatch path uses this); disarm_repeat closes it (the mouse path).
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.arm_repeat(t0);
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(40)),
+            vec![RESIZE_R],
+            "arm_repeat opens the window without a preceding chord"
+        );
+        s.disarm_repeat();
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(60)),
+            vec![Event::Forward(b"L".to_vec())],
+            "disarm_repeat closes it: bare L forwards again"
         );
     }
 
