@@ -1,6 +1,8 @@
 """Design-stage probe: the `design` rung of the derived lifecycle ladder."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from fno.graph.ladder import is_design_stage
@@ -41,11 +43,27 @@ def test_tilde_plan_path_expands(tmp_path, monkeypatch):
     assert is_design_stage({"id": "x-test", "plan_path": "~/d.md"})
 
 
-def test_relative_path_without_cwd_stays_armed(tmp_path, monkeypatch):
-    """No `cwd` to resolve against: fail open rather than guess."""
+def test_relative_path_without_cwd_does_not_use_process_cwd(tmp_path, monkeypatch):
+    """No `cwd` to resolve against: fail open rather than guess.
+
+    The file deliberately EXISTS at that relative path in the process cwd - an
+    earlier cut returned the bare relative path and would have design-gated an
+    unrelated node off a coincidentally-matching local doc.
+    """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "d.md").write_text(DESIGN_FM)
-    assert not is_design_stage({"id": "x-test", "plan_path": "nope/d.md"})
+    assert not is_design_stage({"id": "x-test", "plan_path": "d.md"})
+
+
+def test_undecodable_plan_stays_armed_without_raising(tmp_path):
+    """A binary file at the plan path must not escape as an exception.
+
+    `detect_stale_ready` has no outer catch, so a read error escaping here
+    would abort an entire `maintain` run.
+    """
+    binary = tmp_path / "d.md"
+    binary.write_bytes(b"\xff\xfe\x00\x80 not utf-8")
+    assert not is_design_stage({"id": "x-test", "plan_path": str(binary)})
 
 
 def test_folder_plan_stays_armed(tmp_path):
@@ -108,6 +126,30 @@ def test_missing_file_stays_armed(tmp_path):
 )
 def test_malformed_entries_stay_armed(entry):
     assert not is_design_stage(entry)
+
+
+def test_design_node_is_never_stale_ready(tmp_path):
+    """Quarantine must not reach a node that is unarmed on purpose.
+
+    Pinned on `is_stale_ready` itself rather than `detect_stale_ready`, because
+    `maintain --apply` re-runs the predicate directly under the lock.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.maintain import detect_stale_ready, is_stale_ready
+
+    now = datetime.now(timezone.utc)
+    plan = tmp_path / "d.md"
+    plan.write_text(DESIGN_FM)
+    os.utime(plan, (0, 0))  # ancient mtime: no movement signal
+    node = {
+        "id": "x-old",
+        "_status": "ready",
+        "plan_path": str(plan),
+        "created_at": (now - timedelta(days=400)).isoformat(),
+    }
+    assert not is_stale_ready(node, now, 21)
+    assert detect_stale_ready([node], 21, now) == []
 
 
 def test_starvation_receipt_names_design_not_quarantined(tmp_path):

@@ -378,11 +378,22 @@ def is_stale_ready(entry: dict, now: datetime, staleness_days: int) -> bool:
       never starve live work; the untimestamped abandoned node is instead left
       for a human via the propose-only maintain leg + triage pile.
 
+    A design-stage node is likewise never stale: it is gated by being pre-ready,
+    not abandoned, so it accrues none of the movement signals autonomous
+    dispatch used to supply and would otherwise be quarantined for sitting
+    exactly where it belongs. Lives in the predicate rather than in
+    ``detect_stale_ready`` so every caller inherits it - the detector, the
+    selection guard, and the under-lock recheck in ``maintain --apply``.
+
     Caller guarantees the entry is ready-status; this does not re-check
     ``_status`` so it stays reusable by the selection guard AND the maintain leg.
     """
+    from fno.graph.ladder import is_design_stage
+
     if entry.get("blocked_by"):
         return False  # was gated by a dependency, not abandoned
+    if is_design_stage(entry):
+        return False  # gated by being pre-ready, not abandoned
     if node_has_movement(entry, now, staleness_days):
         return False
     created = _parse_ts(entry.get("created_at"))
@@ -406,20 +417,11 @@ def detect_stale_ready(
     if now is None:
         now = datetime.now(timezone.utc)
     out: list[StaleIdea] = []
-    from fno.graph.ladder import is_design_stage
-
     for e in entries:
         if e.get("_status") != "ready":
             continue
         nid = e.get("id")
         if not isinstance(nid, str):
-            continue
-        # A design-stage node is unarmed on purpose, so it accrues none of the
-        # movement signals dispatch used to supply and would age into a
-        # quarantine defer for sitting exactly where it belongs. Mirrors the
-        # same skip in selection_guards - this leg and live selection must
-        # never disagree about what is stale.
-        if is_design_stage(e):
             continue
         if not is_stale_ready(e, now, staleness_days):
             continue

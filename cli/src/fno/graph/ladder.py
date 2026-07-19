@@ -41,8 +41,13 @@ def resolve_plan_probe(entry: dict) -> Optional[str]:
         return None
     if not os.path.isabs(probe):
         cwd = entry.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            probe = os.path.join(cwd, probe)
+        if not (isinstance(cwd, str) and cwd):
+            # No anchor to resolve against. Returning the relative path would
+            # silently resolve it against the CALLING process's cwd, where a
+            # coincidentally-matching local doc could design-gate an unrelated
+            # node. Refuse to guess and let the caller fail open instead.
+            return None
+        probe = os.path.join(cwd, probe)
     return probe
 
 
@@ -68,5 +73,12 @@ def is_design_stage(entry: object) -> bool:
         return False
     from fno.graph._intake import _read_plan_frontmatter
 
-    raw = _read_plan_frontmatter(probe).get("status")
+    try:
+        raw = _read_plan_frontmatter(probe).get("status")
+    except Exception:  # noqa: BLE001 - fail OPEN; see the fail-open note above
+        # `_read_plan_frontmatter` absorbs OSError and YAML errors but not, say,
+        # a UnicodeDecodeError from a binary file at the plan path. Callers must
+        # not have to know that: `detect_stale_ready` has no outer catch, so an
+        # escaping read error there would abort an entire `maintain` run.
+        return False
     return str(raw if raw is not None else "").strip().strip("'\"").lower() == "design"
