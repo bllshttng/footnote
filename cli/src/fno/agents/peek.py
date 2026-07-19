@@ -191,15 +191,13 @@ def _opencode_message_dir(
 
 
 def _opencode_part_text(part_dir: Path) -> str:
-    """Join one message's renderable parts into text.
+    """Join one message's renderable parts, mirroring ``_extract_text``'s policy.
 
-    Mirrors ``_extract_text``'s block policy so peek reads uniformly across
-    harnesses: ``text`` renders verbatim, ``tool`` renders a compact marker, and
-    ``reasoning`` (opencode's ``thinking``) plus the ``step-*``/``patch``/``file``
-    bookkeeping parts are dropped as observe-noise. Parts are ordered by their
-    monotonic ``prt_`` id (the filename). A message whose parts are all noise, or
-    whose part dir is missing entirely, yields ``""`` — the caller skips it
-    rather than emitting an empty turn.
+    Any type not matched below (``reasoning`` is opencode's ``thinking``, plus
+    the step/patch bookkeeping) is observe-noise. ``""`` means the caller skips
+    the turn. Filename order is creation order here — unlike message ids, part
+    ids within one message are same-era and monotonic (measured: 230 multi-part
+    messages, zero out of order).
     """
     parts: list[str] = []
     try:
@@ -221,14 +219,21 @@ def _opencode_part_text(part_dir: Path) -> str:
 
 
 def _parse_opencode_record(msg: dict, part_root: Path) -> Optional[Record]:
-    """One opencode message JSON + its parts dir → Record, else None."""
-    mid, role = msg.get("id"), msg.get("role")
-    if not isinstance(mid, str) or not mid or not isinstance(role, str) or not role:
+    """One opencode message JSON + its parts dir → Record, else None.
+
+    Only ``id`` is load-bearing (it locates the parts). A missing ``role``
+    degrades to ``"?"`` rather than dropping the turn, matching the codex arm —
+    otherwise a message written before its ``role`` lands would silently vanish
+    from the tail and the user would read the previous turn as the peer's latest.
+    """
+    mid = msg.get("id")
+    if not isinstance(mid, str) or not mid:
         return None
     text = _opencode_part_text(part_root / mid)
     if not text:
         return None
-    return Record(role=role, text=text)
+    role = msg.get("role")
+    return Record(role=role if isinstance(role, str) and role else "?", text=text)
 
 
 def _opencode_records(
@@ -236,10 +241,17 @@ def _opencode_records(
 ) -> list[Record]:
     """The last ``n`` renderable opencode turns, chronologically (tail parity).
 
-    Ordering is by ``time.created`` because the message FILENAME does not sort
-    chronologically in general; the id is used only to break a tie so the render
-    is deterministic. A message missing ``time.created`` sorts to the front (0.0)
-    rather than being dropped.
+    Ordering is by ``time.created``: the message filename does NOT sort
+    chronologically (measured across a real 166-message session, zero of them in
+    order), so a message missing that field falls back to its file mtime rather
+    than to a constant. A constant would collapse every message to one sort key
+    and silently degrade the whole render to filename order — a scrambled
+    transcript presented as chronological, which is worse than an empty one.
+
+    Parts are joined only for the messages actually returned. The sibling jsonl
+    reader bounds its work with a ``deque(maxlen=n)``; the equivalent here is
+    walking the sorted list backwards until ``n`` renderable turns are found, so
+    a ``--lines 5`` on a long session reads ~5 messages' parts, not every one.
     """
     if n is not None and n <= 0:
         return []
@@ -261,16 +273,22 @@ def _opencode_records(
             continue
         t = msg.get("time")
         created = t.get("created") if isinstance(t, dict) else None
-        dated.append(
-            (float(created) if isinstance(created, (int, float)) else 0.0, mf.name, msg)
-        )
+        if not isinstance(created, (int, float)):
+            try:
+                created = mf.stat().st_mtime
+            except OSError:
+                continue
+        dated.append((float(created), mf.name, msg))
     dated.sort(key=lambda t: (t[0], t[1]))
     records: list[Record] = []
-    for _created, _name, msg in dated:
+    for _created, _name, msg in reversed(dated):
         record = _parse_opencode_record(msg, part_root)
         if record is not None:
             records.append(record)
-    return records[-n:] if n is not None else records
+            if n is not None and len(records) >= n:
+                break
+    records.reverse()
+    return records
 
 
 def recent_records(
@@ -586,10 +604,14 @@ def peek(
             agent, session_id, cwd, projects_root, codex_sessions_dir
         )
         if path is None:
-            # AC1-UI: no silent exit-0. opencode's transcript is a directory
-            # tree, not one growing file, so there is nothing to tail; say so
-            # instead of returning as if --follow had run and ended.
-            err.write(f"--follow not supported for {agent}; showed the tail only\n")
+            # Distinguish "this harness has nothing tailable" from "we failed to
+            # resolve the transcript" — claude/codex reach here on a resolution
+            # miss, and reporting that as unsupported would send the reader after
+            # the wrong problem.
+            if agent == "opencode":
+                err.write("--follow not supported for opencode; showed the tail only\n")
+            else:
+                err.write(f"could not resolve a transcript to follow for {agent}\n")
             return EXIT_OK
         try:
             _follow_records(

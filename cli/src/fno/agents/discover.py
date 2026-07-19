@@ -247,11 +247,6 @@ def _discover_from_codex(
     return rows
 
 
-# opencode stores each session as three sibling trees rather than one transcript
-# file: ``storage/session/<projectID>/<ses_id>.json`` (info),
-# ``storage/message/<ses_id>/<msg_id>.json`` (one file per turn), and
-# ``storage/part/<msg_id>/`` (that turn's text). Only the first two matter for
-# discovery; peek joins the parts. Verified against a live 1.0.223 install.
 OPENCODE_STORAGE_DIR_ENV = "FNO_OPENCODE_STORAGE_DIR"
 
 
@@ -288,14 +283,29 @@ def _discover_from_opencode(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live opencode sessions from the storage tree (US6).
+    """Discover live opencode sessions from the storage tree.
+
+    opencode splits a session across three sibling trees rather than one
+    transcript file: ``session/<projectID>/<ses_id>.json`` (info, cwd under
+    ``directory``), ``message/<ses_id>/<msg_id>.json`` (one file per turn), and
+    ``part/<msg_id>/`` (that turn's text, which only peek needs). Verified
+    against a live 1.0.223 install; the nesting and the ``directory`` key are
+    both easy to guess wrong.
 
     Liveness is mtime-only, like the codex lane: opencode publishes no live-PID
     sidecar. The signal is the NEWER of the session-info mtime and its message
-    dir's, because a session mid-turn rewrites the message dir while the info
-    file can lag — reading info alone would age out a session that is actively
-    talking. Rows are shaped like the codex lane's so the shared dedup/alias
-    pipeline consumes them unchanged.
+    dir's, so a session whose info file lags still counts as live once its next
+    turn lands. Note the dir mtime moves when a message file is CREATED, not
+    when one is rewritten in place, so this detects new turns rather than
+    streaming progress within one long turn — a session silent for the whole
+    window ages out either way, which is the intended behavior.
+
+    Rows are shaped like the codex lane's so the shared dedup/alias pipeline
+    consumes them unchanged.
+
+    ponytail: full glob + up to two stats per session, on the same interactive
+    resolution path as the codex scan. Prune by project dir if a heavy opencode
+    user's send drags.
     """
     cutoff = (now if now is not None else time.time()) - recency_seconds
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
@@ -1073,8 +1083,8 @@ def discover_live_sessions(
             continue
         candidates.append(r)
 
-    # opencode disk-discovery (US6). Unioned ALWAYS for the same reason as the
-    # codex lane, and zero-effect on a host with no opencode store (empty glob).
+    # opencode disk-discovery. Unioned ALWAYS for the same reason as the codex
+    # lane, and zero-effect on a host with no opencode store (empty glob).
     for r in _discover_from_opencode(
         opencode_storage_dir or default_opencode_storage_dir(),
         recency_seconds=_recency_seconds(),

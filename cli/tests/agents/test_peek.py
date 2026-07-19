@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
 from pathlib import Path
 
 from fno.agents.peek import (
@@ -445,3 +447,82 @@ def test_peek_opencode_follow_reports_unsupported(tmp_path):
     assert rc == 0
     assert "hi" in out.getvalue()
     assert "--follow not supported for opencode" in err.getvalue()
+
+
+def test_peek_reader_opencode_missing_role_degrades_not_dropped(tmp_path):
+    """A message whose `role` has not landed yet still renders (as "?"),
+    matching the codex arm. Dropping it would hide the peer's latest word."""
+    storage = tmp_path / "opencode"
+    sid = "ses_norole"
+    mdir = storage / "message" / sid
+    mdir.mkdir(parents=True)
+    (mdir / "m1.json").write_text(
+        json.dumps({"id": "m1", "time": {"created": 1}}), encoding="utf-8"
+    )
+    pdir = storage / "part" / "m1"
+    pdir.mkdir(parents=True)
+    (pdir / "p.json").write_text(
+        json.dumps({"type": "text", "text": "mid-write"}), encoding="utf-8"
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [("?", "mid-write")]
+
+
+def test_peek_reader_opencode_missing_created_falls_back_to_mtime(tmp_path):
+    """A message with no time.created must not collapse to a shared sort key.
+
+    Filenames sort the reverse of true order here, so a constant fallback would
+    render the transcript backwards while still calling it chronological.
+    """
+    storage = tmp_path / "opencode"
+    sid = "ses_notime"
+    mdir = storage / "message" / sid
+    mdir.mkdir(parents=True)
+    for name, text, age in (("zzz", "older", 100.0), ("aaa", "newer", 10.0)):
+        (mdir / f"{name}.json").write_text(
+            json.dumps({"id": name, "role": "user"}), encoding="utf-8"
+        )
+        pdir = storage / "part" / name
+        pdir.mkdir(parents=True)
+        (pdir / "p.json").write_text(
+            json.dumps({"type": "text", "text": text}), encoding="utf-8"
+        )
+        mt = time.time() - age
+        os.utime(mdir / f"{name}.json", (mt, mt))
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["older", "newer"]
+
+
+def test_peek_reader_opencode_tail_skips_noise_to_fill_n(tmp_path):
+    """The bounded walk must still return N *renderable* turns, so noise-only
+    messages at the tail do not shrink the result."""
+    storage = tmp_path / "opencode"
+    sid = "ses_noisetail"
+    _opencode_message(
+        storage, sid, msg_id="m1", role="user", created=1,
+        parts=[{"type": "text", "text": "keep me"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="m2", role="assistant", created=2,
+        parts=[{"type": "reasoning", "text": "noise"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="m3", role="assistant", created=3,
+        parts=[{"type": "text", "text": "last"}],
+    )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["keep me", "last"]
+
+
+def test_peek_follow_unresolved_transcript_is_not_reported_unsupported(tmp_path):
+    """A claude transcript that fails to resolve is a resolution miss, not a
+    harness-capability limit; the two must not share a message."""
+    out, err = io.StringIO(), io.StringIO()
+    sess = _Session(agent="claude", session_id="nope-does-not-exist")
+    rc = peek(
+        "h", follow=True, stdout=out, stderr=err,
+        resolve=lambda h: (sess, []), projects_root=tmp_path / "empty",
+    )
+    assert rc == 0
+    assert "not supported" not in err.getvalue()
+    assert "could not resolve a transcript" in err.getvalue()
