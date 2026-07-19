@@ -2456,6 +2456,12 @@ impl View {
                 // the lattice accent at full brightness (not the DIM chrome), so
                 // the focused pane wears a standing outline that moves with focus.
                 // Interior seams only - an edge pane has no divider on that side.
+                // Orthogonal neighbours suffice: a `┼` is emitted only when a cell
+                // has a covered horizontal AND vertical neighbour, so every
+                // visible junction is already orthogonally adjacent to its pane.
+                // The lone diagonal-only cell is the 1-wide crossing where four
+                // dividers meet, which renders blank (no covered ortho neighbour)
+                // - accenting a space would be invisible, so we don't.
                 let outline = c > origin_c && focused[r * cols + c - 1]
                     || c + 1 < cols && focused[r * cols + c + 1]
                     || r > origin_r && focused[(r - 1) * cols + c]
@@ -3367,16 +3373,12 @@ impl View {
             // active (accent) and selected (inverse) compose instead of masking.
             if (mark_caret || mark_gutter) && text_w >= 1 {
                 let idx = r * cols;
+                // Recolor in place so the existing flags (INVERSE band, BOLD)
+                // survive; the caret keeps its glyph, the agent gutter replaces
+                // its leading space with the marker.
+                cells[idx].fg = LATTICE_ACCENT;
                 if mark_gutter {
-                    let inv = cells[idx].flags & cell_flags::INVERSE;
-                    cells[idx] = Cell {
-                        c: '▎',
-                        fg: LATTICE_ACCENT,
-                        bg: Color::Default,
-                        flags: inv,
-                    };
-                } else {
-                    cells[idx].fg = LATTICE_ACCENT;
+                    cells[idx].c = '▎';
                 }
             }
         }
@@ -8319,6 +8321,94 @@ mod tests {
         assert!(
             !outline_in_content,
             "a single-pane tab paints no accent outline in the content area"
+        );
+    }
+
+    // A 2x2 grid over two_pane_view's geometry: A|B on top, C|D below, meeting
+    // at a `┼` junction. focus = A (pane 10).
+    fn four_pane_view() -> View {
+        let mut view = two_pane_view();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![
+                (
+                    10,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 14,
+                        cols: 35,
+                    },
+                ),
+                (
+                    11,
+                    Rect {
+                        x: 36,
+                        y: 0,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+                (
+                    12,
+                    Rect {
+                        x: 0,
+                        y: 15,
+                        rows: 14,
+                        cols: 35,
+                    },
+                ),
+                (
+                    13,
+                    Rect {
+                        x: 36,
+                        y: 15,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+            ],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        view
+    }
+
+    #[test]
+    fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
+        // x-5a52 AC1-HP (the 2x2 case the horizontal-split test missed): the
+        // focused top-left pane borders on TWO interior sides, so the outline
+        // must accent both its right `│` seam and its bottom `─` seam - and a
+        // seam bordering only the unfocused panes stays dim.
+        let frame = four_pane_view().compose(); // focus = pane 10 (top-left)
+        let cols = frame.cols as usize;
+        // A's right seam: vertical divider at content col 35 -> outer col 63,
+        // within A's rows (outer 1..14). Sample outer row 5.
+        let right_seam = frame.cells[5 * cols + (28 + 35)];
+        assert_eq!(right_seam.c, '│', "A's right border is a vertical divider");
+        assert_eq!(right_seam.fg, LATTICE_ACCENT, "A's right seam is accented");
+        // A's bottom seam: horizontal divider at content row 14 -> outer row 15,
+        // within A's cols (outer 28..62). Sample outer col 40.
+        let bottom_seam = frame.cells[15 * cols + (28 + 10)];
+        assert_eq!(
+            bottom_seam.c, '─',
+            "A's bottom border is a horizontal divider"
+        );
+        assert_eq!(
+            bottom_seam.fg, LATTICE_ACCENT,
+            "A's bottom seam is accented"
+        );
+        // The C/D vertical seam (below A, outer row 20 col 63) borders only the
+        // unfocused panes and stays dim.
+        let cd_seam = frame.cells[20 * cols + (28 + 35)];
+        assert_eq!(
+            cd_seam.flags & cell_flags::DIM,
+            cell_flags::DIM,
+            "a seam not bordering the focused pane stays dim"
         );
     }
 
