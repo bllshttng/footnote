@@ -966,7 +966,11 @@ impl Provider for OpencodeProvider {
         entry: &AgentEntry,
         timeout: Duration,
     ) -> Result<bool, ReachabilityProbeError> {
-        opencode_reachable_with(entry, timeout, &(run_opencode_db as OpencodeDbRunner))
+        opencode_reachable_with(
+            entry,
+            timeout.max(OPENCODE_PROBE_MIN_BUDGET),
+            &(run_opencode_db as OpencodeDbRunner),
+        )
     }
 
     fn as_pty(&self) -> Option<&dyn ProviderWithPty> {
@@ -977,6 +981,13 @@ impl Provider for OpencodeProvider {
 /// Runs an opencode store query, yielding `(exited_zero, stdout)`. Injected at
 /// the [`opencode_reachable_with`] seam so unit tests need no opencode binary.
 type OpencodeDbRunner = fn(&str, Duration) -> Result<(bool, String), String>;
+
+/// Floor for the opencode probe's budget. The daemon's per-probe timeout is
+/// sized for a file read, but this probe pays a node CLI's startup: `opencode
+/// db` measured 0.30-0.35s on v1.14.50, so the 250ms reconcile bound would time
+/// out EVERY call and report inconclusive forever. The sweep's total budget
+/// still caps how many rows one pass probes.
+const OPENCODE_PROBE_MIN_BUDGET: Duration = Duration::from_secs(2);
 
 /// True iff `s` is a well-formed opencode session id (`ses_` + ASCII
 /// alphanumerics). Gates SQL interpolation in the probe: no quote, space, or
@@ -1065,7 +1076,13 @@ fn run_opencode_db(sql: &str, timeout: Duration) -> Result<(bool, String), Strin
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                // Reap before bailing: an interrupted wait would otherwise
+                // abandon a running opencode and leave it unreaped after exit.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
         }
     }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
@@ -1470,9 +1487,11 @@ mod tests {
     }
 
     #[test]
-    fn opencode_is_pty_managed_and_inconclusive_to_probe() {
+    fn opencode_is_pty_managed_and_id_less_probe_is_inconclusive() {
         assert!(OpencodeProvider.as_pty().is_some());
-        // v1 never false-orphans a live opencode pane: probes are inconclusive.
+        // An id-less row has nothing to look up, so the probe stays inconclusive
+        // and never orphans the pane. A row WITH an id is probed for real
+        // (x-830c) - see the opencode store-probe cases above.
         let entry = AgentEntry {
             name: "oc".into(),
             provider: "opencode".into(),
