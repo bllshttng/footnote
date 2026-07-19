@@ -526,3 +526,34 @@ def test_peek_follow_unresolved_transcript_is_not_reported_unsupported(tmp_path)
     assert rc == 0
     assert "not supported" not in err.getvalue()
     assert "could not resolve a transcript" in err.getvalue()
+
+
+def test_peek_reader_opencode_message_without_id_is_dropped(tmp_path):
+    """The counterpart to the role guard: `id` locates the parts, so a message
+    missing it must drop rather than build a path from None."""
+    storage = tmp_path / "opencode"
+    sid = "ses_noid"
+    mdir = storage / "message" / sid
+    mdir.mkdir(parents=True)
+    (mdir / "m1.json").write_text(
+        json.dumps({"role": "user", "time": {"created": 1}}), encoding="utf-8"
+    )
+    _opencode_message(
+        storage, sid, msg_id="m2", role="user", created=2,
+        parts=[{"type": "text", "text": "survives"}],
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["survives"]
+
+
+def test_peek_reader_opencode_torn_message_file_skipped(tmp_path):
+    """A torn message JSON is skipped like a torn jsonl line, not fatal."""
+    storage = tmp_path / "opencode"
+    sid = "ses_tornmsg"
+    _opencode_message(
+        storage, sid, msg_id="ok", role="user", created=1,
+        parts=[{"type": "text", "text": "intact"}],
+    )
+    (storage / "message" / sid / "torn.json").write_text("{nope", encoding="utf-8")
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["intact"]

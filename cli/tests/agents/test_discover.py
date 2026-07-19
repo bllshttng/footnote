@@ -1132,3 +1132,20 @@ def test_us6_opencode_deep_scan_is_bounded_to_recent_sessions(tmp_path):
     (pdir / "prt_000.json").write_text('{"type":"text","text":"x"}', encoding="utf-8")
     _touch(pdir, 5.0)
     assert _run_opencode(tmp_path, storage) == []
+
+
+def test_us6_opencode_dedups_and_honors_exclusions(tmp_path):
+    """The dedup/exclusion guard is this lane's only expression of the
+    "live but un-adopted" contract, so pin both halves of it."""
+    storage = tmp_path / "opencode"
+    sid = "ses_dupe"
+    # Same session id recorded under two project dirs -> one row, not two.
+    _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projA"
+    )
+    _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projB"
+    )
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
+    # An already-adopted session is excluded from the discovered lane.
+    assert _run_opencode(tmp_path, storage, exclude_session_ids={sid}) == []
