@@ -439,6 +439,8 @@ enum CoreMsg {
         holders: HashMap<String, String>,
         /// (x-9c5f) node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
+        /// Active missions, from the same graph read as `cards`.
+        missions: backlog_view::MissionMap,
     },
 }
 
@@ -891,6 +893,9 @@ struct Core {
     /// layout time (holder name -> node -> pr) into `AgentRow.pr` for the peek
     /// header's `PR #N` label.
     backlog_pr: HashMap<String, u64>,
+    /// Active missions (x-1a47), from the off-loop graph reader; grouped into
+    /// synthetic "mission squad" headers at layout time.
+    missions: backlog_view::MissionMap,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -5613,12 +5618,14 @@ impl Core {
                 cards,
                 holders,
                 prs,
+                missions,
             } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
+                self.missions = missions;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -5813,6 +5820,7 @@ async fn serve(
         backlog: Vec::new(),
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
+        missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -6024,13 +6032,16 @@ async fn serve(
                 } else {
                     None
                 };
-                if let Some((cards, prs)) = state.tick(stamp, move || raw, last_live.as_ref()) {
+                if let Some((cards, prs, missions)) =
+                    state.tick(stamp, move || raw, last_live.as_ref())
+                {
                     let holders = last_live.clone().unwrap_or_default();
                     if core_tx
                         .send(CoreMsg::BacklogCards {
                             cards,
                             holders,
                             prs,
+                            missions,
                         })
                         .await
                         .is_err()
@@ -10093,6 +10104,7 @@ mod tests {
             backlog: Vec::new(),
             backlog_holders: HashMap::new(),
             backlog_pr: HashMap::new(),
+            missions: backlog_view::MissionMap::default(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),

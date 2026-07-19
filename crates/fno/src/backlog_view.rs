@@ -389,6 +389,11 @@ pub struct ReaderState {
     pr: HashMap<String, u64>,
     /// The pr map as of the last publish, so a pr-only change is detected.
     last_pr: Option<HashMap<String, u64>>,
+    /// Active missions, recomputed only on a fresh read (mirrors `pr`).
+    missions: MissionMap,
+    /// The mission map as of the last publish, so a mission-only change is
+    /// detected (a mission activating/completing with the same cards/prs).
+    last_missions: Option<MissionMap>,
 }
 
 impl ReaderState {
@@ -412,7 +417,7 @@ impl ReaderState {
         stamp: Option<(std::time::SystemTime, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
-    ) -> Option<(Vec<BacklogCard>, HashMap<String, u64>)> {
+    ) -> Option<(Vec<BacklogCard>, HashMap<String, u64>, MissionMap)> {
         if stamp != self.cached_stamp {
             match (read_if_changed(), stamp) {
                 // Only commit the new stamp once we have matching content, so a
@@ -426,11 +431,13 @@ impl ReaderState {
                     // only here, not per tick, so we never parse the 4M graph
                     // twice a second.
                     self.pr = derive_pr_map(&raw);
+                    self.missions = derive_missions(&raw).unwrap_or_default();
                     self.cached_raw = Some(raw);
                 }
                 (None, None) => {
                     self.cached_stamp = stamp;
                     self.pr = HashMap::new();
+                    self.missions = MissionMap::default();
                     self.cached_raw = None; // file vanished: empty the lane
                 }
                 (None, Some(_)) => {} // torn read: keep last-good AND retry next tick
@@ -458,10 +465,13 @@ impl ReaderState {
         // put) must republish too, else the `PR #N` label would lag until an
         // unrelated card/claim flip (x-9c5f).
         let pr_changed = self.last_pr.as_ref() != Some(&self.pr);
-        if live_changed || pr_changed || self.last_sent.as_ref() != Some(&cards) {
+        let missions_changed = self.last_missions.as_ref() != Some(&self.missions);
+        if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&cards)
+        {
             self.last_sent = Some(cards.clone());
             self.last_pr = Some(self.pr.clone());
-            Some((cards, self.pr.clone()))
+            self.last_missions = Some(self.missions.clone());
+            Some((cards, self.pr.clone(), self.missions.clone()))
         } else {
             None
         }
