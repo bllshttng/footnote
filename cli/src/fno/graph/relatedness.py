@@ -95,6 +95,38 @@ def _score(a: Entry, b: Entry, ta: frozenset[str], tb: frozenset[str]) -> tuple[
     return round(combined, 4), "; ".join(reasons)
 
 
+# An epic in one of these states is no longer a rollup target.
+_RETIRED_EPIC_STATUSES = frozenset({"done", "superseded", "deferred"})
+
+
+def epic_candidates(
+    entry: Entry, entries: list[Entry], k: int = 3
+) -> list[tuple[str, float, str]]:
+    """Score ``entry`` against the live epics only, best-first, top-K.
+
+    The rollup counterpart to ``build_map``: same ``_score``, narrowed to
+    candidate parents so intake, ``maintain``, and ``/think`` cannot drift into
+    a second similarity implementation. Ties break on id so a run is
+    reproducible. Pairs below ``_MIN_SCORE`` are absent (``_score`` drops them).
+    """
+    ta = _tokens(entry)
+    nid = entry.get("id")
+    scored: list[tuple[str, float, str]] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("type") != "epic":
+            continue
+        eid = e.get("id")
+        if not isinstance(eid, str) or eid == nid:
+            continue
+        if e.get("_status") in _RETIRED_EPIC_STATUSES:
+            continue
+        score, reason = _score(entry, e, ta, _tokens(e))
+        if score > 0.0:
+            scored.append((eid, score, reason))
+    scored.sort(key=lambda r: (-r[1], r[0]))
+    return scored[:k]
+
+
 def build_map(entries: list[Entry], k: int = 5) -> dict[str, list[dict[str, Any]]]:
     """Return ``{node_id: [{id, score, reason}, ...]}`` best-first, top-K.
 
