@@ -1906,13 +1906,20 @@ impl Core {
             .get(&sid)
             .map(|ms| ms.iter().map(|m| m.attach_id.clone()).collect())
             .unwrap_or_default();
-        let names: Vec<Option<String>> = attach_ids
+        let names: Vec<Option<Option<String>>> = attach_ids
             .iter()
             .map(|id| self.member_tab_name(sid, id))
             .collect();
         if let Some(list) = self.squad_members.get_mut(&sid) {
-            for (m, tab_name) in list.iter_mut().zip(names) {
-                m.tab_name = tab_name;
+            for (m, resolved) in list.iter_mut().zip(names) {
+                // Only overwrite when the member's pane resolved to a tab
+                // (Some(name_opt)): Some -> named, None -> the tab is unnamed, so
+                // a blank rename clears. An UNRESOLVABLE pane (a tombstone or a
+                // transient restore reattach failure, `None`) PRESERVES the last
+                // stored name so a temporary miss never erases it (codex review).
+                if let Some(tab_name) = resolved {
+                    m.tab_name = tab_name;
+                }
             }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
@@ -1921,16 +1928,20 @@ impl Core {
         }
     }
 
-    /// The name of the tab hosting `attach_id`'s pane in squad `sid`, or `None`
-    /// when the member has no live pane (a tombstone) or its tab is unnamed
-    /// (x-0f9d US4). Re-derived fresh at persist so a rename is captured.
-    fn member_tab_name(&self, sid: u64, attach_id: &str) -> Option<String> {
+    /// Resolve the name of the tab hosting `attach_id`'s pane in squad `sid`
+    /// (x-0f9d US4). Outer `None` = the member has no resolvable live pane (a
+    /// tombstone, or a transient restore reattach failure) so the caller should
+    /// PRESERVE its stored name; `Some(inner)` = the pane resolved to a tab
+    /// whose name is `inner` (`None` when the tab is unnamed, so a blank rename
+    /// clears). Re-derived fresh at persist so a rename is captured.
+    fn member_tab_name(&self, sid: u64, attach_id: &str) -> Option<Option<String>> {
         let pid = *self.attached.get(attach_id)?;
         let sq = self.session.squad(sid)?;
-        sq.tabs
+        let tab = sq
+            .tabs
             .iter()
-            .find(|t| tree::leaves(&t.root).contains(&pid))
-            .and_then(|t| t.name.clone())
+            .find(|t| tree::leaves(&t.root).contains(&pid))?;
+        Some(tab.name.clone())
     }
 
     /// Write-through a raw upsert from captured fields (used when the in-session
@@ -9399,6 +9410,28 @@ mod tests {
         assert_eq!(
             loaded.squads[0].members[0].tab_name, None,
             "clearing the name clears the stored tab_name"
+        );
+    }
+
+    #[test]
+    fn persist_preserves_tab_name_when_member_pane_is_unresolvable() {
+        // x-0f9d US4 / codex P1: a member whose pane cannot be resolved (a
+        // transient restore reattach failure, or a tombstone) keeps its stored
+        // tab_name across a persist - member_tab_name returning an unresolvable
+        // None must PRESERVE the stored name, not clobber it to None.
+        let _s = StoreScratch::new("preserve-unresolvable-tab-name");
+        let mut core = empty_core();
+        named_member_squad(&mut core, 1, "harden", 1, "c19cd2c3");
+        // Stored name present, but drop the pane mapping so the pane is
+        // unresolvable (as after a failed reattach at restore).
+        core.squad_members.get_mut(&1).unwrap()[0].tab_name = Some("reviews".into());
+        core.attached.remove("c19cd2c3");
+        core.persist_squad(1);
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name.as_deref(),
+            Some("reviews"),
+            "an unresolvable pane preserves the stored tab name"
         );
     }
 
