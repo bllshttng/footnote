@@ -329,6 +329,8 @@ failure_prone_attempts = 2
 collision_count = 3
 # Breach threshold: project/cwd mismatch count.
 project_cwd_mismatch = 0
+# Breach threshold: fraction of open features with no mission edge (1.0 = off).
+orphan_feature_rate = 1.0
 
 [health_monitor.notifications]
 # Health notification surfaces (terminal/discord/webhook/log_only).

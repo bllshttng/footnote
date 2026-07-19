@@ -128,6 +128,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `health_monitor.thresholds.failure_prone_attempts` | int | `2` | never | Breach threshold: failure-prone attempts. |
 | `health_monitor.thresholds.collision_count` | int | `3` | never | Breach threshold: collision count. |
 | `health_monitor.thresholds.project_cwd_mismatch` | int | `0` | never | Breach threshold: project/cwd mismatch count. |
+| `health_monitor.thresholds.orphan_feature_rate` | float | `1.0` | never | Breach threshold: fraction of open features with no mission edge (1.0 = off). |
 | `health_monitor.notifications.surfaces` | list[str] | `["terminal"]` | never | Health notification surfaces (terminal/discord/webhook/log_only). |
 | `health_monitor.notifications.discord_channel` | str (optional) | _(none)_ | never | Discord channel for health notifications. |
 | `health_monitor.notifications.webhook_url` | str (optional) | _(none)_ | never | Webhook URL for health notifications. |
