@@ -187,9 +187,9 @@ pub struct MissionMap {
     pub node_to_epic: HashMap<String, String>,
 }
 
-/// Depth cap for the ancestor walk and the rollup recursion. The mission tree is
-/// only mission -> epic -> leaf; the slack plus a `seen` set terminates a
-/// malformed parent cycle instead of looping.
+/// Depth cap for the rollup recursion (the ancestor walk relies on its `seen`
+/// guard alone). The mission tree is only mission -> epic -> leaf; the slack
+/// plus the `seen` set terminates a malformed epic-parent cycle.
 const MISSION_DEPTH_CAP: usize = 8;
 
 struct MissionNode<'a> {
@@ -240,13 +240,15 @@ pub fn derive_missions(raw: &str) -> Option<MissionMap> {
     }
 
     // Nearest active-mission ancestor; start at the parent so the epic is never
-    // its own member.
+    // its own member. The full parent chain is walked - mission scope is all
+    // transitive descendants - and the `seen` set is the only bound (it makes
+    // even a malformed parent cycle terminate); a fixed depth cap would drop a
+    // deeply-nested but valid worker.
     let mut node_to_epic = HashMap::new();
     for (&id, node) in &nodes {
         let mut cur = node.parent;
         let mut seen: HashSet<&str> = HashSet::new();
-        for _ in 0..MISSION_DEPTH_CAP {
-            let Some(a) = cur else { break };
+        while let Some(a) = cur {
             if !seen.insert(a) {
                 break; // cycle
             }
@@ -281,14 +283,14 @@ pub fn derive_missions(raw: &str) -> Option<MissionMap> {
 /// Leaf done/total under `epic`: a leaf child counts once (done iff `_status ==
 /// "done"`); an epic child recurses and folds its leaves in, never counting an
 /// epic as a unit. `seen`/`depth` bound a malformed parent cycle.
-fn rollup(
-    epic: &str,
-    nodes: &HashMap<&str, MissionNode>,
-    children: &HashMap<&str, Vec<&str>>,
-    seen: &mut HashSet<String>,
+fn rollup<'a>(
+    epic: &'a str,
+    nodes: &HashMap<&'a str, MissionNode<'a>>,
+    children: &HashMap<&'a str, Vec<&'a str>>,
+    seen: &mut HashSet<&'a str>,
     depth: usize,
 ) -> (u32, u32) {
-    if depth >= MISSION_DEPTH_CAP || !seen.insert(epic.to_string()) {
+    if depth >= MISSION_DEPTH_CAP || !seen.insert(epic) {
         return (0, 0);
     }
     let (mut done, mut total) = (0u32, 0u32);
@@ -786,5 +788,31 @@ mod tests {
         // Terminates (does not hang) and produces a well-formed map.
         let m = derive_missions(&raw).unwrap();
         assert_eq!(m.missions.len(), 1, "x-a is the active mission");
+    }
+
+    #[test]
+    fn deep_worker_maps_past_the_old_depth_cap() {
+        // A worker more than the old fixed cap (8) parent-hops below the active
+        // epic must still map to it - mission scope is all transitive
+        // descendants, bounded only by the cycle guard (codex P2).
+        let mut parts =
+            vec![r#"{"id":"x-m","slug":"m","type":"epic","mission_active":true}"#.to_string()];
+        for i in 0..12 {
+            let parent = if i == 0 {
+                "x-m".to_string()
+            } else {
+                format!("n{}", i - 1)
+            };
+            parts.push(format!(
+                r#"{{"id":"n{i}","_status":"ready","parent":"{parent}"}}"#
+            ));
+        }
+        let raw = graph(&parts.join(","));
+        let m = derive_missions(&raw).unwrap();
+        assert_eq!(
+            m.node_to_epic.get("n11"),
+            Some(&"x-m".to_string()),
+            "a 12-deep worker still maps to its mission"
+        );
     }
 }
