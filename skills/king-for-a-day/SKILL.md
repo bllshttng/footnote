@@ -1,49 +1,54 @@
 ---
-name: leader-pass
-description: "Encode-before-exit ritual for an episodic orchestrator: read the track, write the wave plan, encode it into the graph, kick off, exit. Covers both the cross-epic mega pass and the single-epic leader pass. Use when: 'lead this epic', 'orchestrate the backlog', 'plan the next wave', 'leader pass on <epic>'."
-argument-hint: "<epic-id> | --mega"
+name: king-for-a-day
+description: "Encode-before-exit ritual for an episodic orchestrator: read the track, write the wave plan, encode it into the graph, kick off, abdicate. You are crowned over one scope, you rule it once, the crown expires. Use when: 'crown me on <epic>', 'orchestrate the backlog', 'plan the next wave', 'king for a day on <epic>'."
+argument-hint: "<epic-id>"
 ---
 
-# Leader pass
+# King for a day
 
-A leader pass is a **batch**, not a process.
-One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and exits.
+You have been crowned over one scope, and the crown expires when you exit.
+That is the whole shape: real authority, no tenure.
+
+One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates.
 Nothing supervises afterward: the daemon's reflexes are unchanged, and the tail dispatches from graph state alone.
 
 The core loop is **keep-map-true + promote-next-wave**.
 It is never dispatch-ordering: you do not hand work to workers, you make the graph say what should run next and let the existing hands do their job.
-If you find yourself wanting to watch a worker, the pass is already over.
+If you find yourself wanting to watch a worker, your reign is already over.
 
-## Who runs this: tag, you're it
+Rule like it matters, because it does; the graph you leave behind is the only thing that outlives you.
+
+## Who runs this: the crown is bestowed
 
 Orchestrator authority is not a role you infer from what you were asked to do.
 It is granted, it is explicit, and you know you hold it.
+`crown <epic>` is the dispatch act; a crowned session is named `king-<epic>`.
 
-**A tag is three things: who granted it, what level you are, and what scope you own.**
+**A crown is three things: who bestowed it, what level you hold, and what scope you rule.**
 
-- **Level 0** is granted by a human. Its scope is whatever the human named.
-- **Level N+1** is granted by a level-N orchestrator, and *only* by one.
-- **No tag means you are a worker.** That is the default and it fails closed: a session that cannot point at its grantor does not hold the authority.
+- **Level 0** is bestowed by a human. Its scope is whatever the human named.
+- **Level N+1** is bestowed by a level-N king, and *only* by one.
+- **No crown means you are a worker.** That is the default and it fails closed: a session that cannot name who crowned it does not hold the authority.
 
-Two rules keep the tree from growing:
+Two rules keep the court from growing:
 
-1. **A tag's scope must be a strict subset of the grantor's scope.** You cannot hand out authority you do not hold, and you cannot hand out all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
-2. **Level 1 is the current ceiling.** A level-1 orchestrator spawns workers, not orchestrators. Nothing in the model forbids level 2; there is simply no evidence yet that a third tier earns its translation layer, and the scope-subset rule means it can be raised later without changing anything else.
+1. **A crown's scope must be a strict subset of the grantor's scope.** You cannot bestow authority you do not hold, and you cannot bestow all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
+2. **Level 1 is the current ceiling.** A level-1 king crowns nobody and spawns workers. Nothing in the model forbids level 2; there is simply no evidence yet that a third tier earns its translation layer, and the scope-subset rule means it can be raised later without changing anything else.
 
 State your level and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
-**Spawn and exit.**
-This is orthogonal to the tag and equally load-bearing.
-An orchestrator that tags a subordinate and then stays alive to watch it is an always-on supervisor wearing a different word, and that shape is already rejected.
+**Abdicate.**
+This is orthogonal to the crown and equally load-bearing.
+A king who crowns a subordinate and then stays alive to watch it has made itself a permanent monarch, which is the shape this design exists to prevent.
 Fan out, record what you fanned out, exit.
-If a tagged pass dies, the next pass sees it in the graph and re-tags; that is the recovery path, not a babysitter.
+If a crowned session dies, the next one sees it in the graph and re-crowns; that is the recovery path, not a regency.
 
-**Run leaders on a frontier model at high effort.**
+**Crown kings on a frontier model at high effort.**
 A pass makes judgment calls (which wave, what to park, what to supersede) and those are the calls not to cheap out on.
-Grooming stays on a small model because it is daily and levers-only; leaders are rare and bounded, so the cost argument does not apply to them.
+Grooming stays on a small model because it is daily and levers-only; a reign is rare and bounded, so the cost argument does not apply to it.
 
 ```bash
-fno agents spawn leader-<epic> "<brief>" --model fable --substrate bg
+fno agents spawn king-<epic> "<brief>" --model fable --substrate bg
 ```
 
 Note for claude workers: `--yolo` is a no-op (it only maps to a real bypass on codex).
@@ -63,16 +68,25 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
 
 **Message.**
-`fno mail send <name> "<msg>"` reaches a registered agent; `--to-project <X>` reaches a project (live peer delivers, none queues durable).
-`--from-self` stamps your own reply handle so the answer comes back to you.
+`fno mail send <name> "<msg>"` reaches a registered agent; `--from-self` stamps your own reply handle so the answer comes back to you.
 The envelope is written before delivery is attempted, so a send survives a dead recipient.
+
+Address live peers by handle, never by project.
+A session's canonical mail handle is `claude-<short-id>`; every session prints its own in its startup header, and peers are discoverable via `fno agents discovered-json` or `fno agents top`.
+`--to-project <X>` is anycast: when no live peer resolves it queues durable into what may be a ghost inbox, and the receipt still reads like success.
+**Treat any receipt that is not `delivered (hosted)` as not delivered.**
 
 **Observe (read-only, never drive).**
 `fno agents list` · `status` (daemon liveness + per-agent state) · `top` (every live worker process, fno-spawned and foreign alike) · `logs <name>` · `peek <handle>` (read-only observation of any peer you could message) · `needs` (the needs-me queue) · `digest --session <s>` (catch-up fold) · `trace <name>` (dispatch lifecycle).
 
+**Merge a finished child.**
+`fno pr merge <n>` lands a green child PR, and doing so is in-lane when the wave gate is what is blocking your tail.
+Config is the consent: merge only when `auto_merge.enabled` (or the project's equivalent posture) already permits it, never as a judgment call you make yourself.
+This is the difference between a track that walks and one that silently wedges, so check it before you conclude a wave is stuck.
+
 **Take over.**
 `fno agents attach <name>` joins a running claude session; `resume` restarts one in its recorded cwd; `stop` ends it.
-Prefer `peek` first: attaching is a drive action and a leader that starts driving has stopped leading.
+Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
 
 **Orient yourself after a compaction.**
 `fno whoami` (project, fleet, walker, session, your mail handle) · `fno status` (gate satisfaction + events tail).
@@ -97,12 +111,22 @@ Read the epic's plan doc too.
 You are looking for three things: what landed since the last pass, what is running now, and which nodes are lying about their state.
 A node claiming to be ready with no plan, and a blocked node whose blocker merged, are both worth a second look.
 
+**`done` does not mean merged. Cross-check the wave gate yourself.**
+`done` is stamped at finalize, not at merge, so a child can read `done` while its PR sits open and unmerged.
+This is not cosmetic: it is the wave gate, and a stale `done` means the whole tail behind it is waiting on a merge nobody performed.
+Run `gh pr view <n> --json state,mergeable,statusCheckRollup` on every child whose PR number you are treating as landed, and reconcile before you plan a single edge.
+
+**Check that the merge machinery is alive.**
+A dead pr-watch is silent and looks exactly like "no PRs finished recently."
+If green PRs are piling up unmerged across the track, that is your signal, and it wedges everything downstream: sessions holding lanes while waiting on merges that will never come.
+Confirm the watcher is running before you conclude the track is simply idle.
+
 ### 2. Write the wave plan
 
 Add or refresh an `## Orchestration status` section in the epic's plan doc.
 Keep it short: the wave strata, one line of why, and the receipts from step 3.
 This is the half a human reads; the graph carries the machine-readable half.
-A pass that only mutates the graph leaves no trace of its reasoning, and the next leader re-derives it from nothing.
+A pass that only mutates the graph leaves no trace of its reasoning, and the next king re-derives it from nothing.
 
 ### 3. Encode
 
@@ -142,6 +166,12 @@ fno backlog update <id> --dispatch-brief "<what to decide>"
 
 An L-sized node with no design should get a `/think` pass, not a builder.
 
+**Writing a quick plan for a small node yourself is in-lane.**
+When an S node is next in a chain you just serialized but unselectable for want of a plan, author the plan and link it.
+The alternatives are all worse: hand-spawning into a saturated project oversubscribes it, and spawning a whole session to write one page is absurd overhead.
+This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
+Use `fno plan path` for the canonical filename.
+
 Note what these two verbs do and do not do.
 They change *how* a dispatcher launches a node it has already selected; they do not make it selectable.
 A plan-less node is not selected by any autonomous path, so setting `--dispatch-verb` on one arms nothing by itself.
@@ -168,15 +198,15 @@ Cap it when the wave is wider than you meant to fund.
 
 ### 5. Exit
 
-No leader outlives its batch.
+No king outlives its day.
 Do not stay to watch, and do not re-plan mid-batch.
-Re-planning is a *new* pass with fresh context reading the map, which is the point: a leader that persists accrues drift, and drift is what the graph exists to prevent.
+Re-planning is a *new* pass with fresh context reading the map, which is the point: a monarch that persists accrues drift, and drift is what the graph exists to prevent.
 
 ## What a pass is not
 
-- **Not a supervisor.** Guards narrow what the daemon may select; they never add a second dispatch path. A leader encodes and leaves.
+- **Not a supervisor.** Guards narrow what the daemon may select; they never add a second dispatch path. A king encodes and abdicates.
 - **Not self-appointed.** Being handed an epic to work on is not a tag. If nobody granted you orchestrator authority with a level and a scope, you are a worker on that epic, and spawning subordinates is out of bounds.
-- **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A leader promotes and wires. Grooming may quarantine; only humans and grooming supersede.
+- **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A king promotes and wires. Grooming may quarantine; only humans and grooming supersede.
 - **Not a driver.** You may `peek` at anything. Attaching and steering a worker is someone else's job, and doing it means you are burning frontier tokens on work a builder already owns.
 - **Not a decider of unknowns.** A question you cannot answer from the track goes to the triage pile (`fno backlog defer <id> -R "<question>"`), not into a guessed edge. A day of latency beats a wrong forced decision.
 
