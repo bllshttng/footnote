@@ -5411,7 +5411,19 @@ async fn apply_hit(
         // hand. `open_attach_place` closes peek/the selector; the picker owns the
         // rest of the attach.
         ChromeHit::OpenAttachPlace { id, squad } => {
-            let squads: Vec<u64> = view.layout.squads.iter().map(|s| s.id).take(9).collect();
+            // A synthetic mission squad is a render-time grouping header, not
+            // a real session squad `place_spawned_pane` can route into -
+            // exclude it here so a mission-grouped row's placement falls back
+            // to a real target (the row's cwd match, else active, else first)
+            // instead of leaking the virtual id into the picker.
+            let squads: Vec<u64> = view
+                .layout
+                .squads
+                .iter()
+                .map(|s| s.id)
+                .filter(|id| !is_mission_squad(*id))
+                .take(9)
+                .collect();
             if squads.is_empty() {
                 view.set_notice("no workspace to attach into".into());
             } else {
@@ -7991,6 +8003,36 @@ mod tests {
                 chrome_hit_label(&Some(other))
             ),
         }
+    }
+
+    // A mission squad is a render-time grouping header, not a real squad
+    // `place_spawned_pane` can route a pane into - a mission-grouped row's
+    // placement must fall back to a real target, and the picker must never
+    // offer the virtual id as a choice (codex review of x-1a47 change 2/3,
+    // P1-b).
+    #[tokio::test]
+    async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(1);
+        let mid = mission_meta(9, "mux-squad  1/1").id;
+        layout.squads.push(mission_meta(9, "mux-squad  1/1"));
+        view.set_layout(layout);
+        let hit = ChromeHit::OpenAttachPlace {
+            id: "job1".into(),
+            squad: Some(mid),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        apply_hit(&mut view, hit, &mut buf).await.unwrap();
+        let picker = view.attach_place.expect("picker opened");
+        assert_ne!(
+            picker.target, mid,
+            "target must not be the virtual mission id"
+        );
+        assert!(
+            !picker.squads.contains(&mid),
+            "the mission id must not be offered as a placement choice"
+        );
+        assert_eq!(picker.target, 1, "falls back to the active real squad");
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
