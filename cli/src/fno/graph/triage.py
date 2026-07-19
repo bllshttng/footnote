@@ -1502,6 +1502,33 @@ def cmd_health(
     # events log, event-gated (absent when no decisions recorded - AC6-EDGE).
     # Advisory only; a read failure leaves the sections off, never breaks health.
     routing_metrics: Optional[dict] = None
+    # Orphan feature rate: open features that resolve no mission edge. Scoped to
+    # `pending` like the other actionable metrics - a shipped orphan is history,
+    # not work an operator can still roll up. The parent chain is walked against
+    # the FULL graph, so a parent epic that is already done still counts as a
+    # mission edge. Advisory: a rollup failure leaves the metric absent, never
+    # breaks health.
+    orphan_rate: Optional[float] = None
+    orphan_nodes: list[str] = []
+    try:
+        from fno.graph.rollup import ROLLUP_TYPES, is_orphan
+
+        index = {
+            e["id"]: e for e in entries
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
+        non_exempt = [
+            e for e in pending
+            if e.get("type") in ROLLUP_TYPES and not e.get("orphan_ok")
+        ]
+        orphan_nodes = [e["id"] for e in non_exempt if is_orphan(e, index)]
+        # Zero non-exempt features (greenfield) reads 0.0, never a ZeroDivision.
+        orphan_rate = (
+            round(len(orphan_nodes) / len(non_exempt), 4) if non_exempt else 0.0
+        )
+    except Exception:  # noqa: BLE001 - advisory only; health must not break
+        pass
+
     triage_metrics: Optional[dict] = None
     try:
         _canon_events = _read_canonical_events()
@@ -1521,6 +1548,8 @@ def cmd_health(
         "acknowledged_resolved": resolved_payload,
         "project_cwd_mismatch": len(mismatch_ids),
         "project_cwd_mismatch_nodes": mismatch_ids,
+        **({"orphan_feature_rate": orphan_rate} if orphan_rate is not None else {}),
+        **({"orphan_feature_nodes": orphan_nodes} if orphan_rate is not None else {}),
         "stranded_by_failed_blocker": stranded_payload,
         **({"batch_verdict": batch_verdict} if batch_verdict else {}),
         **({"evals": evals_summary} if evals_summary else {}),
@@ -1622,6 +1651,12 @@ def cmd_health(
     typer.echo(f"  collisions (medium+): {report['totals']['collisions']}")
     typer.echo(f"  acknowledged-resolved: {report['totals']['acknowledged_resolved']}")
     typer.echo(f"  project<->cwd mismatches: {report['totals']['project_cwd_mismatch']}")
+    if "orphan_feature_rate" in report:
+        n_orphans = len(report.get("orphan_feature_nodes", []))
+        typer.echo(
+            f"  orphan features (no mission edge): "
+            f"{report['orphan_feature_rate']:.0%} ({n_orphans})"
+        )
     typer.echo(
         f"  stranded by failed blocker: "
         f"{report['totals']['stranded_by_failed_blocker']}"

@@ -1849,6 +1849,11 @@ def cmd_update(
         "--batch",
         help="Set the batch id this node is a member of (marks node.batch, batch-lane Wave 2). Pass 'null' to clear (requeue for individual ship on abandon).",
     ),
+    orphan_ok: Optional[str] = typer.Option(
+        None,
+        "--orphan-ok",
+        help="Record why this node deliberately serves no mission, exempting it from the orphan metric, the board flag, and the ordering tiebreaker. Pass 'null' to clear.",
+    ),
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
@@ -2111,6 +2116,18 @@ def cmd_update(
             # 'null' clears the mark (requeue as individual ship on abandon); any
             # other value records the batch id this node is a member of.
             node["batch"] = None if batch.lower() == "null" else batch
+        if orphan_ok is not None:
+            # The reason IS the opt-out: an empty string would read as unset and
+            # silently leave the node counted, so refuse it rather than no-op.
+            if orphan_ok.lower() == "null":
+                node["orphan_ok"] = None
+            elif not orphan_ok.strip():
+                typer.echo(
+                    "Error: --orphan-ok needs a reason (or 'null' to clear)", err=True
+                )
+                raise typer.Exit(code=2)
+            else:
+                node["orphan_ok"] = orphan_ok
         # Dispatch overrides (US3). Stored permissively; the resolver is the trust
         # boundary (allowlist + 8 KB cap at dispatch time, not write time).
         if dispatch_verb is not None:

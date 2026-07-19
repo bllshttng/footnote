@@ -43,6 +43,7 @@ MetricKey = Literal[
     "failure_prone_nodes",
     "collisions",
     "project_cwd_mismatch",
+    "orphan_feature_rate",
 ]
 
 
@@ -300,6 +301,22 @@ def evaluate_thresholds(
             kind="count",
             hint="project/cwd disagree on pending nodes; producer regression?",
         ))
+
+    # 6. orphan feature rate (rate > N; default 1.0, i.e. off). Absent from a
+    # report whose rollup scoring failed - a missing metric never breaches.
+    if "orphan_feature_rate" in report:
+        orphan_actual = float(report["orphan_feature_rate"])
+        orphan_thresh = thresh.get(
+            "orphan_feature_rate", DEFAULT_CONFIG["thresholds"]["orphan_feature_rate"]
+        )
+        if orphan_actual > orphan_thresh:
+            breaches.append(_make_breach(
+                "orphan_feature_rate",
+                actual=orphan_actual,
+                threshold=orphan_thresh,
+                kind="count",
+                hint="open features that resolve no mission edge",
+            ))
 
     return breaches
 

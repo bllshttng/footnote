@@ -1700,6 +1700,11 @@ class HealthThresholdsBlock(BaseModel):
     failure_prone_attempts: int = 2
     collision_count: int = 3
     project_cwd_mismatch: int = 0
+    # Fraction of open non-exempt features with no mission edge. Ships at 1.0
+    # (unreachable, so never breaches): a real backlog starts near-total orphan
+    # and a day-one breach would just train operators to ignore --check. Lower
+    # it deliberately once rollup has had time to converge the backlog.
+    orphan_feature_rate: float = 1.0
 
     @model_validator(mode="before")
     @classmethod
