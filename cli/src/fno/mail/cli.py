@@ -1005,7 +1005,7 @@ def cmd_send(
         dispatch_send,
         dispatch_send_to_project,
     )
-    from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.agents.self_stamp import stamp_from
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
