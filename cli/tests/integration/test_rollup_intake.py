@@ -169,3 +169,25 @@ def test_auto_link_repaints_the_parent_rollup(graph, monkeypatch):
     _invoke("backlog", "idea", "mux pane layout polish resize", "--cwd", "/tmp/proj")
 
     assert seen, "auto-linked node did not trigger an ancestor repaint"
+
+
+def test_a_link_never_lands_without_its_receipt(graph, monkeypatch):
+    """The undo receipt is the mitigation for a wrong auto-link.
+
+    If receipt rendering fails, the parent edge must NOT be written - a silent
+    auto-link is exactly the failure the printed receipt exists to prevent.
+    """
+    import fno.graph.rollup as rollup
+
+    g = graph([_epic("x-mux0001", "mux pane layout polish")])
+    monkeypatch.setattr(
+        rollup, "receipt_lines",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render failed")),
+    )
+    title = "mux pane layout polish resize"
+
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj")
+
+    assert res.exit_code == 0
+    assert _created(g, title).get("parent") is None
+    assert "rollup skipped" in res.stderr

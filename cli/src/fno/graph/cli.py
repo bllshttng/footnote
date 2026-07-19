@@ -729,6 +729,7 @@ def _create_node_impl(
             )
 
             resolution = _rollup.resolve(node, entries)
+            link_to: Optional[str] = None
             if resolution.kind == "linked":
                 target = _find_node(entries, resolution.epic_id or "")
                 # A brand-new leaf can neither cycle nor deepen epic nesting,
@@ -737,14 +738,19 @@ def _create_node_impl(
                 if target is not None and not _would_exceed_epic_depth(
                     entries, node, target
                 ) and not _would_create_cycle(entries, node["id"], target["id"]):
-                    node["parent"] = target["id"]
+                    link_to = target["id"]
                 else:
                     resolution = resolution._replace(kind="suggest")
             index = {
                 e["id"]: e for e in entries
                 if isinstance(e, dict) and isinstance(e.get("id"), str)
             }
+            # Receipt FIRST, then the edge: an auto-link is only safe because a
+            # human reads the receipt and can undo it, so a link must never land
+            # without one. Anything that raises above leaves the node unlinked.
             rollup_lines[:] = _rollup.receipt_lines(resolution, node["id"], index)
+            if link_to is not None:
+                node["parent"] = link_to
         except Exception as exc:  # noqa: BLE001 - rollup never breaks intake
             rollup_error[0] = str(exc)
         return entries
