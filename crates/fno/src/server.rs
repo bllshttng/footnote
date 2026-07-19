@@ -3428,13 +3428,10 @@ impl Core {
                 .iter()
                 .find(|s| s.owns_path(&r.cwd))
                 .map(|s| s.id);
-            let cwd_base = squad.is_none().then(|| {
-                Path::new(&r.cwd)
-                    .file_name()
-                    .and_then(|b| b.to_str())
-                    .unwrap_or(r.cwd.as_str())
-                    .to_string()
-            });
+            // (x-6851 US3) Every row carries its cwd basename - including a
+            // squad-matched external-lifecycle row, so its foreign-cwd subline
+            // still renders (the "every row" wire contract; codex review).
+            let cwd_base = cwd_basename(&r.cwd);
             out.push(AgentRow {
                 squad,
                 name: r.name.clone(),
@@ -9071,6 +9068,38 @@ mod tests {
             "no branch in map -> tail only"
         );
         assert_eq!(regready.cwd_base.as_deref(), Some("regready"));
+    }
+
+    #[test]
+    fn external_lifecycle_row_carries_cwd_base_when_squad_matched() {
+        // x-6851 US3 (codex review): a squad-matched external-lifecycle tombstone
+        // must carry its cwd_base (the every-row wire contract), so a foreign-cwd
+        // child directory still renders the exception subline instead of reading
+        // as same-project. Before the fix this branch left cwd_base None for a
+        // matched row.
+        use crate::squad_store::{ExternalLifecycle, ExternalState};
+        let mut core = placement_core(); // squad 7 owns /repo/default
+        core.external_lifecycle = vec![ExternalLifecycle {
+            attach_id: "abc123".into(),
+            name: "dead-worker".into(),
+            cwd: "/repo/default/worktrees/x-6851".into(), // child of the squad root
+            state: ExternalState::Stopped,
+            generation: 0,
+            updated_at: String::new(),
+            reason: None,
+        }];
+        let rows = core.agent_rows();
+        let row = rows.iter().find(|r| r.name == "dead-worker").unwrap();
+        assert_eq!(
+            row.squad,
+            Some(7),
+            "a cwd under the squad root is squad-matched"
+        );
+        assert_eq!(
+            row.cwd_base.as_deref(),
+            Some("x-6851"),
+            "a squad-matched external row now carries its cwd basename"
+        );
     }
 
     #[test]
