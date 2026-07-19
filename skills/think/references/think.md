@@ -173,6 +173,11 @@ narrow scope, or supersede - rather than filing a duplicate. The graph dedup
 (`fno backlog find`) is the hard requirement; the `gh pr list` search is
 best-effort and skips silently when `gh` is unauthenticated or absent.
 
+**Rollup, alongside the dedup verdict.**
+When the seed is a node-seeded feature that carries no mission edge, print its rollup status and top epic candidates next to the dedup verdict, and record the resolution - the epic it links to, or the reason it deliberately serves none - in the design doc's Overview.
+Read it with `fno backlog maintain` (its rollup leg lists an orphan's best candidates) or `fno backlog get <id>` to check `parent`.
+This is a question to answer in the design, never a gate: an orphan is filed and designed exactly as before, and a bug or an `orphan_ok` node skips this entirely.
+
 ### 1e. Schema Reconciliation (DB-backed repos)
 
 When the repo is database-backed, ground the design against the real schema
