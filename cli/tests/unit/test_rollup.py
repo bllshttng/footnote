@@ -167,10 +167,26 @@ def test_ladder_reports_orphan_with_no_candidates():
     assert resolve(subject, entries).kind == "orphan"
 
 
-def test_ladder_on_empty_graph_is_orphan_not_crash():
-    """Boundary: greenfield repo with zero epics."""
+def test_ladder_is_silent_on_a_graph_with_no_epics():
+    """Greenfield: with no mission to serve, the orphan line is unactionable.
+
+    The node is still an orphan to the metric and the board flag - only the
+    intake line is suppressed, so intake does not narrate the obvious on every
+    single add.
+    """
     subject = node("x-1")
-    assert resolve(subject, [subject]).kind == "orphan"
+    assert resolve(subject, [subject]).kind == "exempt"
+    assert orphan_ids([subject]) == {"x-1"}, "still an orphan to the metric"
+
+
+def test_ladder_reports_orphan_once_a_live_epic_exists():
+    entries = [epic("x-e", "totally unrelated domain"), node("x-1", title="quantum teapot")]
+    assert resolve(entries[1], entries).kind == "orphan"
+
+
+def test_retired_epics_do_not_re_enable_the_orphan_line():
+    entries = [epic("x-e", "unrelated", _status="done"), node("x-1", title="quantum teapot")]
+    assert resolve(entries[1], entries).kind == "exempt"
 
 
 def test_ladder_exempts_bugs_and_deliberate_orphans():
@@ -210,7 +226,8 @@ def test_linked_receipt_names_epic_score_and_undo():
 
 
 def test_orphan_receipt_offers_the_orphan_ok_hint():
-    (line,) = receipt_lines(resolve(node("x-1"), []), "x-1", {})
+    entries = [epic("x-e", "unrelated mission"), node("x-1", title="quantum teapot")]
+    (line,) = receipt_lines(resolve(entries[1], entries), "x-1", {})
     assert "--orphan-ok" in line
 
 

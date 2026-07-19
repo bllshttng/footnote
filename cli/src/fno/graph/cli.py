@@ -759,8 +759,11 @@ def _create_node_impl(
 
     if rollup_error[0] is not None:
         typer.echo(f"warning: rollup skipped ({rollup_error[0]})", err=True)
+    # stderr, not stdout: this verb's stdout is a machine-readable JSON payload
+    # that callers pipe through `json.loads` / `jq`. The receipt is advisory
+    # human output and must not corrupt that contract.
     for line in rollup_lines:
-        typer.echo(line)
+        typer.echo(line, err=True)
 
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch

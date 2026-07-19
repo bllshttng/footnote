@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple, Optional
 
-from fno.graph.relatedness import epic_candidates
+from fno.graph.relatedness import _RETIRED_EPIC_STATUSES, epic_candidates
 
 Entry = dict[str, Any]
 
@@ -112,6 +112,18 @@ def resolve(node: Entry, entries: list[Entry]) -> Resolution:
 
     candidates = tuple(epic_candidates(node, entries))
     if not candidates:
+        # "This serves no mission" is only advice worth giving when missions
+        # exist to serve. On a graph with no live epic there is nothing to link
+        # to and nothing the operator can do, so the line would fire on every
+        # single intake and carry no information. The health metric and the
+        # board flag still count the node; only the intake line is suppressed.
+        if not any(
+            isinstance(e, dict)
+            and e.get("type") == "epic"
+            and e.get("_status") not in _RETIRED_EPIC_STATUSES
+            for e in entries
+        ):
+            return Resolution("exempt", reason="no epics in graph")
         return Resolution("orphan")
 
     top_id, top_score, top_reason = candidates[0]
