@@ -114,7 +114,10 @@ _HARNESS_CAPS: dict[str, dict] = {
         # registered), so a slash surface expands in both lanes - not a no-op.
         # Plugin-namespaced, so `slash_prefix` is "fno:" (palette `/fno:verb`).
         "permission_bypass": ["--dangerously-skip-permissions"],
-        "resume": "native-continue",  # opencode run --continue
+        # x-830c: session store + `--session <ses_id>`, the same strict id-keyed
+        # shape as claude. NOT `--continue`, which creates a NEW session when the
+        # project has none rather than refusing - never a resume.
+        "resume": "native-session",
         "bg": False,
         "stop_hook": "native",
         "command_surface": _SLASH,

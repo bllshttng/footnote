@@ -884,8 +884,9 @@ impl ProviderWithPty for AgyProvider {
 /// pane back half since 4a-G2); the argv forms below are the HEADLESS
 /// `opencode run` shapes, carried for trait completeness — no client-side
 /// one-shot lane is wired in v1 (`spawn --substrate headless` refuses with a
-/// pointer to `pane`). opencode mints session ids (`--session`/`-s`), but v1
-/// does not probe or resume them (registry rows are live-only, like agy).
+/// pointer to `pane`). Session ids are captured at spawn, probed against
+/// opencode's own store, and resumable (x-830c) — unlike agy, whose rows stay
+/// live-only.
 /// Trailing argv for an `opencode run` dispatch: route a footnote slash command
 /// through `--command`, else pass a prose prompt as the message positional.
 ///
