@@ -8336,6 +8336,78 @@ mod tests {
     }
 
     #[test]
+    fn active_mission_groups_workers_and_header_shows_done_total() {
+        // x-1a47: an active mission's two children render under a synthetic
+        // squad header, name carrying done/total.
+        let mut core = empty_core();
+        core.missions = backlog_view::MissionMap {
+            missions: vec![backlog_view::Mission {
+                epic_id: "x-aaaa".into(),
+                slug: "mux-squad".into(),
+                done: 1,
+                total: 2,
+            }],
+            node_to_epic: HashMap::from([
+                ("x-bbbb".to_string(), "x-aaaa".to_string()),
+                ("x-cccc".to_string(), "x-aaaa".to_string()),
+            ]),
+        };
+        core.agents = vec![
+            bg_row("target-x-bbbb-foo", "/w", None),
+            bg_row("target-x-cccc-bar", "/w", None),
+        ];
+        let sid = mission_sid("x-aaaa");
+        let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
+        let squads = match &msg {
+            ServerMsg::Layout { squads, .. } => squads,
+            _ => unreachable!(),
+        };
+        let header = squads.iter().find(|s| s.id == sid).expect("mission header");
+        assert_eq!(header.name, "mux-squad  1/2");
+        let rows = core.agent_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.squad == Some(sid)));
+    }
+
+    #[test]
+    fn empty_but_active_mission_still_renders() {
+        // An active mission with no matching worker rows still shows its
+        // header - "nothing running" stays visible, never vanishes.
+        let mut core = empty_core();
+        core.missions = backlog_view::MissionMap {
+            missions: vec![backlog_view::Mission {
+                epic_id: "x-aaaa".into(),
+                slug: "mux-squad".into(),
+                done: 0,
+                total: 0,
+            }],
+            node_to_epic: HashMap::new(),
+        };
+        let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
+        let squads = match &msg {
+            ServerMsg::Layout { squads, .. } => squads,
+            _ => unreachable!(),
+        };
+        assert!(squads.iter().any(|s| s.id == mission_sid("x-aaaa")));
+    }
+
+    #[test]
+    fn derive_failure_leaves_workers_ungrouped() {
+        // A malformed/absent graph read leaves `missions` at its default: no
+        // mission squad header, and workers render via their normal path.
+        let mut core = empty_core();
+        core.agents = vec![bg_row("target-x-bbbb-foo", "/w", None)];
+        let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
+        let squads = match &msg {
+            ServerMsg::Layout { squads, .. } => squads,
+            _ => unreachable!(),
+        };
+        assert!(squads.is_empty());
+        let rows = core.agent_rows();
+        assert_eq!(rows[0].squad, None);
+    }
+
+    #[test]
     fn external_row_stop_and_remove_refused() {
         // US4: an external roster row belongs to the claude daemon, not the fno
         // registry, so BOTH verbs refuse with a notice rather than fire a doomed
