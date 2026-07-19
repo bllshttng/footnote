@@ -243,7 +243,8 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
 
 
 def _stub_pane_rung(
-    monkeypatch, *, in_roster: bool, pane_sends: bool, expect_token: str
+    monkeypatch, *, in_roster: bool, pane_sends: bool, expect_token: str,
+    status: str = "live",
 ) -> list:
     """Wire the pane rung to a fake roster entry and a recorded ``_mux_pane_send``.
     Returns the call log, so a test can assert the rung was skipped entirely.
@@ -256,7 +257,9 @@ def _stub_pane_rung(
 
     from fno.agents.registry import AgentResolutionError, ResolvedAgent
 
-    entry = SimpleNamespace(name="hosted-worker", mux={"session": "main", "pane_id": 3})
+    entry = SimpleNamespace(
+        name="hosted-worker", status=status, mux={"session": "main", "pane_id": 3}
+    )
 
     def _resolve(token, **_kw):
         assert token == expect_token, f"rung resolved {token!r}, expected the session id"
@@ -367,6 +370,32 @@ def test_us7b_working_socket_inject_preempts_pane_rung(
     assert calls == []
 
 
+def test_us7b_non_live_entry_never_pane_sends(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """An exited row keeps its mux ref, and pane ids are reused across a mux
+    restart. Sending on that stale ref would type into an unrelated pane and
+    report hosted, suppressing the durable copy the real recipient needs."""
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    calls = _stub_pane_rung(
+        monkeypatch, in_roster=True, pane_sends=True, expect_token=sid, status="exited"
+    )
+
+    sent = runner.invoke(
+        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "queued (durable)" in sent.output
+    assert calls == []  # the stale pane was never written to
+
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and "ping" in payload[0]["body"]
+
+
 def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     runner, mailbox, monkeypatch, tmp_path
 ):
@@ -382,7 +411,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
-    paneless = SimpleNamespace(name="not-hosted", mux=None)
+    paneless = SimpleNamespace(name="not-hosted", status="live", mux=None)
 
     def _resolve(token, **_kw):
         assert token == sid, f"rung resolved {token!r}, expected the session id"

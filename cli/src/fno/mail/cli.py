@@ -881,7 +881,13 @@ def _name_lane_send(
             except (AgentResolutionError, OSError):
                 pass
             else:
-                injected = _mux_pane_send(entry, wrapped)
+                # Gate on live status like the registered-name path does. An
+                # exited row keeps its mux ref, and pane ids are reused across a
+                # mux restart, so sending on a stale ref types into an unrelated
+                # pane and reports hosted -- suppressing the durable copy the
+                # real recipient still needs.
+                if entry.status == "live":
+                    injected = _mux_pane_send(entry, wrapped)
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
