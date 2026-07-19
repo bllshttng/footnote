@@ -15,8 +15,8 @@ What each provider fundamentally is, from fno's point of view:
 | Substrates | pane, **bg**, headless | pane, headless | pane, headless | pane, headless | pane only |
 | Detached-thread lane (`--substrate bg`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | no |
 | Headless one-shot (`--substrate headless` / `-H`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | **no** (refuses, pointing to pane) |
-| Session id recorded | `claude_short_id` (jobId) + `claude_session_uuid` (full transcript UUID) | `codex_session_id` | `gemini_session_id` | **none** (stateless: plain-text output, no parseable ID) | minted by opencode but not probed or resumed by fno |
-| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | no |
+| Session id recorded | `claude_short_id` (jobId) + `claude_session_uuid` (full transcript UUID) | `codex_session_id` | `gemini_session_id` | **none** (stateless: plain-text output, no parseable ID) | `harness_session_id` (the `ses_` id, captured at spawn) |
+| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | `resume` |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
@@ -44,7 +44,7 @@ Retired creation verbs (each prints a pointer and exits non-zero, never a silent
 | `watch <name>` | yes | no | no | no | no | Observe a held stream-json thread's turns in real time. claude-only transport. |
 | `peek <name>` | yes | yes | status events only | status events only | status events only | Read-only: recent transcript + status from disk. Never spawns anything, works on suspended and exited rows. The transcript-fallback arm supports claude and codex only; a gemini/agy/opencode row with no normalized status event exits 1 (`ObserveUnsupported`). The observe twin of `fno mail send`. |
 | `attach <name>` | yes | no | no | no | no | Re-exec your terminal into the running session's own TUI (`claude attach <short_id>`). Requires the session to be **live**. |
-| `resume <name> [--print-command]` | yes (live only) | yes | yes | no | no | Re-exec the provider's resume CLI in the agent's recorded cwd. Note the claude arm builds `claude attach <short_id>` - on claude this is attach-with-cwd, not a dead-session revival (that is `spawn --resume`). `--print-command` prints the shell snippet instead of exec'ing. |
+| `resume <name> [--print-command]` | yes (live only) | yes | yes | no | yes | Re-exec the provider's resume CLI in the agent's recorded cwd. Note the claude arm builds `claude attach <short_id>` - on claude this is attach-with-cwd, not a dead-session revival (that is `spawn --resume`). `--print-command` prints the shell snippet instead of exec'ing. |
 | `logs <name>` | yes | yes | yes | yes | yes | Tail or follow the agent's log output (reads `log_path`). |
 
 The three re-entry verbs are easy to conflate; the axes that separate them:
@@ -126,7 +126,7 @@ Retired verbs print these pointers and exit non-zero, so scripts fail loud rathe
 - **claude** is the only provider with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
 - **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
 - **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
-- **opencode** is pane-hostable with a readiness detector and badge manifest, but fno does not probe or resume its session IDs this release. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.
+- **opencode** is pane-hostable with a readiness detector and badge manifest. Its `ses_` session id is captured at spawn (a best-effort store lookup; an ambiguous or missed capture leaves the row live-only), probed for store membership, and resumable via `opencode --session <id>`. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.
 
 ## Dispatch command surface
 
