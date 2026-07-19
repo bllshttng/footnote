@@ -351,6 +351,38 @@ def test_us7b_working_socket_inject_preempts_pane_rung(
     assert calls == []
 
 
+def test_us7b_rostered_but_paneless_entry_falls_to_durable(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Runs the REAL _mux_pane_send: an entry that is rostered but has no pane
+    (never mux-hosted, or the pane is gone) must return False on its own
+    predicate and demote to durable -- no subprocess, no hang. This is the test
+    that would catch the rung handing _mux_pane_send the wrong object shape."""
+    from types import SimpleNamespace
+
+    from fno.agents.registry import ResolvedAgent
+
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    paneless = SimpleNamespace(name="not-hosted", mux=None)
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_agent",
+        lambda token, **_kw: ResolvedAgent(entry=paneless, matched_by="full_session_id"),
+    )
+
+    sent = runner.invoke(
+        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "queued (durable)" in sent.output
+
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and "ping" in payload[0]["body"]
+
+
 # ---------------------------------------------------------------------------
 # x-605c US3 / AC1-HP + AC1-FR: send to a ROSTERED claude bg worker is
 # handle-addressed (live-inject first, durable floor to its canonical handle);
