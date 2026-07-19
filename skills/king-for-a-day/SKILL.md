@@ -72,7 +72,7 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 The envelope is written before delivery is attempted, so a send survives a dead recipient.
 
 Address live peers by handle, never by project.
-A session's canonical mail handle is `claude-<short-id>`; every session prints its own in its startup header, and peers are discoverable via `fno agents discovered-json` or `fno agents top`.
+A session's canonical mail handle is `<harness>-<short-id>` (`claude-<short-id>`, `codex-<short-id>`, `opencode-<short-id>`, ...), and a session's slug resolves too; every session prints its own handle in its startup header, and peers are discoverable via `fno agents discovered-json` or `fno agents top`.
 `--to-project <X>` is anycast: when no live peer resolves it queues durable into what may be a ghost inbox, and the receipt still reads like success.
 **Treat any receipt that is not `delivered (hosted)` as not delivered.**
 
