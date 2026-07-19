@@ -34,6 +34,7 @@ use crate::proto::{
     SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::tree::{Dir, Rect, TabId};
+use crate::view_store::{self, next_view, SectionKey, SectionView};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -418,8 +419,12 @@ struct View {
     aux: Option<AuxPopup>,
     /// Pending escape bytes in aux-popup mode (arrow folding).
     aux_esc: Vec<u8>,
-    /// Caret expansion per squad id - client-local, instant (AC6-UI).
-    expanded: HashSet<u64>,
+    /// (x-975a) Per-section view state - client-local, instant (AC6-UI), and
+    /// persisted across restarts by [`crate::view_store`]. Keyed by squad NAME
+    /// (not the ephemeral session id) so a restart restores the same sections.
+    /// An absent squad key reads as [`SectionView::Collapsed`], an absent
+    /// fixed section as `Expanded` - see [`View::section_view`].
+    section_view: HashMap<SectionKey, SectionView>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
     /// index space shared with painting, hover, and mouse hit-testing).
     selector: Option<usize>,
@@ -949,9 +954,20 @@ fn build_sideline_menu(anchor: Anchor) -> AuxPopup {
 
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
+        // Persisted per-section state wins (x-975a); pruned to the squads this
+        // layout actually has, so a workspace deleted since the last run is
+        // absent from the map (and so from the next write).
+        let mut section_view = view_store::load();
+        section_view.retain(|k, _| match k {
+            SectionKey::Squad(name) => layout.squads.iter().any(|s| &s.name == name),
+            _ => true,
+        });
         // Seed with the active squad so the first frame already shows its tabs
-        // (and the focused tab's `*` marker) without any keypress (x-2f99).
-        let expanded = HashSet::from([layout.active_squad]);
+        // (and the focused tab's `*` marker) without any keypress (x-2f99) -
+        // only where the store had no opinion, so a persisted collapse holds.
+        if let Some(key) = squad_key(&layout, layout.active_squad) {
+            section_view.entry(key).or_insert(SectionView::Expanded);
+        }
         View {
             term,
             session,
@@ -966,7 +982,7 @@ impl View {
             row_menu_esc: Vec::new(),
             aux: None,
             aux_esc: Vec::new(),
-            expanded,
+            section_view,
             selector: None,
             sel_esc: Vec::new(),
             sideline_offset: 0,
@@ -1756,7 +1772,7 @@ impl View {
                 // squad has no server-side squad to select (SelectSquad would
                 // refuse "no such squad"), so it always just toggles locally.
                 None if row.squad == self.layout.active_squad || is_mission_squad(row.squad) => {
-                    Some(ChromeHit::ToggleExpand(row.squad))
+                    Some(ChromeHit::CycleSection(squad_key(&self.layout, row.squad)?))
                 }
                 None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
                 Some(t) => {
@@ -1777,8 +1793,13 @@ impl View {
             // A work-queue card dispatches/focuses via [`View::card_hit`], the
             // same resolver the navigator uses (x-653d).
             DisplayRow::Card(c) => Some(self.card_hit(c)),
-            // Inert rows (label, subline, spacer) resolve to no action (x-cd67).
-            DisplayRow::Header { .. } | DisplayRow::Sub(_) | DisplayRow::Blank => None,
+            // (x-975a) A `~` section header cycles its own view state, exactly
+            // like a squad name row. It stays `row_is_inert` so the selector
+            // cursor still skips it (the x-260a "never rests on a label"
+            // invariant): this makes it CLICKABLE, not selectable.
+            DisplayRow::Header { key, .. } => Some(ChromeHit::CycleSection(key.clone())),
+            // Inert rows (subline, spacer) resolve to no action (x-cd67).
+            DisplayRow::Sub(_) | DisplayRow::Blank => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -1842,7 +1863,7 @@ impl View {
         let cross = |sq: u64| (sq != self.layout.active_squad).then_some(sq);
         for s in &self.layout.squads {
             // Always SelectSquad (unlike the sideline's active-squad
-            // ToggleExpand): the navigator is a jump, never an expand toggle.
+            // CycleSection): the navigator is a jump, never a view-state cycle.
             out.push(NavRow {
                 label: s.name.clone(),
                 state: PaneState::Idle,
@@ -2078,7 +2099,9 @@ impl View {
         // scrape tick, so an unconditional insert would fight manual collapse
         // (x-2f99, AC1-EDGE). Insert-only: activation never collapses others.
         if layout.active_squad != self.layout.active_squad {
-            self.expanded.insert(layout.active_squad);
+            if let Some(key) = squad_key(&layout, layout.active_squad) {
+                self.section_view.insert(key, SectionView::Expanded);
+            }
         }
         // A synthetic mission-squad header defaults to expanded the first time
         // it appears - it has no `active_squad` moment to ride in on (it is
@@ -2089,13 +2112,18 @@ impl View {
         let prev_ids: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
         for s in &layout.squads {
             if is_mission_squad(s.id) && !prev_ids.contains(&s.id) {
-                self.expanded.insert(s.id);
+                self.section_view
+                    .insert(SectionKey::Squad(s.name.clone()), SectionView::Expanded);
             }
         }
-        // Prune ids whose squad vanished server-side, so the set only ever
-        // holds live squads (bounded leak otherwise).
-        self.expanded
-            .retain(|id| layout.squads.iter().any(|s| s.id == *id));
+        // Prune squads that vanished server-side, so the map only ever holds
+        // live sections (bounded leak otherwise). The write is deferred to the
+        // next operator cycle - persisting here would hit the disk on every
+        // scrape tick for a pure cleanup.
+        self.section_view.retain(|k, _| match k {
+            SectionKey::Squad(name) => layout.squads.iter().any(|s| &s.name == name),
+            _ => true,
+        });
         // Capture the selected needs-row identity against the OLD layout, before
         // the swap, so the cursor can re-anchor to the same item afterward.
         let needs_prev = self.answers_selected_id();
@@ -2159,15 +2187,96 @@ impl View {
         self.notice = Some((text, Instant::now() + NOTICE_TTL));
     }
 
-    /// Flip a squad's caret expansion (x-2f99): pure client state, always
-    /// visible next frame (the caret glyph and tab rows change together).
-    fn toggle_expand(&mut self, id: u64) {
-        if !self.expanded.remove(&id) {
-            self.expanded.insert(id);
-        }
-        // Collapsing shrinks the row set; re-clamp so a scrolled sideline never
+    /// A section's current view state. A squad the map has no entry for reads
+    /// `Collapsed` (today's semantics: only the active squad seeds open); a
+    /// fixed `~` section reads `Expanded` (they have always rendered in full).
+    fn section_view(&self, key: &SectionKey) -> SectionView {
+        self.section_view.get(key).copied().unwrap_or(match key {
+            SectionKey::Squad(_) => SectionView::Collapsed,
+            _ => SectionView::Expanded,
+        })
+    }
+
+    /// Advance a section one step through the view cycle (x-975a): pure client
+    /// state, always visible next frame, then persisted so the choice survives
+    /// a restart. `has_dead` and `binary` come from the section's own rows -
+    /// see [`next_view`].
+    fn cycle_section(&mut self, key: SectionKey) {
+        let binary = matches!(key, SectionKey::WorkQueue);
+        let has_dead = !binary && self.section_has_dead(&key);
+        let next = next_view(self.section_view(&key), has_dead, binary);
+        self.set_section_view(key, next);
+    }
+
+    /// Put a section in an explicit view state (the selector's `l`/`h`), then
+    /// persist. The one write point both operator-initiated paths share, so a
+    /// click and a keypress can never diverge on what gets saved.
+    fn set_section_view(&mut self, key: SectionKey, view: SectionView) {
+        self.section_view.insert(key, view);
+        view_store::save(&self.section_view);
+        // Hiding rows shrinks the row set; re-clamp so a scrolled sideline never
         // skips past the new last row (x-a621).
         self.clamp_sideline_offset();
+    }
+
+    /// Whether a section holds at least one exited row - the predicate that
+    /// decides if `LiveOnly` would hide anything. Folded live off the layout,
+    /// never cached (the x-df4c drift posture), so a section whose last dead
+    /// row was reaped elsewhere reports honestly on the very next click.
+    fn section_has_dead(&self, key: &SectionKey) -> bool {
+        match key {
+            SectionKey::Squad(name) => {
+                let Some(s) = self.layout.squads.iter().find(|s| &s.name == name) else {
+                    return false;
+                };
+                self.layout
+                    .agents
+                    .iter()
+                    .any(|a| a.squad == Some(s.id) && a.exited)
+            }
+            SectionKey::Elsewhere => self.orphans().iter().any(|a| a.exited),
+            // Cards have no exited state, so the work queue is always binary.
+            SectionKey::WorkQueue => false,
+        }
+    }
+
+    /// A squad's view state by id (test convenience: the production paths all
+    /// hold the `&Squad` and key by name directly).
+    #[cfg(test)]
+    fn squad_view(&self, id: u64) -> SectionView {
+        match squad_key(&self.layout, id) {
+            Some(key) => self.section_view(&key),
+            None => SectionView::Collapsed,
+        }
+    }
+
+    /// Cycle a squad's section by id (test convenience for [`Self::cycle_section`]).
+    #[cfg(test)]
+    fn cycle_squad(&mut self, id: u64) {
+        if let Some(key) = squad_key(&self.layout, id) {
+            self.cycle_section(key);
+        }
+    }
+
+    /// Force a squad's view state by id WITHOUT persisting - tests set up
+    /// state, they do not simulate an operator gesture.
+    #[cfg(test)]
+    fn set_squad_view(&mut self, id: u64, view: SectionView) {
+        if let Some(key) = squad_key(&self.layout, id) {
+            self.section_view.insert(key, view);
+        }
+    }
+
+    /// Agents matched to no live squad - the `~ elsewhere` section's membership.
+    /// One predicate so `display_rows` and the dead-row fold never diverge.
+    fn orphans(&self) -> Vec<&AgentRow> {
+        self.layout
+            .agents
+            .iter()
+            .filter(
+                |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
+            )
+            .collect()
     }
 
     /// Clamp a selector cursor into the current [`View::display_rows`] and
@@ -3055,9 +3164,20 @@ impl View {
             // squad shows only its name row + the x-d140 rollup glyph, so the
             // rollup is the sole signal there - no more agent rows rendering
             // unconditionally under a folded squad.
-            if self.expanded.contains(&s.id) {
+            // (x-975a) Tri-state: `LiveOnly` drops the exited rows in place
+            // while the header's `✗N` rollup keeps them discoverable; live rows
+            // keep their original order. Display filtering only - nothing is
+            // reaped (that is x-f300).
+            let view = self.section_view(&SectionKey::Squad(s.name.clone()));
+            if view != SectionView::Collapsed {
                 let section_base = section_project_base(&s.canonical_cwd);
-                for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
+                for a in self
+                    .layout
+                    .agents
+                    .iter()
+                    .filter(|a| a.squad == Some(s.id))
+                    .filter(|a| view == SectionView::Expanded || !a.exited)
+                {
                     out.push(DisplayRow::Agent(a));
                     // (x-6851 US3) Exception-based subline: a Sub row follows the
                     // agent ONLY when its cwd_base differs from the squad's
@@ -3079,14 +3199,7 @@ impl View {
         // The `+` create-workspace affordance sits directly under the squad list
         // (x-9e5e), above the agents/work-queue sections.
         out.push(DisplayRow::NewSquad);
-        let orphans: Vec<&AgentRow> = self
-            .layout
-            .agents
-            .iter()
-            .filter(
-                |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
-            )
-            .collect();
+        let orphans = self.orphans();
         if !orphans.is_empty() {
             // Orphans (cwd matched no squad) keep one flat section in the same
             // row grammar; the header reads `~ elsewhere` (Locked 6). One spacer
@@ -3096,15 +3209,23 @@ impl View {
                 out.push(DisplayRow::Blank);
             }
             let rollup = section_rollup(orphans.iter().map(|&a| agent_lattice_state(a)));
+            let view = self.section_view(&SectionKey::Elsewhere);
             out.push(DisplayRow::Header {
                 label: "~ elsewhere",
                 rollup,
+                key: SectionKey::Elsewhere,
+                view,
             });
             // Orphans keep their line-1 ` (basename)` suffix (every orphan is
             // foreign by definition); a Sub row would double it, so the
             // `~ elsewhere` section emits no sublines (x-6851 US3).
-            for a in orphans {
-                out.push(DisplayRow::Agent(a));
+            if view != SectionView::Collapsed {
+                for a in orphans
+                    .into_iter()
+                    .filter(|a| view == SectionView::Expanded || !a.exited)
+                {
+                    out.push(DisplayRow::Agent(a));
+                }
             }
         }
         // The work-queue lane (x-6f77): board-ordered ready/blocked/in-flight
@@ -3120,11 +3241,18 @@ impl View {
                     .iter()
                     .map(|c| card_lattice_state(c.state)),
             );
+            let view = self.section_view(&SectionKey::WorkQueue);
             out.push(DisplayRow::Header {
                 label: "~ work queue",
                 rollup,
+                key: SectionKey::WorkQueue,
+                view,
             });
-            out.extend(self.layout.backlog.iter().map(DisplayRow::Card));
+            // Binary: a card has no exited state, so the queue never enters
+            // `LiveOnly` (see [`next_view`]) and only `Collapsed` hides rows.
+            if view != SectionView::Collapsed {
+                out.extend(self.layout.backlog.iter().map(DisplayRow::Card));
+            }
         }
         out
     }
@@ -3170,8 +3298,9 @@ impl View {
                     let is_active_squad = squad.id == self.layout.active_squad;
                     let (text, flags, fg) = match row.tab {
                         None => {
-                            let expanded = self.expanded.contains(&squad.id);
-                            let caret = if expanded { '▾' } else { '▸' };
+                            let caret = view_caret(
+                                self.section_view(&SectionKey::Squad(squad.name.clone())),
+                            );
                             // `*` after the caret marks the active squad so
                             // activity survives weak-BOLD themes and manual
                             // collapse (x-2f99); replaces the space, so row
@@ -3297,8 +3426,15 @@ impl View {
                         style.fg,
                     )
                 }
-                DisplayRow::Header { label, rollup } => (
-                    header_band_text(label, &rollup, text_w),
+                DisplayRow::Header {
+                    label,
+                    rollup,
+                    view,
+                    ..
+                } => (
+                    // (x-975a) The caret leads a `~` header exactly as it leads
+                    // a squad row, so both read as the same cycleable control.
+                    header_band_text(&format!("{}{label}", view_caret(view)), &rollup, text_w),
                     // A section header is never the active squad, so it is the
                     // inactive band (INVERSE+DIM) - one grammar with the squad
                     // rows above.
@@ -3433,6 +3569,11 @@ enum DisplayRow<'a> {
     Header {
         label: &'static str,
         rollup: Vec<(LatticeState, usize)>,
+        /// (x-975a) Which section this header owns, so a click cycles it
+        /// without the action path re-deriving the section from `label`.
+        key: SectionKey,
+        /// The section's view state at fold time, for the caret glyph.
+        view: SectionView,
     },
     /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
     /// list. A click opens the name-input overlay.
@@ -3461,6 +3602,30 @@ fn glyph_cols(ch: char) -> usize {
         2
     } else {
         1
+    }
+}
+
+/// The [`SectionKey`] for a squad id against a given layout. `None` for an id
+/// the layout does not carry - the caller then has no section to act on, which
+/// is the correct no-op rather than minting a key for a dead squad.
+fn squad_key(layout: &LayoutView, id: u64) -> Option<SectionKey> {
+    layout
+        .squads
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| SectionKey::Squad(s.name.clone()))
+}
+
+/// The caret glyph per view state. `LiveOnly` is the HOLLOW triangle against
+/// `Expanded`'s filled one - the same hollow/filled discriminator the icon
+/// lattice already uses for `○` idle vs `●` working, so the middle state is
+/// legible without a new indicator element (the header's `✗N` rollup, which
+/// paints in every state, is what says how many rows are hidden).
+fn view_caret(v: SectionView) -> char {
+    match v {
+        SectionView::Expanded => '▾',
+        SectionView::LiveOnly => '▿',
+        SectionView::Collapsed => '▸',
     }
 }
 
@@ -3521,7 +3686,8 @@ enum ChromeHit {
     /// Open the new-workspace name-input overlay (x-9e5e); the `+` footer.
     OpenCreate,
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
-    ToggleExpand(u64),
+    /// (x-975a) Advance one sideline section through the view cycle.
+    CycleSection(SectionKey),
     /// Open the sideline MENU popup anchored at the footer's menu cell (x-8ccf
     /// US4). Carries the click cell so the popup anchors under the pointer.
     OpenSidelineMenu {
@@ -5246,6 +5412,13 @@ async fn dispatch_event(
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
         }
+        Event::CycleSection => {
+            // Pure local state, no I/O - usable even when the socket write path
+            // is failing (same posture as the click path).
+            if let Some(key) = squad_key(&view.layout, view.layout.active_squad) {
+                view.cycle_section(key);
+            }
+        }
         Event::ShowKeys => {
             view.open_keys_modal();
         }
@@ -5399,7 +5572,7 @@ async fn apply_hit(
         ChromeHit::OpenCreate => view.open_create(),
         // Pure state flip, no I/O - usable even when the socket write path
         // is failing (x-2f99, AC1-FR).
-        ChromeHit::ToggleExpand(id) => view.toggle_expand(id),
+        ChromeHit::CycleSection(key) => view.cycle_section(key),
         // x-8ccf US4: open the sideline MENU popup anchored at the clicked cell.
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
@@ -6532,12 +6705,16 @@ async fn selector_keys(
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
                     _ => None,
                 };
-                if let Some(sq) = squad {
-                    if k == b'l' {
-                        view.expanded.insert(sq);
+                // `l`/`h` stay the EXPLICIT open/close pair (x-975a keeps the
+                // tri-state cycle on the header click and leader+z); `l` from
+                // live-only opens back to the full section.
+                if let Some(key) = squad.and_then(|sq| squad_key(&view.layout, sq)) {
+                    let next = if k == b'l' {
+                        SectionView::Expanded
                     } else {
-                        view.expanded.remove(&sq);
-                    }
+                        SectionView::Collapsed
+                    };
+                    view.set_section_view(key, next);
                 }
             }
             b'\r' | b'\n' => {
@@ -9089,7 +9266,7 @@ mod tests {
             Some(ChromeHit::Notice(_)) => "Notice",
             Some(ChromeHit::Confirm(_)) => "Confirm",
             Some(ChromeHit::OpenCreate) => "OpenCreate",
-            Some(ChromeHit::ToggleExpand(_)) => "ToggleExpand",
+            Some(ChromeHit::CycleSection(_)) => "CycleSection",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
             Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
         }
@@ -9134,7 +9311,7 @@ mod tests {
         // never a tab.
         assert!(matches!(
             view.chrome_hit(0, 2),
-            Some(ChromeHit::ToggleExpand(1))
+            Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
         ));
     }
 
@@ -9148,7 +9325,7 @@ mod tests {
         let view = two_pane_view();
         assert!(matches!(
             view.chrome_hit(0, 4),
-            Some(ChromeHit::ToggleExpand(1))
+            Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
         ));
         assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
         // The Blank spacer row is inert.
@@ -9200,8 +9377,8 @@ mod tests {
     #[test]
     fn view_new_seeds_expanded_with_active_squad() {
         let view = two_pane_view();
-        assert!(view.expanded.contains(&1));
-        assert!(!view.expanded.contains(&2));
+        assert!(view.squad_view(1) == SectionView::Expanded);
+        assert!(view.squad_view(2) == SectionView::Collapsed);
     }
 
     // AC1-HP + Locked 3: activation auto-expands the newly active squad and
@@ -9210,9 +9387,12 @@ mod tests {
     fn set_layout_auto_expands_on_activation_change() {
         let mut view = two_pane_view();
         view.set_layout(two_squad_layout(2));
-        assert!(view.expanded.contains(&2), "newly active squad expands");
         assert!(
-            view.expanded.contains(&1),
+            view.squad_view(2) == SectionView::Expanded,
+            "newly active squad expands"
+        );
+        assert!(
+            view.squad_view(1) == SectionView::Expanded,
             "activation never collapses others"
         );
     }
@@ -9222,17 +9402,17 @@ mod tests {
     #[test]
     fn manual_collapse_survives_same_active_layout_push() {
         let mut view = two_pane_view();
-        view.toggle_expand(1);
-        assert!(!view.expanded.contains(&1));
+        view.cycle_squad(1);
+        assert!(view.squad_view(1) == SectionView::Collapsed);
         view.set_layout(two_squad_layout(1));
         assert!(
-            !view.expanded.contains(&1),
+            view.squad_view(1) == SectionView::Collapsed,
             "a push with an unchanged active_squad must not re-expand"
         );
         // A real activation change still re-expands on re-activation.
         view.set_layout(two_squad_layout(2));
         view.set_layout(two_squad_layout(1));
-        assert!(view.expanded.contains(&1));
+        assert!(view.squad_view(1) == SectionView::Expanded);
     }
 
     // AC3-EDGE: an expanded squad removed server-side leaves `expanded`.
@@ -9242,8 +9422,11 @@ mod tests {
         let mut layout = two_squad_layout(2);
         layout.squads.remove(0); // squad 1 (expanded) vanishes
         view.set_layout(layout);
-        assert!(!view.expanded.contains(&1), "dead id pruned");
-        assert!(view.expanded.contains(&2));
+        assert!(
+            view.squad_view(1) == SectionView::Collapsed,
+            "dead id pruned"
+        );
+        assert!(view.squad_view(2) == SectionView::Expanded);
     }
 
     // A synthetic mission squad has no `active_squad` moment to auto-expand
@@ -9257,7 +9440,10 @@ mod tests {
         let mid = mission_meta(1, "mux-squad  1/2").id;
         layout.squads.push(mission_meta(1, "mux-squad  1/2"));
         view.set_layout(layout);
-        assert!(view.expanded.contains(&mid), "new mission seeds expanded");
+        assert!(
+            view.squad_view(mid) == SectionView::Expanded,
+            "new mission seeds expanded"
+        );
     }
 
     // A manual collapse of a mission squad must survive later ticks the same
@@ -9272,11 +9458,11 @@ mod tests {
         let mid = mission_meta(7, "mux-squad  0/3").id;
         let mut view = two_pane_view();
         view.set_layout(mission_layout(1));
-        view.toggle_expand(mid);
-        assert!(!view.expanded.contains(&mid));
+        view.cycle_squad(mid);
+        assert!(view.squad_view(mid) == SectionView::Collapsed);
         view.set_layout(mission_layout(1));
         assert!(
-            !view.expanded.contains(&mid),
+            view.squad_view(mid) == SectionView::Collapsed,
             "an already-known mission must not re-seed on every tick"
         );
     }
@@ -9298,31 +9484,38 @@ mod tests {
             .position(|r| matches!(r, DisplayRow::Sel(row) if row.squad == mid))
             .expect("mission header row");
         assert!(
-            matches!(view.row_action(i), Some(ChromeHit::ToggleExpand(id)) if id == mid),
+            matches!(view.row_action(i), Some(ChromeHit::CycleSection(_))),
             "a mission header must toggle, never SelectSquad"
         );
     }
 
-    // AC3-HP: acting on the active squad row toggles locally - twice
-    // round-trips - and apply_hit's ToggleExpand arm does no I/O (AC1-FR is
-    // structural: toggle_expand never touches the socket).
+    // AC3-HP: acting on the active squad row cycles locally - with no dead
+    // rows the cycle is binary, so two clicks round-trip - and apply_hit's
+    // CycleSection arm does no I/O (AC1-FR is structural: cycle_section never
+    // touches the socket).
     #[test]
-    fn toggle_expand_round_trips() {
+    fn cycle_section_round_trips_without_dead_rows() {
         let mut view = two_pane_view();
         assert!(matches!(
             view.row_action(0),
-            Some(ChromeHit::ToggleExpand(1))
+            Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
         ));
-        view.toggle_expand(1);
-        assert!(!view.expanded.contains(&1), "first toggle collapses");
+        view.cycle_squad(1);
+        assert!(
+            view.squad_view(1) == SectionView::Collapsed,
+            "first toggle collapses"
+        );
         // Collapsed, the active row still resolves to the toggle (rows are
         // now [sq1, sq2, footer]).
         assert!(matches!(
             view.row_action(0),
-            Some(ChromeHit::ToggleExpand(1))
+            Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
         ));
-        view.toggle_expand(1);
-        assert!(view.expanded.contains(&1), "second toggle re-expands");
+        view.cycle_squad(1);
+        assert!(
+            view.squad_view(1) == SectionView::Expanded,
+            "second toggle re-expands"
+        );
     }
 
     // AC1-UI: exactly one squad row carries the `*` glyph - the active one -
@@ -9333,9 +9526,247 @@ mod tests {
         let text = frame_text(&view.compose());
         assert!(text.contains("▾*footnote"), "expanded active carries *");
         assert!(text.contains("▸ notes"), "inactive carries no *");
-        view.toggle_expand(1);
+        view.cycle_squad(1);
         let text = frame_text(&view.compose());
         assert!(text.contains("▸*footnote"), "collapsed active keeps *");
+    }
+
+    // (x-975a) A squad row with interleaved live/exited agents, for the
+    // tri-state filtering tests below.
+    fn view_with_dead_interleaved() -> View {
+        let row = |name: &str, exited: bool| AgentRow {
+            squad: Some(1),
+            name: name.into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab: None,
+            account: None,
+            updated_at: None,
+            pr: None,
+        };
+        view_with_agents(vec![
+            row("live-a", false),
+            row("dead-a", true),
+            row("live-b", false),
+            row("dead-b", true),
+        ])
+    }
+
+    fn agent_names(view: &View) -> Vec<String> {
+        view.display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // AC4-UI: with exited agents interleaved, click 1 hides exactly the exited
+    // rows in place (live order preserved), click 2 collapses all, click 3
+    // restores Expanded.
+    #[test]
+    fn cycle_section_tri_state_filters_then_collapses_then_restores() {
+        let mut view = view_with_dead_interleaved();
+        assert_eq!(
+            agent_names(&view),
+            vec!["live-a", "dead-a", "live-b", "dead-b"],
+            "expanded shows every row"
+        );
+
+        view.cycle_squad(1);
+        assert_eq!(view.squad_view(1), SectionView::LiveOnly);
+        assert_eq!(
+            agent_names(&view),
+            vec!["live-a", "live-b"],
+            "live-only hides exactly the exited rows, order preserved"
+        );
+
+        view.cycle_squad(1);
+        assert_eq!(view.squad_view(1), SectionView::Collapsed);
+        assert!(agent_names(&view).is_empty(), "collapsed hides every row");
+
+        view.cycle_squad(1);
+        assert_eq!(view.squad_view(1), SectionView::Expanded);
+        assert_eq!(
+            agent_names(&view).len(),
+            4,
+            "cycle restores the full section"
+        );
+    }
+
+    // AC5-EDGE: a squad with no exited rows skips LiveOnly entirely - the
+    // middle state would hide nothing and read as a dead click.
+    #[test]
+    fn cycle_section_skips_live_only_when_no_row_is_dead() {
+        let mut view = two_pane_view();
+        assert_eq!(view.squad_view(1), SectionView::Expanded);
+        view.cycle_squad(1);
+        assert_eq!(
+            view.squad_view(1),
+            SectionView::Collapsed,
+            "straight to collapsed"
+        );
+    }
+
+    // AC12-FR: a section left in LiveOnly whose last exited agent is reaped
+    // elsewhere paints no `✗` count and advances to Collapsed on the next
+    // click - it can never wedge in a state that now hides nothing.
+    #[test]
+    fn live_only_advances_after_dead_rows_disappear() {
+        let mut view = view_with_dead_interleaved();
+        view.cycle_squad(1);
+        assert_eq!(view.squad_view(1), SectionView::LiveOnly);
+
+        // The reap lands as a plain layout push with the exited rows gone.
+        view.layout.agents.retain(|a| !a.exited);
+        assert!(
+            !frame_text(&view.compose()).contains('✗'),
+            "no dead rows left, so no ✗ count"
+        );
+        view.cycle_squad(1);
+        assert_eq!(
+            view.squad_view(1),
+            SectionView::Collapsed,
+            "no stuck LiveOnly"
+        );
+    }
+
+    // The caret discriminates all three states - hollow `▿` for live-only
+    // against filled `▾` for expanded, so the middle state is never
+    // indistinguishable from the full one.
+    #[test]
+    fn caret_glyph_distinguishes_all_three_view_states() {
+        let mut view = view_with_dead_interleaved();
+        assert!(frame_text(&view.compose()).contains("▾*footnote"));
+        view.cycle_squad(1);
+        assert!(
+            frame_text(&view.compose()).contains("▿*footnote"),
+            "live-only carries the hollow caret"
+        );
+        view.cycle_squad(1);
+        assert!(frame_text(&view.compose()).contains("▸*footnote"));
+    }
+
+    // The work queue is binary in both directions: a card has no exited state,
+    // so LiveOnly would be meaningless there.
+    #[test]
+    fn work_queue_section_is_binary_and_hides_cards_when_collapsed() {
+        let mut view = two_pane_view();
+        view.layout.backlog = vec![BacklogCard {
+            id: "x-0001".into(),
+            slug: "a-card".into(),
+            state: CardState::Ready,
+            priority: "p2".into(),
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+        }];
+        let cards = |v: &View| {
+            v.display_rows()
+                .iter()
+                .filter(|r| matches!(r, DisplayRow::Card(_)))
+                .count()
+        };
+        assert_eq!(cards(&view), 1, "queue renders expanded by default");
+
+        view.cycle_section(SectionKey::WorkQueue);
+        assert_eq!(
+            view.section_view(&SectionKey::WorkQueue),
+            SectionView::Collapsed,
+            "binary: straight to collapsed, never LiveOnly"
+        );
+        assert_eq!(cards(&view), 0, "collapsed hides the cards");
+
+        view.cycle_section(SectionKey::WorkQueue);
+        assert_eq!(
+            view.section_view(&SectionKey::WorkQueue),
+            SectionView::Expanded
+        );
+    }
+
+    // A `~` section header is CLICKABLE (it cycles its own view) but stays
+    // inert to the selector cursor - the x-260a "cursor never rests on a
+    // label" invariant is preserved, not widened.
+    #[test]
+    fn section_header_is_clickable_but_never_selector_selectable() {
+        let view = view_with_agents(vec![AgentRow {
+            squad: Some(99), // no such squad -> orphan -> `~ elsewhere`
+            name: "stray".into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab: None,
+            account: None,
+            updated_at: None,
+            pr: None,
+        }]);
+        let hdr = view
+            .display_rows()
+            .iter()
+            .position(
+                |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere),
+            )
+            .expect("elsewhere header present");
+        assert!(matches!(
+            view.row_action(hdr),
+            Some(ChromeHit::CycleSection(SectionKey::Elsewhere))
+        ));
+        assert!(
+            row_is_inert(&view.display_rows()[hdr]),
+            "still inert: the selector cursor skips it"
+        );
+        assert_ne!(view.selector_anchor(hdr), Some(hdr), "cursor steps off it");
+    }
+
+    // A persisted state wins over the active-squad seed on a fresh attach, and
+    // an operator cycle writes back - the restart-survival contract.
+    #[test]
+    fn persisted_section_state_survives_a_fresh_view() {
+        let dir = std::env::temp_dir().join(format!("fno-view-client-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::view_store::set_test_path(&dir);
+
+        // A cycle on the active squad persists.
+        let mut view = view_with_dead_interleaved();
+        view.cycle_squad(1);
+        assert_eq!(view.squad_view(1), SectionView::LiveOnly);
+
+        // A fresh attach restores it INSTEAD of re-seeding the active squad
+        // expanded, and a squad absent from this layout is pruned away.
+        let restored = two_pane_view();
+        assert_eq!(
+            restored.squad_view(1),
+            SectionView::LiveOnly,
+            "persisted state beats the active-squad seed"
+        );
+        assert!(
+            !crate::view_store::load()
+                .keys()
+                .any(|k| matches!(k, SectionKey::Squad(n) if n != "footnote" && n != "notes")),
+            "only live squads persist"
+        );
+
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // AC2-EDGE: a zero-tab active squad expands to a bare `▾` caret - no tab
@@ -9461,8 +9892,13 @@ mod tests {
             Some(ChromeHit::OpenAttachPlace { id, squad }) if id == "c19cd2c3" && squad.is_none()
         ));
         assert!(matches!(view.chrome_hit(9, 4), Some(ChromeHit::Notice(_))));
-        // The "~ elsewhere" header row is inert.
-        assert!(view.chrome_hit(7, 4).is_none());
+        // (x-975a) The "~ elsewhere" header cycles its own section view. It
+        // stays `row_is_inert` (the selector cursor still skips it) - clickable
+        // is not selectable.
+        assert!(matches!(
+            view.chrome_hit(7, 4),
+            Some(ChromeHit::CycleSection(SectionKey::Elsewhere))
+        ));
         // The "+ new workspace" footer opens the create overlay.
         assert!(matches!(view.chrome_hit(5, 4), Some(ChromeHit::OpenCreate)));
     }
@@ -11570,7 +12006,7 @@ mod tests {
             pr: None,
         };
         let mut v = view_with_agents(vec![tomb]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         let idx = agent_row_at(&v, |a| a.tombstone);
         v.selector = Some(idx);
         let mut buf: Vec<u8> = Vec::new();
@@ -11617,7 +12053,7 @@ mod tests {
         // a StopAgent confirm carrying the row's name; nothing is sent until the
         // confirm commits, and the selector closes (open_confirm).
         let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"x", &mut buf).await.unwrap();
@@ -11637,7 +12073,7 @@ mod tests {
         // US2 / AC2-HP (client half): x on an exited row arms a RemoveAgent
         // confirm - the row's own state (exited) selects the verb, no timer.
         let mut v = view_with_agents(vec![lifecycle_row("worker-b", true, false)]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.selector = Some(agent_row_at(&v, |a| a.name == "worker-b"));
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"x", &mut buf).await.unwrap();
@@ -11658,7 +12094,7 @@ mod tests {
         let mut pane_hosted = lifecycle_row("shell", false, false);
         pane_hosted.pane_id = Some(99);
         let mut v = view_with_agents(vec![pane_hosted]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.selector = Some(agent_row_at(&v, |a| a.name == "shell"));
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"x", &mut buf).await.unwrap();
@@ -11677,7 +12113,7 @@ mod tests {
         // AC4-UI (x-260a): a too-short terminal refuses with a notice rather than
         // arm an invisible confirm - same rule the squad arm follows.
         let mut v = view_with_agents(vec![lifecycle_row("worker-c", false, false)]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.term.0 = MIN_ROWS_FOR_STATUS - 1;
         v.selector = Some(agent_row_at(&v, |a| a.name == "worker-c"));
         selector_keys(&mut v, b"x", &mut Vec::new()).await.unwrap();
@@ -11694,7 +12130,7 @@ mod tests {
         // confirm (no payload) and sends nothing until it commits. Contextual on
         // an agent row - headers stay inert, no selector surgery.
         let mut v = view_with_agents(vec![lifecycle_row("worker-a", true, false)]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"X", &mut buf).await.unwrap();
@@ -11731,7 +12167,7 @@ mod tests {
         // AC1-UI (x-260a): a too-short terminal refuses with a notice rather than
         // arm an invisible confirm, matching the per-row `x` arm.
         let mut v = view_with_agents(vec![lifecycle_row("worker-a", true, false)]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.term.0 = MIN_ROWS_FOR_STATUS - 1;
         v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
         selector_keys(&mut v, b"X", &mut Vec::new()).await.unwrap();
@@ -11765,7 +12201,7 @@ mod tests {
         let mut row = lifecycle_row("ext-a", false, true);
         row.attach_id = Some("deadbeef".into());
         let mut v = view_with_agents(vec![row]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.selector = Some(agent_row_at(&v, |a| a.name == "ext-a"));
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"x", &mut buf).await.unwrap();
@@ -11786,7 +12222,7 @@ mod tests {
         let mut row = lifecycle_row("ext-b", true, true);
         row.attach_id = Some("cafef00d".into());
         let mut v = view_with_agents(vec![row]);
-        v.expanded.insert(1);
+        v.set_squad_view(1, SectionView::Expanded);
         v.selector = Some(agent_row_at(&v, |a| a.name == "ext-b"));
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"x", &mut buf).await.unwrap();
@@ -12157,7 +12593,10 @@ mod tests {
         // AC1-HP + Locked 3: the flat catalog lists a COLLAPSED squad's tabs too
         // (the sideline gates tabs behind expand; the navigator never does).
         let v = two_pane_view(); // footnote(active, tabs 1&2), notes(collapsed, tab 1)
-        assert!(!v.expanded.contains(&2), "notes is collapsed");
+        assert!(
+            v.squad_view(2) == SectionView::Collapsed,
+            "notes is collapsed"
+        );
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         for want in [
             "footnote",

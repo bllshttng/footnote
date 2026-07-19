@@ -103,6 +103,10 @@ pub enum Event {
     /// Reorder the active tab one slot within its squad (leader+`<`/`>`,
     /// x-0333). The client resolves the active tab's stable id before sending.
     ReorderTab(i32),
+    /// Cycle the ACTIVE squad's sideline section one step through
+    /// expanded -> live-only -> collapsed (leader+z, x-975a). The client owns
+    /// the state and resolves the active squad; the chord only fires the step.
+    CycleSection,
     /// Swallowed unmapped chord: the client sounds BEL.
     Bell,
 }
@@ -386,6 +390,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         b(b'p', "p", Cmd(C::PrevTab), WorkspacesTabs, "prev tab"),
         b(b'&', "&", Cmd(C::CloseTab), WorkspacesTabs, "close tab"),
         b(b',', ",", OpenRename, WorkspacesTabs, "rename tab"),
+        b(
+            b'z',
+            "z",
+            CycleSection,
+            WorkspacesTabs,
+            "cycle section view",
+        ),
         b(b'<', "<", ReorderTab(-1), WorkspacesTabs, "move tab left"),
         b(b'>', ">", ReorderTab(1), WorkspacesTabs, "move tab right"),
         // navigation (scrollback blocks + goto/search)
