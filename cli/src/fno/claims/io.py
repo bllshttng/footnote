@@ -89,7 +89,7 @@ def global_claims_root() -> Path:
 #                  transcript (codex P1).
 # Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
 # their own scope and are NOT listed here; they keep the cwd/env default.
-_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile", "session"})
+_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile", "session", "groom"})
 
 
 def claims_root_for(key: str) -> Path | None:
@@ -97,7 +97,9 @@ def claims_root_for(key: str) -> Path | None:
 
     A claim keyed on a globally-unique id (``node:``/``dispatch:``/
     ``reconcile:`` name the same global graph node; ``session:`` names a durable
-    claude session) is rooted at the global ($HOME / ``$FNO_CLAIMS_ROOT``) root,
+    claude session; ``groom:<date>`` names a day of the global graph, so the
+    daily pass dedups across repos) is rooted at the global
+    ($HOME / ``$FNO_CLAIMS_ROOT``) root,
     so a writer and a reader in different repos/worktrees coordinate on the SAME
     lock. A claim keyed on a
     repo-local resource (``walker:<repo_root>``) or any unrecognized / colon-less
