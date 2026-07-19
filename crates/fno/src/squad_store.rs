@@ -65,6 +65,14 @@ pub struct StoredMember {
     pub attach_id: String,
     #[serde(default)]
     pub tombstone: bool,
+    /// (x-0f9d US4) The name of the tab hosting this member's pane at store
+    /// time, so a chosen tab name survives a mux restart: restore names the
+    /// re-derived tab from it. Re-derived fresh on every persist so a rename is
+    /// captured. `#[serde(default)]` keeps a pre-x-0f9d store readable (absent
+    /// -> `None` -> the tab restores unnamed, exactly as before) and holds
+    /// STORE_VERSION at 1 (an additive field never quarantines existing squads).
+    #[serde(default)]
+    pub tab_name: Option<String>,
 }
 
 /// One persisted named workspace.
@@ -599,6 +607,7 @@ mod tests {
         StoredMember {
             attach_id: id.into(),
             tombstone: false,
+            tab_name: None,
         }
     }
 
@@ -624,6 +633,36 @@ mod tests {
         assert_eq!(second.squads.len(), 1, "upsert replaces, never dupes");
         assert_eq!(second.squads[0].members.len(), 2);
         assert_eq!(second.squads[0].created_at, created, "created_at preserved");
+    }
+
+    #[test]
+    fn tab_name_roundtrips_and_absent_field_loads_none() {
+        // x-0f9d US4: a member's tab_name persists and reloads; a pre-x-0f9d
+        // store written without the field is wire-tolerant (loads as None ->
+        // the tab restores unnamed), so STORE_VERSION stays 1.
+        let s = Scratch::new("tabname");
+        let mut named = m("c19cd2c3");
+        named.tab_name = Some("reviews".into());
+        upsert("work", &["/repo".into()], &[named]).unwrap();
+        let loaded = load();
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name.as_deref(),
+            Some("reviews"),
+            "chosen tab name round-trips"
+        );
+
+        // A hand-written v1 store with no tab_name field must not quarantine.
+        std::fs::write(
+            s.file(),
+            r#"{"version":1,"squads":[{"name":"legacy","origins":[],"members":[{"attach_id":"deadbeef","tombstone":false}],"created_at":""}]}"#,
+        )
+        .unwrap();
+        let loaded = load();
+        assert!(loaded.notice.is_none(), "absent field is not corruption");
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name, None,
+            "absent tab_name -> None"
+        );
     }
 
     #[test]

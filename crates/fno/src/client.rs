@@ -339,6 +339,13 @@ impl Drop for TerminalGuard {
 // View state + pure composition
 // ---------------------------------------------------------------------------
 
+/// An agent row's hosting-tab context, resolved inside-out (x-0f9d US3): a
+/// chosen tab name when the tab is named, else its `·N` ordinal.
+enum TabContext {
+    Named(String),
+    Ordinal(usize),
+}
+
 /// The last `Layout` as the client holds it.
 struct LayoutView {
     squads: Vec<SquadMeta>,
@@ -504,6 +511,17 @@ struct View {
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
+    /// (x-0f9d US1) Armed when a bare NewTab (`c` / the strip `+`) is
+    /// dispatched: `Some(baseline)` where `baseline` is the greatest tab id in
+    /// the active squad at send time, or `None` when the squad had no tabs. The
+    /// layout that materializes a tab beyond that baseline opens the rename
+    /// overlay on it, so a create-time name prompt reuses the x-c150 rename
+    /// machinery with no new command or overlay. Guarding on the baseline (not a
+    /// bare bool) keeps a routine scrape-tick layout - which can arrive before
+    /// the server has processed NewTab - from arming on the wrong (old) tab. The
+    /// nested Option distinguishes "no tabs before" from "max id 0", so the
+    /// first tab (id 0) still triggers (gemini review).
+    pending_new_tab: Option<Option<u64>>,
     /// (x-8f11) Multi-select marks for bulk recruit: the `attach_id`s toggled
     /// with `space` in the sideline selector. Client-local ephemera keyed by id,
     /// so a marked row surviving a filter/scroll keeps its mark and a vanished
@@ -981,6 +999,7 @@ impl View {
             create_esc: Vec::new(),
             rename: None,
             rename_esc: Vec::new(),
+            pending_new_tab: None,
             marks: std::collections::HashSet::new(),
             recruit: None,
             recruit_esc: Vec::new(),
@@ -1309,6 +1328,64 @@ impl View {
         self.clear_peek();
         self.rename = Some((target, String::new()));
         self.rename_esc.clear();
+    }
+
+    /// The greatest tab id in the active squad (ids are monotonic + never
+    /// reused, so the max is the newest tab), or `None` when the active squad
+    /// is absent/empty (x-0f9d US1). Used only as the arm-time baseline.
+    fn active_squad_max_tab_id(&self) -> Option<u64> {
+        self.layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad)
+            .and_then(|s| s.tabs.iter().map(|t| t.id).max())
+    }
+
+    /// The id of the active squad's ACTIVE tab (x-0f9d US1). For the active
+    /// squad the server projects `active_tab` per-viewer, and a NewTab switches
+    /// only its sender to the new tab (Locked 3), so this identifies THIS
+    /// client's own newly-created tab - not a concurrent tab another client
+    /// created in the same squad (codex review).
+    fn active_squad_active_tab_id(&self) -> Option<u64> {
+        self.layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad)
+            .and_then(|s| s.tabs.get(s.active_tab).map(|t| t.id))
+    }
+
+    /// Arm the create-time name prompt for the NEXT tab (x-0f9d US1): a bare
+    /// NewTab (keyboard `c`, strip `+`) records the current newest tab id so
+    /// the layout that adds a higher one opens rename on it. Other commands are
+    /// ignored, so only an explicit create arms the prompt.
+    fn note_command_sent(&mut self, cmd: &Command) {
+        if matches!(cmd, Command::NewTab) {
+            self.pending_new_tab = Some(self.active_squad_max_tab_id());
+        }
+    }
+
+    /// If a create-time name prompt is armed and THIS client's active tab is a
+    /// newly-minted one (its id is beyond the arm-time baseline), open the
+    /// x-c150 rename overlay on it (x-0f9d US1): type + Enter names it, Esc /
+    /// empty Enter leaves it unnamed. Called from [`View::set_layout`] after the
+    /// swap. Keying on the active tab (not the max id) means a concurrent tab
+    /// another client created in the same squad never steals this prompt.
+    fn maybe_prompt_new_tab_name(&mut self) {
+        if let Some(baseline) = self.pending_new_tab {
+            let fresh = match (baseline, self.active_squad_active_tab_id()) {
+                // No tabs before -> any active tab that now exists is the new one.
+                (None, Some(active_id)) => Some(active_id),
+                // Had tabs -> the sender's active tab is the new one iff its id
+                // is beyond the baseline (the only id > baseline is the fresh
+                // tab; a scrape tick still on the old active tab does not fire).
+                (Some(prev), Some(active_id)) if active_id > prev => Some(active_id),
+                _ => None,
+            };
+            if let Some(new_id) = fresh {
+                self.pending_new_tab = None;
+                self.open_rename(RenameTarget::Tab(new_id));
+            }
+        }
     }
 
     /// Open the move-tab-to-squad picker modally for `tab` (x-96e8), listing the
@@ -1781,7 +1858,7 @@ impl View {
                 hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
             });
             for (t, tab) in s.tabs.iter().enumerate() {
-                let tab_text = tab_label_text(&tab.name, t);
+                let tab_text = tab_label_text(&tab.name, t, tab.named);
                 out.push(NavRow {
                     label: format!("{} › {}", s.name, tab_text),
                     state: PaneState::Idle,
@@ -1809,10 +1886,14 @@ impl View {
                 }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
-                // (x-0090) A pane-hosted agent names its tab with a `·N` ordinal,
-                // coherent with the sideline; a watch-only row has no tab.
-                let label = match a.tab.and_then(|tid| self.tab_ordinal(a.squad, tid)) {
-                    Some(n) => format!("{} › {} ·{n}", s.name, a.name),
+                // (x-0090, x-0f9d US3) A pane-hosted agent's context resolves
+                // inside-out: a NAMED tab leads with the agent then the tab name
+                // (`build › reviews`); an unnamed tab keeps today's
+                // `{squad} › {agent} ·N`; a watch-only row (no tab) falls back
+                // to the squad.
+                let label = match self.agent_tab_context(a.squad, a.tab) {
+                    Some(TabContext::Named(name)) => format!("{} › {}", a.name, name),
+                    Some(TabContext::Ordinal(n)) => format!("{} › {} ·{n}", s.name, a.name),
                     None => format!("{} › {}", s.name, a.name),
                 };
                 out.push(NavRow {
@@ -2063,6 +2144,10 @@ impl View {
                 self.hover_pending = None;
             }
         }
+        // (x-0f9d US1) Last, after every re-anchor: if a bare NewTab is
+        // pending, the layout that just added the tab opens rename on it. Last
+        // so `open_rename` clearing the selector/nav is never re-clobbered.
+        self.maybe_prompt_new_tab_name();
     }
 
     fn set_notice(&mut self, text: String) {
@@ -2812,7 +2897,7 @@ impl View {
             hit: None,
         });
         for (i, t) in s.tabs.iter().enumerate() {
-            let label = tab_label_text(&t.name, i);
+            let label = tab_label_text(&t.name, i, t.named);
             // x-df4c US4: a leading max-severity rollup glyph so a background
             // tab's blocked/working pane reads at the strip without opening it,
             // carrying the lattice's weight and color. `None` (no live panes:
@@ -2900,22 +2985,27 @@ impl View {
         Some((start, text))
     }
 
+    /// The hosting-tab context for an agent row, resolved inside-out (x-0f9d
+    /// US3): a NAMED tab supplies its name; an unnamed tab supplies the `·N`
+    /// ordinal (today's form). `None` = the row has no tab (a paneless /
+    /// watch-only row), so the caller falls back to the squad name.
+    fn agent_tab_context(&self, squad: Option<u64>, tab: Option<TabId>) -> Option<TabContext> {
+        let sid = squad?;
+        let tid = tab?;
+        let s = self.layout.squads.iter().find(|s| s.id == sid)?;
+        let (i, t) = s.tabs.iter().enumerate().find(|(_, t)| t.id == tid)?;
+        Some(if t.named {
+            TabContext::Named(t.name.clone())
+        } else {
+            TabContext::Ordinal(i + 1)
+        })
+    }
+
     /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
     /// squad's agent rows, then the `+ new workspace` footer, a catch-all
     /// section for agents matched to no squad, and the work-queue lane. The
     /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
     /// the leader+w selector all index into it.
-    /// (x-0090) The 1-based display ordinal of `tab_id` within its squad,
-    /// derived from the `Layout` the client already holds (Discretion 2): a
-    /// closed tab shifts the survivors, so the next push recomputes the right
-    /// ordinal (AC2-EDGE) with no server round-trip. `None` if the squad/tab
-    /// raced out of the layout - the row then renders without a suffix.
-    fn tab_ordinal(&self, squad: Option<u64>, tab_id: TabId) -> Option<usize> {
-        let sid = squad?;
-        let s = self.layout.squads.iter().find(|s| s.id == sid)?;
-        s.tabs.iter().position(|t| t.id == tab_id).map(|i| i + 1)
-    }
-
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
@@ -3083,7 +3173,7 @@ impl View {
                             // The same digit-collapse as the tab bar: a
                             // no-signal tab renders its bare ordinal (x-c150).
                             let label = match squad.tabs.get(t) {
-                                Some(tm) => tab_label_text(&tm.name, t),
+                                Some(tm) => tab_label_text(&tm.name, t, tm.named),
                                 None => (t + 1).to_string(),
                             };
                             (format!("  {marker}{label}"), 0, Color::Default)
@@ -3119,21 +3209,26 @@ impl View {
                         Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
                         None => format!(" {mark}{glyph} {}", a.name),
                     };
-                    // (x-0090) A pane row names its tab with a `·N` ordinal; an
-                    // orphan row names its repo with a ` (basename)` suffix. The
-                    // two are mutually exclusive (a pane row has a tab, an orphan
-                    // is paneless), so at most one suffix ever lands.
-                    if let Some(ord) = a.tab.and_then(|tid| self.tab_ordinal(a.squad, tid)) {
-                        text.push_str(&format!(" ·{ord}"));
-                    } else if let Some(base) = a
-                        .cwd_base
-                        .as_deref()
-                        // (x-cd67 US2) When a subline carries the cwd on line 2,
-                        // the orphan basename suffix is suppressed on line 1 so
-                        // it does not duplicate (silent-failure-hunter guard).
-                        .filter(|_| !agent_has_subline(a))
-                    {
-                        text.push_str(&format!(" ({base})"));
+                    // (x-0090, x-0f9d US3) A pane row names its hosting tab
+                    // inside-out: a NAMED tab shows its name (`·reviews`), an
+                    // unnamed tab shows the `·N` ordinal. An orphan row (no tab)
+                    // instead names its repo with a ` (basename)` suffix. Tab vs
+                    // orphan are mutually exclusive, so at most one suffix lands.
+                    match self.agent_tab_context(a.squad, a.tab) {
+                        Some(TabContext::Named(name)) => text.push_str(&format!(" ·{name}")),
+                        Some(TabContext::Ordinal(ord)) => text.push_str(&format!(" ·{ord}")),
+                        None => {
+                            if let Some(base) = a
+                                .cwd_base
+                                .as_deref()
+                                // (x-cd67 US2) When a subline carries the cwd on
+                                // line 2, the orphan basename suffix is suppressed
+                                // on line 1 so it does not duplicate.
+                                .filter(|_| !agent_has_subline(a))
+                            {
+                                text.push_str(&format!(" ({base})"));
+                            }
+                        }
                     }
                     if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
                         text.push_str(": ");
@@ -3581,13 +3676,22 @@ const TAB_LABEL_W: usize = 14;
 /// `{ordinal}:{name}` with the name truncated to [`TAB_LABEL_W`] chars. The
 /// ordinal stays visible in every span because the `1-9 select tab` keys
 /// key off it (Locked 5).
-fn tab_label_text(name: &str, i: usize) -> String {
+fn tab_label_text(name: &str, i: usize, named: bool) -> String {
     let ordinal = (i + 1).to_string();
+    // Collapse (x-0f9d AC7, x-c150): a name equal to its own ordinal renders as
+    // the bare digit, byte-identical to an unnamed ordinal - even a chosen one.
     if name == ordinal {
         return ordinal;
     }
     let short: String = name.chars().take(TAB_LABEL_W).collect();
-    format!("{ordinal}:{short}")
+    if named {
+        // (x-0f9d US2, supersedes x-c150 Locked 5) A chosen name renders alone,
+        // never with a forced `{ordinal}:` prefix.
+        short
+    } else {
+        // A pane-derived or ordinal fallback keeps today's `{ordinal}:{label}`.
+        format!("{ordinal}:{short}")
+    }
 }
 
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
@@ -4871,6 +4975,7 @@ async fn dispatch_event(
                 .map_err(|e| format!("input send failed: {e}"))?;
         }
         Event::Cmd(cmd) => {
+            view.note_command_sent(&cmd);
             write_msg(sock_w, &ClientMsg::Command(cmd))
                 .await
                 .map_err(|e| format!("command send failed: {e}"))?;
@@ -5092,6 +5197,7 @@ async fn apply_hit(
     match hit {
         ChromeHit::Cmds(cmds) => {
             for cmd in cmds {
+                view.note_command_sent(&cmd);
                 write_msg(sock_w, &ClientMsg::Command(cmd))
                     .await
                     .map_err(|e| format!("command send failed: {e}"))?;
@@ -7696,6 +7802,7 @@ mod tests {
                 .map(|i| TabMeta {
                     id: (i - 1) as u64,
                     name: i.to_string(),
+                    named: false,
                     panes: Vec::new(),
                 })
                 .collect(),
@@ -7706,27 +7813,154 @@ mod tests {
     }
 
     #[test]
+    fn new_tab_prompt_arms_rename_on_the_materialized_tab() {
+        // x-0f9d US1: a bare NewTab arms a create-time name prompt; the layout
+        // that adds a higher-id tab opens the x-c150 rename overlay on it. A
+        // non-create command never arms it (frictionless: only an explicit
+        // create prompts).
+        let mut v = two_pane_view();
+        v.note_command_sent(&Command::SelectTab(0));
+        assert_eq!(v.pending_new_tab, None, "only NewTab arms the prompt");
+
+        // Active squad 1 has tabs 0,1 -> max id 1.
+        v.note_command_sent(&Command::NewTab);
+        assert_eq!(
+            v.pending_new_tab,
+            Some(Some(1)),
+            "armed with the current max tab id"
+        );
+
+        // Race guard: a layout with no higher-id tab leaves the prompt armed
+        // and opens no rename (a scrape tick can precede the server's NewTab).
+        v.maybe_prompt_new_tab_name();
+        assert!(v.rename.is_none(), "no new tab yet -> no prompt");
+        assert_eq!(v.pending_new_tab, Some(Some(1)), "still armed");
+
+        // Multi-client guard (codex review): another client creates tab id 5 in
+        // the same squad, so it appears in the broadcast layout with an id past
+        // the baseline - but it is NOT this client's active tab, so the prompt
+        // must NOT open on it.
+        v.layout.squads[0].tabs.push(TabMeta {
+            id: 5,
+            name: "6".into(),
+            named: false,
+            panes: Vec::new(),
+        });
+        v.maybe_prompt_new_tab_name();
+        assert!(
+            v.rename.is_none(),
+            "a concurrent client's tab never steals the prompt"
+        );
+        assert_eq!(
+            v.pending_new_tab,
+            Some(Some(1)),
+            "still armed for our own tab"
+        );
+
+        // Our own NewTab lands: tab id 2, and the server switched THIS client's
+        // view to it (active_tab). Rename opens on it, once.
+        v.layout.squads[0].tabs.push(TabMeta {
+            id: 2,
+            name: "3".into(),
+            named: false,
+            panes: Vec::new(),
+        });
+        v.layout.squads[0].active_tab = v.layout.squads[0].tabs.len() - 1;
+        v.maybe_prompt_new_tab_name();
+        assert_eq!(
+            v.rename.as_ref().map(|(t, _)| *t),
+            Some(RenameTarget::Tab(2)),
+            "rename armed on our own new tab, not the concurrent id-5 tab"
+        );
+        assert_eq!(v.pending_new_tab, None, "prompt consumed once");
+
+        // Baseline-None (gemini): an active squad with NO tabs arms with
+        // Some(None), and the FIRST tab - even id 0 - triggers the prompt, so
+        // the nested Option is not conflating "no tabs" with "max id 0".
+        let mut v2 = two_pane_view();
+        v2.layout.squads[0].tabs.clear();
+        v2.note_command_sent(&Command::NewTab);
+        assert_eq!(
+            v2.pending_new_tab,
+            Some(None),
+            "no baseline when squad is empty"
+        );
+        v2.layout.squads[0].tabs.push(TabMeta {
+            id: 0,
+            name: "1".into(),
+            named: false,
+            panes: Vec::new(),
+        });
+        v2.layout.squads[0].active_tab = 0;
+        v2.maybe_prompt_new_tab_name();
+        assert_eq!(
+            v2.rename.as_ref().map(|(t, _)| *t),
+            Some(RenameTarget::Tab(0)),
+            "the first tab (id 0) still triggers the prompt"
+        );
+    }
+
+    #[test]
     fn tab_bar_spans_label_named_tabs_and_collapse_bare_digits() {
-        // AC1-HP (render half) + AC1-EDGE: a no-signal name (== its ordinal)
-        // renders byte-for-byte today's `[N]` / ` N ` span; a real name
-        // renders `{ordinal}:{label}` (ordinal visible - Locked 5) truncated
-        // to TAB_LABEL_W.
+        // x-0f9d US2 (supersedes x-c150 Locked 5): an UNNAMED tab renders
+        // today's ordinal span byte-identically; a CHOSEN name renders ALONE,
+        // no forced ordinal, truncated to TAB_LABEL_W.
         let mut view = two_pane_view();
         let spans = view.tab_bar_spans();
-        assert_eq!(spans[1].text, " 1 ", "digit collapse: zero regression");
+        assert_eq!(
+            spans[1].text, " 1 ",
+            "unnamed digit collapse: zero regression"
+        );
         assert_eq!(spans[2].text, "[2]");
         view.layout.squads[0].tabs[0].name = "x-abcd".into();
+        view.layout.squads[0].tabs[0].named = true;
         view.layout.squads[0].tabs[1].name = "a-very-long-worktree-name".into();
+        view.layout.squads[0].tabs[1].named = true;
         let spans = view.tab_bar_spans();
-        assert_eq!(spans[1].text, " 1:x-abcd ");
-        assert_eq!(spans[2].text, "[2:a-very-long-wo]", "name truncates to 14");
+        assert_eq!(spans[1].text, " x-abcd ", "chosen name renders alone");
+        assert_eq!(
+            spans[2].text, "[a-very-long-wo]",
+            "name alone truncates to 14"
+        );
     }
 
     #[test]
     fn tab_label_text_collapses_only_the_exact_ordinal() {
-        assert_eq!(tab_label_text("1", 0), "1");
-        assert_eq!(tab_label_text("2", 0), "1:2", "a RENAME to a digit shows");
-        assert_eq!(tab_label_text("debug", 2), "3:debug");
+        // Collapse (x-0f9d AC7): a name equal to its own ordinal is the bare
+        // digit whether chosen or not - byte-identical to the unnamed render.
+        assert_eq!(tab_label_text("1", 0, false), "1");
+        assert_eq!(
+            tab_label_text("1", 0, true),
+            "1",
+            "chosen name == ordinal collapses"
+        );
+        assert_eq!(
+            tab_label_text("2", 1, true),
+            "2",
+            "AC7: tab@2 renamed '2' is bare digit"
+        );
+        // A non-ordinal name: unnamed/derived keeps `{ordinal}:{label}`, a
+        // chosen name (US2) renders alone.
+        assert_eq!(
+            tab_label_text("2", 0, false),
+            "1:2",
+            "unnamed digit off-position"
+        );
+        assert_eq!(
+            tab_label_text("2", 0, true),
+            "2",
+            "chosen '2' at ordinal 1 renders alone"
+        );
+        assert_eq!(
+            tab_label_text("debug", 2, false),
+            "3:debug",
+            "derived keeps ordinal"
+        );
+        assert_eq!(
+            tab_label_text("debug", 2, true),
+            "debug",
+            "chosen renders alone"
+        );
     }
 
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
@@ -11318,11 +11552,30 @@ mod tests {
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
             labels.iter().any(|l| l == "footnote › build ·2"),
-            "pane row names its tab: {labels:?}"
+            "unnamed pane row names its tab with `·N`: {labels:?}"
         );
         assert!(
             labels.iter().any(|l| l == "footnote › watcher"),
             "watch-only row has no ordinal: {labels:?}"
+        );
+
+        // x-0f9d US3/AC4: name the hosting tab (id 1, the 2nd tab) - the pane
+        // row now resolves inside-out (agent leads, tab NAME as context, no
+        // `·N`); the watch-only row still falls back to the squad.
+        v.layout.squads[0].tabs[1].name = "reviews".into();
+        v.layout.squads[0].tabs[1].named = true;
+        let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
+        assert!(
+            labels.iter().any(|l| l == "build › reviews"),
+            "named tab supplies the hosting context, not `·N`: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l == "footnote › build ·2"),
+            "the `·N` ordinal is gone once the tab is named: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "footnote › watcher"),
+            "watch-only row still falls back to the squad: {labels:?}"
         );
     }
 

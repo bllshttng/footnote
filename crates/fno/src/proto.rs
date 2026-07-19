@@ -183,7 +183,7 @@ use crate::tree::{Dir, Rect, TabId};
 /// and `Command::RespawnAgent { name }` are the two new off-loop server verbs;
 /// `AgentRow { updated_at, pr }` carry the peek header's `changed Ns ago` stamp
 /// and `PR #N` label.
-pub const PROTO_VERSION: u32 = 34;
+pub const PROTO_VERSION: u32 = 35;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -1134,6 +1134,15 @@ pub struct PaneMeta {
 pub struct TabMeta {
     pub id: u64,
     pub name: String,
+    /// (v35, x-0f9d) Whether `name` is an operator-CHOSEN name (an explicit
+    /// rename) versus a pane-derived or ordinal fallback the server resolved.
+    /// The wire `name` flattens all three sources, but the strip renders a
+    /// chosen name WITHOUT a forced ordinal (Locked 2) while a derived/ordinal
+    /// name keeps its `{ordinal}:{label}` form - a distinction only the server
+    /// knows. `#[serde(default)]` keeps a v34 reader wire-tolerant (absent ->
+    /// false -> today's ordinal rendering).
+    #[serde(default)]
+    pub named: bool,
     /// (v22, x-653d) Every leaf pane of this tab, so the session navigator can
     /// list and goto panes across tabs/squads (the sideline only ever tiled the
     /// active view's panes). `#[serde(default)]` keeps a v21 reader wire-tolerant
@@ -1833,6 +1842,7 @@ mod tests {
                         TabMeta {
                             id: 7,
                             name: "1".into(),
+                            named: false,
                             panes: vec![PaneMeta {
                                 id: 4,
                                 label: "claude".into(),
@@ -1841,6 +1851,7 @@ mod tests {
                         TabMeta {
                             id: 12,
                             name: "2".into(),
+                            named: false,
                             panes: vec![],
                         },
                     ],

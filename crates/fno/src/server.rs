@@ -1895,10 +1895,53 @@ impl Core {
             return;
         };
         let origins = sq.origins.clone();
+        // (x-0f9d US4) Re-derive each member's hosting tab name and write it back
+        // into the AUTHORITATIVE in-memory list, not just the store copy. Other
+        // write paths (RenameSquad, a churned member's `persist_stored`) persist
+        // `squad_members` verbatim; refreshing here keeps them from erasing a
+        // freshly-renamed tab name on the next write (codex review). A tombstone
+        // (no live pane) resolves to None.
+        let attach_ids: Vec<String> = self
+            .squad_members
+            .get(&sid)
+            .map(|ms| ms.iter().map(|m| m.attach_id.clone()).collect())
+            .unwrap_or_default();
+        let names: Vec<Option<Option<String>>> = attach_ids
+            .iter()
+            .map(|id| self.member_tab_name(sid, id))
+            .collect();
+        if let Some(list) = self.squad_members.get_mut(&sid) {
+            for (m, resolved) in list.iter_mut().zip(names) {
+                // Only overwrite when the member's pane resolved to a tab
+                // (Some(name_opt)): Some -> named, None -> the tab is unnamed, so
+                // a blank rename clears. An UNRESOLVABLE pane (a tombstone or a
+                // transient restore reattach failure, `None`) PRESERVES the last
+                // stored name so a temporary miss never erases it (codex review).
+                if let Some(tab_name) = resolved {
+                    m.tab_name = tab_name;
+                }
+            }
+        }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
         if let Err(e) = crate::squad_store::upsert(&name, &origins, &members) {
             self.persist_degraded(&e);
         }
+    }
+
+    /// Resolve the name of the tab hosting `attach_id`'s pane in squad `sid`
+    /// (x-0f9d US4). Outer `None` = the member has no resolvable live pane (a
+    /// tombstone, or a transient restore reattach failure) so the caller should
+    /// PRESERVE its stored name; `Some(inner)` = the pane resolved to a tab
+    /// whose name is `inner` (`None` when the tab is unnamed, so a blank rename
+    /// clears). Re-derived fresh at persist so a rename is captured.
+    fn member_tab_name(&self, sid: u64, attach_id: &str) -> Option<Option<String>> {
+        let pid = *self.attached.get(attach_id)?;
+        let sq = self.session.squad(sid)?;
+        let tab = sq
+            .tabs
+            .iter()
+            .find(|t| tree::leaves(&t.root).contains(&pid))?;
+        Some(tab.name.clone())
     }
 
     /// Write-through a raw upsert from captured fields (used when the in-session
@@ -2055,6 +2098,7 @@ impl Core {
                     members.push(crate::squad_store::StoredMember {
                         attach_id: m.attach_id.clone(),
                         tombstone: true,
+                        tab_name: m.tab_name.clone(),
                     });
                     continue;
                 }
@@ -2069,7 +2113,10 @@ impl Core {
                         let tid = self.session.mint_tab_id();
                         tabs.push((
                             Tab {
-                                name: None,
+                                // (x-0f9d US4) Re-derive the tab's chosen name
+                                // so a named tab survives the restart; a member
+                                // with no stored name restores unnamed as before.
+                                name: m.tab_name.clone(),
                                 id: tid,
                                 root: Node::Leaf(pid),
                                 focus: pid,
@@ -2079,6 +2126,7 @@ impl Core {
                         members.push(crate::squad_store::StoredMember {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
+                            tab_name: m.tab_name.clone(),
                         });
                     }
                     Err(e) => {
@@ -2088,6 +2136,7 @@ impl Core {
                         members.push(crate::squad_store::StoredMember {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
+                            tab_name: m.tab_name.clone(),
                         });
                     }
                 }
@@ -2873,6 +2922,10 @@ impl Core {
                     .enumerate()
                     .map(|(i, t)| TabMeta {
                         id: t.id,
+                        // (x-0f9d US2) An explicit rename is the ONLY chosen
+                        // name; a pane-derived or ordinal label is not. The
+                        // client renders a chosen name without a forced ordinal.
+                        named: t.name.is_some(),
                         name: tab_label(
                             t.name.as_deref(),
                             self.panes
@@ -4500,6 +4553,9 @@ impl Core {
                         // meaningful rename target).
                         t.name = (!clean.is_empty()).then_some(clean);
                         self.push_layout(true);
+                        // (x-0f9d US4) Persist so the chosen tab name survives a
+                        // restart; a no-op for an unnamed/untracked squad.
+                        self.persist_squad(sid);
                     }
                     None => self.notice(client_id, "no such tab"),
                 }
@@ -4805,6 +4861,8 @@ impl Core {
                         crate::squad_store::StoredMember {
                             attach_id: id.clone(),
                             tombstone: false,
+                            // persist_squad below re-derives the hosting tab name.
+                            tab_name: None,
                         },
                     );
                     recruited += 1;
@@ -9100,6 +9158,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: attach.into(),
                 tombstone: false,
+                tab_name: None,
             }],
         );
         core.attached.insert(attach.into(), pid);
@@ -9109,6 +9168,7 @@ mod tests {
         crate::squad_store::StoredMember {
             attach_id: id.into(),
             tombstone,
+            tab_name: None,
         }
     }
 
@@ -9298,6 +9358,122 @@ mod tests {
                 .iter()
                 .any(|s| s.name.as_deref() == Some("ghost")),
             "no live squad created for the persisted name"
+        );
+    }
+
+    #[test]
+    fn renaming_a_members_tab_persists_the_tab_name() {
+        // x-0f9d US4: renaming the tab hosting a persisted member writes the
+        // chosen name into the store, re-derived at persist time, so a restart
+        // can restore the tab named (AC1-HP persistence half).
+        let _s = StoreScratch::new("tab-name-persist");
+        let mut core = empty_core();
+        // A live named squad whose member's pane (1) is the leaf of tab id 1.
+        named_member_squad(&mut core, 1, "harden", 1, "c19cd2c3");
+        core.clients.push(client(1, 1, (24, 80), false));
+
+        // Unnamed first: the store carries no tab name.
+        core.persist_squad(1);
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name, None,
+            "unnamed -> None"
+        );
+
+        // Rename the hosting tab; the rename handler persists it.
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 1,
+                name: "reviews".into(),
+            },
+        );
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name.as_deref(),
+            Some("reviews"),
+            "the chosen tab name is persisted for restore"
+        );
+
+        // Clearing the name (blank rename) drops it from the store too.
+        // Re-register the sender: the prior rename's layout push reaped the
+        // test client's dropped receiver (as in rename_tab_round_trips).
+        core.clients.push(client(1, 1, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 1,
+                name: "".into(),
+            },
+        );
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name, None,
+            "clearing the name clears the stored tab_name"
+        );
+    }
+
+    #[test]
+    fn persist_preserves_tab_name_when_member_pane_is_unresolvable() {
+        // x-0f9d US4 / codex P1: a member whose pane cannot be resolved (a
+        // transient restore reattach failure, or a tombstone) keeps its stored
+        // tab_name across a persist - member_tab_name returning an unresolvable
+        // None must PRESERVE the stored name, not clobber it to None.
+        let _s = StoreScratch::new("preserve-unresolvable-tab-name");
+        let mut core = empty_core();
+        named_member_squad(&mut core, 1, "harden", 1, "c19cd2c3");
+        // Stored name present, but drop the pane mapping so the pane is
+        // unresolvable (as after a failed reattach at restore).
+        core.squad_members.get_mut(&1).unwrap()[0].tab_name = Some("reviews".into());
+        core.attached.remove("c19cd2c3");
+        core.persist_squad(1);
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name.as_deref(),
+            Some("reviews"),
+            "an unresolvable pane preserves the stored tab name"
+        );
+    }
+
+    #[test]
+    fn squad_rename_after_tab_rename_keeps_the_tab_name() {
+        // x-0f9d US4 / codex review: persist_squad refreshes the AUTHORITATIVE
+        // in-memory member list, so a later RenameSquad (which persists that
+        // list verbatim through squad_store::rename) does not erase a
+        // freshly-renamed tab name.
+        let _s = StoreScratch::new("tab-name-survives-squad-rename");
+        let mut core = empty_core();
+        named_member_squad(&mut core, 1, "harden", 1, "c19cd2c3");
+        core.clients.push(client(1, 1, (24, 80), false));
+
+        // Name the tab (persists tab_name AND refreshes squad_members in place).
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 1,
+                name: "reviews".into(),
+            },
+        );
+        // Rename the squad; it writes the in-memory member list to the store.
+        core.clients.push(client(1, 1, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 1,
+                name: "hardened".into(),
+            },
+        );
+
+        let loaded = crate::squad_store::load();
+        let sq = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "hardened")
+            .expect("renamed squad persisted");
+        assert_eq!(
+            sq.members[0].tab_name.as_deref(),
+            Some("reviews"),
+            "the tab name survives the squad rename"
         );
     }
 
