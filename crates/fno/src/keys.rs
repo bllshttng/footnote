@@ -817,7 +817,11 @@ mod tests {
         // extending it. One leader chord + N bare keys -> N+1 Resize events.
         let mut s = Scanner::default();
         let t0 = Instant::now();
-        assert_eq!(s.scan(b"\x02L", t0), vec![RESIZE_R], "leader+L resizes + arms");
+        assert_eq!(
+            s.scan(b"\x02L", t0),
+            vec![RESIZE_R],
+            "leader+L resizes + arms"
+        );
         // Three bare L within the window, 30ms apart (terminal auto-repeat rate).
         let mut t = t0;
         for _ in 0..3 {
@@ -832,11 +836,18 @@ mod tests {
         // second bare L that would have missed the ORIGINAL window still lands.
         let mut s = Scanner::default();
         let t0 = Instant::now();
-        s.scan(b"\x02L", t0); // until = t0 + 500
-        // 400ms in: repeats, until = t0 + 900.
-        assert_eq!(s.scan(b"L", t0 + Duration::from_millis(400)), vec![RESIZE_R]);
+        // Arm at t0; the window lapses at t0 + 500.
+        s.scan(b"\x02L", t0);
+        // 400ms in: repeats, pushing the deadline out to t0 + 900.
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(400)),
+            vec![RESIZE_R]
+        );
         // 700ms in: past the ORIGINAL 500ms deadline but inside the extension.
-        assert_eq!(s.scan(b"L", t0 + Duration::from_millis(700)), vec![RESIZE_R]);
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(700)),
+            vec![RESIZE_R]
+        );
     }
 
     #[test]
