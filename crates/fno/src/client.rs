@@ -339,6 +339,13 @@ impl Drop for TerminalGuard {
 // View state + pure composition
 // ---------------------------------------------------------------------------
 
+/// An agent row's hosting-tab context, resolved inside-out (x-0f9d US3): a
+/// chosen tab name when the tab is named, else its `·N` ordinal.
+enum TabContext {
+    Named(String),
+    Ordinal(usize),
+}
+
 /// The last `Layout` as the client holds it.
 struct LayoutView {
     squads: Vec<SquadMeta>,
@@ -1852,10 +1859,14 @@ impl View {
                 }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
-                // (x-0090) A pane-hosted agent names its tab with a `·N` ordinal,
-                // coherent with the sideline; a watch-only row has no tab.
-                let label = match a.tab.and_then(|tid| self.tab_ordinal(a.squad, tid)) {
-                    Some(n) => format!("{} › {} ·{n}", s.name, a.name),
+                // (x-0090, x-0f9d US3) A pane-hosted agent's context resolves
+                // inside-out: a NAMED tab leads with the agent then the tab name
+                // (`build › reviews`); an unnamed tab keeps today's
+                // `{squad} › {agent} ·N`; a watch-only row (no tab) falls back
+                // to the squad.
+                let label = match self.agent_tab_context(a.squad, a.tab) {
+                    Some(TabContext::Named(name)) => format!("{} › {}", a.name, name),
+                    Some(TabContext::Ordinal(n)) => format!("{} › {} ·{n}", s.name, a.name),
                     None => format!("{} › {}", s.name, a.name),
                 };
                 out.push(NavRow {
@@ -2963,6 +2974,22 @@ impl View {
         s.tabs.iter().position(|t| t.id == tab_id).map(|i| i + 1)
     }
 
+    /// The hosting-tab context for an agent row, resolved inside-out (x-0f9d
+    /// US3): a NAMED tab supplies its name; an unnamed tab supplies the `·N`
+    /// ordinal (today's form). `None` = the row has no tab (a paneless /
+    /// watch-only row), so the caller falls back to the squad name.
+    fn agent_tab_context(&self, squad: Option<u64>, tab: Option<TabId>) -> Option<TabContext> {
+        let sid = squad?;
+        let tid = tab?;
+        let s = self.layout.squads.iter().find(|s| s.id == sid)?;
+        let (i, t) = s.tabs.iter().enumerate().find(|(_, t)| t.id == tid)?;
+        Some(if t.named {
+            TabContext::Named(t.name.clone())
+        } else {
+            TabContext::Ordinal(i + 1)
+        })
+    }
+
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
@@ -3166,21 +3193,26 @@ impl View {
                         Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
                         None => format!(" {mark}{glyph} {}", a.name),
                     };
-                    // (x-0090) A pane row names its tab with a `·N` ordinal; an
-                    // orphan row names its repo with a ` (basename)` suffix. The
-                    // two are mutually exclusive (a pane row has a tab, an orphan
-                    // is paneless), so at most one suffix ever lands.
-                    if let Some(ord) = a.tab.and_then(|tid| self.tab_ordinal(a.squad, tid)) {
-                        text.push_str(&format!(" ·{ord}"));
-                    } else if let Some(base) = a
-                        .cwd_base
-                        .as_deref()
-                        // (x-cd67 US2) When a subline carries the cwd on line 2,
-                        // the orphan basename suffix is suppressed on line 1 so
-                        // it does not duplicate (silent-failure-hunter guard).
-                        .filter(|_| !agent_has_subline(a))
-                    {
-                        text.push_str(&format!(" ({base})"));
+                    // (x-0090, x-0f9d US3) A pane row names its hosting tab
+                    // inside-out: a NAMED tab shows its name (`·reviews`), an
+                    // unnamed tab shows the `·N` ordinal. An orphan row (no tab)
+                    // instead names its repo with a ` (basename)` suffix. Tab vs
+                    // orphan are mutually exclusive, so at most one suffix lands.
+                    match self.agent_tab_context(a.squad, a.tab) {
+                        Some(TabContext::Named(name)) => text.push_str(&format!(" ·{name}")),
+                        Some(TabContext::Ordinal(ord)) => text.push_str(&format!(" ·{ord}")),
+                        None => {
+                            if let Some(base) = a
+                                .cwd_base
+                                .as_deref()
+                                // (x-cd67 US2) When a subline carries the cwd on
+                                // line 2, the orphan basename suffix is suppressed
+                                // on line 1 so it does not duplicate.
+                                .filter(|_| !agent_has_subline(a))
+                            {
+                                text.push_str(&format!(" ({base})"));
+                            }
+                        }
                     }
                     if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
                         text.push_str(": ");
@@ -11422,11 +11454,30 @@ mod tests {
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
             labels.iter().any(|l| l == "footnote › build ·2"),
-            "pane row names its tab: {labels:?}"
+            "unnamed pane row names its tab with `·N`: {labels:?}"
         );
         assert!(
             labels.iter().any(|l| l == "footnote › watcher"),
             "watch-only row has no ordinal: {labels:?}"
+        );
+
+        // x-0f9d US3/AC4: name the hosting tab (id 1, the 2nd tab) - the pane
+        // row now resolves inside-out (agent leads, tab NAME as context, no
+        // `·N`); the watch-only row still falls back to the squad.
+        v.layout.squads[0].tabs[1].name = "reviews".into();
+        v.layout.squads[0].tabs[1].named = true;
+        let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
+        assert!(
+            labels.iter().any(|l| l == "build › reviews"),
+            "named tab supplies the hosting context, not `·N`: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l == "footnote › build ·2"),
+            "the `·N` ordinal is gone once the tab is named: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "footnote › watcher"),
+            "watch-only row still falls back to the squad: {labels:?}"
         );
     }
 
