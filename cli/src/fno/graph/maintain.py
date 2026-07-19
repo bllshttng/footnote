@@ -338,18 +338,15 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
         return True
     if entry.get("locked_by") or entry.get("claimed_at"):
         return True
-    plan_path = entry.get("plan_path")
-    if plan_path and isinstance(plan_path, str):
-        # Resolve the freshness probe the way the node itself would: strip a
-        # `#anchor` fragment and resolve a repo-relative path against the node's
-        # own `cwd` (not this command's), so a recently-edited plan is not
-        # mis-read as unmoved. A directory plan_path still probes the dir mtime -
-        # a documented gap (folder plans are rare; the outcome is reversible).
-        probe = plan_path.split("#", 1)[0]
-        if probe and not os.path.isabs(probe):
-            cwd = entry.get("cwd")
-            if isinstance(cwd, str) and cwd:
-                probe = os.path.join(cwd, probe)
+    # Resolve the freshness probe the way the node itself would (fragment
+    # stripped, `~` expanded, relative resolved against the node's own `cwd`,
+    # not this command's) so a recently-edited plan is not mis-read as unmoved.
+    # A directory plan_path still probes the dir mtime - a documented gap
+    # (folder plans are rare; the outcome is reversible).
+    from fno.graph.ladder import resolve_plan_probe
+
+    probe = resolve_plan_probe(entry)
+    if probe:
         try:
             mtime = os.path.getmtime(probe)
             age_days = (now - datetime.fromtimestamp(mtime, tz=timezone.utc)).days
@@ -409,11 +406,20 @@ def detect_stale_ready(
     if now is None:
         now = datetime.now(timezone.utc)
     out: list[StaleIdea] = []
+    from fno.graph.ladder import is_design_stage
+
     for e in entries:
         if e.get("_status") != "ready":
             continue
         nid = e.get("id")
         if not isinstance(nid, str):
+            continue
+        # A design-stage node is unarmed on purpose, so it accrues none of the
+        # movement signals dispatch used to supply and would age into a
+        # quarantine defer for sitting exactly where it belongs. Mirrors the
+        # same skip in selection_guards - this leg and live selection must
+        # never disagree about what is stale.
+        if is_design_stage(e):
             continue
         if not is_stale_ready(e, now, staleness_days):
             continue

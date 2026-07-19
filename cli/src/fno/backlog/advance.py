@@ -235,18 +235,23 @@ def selection_guards(
             steps += 1
 
         from fno.graph import maintain as _maintain
+        from fno.graph.ladder import is_design_stage
 
         if now is None:
             now = datetime.now(timezone.utc)
+
+        # BEFORE the stale check: a design node is unarmed by design, so it
+        # accrues none of the movement signals (sessions, pr_number, claims)
+        # that dispatch used to supply, and would age into `stale-quarantine` -
+        # reporting the wrong reason and letting `maintain --apply` auto-defer
+        # a perfectly healthy design doc off the board.
+        if entry.get("_status") == "ready" and is_design_stage(entry):
+            return "design-stage"
+
         if entry.get("_status") == "ready" and _maintain.is_stale_ready(
             entry, now, staleness_days
         ):
             return "stale-quarantine"
-
-        from fno.graph.ladder import is_design_stage
-
-        if entry.get("_status") == "ready" and is_design_stage(entry.get("plan_path")):
-            return "design-stage"
         return None
     except Exception as exc:  # noqa: BLE001 - fail OPEN, never starve on a guard bug
         sys.stderr.write(

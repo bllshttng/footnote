@@ -17,9 +17,40 @@ same reason.
 """
 from __future__ import annotations
 
+import os
+from typing import Optional
 
-def is_design_stage(plan_path: object) -> bool:
-    """True only when the linked plan's frontmatter says ``status: design``.
+
+def resolve_plan_probe(entry: dict) -> Optional[str]:
+    """Filesystem path for a node's plan doc, or None when it has no usable one.
+
+    Resolves the way the node itself would: strip a ``#anchor`` fragment,
+    expand ``~``, and resolve a repo-relative path against the NODE's own
+    ``cwd`` rather than the calling process's. The daemon selects across
+    projects, so probing a foreign node's relative path against the current
+    process cwd would silently find nothing - on the live graph that is the
+    majority of linked plans, not an edge case.
+    """
+    if not isinstance(entry, dict):
+        return None
+    plan_path = entry.get("plan_path")
+    if not isinstance(plan_path, str) or not plan_path:
+        return None
+    probe = os.path.expanduser(plan_path.split("#", 1)[0])
+    if not probe:
+        return None
+    if not os.path.isabs(probe):
+        cwd = entry.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            probe = os.path.join(cwd, probe)
+    return probe
+
+
+def is_design_stage(entry: object) -> bool:
+    """True only when the node's linked plan says ``status: design``.
+
+    Takes the whole entry, not a bare path, because resolving the path needs
+    the node's ``cwd`` (see ``resolve_plan_probe``).
 
     Positive evidence only: an unreadable, frontmatter-less, or
     differently-stamped plan reads False and the node stays armed. Failing
@@ -32,9 +63,10 @@ def is_design_stage(plan_path: object) -> bool:
     `/blueprint quick` deliberately omits that heading (blueprint SKILL.md),
     so the heading would misread every quick-plan as unfinished.
     """
-    if not isinstance(plan_path, str) or not plan_path:
+    probe = resolve_plan_probe(entry)
+    if not probe:
         return False
     from fno.graph._intake import _read_plan_frontmatter
 
-    raw = _read_plan_frontmatter(plan_path).get("status")
+    raw = _read_plan_frontmatter(probe).get("status")
     return str(raw if raw is not None else "").strip().strip("'\"").lower() == "design"

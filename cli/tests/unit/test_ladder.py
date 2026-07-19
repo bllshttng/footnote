@@ -6,14 +6,56 @@ import pytest
 from fno.graph.ladder import is_design_stage
 
 
-def _plan(tmp_path, body: str, name: str = "p.md") -> str:
+DESIGN_FM = "---\nstatus: design\n---\n\n# Doc\n"
+
+
+def _plan(tmp_path, body: str, name: str = "p.md") -> dict:
+    """A node entry carrying an absolute plan_path (the simplest form)."""
     target = tmp_path / name
     target.write_text(body)
-    return str(target)
+    return {"id": "x-test", "plan_path": str(target)}
+
+
+def test_relative_plan_path_resolves_against_node_cwd(tmp_path):
+    """The majority form on the live graph: repo-relative path + node `cwd`.
+
+    Resolving against the calling process's cwd instead silently no-ops the
+    gate for every foreign node - the daemon selects across projects.
+    """
+    (tmp_path / "plans").mkdir()
+    (tmp_path / "plans" / "d.md").write_text(DESIGN_FM)
+    entry = {"id": "x-test", "plan_path": "plans/d.md", "cwd": str(tmp_path)}
+    assert is_design_stage(entry)
+
+
+def test_fragment_plan_path_strips_anchor(tmp_path):
+    """`<doc>#group-<slug>` paths are not literal filenames."""
+    (tmp_path / "d.md").write_text(DESIGN_FM)
+    entry = {"id": "x-test", "plan_path": f"{tmp_path / 'd.md'}#group-foo"}
+    assert is_design_stage(entry)
+
+
+def test_tilde_plan_path_expands(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "d.md").write_text(DESIGN_FM)
+    assert is_design_stage({"id": "x-test", "plan_path": "~/d.md"})
+
+
+def test_relative_path_without_cwd_stays_armed(tmp_path, monkeypatch):
+    """No `cwd` to resolve against: fail open rather than guess."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "d.md").write_text(DESIGN_FM)
+    assert not is_design_stage({"id": "x-test", "plan_path": "nope/d.md"})
+
+
+def test_folder_plan_stays_armed(tmp_path):
+    """A directory plan_path has no frontmatter to read - documented gap."""
+    (tmp_path / "planfolder").mkdir()
+    assert not is_design_stage({"id": "x-test", "plan_path": str(tmp_path / "planfolder")})
 
 
 def test_design_frontmatter_is_design_stage(tmp_path):
-    assert is_design_stage(_plan(tmp_path, "---\nstatus: design\n---\n\n# Doc\n"))
+    assert is_design_stage(_plan(tmp_path, DESIGN_FM))
 
 
 @pytest.mark.parametrize("status", ["ready", "in_progress", "shipped", "done", "archived"])
@@ -50,12 +92,22 @@ def test_unparseable_plan_stays_armed(tmp_path, body):
 
 def test_missing_file_stays_armed(tmp_path):
     """A symlinked vault that is not mounted must never quarantine the backlog."""
-    assert not is_design_stage(str(tmp_path / "absent.md"))
+    assert not is_design_stage({"id": "x-test", "plan_path": str(tmp_path / "absent.md")})
 
 
-@pytest.mark.parametrize("value", [None, "", 0, [], {"status": "design"}])
-def test_non_path_inputs_stay_armed(value):
-    assert not is_design_stage(value)
+@pytest.mark.parametrize(
+    "entry",
+    [
+        None,
+        "not-an-entry",
+        {},                                   # no plan_path (an `idea` node)
+        {"plan_path": None},
+        {"plan_path": ""},
+        {"plan_path": 42},                    # non-string survives the graph's tolerance
+    ],
+)
+def test_malformed_entries_stay_armed(entry):
+    assert not is_design_stage(entry)
 
 
 def test_starvation_receipt_names_design_not_quarantined(tmp_path):
