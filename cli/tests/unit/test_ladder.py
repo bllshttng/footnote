@@ -56,3 +56,27 @@ def test_missing_file_stays_armed(tmp_path):
 @pytest.mark.parametrize("value", [None, "", 0, [], {"status": "design"}])
 def test_non_path_inputs_stay_armed(value):
     assert not is_design_stage(value)
+
+
+def test_starvation_receipt_names_design_not_quarantined(tmp_path):
+    """A design-stage node is a lifecycle rung, not starvation.
+
+    Reporting it as the generic `quarantined` would read as a stuck node and
+    send an operator hunting for a problem that isn't there.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.cli import _starvation_receipts
+
+    plan = tmp_path / "d.md"
+    plan.write_text("---\nstatus: design\n---\n")
+    node = {
+        "id": "x-aaaa",
+        "_status": "ready",
+        "plan_path": str(plan),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    out = _starvation_receipts(
+        [node], None, True, None, set(), datetime.now(timezone.utc), 21
+    )
+    assert out == [("x-aaaa", "design")]

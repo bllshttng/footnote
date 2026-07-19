@@ -2458,8 +2458,9 @@ def _starvation_receipts(
     Zero-silent-starvation (x-3236, epic Success Definition 2): when ``next``
     returns null but buildable-looking nodes exist, name why each was excluded
     so an operator is never left guessing. Reasons: ``plan-less`` | ``container``
-    | ``claimed`` | ``quarantined`` | ``dead-ancestor``. A node genuinely in
-    review (open PR) or committed to a batch is not starved and gets no line.
+    | ``claimed`` | ``design`` | ``quarantined`` | ``dead-ancestor``. A node
+    genuinely in review (open PR) or committed to a batch is not starved and
+    gets no line.
     Pure over the injected ``claimed`` set + ``now`` so it is unit-testable.
 
     Mirrors ``_pick_ready``'s SCOPING (project, parent subtree via ``scope_ids``,
