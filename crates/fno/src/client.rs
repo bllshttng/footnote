@@ -3101,8 +3101,12 @@ impl View {
             if multi_squad {
                 out.push(DisplayRow::Blank);
             }
-            let rollup =
-                section_rollup(self.layout.backlog.iter().map(|c| card_lattice_state(c.state)));
+            let rollup = section_rollup(
+                self.layout
+                    .backlog
+                    .iter()
+                    .map(|c| card_lattice_state(c.state)),
+            );
             out.push(DisplayRow::Header {
                 label: "~ work queue",
                 rollup,
@@ -3458,7 +3462,9 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
 /// canonical repo root), for the foreign-cwd subline comparison. `None` for a
 /// squad whose canonical cwd has no final component (degenerate; no subline).
 fn section_project_base(canonical_cwd: &str) -> Option<&str> {
-    Path::new(canonical_cwd).file_name().and_then(|b| b.to_str())
+    Path::new(canonical_cwd)
+        .file_name()
+        .and_then(|b| b.to_str())
 }
 
 /// (x-6851 US3) Whether an agent's cwd is FOREIGN to its section: its `cwd_base`
@@ -10281,7 +10287,10 @@ mod tests {
         // pair must go.)
         let mid = header_band_text("sq", &rollup, 10);
         assert!(mid.contains("\u{25b2}2") && mid.contains("\u{25cf}3"));
-        assert!(!mid.contains('\u{2717}'), "least-severe pair dropped whole: {mid:?}");
+        assert!(
+            !mid.contains('\u{2717}'),
+            "least-severe pair dropped whole: {mid:?}"
+        );
         // Too narrow for any pair: all drop, the name renders (truncated by
         // pad_to only once every pair is gone).
         let narrow = header_band_text("a-very-long-section-name", &rollup, 8);
@@ -10323,7 +10332,10 @@ mod tests {
         // Row 2 = the Blank spacer between squads (inert, no INVERSE). Row 3 =
         // inactive `notes` band: INVERSE + DIM.
         assert_eq!(cells[2 * cols].flags & cell_flags::INVERSE, 0);
-        assert_eq!(cells[3 * cols].flags & cell_flags::INVERSE, cell_flags::INVERSE);
+        assert_eq!(
+            cells[3 * cols].flags & cell_flags::INVERSE,
+            cell_flags::INVERSE
+        );
         assert_eq!(cells[3 * cols].flags & cell_flags::DIM, cell_flags::DIM);
     }
 
