@@ -63,9 +63,12 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 `fno backlog epic status <epic>` · `get` · `update --add-blocker/--blocked-by/--plan-path/--dispatch-verb/--dispatch-brief` · `rank` · `defer -R` / `undefer` · `advance --epic`
 
 **Dispatch.**
-`fno agents spawn <name> "<msg>" --model <m> --substrate pane|bg|headless` starts a worker.
-`fno agents ask <name> "<msg>"` follows up on one already running.
+`fno agents spawn <name> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
+The payload decides what it does: free text is a verbatim **seed** (it opens a session, it does NOT build), a resolved node id is a **build**, a leading `/verb` is **passthrough**, and `--handoff <doc>` hands an in-flight thread to a fresh context.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
+
+To reach a worker that is already running, mail it (below).
+`ask` and `discuss` were retired: a one-shot question is `spawn "<question>" headless`, and a conversation is just the default seed.
 
 **Message.**
 Mail a live pane directly; everything else is voicemail.
