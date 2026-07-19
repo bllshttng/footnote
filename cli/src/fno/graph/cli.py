@@ -2463,15 +2463,18 @@ def _starvation_receipts(
     from fno.graph._intake import filter_by_project
 
     container_ids = _container_ids(entries)
-    by_id = {e.get("id"): e for e in entries if e.get("id")}
-    ready_ish = filter_by_project(
-        [
-            e for e in entries
-            if e.get("_status") in ("ready", "idea") and not e.get("completed_at")
-        ],
-        project_filter,
-        all_,
-    )
+    # One pass, guarding against a non-dict row (codebase convention: a malformed
+    # entry must not AttributeError the cold receipt path).
+    by_id: dict = {}
+    ready_ish_rows: list[dict] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if e.get("id"):
+            by_id[e["id"]] = e
+        if e.get("_status") in ("ready", "idea") and not e.get("completed_at"):
+            ready_ish_rows.append(e)
+    ready_ish = filter_by_project(ready_ish_rows, project_filter, all_)
     if scope_ids is not None:
         ready_ish = [e for e in ready_ish if e.get("id") in scope_ids]
     out: list[tuple[str, str]] = []

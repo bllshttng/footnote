@@ -779,3 +779,11 @@ def test_detect_stale_ready_only_ready_and_unmoved():
     ]
     got = {s.node_id for s in m.detect_stale_ready(entries, 21, now=now)}
     assert got == {"a"}
+
+
+def test_node_has_movement_non_string_plan_path_no_crash():
+    # A malformed graph could carry a non-string plan_path; getmtime would raise
+    # TypeError (not OSError). The isinstance guard keeps it from crashing.
+    now = _sr_now()
+    assert not m.node_has_movement({"plan_path": 12345}, now, 21)
+    assert not m.node_has_movement({"plan_path": ["a", "b"]}, now, 21)

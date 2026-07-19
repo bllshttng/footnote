@@ -339,7 +339,7 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
     if entry.get("locked_by") or entry.get("claimed_at"):
         return True
     plan_path = entry.get("plan_path")
-    if plan_path:
+    if plan_path and isinstance(plan_path, str):
         try:
             mtime = os.path.getmtime(plan_path)
             age_days = (now - datetime.fromtimestamp(mtime, tz=timezone.utc)).days
