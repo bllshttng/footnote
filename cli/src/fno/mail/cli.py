@@ -843,8 +843,9 @@ def _name_lane_send(
     to an offline sender). ``reply_to`` stamps BOTH the wire ``reply_to`` attr and
     the bus ``in_reply_to`` from ONE msg-id -- never one set, the other null.
     Exits 12 on a durable-floor write failure."""
-    from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
+    from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex, _mux_pane_send
     from fno.agents.provider_resolve import infer_invoking_harness
+    from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import write_new_thread
@@ -871,6 +872,16 @@ def _name_lane_send(
             injected = _mail_inject_claude(resolved.session_id, wrapped)
         elif provider == "codex":
             injected = _mail_inject_codex(resolved.session_id, wrapped)
+        if not injected:
+            # A send addressed by session id never consults the roster, so a
+            # mux-hosted session of any provider would demote to durable with a
+            # live pane right there. Not-found means "not mux-hosted", not an error.
+            try:
+                entry = resolve_agent(resolved.session_id).entry
+            except (AgentResolutionError, OSError):
+                pass
+            else:
+                injected = _mux_pane_send(entry, wrapped)
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""

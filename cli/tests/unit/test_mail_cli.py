@@ -235,6 +235,123 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
 
 
 # ---------------------------------------------------------------------------
+# a2a US7b / AC3-HP: the mux PaneSend live rung. A resolved session that is
+# mux-hosted (fno owns its PTY) delivers live through its pane instead of
+# demoting to the durable bus. Provider-agnostic by construction: the rung keys
+# off the roster entry's pane info, never a provider name.
+# ---------------------------------------------------------------------------
+
+
+def _stub_pane_rung(monkeypatch, *, in_roster: bool, pane_sends: bool) -> list:
+    """Wire the pane rung to a fake roster entry and a recorded ``_mux_pane_send``.
+    Returns the call log, so a test can assert the rung was skipped entirely."""
+    from types import SimpleNamespace
+
+    from fno.agents.registry import AgentResolutionError, ResolvedAgent
+
+    entry = SimpleNamespace(name="hosted-worker", mux={"session": "main", "pane_id": 3})
+
+    def _resolve(token, **_kw):
+        if not in_roster:
+            raise AgentResolutionError(f"no agent matching {token!r}")
+        return ResolvedAgent(entry=entry, matched_by="full_session_id")
+
+    calls: list = []
+
+    def _send(resolved_entry, text):
+        calls.append((resolved_entry, text))
+        return pane_sends
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent", _resolve)
+    monkeypatch.setattr("fno.agents.dispatch._mux_pane_send", _send)
+    return calls
+
+
+def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Codex daemon socket is dead but the session is mux-hosted: the pane rung
+    takes the turn live, so no durable thread is written."""
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    calls = _stub_pane_rung(monkeypatch, in_roster=True, pane_sends=True)
+
+    sent = runner.invoke(
+        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "delivered (hosted)" in sent.output
+    assert "queued (durable)" not in sent.output
+    assert len(calls) == 1
+    assert "ping" in calls[0][1]  # the wrapped <fno_mail> envelope, not raw text
+
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert json.loads(drained.stdout.strip().splitlines()[-1]) == []
+
+
+def test_us7b_mux_pane_send_failure_falls_closed_to_durable(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Roster entry exists but the pane send fails (mux gone, claim lost): the
+    message must land on the durable floor, never vanish."""
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    calls = _stub_pane_rung(monkeypatch, in_roster=True, pane_sends=False)
+
+    sent = runner.invoke(
+        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "queued (durable)" in sent.output
+    assert len(calls) == 1
+
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and "ping" in payload[0]["body"]
+
+
+def test_us7b_unrostered_session_skips_pane_rung_silently(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Not mux-hosted is the common case, not an error: resolution failure falls
+    through to the durable floor without a crash or a stderr complaint."""
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    calls = _stub_pane_rung(monkeypatch, in_roster=False, pane_sends=True)
+
+    sent = runner.invoke(
+        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "queued (durable)" in sent.output
+    assert calls == []
+    assert "no agent matching" not in sent.output
+
+
+def test_us7b_working_socket_inject_preempts_pane_rung(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Rung ordering: a socket inject is less invasive than typing into a live
+    TUI, so a working control.sock means the pane is never touched."""
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
+    calls = _stub_pane_rung(monkeypatch, in_roster=True, pane_sends=True)
+
+    sent = runner.invoke(
+        app, ["mail", "send", "claude-9a063cd3", "hi", "--from-name", "web"]
+    )
+    assert sent.exit_code == 0, sent.output
+    assert "delivered (hosted)" in sent.output
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # x-605c US3 / AC1-HP + AC1-FR: send to a ROSTERED claude bg worker is
 # handle-addressed (live-inject first, durable floor to its canonical handle);
 # the old claude->project re-route is gone. US4/AC3-HP: the envelope carries the
