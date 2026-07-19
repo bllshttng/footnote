@@ -242,9 +242,16 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
 # ---------------------------------------------------------------------------
 
 
-def _stub_pane_rung(monkeypatch, *, in_roster: bool, pane_sends: bool) -> list:
+def _stub_pane_rung(
+    monkeypatch, *, in_roster: bool, pane_sends: bool, expect_token: str
+) -> list:
     """Wire the pane rung to a fake roster entry and a recorded ``_mux_pane_send``.
-    Returns the call log, so a test can assert the rung was skipped entirely."""
+    Returns the call log, so a test can assert the rung was skipped entirely.
+
+    ``expect_token`` is asserted inside the resolver: the rung must look up the
+    full session id, not the display handle. The two pick different match rules
+    in resolve_agent_in (full_session_id vs derived_short), so a swap changes
+    real behavior while leaving every outcome assertion green."""
     from types import SimpleNamespace
 
     from fno.agents.registry import AgentResolutionError, ResolvedAgent
@@ -252,6 +259,7 @@ def _stub_pane_rung(monkeypatch, *, in_roster: bool, pane_sends: bool) -> list:
     entry = SimpleNamespace(name="hosted-worker", mux={"session": "main", "pane_id": 3})
 
     def _resolve(token, **_kw):
+        assert token == expect_token, f"rung resolved {token!r}, expected the session id"
         if not in_roster:
             raise AgentResolutionError(f"no agent matching {token!r}")
         return ResolvedAgent(entry=entry, matched_by="full_session_id")
@@ -275,7 +283,9 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
-    calls = _stub_pane_rung(monkeypatch, in_roster=True, pane_sends=True)
+    calls = _stub_pane_rung(
+        monkeypatch, in_roster=True, pane_sends=True, expect_token=sid
+    )
 
     sent = runner.invoke(
         app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
@@ -299,7 +309,9 @@ def test_us7b_mux_pane_send_failure_falls_closed_to_durable(
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
-    calls = _stub_pane_rung(monkeypatch, in_roster=True, pane_sends=False)
+    calls = _stub_pane_rung(
+        monkeypatch, in_roster=True, pane_sends=False, expect_token=sid
+    )
 
     sent = runner.invoke(
         app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
@@ -322,7 +334,9 @@ def test_us7b_unrostered_session_skips_pane_rung_silently(
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
-    calls = _stub_pane_rung(monkeypatch, in_roster=False, pane_sends=True)
+    calls = _stub_pane_rung(
+        monkeypatch, in_roster=False, pane_sends=True, expect_token=sid
+    )
 
     sent = runner.invoke(
         app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
@@ -341,7 +355,9 @@ def test_us7b_working_socket_inject_preempts_pane_rung(
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
-    calls = _stub_pane_rung(monkeypatch, in_roster=True, pane_sends=True)
+    calls = _stub_pane_rung(
+        monkeypatch, in_roster=True, pane_sends=True, expect_token=sid
+    )
 
     sent = runner.invoke(
         app, ["mail", "send", "claude-9a063cd3", "hi", "--from-name", "web"]
@@ -358,6 +374,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     (never mux-hosted, or the pane is gone) must return False on its own
     predicate and demote to durable -- no subprocess, no hang. This is the test
     that would catch the rung handing _mux_pane_send the wrong object shape."""
+    import subprocess
     from types import SimpleNamespace
 
     from fno.agents.registry import ResolvedAgent
@@ -366,10 +383,24 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
     paneless = SimpleNamespace(name="not-hosted", mux=None)
-    monkeypatch.setattr(
-        "fno.agents.registry.resolve_agent",
-        lambda token, **_kw: ResolvedAgent(entry=paneless, matched_by="full_session_id"),
-    )
+
+    def _resolve(token, **_kw):
+        assert token == sid, f"rung resolved {token!r}, expected the session id"
+        return ResolvedAgent(entry=paneless, matched_by="full_session_id")
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent", _resolve)
+    # The mux predicate must short-circuit BEFORE shelling out. Without this the
+    # test would still pass for the wrong reason: a real `fno mux pane claim`
+    # against pane None fails and returns False anyway. Only mux calls are
+    # trapped -- the send path legitimately shells out for other things.
+    real_run = subprocess.run
+
+    def _guard_run(args, *a, **kw):
+        if isinstance(args, (list, tuple)) and "mux" in [str(x) for x in args]:
+            pytest.fail(f"paneless entry must not shell out to mux: {args}")
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr("fno.agents.dispatch.subprocess.run", _guard_run)
 
     sent = runner.invoke(
         app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
