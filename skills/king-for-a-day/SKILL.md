@@ -68,13 +68,17 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
 
 **Message.**
-`fno mail send <name> "<msg>"` reaches a registered agent; `--from-self` stamps your own reply handle so the answer comes back to you.
-The envelope is written before delivery is attempted, so a send survives a dead recipient.
+Mail a live pane directly; everything else is voicemail.
+A direct send to a live session injects into its pane as a notification it acts on this turn; a durable queue waits for a drain the recipient may never run.
+Both "work", but nobody checks their voicemail.
 
-Address live peers by handle, never by project.
-A session's canonical mail handle is `<harness>-<short-id>` (`claude-<short-id>`, `codex-<short-id>`, `opencode-<short-id>`, ...), and a session's slug resolves too; every session prints its own handle in its startup header, and peers are discoverable via `fno agents discovered-json` or `fno agents top`.
-`--to-project <X>` is anycast: when no live peer resolves it queues durable into what may be a ghost inbox, and the receipt still reads like success.
-**Treat any receipt that is not `delivered (hosted)` as not delivered.**
+The direct form: `fno mail send <harness>-<short-id> "<msg>"` (`claude-<short-id>`, `codex-<short-id>`, `opencode-<short-id>`, ...), or the session's slug if you know it.
+Every session prints its own handle in its startup header; find a peer's with `fno agents discovered-json` or `fno agents top`.
+Add `--from-self` to stamp your own reply handle so the answer comes back to you, and do not trust a sender's advertised `from-name` as an address - it can be stale.
+
+The fallbacks, and why they rank below: `fno mail send <name>` reaches a registered agent (fine when the name resolves); `--to-project <X>` is anycast that queues durable into what may be a ghost inbox when no live peer resolves - and the receipt still reads like success.
+The envelope is always written before delivery is attempted, so a send survives a dead recipient; that durability is recovery, not delivery.
+**Treat any receipt that is not `delivered (hosted)` as not delivered: re-resolve the handle and send again, do not re-queue.**
 
 **Observe (read-only, never drive).**
 `fno agents list` · `status` (daemon liveness + per-agent state) · `top` (every live worker process, fno-spawned and foreign alike) · `logs <name>` · `peek <handle>` (read-only observation of any peer you could message) · `needs` (the needs-me queue) · `digest --session <s>` (catch-up fold) · `trace <name>` (dispatch lifecycle).
