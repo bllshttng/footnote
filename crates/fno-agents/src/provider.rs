@@ -27,7 +27,7 @@
 //! daemon invokes the CLIs identically to the proven implementations.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::envelope::{Envelope, JsonEnvelope, NoEnvelope};
 use crate::readiness::{
@@ -962,20 +962,116 @@ impl Provider for OpencodeProvider {
 
     fn reachability(
         &self,
-        _entry: &AgentEntry,
-        _timeout: Duration,
+        entry: &AgentEntry,
+        timeout: Duration,
     ) -> Result<bool, ReachabilityProbeError> {
-        // opencode HAS an on-disk session store, but v1 does not probe it —
-        // inconclusive, so callers never false-orphan a live opencode pane.
-        Err(ReachabilityProbeError::new(
-            "opencode",
-            "opencode session probe not wired in v1 (pane is live-only)",
-        ))
+        opencode_reachable_with(entry, timeout, &(run_opencode_db as OpencodeDbRunner))
     }
 
     fn as_pty(&self) -> Option<&dyn ProviderWithPty> {
         Some(self)
     }
+}
+
+/// Runs an opencode store query, yielding `(exited_zero, stdout)`. Injected at
+/// the [`opencode_reachable_with`] seam so unit tests need no opencode binary.
+type OpencodeDbRunner = fn(&str, Duration) -> Result<(bool, String), String>;
+
+/// True iff `s` is a well-formed opencode session id (`ses_` + ASCII
+/// alphanumerics). Gates SQL interpolation in the probe: no quote, space, or
+/// shell metacharacter can reach the subprocess.
+fn is_opencode_session_id(s: &str) -> bool {
+    match s.strip_prefix("ses_") {
+        Some(tail) => !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphanumeric()),
+        None => false,
+    }
+}
+
+/// opencode reachability: membership in opencode's own session store, the same
+/// question codex's probe answers ("does the session still exist" = resumable),
+/// NOT "is the pane live" — a default TUI leaves no on-disk liveness artifact,
+/// so liveness stays the registry row's pid axis (x-5e58).
+///
+/// Tri-state mirrors codex: id present -> `Ok(true)`, clean query without it ->
+/// `Ok(false)`, any infrastructure failure -> `Err` (inconclusive), so a missing
+/// binary or unreadable store never false-orphans a live pane. Verified against
+/// opencode v1.14.50: an absent id exits 0 with empty stdout, while bad SQL, a
+/// usage error, and an unopenable database all exit nonzero — so exit status
+/// alone separates "gone" from "could not tell".
+///
+/// Matching is substring containment on the shape-validated id rather than a
+/// JSON parse: opencode plugins print banners to stdout ahead of real output
+/// (verified live), which would break any structured read.
+fn opencode_reachable_with(
+    entry: &AgentEntry,
+    timeout: Duration,
+    run: &OpencodeDbRunner,
+) -> Result<bool, ReachabilityProbeError> {
+    let sid = entry
+        .session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ReachabilityProbeError::new("opencode", "no session id in entry"))?;
+    if !is_opencode_session_id(sid) {
+        return Err(ReachabilityProbeError::new(
+            "opencode",
+            format!("malformed opencode session id {sid:?} (expected ses_<alnum>)"),
+        ));
+    }
+    let sql = format!("select id from session where id='{sid}'");
+    match run(&sql, timeout) {
+        Ok((true, stdout)) => Ok(stdout.contains(sid)),
+        Ok((false, _)) => Err(ReachabilityProbeError::new(
+            "opencode",
+            "`opencode db` exited nonzero (store unreadable or query rejected)",
+        )),
+        Err(e) => Err(ReachabilityProbeError::new(
+            "opencode",
+            format!("cannot run `opencode db`: {e}"),
+        )),
+    }
+}
+
+/// The real [`OpencodeDbRunner`]: `opencode db <sql>`, bounded by `timeout`.
+///
+/// Shelling out to opencode's own binary (rather than opening the sqlite file)
+/// inherits its channel-aware database resolution (`opencode-<channel>.db`,
+/// `OPENCODE_DB`) for free, keeps this crate free of a sqlite dependency, and
+/// pins to the CLI verb rather than a storage layout mid-migration to v2.
+///
+/// The query is a single-row lookup, so its output cannot fill the stdout pipe
+/// while we poll. On timeout only the child pid is killed — never its process
+/// group, which fno shares with a child not placed in its own session.
+fn run_opencode_db(sql: &str, timeout: Duration) -> Result<(bool, String), String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("opencode")
+        .arg("db")
+        .arg(sql)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("probe timed out after {timeout:?}"));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
 }
 
 impl ProviderWithPty for OpencodeProvider {
@@ -1608,6 +1704,156 @@ mod tests {
             session_id: Some(session_id.into()),
             cwd: PathBuf::from("/x"),
         }
+    }
+
+    // -- opencode store probe (x-830c) ------------------------------------
+    // Every case drives an injected runner, so the suite never shells out to a
+    // real opencode binary or reads ~/.local/share/opencode.
+
+    const OC_SES: &str = "ses_09679f284ffeJv7NdBAoLQLnLZ";
+
+    fn opencode_entry(session_id: Option<&str>) -> AgentEntry {
+        AgentEntry {
+            name: "o".into(),
+            provider: "opencode".into(),
+            session_id: session_id.map(Into::into),
+            cwd: PathBuf::from("/x"),
+        }
+    }
+
+    #[test]
+    fn opencode_reachable_when_store_returns_the_id() {
+        // Leading plugin banner: opencode plugins print to stdout ahead of real
+        // output, so the probe must tolerate garbage before the row.
+        fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            Ok((
+                true,
+                format!("[claude-mem] OpenCode plugin loading\nid\n{OC_SES}\n"),
+            ))
+        }
+        assert_eq!(
+            opencode_reachable_with(
+                &opencode_entry(Some(OC_SES)),
+                Duration::from_secs(2),
+                &(run as OpencodeDbRunner)
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn opencode_probe_embeds_only_the_validated_id_in_the_query() {
+        use std::sync::{Mutex, OnceLock};
+        static SEEN: OnceLock<Mutex<String>> = OnceLock::new();
+        fn run(sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            *SEEN.get_or_init(Default::default).lock().unwrap() = sql.to_string();
+            Ok((true, OC_SES.to_string()))
+        }
+        let _ = opencode_reachable_with(
+            &opencode_entry(Some(OC_SES)),
+            Duration::from_secs(2),
+            &(run as OpencodeDbRunner),
+        );
+        assert_eq!(
+            *SEEN.get_or_init(Default::default).lock().unwrap(),
+            format!("select id from session where id='{OC_SES}'")
+        );
+    }
+
+    #[test]
+    fn opencode_clean_query_without_the_id_is_gone() {
+        // Verified on v1.14.50: an absent id exits 0 with empty stdout.
+        fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            Ok((true, String::new()))
+        }
+        assert_eq!(
+            opencode_reachable_with(
+                &opencode_entry(Some(OC_SES)),
+                Duration::from_secs(2),
+                &(run as OpencodeDbRunner)
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn opencode_infrastructure_failure_is_inconclusive_never_gone() {
+        // Spawn failure (binary missing) and a nonzero exit (unopenable store)
+        // must both stay Err, or a dead-pane pass would orphan a live pane.
+        fn spawn_failed(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            Err("No such file or directory (os error 2)".into())
+        }
+        fn nonzero(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            Ok((false, String::new()))
+        }
+        for run in [
+            spawn_failed as OpencodeDbRunner,
+            nonzero as OpencodeDbRunner,
+        ] {
+            let err = opencode_reachable_with(
+                &opencode_entry(Some(OC_SES)),
+                Duration::from_secs(2),
+                &run,
+            )
+            .unwrap_err();
+            assert_eq!(err.provider, "opencode");
+        }
+    }
+
+    #[test]
+    fn opencode_malformed_id_never_reaches_the_subprocess() {
+        fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            panic!("probe must reject a malformed id before spawning");
+        }
+        for bad in ["ses_'; drop table session--", "ses_ x", "ses_", "not-a-ses"] {
+            let err = opencode_reachable_with(
+                &opencode_entry(Some(bad)),
+                Duration::from_secs(2),
+                &(run as OpencodeDbRunner),
+            )
+            .unwrap_err();
+            assert!(err.reason.contains(bad), "reason should quote {bad:?}");
+        }
+    }
+
+    #[test]
+    fn opencode_missing_session_id_is_inconclusive() {
+        fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            panic!("no id means nothing to probe");
+        }
+        assert!(opencode_reachable_with(
+            &opencode_entry(None),
+            Duration::from_secs(2),
+            &(run as OpencodeDbRunner)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn opencode_probe_is_stateless_across_calls() {
+        // AC1-FR: a transient failure poisons nothing; the next call reports the
+        // true store verdict.
+        fn failing(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            Err("binary briefly unavailable".into())
+        }
+        fn healthy(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
+            Ok((true, OC_SES.to_string()))
+        }
+        let entry = opencode_entry(Some(OC_SES));
+        assert!(opencode_reachable_with(
+            &entry,
+            Duration::from_secs(2),
+            &(failing as OpencodeDbRunner)
+        )
+        .is_err());
+        assert_eq!(
+            opencode_reachable_with(
+                &entry,
+                Duration::from_secs(2),
+                &(healthy as OpencodeDbRunner)
+            ),
+            Ok(true)
+        );
     }
 
     #[test]
