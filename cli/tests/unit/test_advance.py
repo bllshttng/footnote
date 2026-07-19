@@ -1649,3 +1649,96 @@ def test_claude_leg_default_mode_positive(iso, monkeypatch):
     """AC2-EDGE: "default" is forwarded verbatim (prompting, expressed positively)."""
     cmd = _spawn_argv(monkeypatch, provider="claude", perm_config="default")
     assert _perm_of(cmd) == "default"
+
+
+# ---------------------------------------------------------------------------
+# G1 selection_guards (x-3236)
+# ---------------------------------------------------------------------------
+from datetime import datetime, timezone, timedelta  # noqa: E402
+
+
+def _gnow():
+    return datetime(2026, 7, 18, tzinfo=timezone.utc)
+
+
+def test_selection_guards_dead_ancestor_superseded():
+    now = _gnow()
+    child = {"id": "c", "parent": "p", "_status": "ready",
+             "plan_path": "x", "created_at": now.isoformat()}
+    by_id = {"c": child, "p": {"id": "p", "_status": "superseded"}}
+    assert adv.selection_guards(child, by_id, now) == "dead-ancestor:p"
+
+
+def test_selection_guards_dead_ancestor_transitive_deferred():
+    now = _gnow()
+    by_id = {
+        "c": {"id": "c", "parent": "m", "_status": "ready", "created_at": now.isoformat()},
+        "m": {"id": "m", "parent": "g", "_status": "ready"},
+        "g": {"id": "g", "_status": "deferred"},
+    }
+    assert adv.selection_guards(by_id["c"], by_id, now) == "dead-ancestor:g"
+
+
+def test_selection_guards_missing_parent_no_verdict():
+    now = _gnow()
+    child = {"id": "c", "parent": "gone", "_status": "ready",
+             "plan_path": "x", "created_at": now.isoformat()}
+    assert adv.selection_guards(child, {"c": child}, now) is None
+
+
+def test_selection_guards_parent_cycle_terminates():
+    now = _gnow()
+    by_id = {
+        "a": {"id": "a", "parent": "b", "_status": "ready",
+              "plan_path": "x", "created_at": now.isoformat()},
+        "b": {"id": "b", "parent": "a", "_status": "ready"},
+    }
+    # No dead ancestor in the cycle; must terminate and (recent) not quarantine.
+    assert adv.selection_guards(by_id["a"], by_id, now) is None
+
+
+def test_selection_guards_stale_quarantine():
+    now = _gnow()
+    old = (now - timedelta(days=80)).isoformat()
+    node = {"id": "c", "_status": "ready", "created_at": old}
+    assert adv.selection_guards(node, {"c": node}, now) == "stale-quarantine"
+
+
+def test_selection_guards_healthy_ready_selected():
+    now = _gnow()
+    recent = (now - timedelta(days=2)).isoformat()
+    node = {"id": "c", "_status": "ready", "plan_path": "x", "created_at": recent}
+    assert adv.selection_guards(node, {"c": node}, now) is None
+
+
+def test_selection_guards_stale_check_skipped_for_non_ready():
+    # A non-ready entry (e.g. idea) is never quarantined by this guard - idea
+    # staleness is detect_stale_ideas' job.
+    now = _gnow()
+    old = (now - timedelta(days=80)).isoformat()
+    node = {"id": "c", "_status": "idea", "created_at": old}
+    assert adv.selection_guards(node, {"c": node}, now) is None
+
+
+def test_selection_guards_fail_open_on_error(monkeypatch, capsys):
+    import fno.graph.maintain as mm
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mm, "is_stale_ready", boom)
+    now = _gnow()
+    node = {"id": "c", "_status": "ready", "created_at": now.isoformat()}
+    assert adv.selection_guards(node, {"c": node}, now) is None
+    assert "selecting anyway" in capsys.readouterr().err
+
+
+def test_selection_guards_dead_ancestor_via_field_not_status():
+    # Robust to read_graph NOT recomputing _status: an ancestor carrying only
+    # the underlying superseded_by / deferred_at field is still a dead ancestor.
+    now = _gnow()
+    child = {"id": "c", "parent": "p", "_status": "ready", "created_at": now.isoformat()}
+    by_sup = {"c": child, "p": {"id": "p", "superseded_by": "new"}}
+    assert adv.selection_guards(child, by_sup, now) == "dead-ancestor:p"
+    by_def = {"c": child, "p": {"id": "p", "deferred_at": "2026-01-01T00:00:00+00:00"}}
+    assert adv.selection_guards(child, by_def, now) == "dead-ancestor:p"
