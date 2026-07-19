@@ -26,6 +26,10 @@ Entry = dict[str, Any]
 # type: a bug serves a defect, not a mission (AC6).
 ROLLUP_TYPES = frozenset({"feature", "task"})
 
+# Work that is over. A shipped feature with no mission edge is history, not a
+# rollup an operator can still make.
+CLOSED_STATUSES = frozenset({"done", "superseded", "deferred"})
+
 # Auto-link bar. Deliberately high, and margin-gated so two plausible epics
 # never coin-flip a parent edge - below either bar we suggest instead.
 AUTO_LINK_MIN = 0.55
@@ -77,16 +81,24 @@ def has_epic_ancestor(entry: Entry, id_to_entry: dict[str, Entry]) -> bool:
 
 
 def is_orphan(entry: Entry, id_to_entry: dict[str, Entry]) -> bool:
-    """True iff this node is a feature/task with no mission edge and no opt-out.
+    """True iff this is OPEN feature/task work with no mission edge and no opt-out.
 
-    Exempt nodes (wrong type, or a deliberate ``orphan_ok``) are False, so they
-    stay invisible to the metric, the flag, and the tiebreaker alike (AC6).
+    Exempt nodes (wrong type, a deliberate ``orphan_ok``, or closed work) are
+    False, so they stay invisible to the metric, the flag, and the tiebreaker
+    alike (AC6).
+
+    Closed work is excluded here rather than at each call site: a shipped
+    feature is history, not a rollup an operator can still make, and scoping it
+    per-surface is what let a Done card render an ``[orphan]`` tag the health
+    metric had already excluded.
     """
     if not isinstance(entry, dict):
         return False
     if entry.get("type") not in ROLLUP_TYPES:
         return False
     if entry.get("orphan_ok"):
+        return False
+    if entry.get("_status") in CLOSED_STATUSES:
         return False
     return not has_epic_ancestor(entry, id_to_entry)
 
@@ -107,8 +119,12 @@ def resolve(node: Entry, entries: list[Entry]) -> Resolution:
     """
     if node.get("type") not in ROLLUP_TYPES or node.get("orphan_ok"):
         return Resolution("exempt")
-    if has_epic_ancestor(node, _id_index(entries)):
-        return Resolution("exempt", reason="already linked")
+    # ANY explicit parent is the operator's answer to "what does this serve",
+    # even one pointing at a plain feature rather than an epic. Rollup proposes
+    # an edge where none exists; it never overrules one a human set, because the
+    # printed undo (`--parent null`) could not restore what it overwrote.
+    if node.get("parent"):
+        return Resolution("exempt", reason="parent already set")
 
     candidates = tuple(epic_candidates(node, entries))
     if not candidates:

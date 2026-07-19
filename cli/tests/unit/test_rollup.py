@@ -245,3 +245,35 @@ def test_suggest_receipt_lists_copy_paste_commands():
 
 def test_exempt_resolution_prints_nothing():
     assert receipt_lines(resolve(node("x-1", type="bug"), []), "x-1", {}) == []
+
+
+# -- review findings: explicit parent, closed work --
+
+
+def test_an_explicit_non_epic_parent_is_never_overwritten():
+    """Rollup proposes an edge where none exists; it never overrules a human.
+
+    `--parent <feature>` is accepted by add/idea by design. Auto-linking over it
+    would destroy operator intent, and the printed undo (`--parent null`) could
+    not restore it.
+    """
+    entries = [
+        epic("x-epic", "billing invoice export"),
+        node("x-host", title="host feature"),
+    ]
+    child = node("x-1", title="billing invoice export", parent="x-host")
+    res = resolve(child, entries + [child])
+    assert res.kind == "exempt"
+    assert res.epic_id is None
+
+
+@pytest.mark.parametrize("status", ["done", "superseded", "deferred"])
+def test_closed_work_is_never_an_orphan(status):
+    """A shipped feature is history, not a rollup anyone can still make."""
+    entries = [node("x-1", _status=status)]
+    assert orphan_ids(entries) == frozenset()
+
+
+def test_open_statuses_still_count():
+    for status in ("ready", "idea", "blocked", "claimed", None):
+        assert orphan_ids([node("x-1", _status=status)]) == {"x-1"}, status

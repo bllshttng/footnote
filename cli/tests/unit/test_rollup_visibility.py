@@ -158,3 +158,50 @@ def test_absent_metric_never_breaches():
     }}
     breaches = evaluate_thresholds({}, config=config)
     assert [b for b in breaches if b.key == "orphan_feature_rate"] == []
+
+
+# -- review findings: per-project scoping, rate severity --
+
+
+def test_per_project_board_does_not_invent_orphans():
+    """Orphanhood is a whole-graph property.
+
+    A feature whose parent epic lives in another project has no reachable
+    ancestor inside a project-scoped slice; computing orphans from that subset
+    invented orphans AND disagreed with the card flag, which is built from the
+    full index.
+    """
+    from fno.graph.render_html import _bucket
+
+    entries = [
+        node("x-epic", type="epic", title="mission", project="other"),
+        node("x-child", parent="x-epic", project="fno"),
+    ]
+    all_orphans = orphan_ids(entries)
+    assert all_orphans == frozenset(), "child reaches its epic in the full graph"
+
+    proj_entries = [e for e in entries if e["project"] == "fno"]
+    # Without the whole-graph set the subset would call x-child an orphan.
+    assert orphan_ids(proj_entries) == {"x-child"}
+    # _bucket must use the set it is handed, not recompute from the slice.
+    _bucket(proj_entries, all_orphans)
+
+
+def test_done_cards_are_not_flagged_as_orphans():
+    """The metric excludes closed work, so the board must too."""
+    assert orphan_ids([node("x-1", _status="done")]) == frozenset()
+
+
+def test_rate_severity_can_reach_alert():
+    """A rate is capped at 1.0, so count-style ratios could never escalate."""
+    from fno.health_monitor import _classify_severity
+
+    assert _classify_severity(actual=0.95, threshold=0.5, kind="rate") == "alert"
+    assert _classify_severity(actual=0.65, threshold=0.5, kind="rate") == "warn"
+    assert _classify_severity(actual=0.55, threshold=0.5, kind="rate") == "info"
+
+
+def test_rate_severity_handles_a_zero_headroom_threshold():
+    from fno.health_monitor import _classify_severity
+
+    assert _classify_severity(actual=1.0, threshold=1.0, kind="rate") == "alert"

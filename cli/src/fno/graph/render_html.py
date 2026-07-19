@@ -208,11 +208,20 @@ def _column_for(
     return _kanban_column(entry, epics, live_claimed)
 
 
-def _bucket(entries: list[dict]) -> dict[str, list[dict]]:
-    """Partition entries into the kanban columns, sorted per column."""
+def _bucket(
+    entries: list[dict], orphans: frozenset[str] | None = None
+) -> dict[str, list[dict]]:
+    """Partition entries into the kanban columns, sorted per column.
+
+    ``orphans`` MUST be passed when ``entries`` is a subset of the graph (the
+    per-project sections). Orphanhood is a whole-graph property - a feature
+    whose parent epic sits in another project has no reachable ancestor inside
+    a project-scoped slice, so computing it from the subset invents orphans.
+    """
     epics = in_progress_epic_ids(entries)
     live_claimed = frozenset(live_claimed_node_ids())
-    orphans = _orphan_ids(entries)
+    if orphans is None:
+        orphans = _orphan_ids(entries)
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
         col = _column_for(e, epics, live_claimed)
@@ -747,9 +756,12 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     if UNSCOPED_LABEL in projects:
         project_order.append(UNSCOPED_LABEL)
 
+    # Computed over the FULL graph, then handed to each project slice: the
+    # per-project sort and the card flags must agree about who is an orphan.
+    all_orphans = _orphan_ids(entries)
     for project in project_order:
         proj_entries = [e for e in entries if _project_key(e) == project]
-        cols = _bucket(proj_entries)
+        cols = _bucket(proj_entries, all_orphans)
         chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
         summary = (
             f'<summary><span class="chip" style="background:{chip_color}">'
