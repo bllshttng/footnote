@@ -511,10 +511,12 @@ fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
 }
 
 /// Holds an advisory `flock` for the life of the guard, releasing on drop.
-struct FlockGuard(std::fs::File);
+/// `pub(crate)` so the sibling view store serializes its own read-modify-write
+/// on the same proven primitive instead of hand-rolling a second one.
+pub(crate) struct FlockGuard(std::fs::File);
 
 impl FlockGuard {
-    fn acquire(file: std::fs::File) -> io::Result<Self> {
+    pub(crate) fn acquire(file: std::fs::File) -> io::Result<Self> {
         let fd = file.as_raw_fd();
         for _ in 0..FLOCK_RETRIES {
             // SAFETY: fd is owned by `file`, valid for this call.

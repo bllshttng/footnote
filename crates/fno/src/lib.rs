@@ -27,5 +27,6 @@ pub mod squad;
 pub mod squad_store;
 pub mod tree;
 pub mod version;
+pub mod view_store;
 pub mod vt;
 pub mod web;
