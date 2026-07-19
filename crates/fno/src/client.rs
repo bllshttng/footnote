@@ -1332,13 +1332,26 @@ impl View {
 
     /// The greatest tab id in the active squad (ids are monotonic + never
     /// reused, so the max is the newest tab), or `None` when the active squad
-    /// is absent/empty (x-0f9d US1).
+    /// is absent/empty (x-0f9d US1). Used only as the arm-time baseline.
     fn active_squad_max_tab_id(&self) -> Option<u64> {
         self.layout
             .squads
             .iter()
             .find(|s| s.id == self.layout.active_squad)
             .and_then(|s| s.tabs.iter().map(|t| t.id).max())
+    }
+
+    /// The id of the active squad's ACTIVE tab (x-0f9d US1). For the active
+    /// squad the server projects `active_tab` per-viewer, and a NewTab switches
+    /// only its sender to the new tab (Locked 3), so this identifies THIS
+    /// client's own newly-created tab - not a concurrent tab another client
+    /// created in the same squad (codex review).
+    fn active_squad_active_tab_id(&self) -> Option<u64> {
+        self.layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad)
+            .and_then(|s| s.tabs.get(s.active_tab).map(|t| t.id))
     }
 
     /// Arm the create-time name prompt for the NEXT tab (x-0f9d US1): a bare
@@ -1351,17 +1364,21 @@ impl View {
         }
     }
 
-    /// If a create-time name prompt is armed and a tab beyond the recorded
-    /// baseline has appeared in the active squad, open the x-c150 rename overlay
-    /// on it (x-0f9d US1): type + Enter names it, Esc / empty Enter leaves it
-    /// unnamed. Called from [`View::set_layout`] after the swap.
+    /// If a create-time name prompt is armed and THIS client's active tab is a
+    /// newly-minted one (its id is beyond the arm-time baseline), open the
+    /// x-c150 rename overlay on it (x-0f9d US1): type + Enter names it, Esc /
+    /// empty Enter leaves it unnamed. Called from [`View::set_layout`] after the
+    /// swap. Keying on the active tab (not the max id) means a concurrent tab
+    /// another client created in the same squad never steals this prompt.
     fn maybe_prompt_new_tab_name(&mut self) {
         if let Some(baseline) = self.pending_new_tab {
-            let fresh = match (baseline, self.active_squad_max_tab_id()) {
-                // No tabs before -> any tab that now exists is the new one.
-                (None, Some(new_id)) => Some(new_id),
-                // Had tabs -> a strictly higher id is the newly minted tab.
-                (Some(prev), Some(new_id)) if new_id > prev => Some(new_id),
+            let fresh = match (baseline, self.active_squad_active_tab_id()) {
+                // No tabs before -> any active tab that now exists is the new one.
+                (None, Some(active_id)) => Some(active_id),
+                // Had tabs -> the sender's active tab is the new one iff its id
+                // is beyond the baseline (the only id > baseline is the fresh
+                // tab; a scrape tick still on the old active tab does not fire).
+                (Some(prev), Some(active_id)) if active_id > prev => Some(active_id),
                 _ => None,
             };
             if let Some(new_id) = fresh {
@@ -7819,18 +7836,41 @@ mod tests {
         assert!(v.rename.is_none(), "no new tab yet -> no prompt");
         assert_eq!(v.pending_new_tab, Some(Some(1)), "still armed");
 
-        // The server materialized tab id 2: rename opens on it, once.
+        // Multi-client guard (codex review): another client creates tab id 5 in
+        // the same squad, so it appears in the broadcast layout with an id past
+        // the baseline - but it is NOT this client's active tab, so the prompt
+        // must NOT open on it.
+        v.layout.squads[0].tabs.push(TabMeta {
+            id: 5,
+            name: "6".into(),
+            named: false,
+            panes: Vec::new(),
+        });
+        v.maybe_prompt_new_tab_name();
+        assert!(
+            v.rename.is_none(),
+            "a concurrent client's tab never steals the prompt"
+        );
+        assert_eq!(
+            v.pending_new_tab,
+            Some(Some(1)),
+            "still armed for our own tab"
+        );
+
+        // Our own NewTab lands: tab id 2, and the server switched THIS client's
+        // view to it (active_tab). Rename opens on it, once.
         v.layout.squads[0].tabs.push(TabMeta {
             id: 2,
             name: "3".into(),
             named: false,
             panes: Vec::new(),
         });
+        v.layout.squads[0].active_tab = v.layout.squads[0].tabs.len() - 1;
         v.maybe_prompt_new_tab_name();
         assert_eq!(
             v.rename.as_ref().map(|(t, _)| *t),
             Some(RenameTarget::Tab(2)),
-            "rename armed on the new tab"
+            "rename armed on our own new tab, not the concurrent id-5 tab"
         );
         assert_eq!(v.pending_new_tab, None, "prompt consumed once");
 
@@ -7851,6 +7891,7 @@ mod tests {
             named: false,
             panes: Vec::new(),
         });
+        v2.layout.squads[0].active_tab = 0;
         v2.maybe_prompt_new_tab_name();
         assert_eq!(
             v2.rename.as_ref().map(|(t, _)| *t),
