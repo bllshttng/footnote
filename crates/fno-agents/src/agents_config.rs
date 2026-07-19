@@ -510,7 +510,13 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         let cwd = write_project_settings("am-absent", "schema_version = 1\n");
-        assert!(!dispatch_auto_merge(&cwd));
+        // Pin FNO_CONFIG (the SOLE-source short-circuit) to the project file:
+        // without it the candidate chain falls through to the developer's real
+        // global config, whose dispatch.auto_merge masks the default under test.
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = dispatch_auto_merge(&cwd);
+        clear_config_env();
+        assert!(!got);
     }
 
     #[test]
@@ -536,6 +542,11 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         let cwd = write_project_settings("am-str", "[dispatch]\nauto_merge = \"yes\"\n");
-        assert!(!dispatch_auto_merge(&cwd));
+        // Pinned for the same reason as the absent case: a non-bool yields None,
+        // which would otherwise fall through to the real global config.
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = dispatch_auto_merge(&cwd);
+        clear_config_env();
+        assert!(!got);
     }
 }
