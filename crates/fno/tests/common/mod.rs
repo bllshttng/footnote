@@ -120,6 +120,11 @@ impl ClientHarness {
         // real ~/.fno. Overridable via `envs` below.
         cmd.env("FNO_AGENTS_HOME", scratch.0.join("iso-agents"));
         cmd.env("FNO_CLAUDE_DAEMON_DIR", scratch.0.join("iso-daemon"));
+        // See spawn_server: neutralize isolated-account roster discovery too.
+        cmd.env(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            scratch.0.join("iso-cfg").join("settings.json"),
+        );
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -327,6 +332,15 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     let iso = sock.parent().unwrap_or_else(|| Path::new("."));
     cmd.env("FNO_AGENTS_HOME", iso.join("iso-agents"));
     cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
+    // Isolated-account rosters are discovered via the provider config
+    // (isolated_account_dirs -> $PWD/.fno/config.toml, else this override's
+    // sibling config.toml, else ~/.fno/config.toml). Point the override at an
+    // empty scratch dir so a multi-account developer's live alt-account workers
+    // don't fold into the sideline either.
+    cmd.env(
+        "FNO_GLOBAL_SETTINGS_PATH",
+        iso.join("iso-cfg").join("settings.json"),
+    );
     for (k, v) in envs {
         cmd.env(k, v);
     }
