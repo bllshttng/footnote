@@ -1020,14 +1020,24 @@ struct WheelGateState {
 /// expired window (at or after the boundary instant - no permanent mute,
 /// AC1-FR) resets to a fresh budget and allows; under budget allows; else
 /// drops. Drops only - forwarded ticks keep arrival order (brief Locked 5).
-fn wheel_gate(gate: &mut HashMap<u64, WheelGateState>, pane: u64, dir: MouseKind, now: Instant) -> bool {
+fn wheel_gate(
+    gate: &mut HashMap<u64, WheelGateState>,
+    pane: u64,
+    dir: MouseKind,
+    now: Instant,
+) -> bool {
     match gate.entry(pane) {
         std::collections::hash_map::Entry::Occupied(mut e) => {
             let st = e.get_mut();
             // saturating: a `now` behind window_start (virtualized clock skew)
             // treats the tick as inside the window instead of panicking.
-            if st.dir != dir || now.saturating_duration_since(st.window_start) >= WHEEL_GATE_WINDOW {
-                *st = WheelGateState { window_start: now, count: 1, dir };
+            if st.dir != dir || now.saturating_duration_since(st.window_start) >= WHEEL_GATE_WINDOW
+            {
+                *st = WheelGateState {
+                    window_start: now,
+                    count: 1,
+                    dir,
+                };
                 true
             } else if st.count < WHEEL_GATE_BUDGET {
                 st.count += 1;
@@ -1037,7 +1047,11 @@ fn wheel_gate(gate: &mut HashMap<u64, WheelGateState>, pane: u64, dir: MouseKind
             }
         }
         std::collections::hash_map::Entry::Vacant(v) => {
-            v.insert(WheelGateState { window_start: now, count: 1, dir });
+            v.insert(WheelGateState {
+                window_start: now,
+                count: 1,
+                dir,
+            });
             true
         }
     }
