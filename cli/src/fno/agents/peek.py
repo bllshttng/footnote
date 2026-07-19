@@ -191,15 +191,13 @@ def _opencode_message_dir(
 
 
 def _opencode_part_text(part_dir: Path) -> str:
-    """Join one message's renderable parts, mirroring ``_extract_text``'s policy.
+    """Join one message's renderable parts from the legacy on-disk tree.
 
-    Any type not matched below (``reasoning`` is opencode's ``thinking``, plus
-    the step/patch bookkeeping) is observe-noise. ``""`` means the caller skips
-    the turn. Filename order is creation order here — unlike message ids, part
-    ids within one message are same-era and monotonic (measured: 230 multi-part
-    messages, zero out of order).
+    Filename order is creation order here — unlike message ids, part ids within
+    one message are same-era and monotonic (measured: 230 multi-part messages,
+    zero out of order).
     """
-    parts: list[str] = []
+    blocks: list[dict] = []
     try:
         files = sorted(part_dir.glob("*.json"))
     except OSError:
@@ -209,8 +207,22 @@ def _opencode_part_text(part_dir: Path) -> str:
             p = json.loads(pf.read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeDecodeError):
             continue  # torn/mid-write part: skip, never abort the message
-        if not isinstance(p, dict):
-            continue
+        if isinstance(p, dict):
+            blocks.append(p)
+    return _opencode_join_parts(blocks)
+
+
+def _opencode_join_parts(blocks: "list[dict]") -> str:
+    """The part-rendering policy, shared by the SQLite and legacy readers.
+
+    Mirrors ``_extract_text`` so peek reads uniformly across harnesses: any
+    type not matched here (``reasoning`` is opencode's ``thinking``, plus the
+    step/patch bookkeeping) is observe-noise. ``""`` means the caller skips the
+    turn. One function so the two readers cannot drift apart on what a turn
+    looks like.
+    """
+    parts: list[str] = []
+    for p in blocks:
         if p.get("type") == "text" and isinstance(p.get("text"), str):
             parts.append(p["text"])
         elif p.get("type") == "tool":
@@ -234,6 +246,61 @@ def _parse_opencode_record(msg: dict, part_root: Path) -> Optional[Record]:
         return None
     role = msg.get("role")
     return Record(role=role if isinstance(role, str) and role else "?", text=text)
+
+
+def _opencode_records_db(
+    session_id: str, storage_dir: Optional[Path], n: Optional[int]
+) -> list[Record]:
+    """The last ``n`` renderable turns from opencode's SQLite store.
+
+    Both orderings come from explicit ``time_created`` columns, so unlike the
+    legacy tree there is no filename or mtime inference anywhere. Walks newest
+    first and stops once ``n`` renderable turns are found, so parts are queried
+    only for the messages actually returned.
+    """
+    from fno.agents.discover import default_opencode_db_path, opencode_query
+
+    if n is not None and n <= 0:
+        return []
+    db = default_opencode_db_path(storage_dir)
+    rows = opencode_query(
+        db,
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC",
+        (session_id,),
+    )
+    records: list[Record] = []
+    for mid, raw in rows:
+        if not isinstance(mid, str) or not mid:
+            continue
+        try:
+            msg = json.loads(raw) if isinstance(raw, str) else {}
+        except ValueError:
+            msg = {}
+        if not isinstance(msg, dict):
+            continue
+        blocks: list[dict] = []
+        for (praw,) in opencode_query(
+            db,
+            "SELECT data FROM part WHERE message_id = ? ORDER BY time_created",
+            (mid,),
+        ):
+            try:
+                block = json.loads(praw) if isinstance(praw, str) else None
+            except ValueError:
+                continue
+            if isinstance(block, dict):
+                blocks.append(block)
+        text = _opencode_join_parts(blocks)
+        if not text:
+            continue
+        role = msg.get("role")
+        records.append(
+            Record(role=role if isinstance(role, str) and role else "?", text=text)
+        )
+        if n is not None and len(records) >= n:
+            break
+    records.reverse()
+    return records
 
 
 def _opencode_records(
@@ -275,7 +342,10 @@ def _opencode_records(
         created = t.get("created") if isinstance(t, dict) else None
         if not isinstance(created, (int, float)):
             try:
-                created = mf.stat().st_mtime
+                # opencode's timestamps are milliseconds; st_mtime is seconds.
+                # Mixing the units unconverted would sort every fallback-dated
+                # message ~1000x too early, i.e. always to the front.
+                created = mf.stat().st_mtime * 1000.0
             except OSError:
                 continue
         dated.append((float(created), mf.name, msg))
@@ -325,6 +395,11 @@ def recent_records(
             return []
         return _records_from_jsonl(path, n, _parse_codex_record)
     if agent == "opencode":
+        # SQLite is where current opencode writes; the legacy JSON tree is the
+        # fallback for an install old enough to still use it.
+        records = _opencode_records_db(session_id, opencode_storage_dir, n)
+        if records:
+            return records
         return _opencode_records(session_id, opencode_storage_dir, n)
     raise ObserveUnsupported(agent)
 

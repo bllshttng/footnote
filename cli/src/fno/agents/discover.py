@@ -258,6 +258,79 @@ def default_opencode_storage_dir() -> Path:
     return Path(os.path.expanduser("~")) / ".local" / "share" / "opencode" / "storage"
 
 
+def default_opencode_db_path(storage_dir: Optional[Path] = None) -> Path:
+    """opencode's SQLite store, the sibling of the legacy storage tree.
+
+    Current opencode (verified on 1.14.50) writes sessions, messages and parts
+    here; the ``storage/`` JSON tree is the legacy layout and stops being
+    written. Derived from the storage dir so one env override seams both.
+    """
+    return (storage_dir or default_opencode_storage_dir()).parent / "opencode.db"
+
+
+def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
+    """Run one read-only query, returning ``[]`` on any failure.
+
+    Read-only URI mode is load-bearing, not decoration: a live opencode holds
+    this database open in WAL mode, and observing must not perturb the
+    observed. A missing file, a lock, or schema drift on a future opencode all
+    degrade to no rows rather than raising, matching the disk readers.
+    """
+    import sqlite3
+
+    if not db_path.exists():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return []
+    try:
+        return list(con.execute(sql, params))
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
+
+
+def _discover_from_opencode_db(
+    db_path: Path,
+    *,
+    recency_seconds: float,
+    exclude_session_ids: Iterable[str] = (),
+    now: Optional[float] = None,
+) -> list[dict]:
+    """Discover live opencode sessions from the SQLite store.
+
+    ``session.time_updated`` is an explicit activity timestamp opencode
+    maintains itself, so this needs none of the mtime inference the legacy tree
+    forced. Timestamps are milliseconds.
+    """
+    cutoff_ms = ((now if now is not None else time.time()) - recency_seconds) * 1000.0
+    exclude_sids = {s for s in (exclude_session_ids or ()) if s}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for sid, directory, _updated in opencode_query(
+        db_path,
+        "SELECT id, directory, time_updated FROM session "
+        "WHERE time_updated >= ? ORDER BY time_updated DESC",
+        (cutoff_ms,),
+    ):
+        if not isinstance(sid, str) or not sid or sid in seen or sid in exclude_sids:
+            continue
+        seen.add(sid)
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": directory if isinstance(directory, str) else "",
+                "status": None,
+                "agent": "opencode",
+            }
+        )
+    return rows
+
+
 def _opencode_session_info(path: Path) -> Optional[tuple[str, str]]:
     """``(session_id, cwd)`` from a session-info JSON, or None.
 
@@ -1127,13 +1200,23 @@ def discover_live_sessions(
             continue
         candidates.append(r)
 
-    # opencode disk-discovery. Unioned ALWAYS for the same reason as the codex
-    # lane, and zero-effect on a host with no opencode store (empty glob).
-    for r in _discover_from_opencode(
-        opencode_storage_dir or default_opencode_storage_dir(),
+    # opencode discovery. Unioned ALWAYS for the same reason as the codex lane,
+    # and zero-effect on a host with no opencode install. The SQLite store is
+    # where current opencode writes; the legacy JSON tree is consulted only
+    # when there is no database, so an old install still resolves.
+    opencode_store = opencode_storage_dir or default_opencode_storage_dir()
+    opencode_rows = _discover_from_opencode_db(
+        default_opencode_db_path(opencode_store),
         recency_seconds=_recency_seconds(),
         exclude_session_ids=excluded_session_ids,
-    ):
+    )
+    if not opencode_rows:
+        opencode_rows = _discover_from_opencode(
+            opencode_store,
+            recency_seconds=_recency_seconds(),
+            exclude_session_ids=excluded_session_ids,
+        )
+    for r in opencode_rows:
         if r["short_id"] in exclude:
             continue
         candidates.append(r)

@@ -2058,7 +2058,9 @@ fn fetch_discovered_sessions(
     }
     // Without this the rendered surface disagrees with the Python one:
     // `--provider claude` would list every discovered codex/opencode session.
-    if let Some(p) = provider_filter {
+    // An empty value is "no filter" on the Python side, so forwarding it would
+    // make the two runtimes disagree again in the other direction.
+    if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
         cmd.args(["--provider", p]);
     }
     let output = match cmd.output() {

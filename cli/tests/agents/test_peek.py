@@ -557,3 +557,98 @@ def test_peek_reader_opencode_torn_message_file_skipped(tmp_path):
     (storage / "message" / sid / "torn.json").write_text("{nope", encoding="utf-8")
     recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
     assert [r.text for r in recs] == ["intact"]
+
+
+# --------------------------------------------------------------------------
+# peek_reader — opencode SQLite store (current opencode)
+# --------------------------------------------------------------------------
+
+
+def _opencode_db(storage: Path, session_id: str, turns) -> None:
+    """Build an opencode.db transcript. `turns` = [(msg_id, role, created, parts)].
+
+    Message and part payloads are the same JSON shapes the legacy files hold,
+    which is why the rendering policy is shared between the two readers.
+    """
+    import sqlite3
+
+    storage.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(storage.parent / "opencode.db")
+    con.execute("CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER)")
+    con.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+    con.execute("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+    for mid, role, created, parts in turns:
+        con.execute(
+            "INSERT INTO message VALUES (?,?,?,?)",
+            (mid, session_id, created, json.dumps({"id": mid, "role": role})),
+        )
+        for i, p in enumerate(parts):
+            con.execute(
+                "INSERT INTO part VALUES (?,?,?,?,?)",
+                (f"prt_{mid}_{i}", mid, session_id, i, json.dumps(p)),
+            )
+    con.commit()
+    con.close()
+
+
+def test_peek_reader_opencode_db_orders_and_joins(tmp_path):
+    """Ordering comes from the time_created column, not a filename or mtime."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_db"
+    _opencode_db(
+        storage,
+        sid,
+        [
+            ("zzz", "user", 1, [{"type": "text", "text": "first"}]),
+            ("mmm", "assistant", 2, [
+                {"type": "reasoning", "text": "hidden"},
+                {"type": "text", "text": "second"},
+                {"type": "tool", "tool": "bash"},
+            ]),
+            ("aaa", "user", 3, [{"type": "text", "text": "third"}]),
+        ],
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [
+        ("user", "first"),
+        ("assistant", "second [tool_use: bash]"),
+        ("user", "third"),
+    ]
+
+
+def test_peek_reader_opencode_db_tail_is_last_n(tmp_path):
+    """Tail parity: last N, still chronological."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_dbtail"
+    _opencode_db(
+        storage, sid,
+        [(f"m{i}", "user", i, [{"type": "text", "text": f"turn{i}"}]) for i in range(5)],
+    )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["turn3", "turn4"]
+
+
+def test_peek_reader_opencode_db_noise_only_turn_skipped(tmp_path):
+    """A turn whose parts are all observe-noise renders nothing, so the tail
+    still fills to N with real turns."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_dbnoise"
+    _opencode_db(
+        storage, sid,
+        [
+            ("m1", "user", 1, [{"type": "text", "text": "keep"}]),
+            ("m2", "assistant", 2, [{"type": "step-start"}, {"type": "reasoning", "text": "x"}]),
+            ("m3", "assistant", 3, [{"type": "text", "text": "last"}]),
+        ],
+    )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["keep", "last"]
+
+
+def test_peek_reader_opencode_db_unknown_session_empty(tmp_path):
+    """An unknown ses_ id yields the resolved-but-nothing-to-show shape."""
+    storage = tmp_path / "opencode" / "storage"
+    _opencode_db(storage, "ses_other", [("m1", "user", 1, [{"type": "text", "text": "hi"}])])
+    assert recent_records(
+        "opencode", "ses_nope", "/x", 10, opencode_storage_dir=storage
+    ) == []

@@ -1149,3 +1149,91 @@ def test_us6_opencode_dedups_and_honors_exclusions(tmp_path):
     assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
     # An already-adopted session is excluded from the discovered lane.
     assert _run_opencode(tmp_path, storage, exclude_session_ids={sid}) == []
+
+
+# --------------------------------------------------------------------------
+# opencode SQLite store (current opencode; the JSON tree above is legacy)
+# --------------------------------------------------------------------------
+
+
+def _write_opencode_db(storage: Path, sessions, messages=(), parts=()) -> Path:
+    """Build an opencode.db matching the real 1.14.50 schema.
+
+    Timestamps are milliseconds, as opencode stores them.
+    """
+    import sqlite3
+
+    storage.mkdir(parents=True, exist_ok=True)
+    db = storage.parent / "opencode.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER,"
+        " time_updated INTEGER)"
+    )
+    con.execute(
+        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER,"
+        " data TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT,"
+        " time_created INTEGER, data TEXT)"
+    )
+    for sid, directory, age in sessions:
+        updated = int((time.time() - age) * 1000)
+        con.execute(
+            "INSERT INTO session VALUES (?,?,?,?)", (sid, directory, updated, updated)
+        )
+    for mid, sid, created, data in messages:
+        con.execute(
+            "INSERT INTO message VALUES (?,?,?,?)", (mid, sid, created, json.dumps(data))
+        )
+    for pid, mid, created, data in parts:
+        con.execute(
+            "INSERT INTO part VALUES (?,?,?,?,?)",
+            (pid, mid, "", created, json.dumps(data)),
+        )
+    con.commit()
+    con.close()
+    return db
+
+
+def test_opencode_db_surfaces_live_session(tmp_path):
+    """The SQLite store is where current opencode writes; time_updated is an
+    explicit activity timestamp, so no mtime inference is involved."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_db(
+        storage,
+        [("ses_live", "/Users/x/proj", 5.0), ("ses_stale", "/Users/x/old", 10_000.0)],
+    )
+    sessions = _run_opencode(tmp_path, storage)
+    assert [(s.session_id, s.cwd, s.agent) for s in sessions] == [
+        ("ses_live", "/Users/x/proj", "opencode")
+    ]
+
+
+def test_opencode_db_wins_over_legacy_tree(tmp_path):
+    """A host mid-migration has both; the database is authoritative because the
+    JSON tree stops being written once opencode moves to SQLite."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
+    )
+    _write_opencode_db(storage, [("ses_db", "/current", 5.0)])
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == ["ses_db"]
+
+
+def test_opencode_legacy_tree_used_when_no_db(tmp_path):
+    """An install old enough to have no database still resolves."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_old", cwd="/legacy", mtime_age=5.0
+    )
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == ["ses_old"]
+
+
+def test_opencode_db_unreadable_degrades_to_no_rows(tmp_path):
+    """A corrupt or future-schema database contributes nothing, never raises."""
+    storage = tmp_path / "opencode" / "storage"
+    storage.mkdir(parents=True)
+    (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
+    assert _run_opencode(tmp_path, storage) == []
