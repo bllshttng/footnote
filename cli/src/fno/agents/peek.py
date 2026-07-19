@@ -16,8 +16,8 @@ Two data paths, tried in order (design x-05da):
    worker today.
 
 The per-harness on-disk shape differs (claude/codex = one JSONL; opencode = a
-per-message dir), so the extensible seam is ``recent_records`` dispatching on
-``agent``. claude + codex arms ship here; opencode is a fast-follow arm.
+per-message dir joined against a per-message parts dir), so the extensible seam
+is ``recent_records`` dispatching on ``agent``.
 
 Read-only invariant: peek opens files for read and polls stat for ``--follow``.
 It never writes ``events.jsonl``, the peer transcript, the registry, or a
@@ -35,9 +35,6 @@ from typing import Callable, Optional
 EXIT_OK = 0
 EXIT_UNSUPPORTED = 1  # known peer, no reader arm — distinct from "not found"
 EXIT_NOT_FOUND = 13  # parity with mail send's unresolvable-handle exit
-
-# Harnesses with a recent_records arm today. opencode is the fast-follow arm.
-_SUPPORTED_AGENTS = frozenset({"claude", "codex"})
 
 _STATUS_KINDS = frozenset(
     {"task_started", "task_done", "blocked", "run_summary"}
@@ -176,6 +173,106 @@ def _codex_rollout_path(
     return None
 
 
+def _opencode_storage_root(storage_dir: Optional[Path]) -> Path:
+    from fno.agents.discover import default_opencode_storage_dir
+
+    return storage_dir or default_opencode_storage_dir()
+
+
+def _opencode_message_dir(
+    session_id: str, storage_dir: Optional[Path]
+) -> Optional[Path]:
+    """The session's per-message dir, or None when absent (unknown ``ses_`` id).
+
+    Unlike codex there is nothing to scan: the session id IS the directory name.
+    """
+    d = _opencode_storage_root(storage_dir) / "message" / session_id
+    return d if d.is_dir() else None
+
+
+def _opencode_part_text(part_dir: Path) -> str:
+    """Join one message's renderable parts into text.
+
+    Mirrors ``_extract_text``'s block policy so peek reads uniformly across
+    harnesses: ``text`` renders verbatim, ``tool`` renders a compact marker, and
+    ``reasoning`` (opencode's ``thinking``) plus the ``step-*``/``patch``/``file``
+    bookkeeping parts are dropped as observe-noise. Parts are ordered by their
+    monotonic ``prt_`` id (the filename). A message whose parts are all noise, or
+    whose part dir is missing entirely, yields ``""`` — the caller skips it
+    rather than emitting an empty turn.
+    """
+    parts: list[str] = []
+    try:
+        files = sorted(part_dir.glob("*.json"))
+    except OSError:
+        return ""
+    for pf in files:
+        try:
+            p = json.loads(pf.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue  # torn/mid-write part: skip, never abort the message
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text" and isinstance(p.get("text"), str):
+            parts.append(p["text"])
+        elif p.get("type") == "tool":
+            parts.append(f"[tool_use: {p.get('tool', '?')}]")
+    return " ".join(x.strip() for x in parts if x.strip())
+
+
+def _parse_opencode_record(msg: dict, part_root: Path) -> Optional[Record]:
+    """One opencode message JSON + its parts dir → Record, else None."""
+    mid, role = msg.get("id"), msg.get("role")
+    if not isinstance(mid, str) or not mid or not isinstance(role, str) or not role:
+        return None
+    text = _opencode_part_text(part_root / mid)
+    if not text:
+        return None
+    return Record(role=role, text=text)
+
+
+def _opencode_records(
+    session_id: str, storage_dir: Optional[Path], n: Optional[int]
+) -> list[Record]:
+    """The last ``n`` renderable opencode turns, chronologically (tail parity).
+
+    Ordering is by ``time.created`` because the message FILENAME does not sort
+    chronologically in general; the id is used only to break a tie so the render
+    is deterministic. A message missing ``time.created`` sorts to the front (0.0)
+    rather than being dropped.
+    """
+    if n is not None and n <= 0:
+        return []
+    msg_dir = _opencode_message_dir(session_id, storage_dir)
+    if msg_dir is None:
+        return []
+    part_root = _opencode_storage_root(storage_dir) / "part"
+    dated: list[tuple[float, str, dict]] = []
+    try:
+        files = list(msg_dir.glob("*.json"))
+    except OSError:
+        return []
+    for mf in files:
+        try:
+            msg = json.loads(mf.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue  # torn/mid-write message: skip
+        if not isinstance(msg, dict):
+            continue
+        t = msg.get("time")
+        created = t.get("created") if isinstance(t, dict) else None
+        dated.append(
+            (float(created) if isinstance(created, (int, float)) else 0.0, mf.name, msg)
+        )
+    dated.sort(key=lambda t: (t[0], t[1]))
+    records: list[Record] = []
+    for _created, _name, msg in dated:
+        record = _parse_opencode_record(msg, part_root)
+        if record is not None:
+            records.append(record)
+    return records[-n:] if n is not None else records
+
+
 def recent_records(
     agent: str,
     session_id: str,
@@ -184,6 +281,7 @@ def recent_records(
     *,
     projects_root: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
+    opencode_storage_dir: Optional[Path] = None,
 ) -> list[Record]:
     """The per-harness reader seam (Locked Decision 3).
 
@@ -208,6 +306,8 @@ def recent_records(
         if path is None:
             return []
         return _records_from_jsonl(path, n, _parse_codex_record)
+    if agent == "opencode":
+        return _opencode_records(session_id, opencode_storage_dir, n)
     raise ObserveUnsupported(agent)
 
 
@@ -414,6 +514,7 @@ def peek(
     resolve: Optional[Callable[[str], tuple]] = None,
     projects_root: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
+    opencode_storage_dir: Optional[Path] = None,
     events_path: Optional[Path] = None,
     is_live: Optional[Callable[[], bool]] = None,
 ) -> int:
@@ -463,6 +564,7 @@ def peek(
             lines,
             projects_root=projects_root,
             codex_sessions_dir=codex_sessions_dir,
+            opencode_storage_dir=opencode_storage_dir,
         )
     except ObserveUnsupported as exc:
         err.write(f"observe not yet supported for {exc.agent}\n")
@@ -484,6 +586,10 @@ def peek(
             agent, session_id, cwd, projects_root, codex_sessions_dir
         )
         if path is None:
+            # AC1-UI: no silent exit-0. opencode's transcript is a directory
+            # tree, not one growing file, so there is nothing to tail; say so
+            # instead of returning as if --follow had run and ended.
+            err.write(f"--follow not supported for {agent}; showed the tail only\n")
             return EXIT_OK
         try:
             _follow_records(
@@ -506,7 +612,9 @@ def _follow_target(
     projects_root: Optional[Path],
     codex_sessions_dir: Optional[Path],
 ) -> Optional[Path]:
-    """The single JSONL file to tail for ``--follow`` (claude/codex only)."""
+    """The single JSONL file to tail for ``--follow``, or None when the harness
+    has none (opencode writes a directory tree, so its reader has no tailable
+    file; the caller reports that rather than exiting silently)."""
     if agent == "claude":
         from fno.provenance.resolver import resolve_transcript
 

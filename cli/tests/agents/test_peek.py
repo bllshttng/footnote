@@ -303,3 +303,145 @@ def test_peek_status_absent_falls_through_to_transcript(tmp_path):
     rc = peek("w", stdout=out, stderr=err, resolve=lambda h: (sess, []), projects_root=tmp_path, events_path=events)
     assert rc == 0
     assert "user: via transcript" in out.getvalue()
+
+
+# --------------------------------------------------------------------------
+# peek_reader — US6 opencode arm
+# --------------------------------------------------------------------------
+
+
+def _opencode_message(
+    storage: Path,
+    session_id: str,
+    *,
+    msg_id: str,
+    role: str,
+    created: int,
+    parts: list[dict] | None,
+) -> None:
+    """Write one message + its parts into an opencode storage tree.
+
+    Mirrors the real 1.0.223 layout: the message JSON carries NO text (only
+    role + ``time.created``); the text lives in ``part/<msg_id>/``.
+    """
+    mdir = storage / "message" / session_id
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / f"{msg_id}.json").write_text(
+        json.dumps({"id": msg_id, "role": role, "time": {"created": created}}),
+        encoding="utf-8",
+    )
+    if parts is None:
+        return
+    pdir = storage / "part" / msg_id
+    pdir.mkdir(parents=True, exist_ok=True)
+    for i, p in enumerate(parts):
+        (pdir / f"prt_{i:03d}.json").write_text(json.dumps(p), encoding="utf-8")
+
+
+def test_peek_reader_opencode_orders_by_created_and_joins_parts(tmp_path):
+    """AC-HP: messages render in time.created order with their parts joined,
+    even though the filenames sort the other way."""
+    storage = tmp_path / "opencode"
+    sid = "ses_abc123"
+    # Filenames sort z, m, a; time.created orders them a, m, z.
+    _opencode_message(
+        storage, sid, msg_id="zzz", role="user", created=1,
+        parts=[{"type": "text", "text": "first"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="mmm", role="assistant", created=2,
+        parts=[{"type": "text", "text": "second"}, {"type": "text", "text": "half"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="aaa", role="user", created=3,
+        parts=[{"type": "text", "text": "third"}],
+    )
+    recs = recent_records("opencode", sid, "/tmp/proj", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [
+        ("user", "first"),
+        ("assistant", "second half"),
+        ("user", "third"),
+    ]
+
+
+def test_peek_reader_opencode_part_policy_matches_claude(tmp_path):
+    """reasoning/step bookkeeping is observe-noise; a tool part renders a marker,
+    matching _extract_text's policy for claude blocks."""
+    storage = tmp_path / "opencode"
+    sid = "ses_policy"
+    _opencode_message(
+        storage, sid, msg_id="m1", role="assistant", created=1,
+        parts=[
+            {"type": "step-start", "snapshot": "abc"},
+            {"type": "reasoning", "text": "internal musing"},
+            {"type": "text", "text": "here goes"},
+            {"type": "tool", "tool": "read"},
+            {"type": "step-finish"},
+        ],
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [
+        ("assistant", "here goes [tool_use: read]")
+    ]
+
+
+def test_peek_reader_opencode_tail_is_last_n_chronological(tmp_path):
+    """Tail parity with the jsonl arms: last N, still chronological."""
+    storage = tmp_path / "opencode"
+    sid = "ses_tail"
+    for i in range(5):
+        _opencode_message(
+            storage, sid, msg_id=f"m{i}", role="user", created=i,
+            parts=[{"type": "text", "text": f"turn{i}"}],
+        )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["turn3", "turn4"]
+
+
+def test_peek_reader_opencode_unknown_session_returns_empty(tmp_path):
+    """AC-ERR: an unknown ses_ id yields the same empty shape as the codex arm
+    (resolved-but-nothing-to-show), never a raise."""
+    storage = tmp_path / "opencode"
+    (storage / "message").mkdir(parents=True)
+    assert recent_records(
+        "opencode", "ses_nope", "/x", 10, opencode_storage_dir=storage
+    ) == []
+
+
+def test_peek_reader_opencode_empty_or_missing_parts_skipped(tmp_path):
+    """AC-EDGE: a message with no part dir, an all-noise part set, or a torn
+    part file yields no crash and no empty turn."""
+    storage = tmp_path / "opencode"
+    sid = "ses_empty"
+    _opencode_message(storage, sid, msg_id="nodir", role="user", created=1, parts=None)
+    _opencode_message(
+        storage, sid, msg_id="noise", role="assistant", created=2,
+        parts=[{"type": "reasoning", "text": "hidden"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="real", role="user", created=3,
+        parts=[{"type": "text", "text": "survives"}],
+    )
+    (storage / "part" / "real" / "torn.json").write_text("{nope", encoding="utf-8")
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [("user", "survives")]
+
+
+def test_peek_opencode_follow_reports_unsupported(tmp_path):
+    """--follow on opencode has no tailable file; say so rather than exiting
+    silently (the file's no-blank-exit-0 contract)."""
+    storage = tmp_path / "opencode"
+    sid = "ses_follow"
+    _opencode_message(
+        storage, sid, msg_id="m1", role="user", created=1,
+        parts=[{"type": "text", "text": "hi"}],
+    )
+    out, err = io.StringIO(), io.StringIO()
+    sess = _Session(agent="opencode", session_id=sid)
+    rc = peek(
+        "h", follow=True, stdout=out, stderr=err,
+        resolve=lambda h: (sess, []), opencode_storage_dir=storage,
+    )
+    assert rc == 0
+    assert "hi" in out.getvalue()
+    assert "--follow not supported for opencode" in err.getvalue()
