@@ -1824,7 +1824,7 @@ impl View {
                 hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
             });
             for (t, tab) in s.tabs.iter().enumerate() {
-                let tab_text = tab_label_text(&tab.name, t);
+                let tab_text = tab_label_text(&tab.name, t, tab.named);
                 out.push(NavRow {
                     label: format!("{} › {}", s.name, tab_text),
                     state: PaneState::Idle,
@@ -2859,7 +2859,7 @@ impl View {
             hit: None,
         });
         for (i, t) in s.tabs.iter().enumerate() {
-            let label = tab_label_text(&t.name, i);
+            let label = tab_label_text(&t.name, i, t.named);
             // x-df4c US4: a leading max-severity rollup glyph so a background
             // tab's blocked/working pane reads at the strip without opening it,
             // carrying the lattice's weight and color. `None` (no live panes:
@@ -3130,7 +3130,7 @@ impl View {
                             // The same digit-collapse as the tab bar: a
                             // no-signal tab renders its bare ordinal (x-c150).
                             let label = match squad.tabs.get(t) {
-                                Some(tm) => tab_label_text(&tm.name, t),
+                                Some(tm) => tab_label_text(&tm.name, t, tm.named),
                                 None => (t + 1).to_string(),
                             };
                             (format!("  {marker}{label}"), 0, Color::Default)
@@ -3628,13 +3628,22 @@ const TAB_LABEL_W: usize = 14;
 /// `{ordinal}:{name}` with the name truncated to [`TAB_LABEL_W`] chars. The
 /// ordinal stays visible in every span because the `1-9 select tab` keys
 /// key off it (Locked 5).
-fn tab_label_text(name: &str, i: usize) -> String {
+fn tab_label_text(name: &str, i: usize, named: bool) -> String {
     let ordinal = (i + 1).to_string();
+    // Collapse (x-0f9d AC7, x-c150): a name equal to its own ordinal renders as
+    // the bare digit, byte-identical to an unnamed ordinal - even a chosen one.
     if name == ordinal {
         return ordinal;
     }
     let short: String = name.chars().take(TAB_LABEL_W).collect();
-    format!("{ordinal}:{short}")
+    if named {
+        // (x-0f9d US2, supersedes x-c150 Locked 5) A chosen name renders alone,
+        // never with a forced `{ordinal}:` prefix.
+        short
+    } else {
+        // A pane-derived or ordinal fallback keeps today's `{ordinal}:{label}`.
+        format!("{ordinal}:{short}")
+    }
 }
 
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
@@ -7745,6 +7754,7 @@ mod tests {
                 .map(|i| TabMeta {
                     id: (i - 1) as u64,
                     name: i.to_string(),
+                    named: false,
                     panes: Vec::new(),
                 })
                 .collect(),
@@ -7778,6 +7788,7 @@ mod tests {
         v.layout.squads[0].tabs.push(TabMeta {
             id: 2,
             name: "3".into(),
+            named: false,
             panes: Vec::new(),
         });
         v.maybe_prompt_new_tab_name();
@@ -7791,26 +7802,35 @@ mod tests {
 
     #[test]
     fn tab_bar_spans_label_named_tabs_and_collapse_bare_digits() {
-        // AC1-HP (render half) + AC1-EDGE: a no-signal name (== its ordinal)
-        // renders byte-for-byte today's `[N]` / ` N ` span; a real name
-        // renders `{ordinal}:{label}` (ordinal visible - Locked 5) truncated
-        // to TAB_LABEL_W.
+        // x-0f9d US2 (supersedes x-c150 Locked 5): an UNNAMED tab renders
+        // today's ordinal span byte-identically; a CHOSEN name renders ALONE,
+        // no forced ordinal, truncated to TAB_LABEL_W.
         let mut view = two_pane_view();
         let spans = view.tab_bar_spans();
-        assert_eq!(spans[1].text, " 1 ", "digit collapse: zero regression");
+        assert_eq!(spans[1].text, " 1 ", "unnamed digit collapse: zero regression");
         assert_eq!(spans[2].text, "[2]");
         view.layout.squads[0].tabs[0].name = "x-abcd".into();
+        view.layout.squads[0].tabs[0].named = true;
         view.layout.squads[0].tabs[1].name = "a-very-long-worktree-name".into();
+        view.layout.squads[0].tabs[1].named = true;
         let spans = view.tab_bar_spans();
-        assert_eq!(spans[1].text, " 1:x-abcd ");
-        assert_eq!(spans[2].text, "[2:a-very-long-wo]", "name truncates to 14");
+        assert_eq!(spans[1].text, " x-abcd ", "chosen name renders alone");
+        assert_eq!(spans[2].text, "[a-very-long-wo]", "name alone truncates to 14");
     }
 
     #[test]
     fn tab_label_text_collapses_only_the_exact_ordinal() {
-        assert_eq!(tab_label_text("1", 0), "1");
-        assert_eq!(tab_label_text("2", 0), "1:2", "a RENAME to a digit shows");
-        assert_eq!(tab_label_text("debug", 2), "3:debug");
+        // Collapse (x-0f9d AC7): a name equal to its own ordinal is the bare
+        // digit whether chosen or not - byte-identical to the unnamed render.
+        assert_eq!(tab_label_text("1", 0, false), "1");
+        assert_eq!(tab_label_text("1", 0, true), "1", "chosen name == ordinal collapses");
+        assert_eq!(tab_label_text("2", 1, true), "2", "AC7: tab@2 renamed '2' is bare digit");
+        // A non-ordinal name: unnamed/derived keeps `{ordinal}:{label}`, a
+        // chosen name (US2) renders alone.
+        assert_eq!(tab_label_text("2", 0, false), "1:2", "unnamed digit off-position");
+        assert_eq!(tab_label_text("2", 0, true), "2", "chosen '2' at ordinal 1 renders alone");
+        assert_eq!(tab_label_text("debug", 2, false), "3:debug", "derived keeps ordinal");
+        assert_eq!(tab_label_text("debug", 2, true), "debug", "chosen renders alone");
     }
 
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.

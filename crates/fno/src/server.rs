@@ -2873,6 +2873,10 @@ impl Core {
                     .enumerate()
                     .map(|(i, t)| TabMeta {
                         id: t.id,
+                        // (x-0f9d US2) An explicit rename is the ONLY chosen
+                        // name; a pane-derived or ordinal label is not. The
+                        // client renders a chosen name without a forced ordinal.
+                        named: t.name.is_some(),
                         name: tab_label(
                             t.name.as_deref(),
                             self.panes
