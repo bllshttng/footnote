@@ -958,10 +958,7 @@ impl View {
         // layout actually has, so a workspace deleted since the last run is
         // absent from the map (and so from the next write).
         let mut section_view = view_store::load();
-        section_view.retain(|k, _| match k {
-            SectionKey::Squad(name) => layout.squads.iter().any(|s| &s.name == name),
-            _ => true,
-        });
+        section_view.retain(|k, _| section_is_live(&layout, k));
         // Seed with the active squad so the first frame already shows its tabs
         // (and the focused tab's `*` marker) without any keypress (x-2f99) -
         // only where the store had no opinion, so a persisted collapse holds.
@@ -2113,17 +2110,14 @@ impl View {
         for s in &layout.squads {
             if is_mission_squad(s.id) && !prev_ids.contains(&s.id) {
                 self.section_view
-                    .insert(SectionKey::Squad(s.name.clone()), SectionView::Expanded);
+                    .insert(section_key(s), SectionView::Expanded);
             }
         }
         // Prune squads that vanished server-side, so the map only ever holds
         // live sections (bounded leak otherwise). The write is deferred to the
         // next operator cycle - persisting here would hit the disk on every
         // scrape tick for a pure cleanup.
-        self.section_view.retain(|k, _| match k {
-            SectionKey::Squad(name) => layout.squads.iter().any(|s| &s.name == name),
-            _ => true,
-        });
+        self.section_view.retain(|k, _| section_is_live(&layout, k));
         // Capture the selected needs-row identity against the OLD layout, before
         // the swap, so the cursor can re-anchor to the same item afterward.
         let needs_prev = self.answers_selected_id();
@@ -2202,9 +2196,8 @@ impl View {
     /// a restart. `has_dead` and `binary` come from the section's own rows -
     /// see [`next_view`].
     fn cycle_section(&mut self, key: SectionKey) {
-        let binary = matches!(key, SectionKey::WorkQueue);
-        let has_dead = !binary && self.section_has_dead(&key);
-        let next = next_view(self.section_view(&key), has_dead, binary);
+        let has_dead = self.section_has_dead(&key);
+        let next = next_view(self.section_view(&key), has_dead, &key);
         self.set_section_view(key, next);
     }
 
@@ -2225,8 +2218,8 @@ impl View {
     /// row was reaped elsewhere reports honestly on the very next click.
     fn section_has_dead(&self, key: &SectionKey) -> bool {
         match key {
-            SectionKey::Squad(name) => {
-                let Some(s) = self.layout.squads.iter().find(|s| &s.name == name) else {
+            SectionKey::Squad(_) | SectionKey::Mission(_) => {
+                let Some(s) = self.layout.squads.iter().find(|s| &section_key(s) == key) else {
                     return false;
                 };
                 self.layout
@@ -3168,7 +3161,7 @@ impl View {
             // while the header's `✗N` rollup keeps them discoverable; live rows
             // keep their original order. Display filtering only - nothing is
             // reaped (that is x-f300).
-            let view = self.section_view(&SectionKey::Squad(s.name.clone()));
+            let view = self.section_view(&section_key(s));
             if view != SectionView::Collapsed {
                 let section_base = section_project_base(&s.canonical_cwd);
                 for a in self
@@ -3298,9 +3291,7 @@ impl View {
                     let is_active_squad = squad.id == self.layout.active_squad;
                     let (text, flags, fg) = match row.tab {
                         None => {
-                            let caret = view_caret(
-                                self.section_view(&SectionKey::Squad(squad.name.clone())),
-                            );
+                            let caret = view_caret(self.section_view(&section_key(squad)));
                             // `*` after the caret marks the active squad so
                             // activity survives weak-BOLD themes and manual
                             // collapse (x-2f99); replaces the space, so row
@@ -3605,22 +3596,49 @@ fn glyph_cols(ch: char) -> usize {
     }
 }
 
+/// A squad's [`SectionKey`]. Deliberately NOT keyed on `name`: a mission
+/// header's name carries its live `done/total` counters and a derived squad
+/// label is rewritten the moment a sibling collides, so either would orphan
+/// the operator's choice on an unrelated event. The synthetic mission id and
+/// the canonical repo root are the stable identities. A squad with neither
+/// (no cwd, not a mission) falls back to its name - degenerate, and better
+/// than dropping its state entirely.
+fn section_key(s: &SquadMeta) -> SectionKey {
+    if is_mission_squad(s.id) {
+        SectionKey::Mission(s.id)
+    } else if !s.canonical_cwd.is_empty() {
+        SectionKey::Squad(s.canonical_cwd.clone())
+    } else {
+        SectionKey::Squad(s.name.clone())
+    }
+}
+
 /// The [`SectionKey`] for a squad id against a given layout. `None` for an id
 /// the layout does not carry - the caller then has no section to act on, which
 /// is the correct no-op rather than minting a key for a dead squad.
 fn squad_key(layout: &LayoutView, id: u64) -> Option<SectionKey> {
-    layout
-        .squads
-        .iter()
-        .find(|s| s.id == id)
-        .map(|s| SectionKey::Squad(s.name.clone()))
+    layout.squads.iter().find(|s| s.id == id).map(section_key)
+}
+
+/// Whether `layout` still carries the section `key` names. The prune predicate,
+/// shared by the fresh-attach load and every layout push so the two can never
+/// disagree about what counts as a live section.
+fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
+    match key {
+        SectionKey::Squad(_) | SectionKey::Mission(_) => {
+            layout.squads.iter().any(|s| &section_key(s) == key)
+        }
+        SectionKey::Elsewhere | SectionKey::WorkQueue => true,
+    }
 }
 
 /// The caret glyph per view state. `LiveOnly` is the HOLLOW triangle against
 /// `Expanded`'s filled one - the same hollow/filled discriminator the icon
 /// lattice already uses for `○` idle vs `●` working, so the middle state is
-/// legible without a new indicator element (the header's `✗N` rollup, which
-/// paints in every state, is what says how many rows are hidden).
+/// legible without a new indicator element. The header's `✗N` rollup says HOW
+/// MANY rows are hidden - but it is the first pair `header_band_text` drops on
+/// a narrow panel, so the caret, not the count, is what always distinguishes
+/// the state.
 fn view_caret(v: SectionView) -> char {
     match v {
         SectionView::Expanded => '▾',
@@ -9759,14 +9777,189 @@ mod tests {
             "persisted state beats the active-squad seed"
         );
         assert!(
-            !crate::view_store::load()
-                .keys()
-                .any(|k| matches!(k, SectionKey::Squad(n) if n != "footnote" && n != "notes")),
-            "only live squads persist"
+            crate::view_store::load().keys().all(|k| matches!(
+                k,
+                SectionKey::Squad(cwd) if cwd == "/code/footnote" || cwd == "/code/notes"
+            )),
+            "only live squads persist, keyed by canonical cwd"
         );
 
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The regression the name key would have caused: a mission header's NAME
+    // carries its live done/total counters, so keying on it meant an expanded
+    // mission silently collapsed the moment one of its nodes finished.
+    #[test]
+    fn mission_section_state_survives_a_progress_tick() {
+        let mut view = two_pane_view();
+        let mid = crate::proto::MISSION_SQUAD_BASE | 7;
+        let panes = view.layout.panes.clone();
+        let layout = |name: &str| LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1), mission_meta(7, name)],
+            active_squad: 1,
+            panes: panes.clone(),
+            focus: 10,
+            area: (28, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        };
+        view.set_layout(layout("epic  1/5"));
+        assert_eq!(
+            view.squad_view(mid),
+            SectionView::Expanded,
+            "a new mission seeds expanded"
+        );
+
+        // A worker finishes: same mission, same stable id, brand-new NAME.
+        view.set_layout(layout("epic  2/5"));
+        assert_eq!(
+            view.squad_view(mid),
+            SectionView::Expanded,
+            "progress must not collapse the mission out from under the operator"
+        );
+
+        // And a deliberate collapse still survives the next tick.
+        view.cycle_squad(mid);
+        assert_eq!(view.squad_view(mid), SectionView::Collapsed);
+        view.set_layout(layout("epic  3/5"));
+        assert_eq!(
+            view.squad_view(mid),
+            SectionView::Collapsed,
+            "the operator's choice outlives the rename"
+        );
+    }
+
+    // Two squads whose DERIVED labels collide (display_names disambiguates only
+    // one level, so /a/x/foo and /b/x/foo both render as `x/foo`) must not
+    // share one view state.
+    #[test]
+    fn same_named_squads_keep_separate_view_state() {
+        let mut view = two_pane_view();
+        let mut a = meta(1, "x/foo", 1, 0);
+        a.canonical_cwd = "/a/x/foo".into();
+        let mut b = meta(2, "x/foo", 1, 0);
+        b.canonical_cwd = "/b/x/foo".into();
+        let panes = view.layout.panes.clone();
+        view.set_layout(LayoutView {
+            squads: vec![a, b],
+            active_squad: 1,
+            panes,
+            focus: 10,
+            area: (28, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        view.set_squad_view(1, SectionView::Expanded);
+        view.set_squad_view(2, SectionView::Collapsed);
+        assert_eq!(view.squad_view(1), SectionView::Expanded);
+        assert_eq!(
+            view.squad_view(2),
+            SectionView::Collapsed,
+            "a shared rendered name must not conflate two workspaces"
+        );
+    }
+
+    // The `~ elsewhere` filter is a second copy of the squad filter, so it
+    // needs its own coverage - drift between the two would be silent.
+    #[test]
+    fn elsewhere_section_live_only_hides_exited_orphans() {
+        let orphan = |name: &str, exited: bool| AgentRow {
+            squad: Some(99), // no such squad -> orphan
+            name: name.into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab: None,
+            account: None,
+            updated_at: None,
+            pr: None,
+        };
+        let mut view = view_with_agents(vec![
+            orphan("stray-live", false),
+            orphan("stray-dead", true),
+        ]);
+        assert_eq!(agent_names(&view), vec!["stray-live", "stray-dead"]);
+
+        view.cycle_section(SectionKey::Elsewhere);
+        assert_eq!(
+            view.section_view(&SectionKey::Elsewhere),
+            SectionView::LiveOnly
+        );
+        assert_eq!(
+            agent_names(&view),
+            vec!["stray-live"],
+            "live-only hides the exited orphan"
+        );
+        assert!(
+            frame_text(&view.compose()).contains('✗'),
+            "the header keeps the ✗ count so the hidden row stays discoverable"
+        );
+    }
+
+    // A `~` header's caret is a SEPARATE render path from the squad row's, so
+    // it needs its own frame assertion.
+    #[test]
+    fn section_header_caret_tracks_all_three_states() {
+        let orphan = |name: &str, exited: bool| AgentRow {
+            squad: Some(99),
+            name: name.into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab: None,
+            account: None,
+            updated_at: None,
+            pr: None,
+        };
+        let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
+        assert!(frame_text(&view.compose()).contains("▾~ elsewhere"));
+        view.cycle_section(SectionKey::Elsewhere);
+        assert!(frame_text(&view.compose()).contains("▿~ elsewhere"));
+        view.cycle_section(SectionKey::Elsewhere);
+        assert!(frame_text(&view.compose()).contains("▸~ elsewhere"));
+    }
+
+    // The selector's explicit `l`/`h` pair was rewritten onto the new state
+    // enum; `l` must OPEN a live-only section all the way, not just one step.
+    #[tokio::test]
+    async fn selector_l_and_h_set_explicit_view_states() {
+        let mut v = view_with_dead_interleaved();
+        let mut buf: Vec<u8> = Vec::new();
+        v.selector = Some(0); // the active squad's name row
+        v.set_squad_view(1, SectionView::LiveOnly);
+
+        selector_keys(&mut v, b"l", &mut buf).await.unwrap();
+        assert_eq!(
+            v.squad_view(1),
+            SectionView::Expanded,
+            "l opens fully from live-only, never one step of the cycle"
+        );
+        v.selector = Some(0);
+        selector_keys(&mut v, b"h", &mut buf).await.unwrap();
+        assert_eq!(v.squad_view(1), SectionView::Collapsed);
+        v.selector = Some(0);
+        selector_keys(&mut v, b"l", &mut buf).await.unwrap();
+        assert_eq!(v.squad_view(1), SectionView::Expanded);
     }
 
     // AC2-EDGE: a zero-tab active squad expands to a bare `▾` caret - no tab

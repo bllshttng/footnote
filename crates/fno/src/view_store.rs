@@ -18,11 +18,27 @@ use serde::{Deserialize, Serialize};
 
 const STORE_VERSION: u32 = 1;
 
-/// Which sideline section a view state belongs to. Squads key by NAME so the
-/// state survives a restart that re-mints session ids.
+/// Which sideline section a view state belongs to.
+///
+/// Keyed by what is STABLE, which is deliberately not the rendered name: a
+/// mission header's name embeds its live `done/total` counters, and an
+/// attach-born squad's derived label is rewritten (`foo` -> `parent/foo`) as
+/// soon as a sibling collides. Either would orphan the operator's choice on an
+/// unrelated event, and the derived label is not even unique - the
+/// disambiguation is one level deep, and the server's uniqueness gate compares
+/// explicit names only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SectionKey {
+    /// A real workspace, keyed by its canonical repo root - stable across both
+    /// the label churn above and a restart. Two workspaces rooted at the SAME
+    /// canonical cwd share one view state; that is the accepted residual, and
+    /// strictly better than sharing it with whatever squad happens to render
+    /// under the same name today.
     Squad(String),
+    /// A synthetic mission header, keyed by its per-epic id. That id is a pure
+    /// hash of the epic id, so unlike the mission's name it survives a progress
+    /// tick and a restart alike.
+    Mission(u64),
     /// The `~ elsewhere` catch-all for agents matched to no squad.
     Elsewhere,
     /// The `~ work queue` backlog lane.
@@ -30,11 +46,14 @@ pub enum SectionKey {
 }
 
 impl SectionKey {
-    /// The on-disk key. Prefixed so a squad literally named `elsewhere` can
-    /// never collide with the fixed section.
+    /// The on-disk key. Prefixed so a squad whose identity is literally
+    /// `elsewhere` can never collide with the fixed section. `strip_prefix`
+    /// removes only the leading occurrence, so a cwd containing `squad:` or
+    /// any number of colons still round-trips.
     fn to_wire(&self) -> String {
         match self {
-            SectionKey::Squad(name) => format!("squad:{name}"),
+            SectionKey::Squad(cwd) => format!("squad:{cwd}"),
+            SectionKey::Mission(id) => format!("mission:{id:x}"),
             SectionKey::Elsewhere => "elsewhere".into(),
             SectionKey::WorkQueue => "work-queue".into(),
         }
@@ -44,10 +63,21 @@ impl SectionKey {
         match s {
             "elsewhere" => Some(SectionKey::Elsewhere),
             "work-queue" => Some(SectionKey::WorkQueue),
-            _ => s
-                .strip_prefix("squad:")
-                .map(|n| SectionKey::Squad(n.into())),
+            _ => {
+                if let Some(cwd) = s.strip_prefix("squad:") {
+                    return Some(SectionKey::Squad(cwd.into()));
+                }
+                let id = s.strip_prefix("mission:")?;
+                u64::from_str_radix(id, 16).ok().map(SectionKey::Mission)
+            }
         }
+    }
+
+    /// Whether this section's cycle is binary (expanded <-> collapsed). The
+    /// work queue's rows are cards, which have no exited state, so its middle
+    /// state would hide nothing.
+    fn is_binary(&self) -> bool {
+        matches!(self, SectionKey::WorkQueue)
     }
 }
 
@@ -64,13 +94,14 @@ pub enum SectionView {
 
 /// One click on a section header, as a pure function so the cycle is testable
 /// without a View. `has_dead` false skips the `LiveOnly` state entirely (there
-/// would be nothing to hide, so the click would look like a no-op), and
-/// `binary` forces the same for a section whose rows can never be dead (the
-/// work queue). `LiveOnly -> Collapsed` unconditionally, so a section whose
-/// last dead row was reaped elsewhere can never wedge in `LiveOnly`.
-pub fn next_view(current: SectionView, has_dead: bool, binary: bool) -> SectionView {
+/// would be nothing to hide, so the click would look like a no-op), as does a
+/// binary section - a rule this owns via `key` rather than taking as a second
+/// transposable bool from its caller. `LiveOnly -> Collapsed` unconditionally,
+/// so a section whose last dead row was reaped elsewhere can never wedge in
+/// `LiveOnly`.
+pub fn next_view(current: SectionView, has_dead: bool, key: &SectionKey) -> SectionView {
     match current {
-        SectionView::Expanded if has_dead && !binary => SectionView::LiveOnly,
+        SectionView::Expanded if has_dead && !key.is_binary() => SectionView::LiveOnly,
         SectionView::Expanded => SectionView::Collapsed,
         SectionView::LiveOnly => SectionView::Collapsed,
         SectionView::Collapsed => SectionView::Expanded,
@@ -114,12 +145,17 @@ pub fn view_path() -> PathBuf {
 
 /// `sections` rather than a bare map so a later view preference (x-b186's
 /// density/sort) extends this file instead of minting another one.
+/// Values stay `Value` on the way in so ONE unrecognized state does not fail
+/// the whole map: a file written by a build with a fourth `SectionView` would
+/// otherwise read as zero preferences here, and the next click would overwrite
+/// it - unrecoverable loss of the newer build's state. Parsing per entry is
+/// what makes [`load`]'s degrade-entry-wise promise true.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreFile {
     #[serde(default)]
     version: u32,
     #[serde(default)]
-    sections: HashMap<String, SectionView>,
+    sections: HashMap<String, serde_json::Value>,
 }
 
 /// Read the persisted view state. Missing, empty, corrupt, or a key/value the
@@ -141,7 +177,11 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
     };
     file.sections
         .into_iter()
-        .filter_map(|(k, v)| SectionKey::from_wire(&k).map(|k| (k, v)))
+        .filter_map(|(k, v)| {
+            let key = SectionKey::from_wire(&k)?;
+            let view: SectionView = serde_json::from_value(v).ok()?;
+            Some((key, view))
+        })
         .collect()
 }
 
@@ -163,7 +203,10 @@ pub fn save(sections: &HashMap<SectionKey, SectionView>) {
     }
     let file = StoreFile {
         version: STORE_VERSION,
-        sections: sections.iter().map(|(k, v)| (k.to_wire(), *v)).collect(),
+        sections: sections
+            .iter()
+            .filter_map(|(k, v)| Some((k.to_wire(), serde_json::to_value(v).ok()?)))
+            .collect(),
     };
     let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
         return;
@@ -270,12 +313,13 @@ mod tests {
     #[test]
     fn next_view_skips_live_only_without_dead() {
         use SectionView::*;
-        assert_eq!(next_view(Expanded, false, false), Collapsed);
-        assert_eq!(next_view(Collapsed, false, false), Expanded);
+        let sq = SectionKey::Squad("/repo".into());
+        assert_eq!(next_view(Expanded, false, &sq), Collapsed);
+        assert_eq!(next_view(Collapsed, false, &sq), Expanded);
         assert_eq!(
-            next_view(Expanded, true, true),
+            next_view(Expanded, true, &SectionKey::WorkQueue),
             Collapsed,
-            "work queue binary"
+            "work queue binary even when told rows are dead"
         );
     }
 
@@ -283,9 +327,13 @@ mod tests {
     #[test]
     fn next_view_cycles_tri_state_with_dead() {
         use SectionView::*;
-        assert_eq!(next_view(Expanded, true, false), LiveOnly);
-        assert_eq!(next_view(LiveOnly, true, false), Collapsed);
-        assert_eq!(next_view(Collapsed, true, false), Expanded);
+        let sq = SectionKey::Squad("/repo".into());
+        assert_eq!(next_view(Expanded, true, &sq), LiveOnly);
+        assert_eq!(next_view(LiveOnly, true, &sq), Collapsed);
+        assert_eq!(next_view(Collapsed, true, &sq), Expanded);
+        // A mission header is a normal tri-state section, not a binary one.
+        let m = SectionKey::Mission(0x8000_0000_0000_0001);
+        assert_eq!(next_view(Expanded, true, &m), LiveOnly);
     }
 
     // AC12-FR: a section left in LiveOnly whose last dead row was reaped
@@ -293,8 +341,60 @@ mod tests {
     #[test]
     fn live_only_never_wedges_when_dead_disappears() {
         assert_eq!(
-            next_view(SectionView::LiveOnly, false, false),
+            next_view(
+                SectionView::LiveOnly,
+                false,
+                &SectionKey::Squad("/repo".into())
+            ),
             SectionView::Collapsed
         );
+    }
+
+    // A mission key round-trips through the wire form, so a mission section's
+    // state survives a restart (its NAME would not - it carries done/total).
+    #[test]
+    fn mission_key_round_trips() {
+        let _s = Scratch::new("mission");
+        let mut m = HashMap::new();
+        m.insert(
+            SectionKey::Mission(0x8000_0000_dead_beef),
+            SectionView::Collapsed,
+        );
+        save(&m);
+        assert_eq!(load(), m);
+    }
+
+    // `strip_prefix` removes only the leading marker, so an identity that
+    // itself contains `squad:` or extra colons still round-trips exactly.
+    #[test]
+    fn identity_containing_the_prefix_round_trips() {
+        let _s = Scratch::new("prefixy");
+        let mut m = HashMap::new();
+        m.insert(
+            SectionKey::Squad("squad:/a/b:c".into()),
+            SectionView::LiveOnly,
+        );
+        save(&m);
+        assert_eq!(load(), m);
+    }
+
+    // One unrecognized VALUE must drop only its own entry. Typing the map as
+    // SectionView would fail the whole parse here, so a newer build's file
+    // would read as zero preferences and then be overwritten.
+    #[test]
+    fn unknown_value_drops_only_its_entry() {
+        let _s = Scratch::new("unknown-value");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{"squad:/a":"expanded","squad:/b":"peek_only"}}"#,
+        )
+        .unwrap();
+        let got = load();
+        assert_eq!(
+            got.len(),
+            1,
+            "only the unreadable entry is dropped: {got:?}"
+        );
+        assert_eq!(got[&SectionKey::Squad("/a".into())], SectionView::Expanded);
     }
 }
