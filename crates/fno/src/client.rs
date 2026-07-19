@@ -957,11 +957,17 @@ impl View {
         // Persisted per-section state wins (x-975a); pruned to the squads this
         // layout actually has, so a workspace deleted since the last run is
         // absent from the map (and so from the next write).
+        // Load only - do NOT prune here. A real attach constructs the View with
+        // an EMPTY placeholder layout and waits for the server's first push, so
+        // pruning against it would delete every persisted entry before the
+        // session ever learns what squads exist. `set_layout` owns the prune,
+        // where a real squad list is in hand.
         let mut section_view = view_store::load();
-        section_view.retain(|k, _| section_is_live(&layout, k));
         // Seed with the active squad so the first frame already shows its tabs
         // (and the focused tab's `*` marker) without any keypress (x-2f99) -
         // only where the store had no opinion, so a persisted collapse holds.
+        // A no-op on the real attach path, whose layout is the empty
+        // placeholder; the first `set_layout` seeds under the same rule.
         if let Some(key) = squad_key(&layout, layout.active_squad) {
             section_view.entry(key).or_insert(SectionView::Expanded);
         }
@@ -2091,13 +2097,27 @@ impl View {
         // generation it belongs to).
         let live: HashSet<u64> = layout.panes.iter().map(|(id, _)| *id).collect();
         self.frames.retain(|id, _| live.contains(id));
+        // The FIRST real layout is initialization, not an operator gesture: the
+        // attach path builds this View against an empty placeholder, so every
+        // squad and mission below would read as brand-new and its seed would
+        // clobber the state restored from disk. On that push the seeds defer to
+        // a persisted opinion; every later push keeps today's insert-wins
+        // behavior, so a genuine mid-session activation still expands.
+        let initializing = self.layout.squads.is_empty();
+        let seed = |map: &mut HashMap<SectionKey, SectionView>, key: SectionKey| {
+            if initializing {
+                map.entry(key).or_insert(SectionView::Expanded);
+            } else {
+                map.insert(key, SectionView::Expanded);
+            }
+        };
         // Auto-expand the newly active squad so focus is always visible - but
         // only on an `active_squad` CHANGE: layout pushes arrive on every
         // scrape tick, so an unconditional insert would fight manual collapse
         // (x-2f99, AC1-EDGE). Insert-only: activation never collapses others.
         if layout.active_squad != self.layout.active_squad {
             if let Some(key) = squad_key(&layout, layout.active_squad) {
-                self.section_view.insert(key, SectionView::Expanded);
+                seed(&mut self.section_view, key);
             }
         }
         // A synthetic mission-squad header defaults to expanded the first time
@@ -2109,14 +2129,13 @@ impl View {
         let prev_ids: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
         for s in &layout.squads {
             if is_mission_squad(s.id) && !prev_ids.contains(&s.id) {
-                self.section_view
-                    .insert(section_key(s), SectionView::Expanded);
+                seed(&mut self.section_view, section_key(s));
             }
         }
-        // Prune squads that vanished server-side, so the map only ever holds
-        // live sections (bounded leak otherwise). The write is deferred to the
-        // next operator cycle - persisting here would hit the disk on every
-        // scrape tick for a pure cleanup.
+        // Prune squads that vanished server-side so the in-memory map only
+        // holds live sections. This never reaches disk on its own: `save`
+        // merges rather than replaces, precisely so one session's absent squad
+        // cannot delete a sibling session's preference for it.
         self.section_view.retain(|k, _| section_is_live(&layout, k));
         // Capture the selected needs-row identity against the OLD layout, before
         // the swap, so the cursor can re-anchor to the same item afterward.
@@ -2219,7 +2238,7 @@ impl View {
     fn section_has_dead(&self, key: &SectionKey) -> bool {
         match key {
             SectionKey::Squad(_) | SectionKey::Mission(_) => {
-                let Some(s) = self.layout.squads.iter().find(|s| &section_key(s) == key) else {
+                let Some(s) = self.layout.squads.iter().find(|s| squad_matches(s, key)) else {
                     return false;
                 };
                 self.layout
@@ -3620,13 +3639,27 @@ fn squad_key(layout: &LayoutView, id: u64) -> Option<SectionKey> {
     layout.squads.iter().find(|s| s.id == id).map(section_key)
 }
 
+/// Whether `s` is the squad `key` names. The allocation-free twin of
+/// [`section_key`] - the prune below runs it per squad on every scrape tick,
+/// where building a throwaway key would clone a `String` each time.
+/// `section_key_matches_resolver` pins the two to the same answer.
+fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
+    match key {
+        SectionKey::Mission(id) => is_mission_squad(s.id) && s.id == *id,
+        SectionKey::Squad(_) if is_mission_squad(s.id) => false,
+        SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
+        SectionKey::Squad(ident) => &s.name == ident,
+        SectionKey::Elsewhere | SectionKey::WorkQueue => false,
+    }
+}
+
 /// Whether `layout` still carries the section `key` names. The prune predicate,
-/// shared by the fresh-attach load and every layout push so the two can never
-/// disagree about what counts as a live section.
+/// shared by every layout push so painting and pruning can never disagree about
+/// what counts as a live section.
 fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
     match key {
         SectionKey::Squad(_) | SectionKey::Mission(_) => {
-            layout.squads.iter().any(|s| &section_key(s) == key)
+            layout.squads.iter().any(|s| squad_matches(s, key))
         }
         SectionKey::Elsewhere | SectionKey::WorkQueue => true,
     }
@@ -9786,6 +9819,116 @@ mod tests {
 
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The production attach path: `View::new` against an EMPTY placeholder
+    // layout, then the server's first push. Persisted state has to survive
+    // BOTH - the earlier version pruned in `View::new` (deleting everything
+    // against the placeholder) and then re-seeded the active squad expanded,
+    // so persistence never worked in production while a test that built the
+    // View with a populated layout still passed.
+    #[test]
+    fn persisted_state_survives_the_real_attach_path() {
+        let dir = std::env::temp_dir().join(format!("fno-view-attach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::view_store::set_test_path(&dir);
+
+        let mid = crate::proto::MISSION_SQUAD_BASE | 3;
+        let mut saved = HashMap::new();
+        saved.insert(
+            SectionKey::Squad("/code/footnote".into()),
+            SectionView::Collapsed,
+        );
+        saved.insert(SectionKey::Mission(mid), SectionView::Collapsed);
+        crate::view_store::save(&saved);
+
+        // Exactly what `attach_and_run` builds: no squads, active_squad 0.
+        let mut view = View::new(
+            (30, 100),
+            "main".into(),
+            LayoutView {
+                squads: Vec::new(),
+                active_squad: 0,
+                panes: Vec::new(),
+                focus: 0,
+                area: (0, 0),
+                agents: Vec::new(),
+                focus_node: None,
+                backlog: Vec::new(),
+            },
+        );
+        // The server's first real push.
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1), mission_meta(3, "epic  0/4")],
+            active_squad: 1,
+            panes: Vec::new(),
+            focus: 0,
+            area: (28, 72),
+            agents: Vec::new(),
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+
+        assert_eq!(
+            view.squad_view(1),
+            SectionView::Collapsed,
+            "a persisted collapse must survive attach, not be re-seeded expanded"
+        );
+        assert_eq!(
+            view.squad_view(mid),
+            SectionView::Collapsed,
+            "the same for a mission header, which seeds on first appearance"
+        );
+
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A genuine mid-session activation still expands, so deferring to the
+    // persisted value on the FIRST push did not disable the x-2f99 seed.
+    #[test]
+    fn later_activation_still_expands_a_collapsed_squad() {
+        let mut view = two_pane_view();
+        view.set_squad_view(2, SectionView::Collapsed);
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1), meta(2, "notes", 1, 0)],
+            active_squad: 2,
+            panes: view.layout.panes.clone(),
+            focus: view.layout.focus,
+            area: (28, 72),
+            agents: Vec::new(),
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        assert_eq!(
+            view.squad_view(2),
+            SectionView::Expanded,
+            "activating a squad mid-session expands it"
+        );
+    }
+
+    // `squad_matches` is the allocation-free twin of `section_key`; if they
+    // ever disagree, pruning would silently drop live sections.
+    #[test]
+    fn section_key_matches_resolver() {
+        let mut plain = meta(1, "footnote", 1, 0);
+        let mission = mission_meta(9, "epic  1/2");
+        let mut cwdless = meta(2, "nameonly", 1, 0);
+        cwdless.canonical_cwd = String::new();
+        plain.canonical_cwd = "/code/footnote".into();
+
+        for s in [&plain, &mission, &cwdless] {
+            assert!(
+                squad_matches(s, &section_key(s)),
+                "squad_matches must accept its own section_key: {:?}",
+                s.name
+            );
+        }
+        // ...and reject a foreign one.
+        assert!(!squad_matches(&plain, &section_key(&mission)));
+        assert!(!squad_matches(&mission, &section_key(&plain)));
+        assert!(!squad_matches(&plain, &SectionKey::Elsewhere));
     }
 
     // The regression the name key would have caused: a mission header's NAME

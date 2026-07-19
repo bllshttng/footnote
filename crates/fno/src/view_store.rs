@@ -158,9 +158,18 @@ struct StoreFile {
     sections: HashMap<String, serde_json::Value>,
 }
 
-/// Read the persisted view state. Missing, empty, corrupt, or a key/value the
-/// current build does not recognize all degrade to "no preference" for that
-/// entry - never a refusal to start.
+/// The raw file, entries untyped. Missing, empty, or corrupt all read as a
+/// fresh store - never a refusal to start.
+fn read_raw() -> StoreFile {
+    std::fs::read_to_string(view_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<StoreFile>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Read the persisted view state. A key or value the current build does not
+/// recognize degrades to "no preference" for THAT entry; the raw entry itself
+/// survives on disk (see [`save`]).
 pub fn load() -> HashMap<SectionKey, SectionView> {
     // Hermetic by default under test, for the same reason as [`save`]: every
     // `View::new` loads, so an unguarded read would make the whole client suite
@@ -169,13 +178,8 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
     if TEST_PATH.with(|c| c.borrow().is_none()) {
         return HashMap::new();
     }
-    let Ok(raw) = std::fs::read_to_string(view_path()) else {
-        return HashMap::new();
-    };
-    let Ok(file) = serde_json::from_str::<StoreFile>(&raw) else {
-        return HashMap::new();
-    };
-    file.sections
+    read_raw()
+        .sections
         .into_iter()
         .filter_map(|(k, v)| {
             let key = SectionKey::from_wire(&k)?;
@@ -185,8 +189,20 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
         .collect()
 }
 
-/// Write the whole map (small file, last-writer-wins). Best-effort: any
-/// failure leaves the session running with the in-memory state intact.
+/// MERGE this client's sections into the file rather than replacing it.
+///
+/// The store is machine-global but a client only ever knows its OWN session's
+/// squads, so a wholesale write would delete the preferences of every squad
+/// belonging to another running mux - and would also drop a newer build's
+/// unrecognized entry, which [`load`] deliberately kept on disk. Overlaying
+/// touches only the keys this client actually has an opinion about.
+///
+/// The cost is that an entry is never removed: a workspace that goes away
+/// leaves a few dozen stale bytes behind. That is the right trade against
+/// silently deleting a live sibling session's state.
+///
+/// Best-effort throughout: any failure leaves the session running on its
+/// in-memory state.
 pub fn save(sections: &HashMap<SectionKey, SectionView>) {
     // A unit test that has not explicitly pointed the store at a scratch dir
     // must never write a real `$HOME` (the whole `client.rs` view suite
@@ -201,21 +217,24 @@ pub fn save(sections: &HashMap<SectionKey, SectionView>) {
             return;
         }
     }
-    let file = StoreFile {
-        version: STORE_VERSION,
-        sections: sections
-            .iter()
-            .filter_map(|(k, v)| Some((k.to_wire(), serde_json::to_value(v).ok()?)))
-            .collect(),
-    };
+    let mut file = read_raw();
+    file.version = STORE_VERSION;
+    for (k, v) in sections {
+        if let Ok(value) = serde_json::to_value(v) {
+            file.sections.insert(k.to_wire(), value);
+        }
+    }
     let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
         return;
     };
     // temp+rename so a concurrent reader sees the old or the new file, never a
-    // torn one.
-    let tmp = path.with_file_name(format!("mux-view.json.tmp.{}", std::process::id()));
-    if std::fs::write(&tmp, &bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    // torn one. The counter keeps two writers inside ONE process (several
+    // clients, or the test suite) off each other's temp file.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!("mux-view.json.tmp.{}.{seq}", std::process::id()));
+    if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
