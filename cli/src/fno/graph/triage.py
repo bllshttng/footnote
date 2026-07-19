@@ -1521,7 +1521,10 @@ def cmd_health(
             e for e in pending
             if e.get("type") in ROLLUP_TYPES and not e.get("orphan_ok")
         ]
-        orphan_nodes = [e["id"] for e in non_exempt if is_orphan(e, index)]
+        orphan_nodes = [
+            nid for e in non_exempt
+            if isinstance((nid := e.get("id")), str) and is_orphan(e, index)
+        ]
         # Zero non-exempt features (greenfield) reads 0.0, never a ZeroDivision.
         orphan_rate = (
             round(len(orphan_nodes) / len(non_exempt), 4) if non_exempt else 0.0

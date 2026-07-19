@@ -205,3 +205,20 @@ def test_rate_severity_handles_a_zero_headroom_threshold():
     from fno.health_monitor import _classify_severity
 
     assert _classify_severity(actual=1.0, threshold=1.0, kind="rate") == "alert"
+
+
+def test_orphan_metric_survives_a_node_with_no_id():
+    """A malformed row must not drop the whole metric to absent."""
+    from fno.graph.rollup import ROLLUP_TYPES, is_orphan
+
+    entries = [node("x-1"), {"type": "feature", "title": "no id"}]
+    index = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
+    non_exempt = [
+        e for e in entries
+        if e.get("type") in ROLLUP_TYPES and not e.get("orphan_ok")
+    ]
+    orphan_nodes = [
+        nid for e in non_exempt
+        if isinstance((nid := e.get("id")), str) and is_orphan(e, index)
+    ]
+    assert orphan_nodes == ["x-1"]
