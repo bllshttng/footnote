@@ -149,6 +149,10 @@ def test_spawn_is_headless_sonnet(monkeypatch, claims_root):
     assert cmd[cmd.index("--model") + 1] == G.GROOM_MODEL_DEFAULT
     assert cmd[cmd.index("--cwd") + 1] == "/repo"
     assert "-p" not in cmd, "the subscription lane never shells bare -p"
+    # The RUNNER must own the timeout: killing our own subprocess would reap the
+    # spawn wrapper and leave the `claude -p` grandchild mutating the graph.
+    assert cmd[cmd.index("--timeout") + 1] == str(G._WORKER_TIMEOUT_S)
+    assert G._SPAWN_TIMEOUT_S > G._WORKER_TIMEOUT_S, "inner bound must fire first"
 
 
 # ── the skill brief contract ────────────────────────────────────────────────
@@ -171,6 +175,8 @@ LEVERS = [
     ("update", ("--priority",)),
     ("rank", ("--top",)),
     ("idea", ()),
+    ("intake", ()),
+    ("update", ("--blocked-by",)),
 ]
 
 

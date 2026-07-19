@@ -24,7 +24,13 @@ _GROOM_TTL_MS = 24 * 60 * 60 * 1000
 # `--substrate headless` is a synchronous `claude -p`, so this bounds the whole
 # grooming pass, not just its launch. Generous on purpose: a kill lands mid-pass,
 # after some levers have already been pulled.
-_SPAWN_TIMEOUT_S = 1800
+#
+# The budget is passed to `spawn --timeout` so the RUNNER bounds the worker.
+# Killing our own subprocess would only reap the `fno agents spawn` wrapper - the
+# `claude -p` grandchild would survive and keep mutating the graph unattended.
+# The outer bound is deliberately larger so the inner one always fires first.
+_WORKER_TIMEOUT_S = 1800
+_SPAWN_TIMEOUT_S = _WORKER_TIMEOUT_S + 120
 
 
 def groom_day_key(today: Optional[date] = None) -> str:
@@ -57,6 +63,7 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",
         "--provider", "claude", "--substrate", "headless",
         "--model", model, "--cwd", cwd,
+        "--timeout", str(_WORKER_TIMEOUT_S),
         f"groom-{day}", brief,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_SPAWN_TIMEOUT_S)
@@ -68,10 +75,12 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
     for line in (proc.stdout or "").splitlines():
         if '"short_id"' in line:
             try:
-                sid = str(json.loads(line).get("short_id", "") or "")
+                data = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if sid:
+            # A bare JSON string or list parses fine but has no .get; losing the
+            # correlation id must not crash a pass whose worker already launched.
+            if isinstance(data, dict) and (sid := str(data.get("short_id", "") or "")):
                 return sid
     return "unknown"
 

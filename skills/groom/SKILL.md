@@ -24,8 +24,10 @@ Each is reversible or additive, which is what makes an unattended daily pass saf
 | `fno backlog update <id> --priority <p0..p3>` | A priority the evidence contradicts |
 | `fno backlog rank <id> --top` | Float a card that should run next within its lane |
 | `fno backlog idea "..."` | File genuinely NEW follow-up work you noticed |
+| `fno backlog intake <plan-path>` | Promote a demonstrably blueprint-complete plan into a tracked node |
+| `fno backlog update <id> --blocked-by <ids>` | Encode the order a track must run in (see Auto-convene) |
 
-Promotion (intake / plan-link) is allowed where a node is demonstrably blueprint-complete.
+The table is the whole contract: if an action you want is not on it, it is not yours to take - file the question instead.
 
 **Never** edit `~/.fno/graph.json`, its Kanban sibling, or any state file directly - not with Edit, Write, `jq -i`, or `sed -i`.
 Every mutation goes through a lever above so it lands with a receipt.
@@ -54,9 +56,9 @@ fno backlog defer <id> --reason "question: <the one line you need answered>"
 Use `fno backlog idea` only for genuinely new work you noticed in passing; an idea-status node is NOT in the pile and will not surface in the triage view.
 The pile is the pressure-release valve that lets grooming stay unattended: an honest question costs a line, a wrong supersede costs real work.
 
-**Auto-convene:** when a track has several `ready` nodes but no encoded order (no `blocked_by` edges expressing the sequence a human clearly intended), you MAY convene one fresh-context leader pass to encode that order as graph edges.
-Its entire output is `blocked_by` edges plus a short note.
-Convene at most one per run, and only for a track where the ready depth is real.
+**Auto-convene:** when a track has several `ready` nodes but no encoded order (no `blocked_by` edges expressing the sequence a human clearly intended), you MAY encode that order yourself with `fno backlog update <id> --blocked-by <ids>`, one edge per node whose predecessor is unambiguous.
+Its entire output is `blocked_by` edges plus a line each in the report.
+Do this at most once per run, and only for a track where the ready depth is real and the intended order is evident from the plan - an order you would have to guess is a question for the pile, not an edge.
 
 ## The report
 
