@@ -25,9 +25,11 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid as _uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -305,6 +307,79 @@ def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path
                         pass
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         print(f"warning: could not set opencode effort variant: {exc}", file=sys.stderr)
+
+
+#: Bounds the post-spawn session-id poll. opencode writes its session row some
+#: time after the TUI starts, so the capture is best-effort by construction: two
+#: cheap tries keep the added spawn latency near zero and a miss is recorded, not
+#: retried into a stall.
+_OPENCODE_BACKFILL_ATTEMPTS = 2
+_OPENCODE_BACKFILL_DELAY_S = 0.4
+_OPENCODE_DB_TIMEOUT_S = 5.0
+
+#: A bare opencode session id on its own output line. Matching this (rather than
+#: reading the first line) skips both the `id` column header and the plugin
+#: banners opencode prints to stdout ahead of real output.
+_SES_ID_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
+
+
+def _query_opencode_sessions(sql: str, runner: Optional[Callable] = None) -> Optional[list[str]]:
+    """Run one read-only store query, returning the session ids it printed.
+
+    ``None`` means the query could not be run at all (binary missing, timeout,
+    nonzero exit) as distinct from ``[]`` (ran clean, matched nothing) - the
+    caller treats both as "do not stamp", but only the latter is a real answer.
+    """
+    run = runner or subprocess.run
+    try:
+        proc = run(
+            ["opencode", "db", sql],
+            capture_output=True,
+            text=True,
+            timeout=_OPENCODE_DB_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [ln.strip() for ln in (proc.stdout or "").splitlines() if _SES_ID_RE.match(ln.strip())]
+
+
+def _backfill_opencode_session_id(
+    cwd: Path,
+    since_ms: int,
+    *,
+    runner: Optional[Callable] = None,
+    sleep: Optional[Callable] = None,
+) -> Optional[str]:
+    """Best-effort capture of a freshly spawned pane's opencode session id.
+
+    opencode's ``--session`` only continues an EXISTING session, so an id cannot
+    be minted ahead of the spawn the way claude's uuid is; it has to be
+    discovered afterwards. A session is ours only if it was created after we
+    spawned AND its directory is exactly our pane cwd - matched on the directory
+    string, never opencode's project id, which several worktrees of one repo
+    share.
+
+    Returns the id only on an unambiguous match. Zero candidates (or two, from a
+    same-cwd race) return ``None`` so the row stays live-only rather than
+    carrying a session id that may belong to another pane.
+    """
+    naptime = sleep or time.sleep
+    escaped = str(cwd).replace("'", "''")
+    sql = (
+        "select id from session "
+        f"where directory='{escaped}' and time_created >= {int(since_ms)}"
+    )
+    for attempt in range(_OPENCODE_BACKFILL_ATTEMPTS):
+        if attempt:
+            naptime(_OPENCODE_BACKFILL_DELAY_S)
+        ids = _query_opencode_sessions(sql, runner)
+        if ids and len(ids) == 1:
+            return ids[0]
+        if ids and len(ids) > 1:
+            return None  # ambiguous; retrying cannot narrow it
+    return None
 
 
 def build_pane_argv(
@@ -625,6 +700,9 @@ def dispatch_spawn_pane(
 
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
+    # Read before the pane exists so the opencode backfill can only ever match a
+    # session this spawn created, never one already open in the same cwd.
+    spawn_started_ms = int(time.time() * 1000)
     argv = build_pane_argv(
         provider,
         message,
@@ -731,6 +809,28 @@ def dispatch_spawn_pane(
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+
+        # opencode ids are discovered, not minted (see _backfill_opencode_session_id).
+        # A miss leaves the row exactly as live-only as before capture existed,
+        # so it is logged rather than raised - the pane is already running and a
+        # missing id costs resume, not the spawn.
+        if provider == "opencode":
+            # Reuses the spawn `runner` seam, so the store read is stubbed by
+            # the same fake every spawn test already installs and the suite
+            # never touches the real ~/.local/share/opencode.
+            session_uuid = _backfill_opencode_session_id(
+                cwd, spawn_started_ms, runner=runner
+            )
+            if session_uuid is None:
+                from fno.agents import events as _events
+
+                _events.emit(
+                    "agent_session_id_uncaptured",
+                    name=name,
+                    harness=provider,
+                    cwd=str(cwd),
+                    reason="no unique opencode session for this cwd after spawn",
+                )
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
             rows.append(
