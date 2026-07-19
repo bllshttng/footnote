@@ -23,7 +23,7 @@ Each is reversible or additive, which is what makes an unattended daily pass saf
 | `fno backlog undefer <id>` | A deferred node whose blocker is demonstrably gone |
 | `fno backlog update <id> --priority <p0..p3>` | A priority the evidence contradicts |
 | `fno backlog rank <id> --top` | Float a card that should run next within its lane |
-| `fno backlog idea "..."` | File a question or a follow-up you cannot resolve |
+| `fno backlog idea "..."` | File genuinely NEW follow-up work you noticed |
 
 Promotion (intake / plan-link) is allowed where a node is demonstrably blueprint-complete.
 
@@ -43,7 +43,15 @@ Act only where the pattern is unambiguous.
 A dedup family with an identical title stem and one merged member is unambiguous.
 A p1 that has sat untouched for a month is a question, not a call.
 
-**Anything you cannot decide from the evidence goes to the triage pile as a one-line question** (`fno backlog idea`), never a guess.
+**Anything you cannot decide from the evidence goes to the triage pile as a one-line question, never a guess.**
+The pile IS the `deferred` status - a node is in it because it carries a `deferred_reason`, not because it exists.
+So park an undecidable node with the question as its reason:
+
+```bash
+fno backlog defer <id> --reason "question: <the one line you need answered>"
+```
+
+Use `fno backlog idea` only for genuinely new work you noticed in passing; an idea-status node is NOT in the pile and will not surface in the triage view.
 The pile is the pressure-release valve that lets grooming stay unattended: an honest question costs a line, a wrong supersede costs real work.
 
 **Auto-convene:** when a track has several `ready` nodes but no encoded order (no `blocked_by` edges expressing the sequence a human clearly intended), you MAY convene one fresh-context leader pass to encode that order as graph edges.

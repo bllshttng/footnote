@@ -131,19 +131,11 @@ def run_groom(
 
     try:
         short_id = _spawn_groom_worker(brief, cwd, model, day)
-    except subprocess.TimeoutExpired:
-        # The worker RAN before the kill, so levers may already be applied. Hold
-        # the marker - re-running today would re-apply them - and report loudly.
-        return {
-            "status": "failed",
-            "day": day,
-            "detail": f"groom worker exceeded {_SPAWN_TIMEOUT_S}s and was killed mid-pass",
-            "released": False,
-        }
-    except Exception as exc:  # noqa: BLE001
-        # The worker never ran, so hand the day back rather than burn it. Report
-        # whether the handback actually happened: a silently leaked marker would
-        # make every retry today exit 0 as `already-ran` with nothing amiss.
+    except OSError as exc:
+        # The spawn binary could not be executed, so no worker ran and no lever
+        # was pulled: hand the day back rather than burn it. Report whether the
+        # handback actually happened - a silently leaked marker would make every
+        # retry today exit 0 as `already-ran` with nothing visibly amiss.
         receipt: dict[str, Any] = {"status": "failed", "day": day, "detail": str(exc)[:200]}
         try:
             release_claim(key, holder, strict=True, root=root)
@@ -152,5 +144,16 @@ def run_groom(
             receipt["released"] = False
             receipt["release_error"] = str(rexc)[:200]
         return receipt
+    except Exception as exc:  # noqa: BLE001
+        # A timeout or a non-zero exit both mean the worker may have RUN and
+        # already applied levers - re-running today would re-apply them. Hold the
+        # marker and report; exit 1 puts it in front of the operator. Burning one
+        # day of hygiene is the cheaper mistake than double-mutating the graph.
+        return {
+            "status": "failed",
+            "day": day,
+            "detail": str(exc)[:200],
+            "released": False,
+        }
 
     return {"status": "dispatched", "day": day, "short_id": short_id, "model": model}

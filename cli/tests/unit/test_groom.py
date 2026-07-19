@@ -86,29 +86,39 @@ def test_dry_run_neither_claims_nor_spawns(claims_root, spawns):
     assert G.run_groom(cwd="/tmp", today=DAY)["status"] == "dispatched"
 
 
-def test_failed_spawn_hands_the_day_back(claims_root, monkeypatch, spawns):
-    # A worker that never ran must not burn the day behind a marker nothing
-    # clears until tomorrow.
+def test_unlaunchable_spawn_hands_the_day_back(claims_root, monkeypatch, spawns):
+    # An OSError means the binary never executed, so no lever was pulled and the
+    # day must not be burned behind a marker nothing clears until tomorrow.
     def _boom(*a, **k):
-        raise RuntimeError("spawn exited 2")
+        raise OSError("No such file or directory: fno")
 
     monkeypatch.setattr(G, "_spawn_groom_worker", _boom)
     failed = G.run_groom(cwd="/tmp", today=DAY)
     assert failed["status"] == "failed"
-    assert "spawn exited 2" in failed["detail"]
     assert failed["released"] is True, "the handback must be reported, not assumed"
 
     monkeypatch.setattr(G, "_spawn_groom_worker", lambda *a, **k: "gr02")
     assert G.run_groom(cwd="/tmp", today=DAY)["status"] == "dispatched"
 
 
-def test_timeout_holds_the_marker(claims_root, monkeypatch):
-    # A killed worker already pulled levers; re-running today would re-apply
-    # them, so the day stays held and the receipt says so.
-    def _timeout(*a, **k):
-        raise G.subprocess.TimeoutExpired(cmd="fno", timeout=G._SPAWN_TIMEOUT_S)
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(
+            lambda: G.subprocess.TimeoutExpired(cmd="fno", timeout=G._SPAWN_TIMEOUT_S),
+            id="timeout",
+        ),
+        pytest.param(lambda: RuntimeError("fno agents spawn exited 2"), id="nonzero-exit"),
+    ],
+)
+def test_a_worker_that_may_have_run_holds_the_marker(claims_root, monkeypatch, exc):
+    # headless is synchronous, so both a timeout and a non-zero exit can land
+    # AFTER levers were applied. Re-dispatching today would re-apply them, so the
+    # day stays held; the operator sees it via status=failed + exit 1.
+    def _raise(*a, **k):
+        raise exc()
 
-    monkeypatch.setattr(G, "_spawn_groom_worker", _timeout)
+    monkeypatch.setattr(G, "_spawn_groom_worker", _raise)
     r = G.run_groom(cwd="/tmp", today=DAY)
     assert r["status"] == "failed"
     assert r["released"] is False
@@ -201,6 +211,17 @@ def test_skill_carries_the_auto_convene_and_report_contract():
     assert "Auto-convene" in text
     assert "fno mail send" in text
     assert "Net mint rate" in text
+
+
+def test_skill_routes_questions_to_the_deferred_pile_not_idea():
+    """The triage pile IS `deferred` + a reason, so a question must defer.
+
+    An `idea`-status node does not appear in the pile, so routing questions
+    there would silently drop them from the surface grooming reports on.
+    """
+    text = SKILL.read_text()
+    assert 'fno backlog defer <id> --reason "question:' in text
+    assert "an idea-status node is not in the pile" in text.lower()
 
 
 def test_skill_forbids_direct_state_edits():
