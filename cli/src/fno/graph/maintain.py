@@ -340,8 +340,18 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
         return True
     plan_path = entry.get("plan_path")
     if plan_path and isinstance(plan_path, str):
+        # Resolve the freshness probe the way the node itself would: strip a
+        # `#anchor` fragment and resolve a repo-relative path against the node's
+        # own `cwd` (not this command's), so a recently-edited plan is not
+        # mis-read as unmoved. A directory plan_path still probes the dir mtime -
+        # a documented gap (folder plans are rare; the outcome is reversible).
+        probe = plan_path.split("#", 1)[0]
+        if probe and not os.path.isabs(probe):
+            cwd = entry.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                probe = os.path.join(cwd, probe)
         try:
-            mtime = os.path.getmtime(plan_path)
+            mtime = os.path.getmtime(probe)
             age_days = (now - datetime.fromtimestamp(mtime, tz=timezone.utc)).days
             if age_days <= staleness_days:
                 return True

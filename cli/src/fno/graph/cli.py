@@ -2449,6 +2449,9 @@ def _starvation_receipts(
     claimed: set,
     now,
     staleness_days: int,
+    *,
+    mission: Optional[str] = None,
+    roadmap_id: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     """Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
 
@@ -2458,6 +2461,11 @@ def _starvation_receipts(
     | ``claimed`` | ``quarantined`` | ``dead-ancestor``. A node genuinely in
     review (open PR) or committed to a batch is not starved and gets no line.
     Pure over the injected ``claimed`` set + ``now`` so it is unit-testable.
+
+    Mirrors ``_pick_ready``'s SCOPING (project, parent subtree via ``scope_ids``,
+    ``--mission``, ``--roadmap-id``) so a scoped request that returns null never
+    explains itself with an out-of-scope node (codex P2). Only the exclusion
+    filters differ - that is the whole point of the receipt.
     """
     from fno.backlog.advance import selection_guards
     from fno.graph._intake import filter_by_project
@@ -2472,8 +2480,13 @@ def _starvation_receipts(
             continue
         if e.get("id"):
             by_id[e["id"]] = e
-        if e.get("_status") in ("ready", "idea") and not e.get("completed_at"):
-            ready_ish_rows.append(e)
+        if e.get("_status") not in ("ready", "idea") or e.get("completed_at"):
+            continue
+        if roadmap_id and e.get("roadmap_id") != roadmap_id:
+            continue
+        if mission and e.get("mission_id") != mission:
+            continue
+        ready_ish_rows.append(e)
     ready_ish = filter_by_project(ready_ish_rows, project_filter, all_)
     if scope_ids is not None:
         ready_ish = [e for e in ready_ish if e.get("id") in scope_ids]
@@ -2710,6 +2723,8 @@ def cmd_next(
                 _live_claimed_node_ids(),
                 datetime.now(timezone.utc),
                 _guard_staleness_days(),
+                mission=mission,
+                roadmap_id=roadmap_id,
             ):
                 typer.echo(f"excluded {nid}: {reason}", err=True)
         except Exception as exc:  # noqa: BLE001 - receipts are advisory
@@ -2820,6 +2835,24 @@ def cmd_ready(
     # as individual ready work). Shares _is_batched_member with `next`'s
     # _pick_ready so the surfaces cannot drift.
     ready = [e for e in ready if not _is_batched_member(e)]
+    # G1 guards (x-3236): dead-ancestor + stale-ready quarantine, the SAME filter
+    # `next`'s _pick_ready applies. `ready` is a third dispatch-feeding surface -
+    # `select_lane_fill` -> `_ready_nodes` shells `fno backlog ready` for both
+    # parallel lane-fill AND the active-backlog daemon's single-node path, and
+    # `dispatch-node.sh --all-ready` enumerates it - so an unguarded `ready`
+    # would dispatch exactly the nodes `next` quarantines. Shares selection_guards
+    # so the surfaces cannot drift.
+    from fno.backlog.advance import selection_guards, _guard_staleness_days
+
+    _guard_now = datetime.now(timezone.utc)
+    _guard_stale = _guard_staleness_days()
+    _guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
+    ready = [
+        e for e in ready
+        if not selection_guards(
+            e, _guard_by_id, _guard_now, staleness_days=_guard_stale
+        )
+    ]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries))
@@ -6185,6 +6218,15 @@ def cmd_maintain(
                         continue
                     if n.get("completed_at") or n.get("deferred_at"):
                         continue  # raced to done/deferred; leave it
+                    # Re-run the predicate under the lock: a candidate that
+                    # gained a movement signal since the pre-lock scan (e.g. a
+                    # PR attached -> now in-review, or a fresh plan edit) is no
+                    # longer stale, and deferring it would sink active work into
+                    # the pile (deferred outranks in-review). Re-check on `n`.
+                    if not _maintain.is_stale_ready(
+                        n, datetime.now(timezone.utc), ready_staleness_days
+                    ):
+                        continue
                     n["locked_by"] = None
                     n["claimed_at"] = None
                     n["completed_at"] = None

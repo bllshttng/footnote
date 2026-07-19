@@ -787,3 +787,19 @@ def test_node_has_movement_non_string_plan_path_no_crash():
     now = _sr_now()
     assert not m.node_has_movement({"plan_path": 12345}, now, 21)
     assert not m.node_has_movement({"plan_path": ["a", "b"]}, now, 21)
+
+
+def test_node_has_movement_relative_plan_resolved_against_cwd(tmp_path):
+    # A repo-relative plan_path must resolve against the node's own cwd, not the
+    # command's, so a freshly-edited plan reads as movement (codex P2).
+    now = datetime.now(timezone.utc)
+    (tmp_path / "plans").mkdir()
+    (tmp_path / "plans" / "p.md").write_text("x")
+    entry = {"plan_path": "plans/p.md#anchor", "cwd": str(tmp_path)}
+    assert m.node_has_movement(entry, now, 21)
+
+
+def test_node_has_movement_relative_plan_missing_cwd_no_crash():
+    now = datetime.now(timezone.utc)
+    # No cwd -> probe stays relative -> getmtime misses -> no movement, no crash.
+    assert not m.node_has_movement({"plan_path": "plans/p.md"}, now, 21)
