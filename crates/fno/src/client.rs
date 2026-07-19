@@ -8659,7 +8659,7 @@ mod tests {
         assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
         // Display row 1 -> outer row 1: the focused agent row gutter marker.
-        let gutter = frame.cells[1 * cols];
+        let gutter = frame.cells[cols]; // outer row 1
         assert_eq!(gutter.c, '▎', "focused agent row carries the gutter marker");
         assert_eq!(gutter.fg, LATTICE_ACCENT, "gutter marker is accented");
         assert_eq!(
@@ -8679,7 +8679,7 @@ mod tests {
         view.selector = Some(1); // the focused agent row
         let frame = view.compose();
         let cols = frame.cols as usize;
-        let gutter = frame.cells[1 * cols];
+        let gutter = frame.cells[cols]; // outer row 1
         assert_eq!(gutter.c, '▎', "gutter glyph survives the selection band");
         assert_eq!(gutter.fg, LATTICE_ACCENT, "accent survives under INVERSE");
         assert_eq!(
