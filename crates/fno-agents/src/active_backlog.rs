@@ -171,6 +171,29 @@ fn defer_node(abi_bin: &str, cwd: &Path, node: &str, reason: &str) {
         .output();
 }
 
+/// Does the node carry a PR reference in graph state? Read through `fno backlog
+/// get` so node resolution stays the CLI's job. FAIL-OPEN: an unreadable or
+/// unparseable answer reports `true`, so a flaky read can never auto-defer a
+/// healthy node.
+fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
+    let Ok(out) = abi_cmd(&cfg.abi_bin)
+        .args(["backlog", "get", node_id])
+        .current_dir(&cfg.cwd)
+        .output()
+    else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return true;
+    };
+    ["pr_number", "pr_url"]
+        .iter()
+        .any(|k| v.get(*k).is_some_and(|x| !x.is_null()))
+}
+
 /// Map a dispatched node's termination outcome to a [`DrainOutcome`], updating
 /// the breaker and emitting the decision event. Fed by [`reconcile_pending`]
 /// with the evidence polled from the worker's own termination event, so the
@@ -408,7 +431,21 @@ fn resolve_dispatch(
     // closes at the human merge via reconcile - map_outcome's keep-set counts
     // it as a successful dispatch. DoneBatched/DoneAwaitingMerge close at merge
     // via reconcile and are NOT marked here - map_outcome recognizes them too.
-    let close = if is_done_reason(&ev.reason) {
+    // Zero-artifact dispatch: a DonePRGreen terminal ASSERTS a PR exists
+    // (loop-check gates it on PR + CI + review), so a node carrying no PR ref
+    // means the terminal lied and the worker died leaving an empty worktree.
+    // Park BEFORE `fno backlog done` - its merged-PR cross-check only runs when
+    // refs already exist, so a ref-less node would close exit 0 and score the
+    // dead dispatch as a win. DoneAdvisory is excluded: a doc terminal has no PR
+    // by design.
+    let zero_artifact =
+        matches!(ev.reason, TerminationReason::DonePRGreen) && !node_has_pr_ref(cfg, node_id);
+
+    let close = if zero_artifact {
+        CloseOutcome::Parked(
+            "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
+        )
+    } else if is_done_reason(&ev.reason) {
         match retry_etxtbsy(|| {
             abi_cmd(&cfg.abi_bin)
                 .args(["backlog", "done", node_id])
@@ -1069,6 +1106,27 @@ mod tests {
         p.display().to_string()
     }
 
+    /// Like [`stub_fno`], but `backlog get` answers with `node_json` on stdout so
+    /// a test can control whether the node carries a PR ref. Every other verb
+    /// records its argv and exits 0.
+    fn stub_fno_get(dir: &std::path::Path, record: &std::path::Path, node_json: &str) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 if [ \"$2\" = \"get\" ]; then printf '%s' '{}'; exit 0; fi\n\
+                 echo \"$@\" >> \"{}\"\nexit 0\n",
+                node_json,
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
     fn test_cfg(tmp: &std::path::Path, abi_bin: String, failure_limit: u32) -> DrainConfig {
         DrainConfig {
             cwd: tmp.to_path_buf(),
@@ -1125,6 +1183,127 @@ mod tests {
         assert!(journal_lines(&project_journal)
             .iter()
             .any(|l| l.contains("active_backlog_dispatched") && l.contains("x-suc0001")));
+    }
+
+    #[test]
+    fn resolve_dispatch_done_pr_green_without_pr_ref_is_a_failure() {
+        // The dead-dispatch signature. A DonePRGreen terminal asserts a
+        // PR; a node carrying none means the worker died leaving nothing. It must
+        // count toward the streak AND must not `backlog done` (whose merged-PR
+        // cross-check is skipped entirely for a ref-less node).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-dead0001","_status":"in_review"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-dead0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "promised".to_string(),
+            },
+        );
+
+        assert_eq!(
+            breaker.consecutive_failures("x-dead0001"),
+            1,
+            "a zero-artifact DonePRGreen counts toward the streak"
+        );
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(
+            !calls.contains("backlog done"),
+            "must not close a node whose terminal lied: {calls}"
+        );
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_skip") && l.contains("x-dead0001")));
+    }
+
+    #[test]
+    fn resolve_dispatch_done_pr_green_with_pr_ref_is_success() {
+        // The healthy counterpart: a PR ref present means the terminal told the
+        // truth, so the existing close path runs untouched.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-live0001","pr_number":477}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-live0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: String::new(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-live0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-live0001"), "calls: {calls}");
+    }
+
+    #[test]
+    fn zero_artifact_check_fails_open_on_unreadable_node() {
+        // Fail-open is the safety property: an unparseable `backlog get` must
+        // never auto-defer a healthy node. `stub_fno` prints nothing, so the
+        // parse fails and the node reports as PR-bearing.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
+
+        assert!(
+            node_has_pr_ref(&cfg, "x-unknown1"),
+            "unreadable node must fail open"
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_advisory_without_pr_ref_is_still_success() {
+        // DoneAdvisory is a doc terminal with no PR by design - the zero-artifact
+        // guard must not touch it, or every doc run would trip the breaker.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-doc00001","_status":"in_review"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-doc00001",
+            Evidence {
+                reason: TerminationReason::DoneAdvisory,
+                message: String::new(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-doc00001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-doc00001"), "calls: {calls}");
     }
 
     #[test]
