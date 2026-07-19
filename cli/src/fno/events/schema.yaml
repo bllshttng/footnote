@@ -2349,8 +2349,8 @@ event_types:
           description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
         dimension:
           type: string
-          enum: [structural_validity, collision_free, shipped_outcome, finding_precision]
-          description: "Which rubric dimension this finding scores. structural_validity/collision_free/shipped_outcome are blueprint dimensions (replay scores the first two only, per Review Amendment A1); finding_precision is the review dimension (sweep-only, per Review Amendment A2)."
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged]
+          description: "Which rubric dimension this finding scores. structural_validity/collision_free/shipped_outcome are blueprint dimensions (replay scores the first two only, per Review Amendment A1); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (x-6ff0, sweep-only)."
         verdict:
           type: string
           enum: [pass, degraded, fail]

@@ -23,7 +23,8 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -341,8 +342,9 @@ def _mint_run_id(skill_id: str) -> str:
 
 @observer_app.command("sweep")
 def sweep(
-    skill: str = typer.Option(..., "--skill", help="blueprint | review"),
+    skill: str = typer.Option(..., "--skill", help="blueprint | review | target"),
     since: int = typer.Option(28, "--since", help="Window in days (default 28)."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="target only: pin one repo (owner/name); default = the graph's distinct PR repos."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the run summary as JSON."),
 ) -> None:
     """Retrospective read-only sweep: score a recorded corpus and emit events.
@@ -352,10 +354,14 @@ def sweep(
     present). Never exits 0 silently with no state word (the one anti-silent
     rule for this harness).
     """
-    if skill not in ("blueprint", "review"):
-        raise typer.BadParameter("--skill must be blueprint or review")
+    if skill not in ("blueprint", "review", "target"):
+        raise typer.BadParameter("--skill must be blueprint, review, or target")
     if since < 1:
         raise typer.BadParameter("--since must be >= 1 (days).")
+
+    if skill == "target":
+        _sweep_target(since=since, repo=repo, json_out=json_out)
+        return
 
     corpus, by_id = _load_corpus(skill, since)
     items = corpus["items"]
@@ -436,6 +442,350 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
     if dimension == "shipped_outcome":
         return f"node {nid} outcome={item.get('outcome')} attribution={item.get('attribution_class')}"
     return f"session {sid} node {nid}: {dimension}={verdict}"
+
+
+# --------------------------------------------------------------------------- #
+# target sweep: PR-anchored walk-back (x-6ff0)
+# --------------------------------------------------------------------------- #
+
+# gh pr list defaults to 30 results (Domain Pitfall); pull generously so the
+# *list* limit does not silently shrink the denominator. target makes NO per-PR
+# gh calls (outcome comes from the graph, signals from events), so ONE `gh pr
+# list` per repo covers a whole repo - a high limit costs nothing extra, and an
+# active repo ships >100 PRs inside a 28d window, so a low cap would truncate the
+# default sweep (the truncation caveat still fires past this ceiling).
+_PR_LIST_LIMIT = int(os.environ.get("FNO_OBSERVER_PR_LIST_LIMIT", "600"))
+
+
+def _repos_in_scope(nodes: list[dict], repo_override: Optional[str]) -> list[str]:
+    """target repos: an explicit --repo, else the graph's distinct PR-url repos
+    (Claude's Discretion 4)."""
+    if repo_override:
+        return [repo_override]
+    repos = {r for n in nodes if (r := fold._repo_from_url(n.get("pr_url")))}
+    return sorted(repos)
+
+
+def _gh_pr_list(repo: str, cutoff, now, gh_runner) -> "tuple[Optional[list[dict]], bool]":
+    """`gh pr list` merged+closed for one repo, windowed by merged/closed date.
+    Returns ``(prs, truncated)``; ``prs`` is None on a gh failure (a coverage
+    gap for the whole repo, never a crash). ``truncated`` is True when the repo
+    returned exactly the list limit (there may be more PRs - no silent
+    truncation)."""
+    # `--state` is a SCALAR flag (open|closed|merged|all): repeating it is not a
+    # documented union, so use `--state all` and let the merged/closed timestamp
+    # filter below drop OPEN PRs (they carry neither mergedAt nor closedAt).
+    args = [
+        "pr", "list", "--repo", repo, "--state", "all",
+        "--limit", str(_PR_LIST_LIMIT),
+        "--json", "number,headRefName,mergedAt,closedAt,url,state",
+    ]
+    rc, out, _err = gh_runner(args)
+    if rc != 0:
+        return None, False
+    try:
+        raw = json.loads(out)
+    except (ValueError, TypeError):
+        return None, False
+    if not isinstance(raw, list):
+        return [], False
+    truncated = len(raw) >= _PR_LIST_LIMIT
+    windowed = []
+    for pr in raw:
+        if not isinstance(pr, dict):
+            continue
+        # mergedAt/closedAt through _parse_ts only (naive-local timeline); a
+        # bare datetime.fromisoformat would land the window boundary off by the
+        # tz offset (Domain Pitfall).
+        ts = fold._parse_ts(pr.get("mergedAt")) or fold._parse_ts(pr.get("closedAt"))
+        if ts is not None and cutoff <= ts <= now:
+            windowed.append(pr)
+    return windowed, truncated
+
+
+def _load_target_corpus(since: int, repo_override: Optional[str], gh_runner) -> "tuple[dict, dict]":
+    """Build the PR-anchored corpus. Returns ``(corpus, meta)`` where ``meta``
+    carries the repo-scope coverage caveats (dropped-by-cap repos, truncated
+    repos) the digest must state."""
+    from datetime import datetime as _dt
+
+    from fno import paths as _paths
+    from fno.scoreboard.fold import load_ledger_rows, read_graph_nodes
+
+    rows = load_ledger_rows(_paths.ledger_json())
+    nodes = read_graph_nodes(_paths.graph_json())
+    postmortems = _read_postmortems(_paths.postmortems_dir())
+    events = _read_target_events()
+
+    now = _dt.now()
+    cutoff = now - timedelta(days=since)
+    repos = _repos_in_scope(nodes, repo_override)
+
+    all_prs: list[dict] = []
+    dropped_repos = 0
+    truncated_repos: list[str] = []
+    for r in repos:
+        prs, truncated = _gh_pr_list(r, cutoff, now, gh_runner)
+        if prs is None:  # gh failed / cap reached for this repo -> a coverage gap
+            dropped_repos += 1
+            continue
+        all_prs.extend(prs)
+        if truncated:
+            truncated_repos.append(r)
+
+    corpus = fold.build_target_corpus(
+        all_prs, nodes, rows, events,
+        since_days=since, now=now, postmortems=postmortems,
+        read_transcript=None,  # transcript tier is off in v1 (medium/low, evidence-only)
+    )
+    meta = {
+        "repos_scoped": len(repos),
+        "dropped_repos": dropped_repos,
+        "truncated_repos": truncated_repos,
+    }
+    return corpus, meta
+
+
+def _read_target_events() -> dict:
+    """Read the two structured event kinds that carry target signal - loop_check
+    (fires / promise intent / ci) and termination (terminal reason) - grouped by
+    ``data.session_id``. The plan's promise/gate_escape/phase_transition kinds do
+    not exist as events; the fold grounds on what does."""
+    from fno.scoreboard.fold import read_jsonl_events
+
+    events = read_jsonl_events(_events_paths(), kinds={"loop_check", "termination"})
+    by_session: dict[str, list[dict]] = {}
+    for e in events:
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        sid = data.get("session_id")
+        if isinstance(sid, str) and sid:
+            by_session.setdefault(sid, []).append(e)
+    return by_session
+
+
+def _target_evidence(item: dict, dimension: str, verdict: str) -> str:
+    """One earned-specificity line per (PR, dimension) verdict."""
+    nid = item.get("graph_node_id") or "?"
+    prn = item.get("pr_number")
+    sig = item.get("signals") or {}
+    if dimension == "shipped_outcome":
+        return f"pr#{prn} node {nid} outcome={item.get('outcome')} attribution={item.get('attribution_class')}"
+    if dimension == "first_try_green":
+        return f"pr#{prn} node {nid} ci_reds={sig.get('ci_reds')} loop_fires={sig.get('loop_fires')}"
+    if dimension == "converged":
+        return f"pr#{prn} node {nid} terminal={item.get('terminal_reasons')}"
+    return f"pr#{prn} node {nid}: {dimension}={verdict}"
+
+
+_OUTCOMES = ("merged_clean", "bounced", "reverted")
+
+
+def _falsifier_crosstab(scored: list[tuple]) -> dict:
+    """The falsifier cross-tab: process quality x outcome. The valuable cell is
+    good process + bad outcome - a PR that scored clean yet bounced/reverted, the
+    observation that falsifies a good process score (Locked Decision 5). "Good
+    process" is first_try_green==pass AND converged==pass (both binary structured
+    verdicts - no invented churn threshold, Locked Decision 8)."""
+    cells: dict = {"good_process": Counter(), "other": Counter()}
+    falsifiers: list[int] = []
+    for item, scores in scored:
+        outcome = item.get("outcome")
+        if outcome not in _OUTCOMES:
+            continue
+        good = scores.get("first_try_green") == "pass" and scores.get("converged") == "pass"
+        bucket = "good_process" if good else "other"
+        cells[bucket][outcome] += 1
+        if good and outcome in ("bounced", "reverted"):
+            falsifiers.append(item.get("pr_number"))
+    return {
+        "good_process": dict(cells["good_process"]),
+        "other": dict(cells["other"]),
+        "falsifier_prs": [p for p in falsifiers if p is not None],
+    }
+
+
+def _write_target_digest(summary: dict, coverage: dict, meta: dict, crosstab: dict) -> Path:
+    """target digest: the falsifier cross-tab and the no-PR class render in the
+    summary block directly under the verdict counts (the headline), never below
+    the failure ranking (a falsifier a reader must scroll for goes unread)."""
+    from fno import paths as _paths
+
+    reports_dir = _paths.observer_reports_dir(project_id="fno")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    date = datetime.now().strftime("%Y-%m-%d")
+    path = reports_dir / f"target-{date}.md"
+
+    from fno.scoreboard.fold import _pct
+
+    attributed = coverage["attributed"]
+    no_pr = coverage["no_pr_attempts"]
+    # AC3-HP: the attempt->PR formula and the no_pr line render UNCONDITIONALLY,
+    # including at 0 (a conditional formula that only appears when no_pr>0 is the
+    # bypass; `no_pr_attempts: 0` printed explicitly is the proof it ran).
+    denom = attributed + no_pr
+    attempt_to_pr = _pct(attributed, denom) if denom else 0
+    stop = coverage["no_pr_stop_cause"]
+    stop_line = ", ".join(f"{k}={v}" for k, v in sorted(stop.items())) or "(none)"
+
+    fals = crosstab["falsifier_prs"]
+    fals_line = (
+        f"**{len(fals)}** good-process / bad-outcome (FALSIFIER): "
+        + ", ".join(f"#{p}" for p in fals)
+        if fals
+        else "0 good-process / bad-outcome (no falsifier this window)"
+    )
+
+    def _row(label, d):
+        return f"| {label} | {d.get('merged_clean', 0)} | {d.get('bounced', 0)} | {d.get('reverted', 0)} |"
+
+    caveats = []
+    if coverage["unattributed_pr"]:
+        caveats.append(f"{coverage['unattributed_pr']} unattributed PR(s) (no resolvable node)")
+    if meta.get("dropped_repos"):
+        caveats.append(f"{meta['dropped_repos']} repo(s) dropped by the gh fan-out cap")
+    if meta.get("truncated_repos"):
+        caveats.append(f"repos hitting the list limit (possible more PRs): {', '.join(meta['truncated_repos'])}")
+    caveat_line = "\n".join(f"> coverage gap: {c}" for c in caveats)
+
+    ranking = "\n".join(
+        f"- {r['dimension']}: {r['fail_count']} fail" for r in summary.get("failure_ranking", [])
+    ) or "- (no failing dimensions)"
+
+    path.write_text(
+        f"# Observer sweep: fno:target ({date})\n\n"
+        f"run_id: `{summary['run_id']}`\n"
+        f"denominator: {coverage['prs_total']} merged+closed PR(s) in window "
+        f"(anchor = real deliveries, NOT the ledger)\n"
+        f"coverage: {summary['coverage_pct']}% ({attributed} attributable PR item(s))\n"
+        f"verdicts: pass={summary['pass_count']} degraded={summary['degraded_count']} fail={summary['fail_count']}\n\n"
+        # -- headline block (directly under verdict counts) -----------------
+        f"## Falsifier cross-tab (process x outcome)\n\n"
+        f"{fals_line}\n\n"
+        f"| process | merged_clean | bounced | reverted |\n"
+        f"|---|---|---|---|\n"
+        f"{_row('good (first_try_green + converged)', crosstab['good_process'])}\n"
+        f"{_row('other', crosstab['other'])}\n\n"
+        f"## Attempt -> PR (survivorship-corrected)\n\n"
+        f"no_pr_attempts: {no_pr} (stop-cause: {stop_line})\n"
+        f"attempt -> PR: {attempt_to_pr}% ({attributed} PRs / {denom} attempts)\n\n"
+        f"{caveat_line}\n"
+        f"{chr(10) if caveat_line else ''}"
+        f"## Failure ranking\n{ranking}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _sweep_target(*, since: int, repo: Optional[str], json_out: bool) -> None:
+    """PR-anchored target sweep: enumerate real deliveries, walk each back to its
+    node/sessions, score the three verdict dimensions, and emit the falsifier
+    cross-tab + the survivorship-corrected no-PR class."""
+    from fno.scoreboard.fold import _default_skill_version
+
+    skill_id = fold._SKILL_IDS["target"]
+    gh_runner = _capped_gh(_default_gh, _GH_FANOUT_CAP)
+    corpus, meta = _load_target_corpus(since, repo, gh_runner)
+    items = corpus["items"]
+    coverage = corpus["coverage"]
+
+    # Boundary: 0 merged/closed PRs. Distinguish a genuine empty window (exit 0,
+    # legitimately nothing to do) from an outage where every scoped repo's gh
+    # call failed - the denominator was never OBSERVED, so reporting `no_data`
+    # would hide a coverage failure from operators/automation (exit non-zero).
+    if coverage["prs_total"] == 0:
+        if meta["repos_scoped"] > 0 and meta["dropped_repos"] >= meta["repos_scoped"]:
+            typer.echo(
+                f"partial: gh unavailable for all {meta['repos_scoped']} scoped repo(s) "
+                f"(fan-out cap / rate-limit / outage); the PR denominator was never observed, "
+                f"NOT an empty window. No skill_eval_run_complete emitted.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        typer.echo(f"no_data: 0 merged/closed PR(s) across {meta['repos_scoped']} repo(s) "
+                   f"in the last {since}d. No skill_eval_run_complete emitted.")
+        raise typer.Exit(0)
+
+    # Insufficient guard: <10 attributable PRs -> a ranking would be fabricated
+    # confidence. No run_complete (matches blueprint/review).
+    if len(items) < fold.MIN_ATTRIBUTABLE:
+        typer.echo(
+            f"insufficient: {len(items)} attributable {skill_id} PR item(s) in the last "
+            f"{since}d, need >={fold.MIN_ATTRIBUTABLE}. No skill_eval_run_complete emitted.\n"
+            f"  (denominator was {coverage['prs_total']} PR(s); "
+            f"no_pr_attempts={coverage['no_pr_attempts']}, unattributed={coverage['unattributed_pr']})"
+        )
+        raise typer.Exit(0)
+
+    run_id = _mint_run_id(skill_id)
+    events_paths = _events_paths()
+    skill_version = _default_skill_version(skill_id, None)
+
+    findings: list[tuple[str, str]] = []
+    scored_pairs: list[tuple] = []
+    scored_count = 0
+    for item in items:
+        scores = fold.score_target_item(item)
+        scored_pairs.append((item, scores))
+        # corpus_item_id must be unique across repos: PR numbers are repo-local,
+        # so a bare `pr-42` collides between owner/a#42 and owner/b#42 and would
+        # collapse distinct deliveries for any consumer joining on (run_id, id).
+        emit_item = {
+            **item, "skill_id": skill_id,
+            "session_id": f"pr-{item.get('repo')}#{item.get('pr_number')}",
+            "skill_version": skill_version,
+        }
+        item_scored = False
+        for dimension, verdict in scores.items():
+            if verdict is None:
+                continue  # coverage gap, never a fabricated verdict
+            item_scored = True
+            findings.append((dimension, verdict))
+            _emit_finding(
+                run_id=run_id, item=emit_item, dimension=dimension, verdict=verdict,
+                evidence=_target_evidence(item, dimension, verdict),
+                cost_usd=0.0, skill_ref=None, events_paths=events_paths,
+            )
+        if item_scored:
+            scored_count += 1
+
+    summary = fold.build_run_summary(
+        run_id=run_id, skill_id=skill_id, skill_version=skill_version,
+        findings=findings, corpus_size=len(items), scored_count=scored_count,
+    )
+    summary["cost_usd"] = 0.0
+    if not _emit_run_complete(summary, events_paths):
+        typer.echo(
+            "error: could not write the canonical skill_eval_run_complete event; "
+            "the sweep is not recorded (the digest alone is not the machine contract).",
+            err=True,
+        )
+        raise typer.Exit(5)
+
+    crosstab = _falsifier_crosstab(scored_pairs)
+    digest = _write_target_digest(summary, coverage, meta, crosstab)
+
+    fully_covered = (
+        scored_count == len(items)
+        and coverage["unattributed_pr"] == 0
+        and meta["dropped_repos"] == 0
+        and not meta["truncated_repos"]
+    )
+    state = "ok" if fully_covered else "partial"
+    if json_out:
+        typer.echo(json.dumps(
+            {**summary, "state": state, "digest": str(digest),
+             "coverage": coverage, "meta": meta, "falsifier_prs": crosstab["falsifier_prs"]},
+            indent=2,
+        ))
+        return
+    typer.echo(
+        f"{state}: {skill_id} run {run_id}\n"
+        f"  denominator {coverage['prs_total']} PR(s); scored {scored_count}/{len(items)} attributable "
+        f"({summary['coverage_pct']}% coverage)\n"
+        f"  verdicts: pass={summary['pass_count']} degraded={summary['degraded_count']} fail={summary['fail_count']}\n"
+        f"  no_pr_attempts: {coverage['no_pr_attempts']}; falsifier PRs: {crosstab['falsifier_prs'] or '(none)'}\n"
+        f"  digest: {digest}"
+    )
 
 
 # --------------------------------------------------------------------------- #

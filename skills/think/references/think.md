@@ -834,6 +834,15 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      critiques. On an `epic` this attack is a natural no-op: the epic contract
      excludes ACs, and the anti-filler check already flags any AC block that
      sneaks in.
+   - **Ground-truth join (new, eval-type designs):** an eval / metric / scoreboard
+     design that scores process shape without naming its **ground-truth join** -
+     the downstream observation that would falsify a good score (e.g. a PR that
+     scored clean yet bounced) - is a finding, unless it explicitly declares
+     itself process-only. A good process score with no outcome to falsify it is a
+     number that cannot be wrong, which is not a measurement. The fix is to name
+     the join (what real-world outcome the score is checked against) or the
+     process-only declaration; a rated critique is not a finding, a named missing
+     join is.
    - General quality: missing error states, contradictions between sections,
      vague implementation details.
 3. If issues found: fix them, re-dispatch reviewer (max 3 iterations). Resolve an
