@@ -747,10 +747,6 @@ fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
     }
 }
 
-/// High bit set, so a mission squad id never collides with a real squad id
-/// (those start at 1 and increment by one - see `next_squad_id`).
-const MISSION_SQUAD_BASE: u64 = 1 << 63;
-
 /// FNV-1a over bytes: tiny, dependency-free, deterministic - exactly what a
 /// stable-per-epic synthetic id needs (no crypto property required).
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -763,8 +759,11 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// The synthetic squad id for a mission's `SquadMeta` header, deterministic
-/// per epic id so the same mission maps to the same id across ticks.
+/// per epic id so the same mission maps to the same id across ticks. High bit
+/// (`proto::MISSION_SQUAD_BASE`) set so it never collides with a real squad
+/// id (those start at 1 and increment by one - see `next_squad_id`).
 fn mission_sid(epic_id: &str) -> u64 {
+    use crate::proto::MISSION_SQUAD_BASE;
     MISSION_SQUAD_BASE | (fnv1a(epic_id.as_bytes()) & (MISSION_SQUAD_BASE - 1))
 }
 

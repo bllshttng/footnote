@@ -1153,6 +1153,19 @@ pub struct TabMeta {
     pub panes: Vec<PaneMeta>,
 }
 
+/// High bit of a synthetic "mission squad" `SquadMeta.id` (a render-time
+/// grouping header with no backing session squad - see `derive_missions`).
+/// Real squad ids are monotonic starting at 1, so this bit never collides.
+/// Shared between server (minting) and client (recognizing a virtual id
+/// needs no server round-trip to expand/collapse or place a pane into).
+pub const MISSION_SQUAD_BASE: u64 = 1 << 63;
+
+/// Whether a `SquadMeta.id` names a synthetic mission squad rather than a
+/// real session squad.
+pub fn is_mission_squad(id: u64) -> bool {
+    id & MISSION_SQUAD_BASE != 0
+}
+
 /// One squad's catalog entry inside [`ServerMsg::Layout`]. Identity is the
 /// server-scoped `id` (monotonic, never reused); `canonical_cwd` is the
 /// resolved repo root the squad is keyed by; `name` is display-only (the
