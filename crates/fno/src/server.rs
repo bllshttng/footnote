@@ -763,7 +763,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// The synthetic squad id for a mission's `SquadMeta` header, deterministic
-/// per epic id so the same mission maps to the same id across ticks (x-1a47).
+/// per epic id so the same mission maps to the same id across ticks.
 fn mission_sid(epic_id: &str) -> u64 {
     MISSION_SQUAD_BASE | (fnv1a(epic_id.as_bytes()) & (MISSION_SQUAD_BASE - 1))
 }
@@ -914,7 +914,7 @@ struct Core {
     /// layout time (holder name -> node -> pr) into `AgentRow.pr` for the peek
     /// header's `PR #N` label.
     backlog_pr: HashMap<String, u64>,
-    /// Active missions (x-1a47), from the off-loop graph reader; grouped into
+    /// Active missions, from the off-loop graph reader; grouped into
     /// synthetic "mission squad" headers at layout time.
     missions: backlog_view::MissionMap,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
@@ -3064,10 +3064,10 @@ impl Core {
                 panes: s.tabs.iter().map(|t| tree::leaves(&t.root).len()).sum(),
             })
             .collect();
-        // Synthetic "mission squad" headers (x-1a47): one per active mission,
-        // done/total baked into the name so no proto bump is needed. Renders
-        // even with zero tagged workers - "nothing running" must stay visible,
-        // never vanish (empty-but-active).
+        // Synthetic "mission squad" headers: one per active mission, done/total
+        // baked into the name so no proto bump is needed. Renders even with
+        // zero tagged workers - "nothing running" must stay visible, never
+        // vanish (empty-but-active).
         squads.extend(self.missions.missions.iter().map(|m| SquadMeta {
             id: mission_sid(&m.epic_id),
             name: format!("{}  {}/{}", m.slug, m.done, m.total),
@@ -3222,10 +3222,10 @@ impl Core {
             .iter()
             .filter_map(|(node, holder)| self.backlog_pr.get(node).map(|pr| (holder.as_str(), *pr)))
             .collect();
-        // (x-1a47) A paneless row whose name resolves to a node inside an
-        // active mission is grouped under that mission's synthetic squad,
-        // taking precedence over the owns_path fallback below. A pane-hosted
-        // row keeps its real session squad (it lives in an actual tab tree).
+        // A paneless row whose name resolves to a node inside an active
+        // mission is grouped under that mission's synthetic squad, taking
+        // precedence over the owns_path fallback below. A pane-hosted row
+        // keeps its real session squad (it lives in an actual tab tree).
         let mission_squad_for = |name: &str| -> Option<u64> {
             let node_id = agents_view::parse_node_id_from_name(name)?;
             self.missions
@@ -8337,8 +8337,8 @@ mod tests {
 
     #[test]
     fn active_mission_groups_workers_and_header_shows_done_total() {
-        // x-1a47: an active mission's two children render under a synthetic
-        // squad header, name carrying done/total.
+        // An active mission's two children render under a synthetic squad
+        // header, name carrying done/total.
         let mut core = empty_core();
         core.missions = backlog_view::MissionMap {
             missions: vec![backlog_view::Mission {
