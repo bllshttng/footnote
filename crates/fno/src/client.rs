@@ -512,13 +512,16 @@ struct View {
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
     /// (x-0f9d US1) Armed when a bare NewTab (`c` / the strip `+`) is
-    /// dispatched: the greatest tab id in the active squad at send time. The
-    /// layout that materializes a tab with a HIGHER id opens the rename overlay
-    /// on it, so a create-time name prompt reuses the x-c150 rename machinery
-    /// with no new command or overlay. Guarding on the max id (not a bare bool)
-    /// keeps a routine scrape-tick layout - which can arrive before the server
-    /// has processed NewTab - from arming the prompt on the wrong (old) tab.
-    pending_new_tab: Option<u64>,
+    /// dispatched: `Some(baseline)` where `baseline` is the greatest tab id in
+    /// the active squad at send time, or `None` when the squad had no tabs. The
+    /// layout that materializes a tab beyond that baseline opens the rename
+    /// overlay on it, so a create-time name prompt reuses the x-c150 rename
+    /// machinery with no new command or overlay. Guarding on the baseline (not a
+    /// bare bool) keeps a routine scrape-tick layout - which can arrive before
+    /// the server has processed NewTab - from arming on the wrong (old) tab. The
+    /// nested Option distinguishes "no tabs before" from "max id 0", so the
+    /// first tab (id 0) still triggers (gemini review).
+    pending_new_tab: Option<Option<u64>>,
     /// (x-8f11) Multi-select marks for bulk recruit: the `attach_id`s toggled
     /// with `space` in the sideline selector. Client-local ephemera keyed by id,
     /// so a marked row surviving a filter/scroll keeps its mark and a vanished
@@ -1344,17 +1347,24 @@ impl View {
     /// ignored, so only an explicit create arms the prompt.
     fn note_command_sent(&mut self, cmd: &Command) {
         if matches!(cmd, Command::NewTab) {
-            self.pending_new_tab = Some(self.active_squad_max_tab_id().unwrap_or(0));
+            self.pending_new_tab = Some(self.active_squad_max_tab_id());
         }
     }
 
-    /// If a create-time name prompt is armed and a tab with a higher id has
-    /// appeared in the active squad, open the x-c150 rename overlay on it
-    /// (x-0f9d US1): type + Enter names it, Esc / empty Enter leaves it
+    /// If a create-time name prompt is armed and a tab beyond the recorded
+    /// baseline has appeared in the active squad, open the x-c150 rename overlay
+    /// on it (x-0f9d US1): type + Enter names it, Esc / empty Enter leaves it
     /// unnamed. Called from [`View::set_layout`] after the swap.
     fn maybe_prompt_new_tab_name(&mut self) {
-        if let Some(prev_max) = self.pending_new_tab {
-            if let Some(new_id) = self.active_squad_max_tab_id().filter(|&id| id > prev_max) {
+        if let Some(baseline) = self.pending_new_tab {
+            let fresh = match (baseline, self.active_squad_max_tab_id()) {
+                // No tabs before -> any tab that now exists is the new one.
+                (None, Some(new_id)) => Some(new_id),
+                // Had tabs -> a strictly higher id is the newly minted tab.
+                (Some(prev), Some(new_id)) if new_id > prev => Some(new_id),
+                _ => None,
+            };
+            if let Some(new_id) = fresh {
                 self.pending_new_tab = None;
                 self.open_rename(RenameTarget::Tab(new_id));
             }
@@ -7799,7 +7809,7 @@ mod tests {
         v.note_command_sent(&Command::NewTab);
         assert_eq!(
             v.pending_new_tab,
-            Some(1),
+            Some(Some(1)),
             "armed with the current max tab id"
         );
 
@@ -7807,7 +7817,7 @@ mod tests {
         // and opens no rename (a scrape tick can precede the server's NewTab).
         v.maybe_prompt_new_tab_name();
         assert!(v.rename.is_none(), "no new tab yet -> no prompt");
-        assert_eq!(v.pending_new_tab, Some(1), "still armed");
+        assert_eq!(v.pending_new_tab, Some(Some(1)), "still armed");
 
         // The server materialized tab id 2: rename opens on it, once.
         v.layout.squads[0].tabs.push(TabMeta {
@@ -7823,6 +7833,30 @@ mod tests {
             "rename armed on the new tab"
         );
         assert_eq!(v.pending_new_tab, None, "prompt consumed once");
+
+        // Baseline-None (gemini): an active squad with NO tabs arms with
+        // Some(None), and the FIRST tab - even id 0 - triggers the prompt, so
+        // the nested Option is not conflating "no tabs" with "max id 0".
+        let mut v2 = two_pane_view();
+        v2.layout.squads[0].tabs.clear();
+        v2.note_command_sent(&Command::NewTab);
+        assert_eq!(
+            v2.pending_new_tab,
+            Some(None),
+            "no baseline when squad is empty"
+        );
+        v2.layout.squads[0].tabs.push(TabMeta {
+            id: 0,
+            name: "1".into(),
+            named: false,
+            panes: Vec::new(),
+        });
+        v2.maybe_prompt_new_tab_name();
+        assert_eq!(
+            v2.rename.as_ref().map(|(t, _)| *t),
+            Some(RenameTarget::Tab(0)),
+            "the first tab (id 0) still triggers the prompt"
+        );
     }
 
     #[test]
