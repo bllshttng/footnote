@@ -2971,7 +2971,7 @@ def cmd_groom(
         None, "--model", "-m", help="Model for the groom worker (default: sonnet)."
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print the brief and day key without dispatching."
+        False, "--dry-run", "-N", help="Print the brief and day key without dispatching."
     ),
 ) -> None:
     """Dispatch today's Sonnet grooming pass over the backlog (at most once a day).
