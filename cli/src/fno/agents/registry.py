@@ -94,6 +94,7 @@ HARNESS_SESSION_ID_FIELDS = {
     "claude": "short_id",
     "codex": "harness_session_id",
     "gemini": "harness_session_id",
+    "opencode": "harness_session_id",
 }
 
 from fno import paths
