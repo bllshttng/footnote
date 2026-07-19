@@ -23,6 +23,11 @@ def _isolate_session_discovery(monkeypatch, tmp_path_factory):
     empty_codex = tmp_path_factory.mktemp("empty-codex-sessions")
     monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty_codex))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("empty-codex-home")))
+    # Same hazard for the opencode lane (US6): also pure mtime, so it would read
+    # the developer's real ~/.local/share/opencode/storage and make every
+    # discovery assertion host-dependent.
+    empty_opencode = tmp_path_factory.mktemp("empty-opencode-storage")
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty_opencode))
 
 
 @pytest.fixture(autouse=True)

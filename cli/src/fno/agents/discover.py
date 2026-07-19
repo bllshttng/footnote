@@ -247,6 +247,97 @@ def _discover_from_codex(
     return rows
 
 
+# opencode stores each session as three sibling trees rather than one transcript
+# file: ``storage/session/<projectID>/<ses_id>.json`` (info),
+# ``storage/message/<ses_id>/<msg_id>.json`` (one file per turn), and
+# ``storage/part/<msg_id>/`` (that turn's text). Only the first two matter for
+# discovery; peek joins the parts. Verified against a live 1.0.223 install.
+OPENCODE_STORAGE_DIR_ENV = "FNO_OPENCODE_STORAGE_DIR"
+
+
+def default_opencode_storage_dir() -> Path:
+    """opencode's on-disk storage root on this host (mirror of the codex seam)."""
+    override = os.environ.get(OPENCODE_STORAGE_DIR_ENV)
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~")) / ".local" / "share" / "opencode" / "storage"
+
+
+def _opencode_session_info(path: Path) -> Optional[tuple[str, str]]:
+    """``(session_id, cwd)`` from a session-info JSON, or None.
+
+    cwd is the info file's ``directory`` key (NOT ``cwd`` — verified against a
+    real session). Unreadable/malformed/non-dict files return None, never raise.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    sid = data.get("id")
+    if not isinstance(sid, str) or not sid:
+        return None
+    return sid, str(data.get("directory") or "")
+
+
+def _discover_from_opencode(
+    storage_dir: Path,
+    *,
+    recency_seconds: float,
+    exclude_session_ids: Iterable[str] = (),
+    now: Optional[float] = None,
+) -> list[dict]:
+    """Discover live opencode sessions from the storage tree (US6).
+
+    Liveness is mtime-only, like the codex lane: opencode publishes no live-PID
+    sidecar. The signal is the NEWER of the session-info mtime and its message
+    dir's, because a session mid-turn rewrites the message dir while the info
+    file can lag — reading info alone would age out a session that is actively
+    talking. Rows are shaped like the codex lane's so the shared dedup/alias
+    pipeline consumes them unchanged.
+    """
+    cutoff = (now if now is not None else time.time()) - recency_seconds
+    exclude_sids = {s for s in (exclude_session_ids or ()) if s}
+    msg_root = storage_dir / "message"
+    rows: list[dict] = []
+    seen: set[str] = set()
+    dated: list[tuple[float, Path]] = []
+    try:
+        for path in (storage_dir / "session").glob("*/*.json"):
+            try:
+                mt = path.stat().st_mtime
+            except OSError:
+                continue  # vanished mid-scan: skip, never abort the whole scan
+            try:
+                mt = max(mt, (msg_root / path.stem).stat().st_mtime)
+            except OSError:
+                pass  # no messages yet: the info mtime alone decides
+            if mt >= cutoff:
+                dated.append((mt, path))
+    except OSError:
+        return rows
+    for _mt, path in sorted(dated, key=lambda t: t[0], reverse=True):
+        info = _opencode_session_info(path)
+        if info is None:
+            continue
+        sid, cwd = info
+        if sid in seen or sid in exclude_sids:
+            continue
+        seen.add(sid)
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": cwd,
+                "status": None,
+                "agent": "opencode",
+            }
+        )
+    return rows
+
+
 # Terminal AgentStatus values (mirrors registry.AgentStatus): a row in one of
 # these is dead, so it must not surface as a live discovery result.
 _DEAD_REGISTRY_STATUSES = frozenset({"orphaned", "failed", "exited", "permanent_dead"})
@@ -830,6 +921,7 @@ def resolve_or_suggest(
     sessions_dir: Optional[Path] = None,
     projects_dir: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
+    opencode_storage_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     registry_path: Optional[Path] = None,
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
@@ -849,6 +941,7 @@ def resolve_or_suggest(
         sessions_dir=sessions_dir,
         projects_dir=projects_dir,
         codex_sessions_dir=codex_sessions_dir,
+        opencode_storage_dir=opencode_storage_dir,
         name_map_path=name_map_path,
         registry_path=registry_path,
         project_resolver=project_resolver,
@@ -881,6 +974,7 @@ def discover_live_sessions(
     sessions_dir: Optional[Path] = None,
     projects_dir: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
+    opencode_storage_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     registry_path: Optional[Path] = None,
     exclude_short_ids: Iterable[str] = (),
@@ -975,6 +1069,17 @@ def discover_live_sessions(
         exclude_session_ids=excluded_session_ids,
     )
     for r in codex_rows:
+        if r["short_id"] in exclude:
+            continue
+        candidates.append(r)
+
+    # opencode disk-discovery (US6). Unioned ALWAYS for the same reason as the
+    # codex lane, and zero-effect on a host with no opencode store (empty glob).
+    for r in _discover_from_opencode(
+        opencode_storage_dir or default_opencode_storage_dir(),
+        recency_seconds=_recency_seconds(),
+        exclude_session_ids=excluded_session_ids,
+    ):
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
