@@ -1300,8 +1300,8 @@ def cmd_health(
     )
     from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
-    entries = filter_by_project(entries, project, all_projects)
+    all_entries = read_graph(_graph_path())
+    entries = filter_by_project(all_entries, project, all_projects)
 
     pending = [e for e in entries if _is_pending(e) or _is_idea(e)]
     pending_active = [e for e in entries if _is_pending(e)]
@@ -1511,15 +1511,25 @@ def cmd_health(
     orphan_rate: Optional[float] = None
     orphan_nodes: list[str] = []
     try:
-        from fno.graph.rollup import ROLLUP_TYPES, is_orphan
+        from fno.graph.rollup import CLOSED_STATUSES, ROLLUP_TYPES, is_orphan
 
+        # Ancestry resolves against the UNFILTERED graph: a project-B feature
+        # may legitimately hang off a project-A epic (cross-project decompose),
+        # and walking a project-scoped slice would report it as an orphan.
+        # The numerator/denominator stay project-scoped; only the walk is global.
         index = {
-            e["id"]: e for e in entries
+            e["id"]: e for e in all_entries
             if isinstance(e, dict) and isinstance(e.get("id"), str)
         }
+        # Every OPEN feature, not `pending`: that excludes claimed and in_review,
+        # so claiming an orphan or opening its PR would drop the rate without a
+        # single orphan being resolved.
         non_exempt = [
-            e for e in pending
-            if e.get("type") in ROLLUP_TYPES and not e.get("orphan_ok")
+            e for e in entries
+            if isinstance(e, dict)
+            and e.get("type") in ROLLUP_TYPES
+            and not e.get("orphan_ok")
+            and e.get("_status") not in CLOSED_STATUSES
         ]
         orphan_nodes = [
             nid for e in non_exempt
