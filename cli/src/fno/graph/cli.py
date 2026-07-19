@@ -2509,7 +2509,14 @@ def _starvation_receipts(
             g = selection_guards(e, by_id, now, staleness_days=staleness_days)
             if not g:
                 continue  # no known exclusion (would have been selected)
-            reason = "dead-ancestor" if g.startswith("dead-ancestor") else "quarantined"
+            if g.startswith("dead-ancestor"):
+                reason = "dead-ancestor"
+            elif g == "design-stage":
+                # Not starvation: planned but not blueprinted, so it reads as
+                # its own rung rather than the generic quarantine bucket.
+                reason = "design"
+            else:
+                reason = "quarantined"
         out.append((nid, reason))
     return out
 
