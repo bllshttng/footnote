@@ -270,6 +270,20 @@ class BacklogBlock(BaseModel):
     maintain: MaintainBlock = Field(default_factory=MaintainBlock)
     id_prefix: Optional[str] = None
     id_hex_width: int = 8
+    # Ready-node quarantine threshold (G1 stale-ready guard). A ready node with
+    # no movement signal for this many days is skipped by selection and offered
+    # to `maintain --apply` for a reversible defer. Distinct from
+    # maintain.staleness_days (30, for idea-stage rows) - ready work goes stale
+    # faster than an untriaged idea, so it defaults tighter (21).
+    staleness_days: int = 21
+
+    @field_validator("staleness_days")
+    @classmethod
+    def staleness_days_positive(cls, v: int) -> int:
+        """A ready node cannot be 'older than N days' for N < 1."""
+        if v < 1:
+            raise ValueError("config.backlog.staleness_days must be >= 1")
+        return v
 
     @field_validator("id_prefix")
     @classmethod
