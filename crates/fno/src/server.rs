@@ -9357,7 +9357,10 @@ mod tests {
         // Unnamed first: the store carries no tab name.
         core.persist_squad(1);
         let loaded = crate::squad_store::load();
-        assert_eq!(loaded.squads[0].members[0].tab_name, None, "unnamed -> None");
+        assert_eq!(
+            loaded.squads[0].members[0].tab_name, None,
+            "unnamed -> None"
+        );
 
         // Rename the hosting tab; the rename handler persists it.
         core.command(

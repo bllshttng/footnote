@@ -2958,22 +2958,6 @@ impl View {
         Some((start, text))
     }
 
-    /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
-    /// squad's agent rows, then the `+ new workspace` footer, a catch-all
-    /// section for agents matched to no squad, and the work-queue lane. The
-    /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
-    /// the leader+w selector all index into it.
-    /// (x-0090) The 1-based display ordinal of `tab_id` within its squad,
-    /// derived from the `Layout` the client already holds (Discretion 2): a
-    /// closed tab shifts the survivors, so the next push recomputes the right
-    /// ordinal (AC2-EDGE) with no server round-trip. `None` if the squad/tab
-    /// raced out of the layout - the row then renders without a suffix.
-    fn tab_ordinal(&self, squad: Option<u64>, tab_id: TabId) -> Option<usize> {
-        let sid = squad?;
-        let s = self.layout.squads.iter().find(|s| s.id == sid)?;
-        s.tabs.iter().position(|t| t.id == tab_id).map(|i| i + 1)
-    }
-
     /// The hosting-tab context for an agent row, resolved inside-out (x-0f9d
     /// US3): a NAMED tab supplies its name; an unnamed tab supplies the `·N`
     /// ordinal (today's form). `None` = the row has no tab (a paneless /
@@ -2990,6 +2974,11 @@ impl View {
         })
     }
 
+    /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
+    /// squad's agent rows, then the `+ new workspace` footer, a catch-all
+    /// section for agents matched to no squad, and the work-queue lane. The
+    /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
+    /// the leader+w selector all index into it.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
@@ -7808,7 +7797,11 @@ mod tests {
 
         // Active squad 1 has tabs 0,1 -> max id 1.
         v.note_command_sent(&Command::NewTab);
-        assert_eq!(v.pending_new_tab, Some(1), "armed with the current max tab id");
+        assert_eq!(
+            v.pending_new_tab,
+            Some(1),
+            "armed with the current max tab id"
+        );
 
         // Race guard: a layout with no higher-id tab leaves the prompt armed
         // and opens no rename (a scrape tick can precede the server's NewTab).
@@ -7839,7 +7832,10 @@ mod tests {
         // no forced ordinal, truncated to TAB_LABEL_W.
         let mut view = two_pane_view();
         let spans = view.tab_bar_spans();
-        assert_eq!(spans[1].text, " 1 ", "unnamed digit collapse: zero regression");
+        assert_eq!(
+            spans[1].text, " 1 ",
+            "unnamed digit collapse: zero regression"
+        );
         assert_eq!(spans[2].text, "[2]");
         view.layout.squads[0].tabs[0].name = "x-abcd".into();
         view.layout.squads[0].tabs[0].named = true;
@@ -7847,7 +7843,10 @@ mod tests {
         view.layout.squads[0].tabs[1].named = true;
         let spans = view.tab_bar_spans();
         assert_eq!(spans[1].text, " x-abcd ", "chosen name renders alone");
-        assert_eq!(spans[2].text, "[a-very-long-wo]", "name alone truncates to 14");
+        assert_eq!(
+            spans[2].text, "[a-very-long-wo]",
+            "name alone truncates to 14"
+        );
     }
 
     #[test]
@@ -7855,14 +7854,38 @@ mod tests {
         // Collapse (x-0f9d AC7): a name equal to its own ordinal is the bare
         // digit whether chosen or not - byte-identical to the unnamed render.
         assert_eq!(tab_label_text("1", 0, false), "1");
-        assert_eq!(tab_label_text("1", 0, true), "1", "chosen name == ordinal collapses");
-        assert_eq!(tab_label_text("2", 1, true), "2", "AC7: tab@2 renamed '2' is bare digit");
+        assert_eq!(
+            tab_label_text("1", 0, true),
+            "1",
+            "chosen name == ordinal collapses"
+        );
+        assert_eq!(
+            tab_label_text("2", 1, true),
+            "2",
+            "AC7: tab@2 renamed '2' is bare digit"
+        );
         // A non-ordinal name: unnamed/derived keeps `{ordinal}:{label}`, a
         // chosen name (US2) renders alone.
-        assert_eq!(tab_label_text("2", 0, false), "1:2", "unnamed digit off-position");
-        assert_eq!(tab_label_text("2", 0, true), "2", "chosen '2' at ordinal 1 renders alone");
-        assert_eq!(tab_label_text("debug", 2, false), "3:debug", "derived keeps ordinal");
-        assert_eq!(tab_label_text("debug", 2, true), "debug", "chosen renders alone");
+        assert_eq!(
+            tab_label_text("2", 0, false),
+            "1:2",
+            "unnamed digit off-position"
+        );
+        assert_eq!(
+            tab_label_text("2", 0, true),
+            "2",
+            "chosen '2' at ordinal 1 renders alone"
+        );
+        assert_eq!(
+            tab_label_text("debug", 2, false),
+            "3:debug",
+            "derived keeps ordinal"
+        );
+        assert_eq!(
+            tab_label_text("debug", 2, true),
+            "debug",
+            "chosen renders alone"
+        );
     }
 
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
