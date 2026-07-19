@@ -1092,3 +1092,43 @@ def test_us6_opencode_malformed_info_skipped_not_fatal(tmp_path):
 def test_us6_opencode_absent_store_contributes_nothing(tmp_path):
     """Zero-effect on a host with no opencode install."""
     assert _run_opencode(tmp_path, tmp_path / "never-installed") == []
+
+
+def _touch(path: Path, age: float) -> None:
+    mt = time.time() - age
+    os.utime(path, (mt, mt))
+
+
+def test_us6_opencode_streaming_turn_stays_live_via_part_mtime(tmp_path):
+    """A long turn writes into part/<msg_id>/, which moves neither the session
+    info nor the message dir. Without the deeper look such a session ages out
+    of discovery and becomes unaddressable while still alive."""
+    storage = tmp_path / "opencode"
+    sid = "ses_streaming"
+    info = _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=1800.0, messages=1
+    )
+    # Both cheap signals are stale (well past the 600s window)...
+    assert info.stat().st_mtime < time.time() - 600
+    assert (storage / "message" / sid).stat().st_mtime < time.time() - 600
+    # ...but the newest message's parts are being written right now.
+    pdir = storage / "part" / "msg_0"
+    pdir.mkdir(parents=True)
+    (pdir / "prt_000.json").write_text('{"type":"text","text":"streaming"}', encoding="utf-8")
+    _touch(pdir, 5.0)
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
+
+
+def test_us6_opencode_deep_scan_is_bounded_to_recent_sessions(tmp_path):
+    """The deeper scan must not run for a store full of old sessions, so a
+    session far outside the slack band stays dead even with fresh parts."""
+    storage = tmp_path / "opencode"
+    sid = "ses_ancient"
+    _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=86_400.0 * 30, messages=1
+    )
+    pdir = storage / "part" / "msg_0"
+    pdir.mkdir(parents=True)
+    (pdir / "prt_000.json").write_text('{"type":"text","text":"x"}', encoding="utf-8")
+    _touch(pdir, 5.0)
+    assert _run_opencode(tmp_path, storage) == []

@@ -276,6 +276,58 @@ def _opencode_session_info(path: Path) -> Optional[tuple[str, str]]:
     return sid, str(data.get("directory") or "")
 
 
+# How far past the recency window a session still gets the deeper liveness look
+# below. A single turn can stream for many minutes but not for hours, so this
+# bounds the extra scan to plausibly-active sessions instead of every session
+# in a store that accumulates thousands.
+_OPENCODE_LONG_TURN_SLACK_SECONDS = 6 * 3600
+
+
+def _opencode_activity_mtime(
+    info_path: Path, msg_root: Path, part_root: Path, deep_cutoff: float
+) -> Optional[float]:
+    """Newest activity timestamp for one session, or None if unreadable.
+
+    The cheap signals (session info + message dir) both stop moving once a turn
+    is underway: a directory's mtime tracks entries being created, not an
+    existing file being rewritten, and a streaming turn writes into
+    ``part/<msg_id>/`` whose parent is not the message dir. So a session in a
+    long tool turn would age out of discovery and become unaddressable while
+    still alive. For a session recent enough that a turn could still be running,
+    look at the newest message and its parts; everything older skips the scan.
+    """
+    try:
+        mt = info_path.stat().st_mtime
+    except OSError:
+        return None
+    mdir = msg_root / info_path.stem
+    try:
+        mt = max(mt, mdir.stat().st_mtime)
+    except OSError:
+        return mt  # no messages yet: the info mtime is all there is
+    if mt < deep_cutoff:
+        return mt
+    newest_mt, newest_name = 0.0, ""
+    try:
+        for entry in os.scandir(mdir):
+            try:
+                emt = entry.stat().st_mtime
+            except OSError:
+                continue  # vanished mid-scan
+            if emt > newest_mt:
+                newest_mt, newest_name = emt, entry.name
+    except OSError:
+        return mt
+    if not newest_name:
+        return mt
+    mt = max(mt, newest_mt)
+    try:
+        mt = max(mt, (part_root / Path(newest_name).stem).stat().st_mtime)
+    except OSError:
+        pass  # parts not written yet
+    return mt
+
+
 def _discover_from_opencode(
     storage_dir: Path,
     *,
@@ -293,37 +345,29 @@ def _discover_from_opencode(
     both easy to guess wrong.
 
     Liveness is mtime-only, like the codex lane: opencode publishes no live-PID
-    sidecar. The signal is the NEWER of the session-info mtime and its message
-    dir's, so a session whose info file lags still counts as live once its next
-    turn lands. Note the dir mtime moves when a message file is CREATED, not
-    when one is rewritten in place, so this detects new turns rather than
-    streaming progress within one long turn — a session silent for the whole
-    window ages out either way, which is the intended behavior.
+    sidecar. ``_opencode_activity_mtime`` owns the signal, including why the two
+    cheap timestamps are not enough on their own.
 
     Rows are shaped like the codex lane's so the shared dedup/alias pipeline
     consumes them unchanged.
 
-    ponytail: full glob + up to two stats per session, on the same interactive
-    resolution path as the codex scan. Prune by project dir if a heavy opencode
-    user's send drags.
+    ponytail: full glob + two stats per session, on the same interactive
+    resolution path as the codex scan; the deeper per-message scan is bounded to
+    sessions recent enough to still be mid-turn. Prune by project dir if a heavy
+    opencode user's send drags.
     """
     cutoff = (now if now is not None else time.time()) - recency_seconds
+    deep_cutoff = cutoff - _OPENCODE_LONG_TURN_SLACK_SECONDS
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     msg_root = storage_dir / "message"
+    part_root = storage_dir / "part"
     rows: list[dict] = []
     seen: set[str] = set()
     dated: list[tuple[float, Path]] = []
     try:
         for path in (storage_dir / "session").glob("*/*.json"):
-            try:
-                mt = path.stat().st_mtime
-            except OSError:
-                continue  # vanished mid-scan: skip, never abort the whole scan
-            try:
-                mt = max(mt, (msg_root / path.stem).stat().st_mtime)
-            except OSError:
-                pass  # no messages yet: the info mtime alone decides
-            if mt >= cutoff:
+            mt = _opencode_activity_mtime(path, msg_root, part_root, deep_cutoff)
+            if mt is not None and mt >= cutoff:
                 dated.append((mt, path))
     except OSError:
         return rows
