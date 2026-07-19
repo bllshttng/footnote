@@ -15,6 +15,7 @@ Filter: `uv run pytest cli/tests/graph/test_open_pr_selection.py -q`
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from typer.testing import CliRunner
@@ -23,6 +24,10 @@ from fno.graph.cli import cli, _has_unmerged_open_pr
 
 
 runner = CliRunner()
+
+# Recent so the G1 stale-ready guard never quarantines these selection
+# fixtures (a hardcoded past date rots past the threshold as wall-clock moves).
+_RECENT_CREATED = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 
 def _node(node_id: str, **overrides) -> dict:
@@ -49,7 +54,7 @@ def _node(node_id: str, **overrides) -> dict:
         "pr_number": None,
         "merge_status": None,
         "_status": "ready",
-        "created_at": "2026-06-13T00:00:00+00:00",
+        "created_at": _RECENT_CREATED,
     }
     base.update(overrides)
     return base

@@ -13,6 +13,7 @@ Refs: ab-fcf9cec5 (double-claim of ab-1e86b88e observed across PR #397/#398).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -50,12 +51,16 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     return g
 
 
+# Recent so the G1 stale-ready guard never quarantines these fixtures.
+_RECENT_CREATED = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+
 def _two_ready_entries():
     return [
         {"id": "ab-aaaaaaaa", "title": "A", "_status": "ready", "priority": "p2",
-         "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "a.md"},
+         "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "a.md"},
         {"id": "ab-bbbbbbbb", "title": "B", "_status": "ready", "priority": "p2",
-         "created_at": "2026-01-02", "project": "p", "blocked_by": [], "plan_path": "b.md"},
+         "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "b.md"},
     ]
 
 

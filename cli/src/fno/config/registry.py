@@ -91,6 +91,10 @@ FIELD_META: dict[str, Meta] = {
     "backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),
     "backlog.maintain.validity_days": Meta("advanced", "Age (days) before a stale idea enters the validity sweep."),
     "backlog.maintain.validity_batch_size": Meta("advanced", "Oldest-first validity-sweep batch size (clamped to 100)."),
+    "backlog.staleness_days": Meta(
+        "advanced",
+        "Age (days) before an unmoved ready node is quarantined from selection.",
+    ),
     "backlog.id_prefix": Meta(
         "always", "Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).",
         question="Backlog node-ID prefix?", default_source="repo-slug",
