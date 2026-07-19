@@ -673,6 +673,8 @@ def _create_node_impl(
 
     new_id_holder: list[Optional[str]] = [None]
     node_holder: list[Optional[dict]] = [None]
+    rollup_lines: list[str] = []
+    rollup_error: list[Optional[str]] = [None]
 
     def mutator(entries):
         new_id = mint_node_id({e.get("id") for e in entries})
@@ -714,9 +716,45 @@ def _create_node_impl(
                 raise typer.Exit(code=1)
         entries.append(node)
         node_holder[0] = node
+        # Rollup resolution runs INSIDE the mutator: it reads the same locked
+        # snapshot the node was born into and applies an auto-link in the same
+        # write, so no second lock and no window where the node exists unlinked.
+        # Strictly non-fatal - any failure degrades to the orphan line (AC4).
+        try:
+            from fno.graph import rollup as _rollup
+            from fno.graph._intake import (
+                _find_node,
+                _would_create_cycle,
+                _would_exceed_epic_depth,
+            )
+
+            resolution = _rollup.resolve(node, entries)
+            if resolution.kind == "linked":
+                target = _find_node(entries, resolution.epic_id or "")
+                # A brand-new leaf can neither cycle nor deepen epic nesting,
+                # but honor the same guards the update path applies rather than
+                # trusting that; a refusal falls back to suggest.
+                if target is not None and not _would_exceed_epic_depth(
+                    entries, node, target
+                ) and not _would_create_cycle(entries, node["id"], target["id"]):
+                    node["parent"] = target["id"]
+                else:
+                    resolution = resolution._replace(kind="suggest")
+            index = {
+                e["id"]: e for e in entries
+                if isinstance(e, dict) and isinstance(e.get("id"), str)
+            }
+            rollup_lines[:] = _rollup.receipt_lines(resolution, node["id"], index)
+        except Exception as exc:  # noqa: BLE001 - rollup never breaks intake
+            rollup_error[0] = str(exc)
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    if rollup_error[0] is not None:
+        typer.echo(f"warning: rollup skipped ({rollup_error[0]})", err=True)
+    for line in rollup_lines:
+        typer.echo(line)
 
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
