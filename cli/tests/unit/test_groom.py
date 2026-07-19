@@ -87,7 +87,7 @@ def test_dry_run_neither_claims_nor_spawns(claims_root, spawns):
 
 
 def test_failed_spawn_hands_the_day_back(claims_root, monkeypatch, spawns):
-    # A transient spawn fault must not burn the day behind a marker nothing
+    # A worker that never ran must not burn the day behind a marker nothing
     # clears until tomorrow.
     def _boom(*a, **k):
         raise RuntimeError("spawn exited 2")
@@ -96,9 +96,25 @@ def test_failed_spawn_hands_the_day_back(claims_root, monkeypatch, spawns):
     failed = G.run_groom(cwd="/tmp", today=DAY)
     assert failed["status"] == "failed"
     assert "spawn exited 2" in failed["detail"]
+    assert failed["released"] is True, "the handback must be reported, not assumed"
 
     monkeypatch.setattr(G, "_spawn_groom_worker", lambda *a, **k: "gr02")
     assert G.run_groom(cwd="/tmp", today=DAY)["status"] == "dispatched"
+
+
+def test_timeout_holds_the_marker(claims_root, monkeypatch):
+    # A killed worker already pulled levers; re-running today would re-apply
+    # them, so the day stays held and the receipt says so.
+    def _timeout(*a, **k):
+        raise G.subprocess.TimeoutExpired(cmd="fno", timeout=G._SPAWN_TIMEOUT_S)
+
+    monkeypatch.setattr(G, "_spawn_groom_worker", _timeout)
+    r = G.run_groom(cwd="/tmp", today=DAY)
+    assert r["status"] == "failed"
+    assert r["released"] is False
+
+    monkeypatch.setattr(G, "_spawn_groom_worker", lambda *a, **k: "gr03")
+    assert G.run_groom(cwd="/tmp", today=DAY)["status"] == "already-ran"
 
 
 def test_spawn_is_headless_sonnet(monkeypatch, claims_root):
@@ -130,16 +146,54 @@ def test_spawn_is_headless_sonnet(monkeypatch, claims_root):
 
 def test_brief_points_at_the_skill():
     brief = G.groom_brief("2026-07-19")
-    assert "skills/groom/SKILL.md" in brief
+    # Name the skill, not a repo-relative path: the worker's cwd is not
+    # guaranteed to be the footnote checkout.
+    assert "fno:groom" in brief
     assert "2026-07-19" in brief
 
 
-@pytest.mark.parametrize(
-    "lever",
-    ["supersede", "defer", "undefer", "--priority", "rank", "idea"],
-)
-def test_skill_names_every_allowed_lever(lever):
-    assert lever in SKILL.read_text()
+# (command, flags the brief teaches for it). Kept together so the two tests
+# below cannot drift: one pins the brief's text, the other pins the real CLI.
+LEVERS = [
+    ("supersede", ("--replaces", "--reason")),
+    ("defer", ("--reason",)),
+    ("undefer", ()),
+    ("update", ("--priority",)),
+    ("rank", ("--top",)),
+    ("idea", ()),
+]
+
+
+@pytest.mark.parametrize("command,flags", LEVERS)
+def test_skill_names_every_allowed_lever(command, flags):
+    text = SKILL.read_text()
+    assert f"fno backlog {command}" in text
+    for flag in flags:
+        assert flag in text
+
+
+@pytest.mark.parametrize("command,flags", LEVERS)
+def test_brief_levers_exist_on_the_real_cli(command, flags):
+    """The brief must not teach a flag the CLI does not have.
+
+    A worker follows this brief literally, so a wrong signature fails at exit 2
+    on the lever rather than anywhere visible. Substring checks on the doc alone
+    cannot catch that - this binds it to the actual command.
+    """
+    import click
+    import typer.main
+
+    from fno.graph.cli import cli as graph_cli
+
+    root = typer.main.get_command(graph_cli)
+    sub = root.get_command(click.Context(root), command)
+    assert sub is not None, f"`fno backlog {command}` does not exist"
+
+    available: set[str] = set()
+    for param in sub.params:
+        available.update(param.opts)
+    missing = set(flags) - available
+    assert not missing, f"`fno backlog {command}` has no {sorted(missing)}"
 
 
 def test_skill_carries_the_auto_convene_and_report_contract():

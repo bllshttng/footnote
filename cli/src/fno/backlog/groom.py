@@ -15,13 +15,16 @@ from typing import Any, Optional
 
 GROOM_MODEL_DEFAULT = "claude-sonnet-5"
 
-# The dispatching process exits as soon as the worker is launched, so PID
-# liveness cannot hold the daily marker. A TTL claim whose pid is dead but whose
-# clock has not lapsed classifies SUSPECT, which `acquire_claim` treats as held -
-# that is what makes "once a day" survive the dispatcher's own exit.
+# The marker must outlive the dispatching process, which cannot hold it by PID.
+# A TTL claim whose pid is dead but whose clock has not lapsed classifies
+# SUSPECT, which `acquire_claim` treats as held - that is what keeps "once a day"
+# true after this process is gone.
 _GROOM_TTL_MS = 24 * 60 * 60 * 1000
 
-_SPAWN_TIMEOUT_S = 600
+# `--substrate headless` is a synchronous `claude -p`, so this bounds the whole
+# grooming pass, not just its launch. Generous on purpose: a kill lands mid-pass,
+# after some levers have already been pulled.
+_SPAWN_TIMEOUT_S = 1800
 
 
 def groom_day_key(today: Optional[date] = None) -> str:
@@ -34,7 +37,7 @@ def groom_brief(day: str) -> str:
     """The worker seed. Deliberately thin: the skill carries the contract."""
     return (
         f"Daily backlog grooming pass for {day}.\n\n"
-        "Load the groom skill (skills/groom/SKILL.md) and follow it end to end. "
+        "Load the `fno:groom` skill and follow it end to end. "
         "Use ONLY the levers it allowlists - never edit graph files directly. "
         "Anything the patterns do not support goes to the triage pile as a "
         "one-line question. Finish by mailing the one-screen report."
@@ -128,13 +131,26 @@ def run_groom(
 
     try:
         short_id = _spawn_groom_worker(brief, cwd, model, day)
+    except subprocess.TimeoutExpired:
+        # The worker RAN before the kill, so levers may already be applied. Hold
+        # the marker - re-running today would re-apply them - and report loudly.
+        return {
+            "status": "failed",
+            "day": day,
+            "detail": f"groom worker exceeded {_SPAWN_TIMEOUT_S}s and was killed mid-pass",
+            "released": False,
+        }
     except Exception as exc:  # noqa: BLE001
-        # Hand the day back: a transient spawn fault must not burn the whole
-        # day's grooming behind a marker nothing will clear until tomorrow.
+        # The worker never ran, so hand the day back rather than burn it. Report
+        # whether the handback actually happened: a silently leaked marker would
+        # make every retry today exit 0 as `already-ran` with nothing amiss.
+        receipt: dict[str, Any] = {"status": "failed", "day": day, "detail": str(exc)[:200]}
         try:
-            release_claim(key, holder, root=root)
-        except Exception:  # noqa: BLE001
-            pass
-        return {"status": "failed", "day": day, "detail": str(exc)[:200]}
+            release_claim(key, holder, strict=True, root=root)
+            receipt["released"] = True
+        except Exception as rexc:  # noqa: BLE001
+            receipt["released"] = False
+            receipt["release_error"] = str(rexc)[:200]
+        return receipt
 
     return {"status": "dispatched", "day": day, "short_id": short_id, "model": model}
