@@ -425,6 +425,11 @@ struct View {
     /// An absent squad key reads as [`SectionView::Collapsed`], an absent
     /// fixed section as `Expanded` - see [`View::section_view`].
     section_view: HashMap<SectionKey, SectionView>,
+    /// (x-975a) The subset of [`View::section_view`] the operator EXPLICITLY
+    /// chose, and the only thing that reaches disk. A seeded default is
+    /// recomputed on every attach, so persisting it would let this build
+    /// re-seed over a value a NEWER build wrote and this one could not parse.
+    section_chosen: HashMap<SectionKey, SectionView>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
     /// index space shared with painting, hover, and mouse hit-testing).
     selector: Option<usize>,
@@ -986,6 +991,7 @@ impl View {
             aux: None,
             aux_esc: Vec::new(),
             section_view,
+            section_chosen: HashMap::new(),
             selector: None,
             sel_esc: Vec::new(),
             sideline_offset: 0,
@@ -2224,8 +2230,11 @@ impl View {
     /// persist. The one write point both operator-initiated paths share, so a
     /// click and a keypress can never diverge on what gets saved.
     fn set_section_view(&mut self, key: SectionKey, view: SectionView) {
-        self.section_view.insert(key, view);
-        view_store::save(&self.section_view);
+        self.section_view.insert(key.clone(), view);
+        // Only an operator gesture reaches this method, so this is exactly the
+        // explicit-choice set `save` persists.
+        self.section_chosen.insert(key, view);
+        view_store::save(&self.section_chosen);
         // Hiding rows shrinks the row set; re-clamp so a scrolled sideline never
         // skips past the new last row (x-a621).
         self.clamp_sideline_offset();
@@ -9880,6 +9889,34 @@ mod tests {
             SectionView::Collapsed,
             "the same for a mission header, which seeds on first appearance"
         );
+
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Only an explicit operator choice is persisted. A seeded default is
+    // recomputed on every attach, and writing it would let this build re-seed
+    // over a value a NEWER build wrote and this one could not parse.
+    #[test]
+    fn seeded_defaults_are_not_persisted_only_operator_choices() {
+        let dir = std::env::temp_dir().join(format!("fno-view-chosen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::view_store::set_test_path(&dir);
+
+        // two_pane_view seeds squad 1 expanded; nothing was chosen.
+        let mut view = two_pane_view();
+        assert_eq!(view.squad_view(1), SectionView::Expanded);
+        assert!(
+            crate::view_store::load().is_empty(),
+            "a seed alone must not reach disk"
+        );
+
+        // An operator gesture does persist, and ONLY the key it touched.
+        view.cycle_squad(2);
+        let saved = crate::view_store::load();
+        assert_eq!(saved.len(), 1, "only the chosen key persists: {saved:?}");
+        assert!(saved.contains_key(&SectionKey::Squad("/code/notes".into())));
 
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);

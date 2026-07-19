@@ -189,26 +189,39 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
         .collect()
 }
 
-/// MERGE this client's sections into the file rather than replacing it.
+/// Persist the sections the operator EXPLICITLY chose, merging them into the
+/// file under an exclusive lock.
 ///
-/// The store is machine-global but a client only ever knows its OWN session's
-/// squads, so a wholesale write would delete the preferences of every squad
-/// belonging to another running mux - and would also drop a newer build's
-/// unrecognized entry, which [`load`] deliberately kept on disk. Overlaying
-/// touches only the keys this client actually has an opinion about.
+/// Three properties, each protecting against a different way state was lost:
 ///
-/// The cost is that an entry is never removed: a workspace that goes away
-/// leaves a few dozen stale bytes behind. That is the right trade against
-/// silently deleting a live sibling session's state.
+/// - **Merge, not replace.** The store is machine-global but a client only ever
+///   knows its OWN session's squads, so a wholesale write would delete the
+///   preferences of every squad belonging to another running mux.
+/// - **Only explicit choices.** `chosen` is the operator-touched set, not the
+///   whole in-memory map. A seeded default (auto-expand on activation) is
+///   recomputed every attach and is not a preference; writing it would let an
+///   older build that could not parse a newer `SectionView` re-seed its own
+///   default and overwrite that newer value on disk.
+/// - **Locked read-modify-write.** Read and write under one exclusive `flock`,
+///   so two clients overlaying disjoint keys cannot each write a snapshot taken
+///   before the other's change and silently revert it.
 ///
-/// Best-effort throughout: any failure leaves the session running on its
-/// in-memory state.
-pub fn save(sections: &HashMap<SectionKey, SectionView>) {
+/// The accepted cost is that an entry is never removed: a workspace that goes
+/// away leaves a few dozen stale bytes behind. That beats deleting a live
+/// sibling session's state.
+///
+/// Best-effort throughout - a contended lock or any I/O failure leaves the
+/// session running on its in-memory state, because a display preference is
+/// never worth interrupting a paint over.
+pub fn save(chosen: &HashMap<SectionKey, SectionView>) {
     // A unit test that has not explicitly pointed the store at a scratch dir
     // must never write a real `$HOME` (the whole `client.rs` view suite
     // mutates section state incidentally). Persistence is opt-in under test.
     #[cfg(test)]
     if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return;
+    }
+    if chosen.is_empty() {
         return;
     }
     let path = view_path();
@@ -217,9 +230,23 @@ pub fn save(sections: &HashMap<SectionKey, SectionView>) {
             return;
         }
     }
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path.with_file_name("mux-view.json.lock"))
+    else {
+        return;
+    };
+    let Ok(_guard) = crate::squad_store::FlockGuard::acquire(lock) else {
+        return; // contended: the next gesture writes, nothing is corrupted
+    };
+
+    // Re-read INSIDE the lock so the overlay lands on the current file.
     let mut file = read_raw();
     file.version = STORE_VERSION;
-    for (k, v) in sections {
+    for (k, v) in chosen {
         if let Ok(value) = serde_json::to_value(v) {
             file.sections.insert(k.to_wire(), value);
         }
@@ -227,9 +254,9 @@ pub fn save(sections: &HashMap<SectionKey, SectionView>) {
     let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
         return;
     };
-    // temp+rename so a concurrent reader sees the old or the new file, never a
-    // torn one. The counter keeps two writers inside ONE process (several
-    // clients, or the test suite) off each other's temp file.
+    // temp+rename so a concurrent READER (which takes no lock) sees the old or
+    // the new file, never a torn one. The counter keeps two writers inside ONE
+    // process off each other's temp file.
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_file_name(format!("mux-view.json.tmp.{}.{seq}", std::process::id()));
@@ -395,6 +422,57 @@ mod tests {
         );
         save(&m);
         assert_eq!(load(), m);
+    }
+
+    // A save must not clobber a key it was not asked to write - that is what
+    // keeps one mux session from deleting a sibling session's preferences.
+    #[test]
+    fn save_merges_and_leaves_foreign_keys_alone() {
+        let _s = Scratch::new("merge");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{"squad:/other-session":"collapsed"}}"#,
+        )
+        .unwrap();
+
+        let mut mine = HashMap::new();
+        mine.insert(SectionKey::Squad("/mine".into()), SectionView::LiveOnly);
+        save(&mine);
+
+        let got = load();
+        assert_eq!(
+            got[&SectionKey::Squad("/mine".into())],
+            SectionView::LiveOnly
+        );
+        assert_eq!(
+            got[&SectionKey::Squad("/other-session".into())],
+            SectionView::Collapsed,
+            "another session's key must survive this session's write"
+        );
+    }
+
+    // An entry this build cannot parse survives a write, so an older client
+    // never destroys a newer build's state. Load drops it (no opinion), and
+    // save never writes a key it was not explicitly given.
+    #[test]
+    fn save_preserves_an_unparseable_entry_on_disk() {
+        let _s = Scratch::new("preserve-unknown");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{"squad:/a":"peek_only"}}"#,
+        )
+        .unwrap();
+        assert!(load().is_empty(), "this build has no opinion on that value");
+
+        let mut mine = HashMap::new();
+        mine.insert(SectionKey::Squad("/b".into()), SectionView::Collapsed);
+        save(&mine);
+
+        let raw = std::fs::read_to_string(view_path()).unwrap();
+        assert!(
+            raw.contains("peek_only"),
+            "the newer build's value must still be on disk: {raw}"
+        );
     }
 
     // One unrecognized VALUE must drop only its own entry. Typing the map as
