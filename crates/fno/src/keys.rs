@@ -32,11 +32,20 @@
 //! disable chords at worst, never brick input (AC5-FR). Unbracketed paste
 //! can still trigger leader chords - the tmux-class residual (Locked 11).
 
+use std::time::{Duration, Instant};
+
 use crate::proto::{BlockDir, Command};
 use crate::tree::Dir;
 
 /// The leader byte: Ctrl-b (0x02).
 pub const LEADER: u8 = 0x02;
+
+/// After a resize chord fires, bare resize keys (`H/J/K/L`) keep resizing for
+/// this long without re-pressing leader (tmux `bind -r` / `repeat-time`, 500ms
+/// default). Each accepted repeat extends the window, so holding the key -
+/// which the terminal auto-repeats far faster than 500ms - keeps resizing until
+/// a genuine pause. Locked 2: this literal lives here and nowhere else.
+pub const REPEAT_WINDOW: Duration = Duration::from_millis(500);
 
 /// Bracketed-paste markers, as the terminal emits them.
 const PASTE_OPEN: &[u8] = b"\x1b[200~";
@@ -118,12 +127,17 @@ enum State {
 #[derive(Debug)]
 pub struct Scanner {
     state: State,
+    /// When a resize repeat window is open, the instant it lapses. `None` when
+    /// idle. Repeat is resize-only (Locked 3): a future focus-repeat would add
+    /// a discriminant here, so this is deliberately not a bare bool.
+    repeat_until: Option<Instant>,
 }
 
 impl Default for Scanner {
     fn default() -> Self {
         Scanner {
             state: State::Normal(0),
+            repeat_until: None,
         }
     }
 }
@@ -144,19 +158,35 @@ fn roll(idx: usize, b: u8, marker: &[u8]) -> usize {
 
 impl Scanner {
     /// Scan one stdin chunk into events. Bytes between specials coalesce
-    /// into as few `Forward` chunks as possible.
-    pub fn scan(&mut self, bytes: &[u8]) -> Vec<Event> {
+    /// into as few `Forward` chunks as possible. `now` is the caller's clock
+    /// (client loop passes `Instant::now()`); the scanner reads time ONLY from
+    /// it (Locked 4) so the resize repeat window is deterministic under test.
+    pub fn scan(&mut self, bytes: &[u8], now: Instant) -> Vec<Event> {
         let mut out = Vec::new();
         let mut plain: Vec<u8> = Vec::new();
         for &b in bytes {
             match std::mem::replace(&mut self.state, State::Normal(0)) {
                 State::Normal(open_idx) => {
                     if b == LEADER {
+                        // Leader disarms first, then chords normally (Locked 5);
+                        // a leader+resize re-arms at its emission site below.
+                        self.repeat_until = None;
                         flush(&mut plain, &mut out);
                         self.state = State::Leader;
+                    } else if let (true, Event::Cmd(Command::ResizeDir(dir))) =
+                        (self.repeat_armed(now), chord(b))
+                    {
+                        // Bare resize key inside an open window: repeat the
+                        // resize and extend the window (no leader needed).
+                        flush(&mut plain, &mut out);
+                        out.push(Event::Cmd(Command::ResizeDir(dir)));
+                        self.repeat_until = Some(now + REPEAT_WINDOW);
+                        self.state = State::Normal(0);
                     } else {
-                        // Forward immediately; the rolling match only decides
-                        // whether chord interpretation turns off next.
+                        // Any non-repeat byte disarms (a no-op when idle) and is
+                        // then processed exactly as if no window existed (Locked
+                        // 5): forwarded immediately, rolling the paste-open match.
+                        self.repeat_until = None;
                         plain.push(b);
                         let idx = roll(open_idx, b, PASTE_OPEN);
                         self.state = if idx == PASTE_OPEN.len() {
@@ -181,7 +211,9 @@ impl Scanner {
                     if b == 0x1b {
                         self.state = State::LeaderEsc(vec![0x1b]);
                     } else {
-                        out.push(chord(b));
+                        let ev = chord(b);
+                        self.arm_if_resize(&ev, now);
+                        out.push(ev);
                     }
                 }
                 State::LeaderEsc(mut seq) => {
@@ -201,7 +233,10 @@ impl Scanner {
                         self.state = State::LeaderEsc(seq);
                     } else {
                         match esc_chord(&seq) {
-                            EscScan::Complete(ev) => out.push(ev),
+                            EscScan::Complete(ev) => {
+                                self.arm_if_resize(&ev, now);
+                                out.push(ev);
+                            }
                             EscScan::Partial => self.state = State::LeaderEsc(seq),
                             EscScan::Invalid => out.push(Event::Bell),
                         }
@@ -217,6 +252,20 @@ impl Scanner {
     /// hint timer while this holds and clears the hint when it stops.
     pub fn leader_pending(&self) -> bool {
         matches!(self.state, State::Leader | State::LeaderEsc(_))
+    }
+
+    /// True while a resize repeat window is open at `now`.
+    fn repeat_armed(&self, now: Instant) -> bool {
+        self.repeat_until.is_some_and(|until| now < until)
+    }
+
+    /// Open (or extend) the repeat window iff the just-emitted event is a
+    /// resize; every resize emission funnels through here so the window arms
+    /// the same way whether it fired from a letter chord or a Ctrl-arrow.
+    fn arm_if_resize(&mut self, ev: &Event, now: Instant) {
+        if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
+            self.repeat_until = Some(now + REPEAT_WINDOW);
+        }
     }
 }
 
@@ -458,8 +507,13 @@ mod tests {
     use super::*;
 
     fn scan_all(chunks: &[&[u8]]) -> Vec<Event> {
+        // A single fixed instant: no chunk advances the clock, so the resize
+        // repeat window (if a chord arms one) stays open across the chunks -
+        // exactly what the non-timing tests want (they never send a bare resize
+        // key after a resize chord, so arming is invisible to them).
+        let now = Instant::now();
         let mut s = Scanner::default();
-        chunks.iter().flat_map(|c| s.scan(c)).collect()
+        chunks.iter().flat_map(|c| s.scan(c, now)).collect()
     }
 
     /// Concatenate every Forward chunk; assert nothing but forwards came out.
@@ -558,17 +612,18 @@ mod tests {
     #[test]
     fn client_keys_leader_pending_tracks_chord_in_flight() {
         // US4: the which-key timer arms exactly while a chord is mid-flight.
+        let now = Instant::now();
         let mut s = Scanner::default();
-        s.scan(b"plain");
+        s.scan(b"plain", now);
         assert!(!s.leader_pending());
-        s.scan(b"\x02");
+        s.scan(b"\x02", now);
         assert!(s.leader_pending(), "bare leader held");
-        s.scan(b"\x1b["); // partial leader-escape still pending
+        s.scan(b"\x1b[", now); // partial leader-escape still pending
         assert!(s.leader_pending(), "split escape chord still pending");
-        s.scan(b"C"); // resolves to FocusDir(Right)
+        s.scan(b"C", now); // resolves to FocusDir(Right)
         assert!(!s.leader_pending(), "resolution clears pending");
         // A paste never reads as a pending chord.
-        s.scan(b"\x1b[200~\x02");
+        s.scan(b"\x1b[200~\x02", now);
         assert!(!s.leader_pending());
     }
 
@@ -699,11 +754,12 @@ mod tests {
         let events = scan_all(&chunks);
         assert_eq!(forwarded_only(&events), input);
         // And chords work again after the close marker.
+        let now = Instant::now();
         let mut s = Scanner::default();
         for c in &chunks {
-            s.scan(c);
+            s.scan(c, now);
         }
-        assert_eq!(s.scan(b"\x02%"), vec![Event::Cmd(Command::SplitH)]);
+        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
     }
 
     #[test]
@@ -729,12 +785,13 @@ mod tests {
     fn client_keys_unterminated_paste_keeps_forwarding_leader_inert() {
         // AC5-FR: no close marker ever arrives. Bytes keep forwarding
         // verbatim (chords disabled, input never bricked).
+        let now = Instant::now();
         let mut s = Scanner::default();
         let mut input = PASTE_OPEN.to_vec();
         input.extend_from_slice(b"pasted");
-        assert_eq!(s.scan(&input), vec![Event::Forward(input.clone())]);
+        assert_eq!(s.scan(&input, now), vec![Event::Forward(input.clone())]);
         assert_eq!(
-            s.scan(b"\x02d more"),
+            s.scan(b"\x02d more", now),
             vec![Event::Forward(b"\x02d more".to_vec())],
             "leader stays inert until 201~ or reconnect"
         );
@@ -744,10 +801,163 @@ mod tests {
     fn client_keys_fizzled_marker_prefix_was_already_forwarded() {
         // ESC [ 2 J (clear screen, not a paste marker): every byte reaches
         // the pane and the scanner stays in Normal with chords live.
+        let now = Instant::now();
         let events = scan_all(&[b"\x1b[2J"]);
         assert_eq!(events, vec![Event::Forward(b"\x1b[2J".to_vec())]);
         let mut s = Scanner::default();
-        s.scan(b"\x1b[20");
-        assert_eq!(s.scan(b"\x02%"), vec![Event::Cmd(Command::SplitH)]);
+        s.scan(b"\x1b[20", now);
+        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
+    }
+
+    const RESIZE_R: Event = Event::Cmd(Command::ResizeDir(Dir::Right));
+
+    #[test]
+    fn repeat_window_holds_resize_without_leader() {
+        // AC1-HP: leader+L arms the window; bare L keeps resizing, each repeat
+        // extending it. One leader chord + N bare keys -> N+1 Resize events.
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        assert_eq!(s.scan(b"\x02L", t0), vec![RESIZE_R], "leader+L resizes + arms");
+        // Three bare L within the window, 30ms apart (terminal auto-repeat rate).
+        let mut t = t0;
+        for _ in 0..3 {
+            t += Duration::from_millis(30);
+            assert_eq!(s.scan(b"L", t), vec![RESIZE_R], "bare L repeats the resize");
+        }
+    }
+
+    #[test]
+    fn repeat_window_extends_on_each_repeat() {
+        // A bare L near the end of the window pushes the deadline out, so a
+        // second bare L that would have missed the ORIGINAL window still lands.
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.scan(b"\x02L", t0); // until = t0 + 500
+        // 400ms in: repeats, until = t0 + 900.
+        assert_eq!(s.scan(b"L", t0 + Duration::from_millis(400)), vec![RESIZE_R]);
+        // 700ms in: past the ORIGINAL 500ms deadline but inside the extension.
+        assert_eq!(s.scan(b"L", t0 + Duration::from_millis(700)), vec![RESIZE_R]);
+    }
+
+    #[test]
+    fn repeat_window_lapses_after_the_window() {
+        // AC2-HP: no input for >500ms lapses the window; the next bare resize
+        // key takes its ordinary meaning (forwarded to the pane, no resize).
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.scan(b"\x02J", t0); // arm; until = t0 + 500
+        assert_eq!(
+            s.scan(b"J", t0 + Duration::from_millis(501)),
+            vec![Event::Forward(b"J".to_vec())],
+            "a bare J after the window forwards; it does not resize"
+        );
+    }
+
+    #[test]
+    fn repeat_window_disarms_and_forwards_a_non_resize_byte() {
+        // AC3-ERR: any non-resize byte during the window disarms it and reaches
+        // the pane byte-identically, and a following resize key no longer repeats.
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.scan(b"\x02L", t0);
+        assert_eq!(
+            s.scan(b"x", t0 + Duration::from_millis(100)),
+            vec![Event::Forward(b"x".to_vec())],
+            "the disarming byte passes straight through"
+        );
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(130)),
+            vec![Event::Forward(b"L".to_vec())],
+            "window is gone: bare L now forwards instead of resizing"
+        );
+    }
+
+    #[test]
+    fn repeat_window_esc_disarms_immediately() {
+        // AC5-FR: Esc is the explicit hatch - it disarms and is processed as
+        // today (forwarded), and no resize fires from it.
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.scan(b"\x02K", t0);
+        assert_eq!(
+            s.scan(b"\x1b", t0 + Duration::from_millis(50)),
+            vec![Event::Forward(b"\x1b".to_vec())]
+        );
+        assert_eq!(
+            s.scan(b"K", t0 + Duration::from_millis(80)),
+            vec![Event::Forward(b"K".to_vec())],
+            "disarmed by Esc: bare K forwards"
+        );
+    }
+
+    #[test]
+    fn repeat_window_leader_disarms_then_chords_normally() {
+        // Invariant: leader inside the window disarms first, then the chord runs
+        // as usual - a leader+resize re-arms; a leader+other does not.
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.scan(b"\x02L", t0); // arm
+        assert_eq!(
+            s.scan(b"\x02%", t0 + Duration::from_millis(100)),
+            vec![Event::Cmd(Command::SplitH)],
+            "leader+% still splits inside the window"
+        );
+        // leader+% is not a resize, so the window is now closed: bare L forwards.
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(130)),
+            vec![Event::Forward(b"L".to_vec())]
+        );
+    }
+
+    #[test]
+    fn repeat_window_ctrl_arrow_resize_also_arms() {
+        // A resize can arm from a Ctrl-arrow chord too (not just a letter); the
+        // repeat set itself stays the letters (the muscle-memory hold path).
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            s.scan(b"\x02\x1b[1;5C", t0),
+            vec![RESIZE_R],
+            "leader+Ctrl-Right resizes right"
+        );
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(40)),
+            vec![RESIZE_R],
+            "the window it armed accepts a bare L"
+        );
+    }
+
+    #[test]
+    fn repeat_window_never_arms_without_a_resize_chord() {
+        // Today's behavior byte-for-byte when no resize has fired: a bare L is
+        // just pane input. (scan_all uses a fixed clock and never resizes first.)
+        assert_eq!(scan_all(&[b"L"]), vec![Event::Forward(b"L".to_vec())]);
+        // A focus chord (leader+l) must NOT arm a resize window.
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.scan(b"\x02l", t0);
+        assert_eq!(
+            s.scan(b"L", t0 + Duration::from_millis(40)),
+            vec![Event::Forward(b"L".to_vec())],
+            "focus chord does not open a resize repeat window"
+        );
+    }
+
+    #[test]
+    fn repeat_window_flood_emits_one_resize_per_key() {
+        // AC4-EDGE (scanner half): a flood of bare H within the window emits one
+        // ResizeDir(Left) each - the MIN-size clamp is the server's job, tested
+        // there; the scanner just keeps emitting without error.
+        let mut s = Scanner::default();
+        let t0 = Instant::now();
+        s.scan(b"\x02H", t0);
+        let mut t = t0;
+        for _ in 0..20 {
+            t += Duration::from_millis(15);
+            assert_eq!(
+                s.scan(b"H", t),
+                vec![Event::Cmd(Command::ResizeDir(Dir::Left))]
+            );
+        }
     }
 }

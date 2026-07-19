@@ -4990,7 +4990,7 @@ async fn handle_stdin(
     if view.nav.is_some() {
         return nav_keys(view, &passthrough, sock_w).await;
     }
-    for event in scanner.scan(&passthrough) {
+    for event in scanner.scan(&passthrough, Instant::now()) {
         match dispatch_event(view, event, sock_w).await? {
             DispatchFlow::Continue => {}
             DispatchFlow::Break => break,
