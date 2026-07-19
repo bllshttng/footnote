@@ -4830,11 +4830,20 @@ async fn handle_stdin(
         if rep.shift {
             continue;
         }
+        // A pointer action - click/press/wheel/drag, anything but passive hover
+        // (Move) - is "other input": it disarms the resize repeat window exactly
+        // as a non-resize keystroke does. Without this, a click that may have
+        // refocused a pane could be followed by a bare H/J/K/L that silently
+        // resizes (the mouse pre-pass strips reports before the scanner runs).
+        // Hover is left armed so mouse drift never breaks a held resize.
+        if !matches!(rep.kind, MouseKind::Move) {
+            scanner.disarm_repeat();
+        }
         // x-8ccf US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
         if view.keys_modal.is_some() {
-            if let StdinFlow::Detach = keys_modal_mouse(view, rep, sock_w).await? {
+            if let StdinFlow::Detach = keys_modal_mouse(view, scanner, rep, sock_w).await? {
                 return Ok(StdinFlow::Detach);
             }
             continue;
@@ -4934,7 +4943,7 @@ async fn handle_stdin(
         // arrows/pgup scroll+select, Enter runs the selected row, Esc/unbound
         // dismiss. Routed here (same precedence as the old poster) so its keys
         // never leak to a pane.
-        return keys_modal_keys(view, &passthrough, sock_w).await;
+        return keys_modal_keys(view, scanner, &passthrough, sock_w).await;
     }
     if view.row_menu.is_some() {
         // x-8ccf US2: the row context menu consumes keys while open (arrows walk
@@ -4990,7 +4999,7 @@ async fn handle_stdin(
     if view.nav.is_some() {
         return nav_keys(view, &passthrough, sock_w).await;
     }
-    for event in scanner.scan(&passthrough) {
+    for event in scanner.scan(&passthrough, Instant::now()) {
         match dispatch_event(view, event, sock_w).await? {
             DispatchFlow::Continue => {}
             DispatchFlow::Break => break,
@@ -5426,6 +5435,7 @@ fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
 /// a pane.
 async fn keys_modal_keys(
     view: &mut View,
+    scanner: &mut Scanner,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
@@ -5476,7 +5486,7 @@ async fn keys_modal_keys(
             }
             ModalKey::Enter => {
                 if matches!(
-                    keys_modal_execute_selected(view, sock_w).await?,
+                    keys_modal_execute_selected(view, scanner, sock_w).await?,
                     DispatchFlow::Detach
                 ) {
                     return Ok(StdinFlow::Detach);
@@ -5489,6 +5499,11 @@ async fn keys_modal_keys(
                 // chord uses (Locked 3), then the modal closes.
                 ev => {
                     view.keys_modal = None;
+                    // Parity with a typed chord: a modal-executed resize arms
+                    // the repeat window too (the scanner never saw this byte).
+                    if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
+                        scanner.arm_repeat(Instant::now());
+                    }
                     if matches!(
                         dispatch_event(view, ev, sock_w).await?,
                         DispatchFlow::Detach
@@ -5508,6 +5523,7 @@ async fn keys_modal_keys(
 /// flow so a detach chord (leader+d) run from the modal actually detaches.
 async fn keys_modal_execute_selected(
     view: &mut View,
+    scanner: &mut Scanner,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<DispatchFlow, String> {
     let ev = view.keys_modal.as_ref().and_then(|m| {
@@ -5518,6 +5534,11 @@ async fn keys_modal_execute_selected(
     match ev {
         Some(ev) => {
             view.keys_modal = None;
+            // Parity with a typed chord: a modal-executed resize (Enter or click)
+            // arms the repeat window too (the scanner never saw a key here).
+            if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
+                scanner.arm_repeat(Instant::now());
+            }
             dispatch_event(view, ev, sock_w).await
         }
         None => {
@@ -5532,6 +5553,7 @@ async fn keys_modal_execute_selected(
 /// the popup dismisses (herdr click-elsewhere).
 async fn keys_modal_mouse(
     view: &mut View,
+    scanner: &mut Scanner,
     rep: crate::mouse::MouseReport,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
@@ -5559,7 +5581,7 @@ async fn keys_modal_mouse(
                     m.popup.select(t);
                 }
                 if matches!(
-                    keys_modal_execute_selected(view, sock_w).await?,
+                    keys_modal_execute_selected(view, scanner, sock_w).await?,
                     DispatchFlow::Detach
                 ) {
                     return Ok(StdinFlow::Detach);
@@ -9417,7 +9439,9 @@ mod tests {
         v.term = (40, 80);
         v.open_keys_modal();
         let mut buf: Vec<u8> = Vec::new();
-        keys_modal_keys(&mut v, b"%", &mut buf).await.unwrap();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"%", &mut buf)
+            .await
+            .unwrap();
         assert!(v.keys_modal.is_none(), "executing a chord closes the modal");
         let mut cur = std::io::Cursor::new(buf);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
@@ -9435,17 +9459,23 @@ mod tests {
         v.term = (40, 80);
         let mut buf: Vec<u8> = Vec::new();
         v.open_keys_modal();
-        keys_modal_keys(&mut v, b"Z", &mut buf).await.unwrap();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"Z", &mut buf)
+            .await
+            .unwrap();
         assert!(v.keys_modal.is_none(), "unbound key dismisses");
         assert!(buf.is_empty(), "unbound key sends nothing");
         // A lone Esc is carried (no leak); the next byte flushes it as a dismiss.
         v.open_keys_modal();
-        keys_modal_keys(&mut v, b"\x1b", &mut buf).await.unwrap();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"\x1b", &mut buf)
+            .await
+            .unwrap();
         assert!(
             v.keys_modal.is_some(),
             "a lone Esc is carried, not acted on"
         );
-        keys_modal_keys(&mut v, b"z", &mut buf).await.unwrap();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"z", &mut buf)
+            .await
+            .unwrap();
         assert!(
             v.keys_modal.is_none(),
             "the carried Esc dismisses on the next key"
@@ -9466,7 +9496,9 @@ mod tests {
             kind: MouseKind::WheelDown,
             shift: false,
         };
-        keys_modal_mouse(&mut v, wheel, &mut buf).await.unwrap();
+        keys_modal_mouse(&mut v, &mut Scanner::default(), wheel, &mut buf)
+            .await
+            .unwrap();
         assert_eq!(
             v.keys_modal.as_ref().unwrap().popup.scroll,
             3,
@@ -9479,7 +9511,9 @@ mod tests {
             kind: MouseKind::Press(MouseButton::Left),
             shift: false,
         };
-        keys_modal_mouse(&mut v, click, &mut buf).await.unwrap();
+        keys_modal_mouse(&mut v, &mut Scanner::default(), click, &mut buf)
+            .await
+            .unwrap();
         assert!(v.keys_modal.is_none(), "click off the popup dismisses");
     }
 
@@ -13189,6 +13223,75 @@ mod tests {
             cur.get_ref().len(),
             "same-chunk bytes after the chord are swallowed"
         );
+    }
+
+    #[tokio::test]
+    async fn keys_modal_executed_resize_arms_the_repeat_window() {
+        // codex P2 parity: a resize run from the which-key modal arms the repeat
+        // window, so a following bare H repeats without leader - exactly as a
+        // typed leader+H would (the scanner never saw the modal keystroke).
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, &mut scanner, b"H", &mut buf)
+            .await
+            .unwrap();
+        buf.clear();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"H", &mut buf)
+            .await
+            .unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::ResizeDir(crate::tree::Dir::Left)) => {}
+            other => panic!("bare H after a modal resize should repeat-resize, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mouse_scroll_disarms_the_resize_repeat_window() {
+        // codex P2: a scroll (like a click) is "other input" - it disarms the
+        // window in the mouse pre-pass, before the report is stripped and the
+        // scanner runs, so a following bare H forwards to the pane instead of
+        // silently resizing. (A wheel, unlike a chrome click, opens no overlay
+        // that would swallow the next key, so it isolates the disarm wiring.)
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        // Arm via a typed leader+H.
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x02H", &mut buf)
+            .await
+            .unwrap();
+        // A wheel-down SGR report (button 65) disarms.
+        buf.clear();
+        handle_stdin(
+            &mut v,
+            &mut scanner,
+            &mut carry,
+            b"\x1b[<65;10;5M",
+            &mut buf,
+        )
+        .await
+        .unwrap();
+        // A bare H now forwards to the pane, not a resize.
+        buf.clear();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"H", &mut buf)
+            .await
+            .unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Input(bytes) => {
+                assert_eq!(
+                    bytes, b"H",
+                    "bare H forwards after a scroll disarms the window"
+                )
+            }
+            other => panic!("bare H after a scroll should forward, not resize, got {other:?}"),
+        }
     }
 
     #[tokio::test]

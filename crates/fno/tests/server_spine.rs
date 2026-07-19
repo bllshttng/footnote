@@ -45,16 +45,27 @@ impl Drop for Server {
 }
 
 fn spawn_server(sock: &Path, shell: &str) -> Server {
-    let child = Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["--server"])
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_fno"));
+    cmd.args(["--server"])
         .arg(sock)
         .env("SHELL", shell)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    Server(child)
+        .stderr(Stdio::null());
+    // Isolate the agent registry, claude-daemon roster, and squad store to empty
+    // scratch subdirs (same idiom as common::spawn_server): the spawned binary is
+    // built without cfg(test), so it would otherwise read the developer's real
+    // ~/.fno/squads.json and inherit live named squads, keeping the session alive
+    // after the last child exits (no Bye) - a machine with saved squads fails; a
+    // clean CI home hides it.
+    let iso = sock.parent().unwrap_or_else(|| Path::new("."));
+    cmd.env("FNO_AGENTS_HOME", iso.join("iso-agents"));
+    cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
+    cmd.env(
+        "FNO_GLOBAL_SETTINGS_PATH",
+        iso.join("iso-cfg").join("settings.json"),
+    );
+    Server(cmd.spawn().unwrap())
 }
 
 /// Connect + Attach, returning the ready-to-use stream. Retries the connect

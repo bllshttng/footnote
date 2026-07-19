@@ -327,8 +327,12 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     // never the developer's live agents. Without this the server reads the real
     // ~/.fno/agents/registry.json + roster and injects phantom squads/rows,
     // which shifts squad ids and flakes the layout/multiclient selection tests
-    // whenever a real mux daemon is running. A caller that needs a real
-    // registry (e.g. agent_edge_e2e) overrides via `envs`, applied after.
+    // whenever a real mux daemon is running. It also reads the real
+    // ~/.fno/squads.json (the spawned binary is built without cfg(test), so the
+    // in-process TEST_PATH seam never reaches it) and inherits live named
+    // squads, which breaks squad-count assertions on a machine that has them (a
+    // clean CI home hides the leak). A caller that needs a real registry (e.g.
+    // agent_edge_e2e) overrides via `envs`, applied after.
     let iso = sock.parent().unwrap_or_else(|| Path::new("."));
     cmd.env("FNO_AGENTS_HOME", iso.join("iso-agents"));
     cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
