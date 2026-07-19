@@ -166,6 +166,97 @@ class SpawnError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+# Bound so a pathological `parent` chain (or an undetected cycle) can never spin
+# the dead-ancestor walk. Deeper than any real epic nesting.
+_MAX_ANCESTOR_WALK = 64
+
+
+def selection_guards(
+    entry: dict,
+    entries_by_id: dict,
+    now=None,
+    *,
+    staleness_days: int = 21,
+) -> Optional[str]:
+    """Return a skip-reason for a would-be-selected node, or None to select it.
+
+    The single narrowing choke point shared by ``next`` selection (_pick_ready)
+    and the converge readiness filter (_direct_dependents), so the two paths
+    can never disagree about what is dispatchable. Guards, in order:
+
+      dead-ancestor: any transitive ``parent`` in {superseded, deferred} - the
+        subtree is abandoned, so building a leaf under a killed epic is wasted
+        work. Returns ``dead-ancestor:<ancestor-id>``. A missing parent id ends
+        the walk with no verdict (select normally). Depth-bounded + cycle-safe.
+
+      stale-quarantine: a ready node with no movement signal older than
+        ``staleness_days`` -> ``stale-quarantine``. The guard only EXCLUDES
+        here; the reversible defer is owned by ``maintain --apply`` (guards
+        never mutate the graph as a selection side effect - epic LD1/LD2).
+
+    Fail-open (epic Errors): any read failure returns None and emits one loud
+    stderr line - the daemon staying alive and dispatching outranks guard
+    completeness. A guard that silently swallowed its own bug would starve the
+    backlog invisibly, the exact failure this feature exists to prevent.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        seen: set[str] = set()
+        cur = entry.get("parent")
+        steps = 0
+        while cur and steps < _MAX_ANCESTOR_WALK:
+            if cur in seen:
+                break  # cycle - stop, no verdict
+            seen.add(cur)
+            anc = entries_by_id.get(cur)
+            if anc is None:
+                break  # missing parent - no verdict, select normally
+            # Field-based, not just derived `_status`: read_graph returns the
+            # persisted status and does NOT recompute, so a superseded/deferred
+            # ancestor whose `_status` was not re-persisted still reads its own
+            # bucket here via the underlying fields. Checking both is robust to
+            # either read path.
+            if (
+                anc.get("_status") in ("superseded", "deferred")
+                or anc.get("superseded_by")
+                or anc.get("deferred_at")
+            ):
+                return f"dead-ancestor:{cur}"
+            cur = anc.get("parent")
+            steps += 1
+
+        from fno.graph import maintain as _maintain
+
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if entry.get("_status") == "ready" and _maintain.is_stale_ready(
+            entry, now, staleness_days
+        ):
+            return "stale-quarantine"
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail OPEN, never starve on a guard bug
+        sys.stderr.write(
+            f"warning: selection_guards failed for {entry.get('id')!r}, "
+            f"selecting anyway: {exc}\n"
+        )
+        return None
+
+
+def _guard_staleness_days() -> int:
+    """``config.backlog.staleness_days`` (default 21), fail-open to the default.
+
+    A config read error must never wedge selection, so a bad/missing config
+    degrades to the schema default rather than raising into the picker.
+    """
+    try:
+        from fno.config import load_settings
+
+        return load_settings().backlog.staleness_days
+    except Exception:  # noqa: BLE001 - selection must survive a bad config
+        return 21
+
+
 def _next_node(project: Optional[str]) -> Optional[dict]:
     """Return the next ready node summary (or None), via ``fno backlog next``.
 
@@ -1345,6 +1436,11 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
         e.get("parent") for e in entries
         if isinstance(e, dict) and isinstance(e.get("parent"), str)
     }
+    # Shared guard inputs (dead-ancestor + stale-ready quarantine): the same
+    # selection_guards() the `next` picker applies, so a converge dispatch never
+    # revives a leaf under a killed epic or a long-abandoned ready node.
+    by_id = {e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")}
+    staleness_days = _guard_staleness_days()
     out: list[dict] = []
     for e in entries:
         if not isinstance(e, dict):
@@ -1356,6 +1452,8 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
         # `idea`; a claimed/done/deferred one reads its own bucket - all excluded.
         if e.get("_status") != "ready":
             continue
+        if selection_guards(e, by_id, staleness_days=staleness_days):
+            continue  # dead-ancestor or stale-quarantine - do not revive
         # An in-flight PR (pr_number set, not yet merged-and-closed) still reads
         # `ready` because completed_at is only set at close. The project-scoped
         # `next` path excludes these via _has_unmerged_open_pr; mirror it here so

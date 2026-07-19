@@ -91,6 +91,8 @@ max_prs_per_epic = 4
 # id_prefix = <unset>   # optional; no default
 # Hex width of minted node IDs (4-8).
 id_hex_width = 8
+# Age (days) before an unmoved ready node is quarantined from selection.
+staleness_days = 21
 
 [backlog.maintain]
 # Age (days) before an idea is flagged stale.

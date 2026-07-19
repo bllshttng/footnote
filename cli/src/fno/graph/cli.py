@@ -2441,6 +2441,79 @@ def cmd_release(
 
 # -- next --
 
+def _starvation_receipts(
+    entries: list[dict],
+    project_filter: Optional[str],
+    all_: bool,
+    scope_ids: Optional[set],
+    claimed: set,
+    now,
+    staleness_days: int,
+    *,
+    mission: Optional[str] = None,
+    roadmap_id: Optional[str] = None,
+) -> list[tuple[str, str]]:
+    """Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
+
+    Zero-silent-starvation (x-3236, epic Success Definition 2): when ``next``
+    returns null but buildable-looking nodes exist, name why each was excluded
+    so an operator is never left guessing. Reasons: ``plan-less`` | ``container``
+    | ``claimed`` | ``quarantined`` | ``dead-ancestor``. A node genuinely in
+    review (open PR) or committed to a batch is not starved and gets no line.
+    Pure over the injected ``claimed`` set + ``now`` so it is unit-testable.
+
+    Mirrors ``_pick_ready``'s SCOPING (project, parent subtree via ``scope_ids``,
+    ``--mission``, ``--roadmap-id``) so a scoped request that returns null never
+    explains itself with an out-of-scope node (codex P2). Only the exclusion
+    filters differ - that is the whole point of the receipt.
+    """
+    from fno.backlog.advance import selection_guards
+    from fno.graph._intake import filter_by_project
+
+    container_ids = _container_ids(entries)
+    # One pass, guarding against a non-dict row (codebase convention: a malformed
+    # entry must not AttributeError the cold receipt path).
+    by_id: dict = {}
+    ready_ish_rows: list[dict] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if e.get("id"):
+            by_id[e["id"]] = e
+        if e.get("_status") not in ("ready", "idea") or e.get("completed_at"):
+            continue
+        if roadmap_id and e.get("roadmap_id") != roadmap_id:
+            continue
+        if mission and e.get("mission_id") != mission:
+            continue
+        ready_ish_rows.append(e)
+    ready_ish = filter_by_project(ready_ish_rows, project_filter, all_)
+    if scope_ids is not None:
+        ready_ish = [e for e in ready_ish if e.get("id") in scope_ids]
+    out: list[tuple[str, str]] = []
+    for e in ready_ish:
+        nid = e.get("id")
+        if not nid:
+            continue
+        if not e.get("plan_path"):
+            reason = "plan-less"
+        elif nid in container_ids:
+            reason = "container"
+        elif nid in claimed:
+            reason = "claimed"
+        elif e.get("_status") == "ready" and (
+            _has_unmerged_open_pr(e) or _is_batched_member(e)
+        ):
+            continue  # in review / batched - handled, not starved
+        else:
+            g = selection_guards(e, by_id, now, staleness_days=staleness_days)
+            if not g:
+                continue  # no known exclusion (would have been selected)
+            reason = "dead-ancestor" if g.startswith("dead-ancestor") else "quarantined"
+        out.append((nid, reason))
+    return out
+
+
 @cli.command("next")
 def cmd_next(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -2570,6 +2643,21 @@ def cmd_next(
         # rebuilds work already on the shared branch). Cleared on abandon so a
         # requeued member resurfaces. Shared with cmd_ready.
         candidates = [e for e in candidates if not _is_batched_member(e)]
+        # G1 guards (x-3236): dead-ancestor + stale-ready quarantine. The single
+        # narrowing choke point shared with the converge path
+        # (advance._direct_dependents), so a leaf under a killed epic or a
+        # long-abandoned ready node is never dispatched. Fail-open per guard.
+        from fno.backlog.advance import selection_guards, _guard_staleness_days
+
+        guard_now = datetime.now(timezone.utc)
+        guard_stale = _guard_staleness_days()
+        guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
+        candidates = [
+            e for e in candidates
+            if not selection_guards(
+                e, guard_by_id, guard_now, staleness_days=guard_stale
+            )
+        ]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
@@ -2616,6 +2704,31 @@ def cmd_next(
         candidates = _pick_ready(entries)
         if candidates:
             result[0] = _node_summary(candidates[0])
+
+    if result[0] is None:
+        # Zero-silent-starvation receipts (x-3236 G1): explain to stderr why
+        # nothing was picked. Advisory - stdout stays exactly the node-or-"null"
+        # contract `_next_node` parses, so a receipt failure never breaks
+        # dispatch.
+        try:
+            from fno.backlog.advance import _guard_staleness_days
+
+            recv_entries = read_graph(_graph_path()) if claim else entries
+            scope_ids = (
+                descendants_of(recv_entries, parent_target_id)
+                if parent_target_id is not None else None
+            )
+            for nid, reason in _starvation_receipts(
+                recv_entries, project_filter, all_, scope_ids,
+                _live_claimed_node_ids(),
+                datetime.now(timezone.utc),
+                _guard_staleness_days(),
+                mission=mission,
+                roadmap_id=roadmap_id,
+            ):
+                typer.echo(f"excluded {nid}: {reason}", err=True)
+        except Exception as exc:  # noqa: BLE001 - receipts are advisory
+            typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
 
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
 
@@ -2722,6 +2835,24 @@ def cmd_ready(
     # as individual ready work). Shares _is_batched_member with `next`'s
     # _pick_ready so the surfaces cannot drift.
     ready = [e for e in ready if not _is_batched_member(e)]
+    # G1 guards (x-3236): dead-ancestor + stale-ready quarantine, the SAME filter
+    # `next`'s _pick_ready applies. `ready` is a third dispatch-feeding surface -
+    # `select_lane_fill` -> `_ready_nodes` shells `fno backlog ready` for both
+    # parallel lane-fill AND the active-backlog daemon's single-node path, and
+    # `dispatch-node.sh --all-ready` enumerates it - so an unguarded `ready`
+    # would dispatch exactly the nodes `next` quarantines. Shares selection_guards
+    # so the surfaces cannot drift.
+    from fno.backlog.advance import selection_guards, _guard_staleness_days
+
+    _guard_now = datetime.now(timezone.utc)
+    _guard_stale = _guard_staleness_days()
+    _guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
+    ready = [
+        e for e in ready
+        if not selection_guards(
+            e, _guard_by_id, _guard_now, staleness_days=_guard_stale
+        )
+    ]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries))
@@ -5950,6 +6081,26 @@ def cmd_maintain(
         max_failed_attempts = 3
     stale = _maintain.detect_stale_ideas(entries, staleness_days)
 
+    # G1 stale-ready quarantine leg (x-3236): the propose-only mirror of the
+    # failure-defer leg over READY rows abandoned past
+    # config.backlog.staleness_days (default 21, distinct from the idea-stage
+    # staleness above). --apply defers each with the quarantine reason. Reuses
+    # the SAME blast cap so a mass-quarantine can never defer half the board.
+    try:
+        from fno.config import load_settings
+
+        ready_staleness_days = load_settings().backlog.staleness_days
+    except Exception:
+        ready_staleness_days = 21
+    stale_ready_cands = _maintain.detect_stale_ready(entries, ready_staleness_days)
+    stale_ready_truncated = 0
+    if len(stale_ready_cands) > _maintain.AUTO_DEFER_BLAST_CAP:
+        stale_ready_cands = sorted(
+            stale_ready_cands, key=lambda s: (-s.age_days, s.node_id)
+        )
+        stale_ready_truncated = len(stale_ready_cands) - _maintain.AUTO_DEFER_BLAST_CAP
+        stale_ready_cands = stale_ready_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
+
     now_cap = _load_wip_caps().get("now", 20)
     overflow = _maintain.now_overflow(entries, now_cap, _kanban_column)
 
@@ -5972,9 +6123,10 @@ def cmd_maintain(
     applied_rescope: list[str] = []
     applied_prune: list[str] = []
     applied_defers: list[dict] = []
+    applied_stale_ready: list[dict] = []
     skipped_claimed: list[str] = []
 
-    if apply and (rescope_fixes or prune_ids or defer_cands):
+    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands):
         # Batch every change under ONE locked mutation so the board renders once,
         # not per node (Domain Pitfall). Each item is guarded so one failure
         # never strands the rest (AC1-ERR).
@@ -5982,6 +6134,7 @@ def cmd_maintain(
             applied_rescope.clear()
             applied_prune.clear()
             applied_defers.clear()
+            applied_stale_ready.clear()
             skipped_claimed.clear()
             prune_set: set[str] = set()
             for fix in rescope_fixes:
@@ -6049,6 +6202,45 @@ def cmd_maintain(
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
                     typer.echo(
                         f"warning: auto-defer of {cand.node_id} failed: {exc}", err=True
+                    )
+            # G1 stale-ready quarantine (x-3236): the reversible defer for a ready
+            # node abandoned past the threshold. Same in-lock re-sample as the
+            # failure leg (a node claimed/done/deferred since the read is left
+            # alone - the "quarantine racing a live claim must lose" race rule).
+            sr_claimed = claimed | _live_claimed_node_ids()
+            for cand in stale_ready_cands:
+                if cand.node_id in sr_claimed:
+                    skipped_claimed.append(cand.node_id)
+                    continue
+                try:
+                    n = _find_node(ents, cand.node_id)
+                    if not n:
+                        continue
+                    if n.get("completed_at") or n.get("deferred_at"):
+                        continue  # raced to done/deferred; leave it
+                    # Re-run the predicate under the lock: a candidate that
+                    # gained a movement signal since the pre-lock scan (e.g. a
+                    # PR attached -> now in-review, or a fresh plan edit) is no
+                    # longer stale, and deferring it would sink active work into
+                    # the pile (deferred outranks in-review). Re-check on `n`.
+                    if not _maintain.is_stale_ready(
+                        n, datetime.now(timezone.utc), ready_staleness_days
+                    ):
+                        continue
+                    n["locked_by"] = None
+                    n["claimed_at"] = None
+                    n["completed_at"] = None
+                    n["deferred_at"] = datetime.now(timezone.utc).isoformat()
+                    n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
+                    applied_stale_ready.append({
+                        "node_id": cand.node_id,
+                        "age_days": cand.age_days,
+                        "reason": _maintain.STALE_QUARANTINE_REASON,
+                    })
+                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+                    typer.echo(
+                        f"warning: stale-ready defer of {cand.node_id} failed: {exc}",
+                        err=True,
                     )
             return ents
 
@@ -6123,6 +6315,11 @@ def cmd_maintain(
         if apply
         else [{"node_id": c.node_id, "streak": c.streak} for c in defer_cands],
         "auto_defer_truncated": defer_truncated,
+        "stale_ready": len(applied_stale_ready) if apply else len(stale_ready_cands),
+        "stale_ready_nodes": applied_stale_ready
+        if apply
+        else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
+        "stale_ready_truncated": stale_ready_truncated,
     }
     try:
         from fno.health_monitor import append_history
@@ -6160,6 +6357,14 @@ def cmd_maintain(
                 ],
                 "truncated": defer_truncated,
             },
+            "stale_ready": {
+                "applied": applied_stale_ready if apply else [],
+                "candidates": [
+                    {"node_id": c.node_id, "age_days": c.age_days}
+                    for c in stale_ready_cands
+                ],
+                "truncated": stale_ready_truncated,
+            },
         }
         if validity_result is not None:
             payload["validity"] = {
@@ -6180,6 +6385,7 @@ def cmd_maintain(
         typer.echo(
             f"re-scoped {len(applied_rescope)} | pruned {len(applied_prune)} | "
             f"auto-deferred {len(applied_defers)} | "
+            f"stale-ready-deferred {len(applied_stale_ready)} | "
             f"dedup-groups {len(dup_groups)} | stale-ideas {len(stale)} | "
             f"now-overflow {'yes' if overflow else 'no'} | "
             f"skipped-claimed {len(skipped_claimed)}"
@@ -6188,6 +6394,7 @@ def cmd_maintain(
         typer.echo(
             f"re-scope candidates {len(rescope_fixes)} | prune candidates "
             f"{len(prune_ids)} | auto-defer candidates {len(defer_cands)} | "
+            f"stale-ready candidates {len(stale_ready_cands)} | "
             f"dedup-groups {len(dup_groups)} | stale-ideas "
             f"{len(stale)} | now-overflow {'yes' if overflow else 'no'}  "
             f"(run with --apply to apply the deterministic legs)"
@@ -6215,6 +6422,25 @@ def cmd_maintain(
         typer.echo(
             f"  NOTE: auto-defer blast cap hit - {defer_truncated} further "
             f"candidate(s) NOT deferred this run "
+            f"(cap {_maintain.AUTO_DEFER_BLAST_CAP}); re-run to continue"
+        )
+    if apply:
+        for d in applied_stale_ready:
+            typer.echo(
+                f"  stale-ready deferred {d['node_id']} ({d['age_days']}d "
+                f"unmoved): {d['reason']}"
+            )
+    else:
+        for c in stale_ready_cands:
+            typer.echo(
+                f"  would quarantine stale-ready {c.node_id} ({c.age_days}d "
+                f"unmoved, >{ready_staleness_days}d): fno backlog undefer "
+                f"{c.node_id} to recover"
+            )
+    if stale_ready_truncated:
+        typer.echo(
+            f"  NOTE: stale-ready blast cap hit - {stale_ready_truncated} further "
+            f"candidate(s) NOT quarantined this run "
             f"(cap {_maintain.AUTO_DEFER_BLAST_CAP}); re-run to continue"
         )
     for group in dup_groups:

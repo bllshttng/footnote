@@ -1196,6 +1196,65 @@ def cmd_projects(
 
 
 # ---------------------------------------------------------------------------
+# pile: the triage pile - deferred nodes with their reason (G2, x-3236)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("pile", hidden=True)
+def cmd_pile(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """The triage pile: deferred nodes with their reason, oldest-first (G2).
+
+    No new lifecycle state (epic LD5) - the pile IS ``deferred`` +
+    ``deferred_reason``. Surfaces what selection quarantined or a human paused so
+    nothing rots invisibly. Hidden verb (menu-caps); the sole authority is the
+    derived ``_status``, so a node undeferred out of band drops off immediately.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.store import read_graph
+    from fno.graph.statuses import recompute_statuses
+    from fno.graph.maintain import _parse_ts
+
+    entries = recompute_statuses(read_graph(_graph_path()))
+    now = datetime.now(timezone.utc)
+    rows: list[dict] = []
+    for e in entries:
+        if e.get("_status") != "deferred":
+            continue
+        if project and e.get("project") != project:
+            continue
+        dt = _parse_ts(e.get("deferred_at"))
+        age_days = (now - dt).days if dt is not None else None
+        rows.append({
+            "id": e.get("id"),
+            "slug": e.get("slug"),
+            "title": e.get("title"),
+            "reason": e.get("deferred_reason"),
+            "age_days": age_days,
+            "priority": e.get("priority"),
+            "project": e.get("project"),
+        })
+    # Oldest-first: longest-deferred leads; unknown-age rows sort last.
+    rows.sort(key=lambda r: (r["age_days"] is None, -(r["age_days"] or 0)))
+
+    if json_output:
+        typer.echo(json.dumps({"pile": rows}, indent=2))
+        return
+    if not rows:
+        typer.echo("triage pile empty (no deferred nodes)")
+        return
+    for r in rows:
+        age = f"{r['age_days']}d" if r["age_days"] is not None else "?"
+        typer.echo(
+            f"{r['id']}  {age:>5}  {r['priority'] or 'p?'}  "
+            f"{r['project'] or '-'}  {r['reason'] or '(no reason)'}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # health: aggregate "is the backlog healthy?" metrics
 # ---------------------------------------------------------------------------
 

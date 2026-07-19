@@ -672,3 +672,134 @@ def test_run_validity_analysis_parses_stub(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_VALIDITY_STUB", str(stub))
     out = m._run_validity_analysis([_packet("ab-x")])
     assert out["ab-x"]["classification"] == "keep"
+
+
+# ---------------------------------------------------------------------------
+# G1 stale-ready quarantine (x-3236)
+# ---------------------------------------------------------------------------
+
+
+def _sr_now():
+    return datetime(2026, 7, 18, tzinfo=timezone.utc)
+
+
+def test_backlog_staleness_days_default_21():
+    from fno.config import BacklogBlock
+
+    assert BacklogBlock().staleness_days == 21
+
+
+def test_backlog_staleness_days_rejects_non_positive():
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import BacklogBlock
+
+    with pytest.raises(ValidationError):
+        BacklogBlock(staleness_days=0)
+
+
+def test_node_has_movement_field_signals():
+    now = _sr_now()
+    assert m.node_has_movement({"sessions": [{"phase": "do"}]}, now, 21)
+    assert m.node_has_movement({"pr_number": 5}, now, 21)
+    assert m.node_has_movement({"locked_by": "sess"}, now, 21)
+    assert m.node_has_movement({"claimed_at": "2026-07-18T00:00:00+00:00"}, now, 21)
+    assert not m.node_has_movement({}, now, 21)
+
+
+def test_node_has_movement_fresh_plan_mtime(tmp_path):
+    now = datetime.now(timezone.utc)
+    p = tmp_path / "plan.md"
+    p.write_text("x")
+    assert m.node_has_movement({"plan_path": str(p)}, now, 21)
+
+
+def test_node_has_movement_stale_plan_mtime(tmp_path):
+    import os
+    import time
+
+    now = datetime.now(timezone.utc)
+    p = tmp_path / "plan.md"
+    p.write_text("x")
+    old = time.time() - 60 * 86400
+    os.utime(p, (old, old))
+    assert not m.node_has_movement({"plan_path": str(p)}, now, 21)
+
+
+def test_is_stale_ready_old_and_unmoved():
+    now = _sr_now()
+    old = (now - timedelta(days=80)).isoformat()
+    assert m.is_stale_ready({"created_at": old}, now, 21)
+
+
+def test_is_stale_ready_recent_not_stale():
+    now = _sr_now()
+    recent = (now - timedelta(days=5)).isoformat()
+    assert not m.is_stale_ready({"created_at": recent}, now, 21)
+
+
+def test_is_stale_ready_moved_not_stale():
+    now = _sr_now()
+    old = (now - timedelta(days=80)).isoformat()
+    assert not m.is_stale_ready({"created_at": old, "pr_number": 3}, now, 21)
+
+
+def test_is_stale_ready_boundary_exactly_threshold_not_stale():
+    now = _sr_now()
+    at21 = (now - timedelta(days=21)).isoformat()
+    assert not m.is_stale_ready({"created_at": at21}, now, 21)
+
+
+def test_is_stale_ready_no_timestamp_not_quarantined():
+    # AC4-EDGE (as implemented): a node whose age cannot be proven is NEVER
+    # quarantined - a guard must not starve a freshly-minted node lacking a
+    # stamp. The untimestamped abandoned case is left to the human/maintain leg.
+    assert not m.is_stale_ready({}, _sr_now(), 21)
+
+
+def test_is_stale_ready_blocked_node_not_quarantined():
+    # A just-unblocked dependent carries a lingering blocked_by and legitimately
+    # has no movement yet; it must never be quarantined.
+    now = _sr_now()
+    old = (now - timedelta(days=80)).isoformat()
+    assert not m.is_stale_ready(
+        {"created_at": old, "blocked_by": ["dep"]}, now, 21
+    )
+
+
+def test_detect_stale_ready_only_ready_and_unmoved():
+    now = _sr_now()
+    old = (now - timedelta(days=80)).isoformat()
+    entries = [
+        {"id": "a", "_status": "ready", "created_at": old},
+        {"id": "b", "_status": "idea", "created_at": old},        # not ready
+        {"id": "c", "_status": "ready", "created_at": old, "pr_number": 1},  # moved
+        {"id": "d", "_status": "ready", "created_at": (now - timedelta(days=2)).isoformat()},
+    ]
+    got = {s.node_id for s in m.detect_stale_ready(entries, 21, now=now)}
+    assert got == {"a"}
+
+
+def test_node_has_movement_non_string_plan_path_no_crash():
+    # A malformed graph could carry a non-string plan_path; getmtime would raise
+    # TypeError (not OSError). The isinstance guard keeps it from crashing.
+    now = _sr_now()
+    assert not m.node_has_movement({"plan_path": 12345}, now, 21)
+    assert not m.node_has_movement({"plan_path": ["a", "b"]}, now, 21)
+
+
+def test_node_has_movement_relative_plan_resolved_against_cwd(tmp_path):
+    # A repo-relative plan_path must resolve against the node's own cwd, not the
+    # command's, so a freshly-edited plan reads as movement (codex P2).
+    now = datetime.now(timezone.utc)
+    (tmp_path / "plans").mkdir()
+    (tmp_path / "plans" / "p.md").write_text("x")
+    entry = {"plan_path": "plans/p.md#anchor", "cwd": str(tmp_path)}
+    assert m.node_has_movement(entry, now, 21)
+
+
+def test_node_has_movement_relative_plan_missing_cwd_no_crash():
+    now = datetime.now(timezone.utc)
+    # No cwd -> probe stays relative -> getmtime misses -> no movement, no crash.
+    assert not m.node_has_movement({"plan_path": "plans/p.md"}, now, 21)

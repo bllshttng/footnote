@@ -29,6 +29,16 @@ def _write_plan(dirpath: Path, name: str, title: str) -> Path:
     return p
 
 
+def _recent_iso(days_ago: int = 1) -> str:
+    """A created_at within the G1 stale-ready window (x-3236). Ordering fixtures
+    that predate the guard used fixed 2026-01 dates that now read as abandoned;
+    selection tests must anchor to 'now' so an incidental old date does not
+    quarantine a node under test. Relative order is preserved via days_ago."""
+    from datetime import datetime, timezone, timedelta
+
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+
+
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh empty graph.json; monkeypatches fno.graph constants to use it."""
@@ -1050,7 +1060,7 @@ def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
         "entries": [
             {"id": "ab-pinned00", "title": "Pinned", "priority": "p1",
              "plan_path": "x.md", "_status": "ready", "model": "fable",
-             "created_at": "2026-01-01T00:00:00Z"},
+             "created_at": _recent_iso(1)},
         ]
     }))
 
@@ -1070,10 +1080,10 @@ def test_priority_read_path_backfill(tmp_graph):
         "entries": [
             {"id": "ab-mem00low", "title": "Was low", "priority": "low",
              "plan_path": "x.md", "_status": "ready",
-             "created_at": "2026-01-01T00:00:00Z"},
+             "created_at": _recent_iso(2)},
             {"id": "ab-mem00hi0", "title": "Was high", "priority": "high",
              "plan_path": "x.md", "_status": "ready",
-             "created_at": "2026-01-02T00:00:00Z"},
+             "created_at": _recent_iso(1)},
         ]
     }))
 
@@ -1471,13 +1481,13 @@ def _epics_first_entries():
     """
     return [
         {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p2",
-         "created_at": "2026-01-01", "project": "p", "blocked_by": [],
+         "created_at": _recent_iso(3), "project": "p", "blocked_by": [],
          "plan_path": "x.md"},
         {"id": "ab-child", "title": "Child", "_status": "ready", "priority": "p3",
-         "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
+         "created_at": _recent_iso(2), "project": "p", "parent": "ab-epic",
          "blocked_by": [], "plan_path": "x.md"},
         {"id": "ab-loose", "title": "Loose", "_status": "ready", "priority": "p0",
-         "created_at": "2026-01-03", "project": "p", "blocked_by": [],
+         "created_at": _recent_iso(1), "project": "p", "blocked_by": [],
          "plan_path": "x.md"},
     ]
 
@@ -1526,7 +1536,7 @@ def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
          "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
          "completed_at": "2026-01-03", "blocked_by": [], "plan_path": "x.md"},
         {"id": "ab-cpend", "title": "Pending child", "_status": "ready", "priority": "p3",
-         "created_at": "2026-01-04", "project": "p", "parent": "ab-epic",
+         "created_at": _recent_iso(1), "project": "p", "parent": "ab-epic",
          "blocked_by": [], "plan_path": "x.md"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
@@ -2062,3 +2072,144 @@ def test_dispatch_fields_default_absent(tmp_graph):
     node = next(n for n in _read_graph(tmp_graph) if n["id"] == nid)
     assert node.get("dispatch_verb") is None
     assert node.get("dispatch_brief") is None
+
+
+# ---------------------------------------------------------------------------
+# G1+G2 guarded selection + starvation receipts + triage pile (x-3236)
+# ---------------------------------------------------------------------------
+
+
+def _seed(g: Path, entries: list[dict]) -> None:
+    g.write_text(json.dumps({"entries": entries}))
+
+
+def test_next_excludes_stale_ready_with_receipt(tmp_graph):
+    _seed(tmp_graph, [{
+        "id": "ab-stale", "title": "abandoned", "project": "fno",
+        "plan_path": "/nonexistent/plan.md", "priority": "p2",
+        "created_at": "2026-01-01T00:00:00+00:00",  # ~200d before real now -> stale
+    }])
+    r = _invoke("backlog", "next", "--project", "fno")
+    assert "null" in r.output
+    assert "excluded ab-stale: quarantined" in r.output
+
+
+def test_next_excludes_dead_ancestor_child_with_receipt(tmp_graph):
+    from datetime import datetime, timezone, timedelta
+
+    recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    _seed(tmp_graph, [
+        {"id": "ab-epic", "title": "epic", "project": "fno",
+         "superseded_by": "ab-new"},
+        {"id": "ab-child", "title": "child", "project": "fno",
+         "parent": "ab-epic", "plan_path": "/nonexistent/plan.md",
+         "created_at": recent, "priority": "p2"},
+    ])
+    r = _invoke("backlog", "next", "--project", "fno")
+    assert "null" in r.output
+    assert "excluded ab-child: dead-ancestor" in r.output
+
+
+def test_next_selects_healthy_ready_node(tmp_graph):
+    from datetime import datetime, timezone, timedelta
+
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    plan = tmp_graph.parent / "p.md"
+    plan.write_text("---\ntitle: t\n---\n")
+    _seed(tmp_graph, [{
+        "id": "ab-live", "title": "live", "project": "fno",
+        "plan_path": str(plan), "created_at": recent, "priority": "p2",
+    }])
+    r = _invoke("backlog", "next", "--project", "fno")
+    assert '"id": "ab-live"' in r.output
+
+
+def test_triage_pile_lists_deferred_oldest_first(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-a", "title": "a", "project": "fno",
+         "deferred_at": "2026-01-01T00:00:00+00:00",
+         "deferred_reason": "stale-quarantine (guard)", "priority": "p2"},
+        {"id": "ab-b", "title": "b", "project": "fno",
+         "deferred_at": "2026-06-01T00:00:00+00:00",
+         "deferred_reason": "manual pause", "priority": "p1"},
+    ])
+    r = _invoke("backlog", "triage", "pile", "--json")
+    data = json.loads(r.stdout)
+    ids = [x["id"] for x in data["pile"]]
+    assert ids == ["ab-a", "ab-b"]  # oldest-deferred leads
+    assert data["pile"][0]["reason"] == "stale-quarantine (guard)"
+
+
+def test_triage_pile_empty_when_no_deferred(tmp_graph):
+    _seed(tmp_graph, [{"id": "ab-x", "title": "x", "project": "fno"}])
+    r = _invoke("backlog", "triage", "pile")
+    assert "triage pile empty" in r.output
+
+
+def test_maintain_apply_defers_stale_ready(tmp_graph):
+    _seed(tmp_graph, [{
+        "id": "ab-old", "title": "old", "project": "fno",
+        "plan_path": "/nonexistent/plan.md", "priority": "p2",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }])
+    r = _invoke("backlog", "maintain", "--apply", "--json")
+    data = json.loads(r.stdout)
+    applied = [x["node_id"] for x in data["stale_ready"]["applied"]]
+    assert "ab-old" in applied
+    # Reversible defer landed with the quarantine reason.
+    entries = _read_graph(tmp_graph)
+    node = next(e for e in entries if e["id"] == "ab-old")
+    assert node["deferred_reason"] == "stale-quarantine (guard)"
+
+
+def test_next_mission_receipts_ignore_other_mission(tmp_graph):
+    # A --mission scoped next that returns null must not explain itself with a
+    # node from a different mission (codex P2).
+    _seed(tmp_graph, [
+        {"id": "ab-otherm", "title": "other", "project": "fno",
+         "mission_id": "mission-Y", "priority": "p2"},  # plan-less, mission Y
+    ])
+    r = _invoke("backlog", "next", "--project", "fno", "--mission", "mission-X")
+    assert "null" in r.output
+    assert "ab-otherm" not in r.output  # out-of-mission node never reported
+
+
+def test_maintain_apply_skips_in_review_node(tmp_graph):
+    # An old ready node that already carries a PR is in-review (movement); the
+    # stale-ready leg must never defer it into the pile.
+    _seed(tmp_graph, [{
+        "id": "ab-inrev", "title": "in review", "project": "fno",
+        "plan_path": "/nonexistent/plan.md", "priority": "p2",
+        "created_at": "2026-01-01T00:00:00+00:00", "pr_number": 42,
+    }])
+    r = _invoke("backlog", "maintain", "--apply", "--json")
+    data = json.loads(r.stdout)
+    applied = [x["node_id"] for x in data["stale_ready"]["applied"]]
+    assert "ab-inrev" not in applied
+    entries = _read_graph(tmp_graph)
+    node = next(e for e in entries if e["id"] == "ab-inrev")
+    assert not node.get("deferred_at")  # never quarantined
+
+
+def test_ready_excludes_stale_and_dead_ancestor(tmp_graph):
+    # `ready` feeds lane-fill / the daemon / --all-ready dispatch, so it must
+    # apply the SAME guard as `next` (code-reviewer finding, x-3236).
+    from datetime import datetime, timezone, timedelta
+
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    _seed(tmp_graph, [
+        {"id": "ab-live0", "title": "live", "project": "fno", "_status": "ready",
+         "plan_path": "/no/p.md", "created_at": recent, "priority": "p2"},
+        {"id": "ab-stale0", "title": "stale", "project": "fno", "_status": "ready",
+         "plan_path": "/no/p.md", "created_at": "2026-01-01T00:00:00+00:00",
+         "priority": "p2"},
+        {"id": "ab-deadep", "title": "epic", "project": "fno",
+         "superseded_by": "ab-new"},
+        {"id": "ab-deadch", "title": "child", "project": "fno", "_status": "ready",
+         "parent": "ab-deadep", "plan_path": "/no/p.md", "created_at": recent,
+         "priority": "p2"},
+    ])
+    ids = [e["id"] for e in json.loads(_invoke("backlog", "ready", "--project", "fno").stdout)]
+    assert "ab-live0" in ids
+    assert "ab-stale0" not in ids      # stale-quarantined
+    assert "ab-deadch" not in ids      # dead-ancestor

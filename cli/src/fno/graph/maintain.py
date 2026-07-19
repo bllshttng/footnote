@@ -314,6 +314,115 @@ class StaleIdea:
     age_days: int
 
 
+# G1 stale-ready quarantine. A ready node with no movement signal for this many
+# days is quarantined by selection (advance.selection_guards) and offered to
+# `maintain --apply` for a reversible defer with this reason.
+STALE_QUARANTINE_REASON = "stale-quarantine (guard)"
+
+
+def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
+    """True when a ready node shows any sign of being live or recently worked.
+
+    Movement is ANY of: a live/past session lifecycle entry (``sessions``), an
+    (in-flight or historical) PR (``pr_number``), a lock (``locked_by`` /
+    ``claimed_at``), or a plan file edited within the window (mtime fresher than
+    ``staleness_days``). A node with a movement signal is NEVER quarantined - the
+    quarantine is only for genuinely-abandoned ready work.
+
+    The plan-file mtime probe is best-effort: a missing/unreadable plan is simply
+    "no freshness signal from the plan" (not movement), never an error.
+    """
+    if entry.get("sessions"):
+        return True
+    if entry.get("pr_number"):
+        return True
+    if entry.get("locked_by") or entry.get("claimed_at"):
+        return True
+    plan_path = entry.get("plan_path")
+    if plan_path and isinstance(plan_path, str):
+        # Resolve the freshness probe the way the node itself would: strip a
+        # `#anchor` fragment and resolve a repo-relative path against the node's
+        # own `cwd` (not this command's), so a recently-edited plan is not
+        # mis-read as unmoved. A directory plan_path still probes the dir mtime -
+        # a documented gap (folder plans are rare; the outcome is reversible).
+        probe = plan_path.split("#", 1)[0]
+        if probe and not os.path.isabs(probe):
+            cwd = entry.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                probe = os.path.join(cwd, probe)
+        try:
+            mtime = os.path.getmtime(probe)
+            age_days = (now - datetime.fromtimestamp(mtime, tz=timezone.utc)).days
+            if age_days <= staleness_days:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def is_stale_ready(entry: dict, now: datetime, staleness_days: int) -> bool:
+    """True when a ready node is quarantine-eligible: abandoned, old, unmoved.
+
+    Three conditions, all required:
+
+    - **No blockers.** A non-empty ``blocked_by`` means the node was GATED by a
+      dependency, not abandoned - a long-blocked node that just became ready
+      (its blocker merged) carries a lingering blocked_by and legitimately has
+      no movement yet. Quarantining it would kill freshly-unblocked work, so a
+      node that ever had blockers is never stale (a deliberate under-quarantine:
+      a false negative here is cheap, a false positive starves live work).
+    - **No movement** (``node_has_movement``).
+    - **Old**: ``created_at`` strictly older than ``staleness_days`` (matching
+      ``detect_stale_ideas``). AC4-EDGE "no timestamps at all": a node with no
+      parseable ``created_at`` is NOT quarantined - we cannot prove it is old,
+      and quarantining on uncertainty would starve a freshly-minted node that
+      simply lacks a stamp. This deviates from a literal "treat as stale" reading
+      of the boundary in favor of the epic's overriding rule that a guard must
+      never starve live work; the untimestamped abandoned node is instead left
+      for a human via the propose-only maintain leg + triage pile.
+
+    Caller guarantees the entry is ready-status; this does not re-check
+    ``_status`` so it stays reusable by the selection guard AND the maintain leg.
+    """
+    if entry.get("blocked_by"):
+        return False  # was gated by a dependency, not abandoned
+    if node_has_movement(entry, now, staleness_days):
+        return False
+    created = _parse_ts(entry.get("created_at"))
+    if created is None:
+        return False  # cannot prove age -> never quarantine on uncertainty
+    return (now - created).days > staleness_days
+
+
+def detect_stale_ready(
+    entries: list[dict], staleness_days: int, now: Optional[datetime] = None
+) -> list[StaleIdea]:
+    """Ready-status nodes quarantine-eligible under ``is_stale_ready``.
+
+    The propose-only mirror of ``detect_stale_ideas`` over ready rows, reusing
+    the SAME movement signals as ``advance.selection_guards`` so the maintain
+    leg and live selection can never disagree about what is stale. Returns
+    candidates for a reversible ``defer``; never mutates. A live-claimed node
+    reads ``_status: claimed`` (not ready) so it is already excluded here - the
+    "quarantine racing a live claim must lose" race rule holds without a probe.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    out: list[StaleIdea] = []
+    for e in entries:
+        if e.get("_status") != "ready":
+            continue
+        nid = e.get("id")
+        if not isinstance(nid, str):
+            continue
+        if not is_stale_ready(e, now, staleness_days):
+            continue
+        created = _parse_ts(e.get("created_at"))
+        age_days = (now - created).days if created is not None else -1
+        out.append(StaleIdea(node_id=nid, age_days=age_days))
+    return out
+
+
 def detect_stale_ideas(
     entries: list[dict], staleness_days: int, now: Optional[datetime] = None
 ) -> list[StaleIdea]:
