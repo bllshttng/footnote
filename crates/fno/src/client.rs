@@ -504,6 +504,14 @@ struct View {
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
+    /// (x-0f9d US1) Armed when a bare NewTab (`c` / the strip `+`) is
+    /// dispatched: the greatest tab id in the active squad at send time. The
+    /// layout that materializes a tab with a HIGHER id opens the rename overlay
+    /// on it, so a create-time name prompt reuses the x-c150 rename machinery
+    /// with no new command or overlay. Guarding on the max id (not a bare bool)
+    /// keeps a routine scrape-tick layout - which can arrive before the server
+    /// has processed NewTab - from arming the prompt on the wrong (old) tab.
+    pending_new_tab: Option<u64>,
     /// (x-8f11) Multi-select marks for bulk recruit: the `attach_id`s toggled
     /// with `space` in the sideline selector. Client-local ephemera keyed by id,
     /// so a marked row surviving a filter/scroll keeps its mark and a vanished
@@ -981,6 +989,7 @@ impl View {
             create_esc: Vec::new(),
             rename: None,
             rename_esc: Vec::new(),
+            pending_new_tab: None,
             marks: std::collections::HashSet::new(),
             recruit: None,
             recruit_esc: Vec::new(),
@@ -1309,6 +1318,40 @@ impl View {
         self.clear_peek();
         self.rename = Some((target, String::new()));
         self.rename_esc.clear();
+    }
+
+    /// The greatest tab id in the active squad (ids are monotonic + never
+    /// reused, so the max is the newest tab), or `None` when the active squad
+    /// is absent/empty (x-0f9d US1).
+    fn active_squad_max_tab_id(&self) -> Option<u64> {
+        self.layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad)
+            .and_then(|s| s.tabs.iter().map(|t| t.id).max())
+    }
+
+    /// Arm the create-time name prompt for the NEXT tab (x-0f9d US1): a bare
+    /// NewTab (keyboard `c`, strip `+`) records the current newest tab id so
+    /// the layout that adds a higher one opens rename on it. Other commands are
+    /// ignored, so only an explicit create arms the prompt.
+    fn note_command_sent(&mut self, cmd: &Command) {
+        if matches!(cmd, Command::NewTab) {
+            self.pending_new_tab = Some(self.active_squad_max_tab_id().unwrap_or(0));
+        }
+    }
+
+    /// If a create-time name prompt is armed and a tab with a higher id has
+    /// appeared in the active squad, open the x-c150 rename overlay on it
+    /// (x-0f9d US1): type + Enter names it, Esc / empty Enter leaves it
+    /// unnamed. Called from [`View::set_layout`] after the swap.
+    fn maybe_prompt_new_tab_name(&mut self) {
+        if let Some(prev_max) = self.pending_new_tab {
+            if let Some(new_id) = self.active_squad_max_tab_id().filter(|&id| id > prev_max) {
+                self.pending_new_tab = None;
+                self.open_rename(RenameTarget::Tab(new_id));
+            }
+        }
     }
 
     /// Open the move-tab-to-squad picker modally for `tab` (x-96e8), listing the
@@ -2063,6 +2106,10 @@ impl View {
                 self.hover_pending = None;
             }
         }
+        // (x-0f9d US1) Last, after every re-anchor: if a bare NewTab is
+        // pending, the layout that just added the tab opens rename on it. Last
+        // so `open_rename` clearing the selector/nav is never re-clobbered.
+        self.maybe_prompt_new_tab_name();
     }
 
     fn set_notice(&mut self, text: String) {
@@ -4871,6 +4918,7 @@ async fn dispatch_event(
                 .map_err(|e| format!("input send failed: {e}"))?;
         }
         Event::Cmd(cmd) => {
+            view.note_command_sent(&cmd);
             write_msg(sock_w, &ClientMsg::Command(cmd))
                 .await
                 .map_err(|e| format!("command send failed: {e}"))?;
@@ -5092,6 +5140,7 @@ async fn apply_hit(
     match hit {
         ChromeHit::Cmds(cmds) => {
             for cmd in cmds {
+                view.note_command_sent(&cmd);
                 write_msg(sock_w, &ClientMsg::Command(cmd))
                     .await
                     .map_err(|e| format!("command send failed: {e}"))?;
@@ -7703,6 +7752,41 @@ mod tests {
             // One pane per tab is the test fixture's shape (each tab is a leaf).
             panes: tabs,
         }
+    }
+
+    #[test]
+    fn new_tab_prompt_arms_rename_on_the_materialized_tab() {
+        // x-0f9d US1: a bare NewTab arms a create-time name prompt; the layout
+        // that adds a higher-id tab opens the x-c150 rename overlay on it. A
+        // non-create command never arms it (frictionless: only an explicit
+        // create prompts).
+        let mut v = two_pane_view();
+        v.note_command_sent(&Command::SelectTab(0));
+        assert_eq!(v.pending_new_tab, None, "only NewTab arms the prompt");
+
+        // Active squad 1 has tabs 0,1 -> max id 1.
+        v.note_command_sent(&Command::NewTab);
+        assert_eq!(v.pending_new_tab, Some(1), "armed with the current max tab id");
+
+        // Race guard: a layout with no higher-id tab leaves the prompt armed
+        // and opens no rename (a scrape tick can precede the server's NewTab).
+        v.maybe_prompt_new_tab_name();
+        assert!(v.rename.is_none(), "no new tab yet -> no prompt");
+        assert_eq!(v.pending_new_tab, Some(1), "still armed");
+
+        // The server materialized tab id 2: rename opens on it, once.
+        v.layout.squads[0].tabs.push(TabMeta {
+            id: 2,
+            name: "3".into(),
+            panes: Vec::new(),
+        });
+        v.maybe_prompt_new_tab_name();
+        assert_eq!(
+            v.rename.as_ref().map(|(t, _)| *t),
+            Some(RenameTarget::Tab(2)),
+            "rename armed on the new tab"
+        );
+        assert_eq!(v.pending_new_tab, None, "prompt consumed once");
     }
 
     #[test]
