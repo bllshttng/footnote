@@ -907,6 +907,12 @@ struct Core {
     /// burst is one steering action, not a per-keystroke fork storm. Purged
     /// with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
+    /// (x-9454) Per-pane wheel-passthrough rate gate: bounds how many wheel
+    /// ticks per window reach a mouse-owning pane's PTY, so a trackpad flood
+    /// stops scrolling when the finger stops instead of draining stale ticks.
+    /// Purged with the pane in [`Core::reap_pane`], the `touch_last_emit`
+    /// pattern.
+    wheel_gate: HashMap<u64, WheelGateState>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
     /// steering path. An inflated autonomy rate is the dangerous silent
     /// failure, so the count exists even before the scoreboard reads it.
@@ -984,6 +990,54 @@ fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> 
         }
         std::collections::hash_map::Entry::Vacant(v) => {
             v.insert(now);
+            true
+        }
+    }
+}
+
+/// Wheel-passthrough rate gate (x-9454): forward at most [`WHEEL_GATE_BUDGET`]
+/// wheel ticks per [`WHEEL_GATE_WINDOW`] to a mouse-owning pane's PTY. A
+/// physical notch stream (a few ticks/s) never gates; only a trackpad flood
+/// (hundreds/s) clips. 12 ticks / 100ms is a ~120 ticks/s ceiling.
+/// ponytail: too low and fast-redrawing apps (vim) feel sluggish - raise the
+/// budget if a deliberate notch scroll ever drops.
+const WHEEL_GATE_WINDOW: Duration = Duration::from_millis(100);
+const WHEEL_GATE_BUDGET: u32 = 12;
+
+/// Per-pane wheel-gate state: the current window's start, ticks forwarded in
+/// it, and the direction of the last forwarded tick (a reversal is fresh
+/// intent and resets the window - brief Locked 3).
+#[derive(Debug)]
+struct WheelGateState {
+    window_start: Instant,
+    count: u32,
+    dir: MouseKind,
+}
+
+/// Whether a wheel `dir` tick for `pane` should be forwarded now, recording
+/// `now`. Pure over the state map (injected `Instant`, `touch_coalesce`
+/// pattern) so it is PTY-free unit-testable. Rules: a direction reversal or an
+/// expired window (at or after the boundary instant - no permanent mute,
+/// AC1-FR) resets to a fresh budget and allows; under budget allows; else
+/// drops. Drops only - forwarded ticks keep arrival order (brief Locked 5).
+fn wheel_gate(gate: &mut HashMap<u64, WheelGateState>, pane: u64, dir: MouseKind, now: Instant) -> bool {
+    match gate.entry(pane) {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            let st = e.get_mut();
+            // saturating: a `now` behind window_start (virtualized clock skew)
+            // treats the tick as inside the window instead of panicking.
+            if st.dir != dir || now.saturating_duration_since(st.window_start) >= WHEEL_GATE_WINDOW {
+                *st = WheelGateState { window_start: now, count: 1, dir };
+                true
+            } else if st.count < WHEEL_GATE_BUDGET {
+                st.count += 1;
+                true
+            } else {
+                false
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(WheelGateState { window_start: now, count: 1, dir });
             true
         }
     }
@@ -1617,6 +1671,7 @@ impl Core {
         self.claims.remove(&pid);
         self.claim_eligible.remove(&pid);
         self.touch_last_emit.remove(&pid);
+        self.wheel_gate.remove(&pid);
         // (x-0090) Drop any attach mapping onto the dead pane so a re-attach
         // spawns fresh rather than focusing a corpse (the lazy `panes` check in
         // `agent_rows()` is the belt to this eager suspenders - Discretion 3).
@@ -3443,9 +3498,23 @@ impl Core {
         };
         match route_mouse(modes, event.kind) {
             MouseAction::Passthrough => {
-                let bytes = sgr_mouse_bytes(&event);
-                if let Some(entry) = self.panes.get(&pane) {
-                    let _ = entry.pty.write_input(&bytes);
+                // Rate-gate ONLY wheel ticks (brief Locked 2): a trackpad flood
+                // piles up in the app after the finger stops, so drop stale
+                // ticks beyond the budget before the PTY. Press/release/drag/move
+                // pass through byte-identical. Gate before the pane borrow (it
+                // needs &mut self.wheel_gate); the top-of-fn early return already
+                // proved the pane live, so no dead-pane state is ever inserted.
+                let forward = match event.kind {
+                    MouseKind::WheelUp | MouseKind::WheelDown => {
+                        wheel_gate(&mut self.wheel_gate, pane, event.kind, Instant::now())
+                    }
+                    _ => true,
+                };
+                if forward {
+                    let bytes = sgr_mouse_bytes(&event);
+                    if let Some(entry) = self.panes.get(&pane) {
+                        let _ = entry.pty.write_input(&bytes);
+                    }
                 }
             }
             MouseAction::Scroll(delta) => self.apply_scroll(pane, delta),
@@ -5662,6 +5731,7 @@ async fn serve(
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
+        wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         client_count: client_count_tx,
         seen: HashSet::new(),
@@ -9534,6 +9604,174 @@ mod tests {
         );
     }
 
+    // -- x-9454 wheel-passthrough rate gate --------------------------------
+
+    // AC1-HP / AC2-HP: a 30-tick same-direction flood inside one window
+    // forwards at most WHEEL_GATE_BUDGET; ticks spaced past the window all pass.
+    #[test]
+    fn wheel_gate_bounds_flood_and_passes_notch_rate() {
+        let mut g = HashMap::new();
+        let t0 = Instant::now();
+        let allowed = (0..30)
+            .filter(|_| wheel_gate(&mut g, 7, MouseKind::WheelDown, t0))
+            .count();
+        assert_eq!(
+            allowed, WHEEL_GATE_BUDGET as usize,
+            "a same-window flood forwards exactly the budget, drops the rest"
+        );
+
+        // Notch rate: one tick per window, none dropped.
+        let mut g2 = HashMap::new();
+        let passed = (0..30)
+            .filter(|i| {
+                wheel_gate(
+                    &mut g2,
+                    7,
+                    MouseKind::WheelDown,
+                    t0 + WHEEL_GATE_WINDOW * (*i as u32),
+                )
+            })
+            .count();
+        assert_eq!(passed, 30, "notch-rate input is forwarded 1:1");
+    }
+
+    // AC1-EDGE: exactly budget ticks pass, the (budget+1)th in the window drops.
+    #[test]
+    fn wheel_gate_exact_budget_boundary() {
+        let mut g = HashMap::new();
+        let t0 = Instant::now();
+        for i in 0..WHEEL_GATE_BUDGET {
+            assert!(
+                wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
+                "tick {i} within budget forwards"
+            );
+        }
+        assert!(
+            !wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
+            "the tick past budget drops"
+        );
+    }
+
+    // AC1-UI: a reversal mid-flood forwards immediately and resets the budget.
+    #[test]
+    fn wheel_gate_reversal_passes_immediately() {
+        let mut g = HashMap::new();
+        let t0 = Instant::now();
+        // Exhaust the down budget so drops are occurring.
+        for _ in 0..WHEEL_GATE_BUDGET {
+            wheel_gate(&mut g, 1, MouseKind::WheelDown, t0);
+        }
+        assert!(
+            !wheel_gate(&mut g, 1, MouseKind::WheelDown, t0),
+            "same-direction is dropping"
+        );
+        assert!(
+            wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
+            "the opposite tick forwards immediately (reversal is fresh intent)"
+        );
+        // Reversal reset the window: a fresh up budget is available.
+        for _ in 1..WHEEL_GATE_BUDGET {
+            assert!(wheel_gate(&mut g, 1, MouseKind::WheelUp, t0));
+        }
+        assert!(
+            !wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
+            "the reset up budget then exhausts"
+        );
+    }
+
+    // AC1-FR: a tick at or after exactly window_start + window re-admits
+    // (no permanent mute), testing the boundary instant itself.
+    #[test]
+    fn wheel_gate_readmits_at_window_boundary() {
+        let mut g = HashMap::new();
+        let t0 = Instant::now();
+        for _ in 0..WHEEL_GATE_BUDGET {
+            wheel_gate(&mut g, 1, MouseKind::WheelDown, t0);
+        }
+        assert!(
+            !wheel_gate(&mut g, 1, MouseKind::WheelDown, t0),
+            "budget exhausted inside the window"
+        );
+        assert!(
+            wheel_gate(&mut g, 1, MouseKind::WheelDown, t0 + WHEEL_GATE_WINDOW),
+            "the exact boundary instant counts as a fresh window and forwards"
+        );
+    }
+
+    // AC2-ERR: a now behind window_start (virtualized clock) saturates instead
+    // of panicking, and treats the tick as inside the window.
+    #[test]
+    fn wheel_gate_clock_skew_saturates() {
+        let mut g = HashMap::new();
+        let t0 = Instant::now() + WHEEL_GATE_WINDOW * 10;
+        assert!(wheel_gate(&mut g, 1, MouseKind::WheelDown, t0));
+        // A now BEFORE the stored window_start: saturating_duration_since is 0,
+        // so the tick is inside the window and consumes budget (never panics).
+        let earlier = t0 - WHEEL_GATE_WINDOW * 5;
+        for _ in 1..WHEEL_GATE_BUDGET {
+            assert!(wheel_gate(&mut g, 1, MouseKind::WheelDown, earlier));
+        }
+        assert!(
+            !wheel_gate(&mut g, 1, MouseKind::WheelDown, earlier),
+            "skewed-early ticks stay inside the window and hit the budget"
+        );
+    }
+
+    // Per-pane independence: one pane's flood never spends another's budget.
+    #[test]
+    fn wheel_gate_per_pane() {
+        let mut g = HashMap::new();
+        let t0 = Instant::now();
+        for _ in 0..WHEEL_GATE_BUDGET {
+            wheel_gate(&mut g, 1, MouseKind::WheelDown, t0);
+        }
+        assert!(!wheel_gate(&mut g, 1, MouseKind::WheelDown, t0));
+        assert!(
+            wheel_gate(&mut g, 2, MouseKind::WheelDown, t0),
+            "a different pane draws from its own budget"
+        );
+    }
+
+    // AC1-ERR: a wheel tick routed to a pane absent from the panes map is a
+    // no-op through mouse() - the top-of-fn early return fires, so no PTY write
+    // and no gate-state entry for the dead id.
+    #[test]
+    fn mouse_wheel_dead_pane_is_noop() {
+        let mut core = empty_core();
+        core.mouse(
+            1,
+            999,
+            MouseEvent {
+                row: 0,
+                col: 0,
+                kind: MouseKind::WheelDown,
+            },
+        );
+        assert!(
+            core.wheel_gate.is_empty(),
+            "no gate state is created for a dead pane"
+        );
+    }
+
+    // AC2-EDGE: reaping a pane drops its gate entry (touch_last_emit pattern).
+    #[test]
+    fn reap_pane_clears_wheel_gate() {
+        let mut core = empty_core();
+        core.wheel_gate.insert(
+            42,
+            WheelGateState {
+                window_start: Instant::now(),
+                count: 3,
+                dir: MouseKind::WheelDown,
+            },
+        );
+        core.reap_pane(42);
+        assert!(
+            !core.wheel_gate.contains_key(&42),
+            "the closed pane's gate entry is removed"
+        );
+    }
+
     #[test]
     fn pane_touch_provenance_cwd_fallback_and_none() {
         let mut core = empty_core();
@@ -9615,6 +9853,7 @@ mod tests {
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),
+            wheel_gate: HashMap::new(),
             touch_emit_failures: Arc::new(AtomicU64::new(0)),
             client_count: watch::channel(0).0,
             seen: HashSet::new(),
