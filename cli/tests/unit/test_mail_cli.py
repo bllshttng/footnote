@@ -370,17 +370,21 @@ def test_us7b_working_socket_inject_preempts_pane_rung(
     assert calls == []
 
 
+@pytest.mark.parametrize("status", ["exited", "orphaned", "idle", "permanent_dead"])
 def test_us7b_non_live_entry_never_pane_sends(
-    runner, mailbox, monkeypatch, tmp_path
+    runner, mailbox, monkeypatch, tmp_path, status
 ):
-    """An exited row keeps its mux ref, and pane ids are reused across a mux
-    restart. Sending on that stale ref would type into an unrelated pane and
-    report hosted, suppressing the durable copy the real recipient needs."""
+    """Only a "live" row may be pane-sent. A non-live row keeps its mux ref, and
+    pane ids restart at 1 with the mux server, so sending on that ref would type
+    into an unrelated pane and report hosted, suppressing the durable copy the
+    real recipient needs. "idle" matters as much as "exited" here: it is the
+    status a hand-started session registers under precisely because it has no
+    live transport. Parameterized so weakening the gate to `!= "exited"` fails."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
     calls = _stub_pane_rung(
-        monkeypatch, in_roster=True, pane_sends=True, expect_token=sid, status="exited"
+        monkeypatch, in_roster=True, pane_sends=True, expect_token=sid, status=status
     )
 
     sent = runner.invoke(
