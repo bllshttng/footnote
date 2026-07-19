@@ -439,6 +439,8 @@ enum CoreMsg {
         holders: HashMap<String, String>,
         /// (x-9c5f) node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
+        /// Active missions, from the same graph read as `cards`.
+        missions: backlog_view::MissionMap,
     },
 }
 
@@ -745,6 +747,26 @@ fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
     }
 }
 
+/// FNV-1a over bytes: tiny, dependency-free, deterministic - exactly what a
+/// stable-per-epic synthetic id needs (no crypto property required).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// The synthetic squad id for a mission's `SquadMeta` header, deterministic
+/// per epic id so the same mission maps to the same id across ticks. High bit
+/// (`proto::MISSION_SQUAD_BASE`) set so it never collides with a real squad
+/// id (those start at 1 and increment by one - see `next_squad_id`).
+fn mission_sid(epic_id: &str) -> u64 {
+    use crate::proto::MISSION_SQUAD_BASE;
+    MISSION_SQUAD_BASE | (fnv1a(epic_id.as_bytes()) & (MISSION_SQUAD_BASE - 1))
+}
+
 /// Sanitize a wire-supplied name: strip control characters (they would corrupt
 /// chrome cells), trim, cap at `cap` chars. The cap lives HERE and not only in
 /// the overlay: `Command` is a wire surface, and the TUI is not the only
@@ -891,6 +913,9 @@ struct Core {
     /// layout time (holder name -> node -> pr) into `AgentRow.pr` for the peek
     /// header's `PR #N` label.
     backlog_pr: HashMap<String, u64>,
+    /// Active missions, from the off-loop graph reader; grouped into
+    /// synthetic "mission squad" headers at layout time.
+    missions: backlog_view::MissionMap,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -2975,7 +3000,7 @@ impl Core {
             .map(|s| s.canonical_cwd().to_string())
             .collect();
         let derived = squad::display_names(&cwds);
-        let squads = self
+        let mut squads: Vec<SquadMeta> = self
             .session
             .squads
             .iter()
@@ -3038,6 +3063,18 @@ impl Core {
                 panes: s.tabs.iter().map(|t| tree::leaves(&t.root).len()).sum(),
             })
             .collect();
+        // Synthetic "mission squad" headers: one per active mission, done/total
+        // baked into the name so no proto bump is needed. Renders even with
+        // zero tagged workers - "nothing running" must stay visible, never
+        // vanish (empty-but-active).
+        squads.extend(self.missions.missions.iter().map(|m| SquadMeta {
+            id: mission_sid(&m.epic_id),
+            name: format!("{}  {}/{}", m.slug, m.done, m.total),
+            canonical_cwd: String::new(),
+            tabs: vec![],
+            active_tab: 0,
+            panes: 0,
+        }));
         ServerMsg::Layout {
             squads,
             active_squad: view.0,
@@ -3184,6 +3221,17 @@ impl Core {
             .iter()
             .filter_map(|(node, holder)| self.backlog_pr.get(node).map(|pr| (holder.as_str(), *pr)))
             .collect();
+        // A paneless row whose name resolves to a node inside an active
+        // mission is grouped under that mission's synthetic squad, taking
+        // precedence over the owns_path fallback below. A pane-hosted row
+        // keeps its real session squad (it lives in an actual tab tree).
+        let mission_squad_for = |name: &str| -> Option<u64> {
+            let node_id = agents_view::parse_node_id_from_name(name)?;
+            self.missions
+                .node_to_epic
+                .get(&node_id)
+                .map(|epic| mission_sid(epic))
+        };
 
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
@@ -3320,12 +3368,13 @@ impl Core {
                     // Truly paneless (bg/headless/daemon/roster). Its attach map
                     // pointed at no live pane (else a pane row claimed it), so it
                     // stays watch-only attachable - the AC1-FR revert.
-                    let squad = self
-                        .session
-                        .squads
-                        .iter()
-                        .find(|s| s.owns_path(&a.cwd))
-                        .map(|s| s.id);
+                    let squad = mission_squad_for(&a.name).or_else(|| {
+                        self.session
+                            .squads
+                            .iter()
+                            .find(|s| s.owns_path(&a.cwd))
+                            .map(|s| s.id)
+                    });
                     // (x-6851 US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (x-0090 AC2-UI), a squad-matched row for the foreign-cwd
@@ -3423,12 +3472,13 @@ impl Core {
                 S::Stopping => (false, Some("stopping…".to_string())),
                 S::Removing => (false, Some("removing…".to_string())),
             };
-            let squad = self
-                .session
-                .squads
-                .iter()
-                .find(|s| s.owns_path(&r.cwd))
-                .map(|s| s.id);
+            let squad = mission_squad_for(&r.name).or_else(|| {
+                self.session
+                    .squads
+                    .iter()
+                    .find(|s| s.owns_path(&r.cwd))
+                    .map(|s| s.id)
+            });
             // (x-6851 US3) Every row carries its cwd basename - including a
             // squad-matched external-lifecycle row, so its foreign-cwd subline
             // still renders (the "every row" wire contract; codex review).
@@ -5613,12 +5663,14 @@ impl Core {
                 cards,
                 holders,
                 prs,
+                missions,
             } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
+                self.missions = missions;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -5813,6 +5865,7 @@ async fn serve(
         backlog: Vec::new(),
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
+        missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -6024,13 +6077,16 @@ async fn serve(
                 } else {
                     None
                 };
-                if let Some((cards, prs)) = state.tick(stamp, move || raw, last_live.as_ref()) {
+                if let Some((cards, prs, missions)) =
+                    state.tick(stamp, move || raw, last_live.as_ref())
+                {
                     let holders = last_live.clone().unwrap_or_default();
                     if core_tx
                         .send(CoreMsg::BacklogCards {
                             cards,
                             holders,
                             prs,
+                            missions,
                         })
                         .await
                         .is_err()
@@ -8279,6 +8335,78 @@ mod tests {
     }
 
     #[test]
+    fn active_mission_groups_workers_and_header_shows_done_total() {
+        // An active mission's two children render under a synthetic squad
+        // header, name carrying done/total.
+        let mut core = empty_core();
+        core.missions = backlog_view::MissionMap {
+            missions: vec![backlog_view::Mission {
+                epic_id: "x-aaaa".into(),
+                slug: "mux-squad".into(),
+                done: 1,
+                total: 2,
+            }],
+            node_to_epic: HashMap::from([
+                ("x-bbbb".to_string(), "x-aaaa".to_string()),
+                ("x-cccc".to_string(), "x-aaaa".to_string()),
+            ]),
+        };
+        core.agents = vec![
+            bg_row("target-x-bbbb-foo", "/w", None),
+            bg_row("target-x-cccc-bar", "/w", None),
+        ];
+        let sid = mission_sid("x-aaaa");
+        let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
+        let squads = match &msg {
+            ServerMsg::Layout { squads, .. } => squads,
+            _ => unreachable!(),
+        };
+        let header = squads.iter().find(|s| s.id == sid).expect("mission header");
+        assert_eq!(header.name, "mux-squad  1/2");
+        let rows = core.agent_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.squad == Some(sid)));
+    }
+
+    #[test]
+    fn empty_but_active_mission_still_renders() {
+        // An active mission with no matching worker rows still shows its
+        // header - "nothing running" stays visible, never vanishes.
+        let mut core = empty_core();
+        core.missions = backlog_view::MissionMap {
+            missions: vec![backlog_view::Mission {
+                epic_id: "x-aaaa".into(),
+                slug: "mux-squad".into(),
+                done: 0,
+                total: 0,
+            }],
+            node_to_epic: HashMap::new(),
+        };
+        let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
+        let squads = match &msg {
+            ServerMsg::Layout { squads, .. } => squads,
+            _ => unreachable!(),
+        };
+        assert!(squads.iter().any(|s| s.id == mission_sid("x-aaaa")));
+    }
+
+    #[test]
+    fn derive_failure_leaves_workers_ungrouped() {
+        // A malformed/absent graph read leaves `missions` at its default: no
+        // mission squad header, and workers render via their normal path.
+        let mut core = empty_core();
+        core.agents = vec![bg_row("target-x-bbbb-foo", "/w", None)];
+        let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
+        let squads = match &msg {
+            ServerMsg::Layout { squads, .. } => squads,
+            _ => unreachable!(),
+        };
+        assert!(squads.is_empty());
+        let rows = core.agent_rows();
+        assert_eq!(rows[0].squad, None);
+    }
+
+    #[test]
     fn external_row_stop_and_remove_refused() {
         // US4: an external roster row belongs to the claude daemon, not the fno
         // registry, so BOTH verbs refuse with a notice rather than fire a doomed
@@ -10093,6 +10221,7 @@ mod tests {
             backlog: Vec::new(),
             backlog_holders: HashMap::new(),
             backlog_pr: HashMap::new(),
+            missions: backlog_view::MissionMap::default(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),

@@ -28,10 +28,10 @@ use tokio::sync::mpsc;
 use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
-    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, AnswerablePrompt, BacklogCard,
-    BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
-    MouseKind, PanePlacement, PaneTarget, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION,
-    MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
+    self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
+    AnswerablePrompt, BacklogCard, BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame,
+    MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget, ProtoError, ServerMsg,
+    SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::tree::{Dir, Rect, TabId};
 
@@ -1752,8 +1752,10 @@ impl View {
                 // (SelectSquad to the squad you're on); it now toggles the
                 // caret locally instead (x-2f99). Inactive rows keep
                 // SelectSquad - auto-expand in set_layout completes the
-                // gesture when the resulting layout push lands.
-                None if row.squad == self.layout.active_squad => {
+                // gesture when the resulting layout push lands. A mission
+                // squad has no server-side squad to select (SelectSquad would
+                // refuse "no such squad"), so it always just toggles locally.
+                None if row.squad == self.layout.active_squad || is_mission_squad(row.squad) => {
                     Some(ChromeHit::ToggleExpand(row.squad))
                 }
                 None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
@@ -2077,6 +2079,18 @@ impl View {
         // (x-2f99, AC1-EDGE). Insert-only: activation never collapses others.
         if layout.active_squad != self.layout.active_squad {
             self.expanded.insert(layout.active_squad);
+        }
+        // A synthetic mission-squad header defaults to expanded the first time
+        // it appears - it has no `active_squad` moment to ride in on (it is
+        // never selectable server-side), so without this its grouped workers
+        // would be invisible until a manual toggle. Insert-only, like the
+        // active-squad seed above: a later manual collapse persists across
+        // ticks instead of being fought back open.
+        let prev_ids: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
+        for s in &layout.squads {
+            if is_mission_squad(s.id) && !prev_ids.contains(&s.id) {
+                self.expanded.insert(s.id);
+            }
         }
         // Prune ids whose squad vanished server-side, so the set only ever
         // holds live squads (bounded leak otherwise).
@@ -5397,7 +5411,19 @@ async fn apply_hit(
         // hand. `open_attach_place` closes peek/the selector; the picker owns the
         // rest of the attach.
         ChromeHit::OpenAttachPlace { id, squad } => {
-            let squads: Vec<u64> = view.layout.squads.iter().map(|s| s.id).take(9).collect();
+            // A synthetic mission squad is a render-time grouping header, not
+            // a real session squad `place_spawned_pane` can route into -
+            // exclude it here so a mission-grouped row's placement falls back
+            // to a real target (the row's cwd match, else active, else first)
+            // instead of leaking the virtual id into the picker.
+            let squads: Vec<u64> = view
+                .layout
+                .squads
+                .iter()
+                .map(|s| s.id)
+                .filter(|id| !is_mission_squad(*id))
+                .take(9)
+                .collect();
             if squads.is_empty() {
                 view.set_notice("no workspace to attach into".into());
             } else {
@@ -7979,6 +8005,36 @@ mod tests {
         }
     }
 
+    // A mission squad is a render-time grouping header, not a real squad
+    // `place_spawned_pane` can route a pane into - a mission-grouped row's
+    // placement must fall back to a real target, and the picker must never
+    // offer the virtual id as a choice (codex review of x-1a47 change 2/3,
+    // P1-b).
+    #[tokio::test]
+    async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(1);
+        let mid = mission_meta(9, "mux-squad  1/1").id;
+        layout.squads.push(mission_meta(9, "mux-squad  1/1"));
+        view.set_layout(layout);
+        let hit = ChromeHit::OpenAttachPlace {
+            id: "job1".into(),
+            squad: Some(mid),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        apply_hit(&mut view, hit, &mut buf).await.unwrap();
+        let picker = view.attach_place.expect("picker opened");
+        assert_ne!(
+            picker.target, mid,
+            "target must not be the virtual mission id"
+        );
+        assert!(
+            !picker.squads.contains(&mid),
+            "the mission id must not be offered as a placement choice"
+        );
+        assert_eq!(picker.target, 1, "falls back to the active real squad");
+    }
+
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
         SquadMeta {
             id,
@@ -7995,6 +8051,19 @@ mod tests {
             active_tab,
             // One pane per tab is the test fixture's shape (each tab is a leaf).
             panes: tabs,
+        }
+    }
+
+    /// A synthetic mission-squad `SquadMeta` shaped like the server mints it:
+    /// no tabs, no cwd, high-bit id.
+    fn mission_meta(id: u64, name: &str) -> SquadMeta {
+        SquadMeta {
+            id: crate::proto::MISSION_SQUAD_BASE | id,
+            name: name.into(),
+            canonical_cwd: String::new(),
+            tabs: Vec::new(),
+            active_tab: 0,
+            panes: 0,
         }
     }
 
@@ -8590,7 +8659,7 @@ mod tests {
         assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
         // Display row 1 -> outer row 1: the focused agent row gutter marker.
-        let gutter = frame.cells[1 * cols];
+        let gutter = frame.cells[cols]; // outer row 1
         assert_eq!(gutter.c, '▎', "focused agent row carries the gutter marker");
         assert_eq!(gutter.fg, LATTICE_ACCENT, "gutter marker is accented");
         assert_eq!(
@@ -8610,7 +8679,7 @@ mod tests {
         view.selector = Some(1); // the focused agent row
         let frame = view.compose();
         let cols = frame.cols as usize;
-        let gutter = frame.cells[1 * cols];
+        let gutter = frame.cells[cols]; // outer row 1
         assert_eq!(gutter.c, '▎', "gutter glyph survives the selection band");
         assert_eq!(gutter.fg, LATTICE_ACCENT, "accent survives under INVERSE");
         assert_eq!(
@@ -9175,6 +9244,63 @@ mod tests {
         view.set_layout(layout);
         assert!(!view.expanded.contains(&1), "dead id pruned");
         assert!(view.expanded.contains(&2));
+    }
+
+    // A synthetic mission squad has no `active_squad` moment to auto-expand
+    // on (it is never selectable server-side), so it must seed expanded on
+    // its first appearance - else its grouped workers stay invisible with no
+    // way to reveal them (codex review of x-1a47 change 2/3, P1-a).
+    #[test]
+    fn set_layout_seeds_new_mission_squad_expanded_by_default() {
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(1);
+        let mid = mission_meta(1, "mux-squad  1/2").id;
+        layout.squads.push(mission_meta(1, "mux-squad  1/2"));
+        view.set_layout(layout);
+        assert!(view.expanded.contains(&mid), "new mission seeds expanded");
+    }
+
+    // A manual collapse of a mission squad must survive later ticks the same
+    // way a real squad's does - insert-only, not force-reopened.
+    #[test]
+    fn manual_collapse_of_mission_squad_persists_across_ticks() {
+        let mission_layout = |active| {
+            let mut l = two_squad_layout(active);
+            l.squads.push(mission_meta(7, "mux-squad  0/3"));
+            l
+        };
+        let mid = mission_meta(7, "mux-squad  0/3").id;
+        let mut view = two_pane_view();
+        view.set_layout(mission_layout(1));
+        view.toggle_expand(mid);
+        assert!(!view.expanded.contains(&mid));
+        view.set_layout(mission_layout(1));
+        assert!(
+            !view.expanded.contains(&mid),
+            "an already-known mission must not re-seed on every tick"
+        );
+    }
+
+    // A mission squad has no server-side squad `SelectSquad` could resolve
+    // (it would refuse "no such squad"), so acting on its header row must
+    // always toggle locally instead - even though it is never the active
+    // squad (codex review of x-1a47 change 2/3, P1-a).
+    #[test]
+    fn row_action_on_mission_squad_toggles_expand_not_select() {
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(1);
+        let mid = mission_meta(3, "mux-squad  2/2").id;
+        layout.squads.push(mission_meta(3, "mux-squad  2/2"));
+        view.set_layout(layout);
+        let i = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Sel(row) if row.squad == mid))
+            .expect("mission header row");
+        assert!(
+            matches!(view.row_action(i), Some(ChromeHit::ToggleExpand(id)) if id == mid),
+            "a mission header must toggle, never SelectSquad"
+        );
     }
 
     // AC3-HP: acting on the active squad row toggles locally - twice
