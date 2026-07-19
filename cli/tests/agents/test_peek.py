@@ -652,3 +652,45 @@ def test_peek_reader_opencode_db_unknown_session_empty(tmp_path):
     assert recent_records(
         "opencode", "ses_nope", "/x", 10, opencode_storage_dir=storage
     ) == []
+
+
+def test_peek_opencode_idle_db_session_does_not_serve_legacy_transcript(tmp_path):
+    """A session with no messages yet reads empty from the database. Falling
+    back would serve the legacy tree's stale transcript for that same id as if
+    it were current."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_both"
+    _opencode_message(
+        storage, sid, msg_id="old", role="user", created=1,
+        parts=[{"type": "text", "text": "six months stale"}],
+    )
+    _opencode_db(storage, "ses_other", [("m1", "user", 1, [{"type": "text", "text": "x"}])])
+    assert recent_records(
+        "opencode", sid, "/x", 10, opencode_storage_dir=storage
+    ) == []
+
+
+def test_peek_opencode_db_ties_render_deterministically(tmp_path):
+    """Identical millisecond timestamps occur in a real store, so ordering must
+    not be left to the query planner."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_ties"
+    _opencode_db(
+        storage, sid,
+        [
+            ("m_a", "user", 5, [{"type": "text", "text": "a"}]),
+            ("m_b", "user", 5, [{"type": "text", "text": "b"}]),
+            ("m_c", "user", 5, [{"type": "text", "text": "c"}]),
+        ],
+    )
+    seen = {
+        tuple(
+            r.text
+            for r in recent_records(
+                "opencode", sid, "/x", 10, opencode_storage_dir=storage
+            )
+        )
+        for _ in range(5)
+    }
+    assert len(seen) == 1, f"tie ordering not deterministic: {seen}"
+    assert seen == {("a", "b", "c")}

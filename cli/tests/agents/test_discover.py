@@ -1237,3 +1237,27 @@ def test_opencode_db_unreadable_degrades_to_no_rows(tmp_path):
     storage.mkdir(parents=True)
     (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
     assert _run_opencode(tmp_path, storage) == []
+
+
+def test_opencode_empty_db_does_not_resurrect_legacy_sessions(tmp_path):
+    """A database that exists but yields nothing means "nothing is live", NOT
+    "no database". Falling back here would surface the legacy tree's long-dead
+    sessions as live."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
+    )
+    _write_opencode_db(storage, [])  # real store, no live sessions
+    assert _run_opencode(tmp_path, storage) == []
+
+
+def test_opencode_broken_db_does_not_resurrect_legacy_sessions(tmp_path):
+    """Same for a locked/corrupt/schema-drifted store: an error reads as empty,
+    and must not be mistaken for "this host has no database"."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
+    )
+    storage.mkdir(parents=True, exist_ok=True)
+    (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
+    assert _run_opencode(tmp_path, storage) == []

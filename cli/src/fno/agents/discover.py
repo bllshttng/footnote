@@ -268,21 +268,35 @@ def default_opencode_db_path(storage_dir: Optional[Path] = None) -> Path:
     return (storage_dir or default_opencode_storage_dir()).parent / "opencode.db"
 
 
-def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
-    """Run one read-only query, returning ``[]`` on any failure.
+def opencode_connect(db_path: Path):
+    """A read-only connection to opencode's store, or None if unavailable.
 
     Read-only URI mode is load-bearing, not decoration: a live opencode holds
     this database open in WAL mode, and observing must not perturb the
-    observed. A missing file, a lock, or schema drift on a future opencode all
-    degrade to no rows rather than raising, matching the disk readers.
+    observed. Callers that issue more than one query should share a single
+    connection so their reads come from one snapshot.
     """
     import sqlite3
 
     if not db_path.exists():
-        return []
+        return None
     try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+        return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
     except sqlite3.Error:
+        return None
+
+
+def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
+    """Run one read-only query, returning ``[]`` on any failure.
+
+    A missing file, a lock, or schema drift on a future opencode all degrade to
+    no rows rather than raising, matching the disk readers. Callers must not
+    read "no rows" as "no database" — see the dispatch in discover.
+    """
+    import sqlite3
+
+    con = opencode_connect(db_path)
+    if con is None:
         return []
     try:
         return list(con.execute(sql, params))
@@ -312,7 +326,7 @@ def _discover_from_opencode_db(
     for sid, directory, _updated in opencode_query(
         db_path,
         "SELECT id, directory, time_updated FROM session "
-        "WHERE time_updated >= ? ORDER BY time_updated DESC",
+        "WHERE time_updated >= ? ORDER BY time_updated DESC, id DESC",
         (cutoff_ms,),
     ):
         if not isinstance(sid, str) or not sid or sid in seen or sid in exclude_sids:
@@ -1205,12 +1219,18 @@ def discover_live_sessions(
     # where current opencode writes; the legacy JSON tree is consulted only
     # when there is no database, so an old install still resolves.
     opencode_store = opencode_storage_dir or default_opencode_storage_dir()
-    opencode_rows = _discover_from_opencode_db(
-        default_opencode_db_path(opencode_store),
-        recency_seconds=_recency_seconds(),
-        exclude_session_ids=excluded_session_ids,
-    )
-    if not opencode_rows:
+    opencode_db = default_opencode_db_path(opencode_store)
+    # Branch on the database EXISTING, never on it returning no rows. A query
+    # can come back empty because nothing is live, because the store is locked,
+    # or because a future schema drifted — and falling back on any of those
+    # would resurrect the legacy tree's long-dead sessions as if they were live.
+    if opencode_db.exists():
+        opencode_rows = _discover_from_opencode_db(
+            opencode_db,
+            recency_seconds=_recency_seconds(),
+            exclude_session_ids=excluded_session_ids,
+        )
+    else:
         opencode_rows = _discover_from_opencode(
             opencode_store,
             recency_seconds=_recency_seconds(),

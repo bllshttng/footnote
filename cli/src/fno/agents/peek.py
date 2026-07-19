@@ -258,47 +258,61 @@ def _opencode_records_db(
     first and stops once ``n`` renderable turns are found, so parts are queried
     only for the messages actually returned.
     """
-    from fno.agents.discover import default_opencode_db_path, opencode_query
+    import sqlite3
+
+    from fno.agents.discover import default_opencode_db_path, opencode_connect
 
     if n is not None and n <= 0:
         return []
-    db = default_opencode_db_path(storage_dir)
-    rows = opencode_query(
-        db,
-        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC",
-        (session_id,),
-    )
+    con = opencode_connect(default_opencode_db_path(storage_dir))
+    if con is None:
+        return []
+    # One connection for every query below, so the messages and the parts come
+    # from a single snapshot of a store a live opencode is still writing to.
+    # `id` breaks ties on the millisecond timestamps, which do collide in a real
+    # store (measured: 15 tied message groups, 1291 tied part groups); without
+    # it the render order would be whatever the query planner happened to pick.
     records: list[Record] = []
-    for mid, raw in rows:
-        if not isinstance(mid, str) or not mid:
-            continue
-        try:
-            msg = json.loads(raw) if isinstance(raw, str) else {}
-        except ValueError:
-            msg = {}
-        if not isinstance(msg, dict):
-            continue
-        blocks: list[dict] = []
-        for (praw,) in opencode_query(
-            db,
-            "SELECT data FROM part WHERE message_id = ? ORDER BY time_created",
-            (mid,),
-        ):
-            try:
-                block = json.loads(praw) if isinstance(praw, str) else None
-            except ValueError:
+    try:
+        rows = con.execute(
+            "SELECT id, data FROM message WHERE session_id = ? "
+            "ORDER BY time_created DESC, id DESC",
+            (session_id,),
+        ).fetchall()
+        for mid, raw in rows:
+            if not isinstance(mid, str) or not mid:
                 continue
-            if isinstance(block, dict):
-                blocks.append(block)
-        text = _opencode_join_parts(blocks)
-        if not text:
-            continue
-        role = msg.get("role")
-        records.append(
-            Record(role=role if isinstance(role, str) and role else "?", text=text)
-        )
-        if n is not None and len(records) >= n:
-            break
+            try:
+                msg = json.loads(raw) if isinstance(raw, str) else {}
+            except ValueError:
+                msg = {}
+            if not isinstance(msg, dict):
+                continue
+            blocks: list[dict] = []
+            for (praw,) in con.execute(
+                "SELECT data FROM part WHERE message_id = ? "
+                "ORDER BY time_created, id",
+                (mid,),
+            ):
+                try:
+                    block = json.loads(praw) if isinstance(praw, str) else None
+                except ValueError:
+                    continue
+                if isinstance(block, dict):
+                    blocks.append(block)
+            text = _opencode_join_parts(blocks)
+            if not text:
+                continue
+            role = msg.get("role")
+            records.append(
+                Record(role=role if isinstance(role, str) and role else "?", text=text)
+            )
+            if n is not None and len(records) >= n:
+                break
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
     records.reverse()
     return records
 
@@ -395,11 +409,14 @@ def recent_records(
             return []
         return _records_from_jsonl(path, n, _parse_codex_record)
     if agent == "opencode":
-        # SQLite is where current opencode writes; the legacy JSON tree is the
-        # fallback for an install old enough to still use it.
-        records = _opencode_records_db(session_id, opencode_storage_dir, n)
-        if records:
-            return records
+        from fno.agents.discover import default_opencode_db_path
+
+        # Branch on the database EXISTING, never on it yielding no records: an
+        # idle session, a locked store, or an unknown id all read as empty, and
+        # falling back on those would serve a stale legacy transcript as if it
+        # were the session's current one.
+        if default_opencode_db_path(opencode_storage_dir).exists():
+            return _opencode_records_db(session_id, opencode_storage_dir, n)
         return _opencode_records(session_id, opencode_storage_dir, n)
     raise ObserveUnsupported(agent)
 
