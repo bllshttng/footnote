@@ -1895,20 +1895,27 @@ impl Core {
             return;
         };
         let origins = sq.origins.clone();
-        let members: Vec<_> = self
+        // (x-0f9d US4) Re-derive each member's hosting tab name and write it back
+        // into the AUTHORITATIVE in-memory list, not just the store copy. Other
+        // write paths (RenameSquad, a churned member's `persist_stored`) persist
+        // `squad_members` verbatim; refreshing here keeps them from erasing a
+        // freshly-renamed tab name on the next write (codex review). A tombstone
+        // (no live pane) resolves to None.
+        let attach_ids: Vec<String> = self
             .squad_members
             .get(&sid)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|mut m| {
-                // (x-0f9d US4) Re-derive each member's hosting tab name at write
-                // time so a rename since the last persist is captured; a
-                // tombstone (no live pane) resolves to None.
-                m.tab_name = self.member_tab_name(sid, &m.attach_id);
-                m
-            })
+            .map(|ms| ms.iter().map(|m| m.attach_id.clone()).collect())
+            .unwrap_or_default();
+        let names: Vec<Option<String>> = attach_ids
+            .iter()
+            .map(|id| self.member_tab_name(sid, id))
             .collect();
+        if let Some(list) = self.squad_members.get_mut(&sid) {
+            for (m, tab_name) in list.iter_mut().zip(names) {
+                m.tab_name = tab_name;
+            }
+        }
+        let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
         if let Err(e) = crate::squad_store::upsert(&name, &origins, &members) {
             self.persist_degraded(&e);
         }
@@ -9392,6 +9399,48 @@ mod tests {
         assert_eq!(
             loaded.squads[0].members[0].tab_name, None,
             "clearing the name clears the stored tab_name"
+        );
+    }
+
+    #[test]
+    fn squad_rename_after_tab_rename_keeps_the_tab_name() {
+        // x-0f9d US4 / codex review: persist_squad refreshes the AUTHORITATIVE
+        // in-memory member list, so a later RenameSquad (which persists that
+        // list verbatim through squad_store::rename) does not erase a
+        // freshly-renamed tab name.
+        let _s = StoreScratch::new("tab-name-survives-squad-rename");
+        let mut core = empty_core();
+        named_member_squad(&mut core, 1, "harden", 1, "c19cd2c3");
+        core.clients.push(client(1, 1, (24, 80), false));
+
+        // Name the tab (persists tab_name AND refreshes squad_members in place).
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 1,
+                name: "reviews".into(),
+            },
+        );
+        // Rename the squad; it writes the in-memory member list to the store.
+        core.clients.push(client(1, 1, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 1,
+                name: "hardened".into(),
+            },
+        );
+
+        let loaded = crate::squad_store::load();
+        let sq = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "hardened")
+            .expect("renamed squad persisted");
+        assert_eq!(
+            sq.members[0].tab_name.as_deref(),
+            Some("reviews"),
+            "the tab name survives the squad rename"
         );
     }
 
