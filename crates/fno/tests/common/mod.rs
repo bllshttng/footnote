@@ -114,6 +114,17 @@ impl ClientHarness {
         // inherits the env (no env_clear), so the marker reaches the
         // setsid'd, harness-untracked server and it self-exits within grace.
         cmd.env("FNO_E2E", "1");
+        // Same hermetic isolation as spawn_server: the autospawned server reads
+        // the agent registry + claude-daemon roster from empty scratch subdirs,
+        // so it neither sees the developer's live agents nor writes events to the
+        // real ~/.fno. Overridable via `envs` below.
+        cmd.env("FNO_AGENTS_HOME", scratch.0.join("iso-agents"));
+        cmd.env("FNO_CLAUDE_DAEMON_DIR", scratch.0.join("iso-daemon"));
+        // See spawn_server: neutralize isolated-account roster discovery too.
+        cmd.env(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            scratch.0.join("iso-cfg").join("settings.json"),
+        );
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -311,6 +322,25 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     // panic=abort, cargo-test timeout) — x-4e30. A test that needs a specific
     // grace (or none) overrides via `envs`, which is applied after.
     cmd.env("FNO_E2E", "1");
+    // Hermetic sideline: point the agent registry and the claude-daemon roster
+    // at empty scratch subdirs so the server enumerates only THIS test's panes,
+    // never the developer's live agents. Without this the server reads the real
+    // ~/.fno/agents/registry.json + roster and injects phantom squads/rows,
+    // which shifts squad ids and flakes the layout/multiclient selection tests
+    // whenever a real mux daemon is running. A caller that needs a real
+    // registry (e.g. agent_edge_e2e) overrides via `envs`, applied after.
+    let iso = sock.parent().unwrap_or_else(|| Path::new("."));
+    cmd.env("FNO_AGENTS_HOME", iso.join("iso-agents"));
+    cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
+    // Isolated-account rosters are discovered via the provider config
+    // (isolated_account_dirs -> $PWD/.fno/config.toml, else this override's
+    // sibling config.toml, else ~/.fno/config.toml). Point the override at an
+    // empty scratch dir so a multi-account developer's live alt-account workers
+    // don't fold into the sideline either.
+    cmd.env(
+        "FNO_GLOBAL_SETTINGS_PATH",
+        iso.join("iso-cfg").join("settings.json"),
+    );
     for (k, v) in envs {
         cmd.env(k, v);
     }

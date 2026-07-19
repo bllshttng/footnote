@@ -2367,6 +2367,9 @@ impl View {
         let origin_r = TAB_BAR_ROWS as usize;
         let origin_c = panel_w;
         let mut covered = vec![false; rows * cols];
+        // x-5a52: cells owned by the focused pane, so the divider pass can accent
+        // the seams that bound it (a standing "you are here" outline).
+        let mut focused = vec![false; rows * cols];
         for (pid, rect) in &self.layout.panes {
             let frame = self.frames.get(pid);
             for fr in 0..rect.rows as usize {
@@ -2380,6 +2383,9 @@ impl View {
                         break;
                     }
                     covered[r * cols + c] = true;
+                    if *pid == self.layout.focus {
+                        focused[r * cols + c] = true;
+                    }
                     if let Some(f) = frame {
                         if fr < f.rows as usize && fc < f.cols as usize {
                             cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
@@ -2446,6 +2452,25 @@ impl View {
                     || c + 1 < cols && covered[r * cols + c + 1];
                 let vert = r > origin_r && covered[(r - 1) * cols + c]
                     || r + 1 < rows && covered[(r + 1) * cols + c];
+                // x-5a52: a divider cell that borders the focused pane paints in
+                // the lattice accent at full brightness (not the DIM chrome), so
+                // the focused pane wears a standing outline that moves with focus.
+                // Interior seams only - an edge pane has no divider on that side.
+                // Orthogonal neighbours suffice: a `┼` is emitted only when a cell
+                // has a covered horizontal AND vertical neighbour, so every
+                // visible junction is already orthogonally adjacent to its pane.
+                // The lone diagonal-only cell is the 1-wide crossing where four
+                // dividers meet, which renders blank (no covered ortho neighbour)
+                // - accenting a space would be invisible, so we don't.
+                let outline = c > origin_c && focused[r * cols + c - 1]
+                    || c + 1 < cols && focused[r * cols + c + 1]
+                    || r > origin_r && focused[(r - 1) * cols + c]
+                    || r + 1 < rows && focused[(r + 1) * cols + c];
+                let (fg, flags) = if outline {
+                    (LATTICE_ACCENT, 0)
+                } else {
+                    (Color::Default, cell_flags::DIM)
+                };
                 cells[r * cols + c] = Cell {
                     c: match (horiz, vert) {
                         (true, true) => '┼',
@@ -2453,9 +2478,9 @@ impl View {
                         (false, true) => '─',
                         (false, false) => ' ',
                     },
-                    fg: Color::Default,
+                    fg,
                     bg: Color::Default,
-                    flags: cell_flags::DIM,
+                    flags,
                 };
             }
         }
@@ -3100,6 +3125,19 @@ impl View {
                 break;
             }
             let is_inert = row_is_inert(&drow);
+            // x-5a52: standing "you are here" markers, always on (independent of
+            // the selector/hover). The active squad header accents its caret; the
+            // agent row whose pane holds focus gets an accent gutter bar. At most
+            // one of each renders at a time.
+            let (mark_caret, mark_gutter) = match &drow {
+                DisplayRow::Sel(row)
+                    if row.tab.is_none() && row.squad == self.layout.active_squad =>
+                {
+                    (true, false)
+                }
+                DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) => (false, true),
+                _ => (false, false),
+            };
             // (x-df4c) The row tuple carries `fg` now: most rows are
             // `Color::Default`, but a needs-attention (Blocked) agent row or card
             // paints the accent, so the color must reach the cells below.
@@ -3328,6 +3366,19 @@ impl View {
             if highlit {
                 for j in col..text_w {
                     cells[r * cols + j].flags |= cell_flags::INVERSE;
+                }
+            }
+            // x-5a52 (US4): the active marker rides column 0, preserving the
+            // INVERSE selection band when the selector also sits on this row so
+            // active (accent) and selected (inverse) compose instead of masking.
+            if (mark_caret || mark_gutter) && text_w >= 1 {
+                let idx = r * cols;
+                // Recolor in place so the existing flags (INVERSE band, BOLD)
+                // survive; the caret keeps its glyph, the agent gutter replaces
+                // its leading space with the marker.
+                cells[idx].fg = LATTICE_ACCENT;
+                if mark_gutter {
+                    cells[idx].c = '▎';
                 }
             }
         }
@@ -8183,6 +8234,253 @@ mod tests {
         assert_eq!(frame.cursor_row, 1);
         assert_eq!(frame.cursor_col, 28 + 36);
         assert!(frame.cursor_visible);
+    }
+
+    #[test]
+    fn focus_outline_accents_focused_pane_seams_and_moves_with_focus() {
+        // x-5a52 US1 / AC1-HP: the divider cells bounding the focused pane render
+        // in the lattice accent at full brightness; a seam between two unfocused
+        // panes stays DIM. Moving focus moves the accent in the same compose.
+        let view = three_pane_view(); // focus = pane 10
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        let seam_10_11 = 28 + 23; // divider left of pane 11: borders focused 10
+        let seam_11_12 = 28 + 47; // divider between unfocused 11 and 12
+        let row = 5;
+        let accented = frame.cells[row * cols + seam_10_11];
+        assert_eq!(
+            accented.c, '│',
+            "the accented cell is still a divider glyph"
+        );
+        assert_eq!(accented.fg, LATTICE_ACCENT, "focused-pane seam is amber");
+        assert_eq!(
+            accented.flags & cell_flags::DIM,
+            0,
+            "focus outline is full-bright, never dimmed"
+        );
+        let dim = frame.cells[row * cols + seam_11_12];
+        assert_eq!(
+            dim.fg,
+            Color::Default,
+            "unfocused seam keeps the default fg"
+        );
+        assert_eq!(
+            dim.flags & cell_flags::DIM,
+            cell_flags::DIM,
+            "unfocused seam stays the DIM chrome"
+        );
+
+        // Move focus to pane 12: the accent follows to its seam in the same
+        // frame, and the old seam reverts to DIM (AC1-HP "in the same frame").
+        let mut moved = three_pane_view();
+        moved.layout.focus = 12;
+        let frame = moved.compose();
+        assert_eq!(
+            frame.cells[row * cols + seam_11_12].fg,
+            LATTICE_ACCENT,
+            "accent follows focus to pane 12"
+        );
+        assert_eq!(
+            frame.cells[row * cols + seam_10_11].flags & cell_flags::DIM,
+            cell_flags::DIM,
+            "the previously-focused seam reverts to DIM"
+        );
+    }
+
+    #[test]
+    fn single_pane_tab_paints_no_focus_outline() {
+        // x-5a52 AC5-EDGE: one pane fills the content area, so there are no
+        // interior seams and nothing paints the accent - the sideline markers
+        // alone carry the "you are here" state.
+        let mut view = three_pane_view();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(
+                10,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        let frame = view.compose();
+        // The sideline still marks the active squad, so scope the check to the
+        // content area (col >= panel_w) where the outline would live.
+        let cols = frame.cols as usize;
+        let panel_w = view.panel_w() as usize;
+        let outline_in_content = (0..frame.rows as usize)
+            .any(|r| (panel_w..cols).any(|c| frame.cells[r * cols + c].fg == LATTICE_ACCENT));
+        assert!(
+            !outline_in_content,
+            "a single-pane tab paints no accent outline in the content area"
+        );
+    }
+
+    // A 2x2 grid over two_pane_view's geometry: A|B on top, C|D below, meeting
+    // at a `┼` junction. focus = A (pane 10).
+    fn four_pane_view() -> View {
+        let mut view = two_pane_view();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![
+                (
+                    10,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 14,
+                        cols: 35,
+                    },
+                ),
+                (
+                    11,
+                    Rect {
+                        x: 36,
+                        y: 0,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+                (
+                    12,
+                    Rect {
+                        x: 0,
+                        y: 15,
+                        rows: 14,
+                        cols: 35,
+                    },
+                ),
+                (
+                    13,
+                    Rect {
+                        x: 36,
+                        y: 15,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+            ],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        view
+    }
+
+    #[test]
+    fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
+        // x-5a52 AC1-HP (the 2x2 case the horizontal-split test missed): the
+        // focused top-left pane borders on TWO interior sides, so the outline
+        // must accent both its right `│` seam and its bottom `─` seam - and a
+        // seam bordering only the unfocused panes stays dim.
+        let frame = four_pane_view().compose(); // focus = pane 10 (top-left)
+        let cols = frame.cols as usize;
+        // A's right seam: vertical divider at content col 35 -> outer col 63,
+        // within A's rows (outer 1..14). Sample outer row 5.
+        let right_seam = frame.cells[5 * cols + (28 + 35)];
+        assert_eq!(right_seam.c, '│', "A's right border is a vertical divider");
+        assert_eq!(right_seam.fg, LATTICE_ACCENT, "A's right seam is accented");
+        // A's bottom seam: horizontal divider at content row 14 -> outer row 15,
+        // within A's cols (outer 28..62). Sample outer col 40.
+        let bottom_seam = frame.cells[15 * cols + (28 + 10)];
+        assert_eq!(
+            bottom_seam.c, '─',
+            "A's bottom border is a horizontal divider"
+        );
+        assert_eq!(
+            bottom_seam.fg, LATTICE_ACCENT,
+            "A's bottom seam is accented"
+        );
+        // The C/D vertical seam (below A, outer row 20 col 63) borders only the
+        // unfocused panes and stays dim.
+        let cd_seam = frame.cells[20 * cols + (28 + 35)];
+        assert_eq!(
+            cd_seam.flags & cell_flags::DIM,
+            cell_flags::DIM,
+            "a seam not bordering the focused pane stays dim"
+        );
+    }
+
+    // An agent row hosting a given pane, under squad 1.
+    fn focus_agent(pane: u64) -> AgentRow {
+        AgentRow {
+            squad: Some(1),
+            name: "worker".into(),
+            pane_id: Some(pane),
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab: None,
+            account: None,
+            updated_at: None,
+            pr: None,
+        }
+    }
+
+    #[test]
+    fn sideline_marks_active_squad_and_focused_agent_row() {
+        // x-5a52 US2/US3 / AC2-HP: the active squad header accents its caret and
+        // the agent row whose pane holds focus carries the `▎` gutter, both
+        // standing regardless of the selector (parked elsewhere) or hover.
+        let mut view = two_pane_view(); // active_squad = 1, focus = pane 11
+        view.layout.agents.push(focus_agent(11));
+        view.selector = Some(3); // squad 2's header, not row 0 or 1
+        view.hover_row = None;
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+
+        // Display row 0 -> outer row 0: the active squad header caret is amber.
+        let caret = frame.cells[0];
+        assert_eq!(caret.c, '▾', "active expanded squad shows the caret");
+        assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
+
+        // Display row 1 -> outer row 1: the focused agent row gutter marker.
+        let gutter = frame.cells[1 * cols];
+        assert_eq!(gutter.c, '▎', "focused agent row carries the gutter marker");
+        assert_eq!(gutter.fg, LATTICE_ACCENT, "gutter marker is accented");
+        assert_eq!(
+            gutter.flags & cell_flags::INVERSE,
+            0,
+            "standing marker shows without a selection band"
+        );
+    }
+
+    #[test]
+    fn active_marker_composes_with_selection_inverse() {
+        // x-5a52 US4 / AC3-UI: when the selector sits on the active agent row, the
+        // gutter keeps its accent AND the INVERSE band, so active and selected
+        // render together instead of one masking the other.
+        let mut view = two_pane_view();
+        view.layout.agents.push(focus_agent(11));
+        view.selector = Some(1); // the focused agent row
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        let gutter = frame.cells[1 * cols];
+        assert_eq!(gutter.c, '▎', "gutter glyph survives the selection band");
+        assert_eq!(gutter.fg, LATTICE_ACCENT, "accent survives under INVERSE");
+        assert_eq!(
+            gutter.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the selection band still covers the marked row"
+        );
     }
 
     #[test]
