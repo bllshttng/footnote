@@ -688,6 +688,25 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     return False
 
 
+def find_nodes_for_pr(
+    path: Path, pr_number: int, *, repo: "str | None" = None
+) -> "list[str]":
+    """Node ids carrying ``pr_number``, optionally narrowed to one repo slug.
+
+    Split out of :func:`stamp_session_for_pr` so a caller reporting an ambiguous
+    resolution can name the candidates without re-deriving the match rule.
+    """
+    return [
+        e["id"] for e in read_graph(path)
+        if isinstance(e.get("id"), str)
+        and (
+            _node_matches_repo_pr(e, pr_number, repo)
+            if repo
+            else _node_carries_pr(e, pr_number)
+        )
+    ]
+
+
 def stamp_session_for_pr(
     path: Path,
     pr_number: int,
@@ -714,15 +733,7 @@ def stamp_session_for_pr(
     preserves the bare-``pr_number`` match (single-repo / manual / tests); the
     repo-scoped set is strictly narrower, so it never introduces a false match.
     """
-    matches = [
-        e["id"] for e in read_graph(path)
-        if isinstance(e.get("id"), str)
-        and (
-            _node_matches_repo_pr(e, pr_number, repo)
-            if repo
-            else _node_carries_pr(e, pr_number)
-        )
-    ]
+    matches = find_nodes_for_pr(path, pr_number, repo=repo)
     if not matches:
         return None, "no-node"
     if len(matches) > 1:

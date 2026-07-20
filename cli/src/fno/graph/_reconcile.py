@@ -56,6 +56,45 @@ def repo_slug_from_url(url: Optional[str]) -> Optional[str]:
     m = _PR_URL_RE.search(url)
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
+
+# `owner/repo` from a remote URL: git@github.com:owner/repo.git or
+# https://github.com/owner/repo(.git).
+_REMOTE_SLUG_RE = re.compile(r"(?:github\.com[:/])([^/]+)/(.+?)(?:\.git)?/?$")
+
+
+def _run_slug_cmd(argv: list, cwd: Optional[str]) -> "tuple[int, str]":
+    try:
+        proc = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, timeout=GH_QUERY_TIMEOUT_S
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 127, ""
+    return proc.returncode, proc.stdout
+
+
+def resolve_current_repo_slug(
+    cwd: Optional[str] = None,
+    *,
+    runner: Callable[..., "tuple[int, str]"] = _run_slug_cmd,
+) -> Optional[str]:
+    """Best-effort ``owner/repo`` for the checkout at ``cwd``, or None.
+
+    git origin first, then ``gh repo view``: the git read needs no network and
+    no auth, and a repo whose origin parses is the overwhelming majority case.
+    gh still covers the checkout whose GitHub remote is not named ``origin``.
+    None on every failure - the caller degrades to unscoped resolution, which
+    is a safe skip on ambiguity, never a wrong stamp.
+    """
+    rc, out = runner(["git", "remote", "get-url", "origin"], cwd)
+    if rc == 0:
+        m = _REMOTE_SLUG_RE.search(out.strip())
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    rc, out = runner(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd
+    )
+    return (out.strip() or None) if rc == 0 else None
+
 # GitHub PR states we resolve from gh, plus the "UNKNOWN" sentinel used on a
 # drift record whose query failed. Kept here as the single home for the
 # vocabulary so both types below reference it rather than bare strings.
