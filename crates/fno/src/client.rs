@@ -1006,6 +1006,13 @@ enum AuxAction {
 /// authority), never from rank, which is why floating a card reorders WITHIN a
 /// lane and never moves it across one.
 ///
+/// It is the QUEUE's lanes, not the whole board's. The feed carries only
+/// actionable work (ready / blocked / in-flight), so done and idea nodes never
+/// reach it and a `Done` column never appears - this is a scan of what is up for
+/// grabs, and `fno backlog board` remains the full-board view. The counts are
+/// true for what they claim: every queue card, including those past the render
+/// cap.
+///
 /// Lanes stack vertically rather than sitting side by side: the sideline is
 /// narrow, and a stacked list needs no 2D navigation to scan. The `counts` are
 /// the uncapped per-lane totals, so a lane whose cards were cut by the feed cap
