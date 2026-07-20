@@ -184,6 +184,76 @@ def test_legacy_claimed_status_migrates_on_read(tmp_path):
     assert entries[0]["_status"] == "in_progress"
 
 
+def _fm(path) -> str:
+    import re
+
+    m = re.search(r"^status:\s*(.+?)\s*$", path.read_text(), re.M)
+    return m.group(1).strip().strip("'\"") if m else ""
+
+
+@pytest.mark.parametrize("stamped", ["design", "ready"])
+def test_graph_and_frontmatter_are_a_fixed_point(tmp_path, stamped):
+    """The doc and the graph must agree and STAY agreed.
+
+    The graph derives `design` FROM the plan doc while the projection writes the
+    plan doc FROM the graph, so the two could in principle chase each other.
+    They must not: one round trip has to be a no-op.
+    """
+    from fno.graph.statuses import recompute_statuses
+    from fno.plan._project import project_node_to_plan
+
+    plan = tmp_path / "p.md"
+    plan.write_text(f"---\nstatus: {stamped}\ntitle: T\n---\n\n# T\n\nbody\n")
+    node = {"id": "x-a", "plan_path": str(plan)}
+
+    recompute_statuses([node])
+    assert node["_status"] == stamped  # graph reads the doc
+
+    assert project_node_to_plan(node, plan) is False  # doc already agrees
+    assert _fm(plan) == stamped
+
+    recompute_statuses([node])
+    assert node["_status"] == stamped  # and it stays put
+
+
+def test_claiming_a_design_node_advances_the_doc_off_design(tmp_path):
+    """Forward motion still projects: claiming beats the design rung."""
+    from fno.graph.statuses import recompute_statuses
+    from fno.plan._project import project_node_to_plan
+
+    plan = tmp_path / "p.md"
+    plan.write_text("---\nstatus: design\ntitle: T\n---\n\n# T\n\nbody\n")
+    node = {"id": "x-a", "plan_path": str(plan), "locked_by": "w", "claimed_at": _now()}
+
+    recompute_statuses([node])
+    assert node["_status"] == "in_progress"
+
+    assert project_node_to_plan(node, plan) is True
+    assert _fm(plan) == "in_progress"
+
+    # Re-derived from the advanced doc, it is no longer design-stage.
+    assert not is_design_stage(node)
+
+
+def test_stale_graph_design_never_regresses_a_blueprinted_doc(tmp_path):
+    """`plan sync` must not undo a fresh `/blueprint`.
+
+    `/blueprint` rewrites the doc design -> ready without touching the graph,
+    and `read_graph` does not recompute, so the persisted `_status` can still
+    say `design` when the sweep runs. Repainting from that stale value would
+    stamp `design` back onto the doc and un-blueprint it. The forward-only rule
+    in project_plan_status is what prevents it.
+    """
+    from fno.plan._project import project_node_to_plan
+
+    plan = tmp_path / "p.md"
+    plan.write_text("---\nstatus: ready\ntitle: T\n---\n\n# T\n\nbody\n")
+    stale = {"id": "x-a", "plan_path": str(plan), "_status": "design"}
+
+    assert project_node_to_plan(stale, plan) is False
+    assert _fm(plan) == "ready"  # blueprint survives
+
+
 def test_starvation_receipt_names_design_not_quarantined(tmp_path):
     """A design-stage node is a lifecycle rung, not starvation.
 
