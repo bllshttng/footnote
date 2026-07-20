@@ -165,6 +165,14 @@ const NOTICE_TTL: Duration = Duration::from_secs(3);
 /// the burst to one `FocusPane` for the pane the pointer lands on.
 const HOVER_DEBOUNCE: Duration = Duration::from_millis(50);
 
+/// How long a seam drag survives with no motion before it expires (x-d807,
+/// AC7-FR). A drag whose mouse-up never arrives - the terminal lost focus
+/// mid-gesture, or the release was eaten - would otherwise stay latched and
+/// swallow every later mouse event. Generous compared to [`HOVER_DEBOUNCE`]
+/// because a human pausing mid-drag to look at the layout is ordinary; this is
+/// a stuck-state backstop, not a gesture timer.
+const SEAM_DRAG_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Run the client for `session`. Returns the process exit code.
 pub fn run(session: &str) -> i32 {
     match run_inner(session) {
@@ -2385,6 +2393,18 @@ impl View {
             a: drag.seam.a,
             b: drag.seam.b,
             ratio_permille: target,
+        })
+    }
+
+    /// End the drag and put the seam back where it started, returning the
+    /// command that does it. `None` when the seam never moved: a press that
+    /// released without a crossing sent nothing, so there is nothing to undo.
+    fn revert_seam_drag(&mut self) -> Option<Command> {
+        let drag = self.seam_drag.take()?;
+        (drag.last_permille != drag.start_permille).then_some(Command::ResizeSeam {
+            a: drag.seam.a,
+            b: drag.seam.b,
+            ratio_permille: drag.start_permille,
         })
     }
 
@@ -6031,6 +6051,10 @@ async fn attach_and_run(
         // (x-1d91) A dispatched reorder verb the feed never confirmed: the `…`
         // marker must clear with a notice rather than spin forever.
         let backlog_deadline = view.backlog_pending_deadline();
+        // (x-d807, AC7-FR) A drag whose mouse-up never arrives - the terminal
+        // lost focus mid-gesture, or the release was eaten - would otherwise
+        // leave the drag latched, swallowing every later mouse event. Expire it.
+        let seam_drag_deadline = view.seam_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -6356,6 +6380,20 @@ async fn attach_and_run(
                 }
             }
             _ = async {
+                match seam_drag_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if seam_drag_deadline.is_some() => {
+                // The last applied ratio stands - the operator's drag was real
+                // up to the point the release went missing, so keeping it is
+                // less surprising than reverting work they watched happen.
+                view.seam_drag = None;
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
                 match hover_deadline {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
@@ -6538,6 +6576,19 @@ async fn handle_stdin(
         }
     }
     if passthrough.is_empty() {
+        return Ok(StdinFlow::Continue);
+    }
+    // x-d807 (AC6-FR): a bare Esc during a seam drag reverts it. The revert is
+    // an explicit final command to the drag-start ratio, not a client-side
+    // rollback - the server owns the layout, so putting the seam back has to
+    // travel the same path that moved it. Matched on a lone 0x1b so an arrow
+    // key's escape sequence never reads as a cancel.
+    if view.seam_drag.is_some() && passthrough == [0x1b] {
+        if let Some(cmd) = view.revert_seam_drag() {
+            write_msg(sock_w, &ClientMsg::Command(cmd))
+                .await
+                .map_err(|e| format!("seam revert send failed: {e}"))?;
+        }
         return Ok(StdinFlow::Continue);
     }
     if view.digest.is_some() {
@@ -10677,6 +10728,39 @@ mod tests {
         });
         assert!(view.seam_drag.is_some(), "the drag survives its own resize");
         assert!(view.notice.is_none(), "a normal resize is not an error");
+    }
+
+    #[test]
+    fn esc_reverts_a_seam_drag_to_where_it_started() {
+        // AC6-FR: the revert is an explicit final command, not a local
+        // rollback - the server owns the layout.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        let t0 = Instant::now();
+        view.begin_seam_drag(seam, t0);
+        view.seam_drag_to(5, 58, t0);
+        view.seam_drag_to(5, 62, t0);
+        assert_eq!(
+            view.revert_seam_drag(),
+            Some(Command::ResizeSeam {
+                a: 10,
+                b: 11,
+                ratio_permille: 500
+            }),
+            "reverts to the share held when the drag began, not the last one"
+        );
+        assert!(view.seam_drag.is_none(), "the revert also ends the drag");
+    }
+
+    #[test]
+    fn a_drag_that_never_moved_reverts_to_nothing() {
+        // A press-and-release on a divider is a click, not a resize: it sent no
+        // command, so cancelling it must not send one either.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        assert_eq!(view.revert_seam_drag(), None);
+        assert!(view.seam_drag.is_none());
     }
 
     #[test]
