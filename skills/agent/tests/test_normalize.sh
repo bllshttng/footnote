@@ -23,6 +23,15 @@ field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 # run <input> [extra argv...] -> echoes normalize.sh stdout
 run() { bash "$NORM" --input "$1" "${@:2}"; }
 
+# run_nofno shadows `fno` with an exit-1 stub so assertions about BUILTIN
+# defaults (no-merge posture, static fallback tables) hold regardless of the
+# host's installed fno and its config (e.g. dispatch.auto_merge=true would
+# otherwise flip allow_merge via the x-4391 rung-2 read).
+_de43_stub="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
+trap 'rm -rf "$_de43_stub"' EXIT
+run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
+
 # run_guarded caps a run at 5s when a timeout binary exists (coreutils `timeout`,
 # or `gtimeout` on macOS), so a regressed $#-guard that spins is caught, not hung.
 # Where neither exists (bare macOS), it runs unguarded - the status/value asserts
@@ -81,7 +90,7 @@ out="$(run 'codex yolo merge')"
 check_eq   'AC1-ERR bareword-only status' "$(field "$out" status)" 'error'
 
 # --- AC1-EDGE: posture word mid-task stays task text --------------------------
-out="$(run 'spawn the node that will merge two branches')"
+out="$(run_nofno 'spawn the node that will merge two branches')"
 check_eq   'AC1-EDGE merge not consumed' "$(field "$out" allow_merge)" '0'
 check_contains 'AC1-EDGE merge stays in message' "$(field "$out" message)" 'merge two branches'
 
@@ -164,7 +173,7 @@ check_eq   'dangling as is error' "$(field "$out" status)" 'error'
 out="$(run 'ab-99999999 as gemini')"
 check_eq   'as gemini -> name=gemini'        "$(field "$out" name)" 'gemini'
 check_eq   'as gemini -> provider NOT gemini' "$(field "$out" provider)" 'claude'
-out="$(run 'ab-99999999 as merge')"
+out="$(run_nofno 'ab-99999999 as merge')"
 check_eq   'as merge -> name=merge'           "$(field "$out" name)" 'merge'
 check_eq   'as merge -> allow_merge stays 0'  "$(field "$out" allow_merge)" '0'
 # a posture word BEFORE the `as <name>` pair still binds normally
@@ -183,12 +192,9 @@ check_eq   'hermes not a spawn provider'       "$(field "$out" provider)" 'claud
 check_contains 'hermes stays in message'       "$(field "$out" message)" 'hermes'
 
 # --- x-de43: per-harness native invocation (opencode /fno:verb, gemini refused)
-# Force the STATIC fallback table (stub `fno` to exit 1) so the rendered surface
-# is asserted against the in-tree mirror, not the installed fno (which may lag
-# until redeployed). This is the mirror the parity python test also guards.
-_de43_stub="$(mktemp -d)"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
-run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
+# run_nofno (defined at top) forces the STATIC fallback table so the rendered
+# surface is asserted against the in-tree mirror, not the installed fno (which
+# may lag until redeployed). This is the mirror the parity python test guards.
 
 # AC1-HP: an opencode node-id build renders the plugin-namespaced /fno:target
 # (+ no-merge). Free text no longer builds (x-cbb0) - only a resolved node id
@@ -223,8 +229,6 @@ check_contains 'gemini build names agy'       "$(field "$out" error)"  'agy'
 out="$(run_nofno '/target ship it' --provider gemini)"
 check_eq       'gemini passthrough refused'   "$(field "$out" status)" 'error'
 check_contains 'gemini passthrough names agy' "$(field "$out" error)"  'agy'
-
-rm -rf "$_de43_stub"
 
 # --- model <name> two-word posture -------------------------------------------
 out="$(run 'ab-99999999 model opus')"
@@ -345,7 +349,7 @@ check_contains 'multiline line2 NOT discarded' "$(msg_block "$out")" 'and the si
 check_not_contains 'multiline trailing posture stripped from message' "$(msg_block "$out")" 'codex'
 # mid-text posture across lines stays task text (right-anchored run)
 ml2="$(printf 'refactor the merge module\ninto two files')"
-out="$(run "$ml2")"
+out="$(run_nofno "$ml2")"
 check_eq       'multiline mid-merge not consumed' "$(field "$out" allow_merge)" '0'
 check_contains 'multiline mid-text keeps both lines' "$(msg_block "$out")" 'into two files'
 
