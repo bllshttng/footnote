@@ -1452,20 +1452,82 @@ pub fn write_msg_sync<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), 
     Ok(())
 }
 
+/// How many consecutive retryable errors a PARTIALLY-read frame tolerates
+/// before giving up. Each one costs the stream's own read timeout, so this
+/// bounds the wait for a frame that started arriving and then stalled; a peer
+/// that dies mid-frame errors out instead of spinning forever.
+const FRAME_STALL_RETRIES: u32 = 40;
+
+/// Fill `buf` completely from `r`.
+///
+/// Deliberately not `read_exact`. On a stream with a read timeout (or a
+/// non-blocking one), `read_exact` may consume part of the frame and THEN
+/// return `WouldBlock`/`TimedOut` - and those bytes are gone from the stream,
+/// with the buffer left unspecified. A caller that reads such an error as
+/// "nothing arrived yet" and retries would restart mid-frame, decode the next
+/// four bytes as a length, and get garbage.
+///
+/// So: a retryable error is passed up only while nothing of the FRAME has been
+/// consumed (`committed` false and no byte read yet) - the stream is genuinely
+/// idle and a polling caller should poll again. `committed` is what makes this
+/// a frame-level property rather than a per-buffer one: once the length prefix
+/// is off the stream, the body read can no longer bail out, or the next call
+/// would start reading the body as if it were a prefix.
+fn read_fill<R: Read>(r: &mut R, buf: &mut [u8], committed: bool) -> Result<(), ProtoError> {
+    let mut n = 0;
+    let mut stalls = 0u32;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => return Err(ProtoError::Closed),
+            Ok(k) => {
+                n += k;
+                stalls = 0;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if is_retryable(&e) => {
+                if n == 0 && !committed {
+                    return Err(e.into()); // nothing consumed: safe to hand back
+                }
+                stalls += 1;
+                if stalls >= FRAME_STALL_RETRIES {
+                    return Err(e.into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+fn is_retryable(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
 /// Sync twin of [`read_msg`].
+///
+/// Framing is all-or-nothing: an error never leaves the stream positioned
+/// inside a frame (see [`read_fill`]), so a caller may poll this in a loop and
+/// treat `WouldBlock`/`TimedOut` as "nothing yet" without desynchronising.
 pub fn read_msg_sync<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, ProtoError> {
     let mut len_buf = [0u8; 4];
-    match r.read_exact(&mut len_buf) {
+    match read_fill(r, &mut len_buf, false) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(ProtoError::Closed),
-        Err(e) => return Err(e.into()),
+        Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(ProtoError::Closed)
+        }
+        Err(e) => return Err(e),
     }
     let len = check_len(u32::from_be_bytes(len_buf))?;
     let mut body = vec![0u8; len];
-    match r.read_exact(&mut body) {
+    match read_fill(r, &mut body, true) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(ProtoError::Closed),
-        Err(e) => return Err(e.into()),
+        Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(ProtoError::Closed)
+        }
+        Err(e) => return Err(e),
     }
     decode_body(&body)
 }
@@ -2379,4 +2441,86 @@ mod tests {
         assert!(socket_path("").is_err());
         assert!(socket_path("ok-name_1").is_ok());
     }
+
+    /// A reader that dribbles bytes out `chunk` at a time and returns
+    /// `WouldBlock` between chunks - what a socket with a read timeout does
+    /// when a frame arrives in pieces.
+    struct Dribble {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+        stall: bool,
+    }
+
+    impl std::io::Read for Dribble {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "idle"));
+            }
+            // Alternate: one short read, then one WouldBlock, then more.
+            self.stall = !self.stall;
+            if !self.stall {
+                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "partial"));
+            }
+            let n = self.chunk.min(buf.len()).min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    /// A length prefix split across reads must not desync the stream.
+    ///
+    /// `read_exact` can consume part of a frame and THEN return `WouldBlock`;
+    /// those bytes are gone. A caller that treats `WouldBlock` as "nothing yet"
+    /// and retries would restart mid-frame, decode a garbage length, and trip
+    /// the size cap - the `message of N bytes exceeds the cap` desync.
+    #[test]
+    fn read_msg_sync_reassembles_a_frame_split_mid_length_prefix() {
+        let msg = ClientMsg::Command(Command::NewTab);
+        let mut wire = encode(&msg).unwrap();
+        // Two frames back to back, so a desync on the first corrupts the second.
+        wire.extend_from_slice(&encode(&msg).unwrap());
+        let mut r = Dribble {
+            data: wire,
+            pos: 0,
+            chunk: 3, // < 4, so the length prefix itself straddles a read
+            stall: false,
+        };
+        // Poll exactly as a real caller does: WouldBlock means "nothing yet".
+        // The property under test is that polling can never desync the framing.
+        let mut got = 0;
+        for _ in 0..200 {
+            match read_msg_sync::<_, ClientMsg>(&mut r) {
+                Ok(m) => {
+                    assert!(matches!(m, ClientMsg::Command(Command::NewTab)));
+                    got += 1;
+                    if got == 2 {
+                        return;
+                    }
+                }
+                Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("frame {got} failed: {e}"),
+            }
+        }
+        panic!("only decoded {got} of 2 frames");
+    }
+
+    /// An IDLE stream must still report `WouldBlock` rather than blocking, so a
+    /// polling caller keeps polling. Only a STARTED frame is seen through.
+    #[test]
+    fn read_msg_sync_still_reports_wouldblock_on_an_idle_stream() {
+        let mut r = Dribble {
+            data: Vec::new(),
+            pos: 0,
+            chunk: 4,
+            stall: false,
+        };
+        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
+        assert!(
+            matches!(&got, Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "idle stream must stay pollable, got {got:?}"
+        );
+    }
+
 }
