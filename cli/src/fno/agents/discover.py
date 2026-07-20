@@ -1159,25 +1159,34 @@ class StoreReadError(Exception):
     fall toward keeping the mail.
     """
 
-    def __init__(self, failed: list[str]) -> None:
+    def __init__(self, failed: list[str], resolved=None) -> None:
         super().__init__(f"unreadable reachability stores: {', '.join(failed)}")
         self.failed = failed
+        # The lone candidate, when one was found but uniqueness could not be
+        # proven. Carrying it lets the caller address the durable copy to a real
+        # session rather than to the raw token it was handed.
+        self.resolved = resolved
 
 
 # Each helper returns ``(hits, read_ok)``. ``read_ok=False`` means the store
 # could not be consulted at all -- never that it was consulted and came back
 # empty. Collapsing those two into one empty list is what loses mail.
-_Hits = list[tuple[str, str, Optional[str]]]  # (session_id, agent, cwd)
+# (session_id, agent, cwd, cwd_is_verbatim). The last flag matters: a cwd
+# decoded from a transcript directory name is a lossy GUESS, while a registry
+# or roster row records the path verbatim. A verbatim cwd must be able to
+# correct a decoded one even though the decoding source ranks higher overall.
+_Hits = list[tuple[str, str, Optional[str], bool]]
 
 
 def _decode_project_dir(name: str) -> Optional[str]:
     """Best-effort cwd for a transcript directory name (``-Users-x-proj``).
 
     The encoding replaces every non-alphanumeric character with ``-``, so it is
-    lossy and cannot be inverted exactly: a real hyphen in a path is
-    indistinguishable from a separator. The decode is therefore VALIDATED --
-    only a path that exists on disk is returned. A wrong guess resolves to
-    nothing and the caller falls back rather than resuming in a bogus directory.
+    lossy and cannot be inverted exactly: ``-repo-foo-bar`` is produced by both
+    ``/repo/foo-bar`` and ``/repo/foo/bar``. Validating with ``is_dir()`` rules
+    out nonsense but CANNOT disambiguate two real paths, so this stays a guess
+    and is flagged non-verbatim by its caller. Any source that records the cwd
+    literally overrides it.
     """
     if not name.startswith("-"):
         return None
@@ -1190,7 +1199,9 @@ def _decode_project_dir(name: str) -> Optional[str]:
     return None
 
 
-def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> list[str]:
+def _alias_to_session_ids(
+    token: str, name_map_path: Optional[Path]
+) -> tuple[list[str], bool]:
     """Session ids whose persisted friendly alias equals ``token``.
 
     A user who addressed ``<project>-<short8>`` while a session was live should
@@ -1200,13 +1211,27 @@ def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> list[str
     Partial by nature: the alias map is pruned of non-live sessions on any scan
     that sees at least one live session, so a long-asleep session may have no
     alias left to resolve. That is a miss, not a wrong answer.
+
+    Returns ``(session_ids, read_ok)``. The read is done here rather than via
+    ``_load_name_map`` because that helper folds OSError, ValueError and decode
+    failures into an empty dict -- fine for a display path, but here it would
+    make an existing-but-unreadable map look absent and send a session that is
+    only addressable by its alias to exit 16 with nothing queued.
     """
     path = name_map_path or default_name_map_path()
+    if not path.exists():
+        return [], True
     try:
-        stored = _load_name_map(path)
-    except OSError:
-        return []
-    return [sid for sid, alias in stored.items() if alias == token and isinstance(sid, str)]
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return [], False
+    if not isinstance(stored, dict):
+        return [], False
+    return [
+        sid
+        for sid, alias in stored.items()
+        if isinstance(sid, str) and alias == token
+    ], True
 
 
 def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:
@@ -1238,7 +1263,7 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
         sid = path.name[: -len(".jsonl")]
         if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
-            hits.append((sid, "claude", _decode_project_dir(path.parent.name)))
+            hits.append((sid, "claude", _decode_project_dir(path.parent.name), False))
     return hits, True
 
 
@@ -1289,12 +1314,17 @@ def _reachable_from_registry(
         # ``claude -r <jobId>`` against a session id that does not exist.
         # ``harness_session_id`` is the canonical uuid for every harness.
         sid = getattr(e, "harness_session_id", None)
-        if sid and _token_matches(token, sid) and sid not in seen:
+        if not isinstance(sid, str):
+            continue
+        if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
+            harness = getattr(e, "harness", None)
+            cwd = getattr(e, "cwd", None)
             hits.append((
                 sid,
-                getattr(e, "harness", None) or "claude",
-                getattr(e, "cwd", None),
+                harness if isinstance(harness, str) and harness else "claude",
+                cwd if isinstance(cwd, str) and cwd else None,
+                True,
             ))
     return hits, True
 
@@ -1335,9 +1365,14 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
         if not isinstance(row, dict):
             continue
         sid = row.get("sessionId")
-        if sid and _token_matches(token, sid) and sid not in seen:
+        if not isinstance(sid, str):
+            # A type-drifted leaf must not reach _token_matches, which would
+            # call .lower() on it and raise straight out of `fno mail send`.
+            continue
+        if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
-            hits.append((sid, "claude", row.get("cwd")))
+            cwd = row.get("cwd")
+            hits.append((sid, "claude", cwd if isinstance(cwd, str) and cwd else None, True))
     return hits, True
 
 
@@ -1361,25 +1396,39 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
         return [], False
     hits: _Hits = []
     seen: set[str] = set()
+    malformed = False
     for node in entries or []:
         if not isinstance(node, dict):
+            malformed = True
             continue
         sessions = node.get("sessions")
+        if sessions is None:
+            continue
         if not isinstance(sessions, list):
-            # Malformed rather than absent; iterating a non-list would raise.
+            # Malformed, NOT absent. Skipping it silently while reporting the
+            # store readable would let a corrupt node hide the only durable
+            # record of the addressed session, turning a demotion into exit 16.
+            malformed = True
             continue
         for entry in sessions:
             if not isinstance(entry, dict):
+                malformed = True
                 continue
             sid = entry.get("session_id")
-            if sid and _token_matches(token, sid) and sid not in seen:
+            if not isinstance(sid, str):
+                malformed = True
+                continue
+            if _token_matches(token, sid) and sid not in seen:
                 seen.add(sid)
+                harness = entry.get("harness")
+                cwd = node.get("cwd")
                 hits.append((
                     sid,
-                    entry.get("harness") or "claude",
-                    node.get("cwd"),
+                    harness if isinstance(harness, str) and harness else "claude",
+                    cwd if isinstance(cwd, str) and cwd else None,
+                    True,
                 ))
-    return hits, True
+    return hits, not malformed
 
 
 def resolve_reachable(
@@ -1418,7 +1467,7 @@ def resolve_reachable(
     # A friendly <project>-<short8> alias must keep working once its session
     # falls out of the live listing; resolve it to real uuids and match those
     # alongside the raw token.
-    alias_sids = _alias_to_session_ids(token, name_map_path)
+    alias_sids, alias_ok = _alias_to_session_ids(token, name_map_path)
 
     sources = (
         ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
@@ -1428,8 +1477,13 @@ def resolve_reachable(
     )
     tokens = [token, *alias_sids]
 
-    degraded: list[str] = []
+    degraded: list[str] = [] if alias_ok else ["alias-map"]
+    # Keyed case-insensitively: _token_matches is case-insensitive, so keying on
+    # the stored spelling would make one uuid recorded lowercase in one store and
+    # uppercase in another look like two sessions -- a false ambiguity, and one
+    # the raw-token/alias expansion below would hit routinely.
     found: dict[str, ReachableSession] = {}
+    cwd_verbatim: dict[str, bool] = {}
     for source, lookup in sources:
         for tok in tokens:
             hits, read_ok = lookup(tok)
@@ -1437,26 +1491,41 @@ def resolve_reachable(
                 if source not in degraded:
                     degraded.append(source)
                 continue
-            for sid, agent, cwd in hits:
-                prior = found.get(sid)
+            for sid, agent, cwd, verbatim in hits:
+                key = sid.lower()
+                prior = found.get(key)
                 if prior is None:
-                    found[sid] = ReachableSession(
+                    found[key] = ReachableSession(
                         session_id=sid, source=source, agent=agent, cwd=cwd
                     )
-                elif prior.cwd is None and cwd is not None:
-                    # Keep the higher-confidence source and agent; take only the
-                    # cwd it did not have.
-                    found[sid] = ReachableSession(
+                    cwd_verbatim[key] = verbatim and cwd is not None
+                    continue
+                # Keep the higher-confidence source and agent. Take a cwd only
+                # when it improves on what we have: filling a missing one, or
+                # replacing a lossy decoded guess with a verbatim record.
+                take = (prior.cwd is None and cwd is not None) or (
+                    cwd is not None and verbatim and not cwd_verbatim.get(key, False)
+                )
+                if take:
+                    found[key] = ReachableSession(
                         session_id=prior.session_id,
                         source=prior.source,
                         agent=prior.agent,
                         cwd=cwd,
                     )
+                    cwd_verbatim[key] = verbatim
 
-    if len(found) == 1:
-        return next(iter(found.values())), []
     if len(found) > 1:
-        return None, sorted(found)
+        return None, sorted(f.session_id for f in found.values())
+    if len(found) == 1:
+        if degraded:
+            # Exactly one hit, but a store we could not read might hold a
+            # colliding session. Uniqueness is therefore unproven, and waking on
+            # an unproven-unique short id is the guess this refuses to make.
+            # StoreReadError demotes durably to a real recipient rather than
+            # waking a possible stranger.
+            raise StoreReadError(degraded, resolved=next(iter(found.values())))
+        return next(iter(found.values())), []
     if degraded:
         # Every source that COULD be read came back empty, but at least one
         # could not be read at all -- so absence is unproven. Refusing here

@@ -1552,8 +1552,14 @@ def test_an_absent_store_is_a_clean_answer_not_a_read_failure(tmp_path, monkeypa
     assert found is None and ambiguous == []
 
 
-def test_a_hit_still_wins_over_a_degraded_earlier_source(tmp_path, monkeypatch):
-    """A degraded source must not mask a later source that DID answer."""
+def test_one_hit_plus_a_degraded_store_is_unproven_not_unique(tmp_path, monkeypatch):
+    """A lone hit is not proof of uniqueness while a store is unreadable.
+
+    The unreadable store could hold a session colliding on the same short id,
+    so waking the one hit would be exactly the guess the never-guess rule
+    forbids. The candidate rides along on the error so the caller can still
+    address a durable copy to a real session instead of demoting blind.
+    """
     from fno.agents import discover
 
     sid = "aa11bb22-3344-5566-7788-99aabbccddee"
@@ -1572,9 +1578,11 @@ def test_a_hit_still_wins_over_a_degraded_earlier_source(tmp_path, monkeypatch):
     projects = tmp_path / "projects"
     projects.mkdir()
 
-    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
-
-    assert found is not None and found.source == "roster"
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable(sid[:8], projects_dir=projects)
+    assert "registry" in err.value.failed
+    assert err.value.resolved is not None
+    assert err.value.resolved.session_id == sid
 
 
 def test_registry_source_yields_the_resumable_uuid_not_the_job_id(tmp_path, monkeypatch):
@@ -1763,8 +1771,13 @@ def test_type_drifted_roster_is_unreadable_not_empty(tmp_path, monkeypatch):
     assert "roster" in err.value.failed
 
 
-def test_malformed_graph_sessions_field_does_not_raise(tmp_path, monkeypatch):
-    """`sessions` as a non-list would raise TypeError mid-iteration."""
+def test_malformed_graph_is_reported_unreadable_not_empty(tmp_path, monkeypatch):
+    """`sessions` as a non-list must not raise, and must not read as absent.
+
+    Skipping the bad node while still reporting the store readable would let a
+    corrupt entry hide the only durable record of the addressed session,
+    turning a durable demotion into exit 16 with nothing queued.
+    """
     from fno.agents import discover
 
     graph = tmp_path / "graph.json"
@@ -1778,8 +1791,8 @@ def test_malformed_graph_sessions_field_does_not_raise(tmp_path, monkeypatch):
     projects = tmp_path / "projects"
     projects.mkdir()
 
-    found, ambiguous = discover.resolve_reachable(
-        "deadbeef", projects_dir=projects, registry_path=tmp_path / "reg.json"
-    )
-
-    assert found is None and ambiguous == []
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable(
+            "deadbeef", projects_dir=projects, registry_path=tmp_path / "reg.json"
+        )
+    assert "graph" in err.value.failed

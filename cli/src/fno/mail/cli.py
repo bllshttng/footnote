@@ -892,46 +892,63 @@ def _is_self_send(recipient: Optional[str]) -> bool:
     return canonical_handle(own) == recipient
 
 
-def _wake_rung(token: str, wrapped: str) -> tuple[bool, Optional[str], Optional[str]]:
-    """Resolve ``token`` against the durable stores and wake it if it is asleep.
+def _resolve_token(token: str):
+    """Resolve ``token`` to a reachable session BEFORE the envelope is addressed.
 
-    Returns ``(delivered, revived_short_id, lane_note)``. A miss on every store
-    leaves the caller to demote; an ambiguous token raises rather than picking,
-    because guessing between two sessions that share a short id means waking a
-    stranger's session.
+    Resolution has to precede wrapping. The durable recipient is the resolved
+    session's canonical handle, and deriving it from the raw token instead would
+    misaddress every alias: ``canonical_handle`` takes the first 8 characters, so
+    a friendly ``footnote-9a063cd3`` becomes the recipient ``footnote`` and the
+    real session never drains its own mail.
+
+    Returns ``(reachable_or_None, lane_note_or_None)``. A ``None`` reachable with
+    no note means every store was read cleanly and knows nothing -- the only case
+    that still earns exit 16.
     """
     from fno.agents import discover as discover_mod
-    from fno.agents.dispatch import _mail_inject_claude, wake_and_deliver
 
     try:
         reachable, ambiguous = discover_mod.resolve_reachable(token)
     except discover_mod.StoreReadError as exc:
-        # A store we could not read is not proof the token names nothing, and
-        # exit 16 queues nothing. Fall toward keeping the mail: demote durably
-        # and name the stores that were unreadable.
-        return False, None, f"wake=stores-unreadable({','.join(exc.failed)})"
+        # Unreadable is not proof of absence, and exit 16 queues nothing. Keep
+        # the mail: demote durably, addressed to the lone candidate when the
+        # resolver found one, and name the stores that could not be read.
+        return exc.resolved, f"wake=stores-unreadable({','.join(exc.failed)})"
     if ambiguous:
         raise AmbiguousTokenError(ambiguous)
-    if reachable is None:
-        raise UnreachableTokenError(token)
+    return reachable, None
+
+
+def _wake_rung(reachable, wrapped: str) -> tuple[bool, Optional[str], Optional[str]]:
+    """Wake an already-resolved asleep session.
+
+    Returns ``(delivered, revived_short_id, lane_note)``.
+    """
+    from fno.agents.dispatch import _mail_inject_claude, wake_and_deliver
+
     if reachable.agent != "claude":
-        # Wake is claude-only: the revive substrate resumes a claude session,
-        # so handing it a codex/opencode id would resume the wrong thing
-        # entirely. Say so rather than misroute.
+        # Wake is claude-only: the revive substrate resumes a claude session, so
+        # handing it a codex/opencode id would resume the wrong thing entirely.
         return False, None, f"wake=unsupported-harness({reachable.agent})"
 
     # Claude resume is cwd-scoped, so a recipient in another repo must be woken
     # from ITS directory, not the sender's. None means no store recorded one and
     # wake_and_deliver falls back.
-    wake_cwd = Path(reachable.cwd) if reachable.cwd else None
+    wake_cwd = None
+    if isinstance(reachable.cwd, str) and reachable.cwd:
+        try:
+            wake_cwd = Path(reachable.cwd)
+        except (TypeError, ValueError):
+            wake_cwd = None
+
     delivered, detail = wake_and_deliver(
         reachable.session_id, wrapped, cwd=wake_cwd
     )
     if delivered:
         return True, detail, None
 
-    # The asleep->live race: the session woke up on its own between the probe
-    # and the wake, so the wake correctly refused rather than opening a second
+    # The asleep->live race: the session woke on its own between the probe and
+    # the wake, so the wake correctly refused rather than opening a second
     # writer. Retry the socket ONCE -- it is now the right lane.
     if detail in ("writer-possibly-live", "wake-already-in-flight"):
         if _mail_inject_claude(reachable.session_id, wrapped):
@@ -981,11 +998,22 @@ def _name_lane_send(
         recipient = canonical_handle(resolved.session_id)
         provider = resolved.agent
     elif token is not None:
-        # Address the canonical handle up front, before any lane runs: it is
-        # what the recipient's own drain-self reads, so the durable copy stays
-        # drainable no matter which rung ends up demoting.
-        recipient = canonical_handle(token)
-        provider = provider or "claude"
+        # Resolve BEFORE addressing. The durable copy must be addressed to the
+        # resolved session's canonical handle -- deriving it from the raw token
+        # would misaddress every alias (canonical_handle takes the first 8
+        # chars, so `footnote-9a063cd3` would queue to `footnote`, which nothing
+        # drains). Falls back to the token when nothing resolved, which is the
+        # unregistered/exited-row case the socket probe below still covers.
+        if _is_self_send(canonical_handle(token)):
+            token_reachable, token_lane = None, "self-send"
+        else:
+            token_reachable, token_lane = _resolve_token(token)
+        recipient = canonical_handle(
+            token_reachable.session_id if token_reachable is not None else token
+        )
+        provider = (
+            token_reachable.agent if token_reachable is not None else provider
+        ) or "claude"
 
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
     # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
@@ -1012,7 +1040,7 @@ def _name_lane_send(
         # LISTING, so a miss means "not listed", never "not reachable" -- and
         # demoting here without attempting a live rung is the wall this whole
         # node exists to remove.
-        if _is_self_send(recipient):
+        if token_lane == "self-send":
             # A session can neither inject into nor wake itself; attempting it
             # deadlocks a live session and revives a second writer on an asleep
             # one. Durable is the only honest lane.
@@ -1020,13 +1048,33 @@ def _name_lane_send(
         else:
             # Rung 3: inject-as-probe. The socket is its own source of truth --
             # a confirmed delivery IS the receipt, so no roster query is needed
-            # and a miss costs one cheap, side-effect-free call.
-            injected = _mail_inject_claude(token, wrapped)
+            # and a miss costs one cheap, side-effect-free call. Probe the
+            # resolved session id when we have one; otherwise the raw token,
+            # which is how an unregistered session with no store record is still
+            # reached.
+            probe_target = (
+                token_reachable.session_id if token_reachable is not None else token
+            )
+            injected = _mail_inject_claude(probe_target, wrapped)
             if not injected:
                 lanes.append("inject=not-delivered")
-                injected, woken_as, wake_lane = _wake_rung(token, wrapped)
-                if wake_lane:
-                    lanes.append(wake_lane)
+                if token_reachable is None:
+                    if token_lane:
+                        # A store was unreadable, so absence is unproven: keep
+                        # the mail via the durable floor instead of exit 16.
+                        lanes.append(token_lane)
+                    else:
+                        raise UnreachableTokenError(token)
+                elif token_lane:
+                    # Resolved, but uniqueness was unprovable. Do not wake a
+                    # possible stranger; demote durably to this candidate.
+                    lanes.append(token_lane)
+                else:
+                    injected, woken_as, wake_lane = _wake_rung(
+                        token_reachable, wrapped
+                    )
+                    if wake_lane:
+                        lanes.append(wake_lane)
 
     if resolved is not None:
         if provider == "claude":
