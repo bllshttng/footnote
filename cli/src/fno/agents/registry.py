@@ -429,14 +429,41 @@ def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
 
     Wraps :func:`resolve_agent_in`; a malformed/unreadable registry degrades to
     a clean :class:`AgentResolutionError`, never a traceback leaking to the
-    verb. See ``resolve_agent_in`` for the matching rules."""
+    verb. See ``resolve_agent_in`` for the matching rules.
+
+    On a MISS ONLY, a session-shaped token falls through to the harness stores
+    (x-9cc5): the registry is a cache of reality, so a real session with no
+    roster row is adopted here rather than refused. The happy path pays nothing
+    -- this is a hot seam (spawn dedup, mail), and a hit never reaches the probe.
+    """
     try:
         entries = load_registry(path=path)
     except RegistryVersionError as exc:
         raise AgentResolutionError(
             f"registry unreadable ({exc}); cannot resolve {token!r}"
         ) from exc
-    return resolve_agent_in(entries, token)
+    try:
+        return resolve_agent_in(entries, token)
+    except AgentResolutionError:
+        entry = resolve_from_harness_store(token, registry_path=path)
+        if entry is None:
+            raise
+        return ResolvedAgent(entry=entry, matched_by="harness_store")
+
+
+def resolve_from_harness_store(
+    token: str, *, registry_path: Optional[Path] = None
+) -> Optional[AgentEntry]:
+    """The registry-miss healer (x-9cc5), isolated so every resolution surface
+    reaches it identically -- including ``resume``, which loads its own entries
+    and so calls :func:`resolve_agent_in` rather than :func:`resolve_agent`.
+
+    Returns ``None`` when no store knows the token, so the caller raises its own
+    unchanged error. Propagates :class:`AgentResolutionError` on an ambiguous
+    token: refusing to guess is the designed outcome, not a miss."""
+    from fno.agents.store_fallback import heal_from_harness_store
+
+    return heal_from_harness_store(token, registry_path=registry_path)
 
 
 def _registry_path(path: Optional[Path]) -> Path:
@@ -732,6 +759,8 @@ def register_existing_session(
     cwd: str,
     name: Optional[str] = None,
     log_path: str = "",
+    short_id: str = "",
+    status: Optional[AgentStatus] = None,
     registry_path: Optional[Path] = None,
 ) -> AgentEntry:
     """Register an operator-started session so peers can address it by name.
@@ -775,16 +804,26 @@ def register_existing_session(
     # queues durable to the PROJECT inbox the session actually drains. Reliable
     # by-name live delivery to operator sessions waits on the deferred transport
     # (cv-d54ddd45).
-    _REGISTERED_STATUS: AgentStatus = "idle"
+    #
+    # ``status`` overrides that default for a caller with better information:
+    # the harness-store fallback (x-9cc5) adopts a row it only knows EXISTS, so
+    # it registers "orphaned". Neither value is live, so neither reaches live
+    # anycast or a lane cap.
+    _REGISTERED_STATUS: AgentStatus = status or "idle"
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
-            if entry.harness == provider and getattr(entry, session_field) == session_id:
+            # Keyed on harness_session_id, the canonical id every row carries --
+            # `session_field` is `short_id` for claude, which a caller may set to
+            # the 8-hex transport key rather than the session id we match on.
+            if entry.harness == provider and entry.harness_session_id == session_id:
                 # Same session re-registering: refresh, do not duplicate.
                 entry.status = _REGISTERED_STATUS
                 entry.cwd = cwd
                 if log_path:
                     entry.log_path = log_path
+                if short_id:
+                    entry.short_id = short_id
                 return entries
         base = name or canonical_handle(session_id)
         taken = {entry.name for entry in entries}
@@ -801,12 +840,17 @@ def register_existing_session(
             status=_REGISTERED_STATUS,
         )
         setattr(fresh, session_field, session_id)
+        if short_id:
+            # After the setattr: for claude, session_field IS short_id, and the
+            # caller's transport key (the 8-hex jobId `claude attach` wants) must
+            # win over the full UUID that setattr just wrote there.
+            fresh.short_id = short_id
         entries.append(fresh)
         return entries
 
     persisted = update_registry(_updater, path=registry_path)
     for entry in persisted:
-        if entry.harness == provider and getattr(entry, session_field) == session_id:
+        if entry.harness == provider and entry.harness_session_id == session_id:
             return entry
     # update_registry returns the persisted entries list (the updater's
     # output), so the row must be present; a miss means the upsert dropped it.
