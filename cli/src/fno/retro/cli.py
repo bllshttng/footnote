@@ -86,55 +86,14 @@ def _resolve_pr_session_ids(
 
     Returns ``[]`` on any failure (missing/unreadable/malformed ledger, no repo
     scope, no match), so the caller treats "no owning session" as the read-only
-    case (x-90b8) rather than crashing the harvest.
+    case (x-90b8) rather than crashing the harvest. The join itself lives in
+    :mod:`fno.ledger_join` (shared with ``fno carveout list --pr-number``); this
+    wrapper keeps retro's flatten-to-empty contract.
     """
-    if not repo_slug:
-        return []
-    try:
-        data = json.loads(ledger_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    entries = data.get("entries") if isinstance(data, dict) else data
-    if not isinstance(entries, list):
-        return []
-    slug_l = repo_slug.lower()
-    out: list[str] = []
-    seen: set[str] = set()
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        url = e.get("pr_url")
-        url_s = url.rstrip("/").lower() if isinstance(url, str) else ""
-        if url_s:
-            matched = url_s.endswith(f"/{slug_l}/pull/{pr}")
-        else:
-            # No url on the entry: fall back to the bare numeric field. Coerce
-            # to int so a string-stored pr ("522") still matches the int arg.
-            matched = False
-            for key in ("pr", "pr_number"):
-                val = e.get(key)
-                if val is None:
-                    continue
-                try:
-                    if int(val) == pr:
-                        matched = True
-                        break
-                except (ValueError, TypeError):
-                    pass
-        if not matched:
-            continue
-        # Defensive: a non-list ``sessions`` (e.g. a stray string) must NOT be
-        # spread into per-character ids - guard the type before list().
-        sessions_val = e.get("sessions")
-        sids = list(sessions_val) if isinstance(sessions_val, list) else []
-        if e.get("session_id"):
-            sids.append(e["session_id"])
-        for s in sids:
-            s = str(s)
-            if s and s not in seen:
-                seen.add(s)
-                out.append(s)
-    return out
+    from fno.ledger_join import resolve_pr_sessions
+
+    sessions, _reason = resolve_pr_sessions(ledger_path, pr, repo_slug)
+    return sessions
 
 
 def _completion_md_for(plan_path: Optional[str], repo_root: Path) -> Optional[Path]:

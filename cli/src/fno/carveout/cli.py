@@ -122,19 +122,30 @@ def list_carveouts(
         "/pr merged passes the merged PR's owning session(s) so it never touches "
         "another session's backfill.",
     ),
+    pr_number: int = typer.Option(
+        None,
+        "--pr-number",
+        help="Resolve the merged PR's owning session(s) from ledger.json and "
+        "filter to them (replaces the ritual's jq+grep pipeline). Mutually "
+        "exclusive with --session-id.",
+    ),
     as_json: bool = typer.Option(
         False,
         "--json",
         "-J",
-        help="Emit one JSON object per line (JSONL) instead of a human summary.",
+        help="Emit one JSON object per line (JSONL) instead of a human summary. "
+        "With --pr-number, emits ONE object carrying sessions_resolved + carveouts.",
     ),
 ) -> None:
-    """List recorded carve-outs (read-only), optionally filtered by --kind / --session-id.
+    """List recorded carve-outs (read-only), filtered by --kind / --session-id / --pr-number.
 
     Reads the CANONICAL ledger (the same one `add` writes to), so it works from
     a linked worktree. A missing ledger is not an error: prints nothing, exits 0.
     Powers /fno:pr merged's backfill slot via
-    `--kind backfill --session-id <sid> --json`.
+    `--kind backfill --pr-number <n> --json`, whose `sessions_resolved` (and,
+    when empty, `reason`) drives the consume-vs-read-only branch - so that
+    branch keys on verb output, never on an empty shell variable of unknowable
+    provenance (x-f47f US2).
     """
     if kind is not None and kind not in VALID_KINDS:
         typer.echo(
@@ -144,11 +155,33 @@ def list_carveouts(
         )
         raise typer.Exit(2)
 
+    if pr_number is not None and session_id:
+        typer.echo(
+            "carveout: pass --pr-number or --session-id, not both "
+            "(--pr-number resolves the sessions itself).",
+            err=True,
+        )
+        raise typer.Exit(2)
+
     from fno.carveout.core import read_carveouts, resolve_carveout_root
+
+    reason = None
+    if pr_number is not None:
+        from fno.graph._reconcile import resolve_current_repo_slug
+        from fno.ledger_join import resolve_pr_sessions
+        from fno.paths import ledger_json
+
+        session_id, reason = resolve_pr_sessions(
+            ledger_json(), pr_number, resolve_current_repo_slug()
+        )
 
     # Typer gives [] for an unset repeatable option; pass None so "no filter"
     # is distinct from "filter to the empty set".
     sessions = session_id or None
+    if pr_number is not None and not sessions:
+        # Unresolved ownership is NOT "filter to nothing": the caller must see
+        # every carve-out read-only plus the reason, and consume none.
+        sessions = None
     try:
         rows = read_carveouts(resolve_carveout_root(), kind=kind, session_ids=sessions)
     except CarveoutError as exc:
@@ -157,6 +190,21 @@ def list_carveouts(
         # unreadable ledger as "no backfills to run".
         typer.echo(f"carveout: failed to read carve-outs: {exc}", err=True)
         raise typer.Exit(1)
+
+    if pr_number is not None:
+        resolved = list(sessions or [])
+        if as_json:
+            typer.echo(json.dumps({
+                "pr_number": pr_number,
+                "sessions_resolved": resolved,
+                "reason": reason,
+                "consumable": bool(resolved),
+                "carveouts": rows,
+            }, separators=(",", ":")))
+            return
+        if reason:
+            # Never silent: the read-only branch must be able to state WHY.
+            typer.echo(f"carveout: {reason}; listing read-only, not consumable", err=True)
     for r in rows:
         if as_json:
             typer.echo(json.dumps(r, separators=(",", ":")))

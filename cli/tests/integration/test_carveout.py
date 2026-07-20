@@ -362,6 +362,123 @@ def test_carveout_list_filters_by_session(_repo: Path):
     assert [r["id"] for r in rows] == ["cv-a"]  # S2's backfill excluded
 
 
+# -- `carveout list --pr-number` ledger join (x-f47f US2) --
+
+
+def _pin_ledger(monkeypatch, path: Path, slug="bllshttng/footnote") -> None:
+    import fno.graph._reconcile as R
+    import fno.paths as P
+    monkeypatch.setattr(P, "ledger_json", lambda: path)
+    monkeypatch.setattr(R, "resolve_current_repo_slug", lambda *a, **k: slug)
+
+
+def _write_backfills(repo: Path) -> None:
+    ledger = repo / ".fno" / "carveouts.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        '{"id":"cv-a","kind":"backfill","session_id":"S1","description":"mine"}\n'
+        '{"id":"cv-b","kind":"backfill","session_id":"S2","description":"also mine"}\n'
+        '{"id":"cv-c","kind":"backfill","session_id":"S9","description":"theirs"}\n',
+        encoding="utf-8",
+    )
+
+
+def test_list_pr_number_resolves_both_sessions(_repo: Path, monkeypatch):
+    """AC2-HP: a PR-480-shaped entry resolves BOTH session ids, and the listed
+    carve-outs are exactly theirs - not the whole ledger."""
+    lj = _repo / "ledger.json"
+    lj.write_text(json.dumps({"entries": [
+        {"pr_number": 480, "sessions": ["S1"], "session_id": "S2",
+         "pr_url": "https://github.com/bllshttng/footnote/pull/480"},
+        {"pr_number": 999, "session_id": "S9"},
+    ]}), encoding="utf-8")
+    _pin_ledger(monkeypatch, lj)
+    _write_backfills(_repo)
+
+    result = runner.invoke(
+        app, ["carveout", "list", "--kind", "backfill", "--pr-number", "480", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout.strip())
+    assert sorted(out["sessions_resolved"]) == ["S1", "S2"]
+    assert out["reason"] is None and out["consumable"] is True
+    assert [c["id"] for c in out["carveouts"]] == ["cv-a", "cv-b"]
+
+
+def test_list_pr_number_matches_pr_url_suffix(_repo: Path, monkeypatch):
+    """An entry with no pr_number field still matches on its pr_url suffix."""
+    lj = _repo / "ledger.json"
+    lj.write_text(json.dumps({"entries": [
+        {"pr_url": "https://github.com/bllshttng/footnote/pull/480", "session_id": "S1"},
+        # Same number, different repo: must NOT be attributed to this PR.
+        {"pr_url": "https://github.com/bllshttng/abilities/pull/480", "session_id": "SX"},
+    ]}), encoding="utf-8")
+    _pin_ledger(monkeypatch, lj)
+    _write_backfills(_repo)
+
+    result = runner.invoke(
+        app, ["carveout", "list", "--kind", "backfill", "--pr-number", "480", "--json"]
+    )
+    out = json.loads(result.stdout.strip())
+    assert out["sessions_resolved"] == ["S1"]
+
+
+def test_list_pr_number_no_entry_states_reason_and_lists_readonly(_repo: Path, monkeypatch):
+    """AC1-FR: no ledger entry -> the reason is reported, every backfill is listed
+    read-only, and nothing is marked consumable."""
+    lj = _repo / "ledger.json"
+    lj.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    _pin_ledger(monkeypatch, lj)
+    _write_backfills(_repo)
+
+    result = runner.invoke(
+        app, ["carveout", "list", "--kind", "backfill", "--pr-number", "480", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout.strip())
+    assert out["sessions_resolved"] == [] and out["consumable"] is False
+    assert out["reason"] == "no ledger entry for PR #480"
+    assert [c["id"] for c in out["carveouts"]] == ["cv-a", "cv-b", "cv-c"]
+
+
+def test_list_pr_number_unreadable_ledger_is_not_no_match(_repo: Path, monkeypatch):
+    """The bug this verb replaces: a broken read must not read as 'no owning
+    session'. The reason distinguishes them."""
+    lj = _repo / "ledger.json"
+    lj.write_text("{not json", encoding="utf-8")
+    _pin_ledger(monkeypatch, lj)
+    _write_backfills(_repo)
+
+    out = json.loads(runner.invoke(
+        app, ["carveout", "list", "--kind", "backfill", "--pr-number", "480", "--json"]
+    ).stdout.strip())
+    assert out["consumable"] is False
+    assert "unreadable" in out["reason"]
+
+
+def test_list_pr_number_unresolvable_repo_refuses_to_attribute(_repo: Path, monkeypatch):
+    """No repo slug -> PR numbers collide across repos, so ownership is refused."""
+    lj = _repo / "ledger.json"
+    lj.write_text(json.dumps({"entries": [{"pr_number": 480, "session_id": "S1"}]}),
+                  encoding="utf-8")
+    _pin_ledger(monkeypatch, lj, slug=None)
+    _write_backfills(_repo)
+
+    out = json.loads(runner.invoke(
+        app, ["carveout", "list", "--kind", "backfill", "--pr-number", "480", "--json"]
+    ).stdout.strip())
+    assert out["sessions_resolved"] == [] and out["consumable"] is False
+    assert "repo slug unresolved" in out["reason"]
+
+
+def test_list_rejects_pr_number_with_session_id(_repo: Path):
+    result = runner.invoke(
+        app, ["carveout", "list", "--pr-number", "480", "--session-id", "S1"]
+    )
+    assert result.exit_code == 2
+    assert "not both" in result.output
+
+
 def test_carveout_list_null_values_render_placeholders(_repo: Path):
     """Explicit JSON null fields render as placeholders, never the string 'None'."""
     ledger = _repo / ".fno" / "carveouts.jsonl"
