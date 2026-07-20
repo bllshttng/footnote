@@ -764,3 +764,94 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
     assert seen["init"] is False                    # never ran init under x-other
     combined = result.output + (getattr(result, "stderr", "") or "")
     assert "x-other" in combined
+
+
+# ---------------------------------------------------------------------------
+# do-phase provenance stamp (x-0469). `fno target init` is the do-phase entry
+# by contract, so it is the one moment that knows which session does the work.
+# ---------------------------------------------------------------------------
+
+
+def _stamp_env(monkeypatch, tmp_path, *, node_id="x-abcd", graph=None):
+    """Point the stamp helper at a scratch repo root + graph, with an identity."""
+    import json
+
+    root = tmp_path / "repo"
+    (root / ".fno").mkdir(parents=True)
+    (root / ".fno" / "target-state.md").write_text(
+        f"---\ngraph_node_id: {node_id}\n---\n", encoding="utf-8"
+    )
+    graph_path = tmp_path / "graph.json"
+    entries = graph if graph is not None else [{"id": node_id, "title": "t"}]
+    graph_path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+
+    monkeypatch.setattr(target_cli, "_manifest_node_id", lambda _p: node_id)
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **k: root)
+    monkeypatch.setattr("fno.paths.graph_json", lambda *a, **k: graph_path)
+    for marker in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-doer")
+    return graph_path
+
+
+def _sessions(graph_path, node_id="x-abcd"):
+    import json
+
+    entries = json.loads(graph_path.read_text(encoding="utf-8"))["entries"]
+    return next(e for e in entries if e["id"] == node_id).get("sessions", [])
+
+
+def test_do_stamp_records_the_session_that_ran_init(monkeypatch, tmp_path):
+    """AC2-HP: the node points at the session that DID the work, not planned it."""
+    graph_path = _stamp_env(
+        monkeypatch, tmp_path,
+        graph=[{"id": "x-abcd", "sessions": [
+            {"phase": "blueprint", "harness": "claude",
+             "session_id": "sess-planner", "at": "2026-07-20T00:00:00Z"},
+        ]}],
+    )
+
+    target_cli._maybe_stamp_do_session()
+
+    rows = _sessions(graph_path)
+    do_rows = [r for r in rows if r["phase"] == "do"]
+    assert len(do_rows) == 1
+    assert do_rows[0]["session_id"] == "sess-doer"
+    assert do_rows[0]["harness"] == "claude"
+    # append-only: the planning record survives untouched.
+    assert any(r["phase"] == "blueprint" for r in rows)
+
+
+def test_do_stamp_is_idempotent(monkeypatch, tmp_path):
+    """Re-running init is a visible no-op, never a duplicate row."""
+    graph_path = _stamp_env(monkeypatch, tmp_path)
+
+    target_cli._maybe_stamp_do_session()
+    target_cli._maybe_stamp_do_session()
+
+    assert len([r for r in _sessions(graph_path) if r["phase"] == "do"]) == 1
+
+
+def test_do_stamp_failure_never_raises(monkeypatch, tmp_path, capsys):
+    """AC2-FR: a stamp failure warns; init's exit code is never affected."""
+    _stamp_env(monkeypatch, tmp_path)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("graph locked")
+
+    monkeypatch.setattr("fno.graph.store.append_session_record", _boom)
+
+    target_cli._maybe_stamp_do_session()  # must not raise
+
+    assert "do-phase provenance stamp failed" in capsys.readouterr().err
+
+
+def test_do_stamp_skipped_without_ambient_identity(monkeypatch, tmp_path, capsys):
+    """Provenance is never invented: no identity -> a named skip, no row."""
+    graph_path = _stamp_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+    target_cli._maybe_stamp_do_session()
+
+    assert _sessions(graph_path) == []
+    assert "no ambient identity" in capsys.readouterr().err

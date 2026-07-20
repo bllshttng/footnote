@@ -455,6 +455,7 @@ def init(
         _print_orientation_report()
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
+        _maybe_stamp_do_session()
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
@@ -533,6 +534,51 @@ def _maybe_reconcile_lane_slot() -> None:
         reconcile_lane_slot(node_id, pid=resolve_session_pid())
     except Exception:  # noqa: BLE001 - additive; never affect the init exit code
         pass
+
+
+def _maybe_stamp_do_session() -> None:
+    """Record THIS session as the node's ``do`` phase (x-0469).
+
+    `fno target init` is the do-phase entry by contract, so it is the one moment
+    that knows which session is about to do the work. Without this the node's
+    `sessions[]` names only the session that PLANNED it, and every resolver that
+    reads the graph for a node's worker session comes up empty.
+
+    Best-effort by design: the append is idempotent under the graph lock, and a
+    missing node id, absent identity, or locked graph is a WARN, never fatal --
+    provenance must never fail an init the caller already succeeded at.
+    """
+    try:
+        from fno.harness_identity import resolve_harness_identity
+        from fno.paths import graph_json, resolve_repo_root
+
+        manifest = resolve_repo_root() / ".fno" / "target-state.md"
+        node_id = _manifest_node_id(manifest)
+        if not node_id:
+            return
+        ident = resolve_harness_identity()
+        if not ident.session_id or not ident.harness:
+            typer.echo(
+                f"target init: no ambient identity; skipped do-phase stamp for {node_id}.",
+                err=True,
+            )
+            return
+        path = graph_json()
+        if not path.exists():
+            return
+        from fno.graph.store import append_session_record
+
+        found, _added = append_session_record(
+            path, node_id, phase="do",
+            harness=ident.harness, session_id=ident.session_id,
+        )
+        if not found:
+            typer.echo(
+                f"target init: node {node_id} absent from the graph; do-phase stamp skipped.",
+                err=True,
+            )
+    except Exception as exc:  # noqa: BLE001 - additive; never affect the init exit code
+        typer.echo(f"target init: do-phase provenance stamp failed ({exc}).", err=True)
 
 
 def _print_orientation_report() -> None:
