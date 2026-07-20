@@ -7,6 +7,7 @@ refuses to write a stub, plus a redirect on the substitution-prone
 """
 from __future__ import annotations
 
+import os
 
 from typer.testing import CliRunner
 
@@ -630,14 +631,15 @@ def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypat
     assert result.exit_code == 0, result.output
     assert "did NOT take" in result.output, result.output
 
-    # The grant IS present AND anchored to a claim: nothing to warn about.
+    # The grant IS present AND anchored to PROVEN life (a live owner_pid):
+    # nothing to warn about. A present-but-stale claim would NOT qualify.
     manifest.write_text(
-        '---\nattended: true\nauthority: full\n---\ntarget_claim_key: "node:x-1"\n'
+        f"---\nattended: true\nauthority: full\nowner_pid: {os.getpid()}\n---\n"
     )
     result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" not in result.output, result.output
-    assert "ANCHOR" not in result.output, result.output
+    assert "ANCHOR IT" not in result.output, result.output
     _clear_root_cache()
 
 
@@ -663,7 +665,7 @@ def test_target_init_yolo_unanchored_grant_is_named(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["target", "init", "--input", "some idea", "--yolo"])
     assert result.exit_code == 0, result.output
-    assert "NOTHING TO ANCHOR IT" in result.output, result.output
+    assert "NOTHING LIVE TO ANCHOR IT" in result.output, result.output
     _clear_root_cache()
 
 

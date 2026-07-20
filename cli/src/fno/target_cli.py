@@ -458,36 +458,37 @@ def init(
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
-def _warn_if_authority_not_granted(manifest: Optional[Path] = None) -> None:
+def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
     """Name a --yolo that did not take: the write-once manifest and both of
     start's idempotent early returns drop the flag, and an ungranted session
     looks identical to one whose flag was dropped.
 
-    Callers on a worktree fast path pass their own manifest; the cwd-relative
-    default is only right for init.
+    Verdict comes from the orienter's own predicate, never a string match, so
+    this warning and the `attended` line can never disagree about whether the
+    grant holds - a stamped-but-stale claim denies authority in one place and
+    must not read as granted in the other. Callers on a worktree path pass their
+    own root; the cwd default is only right for init.
     """
     try:
         from fno.paths import resolve_repo_root
+        from fno.target.orient import _authority_granted, _read_manifest
 
-        if manifest is None:
-            manifest = resolve_repo_root() / ".fno" / "target-state.md"
-        text = manifest.read_text(encoding="utf-8") if manifest.exists() else None
+        root = project_root or resolve_repo_root()
+        raw = _read_manifest(root)
+        if _authority_granted(raw):
+            return
+        stamped = str((raw or {}).get("authority", "")).strip().lower() == "full"
     except Exception:  # noqa: BLE001 - a warning must never fail a run that worked
         return
-    if text is not None and "authority: full" in text:
-        # Stamped, but a grant with no claim to anchor it is inert: owner_pid is
-        # transient, so nothing can later tell this session from an abandoned
-        # one, and the orienter refuses to advertise it (fail closed). Say so
-        # here rather than let the operator discover a silently powerless grant.
-        if "target_claim_key:" in text:
-            return
+    if stamped:
         typer.echo(
-            "--yolo was stamped but has NOTHING TO ANCHOR IT - this session will "
-            "not act with authority.\nA free-text run claims no backlog node, and "
-            "without a claim an abandoned session is indistinguishable from a live "
-            "one, so the grant is refused rather than left to outlive the session.\n"
-            "Re-run against a node or a plan (`fno target start --yolo <node>`), or "
-            "continue without authority.",
+            "--yolo was stamped but has NOTHING LIVE TO ANCHOR IT - this session "
+            "will not act with authority.\nAuthority needs a held claim (or a live "
+            "owner_pid): a free-text run claims no node, and a stale claim proves "
+            "nothing, so an abandoned session would be indistinguishable from a "
+            "live one. The grant is refused rather than left to outlive its "
+            "session.\nRe-run against a backlog node (`fno target start --yolo "
+            "<node>`), or continue without authority.",
             err=True,
         )
         return
@@ -495,7 +496,7 @@ def _warn_if_authority_not_granted(manifest: Optional[Path] = None) -> None:
         "The manifest is write-once and one already existed, so the flag was a "
         "no-op. To run with authority, finish or cancel this session first "
         "(`/fno:cancel-target`), then start a fresh one."
-        if text is not None
+        if raw
         else "No manifest was written, so nothing consumed the flag. Run "
         "`fno target init --yolo --input <node>` to claim this session with a grant."
     )
@@ -1010,7 +1011,7 @@ def start(
             f"node=already-claimed"
         )
         if yolo:
-            _warn_if_authority_not_granted(manifest)
+            _warn_if_authority_not_granted(wt_path)
         return
 
     # Project the node's model pin / tier into init's dispatch pin so a bare

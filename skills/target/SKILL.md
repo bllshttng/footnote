@@ -135,11 +135,12 @@ It grants no new powers: merge stays on the auto-merge axis, and destructive or 
 `fno agents spawn --yolo` grants a *permission/sandbox* bypass to a spawned worker and touches no judgment.
 Same word, orthogonal axes: a yolo target session still asks the harness for permission exactly as before, and a yolo-spawned worker still stops on an architecture fork unless it also holds an authority grant.
 
-**The grant needs a node or a plan; a free-text run cannot hold it.**
-Authority is anchored to the session's claim, and only a node-bound or plan-bound run takes one.
-A free-text `/target yolo "some idea"` claims nothing, and `owner_pid` is transient - so minutes after init nothing could distinguish that session from one that crashed and left its manifest behind.
-Rather than let a grant outlive its session, an unanchored one is refused and `fno target init` says so.
-Bind a node first (`/think` then `/blueprint`), then run `/target yolo <node>`.
+**The grant needs a BACKLOG NODE; free text cannot hold it, and neither can an unlinked plan.**
+Authority is anchored to the session's claim, and init claims only `node:<id>` - resolved from a node input, or from a plan that resolves to a node in the graph.
+A free-text run claims nothing; so does a standalone plan file that no node points at.
+In both cases `owner_pid` is the only anchor and it is transient, so minutes after init nothing could distinguish that session from one that crashed and left its manifest behind.
+Rather than let a grant outlive its session, an unanchored one is refused and `fno target init` says so at the point it happens.
+Bind a node first (`/think` then `/blueprint` files one), then run `/target yolo <node>`.
 
 **How to read the grant.** Pass `--yolo` to `fno target start` / `fno target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
 Read it back from `fno target status --json` - the `attended` line carries `; authority: full (yolo)` when the grant is live.
@@ -164,7 +165,11 @@ Every `<help>` currently written into this skill and its references is already a
 Authority changes none of them.
 It governs the decisions you would otherwise stop and ask about *without* a written `<help>` site - the architecture forks, the ambiguous requirements, the interactive prompts inside composed skills - which is exactly where an overnight walk actually stalls.
 
-**The Autonomous Decisions ledger.** Every decision taken under authority appends ONE entry, immediately, before acting on it:
+**The Autonomous Decisions ledger.** Nothing enforces this section - no code reads `authority` or writes an entry, so the ledger is a behavioral contract you keep, exactly like the decide-and-record rule it records.
+That is deliberate (the grant changes judgment, and judgment has no gate), but it means a skipped entry fails silently: the session looks identical either way, and the loss shows up only when someone goes looking for a rationale that was never written.
+Treat the append as part of making the decision, not as bookkeeping after it.
+
+Every decision taken under authority appends ONE entry, immediately, before acting on it:
 
 ```markdown
 ## Autonomous Decisions
