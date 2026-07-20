@@ -7,7 +7,9 @@ by the inspectable `--dry-run` path.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 import types
 from pathlib import Path
 
@@ -1611,7 +1613,9 @@ def test_installed_bin_crates_rev_accept_dirty_returns_rev(tmp_path: Path, monke
         update.subprocess, "run",
         _fake_version_run('{"crates_rev": "abc123", "dirty": true}'),
     )
-    assert update._installed_bin_crates_rev(b, accept_dirty=True) == "abc123"
+    meta: dict = {}
+    assert update._installed_bin_crates_rev(b, accept_dirty=True, out_meta=meta) == "abc123"
+    assert meta == {"dirty": True}
     assert update._installed_bin_crates_rev(b) is None
 
 
@@ -1700,6 +1704,10 @@ def test_post_deploy_verify_accepts_dirty_build_with_matching_rev(
 
     def _fake_run(cmd, **kw):
         if cmd and cmd[0] == "cargo":
+            # cargo "writes" the artifact: give it a safely-future mtime so the
+            # dirty-build freshness gate reads it as produced by this run.
+            future = time.time() + 60
+            os.utime(fake_bin, (future, future))
             return types.SimpleNamespace(returncode=0)
         if cmd and "version" in cmd:
             return types.SimpleNamespace(
@@ -1715,6 +1723,44 @@ def test_post_deploy_verify_accepts_dirty_build_with_matching_rev(
     err = capsys.readouterr().err
     assert "post-deploy verify FAILED" not in err
     assert "dirty" in err
+
+
+def test_post_deploy_verify_rejects_stale_dirty_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A dirty binary that rev-matches source but PREDATES this cargo run is a
+    stale artifact from an earlier dirty install - the rev cannot prove which
+    uncommitted content it carries, so verify halts instead of syncing it."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    past = time.time() - 3600
+    os.utime(fake_bin, (past, past))
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    subtree = "a" * 40
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
+    monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def _fake_run(cmd, **kw):
+        if cmd and cmd[0] == "cargo":
+            return types.SimpleNamespace(returncode=0)  # exits 0, writes nothing
+        if cmd and "version" in cmd:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"crates_rev": "' + subtree + '", "dirty": true}',
+            )
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
+
+    with pytest.raises(typer.Exit):
+        update._refresh_rust_bins(source)
+    err = capsys.readouterr().err
+    assert "post-deploy verify FAILED" in err
+    assert "predates" in err
 
 
 def test_sync_triad_copies_into_location_hosting_a_bin(

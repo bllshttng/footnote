@@ -22,6 +22,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -320,7 +321,11 @@ def _cargo_installed_bin() -> Optional[Path]:
 
 
 def _installed_bin_crates_rev(
-    binary: Path, *, timeout: float = 20.0, accept_dirty: bool = False
+    binary: Path,
+    *,
+    timeout: float = 20.0,
+    accept_dirty: bool = False,
+    out_meta: Optional[dict] = None,
 ) -> Optional[str]:
     """The clean crates/ subtree rev the installed binary self-reports, or None.
 
@@ -337,6 +342,9 @@ def _installed_bin_crates_rev(
     rev-matching dirty binary proves the deploy landed, and rejecting it
     wedged every subsequent sync on a false failure. The staleness gate and
     triad check keep the strict default.
+
+    ``out_meta`` (when a dict) receives the parsed metadata (``dirty``) so
+    the caller can branch on it without invoking the binary a second time.
     """
     try:
         result = subprocess.run(
@@ -359,6 +367,8 @@ def _installed_bin_crates_rev(
         return None
     if not isinstance(data, dict):
         return None
+    if isinstance(out_meta, dict):
+        out_meta["dirty"] = data.get("dirty") is True
     if data.get("dirty") is True and not accept_dirty:
         return None
     rev = data.get("crates_rev")
@@ -717,6 +727,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         return "dry-run"
 
     typer.echo(f"fno update: refreshing rust bins: {shlex.join(cmd)}")
+    cargo_started = time.time()
     try:
         result = subprocess.run(cmd, check=False)
     except OSError as exc:
@@ -741,14 +752,20 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # is not what the runtime actually resolves) - the marker gate hid exactly
     # this class. HALT loud on mismatch with both revs printed. Skipped
     # only when subtree is undeterminable (force with no git rev to check against).
-    # accept_dirty: a rev-matching dirty build proves the deploy landed (we just
-    # built from this tree); rejecting it wedged every later sync falsely.
+    # accept_dirty: a rev-matching dirty build no longer auto-fails (rejecting it
+    # wedged every later sync falsely). But a rev alone cannot prove WHICH
+    # uncommitted content a dirty binary carries - a stale dirty artifact from
+    # the same commit would rev-match if cargo silently failed to replace it -
+    # so a dirty build must additionally postdate this cargo run (the freshness
+    # proof that this rebuild wrote this file). Clean builds keep rev-only: a
+    # rev-matching clean binary is content-identical by definition.
     if subtree is not None:
         deployed = _cargo_installed_bin()
+        meta: dict = {}
         verify_rev = (
             None
             if deployed is None
-            else _installed_bin_crates_rev(deployed, accept_dirty=True)
+            else _installed_bin_crates_rev(deployed, accept_dirty=True, out_meta=meta)
         )
         if verify_rev != subtree:
             typer.echo(
@@ -761,10 +778,26 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
                 err=True,
             )
             raise typer.Exit(1)
-        if _installed_bin_crates_rev(deployed) is None:
+        if meta.get("dirty"):
+            try:
+                deployed_mtime = deployed.stat().st_mtime
+            except OSError:
+                deployed_mtime = 0.0
+            if deployed_mtime < cargo_started:
+                typer.echo(
+                    "fno update: ERROR: post-deploy verify FAILED - the deployed"
+                    f" fno-agents is a dirty build at rev {subtree[:12]} whose"
+                    " artifact predates this rebuild; a rev match cannot prove"
+                    " which uncommitted content it carries. The rebuild did not"
+                    f" land where the runtime resolves it (install root"
+                    f" {install_root}). NOT continuing.",
+                    err=True,
+                )
+                raise typer.Exit(1)
             typer.echo(
                 "fno update: note: deployed build is dirty (uncommitted crates/"
-                f" changes at rev {subtree[:12]}); verify passed on the rev match.",
+                f" changes at rev {subtree[:12]}); verify passed on the rev match"
+                " plus a fresh artifact.",
                 err=True,
             )
 
