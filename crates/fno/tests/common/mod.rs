@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use fno::proto::{
-    read_msg_sync, write_msg_sync, AgentRow, BlockDir, ClientMsg, Command, Frame, MouseEvent,
-    ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
+    write_msg_sync, AgentRow, BlockDir, ClientMsg, Command, Frame, MouseEvent, ServerMsg,
+    SquadMeta, BUILD_VERSION, MAX_MSG_BYTES, PROTO_VERSION,
 };
 use fno::tree::Rect;
 use fno::vt::{frame_text, Pane};
@@ -336,6 +336,14 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     let iso = sock.parent().unwrap_or_else(|| Path::new("."));
     cmd.env("FNO_AGENTS_HOME", iso.join("iso-agents"));
     cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
+    // Same leak, one reader over: the backlog reader resolves FNO_GRAPH_JSON >
+    // $HOME/.fno/graph.json, so without this the server derives Backlog cards AND
+    // mission squads from the DEVELOPER'S real graph. An active mission adds a
+    // synthetic squad to the sideline and breaks squad-count assertions - the
+    // failure follows whatever happens to be in flight on the machine, which is
+    // why it reads as a flake, and a clean CI home hides it entirely. The path
+    // deliberately does not exist: no graph means an empty lane and no missions.
+    cmd.env("FNO_GRAPH_JSON", iso.join("iso-graph.json"));
     // Isolated-account rosters are discovered via the provider config
     // (isolated_account_dirs -> $PWD/.fno/config.toml, else this override's
     // sibling config.toml, else ~/.fno/config.toml). Point the override at an
@@ -408,6 +416,15 @@ pub struct FakeClient {
     pub search_results: Vec<(u64, u32, u32)>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
+    /// Bytes read off the socket that do not yet form a whole message.
+    ///
+    /// The stream carries length-prefixed frames and the socket has a short read
+    /// timeout so the wait loops can poll. Those two only compose if a partial
+    /// read is KEPT: `read_exact` discards what it consumed when it errors, so a
+    /// body that straddles the timeout used to be dropped, and the next read took
+    /// mid-body bytes for a length prefix - a desync that surfaced as an absurd
+    /// "message of N bytes exceeds the cap" panic under load.
+    carry: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -441,6 +458,7 @@ impl FakeClient {
             copies: Vec::new(),
             search_results: Vec::new(),
             order: Vec::new(),
+            carry: Vec::new(),
         }
     }
 
@@ -556,16 +574,49 @@ impl FakeClient {
         }
     }
 
+    /// Read the next whole message, or `None` when none is available yet.
+    ///
+    /// Resumable by construction: bytes land in `carry` via plain `read` (which
+    /// never discards a short read) and a message is decoded only once its whole
+    /// body is buffered. A timeout mid-body is therefore just "not yet" - the
+    /// stream can never lose framing, however the reads happen to split.
+    fn next_msg(&mut self) -> Option<ServerMsg> {
+        loop {
+            if let Some(msg) = self.take_framed() {
+                return Some(msg);
+            }
+            let mut buf = [0u8; 64 * 1024];
+            match self.stream.read(&mut buf) {
+                Ok(0) => return None, // peer closed
+                Ok(n) => self.carry.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                    return None
+                }
+                Err(e) => panic!("fake client read failed: {e}"),
+            }
+        }
+    }
+
+    /// Pop one complete length-prefixed message out of `carry`, if one is there.
+    fn take_framed(&mut self) -> Option<ServerMsg> {
+        let len = u32::from_be_bytes(self.carry.get(..4)?.try_into().ok()?) as usize;
+        assert!(
+            len <= MAX_MSG_BYTES as usize,
+            "framing desync: length prefix claims {len} bytes"
+        );
+        if self.carry.len() < 4 + len {
+            return None; // body still arriving
+        }
+        let body: Vec<u8> = self.carry.drain(..4 + len).skip(4).collect();
+        Some(serde_json::from_slice(&body).expect("server sent undecodable message"))
+    }
+
     /// Absorb whatever arrives for `dur` (used for wire-SILENCE windows).
     pub fn pump(&mut self, dur: Duration) {
         let deadline = Instant::now() + dur;
         while Instant::now() < deadline {
-            match read_msg_sync::<_, ServerMsg>(&mut self.stream) {
-                Ok(m) => self.absorb(m),
-                Err(ProtoError::Io(e))
-                    if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
-                Err(ProtoError::Closed) => return,
-                Err(e) => panic!("fake client read failed: {e}"),
+            if let Some(m) = self.next_msg() {
+                self.absorb(m);
             }
         }
     }
@@ -588,11 +639,8 @@ impl FakeClient {
                         .collect::<Vec<_>>(),
                 );
             }
-            match read_msg_sync::<_, ServerMsg>(&mut self.stream) {
-                Ok(m) => self.absorb(m),
-                Err(ProtoError::Io(e))
-                    if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
-                Err(e) => panic!("fake client read failed waiting for {what}: {e}"),
+            if let Some(m) = self.next_msg() {
+                self.absorb(m);
             }
         }
     }
