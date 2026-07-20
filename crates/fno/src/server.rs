@@ -764,6 +764,93 @@ fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
     }
 }
 
+/// Is `delta` on `path`? Takes the PATH value rather than reading the
+/// environment so a test can probe a scratch dir without mutating process-wide
+/// state that its parallel siblings share.
+fn delta_in_path(path: Option<&std::ffi::OsStr>) -> bool {
+    path.is_some_and(|p| {
+        std::env::split_paths(p).any(|d| {
+            let f = d.join("delta");
+            f.is_file() || f.is_symlink()
+        })
+    })
+}
+
+/// The renderer chain for a diff pane: delta when installed, git's own
+/// color output through `less` otherwise. Resolved at each open, never cached,
+/// so installing or removing delta takes effect on the next toggle.
+///
+/// `--paging=always` is load-bearing: without it delta dumps and exits on a
+/// short diff, which reads as a broken pane rather than a small diff.
+fn diff_pager() -> &'static str {
+    if delta_in_path(std::env::var_os("PATH").as_deref()) {
+        "delta --paging=always"
+    } else {
+        "less -R"
+    }
+}
+
+/// The diff pane's shell script, rendering the working diff into
+/// `pager`. Pure so the behavioral tests can run it for real with `cat`.
+///
+/// Every branch prints something. A pane that exits with no output is the
+/// silent failure this feature is most exposed to: an empty diff, a repo with
+/// no commits yet, and a non-git cwd would all produce one, and the operator
+/// reads the flash-and-exit as "the feature is broken" rather than "there is
+/// nothing to show". So the clean case states itself, an unborn HEAD diffs
+/// against the empty tree, and a non-repo lets git's own error text through.
+/// Untracked files are invisible to `git diff`, hence the header count.
+#[cfg(test)]
+thread_local! {
+    /// Test override for the diff pane's shell program (see [`diff_argv`]):
+    /// points a test at a nonexistent binary so the spawn-failure path runs.
+    static DIFF_SHELL: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_diff_shell(program: &str) {
+    DIFF_SHELL.with(|p| *p.borrow_mut() = Some(program.to_string()));
+}
+
+/// The diff pane's argv: the assembled script handed to a shell. The
+/// script is built per call, so the renderer chain is re-probed at each open.
+fn diff_argv() -> Vec<String> {
+    #[cfg(not(test))]
+    let sh = "sh".to_string();
+    #[cfg(test)]
+    let sh = DIFF_SHELL
+        .with(|p| p.borrow().clone())
+        .unwrap_or_else(|| "sh".to_string());
+    vec![sh, "-c".to_string(), diff_script(diff_pager())]
+}
+
+fn diff_script(pager: &str) -> String {
+    format!(
+        r#"{{
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git rev-parse --is-inside-work-tree 2>&1
+else
+  rev=HEAD
+  label=HEAD
+  if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    rev=$(git hash-object -t tree /dev/null)
+    label="the empty tree (no commits yet)"
+  fi
+  u=$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')
+  if [ "$u" -gt 0 ]; then
+    echo "$u untracked file(s) not shown"
+  fi
+  if git diff --quiet "$rev" 2>/dev/null; then
+    echo "no changes vs $label"
+  else
+    git -c color.ui=always diff "$rev"
+  fi
+fi
+}} | {pager}"#
+    )
+}
+
 /// FNV-1a over bytes: tiny, dependency-free, deterministic - exactly what a
 /// stable-per-epic synthetic id needs (no crypto property required).
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -995,6 +1082,11 @@ struct Core {
     /// teardown; `agent_rows()` also checks `panes` liveness lazily so a stale
     /// entry can never present a dead pane.
     attached: HashMap<String, u64>,
+    /// The one live diff pane, as `(source cwd, pane id)`. One at a
+    /// time by construction, so the "at most one pane per source" invariant
+    /// needs no per-source map and no GC: a stale id (the pane was closed by
+    /// any other path) reads as closed, and the next toggle opens fresh.
+    diff_pane: Option<(String, u64)>,
     /// (x-8f11) Durable membership of each PERSISTED named squad: squad id ->
     /// its recruited members (attach-ids + tombstone bits). Populated only by
     /// `NewSquad`, `RecruitAgents`, and restore; presence here is what marks a
@@ -4192,6 +4284,95 @@ impl Core {
         }
     }
 
+    /// Toggle the git working-diff pane. `agent` names a sideline row
+    /// (menu path, resolved to its registry cwd); `None` takes the focused
+    /// pane's spawn cwd (keybind path).
+    ///
+    /// Close runs before open so a press is always a close when one is live -
+    /// never a queued reopen. That is what makes a double-press converge: the
+    /// second press resolves against the state the first one left, so two
+    /// presses land on open-then-closed, never two panes for one source.
+    ///
+    /// Every path ends in a visible layout change or a notice; a press that
+    /// does nothing at all would read as a dead keybind.
+    fn toggle_diff_pane(
+        &mut self,
+        client_id: u64,
+        view: (u64, TabId),
+        vp: Rect,
+        agent: Option<String>,
+    ) -> Flow {
+        let focus = self.viewed_tab(view).map(|t| t.focus);
+        let src = match &agent {
+            Some(name) => self
+                .agents
+                .iter()
+                .find(|a| &a.name == name)
+                .map(|a| a.cwd.clone())
+                .unwrap_or_default(),
+            None => focus
+                .and_then(|p| self.panes.get(&p))
+                .map(|p| p.cwd.clone())
+                .unwrap_or_default(),
+        };
+        if let Some((open_src, pid)) = self.diff_pane.take() {
+            // A recorded pane the registry no longer knows was closed by some
+            // other path (close-pane, tab close, squad teardown). Treat it as
+            // already closed rather than let a stale id wedge the toggle.
+            if self.panes.contains_key(&pid) {
+                let flow = self.close_pane(pid);
+                if open_src == src || matches!(flow, Flow::Shutdown) {
+                    return flow;
+                }
+                // A different source: the old pane is gone, fall through and
+                // open this one (at most one diff pane in the session).
+            }
+        }
+        if src.is_empty() {
+            self.notice(client_id, "no worktree to diff for this row");
+            return Flow::Continue;
+        }
+        // A spawn silently ignores a cwd that is not a directory and lands in
+        // the server's own cwd instead - which for a diff pane would render
+        // some OTHER repo's diff under this row's name. Refuse pre-spawn: a
+        // reaped worktree must say so, not show a plausible wrong answer.
+        if !std::path::Path::new(&src).is_dir() {
+            self.notice(client_id, format!("worktree is gone: {src}"));
+            return Flow::Continue;
+        }
+        let (rows, cols) = focus
+            .and_then(|p| self.panes.get(&p))
+            .map(|e| e.vt.size())
+            .unwrap_or((vp.rows, vp.cols));
+        let argv = diff_argv();
+        // Spawn-first: `spawn_pane_cmd` touches no tree, so a spawn failure
+        // leaves the layout untouched with nothing to roll back.
+        let pid = match self.spawn_pane_cmd(&argv, rows, cols, &src) {
+            Ok(p) => p,
+            Err(e) => {
+                self.notice(client_id, format!("diff pane failed: {e}"));
+                return Flow::Continue;
+            }
+        };
+        let Some(tab) = self.viewed_tab_mut(view) else {
+            self.reap_pane(pid);
+            return Flow::Continue;
+        };
+        match tree::split(tab, vp, Axis::Horizontal, pid) {
+            Ok(()) => {
+                self.diff_pane = Some((src, pid));
+                self.push_layout(true);
+            }
+            Err(e) => {
+                // Refused (too narrow): reap the pre-spawned pane; the tree was
+                // never touched.
+                self.reap_pane(pid);
+                self.notice(client_id, e.to_string());
+            }
+        }
+        Flow::Continue
+    }
+
     fn command(&mut self, client_id: u64, cmd: Command) -> Flow {
         // Commands act on the SENDER's view (Locked 3/4). A command from a
         // just-deregistered client has nothing to act on: drop fail-closed.
@@ -4246,6 +4427,7 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::ToggleDiffPane { agent } => self.toggle_diff_pane(client_id, view, vp, agent),
             Command::ClosePane => {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
@@ -5988,6 +6170,7 @@ async fn serve(
         client_count: client_count_tx,
         seen: HashSet::new(),
         attached: HashMap::new(),
+        diff_pane: None,
         squad_members: HashMap::new(),
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
@@ -9069,6 +9252,427 @@ mod tests {
             .any(|t| t.contains("not a detachable viewer")));
     }
 
+    // -- git diff side pane ----------------------------------------------
+
+    /// A scratch dir under the temp root, keyed per test thread (one test ==
+    /// one thread) so parallel tests never share one. Callers drop it via
+    /// `remove_dir_all`; nothing outside the temp root is touched.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "fno-diff-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// An initialized repo with one commit, so `HEAD` resolves.
+    fn scratch_repo(tag: &str) -> std::path::PathBuf {
+        let d = scratch_dir(tag);
+        git(&d, &["init", "-q"]);
+        git(&d, &["config", "user.email", "t@t"]);
+        git(&d, &["config", "user.name", "t"]);
+        std::fs::write(d.join("tracked.txt"), "one\n").unwrap();
+        git(&d, &["add", "tracked.txt"]);
+        git(&d, &["commit", "-qm", "seed"]);
+        d
+    }
+
+    /// Run the REAL diff script with `cat` standing in for the pager, so the
+    /// shipped script's own behavior is what gets asserted (a pager would block
+    /// on a pipe and hide it).
+    fn run_diff_script(dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(diff_script("cat"))
+            .current_dir(dir)
+            .output()
+            .expect("script runs");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn diff_script_reports_no_changes_and_counts_untracked() {
+        // AC1-EDGE: a clean worktree must SAY it is clean and note the
+        // untracked files `git diff` cannot see. A zero-output pane here is
+        // the feature's signature silent failure.
+        let d = scratch_repo("clean");
+        std::fs::write(d.join("new-a.txt"), "a\n").unwrap();
+        std::fs::write(d.join("new-b.txt"), "b\n").unwrap();
+
+        let out = run_diff_script(&d);
+
+        assert!(
+            out.contains("no changes vs HEAD"),
+            "clean worktree states itself: {out:?}"
+        );
+        assert!(
+            out.contains("2 untracked file(s) not shown"),
+            "untracked count present: {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn diff_script_renders_staged_and_unstaged_changes() {
+        // AC1-HP (content half): the pane shows the working diff, and it is
+        // `diff HEAD` - staged changes included, not just unstaged ones.
+        let d = scratch_repo("changes");
+        std::fs::write(d.join("tracked.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(d.join("staged.txt"), "staged\n").unwrap();
+        git(&d, &["add", "staged.txt"]);
+
+        let out = run_diff_script(&d);
+
+        // Color escapes sit between the `+` and the text, so assert on the
+        // content and the file headers rather than a contiguous `+two`.
+        assert!(
+            out.contains("tracked.txt") && out.contains("two"),
+            "unstaged change present: {out:?}"
+        );
+        assert!(out.contains("staged.txt"), "staged change present: {out:?}");
+        assert!(
+            !out.contains("no changes"),
+            "a dirty worktree never claims clean: {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn diff_script_unborn_head_diffs_against_the_empty_tree() {
+        // AC3-ERR: `git diff HEAD` errors outright in a zero-commit repo. The
+        // script falls back to the empty tree so a fresh repo shows its staged
+        // content instead of a blank pane.
+        let d = scratch_dir("unborn");
+        git(&d, &["init", "-q"]);
+        git(&d, &["config", "user.email", "t@t"]);
+        git(&d, &["config", "user.name", "t"]);
+        std::fs::write(d.join("first.txt"), "hello\n").unwrap();
+        git(&d, &["add", "first.txt"]);
+
+        let out = run_diff_script(&d);
+
+        assert!(!out.trim().is_empty(), "never a blank pane");
+        assert!(
+            out.contains("first.txt") && out.contains("hello"),
+            "the empty-tree fallback shows the staged content: {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn diff_script_unborn_head_with_nothing_staged_still_speaks() {
+        // AC3-ERR, the emptier half: a repo with no commits AND nothing staged
+        // must still print something naming why.
+        let d = scratch_dir("unborn-empty");
+        git(&d, &["init", "-q"]);
+
+        let out = run_diff_script(&d);
+
+        assert!(
+            out.contains("no commits yet"),
+            "the unborn state is named, not blank: {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn diff_script_outside_a_repo_shows_gits_own_error() {
+        // AC1-ERR: a non-repo cwd renders git's own message. Honest visible
+        // failure beats a blank pane the operator has to guess about.
+        let d = scratch_dir("norepo");
+
+        let out = run_diff_script(&d);
+
+        assert!(
+            out.to_lowercase().contains("not a git repository"),
+            "git's own error reaches the pane: {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn diff_renderer_chain_prefers_delta_and_falls_back_to_less() {
+        // AC3-EDGE: delta is preferred when present, git-color + less when not.
+        // `--paging=always` is asserted because without it delta dumps and
+        // exits on a short diff, which reads as a broken pane.
+        let d = scratch_dir("pathprobe");
+        assert!(
+            !delta_in_path(Some(d.as_os_str())),
+            "an empty dir has no delta"
+        );
+        std::fs::write(d.join("delta"), "#!/bin/sh\n").unwrap();
+        assert!(
+            delta_in_path(Some(d.as_os_str())),
+            "a delta on PATH is seen"
+        );
+        assert!(!delta_in_path(None), "no PATH at all is not a delta");
+
+        assert!(diff_script("less -R").ends_with("| less -R"));
+        assert!(diff_script("delta --paging=always").contains("--paging=always"));
+        assert!(
+            diff_script("cat").contains("color.ui=always"),
+            "git colors into a pipe only when forced"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A `seen_test_core` whose single agent row points at a real repo, so the
+    /// toggle's cwd resolution and spawn both run for real.
+    fn diff_test_core(tag: &str) -> (Core, u64, std::path::PathBuf, mpsc::Receiver<ServerMsg>) {
+        let repo = scratch_repo(tag);
+        let (mut core, client_id, _p1, _p2, rx) = seen_test_core();
+        core.agents = vec![bg_row("worker", repo.to_str().unwrap(), None)];
+        (core, client_id, repo, rx)
+    }
+
+    fn toggle_diff(core: &mut Core, client_id: u64) {
+        core.command(
+            client_id,
+            Command::ToggleDiffPane {
+                agent: Some("worker".into()),
+            },
+        );
+    }
+
+    #[test]
+    fn diff_pane_opens_a_split_beside_the_focused_pane() {
+        // AC1-HP: the toggle opens a second pane in the viewed tab, spawned in
+        // the row's worktree, with the original pane still in the tree.
+        let (mut core, client_id, repo, _rx) = diff_test_core("open");
+        let view = core.client_view(client_id).unwrap();
+        let focus = core.viewed_tab(view).unwrap().focus;
+        let new_pid = core.next_pane_id;
+
+        toggle_diff(&mut core, client_id);
+
+        assert!(core.panes.contains_key(&new_pid), "diff pane spawned");
+        assert!(core.panes.contains_key(&focus), "the source pane survives");
+        assert_eq!(
+            core.panes.get(&new_pid).map(|p| p.cwd.as_str()),
+            Some(repo.to_str().unwrap()),
+            "spawned in the row's worktree"
+        );
+        assert_eq!(
+            core.diff_pane.as_ref().map(|(_, p)| *p),
+            Some(new_pid),
+            "the toggle records its pane"
+        );
+        let panes: Vec<u64> = tree::layout(
+            &core.viewed_tab(view).unwrap().root,
+            tree::Rect {
+                x: 0,
+                y: 0,
+                rows: 24,
+                cols: 80,
+            },
+        )
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+        assert!(
+            panes.contains(&focus) && panes.contains(&new_pid),
+            "both panes are in the tree: {panes:?}"
+        );
+        core.reap_pane(new_pid);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn diff_pane_second_press_closes_and_restores_the_layout() {
+        // AC2-HP + AC1-FR: press-press converges to exactly the pre-press
+        // layout with no diff pane left behind - a second press is always a
+        // close, never a second pane.
+        let (mut core, client_id, repo, _rx) = diff_test_core("toggle");
+        let view = core.client_view(client_id).unwrap();
+        let root_before = core.viewed_tab(view).unwrap().root.clone();
+        let panes_before = core.panes.len();
+
+        toggle_diff(&mut core, client_id);
+        let opened = core.diff_pane.as_ref().map(|(_, p)| *p).expect("opened");
+        toggle_diff(&mut core, client_id);
+
+        assert!(
+            core.diff_pane.is_none(),
+            "no diff pane recorded after close"
+        );
+        assert!(!core.panes.contains_key(&opened), "its PTY is reaped");
+        assert_eq!(
+            core.viewed_tab(view).unwrap().root,
+            root_before,
+            "the layout is restored exactly"
+        );
+        assert_eq!(core.panes.len(), panes_before, "no pane leaked");
+
+        // A third press opens again - the toggle never wedges closed.
+        toggle_diff(&mut core, client_id);
+        let reopened = core.diff_pane.as_ref().map(|(_, p)| *p).expect("reopened");
+        assert_ne!(reopened, opened, "a fresh pane, not the old id");
+        core.reap_pane(reopened);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn diff_pane_spawn_failure_leaves_the_layout_untouched() {
+        // AC2-ERR: the spawn fails - no split, no dead pane, and the sender is
+        // told. Spawn-first ordering is what makes this hold with no rollback.
+        set_diff_shell("/nonexistent/definitely-not-a-shell-xyz");
+        let (mut core, client_id, repo, mut rx) = diff_test_core("spawnfail");
+        let view = core.client_view(client_id).unwrap();
+        let root_before = core.viewed_tab(view).unwrap().root.clone();
+        let panes_before = core.panes.len();
+
+        toggle_diff(&mut core, client_id);
+
+        assert_eq!(
+            core.viewed_tab(view).unwrap().root,
+            root_before,
+            "layout untouched on spawn failure"
+        );
+        assert_eq!(core.panes.len(), panes_before, "no pane registered");
+        assert!(core.diff_pane.is_none(), "nothing recorded");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("diff pane failed")));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn diff_pane_refuses_a_reaped_worktree_before_spawn() {
+        // A spawn silently ignores a cwd that is not a directory and lands in
+        // the server's own cwd - which would render some OTHER repo's diff
+        // under this row's name. Refuse instead, visibly.
+        let (mut core, client_id, repo, mut rx) = diff_test_core("gone");
+        let _ = std::fs::remove_dir_all(&repo);
+        let panes_before = core.panes.len();
+
+        toggle_diff(&mut core, client_id);
+
+        assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+        assert!(core.diff_pane.is_none());
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("worktree is gone")));
+    }
+
+    #[test]
+    fn diff_pane_unknown_row_says_so_rather_than_diffing_something_else() {
+        // AC1-UI: a press that cannot resolve a worktree still produces
+        // feedback. A silent no-op reads as a dead keybind.
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let panes_before = core.panes.len();
+
+        core.command(
+            client_id,
+            Command::ToggleDiffPane {
+                agent: Some("nobody-here".into()),
+            },
+        );
+
+        assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("no worktree to diff")));
+    }
+
+    #[test]
+    fn diff_pane_switching_source_never_leaves_two_panes() {
+        // Invariant: at most one live diff pane. Toggling a second row closes
+        // the first's pane rather than accumulating one per source.
+        let (mut core, client_id, repo_a, _rx) = diff_test_core("srca");
+        let repo_b = scratch_repo("srcb");
+        core.agents
+            .push(bg_row("worker-b", repo_b.to_str().unwrap(), None));
+
+        toggle_diff(&mut core, client_id);
+        let first = core.diff_pane.as_ref().map(|(_, p)| *p).expect("first");
+        core.command(
+            client_id,
+            Command::ToggleDiffPane {
+                agent: Some("worker-b".into()),
+            },
+        );
+
+        let second = core.diff_pane.as_ref().map(|(_, p)| *p).expect("second");
+        assert_ne!(second, first, "a new pane for the new source");
+        assert!(!core.panes.contains_key(&first), "the first pane is closed");
+        assert_eq!(
+            core.diff_pane.as_ref().map(|(c, _)| c.as_str()),
+            Some(repo_b.to_str().unwrap()),
+            "keyed to the new source"
+        );
+        core.reap_pane(second);
+        let _ = std::fs::remove_dir_all(&repo_a);
+        let _ = std::fs::remove_dir_all(&repo_b);
+    }
+
+    #[test]
+    fn diff_pane_closed_by_another_path_does_not_wedge_the_toggle() {
+        // AC2-FR neighbour: the pane can die outside the toggle (close-pane,
+        // tab teardown). A stale recorded id must read as closed so the next
+        // press opens rather than trying to close a ghost.
+        let (mut core, client_id, repo, _rx) = diff_test_core("stale");
+
+        toggle_diff(&mut core, client_id);
+        let first = core.diff_pane.as_ref().map(|(_, p)| *p).expect("opened");
+        core.close_pane(first);
+        assert!(!core.panes.contains_key(&first), "closed out of band");
+
+        toggle_diff(&mut core, client_id);
+
+        let second = core.diff_pane.as_ref().map(|(_, p)| *p).expect("reopened");
+        assert_ne!(second, first, "the next press opens, not closes a ghost");
+        core.reap_pane(second);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn diff_pane_refuses_a_split_too_narrow_to_fit() {
+        // AC2-EDGE: below the tree's minimum the split is refused pre-spawn,
+        // the layout is untouched, and a notice says why. Silence here reads
+        // as a dead keybind.
+        let (mut core, client_id, repo, mut rx) = diff_test_core("narrow");
+        let view = core.client_view(client_id).unwrap();
+        // Clamp the viewed tab to a width two panes cannot share.
+        for c in core.clients.iter_mut().filter(|c| c.view.1 == view.1) {
+            c.dims = (24, tree::MIN_COLS);
+        }
+        let root_before = core.viewed_tab(view).unwrap().root.clone();
+        let panes_before = core.panes.len();
+
+        toggle_diff(&mut core, client_id);
+
+        assert_eq!(
+            core.viewed_tab(view).unwrap().root,
+            root_before,
+            "layout untouched by a refused split"
+        );
+        assert_eq!(
+            core.panes.len(),
+            panes_before,
+            "the pre-spawned pane is reaped"
+        );
+        assert!(core.diff_pane.is_none());
+        assert!(
+            drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("split refused")),
+            "the refusal is visible"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     #[test]
     fn attach_split_fallback_lands_new_tab_with_notice() {
         // AC3-FR (x-9f75): a same-workspace row click sends AttachAgent with a Right split; at min-size the
@@ -10452,6 +11056,7 @@ mod tests {
             client_count: watch::channel(0).0,
             seen: HashSet::new(),
             attached: HashMap::new(),
+            diff_pane: None,
             squad_members: HashMap::new(),
             external_lifecycle: Vec::new(),
             persist_degraded_notified: false,

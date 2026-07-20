@@ -961,6 +961,8 @@ enum MenuAction {
     Focus,
     /// Open the read-only peek overlay.
     Peek,
+    /// Toggle the git working-diff pane for this row's worktree.
+    Diff,
     /// Stop a live row (StopAgent, or StopExternal for a daemon-roster row).
     Stop,
     /// Remove an exited row (RemoveAgent, or RemoveExternal for a roster row).
@@ -1036,6 +1038,11 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         add(entry("■", "Stop"), &[MenuAction::Stop]);
     }
+    // Diff is common to every row state: it reads the row's worktree,
+    // which an exited or paneless row has just as much as a live pane-hosted
+    // one - and a finished worker's diff is the one you most want to read.
+    add(PopupRow::Rule, &[]);
+    add(entry("±", "Diff"), &[MenuAction::Diff]);
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Agent(AgentIdent::of(agent)),
@@ -7103,6 +7110,16 @@ async fn execute_row_menu_action(
                 .map_err(|e| format!("focus send failed: {e}"))?,
             None => view.set_notice("agent has no pane here".into()),
         },
+        MenuAction::Diff => {
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::ToggleDiffPane {
+                    agent: Some(a.name.clone()),
+                }),
+            )
+            .await
+            .map_err(|e| format!("diff send failed: {e}"))?;
+        }
         MenuAction::Peek => {
             let idx = view
                 .display_rows()

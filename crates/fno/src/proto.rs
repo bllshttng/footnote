@@ -747,6 +747,16 @@ pub enum Command {
     /// agent rows (the sideline click path); a stale id is refused fail-closed
     /// with a notice, like the other catalog-named commands.
     FocusPane(u64),
+    /// Toggle the git working-diff pane for one source worktree.
+    /// `agent` names a sideline row (the menu path) and resolves to that row's
+    /// registry cwd; `None` means the focused pane's spawn cwd (the keybind
+    /// path). At most one diff pane is live at a time: a press on the same
+    /// source closes it, a press on a different one closes the old and opens
+    /// the new. Read-only - the pane only renders a diff, never writes.
+    ToggleDiffPane {
+        #[serde(default)]
+        agent: Option<String>,
+    },
     /// (v14) Attach a watch-only claude bg session into a fresh mux pane by its
     /// jobId (`AgentRow.attach_id`): the server spawns `claude attach <id>` as a
     /// new tab in the sender's squad and switches the sender to it. The id is

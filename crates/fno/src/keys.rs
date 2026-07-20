@@ -399,6 +399,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
             "resize right",
         ),
         b(b'x', "x", Cmd(C::ClosePane), Panes, "close pane"),
+        b(
+            b'D',
+            "D",
+            Cmd(C::ToggleDiffPane { agent: None }),
+            Panes,
+            "toggle git diff pane",
+        ),
         // workspaces & tabs
         b(b'c', "c", Cmd(C::NewTab), WorkspacesTabs, "new tab"),
         b(b'n', "n", Cmd(C::NextTab), WorkspacesTabs, "next tab"),
