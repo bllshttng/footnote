@@ -324,6 +324,41 @@ def test_receipt_reports_a_node_already_on_the_design_rung(tmp_path):
     assert out == [("x-d", "design")]
 
 
+def test_think_attaches_plan_then_blueprint_arms_it(tmp_path):
+    """The whole point of the rung: /think can link its doc safely.
+
+    Before this rung existed, linking a design doc flipped the node to `ready`
+    and the dispatcher claimed it within ~a minute - the reason the old advice
+    was to leave plans unlinked until blueprint. Walks the real sequence:
+    /think links a `status: design` doc (visible, parked, explained), then
+    /blueprint flips the doc and the same node arms.
+    """
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+    from fno.graph.cli import _starvation_receipts
+    from fno.graph.statuses import recompute_statuses
+
+    now = datetime.now(timezone.utc)
+    doc = tmp_path / "20260719-dark-mode-x-8af8.md"
+    doc.write_text("---\nstatus: design\nnode: x-8af8\ntype: think-brief\n---\n\n# Dark mode\n")
+    node = {"id": "x-8af8", "plan_path": str(doc), "created_at": now.isoformat()}
+
+    # /think links it: parked, but visible and explained rather than silent.
+    recompute_statuses([node])
+    assert node["_status"] == "design"
+    assert node["_status"] != "ready"  # the filter every autonomous selector applies
+    assert _starvation_receipts([node], None, True, None, set(), now, 21) == [
+        ("x-8af8", "design")
+    ]
+
+    # /blueprint flips the doc; the very same node is now dispatchable.
+    doc.write_text("---\nstatus: ready\nnode: x-8af8\n---\n\n## Execution Strategy\n")
+    recompute_statuses([node])
+    assert node["_status"] == "ready"
+    assert selection_guards(node, {"x-8af8": node}, now) is None
+
+
 def test_starvation_receipt_names_design_not_quarantined(tmp_path):
     """A design-stage node is a lifecycle rung, not starvation.
 
