@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 
-def _entry_owns_pr(entry: dict, pr: int, slug_l: str) -> bool:
+def _entry_owns_pr(entry: dict, pr: int, slug_l: str, allow_unattributed: bool) -> bool:
     url = entry.get("pr_url")
     # A hand-written url may carry a query, fragment, or trailing slash, and the
     # owner/repo slug is case-insensitive. Normalizing here prevents a false
@@ -31,8 +31,14 @@ def _entry_owns_pr(entry: dict, pr: int, slug_l: str) -> bool:
     )
     if url_s:
         return url_s.endswith(f"/{slug_l}/pull/{pr}")
-    # No url on the entry: fall back to the bare numeric field. Coerce to int so
-    # a string-stored pr ("522") still matches the int arg.
+    if not allow_unattributed:
+        # A url-less row carries no repo, and this ledger is GLOBAL - so matching
+        # it on the bare number can claim a foreign repo's session for this PR.
+        # Refused by default because the caller that resolves sessions in order
+        # to CONSUME carve-outs would then destroy another PR's backfills.
+        return False
+    # Fall back to the bare numeric field. Coerce to int so a string-stored
+    # pr ("522") still matches the int arg.
     for key in ("pr", "pr_number"):
         val = entry.get(key)
         if val is None:
@@ -46,7 +52,11 @@ def _entry_owns_pr(entry: dict, pr: int, slug_l: str) -> bool:
 
 
 def resolve_pr_sessions(
-    ledger_path: Optional[Path], pr: int, repo_slug: Optional[str]
+    ledger_path: Optional[Path],
+    pr: int,
+    repo_slug: Optional[str],
+    *,
+    allow_unattributed: bool = False,
 ) -> "tuple[list[str], Optional[str]]":
     """Return ``(session_ids, reason)`` for the PR's owning ledger entries.
 
@@ -54,6 +64,12 @@ def resolve_pr_sessions(
     naming why none were: an unresolvable repo, an absent/unreadable/malformed
     ledger, or a genuine no-match. Callers MUST surface it - "no owning session"
     that is really "the ledger would not parse" is the failure this returns for.
+
+    ``allow_unattributed`` admits a url-less row on a bare ``pr``/``pr_number``
+    match. Default False: the ledger is global, so such a row may belong to any
+    repo, and a caller that resolves sessions in order to CONSUME their
+    carve-outs must never claim a foreign PR's. Only a read-only, additive
+    caller (retro's harvest) should opt in.
     """
     if not repo_slug:
         return [], (
@@ -76,7 +92,9 @@ def resolve_pr_sessions(
     out: list[str] = []
     seen: set[str] = set()
     for e in entries:
-        if not isinstance(e, dict) or not _entry_owns_pr(e, pr, slug_l):
+        if not isinstance(e, dict) or not _entry_owns_pr(
+            e, pr, slug_l, allow_unattributed
+        ):
             continue
         # Defensive: a non-list ``sessions`` (e.g. a stray string) must NOT be
         # spread into per-character ids - guard the type before list().

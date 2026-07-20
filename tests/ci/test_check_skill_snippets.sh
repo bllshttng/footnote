@@ -36,8 +36,20 @@ echo "$out" | grep -q "a.md:3: unquoted-conditional-expansion" \
     && ok "expansion finding with file:line" || fail "no expansion finding: $out"
 echo "$out" | grep -q "b.md:3: empty-grep-alternation" \
     && ok "grep finding with file:line" || fail "no grep finding: $out"
+echo "$out" | grep -q 'if \[ -n' \
+    && ok "expansion message names the branch rewrite" || fail "no rewrite hint"
 echo "$out" | grep -q 'args=()' \
-    && ok "expansion message names the args=() rewrite" || fail "no rewrite hint"
+    && fail "still recommends the array form (zsh passes an empty arg)" \
+    || ok "does not recommend the non-portable array form"
+
+echo "== the guarded empty-array form is itself a hazard =="
+# Measured: with an empty array, bash expands "${a[@]+"${a[@]}"}" to no args and
+# zsh to one EMPTY arg. The lint's own advice used to recommend this.
+ARR="$TMP/arr"
+fixture "$ARR/a.md" 'FLAG=()' 'fno retro run --pr-number "$PR" "${FLAG[@]+"${FLAG[@]}"}"'
+out="$(bash "$LINT" "$ARR" 2>&1)"
+echo "$out" | grep -q "guarded-empty-array-arg" && ok "guarded array expansion caught" \
+    || fail "missed the guarded array expansion: $out"
 
 echo "== exempt: quoted assignment expansions do not fire =="
 SAFE="$TMP/safe"

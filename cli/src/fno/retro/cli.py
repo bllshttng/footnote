@@ -92,7 +92,11 @@ def _resolve_pr_session_ids(
     """
     from fno.ledger_join import resolve_pr_sessions
 
-    sessions, _reason = resolve_pr_sessions(ledger_path, pr, repo_slug)
+    # allow_unattributed: retro's harvest is additive (it files nodes), never
+    # destructive, so it keeps the legacy bare-number match for url-less rows.
+    sessions, _reason = resolve_pr_sessions(
+        ledger_path, pr, repo_slug, allow_unattributed=True
+    )
     return sessions
 
 

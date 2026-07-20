@@ -168,10 +168,15 @@ For each item line under that heading, in order:
 2. **File second, with inherited weight.** Otherwise classify the item and file it. Strip markdown/backticks AND shell metacharacters (`` ` ``, `$`, `"`) from the item text so nothing can break out of the quoting or trigger `$(...)` expansion, and pass a concise plain title (the trimmed item line, not the whole paragraph) as a double-quoted argument:
    - a pre-existing **bug** being deferred (a missed defect, not a new feature):
      ```bash
-     # An unquoted ${VAR:+...} splits into two argv entries under bash but NOT
-     # under zsh, where the flag+value arrive as one argument and are rejected.
-     PARENT=(); [[ -n "$NODE_ID" ]] && PARENT=(--parent "$NODE_ID")
-     RECEIPT=$(fno backlog idea "<item title>" -t task -p p2 --description "deferred from PR: <pr title> (<branch>)" "${PARENT[@]+"${PARENT[@]}"}")
+     # Branch rather than build an argv array. An unquoted ${VAR:+...} splits
+     # into two argv entries under bash but not zsh; and NO array form is
+     # portable either - plain "${a[@]}" errors under bash set -u, while the
+     # guarded "${a[@]+...}" form passes one EMPTY argument under zsh.
+     if [ -n "$NODE_ID" ]; then
+       RECEIPT=$(fno backlog idea "<item title>" -t task -p p2 --description "deferred from PR: <pr title> (<branch>)" --parent "$NODE_ID")
+     else
+       RECEIPT=$(fno backlog idea "<item title>" -t task -p p2 --description "deferred from PR: <pr title> (<branch>)")
+     fi
      ```
    - a genuine **nice-to-have / future feature**: the same command with `-p p3` (and drop `-t task`).
    - Extract the id from the JSON receipt and **validate it before appending** - a command can exit 0 yet print an empty/unparsable receipt, and appending a blank id leaves the line untracked while skipping the fallback below:

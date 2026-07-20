@@ -3421,7 +3421,6 @@ def cmd_session_add(
     from fno.graph.store import (
         append_session_record,
         find_nodes_for_pr,
-        node_is_repo_attributable,
         read_graph,
         stamp_session_for_pr,
     )
@@ -3454,23 +3453,13 @@ def cmd_session_add(
                 "matching on the bare PR number (skips on cross-repo ambiguity).",
                 err=True,
             )
-        elif not find_nodes_for_pr(_graph_path(), pr, repo=repo):
-            # An auto-resolved slug NARROWS an otherwise-ambiguous match; it must
-            # not exclude a LEGACY node (pr_number, no pr_url), which is
-            # unattributable to any repo and would otherwise silently stop being
-            # stamped - the invisible no-op this verb change exists to kill.
-            #
-            # But the fallback is only safe when EVERY bare candidate is
-            # unattributable. "This repo has no node for the PR" is a normal
-            # post-merge skip, and dropping the scope there would let the bare
-            # lookup stamp another repository's node for the same PR number
-            # (codex P1 on #494). An explicit --repo never takes this branch.
-            entries = {e["id"]: e for e in read_graph(_graph_path())}
-            bare = find_nodes_for_pr(_graph_path(), pr)
-            if bare and not any(
-                node_is_repo_attributable(entries.get(nid, {}), pr) for nid in bare
-            ):
-                repo = None
+        # No bare-number fallback once a slug resolves. The graph is GLOBAL and
+        # cross-project, so a url-less node is unattributable to ANY repo - a
+        # fallback cannot tell "this repo's legacy node" from "another project's
+        # legacy node with the same PR number", and stamping the latter is the
+        # wrong-node write repo scoping exists to prevent. Refusing to guess
+        # costs a stamp on a legacy node; guessing costs a corrupted one, and
+        # the skip is now LOUD (it names the candidates), so nothing is silent.
 
     try:
         if pr is not None:

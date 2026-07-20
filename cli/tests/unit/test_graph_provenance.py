@@ -905,7 +905,10 @@ def test_cli_session_add_pr_mode_resolves_node(tmp_path, monkeypatch):
     import fno.graph.cli as C
     from fno.graph.store import read_graph
 
-    g = _make_graph(tmp_path, [{"id": "ab-prcli001", "title": "t", "pr_number": 1200}])
+    g = _make_graph(tmp_path, [
+        {"id": "ab-prcli001", "title": "t", "pr_number": 1200,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/1200"},
+    ])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
     _stub_slug(monkeypatch, "bllshttng/footnote")
@@ -1045,10 +1048,15 @@ def test_cli_session_add_pr_auto_resolves_repo_slug(tmp_path, monkeypatch):
     assert by_id["ab-autoabil"].get("sessions", []) == []
 
 
-def test_cli_session_add_pr_auto_slug_narrows_never_excludes(tmp_path, monkeypatch):
-    """A pr_number-only node (no pr_url) is unattributable to a repo, so the
-    AUTO-resolved slug must fall back to the bare-number match rather than
-    silently stamping nothing - the invisible no-op this change exists to kill."""
+def test_cli_session_add_resolved_slug_never_falls_back_to_bare(tmp_path, monkeypatch):
+    """A url-less node is unattributable to ANY repo, and the graph is global and
+    cross-project, so a RESOLVED slug must not fall back to the bare number.
+
+    The fallback cannot tell this repo's legacy node from another project's
+    same-numbered one, and stamping the latter is the wrong-node write that repo
+    scoping exists to prevent. The cost is a legacy node going unstamped, and the
+    skip prints its reason - so it is a visible skip, not a silent one.
+    """
     from typer.testing import CliRunner
     import fno.graph.cli as C
     from fno.graph.store import read_graph
@@ -1061,6 +1069,26 @@ def test_cli_session_add_pr_auto_slug_narrows_never_excludes(tmp_path, monkeypat
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
 
     r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1500", "--phase", "ship"])
+    assert r.exit_code == 0, r.output
+    assert "no-node" in r.output
+    assert read_graph(g)[0].get("sessions", []) == []
+
+
+def test_cli_session_add_unresolvable_slug_still_matches_bare(tmp_path, monkeypatch):
+    """With NO slug there is nothing to scope by, so the bare number is all there
+    is - it still skips on ambiguity rather than guessing."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-legacy09", "title": "t", "pr_number": 1550}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, None)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1550", "--phase", "ship"])
     assert r.exit_code == 0, r.output
     assert read_graph(g)[0]["sessions"][0]["phase"] == "ship"
 

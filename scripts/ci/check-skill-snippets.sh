@@ -21,6 +21,9 @@
 #                                   macOS ships no timeout binary, so the
 #                                   watcher silently never runs.
 #   single-spelling-stat            stat -c (GNU) or stat -f (BSD) alone.
+#   guarded-empty-array-arg         "${a[@]+"${a[@]}"}" on an empty array: bash
+#                                   expands to no arguments, zsh to one EMPTY
+#                                   argument (measured argc 2 vs 3).
 #   fno-mutation-swallowed          a mutating fno verb ending in `|| true`,
 #                                   which swallows a real rejection.
 #
@@ -80,15 +83,25 @@ function body_of(s, p,   depth, i, c, out) {
   return out
 }
 
-# True when the expansion at position p is NOT inside double quotes. Quote
-# counting restarts at the last $( because a command substitution opens a fresh
-# quoting context - the reason ROUTING="$(cmd ${V:+--flag "$V"})" is a hazard
-# even though the line has an opening quote before it.
-function unquoted_at(s, p,   seg, q) {
-  seg = substr(s, 1, p - 1)
-  while (match(seg, /\$\(/)) seg = substr(seg, RSTART + 2)
-  q = gsub(/"/, "\"", seg)
-  return (q % 2) == 0
+# True when the expansion at position p is NOT inside double quotes.
+#
+# A command substitution opens a FRESH quoting context, so ROUTING="$(cmd
+# ${V:+--flag "$V"})" is a hazard despite the opening quote earlier on the line.
+# But only an OPEN one: a $( ... ) that already closed must restore the outer
+# context, else X="$(foo)"; cmd ${V:+--flag "$V"} reads as quoted and the hazard
+# is missed. So walk the prefix with a stack rather than resetting at the last $(.
+function unquoted_at(s, p,   i, c, dq, sp, stack) {
+  dq = 0; sp = 0
+  for (i = 1; i < p; i++) {
+    c = substr(s, i, 1)
+    if (c == "\\") { i++; continue }
+    if (c == "$" && substr(s, i + 1, 1) == "(") {
+      stack[++sp] = dq; dq = 0; i++; continue
+    }
+    if (c == ")" && sp > 0) { dq = stack[sp--]; continue }
+    if (c == "\"") dq = !dq
+  }
+  return !dq
 }
 
 # Fence state is per FILE. Without this an unclosed fence in one document would
@@ -117,7 +130,7 @@ FNR == 1 { inblk = 0; prev = "" }
     abs = base + r
     if (body_of(line, abs + l - 1) ~ /[ \t]/ && unquoted_at(line, abs))
       report("unquoted-conditional-expansion", \
-        "portable: args=(); [[ -n \"$V\" ]] && args+=(--flag \"$V\"); cmd \"${args[@]+\"${args[@]}\"}\"")
+        "portable: if [ -n \"$V\" ]; then cmd --flag \"$V\"; else cmd; fi")
     base += r + l - 1
     rest = substr(rest, r + l)
   }
@@ -146,6 +159,15 @@ FNR == 1 { inblk = 0; prev = "" }
     report("single-spelling-stat", "GNU-only: try stat -f (BSD) as a fallback")
   if (line ~ /(^|[ \t;|&(=$])stat[ \t]+-f/ && line !~ /stat[ \t]+-c/)
     report("single-spelling-stat", "BSD-only: try stat -c (GNU) as a fallback")
+
+  # 5b. the guarded empty-array expansion "${a[@]+"${a[@]}"}". Added to survive
+  # bash 3.2 + set -u, but on an EMPTY array zsh expands it to one empty
+  # argument where bash expands it to none - measured: bash argc=2, zsh argc=3.
+  # Plain "${a[@]}" is identical across shells but errors under bash set -u, so
+  # no array form is portable. Branch instead.
+  if (line ~ /\[@\][+]"\$\{[A-Za-z_][A-Za-z_0-9]*\[@\]\}"/)
+    report("guarded-empty-array-arg", \
+      "zsh passes one EMPTY arg here; branch instead: if [ -n \"$V\" ]; then cmd --flag \"$V\"; else cmd; fi")
 
   # 5. a mutating fno verb whose failure is swallowed. A trailing comment must
   # not defeat the anchor - `... || true   # best effort` is the same hazard.

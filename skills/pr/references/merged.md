@@ -367,6 +367,8 @@ status from graph truth (the x-76ea class: a plan left `design` while its node
 merged to `done`). Idempotent, best-effort, never blocks the ritual.
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 fno plan reconcile-status --apply \
   || { echo "post-merge: plan reconcile-status failed" >&2; echo "plan reconcile-status" >> "$FAILURES_FILE"; }
 ```
@@ -381,6 +383,8 @@ exactly one same-repo PR-linked node and warns+skips on zero or multiple
 (Locked Decision 9: never fan out):
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 fno backlog session add --pr-number "$PR" --phase ship \
   || { echo "post-merge: backlog session add failed" >&2; echo "backlog session add" >> "$FAILURES_FILE"; }
 ```
@@ -405,10 +409,18 @@ up on the Step 7 `Failures:` line.
 # In autonomous mode add --keep-going so the keep-going engine (x-3360)
 # classifies surviving carve-outs and dispatches follow-up /think or /target work
 # under the firehose ceiling. A no-op unless config.keep_going.enabled is armed.
-KEEP_GOING_FLAG=()
-if [[ "$AUTONOMOUS" == "1" ]]; then KEEP_GOING_FLAG=(--keep-going); fi
-# Guarded expansion: under Bash 3.2 + set -u, "${arr[@]}" on an empty array errors.
-fno retro run --pr-number "$PR" "${KEEP_GOING_FLAG[@]+"${KEEP_GOING_FLAG[@]}"}" || { echo "post-merge: retro run FAILED" >&2; echo "retro run" >> "$FAILURES_FILE"; }
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
+# Branch, do not build an argv array: under bash 3.2 + set -u a plain
+# "${arr[@]}" on an empty array errors, and the guarded "${arr[@]+...}" form
+# that fixes THAT passes one EMPTY argument under zsh (measured: bash argc 2,
+# zsh argc 3), which `fno retro run` then rejects as a stray positional.
+if [[ "$AUTONOMOUS" == "1" ]]; then
+  fno retro run --pr-number "$PR" --keep-going \
+    || { echo "post-merge: retro run FAILED" >&2; echo "retro run" >> "$FAILURES_FILE"; }
+else
+  fno retro run --pr-number "$PR" \
+    || { echo "post-merge: retro run FAILED" >&2; echo "retro run" >> "$FAILURES_FILE"; }
+fi
 # Processes any retro/.triage-pending sentinels AND explicitly harvests this
 # PR's carve-outs. The bare `retro run` only fires when a sentinel exists; a
 # manual merge with no node<->PR link drops none, so its carve-outs (now stored
@@ -424,8 +436,11 @@ hand the merge event to the shared auto-continue verb so the next now-unblocked
 node auto-builds without a manual "kick off the next group?" prompt:
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 fno backlog advance --closed "$NODE_ID" --project "$LANE_PROJECT" \
-  || echo "post-merge: auto-continue advance returned non-zero (non-fatal) - record in report" >&2
+  || { echo "post-merge: auto-continue advance returned non-zero (non-fatal)" >&2
+       echo "backlog advance" >> "$FAILURES_FILE"; }
 ```
 
 This is **opt-in and non-fatal**. `advance` gates on `config.auto_continue`
@@ -453,8 +468,11 @@ receipt (the before/after delta). Call it unconditionally - the verb self-guards
 receipt, so this is safe for every merge and idempotent on a re-run:
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 fno skill-diff reconcile --pr-number "$PR" \
-  || echo "post-merge: skill-diff eval-after-merge returned non-zero (non-fatal) - record in report" >&2
+  || { echo "post-merge: skill-diff eval-after-merge returned non-zero (non-fatal)" >&2
+       echo "skill-diff reconcile" >> "$FAILURES_FILE"; }
 ```
 
 This is the **merge-triggered fast path** (fast feedback on the just-merged
@@ -471,8 +489,11 @@ env is never left stale after a merge (the manual `git checkout main && git pull
 && fno update && fno restart` becomes a ritual step). Opt-in and self-deduping:
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 fno pr sync-canonical --pr-number "$PR" \
-  || echo "post-merge: canonical sync returned non-zero (non-fatal) - record in report" >&2
+  || { echo "post-merge: canonical sync returned non-zero (non-fatal)" >&2
+       echo "pr sync-canonical" >> "$FAILURES_FILE"; }
 ```
 
 **Opt-in, non-fatal, exactly-once.** A no-op unless `config.post_merge.sync_command`
@@ -592,6 +613,7 @@ else
     if ! bash "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" "$WORKTREE_PATH" --yes 2>&1; then
       echo "post-merge: worktree archive returned non-zero (checks failed or remove failed) - skipped (worktree left in place)."
       echo "    To archive manually: bash scripts/setup/archive-worktree.sh $WORKTREE_PATH --yes"
+      echo "worktree archive" >> "${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
     fi
   fi
 fi
@@ -618,6 +640,8 @@ merged PR's build session declared, never another PR's (consuming/filing those
 under the wrong PR/project). The verb does the `ledger.json` join itself:
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 BACKFILLS="$(fno carveout list --kind backfill --pr-number "$PR" --json)" \
   || { echo "post-merge: carveout list failed" >&2; echo "carveout list" >> "$FAILURES_FILE"; }
 ```
@@ -664,7 +688,11 @@ a later `/pr merged` never re-offers it - but ONLY in the session-scoped branch
 (in the read-only fallback, leave it for the owning PR's `/pr merged`):
 
 ```bash
-fno carveout resolve <cv-id>
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
+fno carveout resolve <cv-id> \
+  || { echo "post-merge: carveout resolve failed for <cv-id>" >&2
+       echo "carveout resolve" >> "$FAILURES_FILE"; }
 ```
 
 **Idempotency / interrupt-safety.** This slot runs BEFORE the Step-5 marker guard
@@ -738,6 +766,8 @@ is visible to `fno backlog capture list --by-type` / `tidy` and is never re-file
 as a duplicate:
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 ( cd "$CANON_ROOT" && fno backlog capture add "<concise title>" \
   --source "PR#$PR" \
   --why "<one line: what the diff deferred>" \
@@ -763,6 +793,8 @@ still goes to (b).
 file a node in the correct project (same judgment you apply by hand):
 
 ```bash
+# Recompute: each fenced block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
 fno backlog idea "<concise title>" \
   --details "<why; references PR #$PR>" \
   --priority p2 \

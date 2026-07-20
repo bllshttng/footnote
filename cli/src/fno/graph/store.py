@@ -691,27 +691,6 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     return False
 
 
-def node_is_repo_attributable(node: dict, pr_number: int) -> bool:
-    """True when the node carries a parseable PR url for ``pr_number`` in SOME repo.
-
-    The discriminator for a safe bare-number fallback: an attributable node
-    belongs to a known repo, so matching it on the bare number would stamp
-    another repository's node. Only an UNattributable node (``pr_number`` with no
-    parseable url - the legacy, pre-``pr_url`` shape) is safe to reach that way.
-    """
-    for url in _node_pr_urls(node):
-        clean = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
-        _head, sep, tail = clean.rpartition("/pull/")
-        if not sep:
-            continue
-        try:
-            if int(tail) == pr_number:
-                return True
-        except ValueError:
-            continue
-    return False
-
-
 def find_nodes_for_pr(
     path: Path, pr_number: int, *, repo: "str | None" = None
 ) -> "list[str]":

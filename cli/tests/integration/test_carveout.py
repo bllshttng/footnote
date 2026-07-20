@@ -471,6 +471,40 @@ def test_list_pr_number_unresolvable_repo_refuses_to_attribute(_repo: Path, monk
     assert "repo slug unresolved" in out["reason"]
 
 
+def test_list_pr_number_refuses_url_less_ledger_rows(_repo: Path, monkeypatch):
+    """A url-less ledger row carries no repo, and the ledger is GLOBAL - matching
+    it on the bare number could claim a foreign PR's sessions and then CONSUME
+    (destroy) their backfills. The consuming caller must refuse."""
+    lj = _repo / "ledger.json"
+    lj.write_text(json.dumps({"entries": [{"pr_number": 480, "session_id": "S1"}]}),
+                  encoding="utf-8")
+    _pin_ledger(monkeypatch, lj)
+    _write_backfills(_repo)
+
+    out = json.loads(runner.invoke(
+        app, ["carveout", "list", "--kind", "backfill", "--pr-number", "480", "--json"]
+    ).stdout.strip())
+    assert out["sessions_resolved"] == [] and out["consumable"] is False
+
+
+def test_resolve_pr_sessions_allow_unattributed_is_opt_in(_repo: Path):
+    """retro's additive harvest opts back into the url-less bare match; the
+    default (the consuming path) does not."""
+    from fno.ledger_join import resolve_pr_sessions
+
+    lj = _repo / "ledger.json"
+    lj.write_text(json.dumps({"entries": [{"pr_number": 480, "session_id": "S1"}]}),
+                  encoding="utf-8")
+
+    strict, reason = resolve_pr_sessions(lj, 480, "bllshttng/footnote")
+    assert strict == [] and reason == "no ledger entry for PR #480"
+
+    lenient, reason2 = resolve_pr_sessions(
+        lj, 480, "bllshttng/footnote", allow_unattributed=True
+    )
+    assert lenient == ["S1"] and reason2 is None
+
+
 def test_list_rejects_pr_number_with_session_id(_repo: Path):
     result = runner.invoke(
         app, ["carveout", "list", "--pr-number", "480", "--session-id", "S1"]
