@@ -35,7 +35,7 @@ use crate::proto::{
     PROTO_VERSION,
 };
 use crate::tree::{Dir, Rect, TabId};
-use crate::view_store::{self, next_view, SectionKey, SectionView};
+use crate::view_store::{self, next_view, AgentSort, Density, SectionKey, SectionView};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -45,11 +45,89 @@ const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// server must produce a clear line, not a hang.
 const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Sideline width in columns, divider column included. Client-local chrome:
-/// the server sees only the content-area viewport.
+/// Sideline width in columns at [`Density::Regular`], divider column included.
+/// Client-local chrome: the server sees only the content-area viewport.
 const PANEL_W: u16 = 28;
+/// (x-b186) The [`Density::Slim`] rail width. FIXED rather than fitted to the
+/// widest header: a rail that resized itself as squads came and went would
+/// shift the content area on unrelated events, and `header_band_text` already
+/// degrades a too-long header gracefully (rollup pairs drop from the
+/// least-severe end, then the label truncates). Wide enough for a short
+/// workspace name plus a rollup pair, which is what makes slim legible rather
+/// than blind.
+const SLIM_PANEL_W: u16 = 16;
+/// (x-b186) The narrowest slim rail. Below this the sideline finally hides, but
+/// between here and [`SLIM_PANEL_W`] it clamps - a rail that disappeared on a
+/// narrow terminal would contradict the one thing slim promises.
+const MIN_SLIM_PANEL_W: u16 = 8;
 /// Below this many content columns the sideline auto-hides (AC6-EDGE).
 const MIN_CONTENT_COLS: u16 = 40;
+
+/// (x-b186) Extended-table column widths in display columns, render order:
+/// status glyph, name, message tail, PR, relative last-update. Each includes
+/// its trailing separator space, so the table width is their sum.
+const COL_STATUS: u16 = 2;
+const COL_NAME: u16 = 20;
+const COL_TAIL: u16 = 34;
+const COL_PR: u16 = 7;
+const COL_TIME: u16 = 6;
+
+/// (x-b186) Which extended-table columns fit a given panel width.
+///
+/// Dropping is by PRIORITY, not by truncation: the tail goes first, then the
+/// last-update time (Discretion 4). Status, name, and PR always render - a
+/// table that cannot show which agent a row is would be worse than no table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TableCols {
+    tail: bool,
+    time: bool,
+}
+
+impl TableCols {
+    /// The widest column set that fits `text_w` display columns.
+    fn fitting(text_w: u16) -> TableCols {
+        let base = COL_STATUS + COL_NAME + COL_PR;
+        if text_w >= base + COL_TAIL + COL_TIME {
+            TableCols {
+                tail: true,
+                time: true,
+            }
+        } else if text_w >= base + COL_TIME {
+            TableCols {
+                tail: false,
+                time: true,
+            }
+        } else {
+            TableCols {
+                tail: false,
+                time: false,
+            }
+        }
+    }
+}
+
+/// (x-b186) The full extended-table panel width (every column plus the divider),
+/// what entering `Extended` widens to before any clamp.
+const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_TAIL + COL_PR + COL_TIME + 1;
+/// (x-b186) The narrowest useful extended panel: status + name + PR, every
+/// droppable column gone, plus the divider. Below this the panel hides rather
+/// than rendering a table with no room for a name.
+const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_PR + 1;
+
+/// (x-b186) Columns the top-right density button reserves on the sideline's
+/// first row: a leading space plus the state glyph.
+const DENSITY_BTN_W: usize = 2;
+
+/// (x-b186) The density button's glyph. Each state paints a DIFFERENT one, so a
+/// press changes the button as well as the geometry - a press with no visible
+/// change would read as a dead control.
+fn density_glyph(d: Density) -> char {
+    match d {
+        Density::Slim => '▏',
+        Density::Regular => '▤',
+        Density::Extended => '▦',
+    }
+}
 /// The tab bar row.
 const TAB_BAR_ROWS: u16 = 1;
 /// The status row (US4): one always-on bottom line of client-local chrome.
@@ -349,6 +427,7 @@ enum TabContext {
 }
 
 /// The last `Layout` as the client holds it.
+#[derive(Clone)]
 struct LayoutView {
     squads: Vec<SquadMeta>,
     active_squad: u64,
@@ -399,7 +478,16 @@ struct View {
     layout: LayoutView,
     frames: HashMap<u64, Frame>,
     /// Manual sideline toggle; narrow terminals override it (auto-hide).
+    /// Orthogonal to [`View::density`]: this is visibility, that is how much
+    /// each visible row shows. `Slim` is a narrow rail, NOT a hidden panel.
     panel_on: bool,
+    /// (x-b186) Sideline density, persisted by [`crate::view_store`]. Drives
+    /// the panel width via [`View::density_bounds`] and the row set via
+    /// [`View::display_rows`].
+    density: Density,
+    /// (x-b186) Extended-table row order, persisted alongside the density.
+    /// Inert in the other two densities (they render no table).
+    agent_sort: AgentSort,
     /// Manual status-row toggle (leader+s). Client-local and deliberately
     /// unpersisted: a reattach resets to on (AC4-FR).
     status_on: bool,
@@ -1113,6 +1201,10 @@ impl View {
         if let Some(key) = squad_key(&layout, layout.active_squad) {
             section_view.entry(key).or_insert(SectionView::Expanded);
         }
+        // (x-b186) Layout-independent, unlike the section map above, so it is
+        // safe to resolve against the empty placeholder layout a real attach
+        // constructs with. A missing or corrupt store reads as the defaults.
+        let (density, agent_sort) = view_store::load_prefs();
         View {
             backlog_pending: None,
             term,
@@ -1120,6 +1212,8 @@ impl View {
             layout,
             frames: HashMap::new(),
             panel_on: true,
+            density,
+            agent_sort,
             status_on: true,
             hint: false,
             keys_modal: None,
@@ -1852,16 +1946,49 @@ impl View {
             .position(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none() && s.squad == id))
     }
 
-    fn panel_visible(&self) -> bool {
-        self.panel_on && self.term.1 >= PANEL_W + MIN_CONTENT_COLS
+    /// (x-b186) The panel width this density WANTS, before any terminal clamp,
+    /// and the floor below which the panel hides instead of shrinking further.
+    ///
+    /// Regular's want and floor are both [`PANEL_W`], so its behaviour on a
+    /// narrow terminal is exactly what it was before densities existed
+    /// (auto-hide, AC6-EDGE) - the clamp path below is reachable only from
+    /// Extended, which is the state that asks for more than it may get.
+    fn density_bounds(&self) -> (u16, u16) {
+        match self.density {
+            // Slim CLAMPS rather than hides: it is explicitly the non-hidden
+            // state, so cycling into it must never make the sideline vanish
+            // (that is what `b` is for). Its floor is the narrowest rail that
+            // still shows a caret plus a rollup pair; `header_band_text` drops
+            // the counts and then truncates the label below that.
+            Density::Slim => (SLIM_PANEL_W, MIN_SLIM_PANEL_W),
+            Density::Regular => (PANEL_W, PANEL_W),
+            Density::Extended => (EXTENDED_PANEL_W, MIN_EXTENDED_PANEL_W),
+        }
     }
 
+    /// The sideline's width in columns, or 0 when it is not rendering.
+    ///
+    /// The single width authority (AC5-EDGE): every consumer routes through
+    /// here, so the work-pane minimum is enforced in ONE place rather than at
+    /// each call site. A density never shrinks content below
+    /// [`MIN_CONTENT_COLS`] - it clamps down to the widest legal width, and
+    /// hides entirely once even its floor would not fit.
+    ///
+    /// Note there is no stored "previous Regular width" to restore on leaving
+    /// Extended: width is a pure function of the density, so exiting recomputes
+    /// Regular's exactly. When x-d807 makes Regular's width drag-adjustable,
+    /// that adjusted value becomes the thing this returns for Regular, and
+    /// save/restore still falls out of the same derivation.
     fn panel_w(&self) -> u16 {
-        if self.panel_visible() {
-            PANEL_W
-        } else {
-            0
+        if !self.panel_on {
+            return 0;
         }
+        let (want, floor) = self.density_bounds();
+        let room = self.term.1.saturating_sub(MIN_CONTENT_COLS);
+        if room < floor {
+            return 0;
+        }
+        want.min(room)
     }
 
     /// Whether the bottom row belongs to chrome. Geometry beats the toggle:
@@ -1936,6 +2063,19 @@ impl View {
         (self.marks.is_empty() && tw >= FOOTER_NEW_LABEL.len() + 2 + mw).then(|| (tw - mw)..tw)
     }
 
+    /// (x-b186) The column range of the density button on the sideline's top
+    /// row, shared by the renderer and the hit-test so a click lands where it
+    /// draws. `None` when the panel is too narrow to reserve the button without
+    /// eating the header's own label.
+    ///
+    /// The button is an affordance, never the only way in: Locked Decision 5
+    /// puts the density cycle on a keybind too, so a too-narrow panel loses the
+    /// button and keeps the gesture.
+    fn density_button_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
+        let tw = panel_w.saturating_sub(1); // last column is the divider
+        (tw >= DENSITY_BTN_W + 6).then(|| (tw - DENSITY_BTN_W)..tw)
+    }
+
     /// Map a left-click on chrome (the tab bar or the sideline) to what it does:
     /// switch tab/squad, focus an agent's pane, open a new tab, or a local hint
     /// for a row that isn't directly actionable (a work-only agent, a card).
@@ -1977,6 +2117,17 @@ impl View {
         // not the sideline row drawn underneath it (codex P2).
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
+        }
+        // (x-b186) The density button rides the sideline's top row, painted over
+        // whatever display row is scrolled to it. It is chrome pinned to row 0,
+        // not a property of that row, so the check is on the PAINTED row and
+        // must precede the display-row resolution below.
+        if row == 0 {
+            if let Some(range) = self.density_button_range(panel_w as usize) {
+                if range.contains(&(col as usize)) {
+                    return Some(ChromeHit::CycleDensity);
+                }
+            }
         }
         // Display row i is painted at `i - sideline_offset` (draw_sideline, since
         // the sideline owns row 0), so invert with the offset - else a click on a
@@ -2035,8 +2186,12 @@ impl View {
             // cursor still skips it (the x-260a "never rests on a label"
             // invariant): this makes it CLICKABLE, not selectable.
             DisplayRow::Header { key, .. } => Some(ChromeHit::CycleSection(key.clone())),
-            // Inert rows (subline, spacer) resolve to no action (x-cd67).
-            DisplayRow::Sub(_) | DisplayRow::Blank => None,
+            // Inert rows (subline, spacer, table column header) resolve to no
+            // action (x-cd67).
+            DisplayRow::Sub(_)
+            | DisplayRow::Blank
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -2378,6 +2533,14 @@ impl View {
         // Capture the selected needs-row identity against the OLD layout, before
         // the swap, so the cursor can re-anchor to the same item afterward.
         let needs_prev = self.answers_selected_id();
+        // (x-b186) Same, for the sideline cursor when the table is status-sorted:
+        // a scrape tick that flips one badge RE-ORDERS the rows, so preserving
+        // only the numeric index would silently move the cursor onto a different
+        // agent and point the next Enter / lifecycle key at the wrong worker.
+        let agent_prev = (self.density == Density::Extended
+            && self.agent_sort == AgentSort::Status)
+            .then(|| self.selected_agent_name())
+            .flatten();
         self.layout = layout;
         // Selector re-anchors to a live, actionable row on catalog change
         // (AC6-FR): clamp into the unified rows, then step off an inert Header
@@ -2388,7 +2551,15 @@ impl View {
         if self.selector.is_some() {
             let anchored = match self.sel_follow.and_then(|sq| self.squad_row(sq)) {
                 Some(row) => Some(row),
-                None => self.selector.and_then(|cur| self.selector_anchor(cur)),
+                // Identity first when a status re-sort could have moved the row
+                // under the cursor; the index clamp is the fallback.
+                None => agent_prev
+                    .and_then(|name| {
+                        self.display_rows()
+                            .iter()
+                            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+                    })
+                    .or_else(|| self.selector.and_then(|cur| self.selector_anchor(cur))),
             };
             self.selector = anchored;
         }
@@ -2456,6 +2627,72 @@ impl View {
         let has_dead = self.section_has_dead(&key);
         let next = next_view(self.section_view(&key), has_dead, &key);
         self.set_section_view(key, next);
+    }
+
+    /// (x-b186) One press of the density control: advance the cycle, persist,
+    /// re-clamp the scroll. The one mutation point the keybind AND the top-right
+    /// button share, so the two inputs cannot diverge on what they persist.
+    ///
+    /// Every press changes both the panel geometry and the button glyph in the
+    /// same frame, so no press is ever visually inert.
+    fn cycle_density(&mut self) {
+        let held = self.selected_agent_name();
+        self.density = self.density.next();
+        view_store::save_prefs(self.density, self.agent_sort);
+        // The row set changes with the density (slim suppresses agent rows,
+        // extended adds a column header), so a scrolled sideline must re-clamp
+        // or it can sit past the new last row (x-a621). Ordering matters: the
+        // clamp scrolls TO the selector, so it has to run after the re-anchor
+        // has decided where the selector is - `reanchor_selector` owns both.
+        self.reanchor_selector(held);
+        self.clamp_sideline_offset();
+    }
+
+    /// (x-b186) One press of the sort control. Persisted even outside Extended
+    /// so the choice survives a round trip through another density.
+    fn toggle_agent_sort(&mut self) {
+        let held = self.selected_agent_name();
+        self.agent_sort = self.agent_sort.toggle();
+        view_store::save_prefs(self.density, self.agent_sort);
+        self.reanchor_selector(held);
+    }
+
+    /// The name of the agent the selector rests on, if it rests on an agent row.
+    /// The re-anchor identity across a re-order: a row INDEX means nothing once
+    /// the sort key changes, so the cursor has to follow the agent instead.
+    fn selected_agent_name(&self) -> Option<String> {
+        match self.display_rows().get(self.selector?) {
+            Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Put the selector back on `held` after the row set changed under it.
+    ///
+    /// Identity first (the agent is still there, just elsewhere), then the
+    /// existing index-clamp fallback for a cursor that was not on an agent or
+    /// whose agent this density no longer emits - so the cursor never dangles
+    /// past the end and never rests on an inert label (x-260a).
+    fn reanchor_selector(&mut self, held: Option<String>) {
+        if self.selector.is_none() {
+            return;
+        }
+        if let Some(name) = held {
+            if let Some(i) = self
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+            {
+                self.selector = Some(i);
+                // A re-order can move the agent outside the scroll window, and a
+                // cursor with no visible row still takes contextual keys - so
+                // scroll to it rather than leaving it off-screen.
+                self.clamp_sideline_offset();
+                return;
+            }
+        }
+        self.selector = self.selector.and_then(|cur| self.selector_anchor(cur));
+        self.clamp_sideline_offset();
     }
 
     /// Put a section in an explicit view state (the selector's `l`/`h`), then
@@ -3396,7 +3633,81 @@ impl View {
     /// section for agents matched to no squad, and the work-queue lane. The
     /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
     /// the leader+w selector all index into it.
+    /// The sideline's rows for the CURRENT density - the one enumeration every
+    /// consumer indexes into (x-260a: painting, hover, hit-test, and the
+    /// selector share this index space in all three densities).
+    ///
+    /// Slim is a FILTER over the regular rows rather than a second builder, so
+    /// it inherits section keys, rollup folding, and ordering for free and
+    /// cannot drift from the tree it is a summary of. Extended is its own
+    /// construction: a flat table has no tree to filter down to.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
+        match self.density {
+            Density::Regular => self.tree_rows(),
+            // Header bands only: squad name rows (a `Sel` with no tab) and the
+            // `~` section headers. Both already carry their rollup counts, which
+            // is what keeps the rail legible rather than blind.
+            Density::Slim => self
+                .tree_rows()
+                .into_iter()
+                .filter(|r| {
+                    matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
+                        || matches!(r, DisplayRow::Header { .. })
+                })
+                .collect(),
+            Density::Extended => self.table_rows(),
+        }
+    }
+
+    /// (x-b186) The extended density's rows: an inert column header, then one
+    /// row per agent in the chosen order.
+    ///
+    /// Flat by design - this is the agents view, not the tree. By-squad keeps
+    /// the tree's own order; by-status re-bands it worst-first. Cards, spacers,
+    /// sublines, and the create-workspace footer are tree furniture and have no
+    /// place in a table, so they are suppressed; the density cycle is one press
+    /// away from all of them.
+    fn table_rows(&self) -> Vec<DisplayRow<'_>> {
+        // Built from the full agent catalog, NOT from `tree_rows` - the table's
+        // job is to list every agent, so it must not inherit the tree's section
+        // state. Filtering tree rows made a collapsed squad (the normal resting
+        // state for an inactive workspace) and a LiveOnly section drop their
+        // agents from the very view that exists to show them.
+        //
+        // By-squad still means the tree's ORDER: squads in layout order, their
+        // agents in catalog order, squadless rows last. Only the visibility
+        // gating is dropped, not the ordering.
+        let mut agents: Vec<&AgentRow> = Vec::with_capacity(self.layout.agents.len());
+        for s in &self.layout.squads {
+            agents.extend(self.layout.agents.iter().filter(|a| a.squad == Some(s.id)));
+        }
+        let known: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
+        agents.extend(
+            self.layout
+                .agents
+                .iter()
+                .filter(|a| a.squad.is_none_or(|id| !known.contains(&id))),
+        );
+        if self.agent_sort == AgentSort::Status {
+            // ONE ordering authority (Locked 3): the severity contract lives on
+            // `PaneState`'s declaration-order `Ord`, the same one the needs-me
+            // queue bands on. Exited sorts last - it is not a severity, it is
+            // the absence of one. `sort_by_key` is stable, so rows inside a band
+            // keep their tree order instead of shuffling on every tick.
+            agents.sort_by_key(|a| (a.exited, pane_state(a.badge, a.seen)));
+        }
+        let mut out = Vec::with_capacity(agents.len() + 1);
+        out.push(DisplayRow::TableHead);
+        if agents.is_empty() {
+            // A bare column header reads as a stalled or broken table. Say so.
+            out.push(DisplayRow::TableEmpty);
+            return out;
+        }
+        out.extend(agents.into_iter().map(DisplayRow::Agent));
+        out
+    }
+
+    fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
         // single squad has no groups to separate (US3 verify: absent with 1
@@ -3539,6 +3850,16 @@ impl View {
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
         let text_w = panel_w - 1; // last column is the divider
         let off = self.sideline_offset;
+        // (x-b186) Read the clock ONCE per paint, not per row: every extended
+        // row's age is relative to the same instant, so a mid-paint tick cannot
+        // make one row read older than the row above it.
+        let now = crate::digest_overlay::now_secs();
+        let table_cols = TableCols::fitting(text_w as u16);
+        // Composition width for the top row: text_w minus the density button.
+        let btn_reserved = match self.density_button_range(panel_w) {
+            Some(r) => r.start,
+            None => text_w,
+        };
         // `i` stays the TRUE display index (so the selector/hover highlight and
         // hit-test still match); the painted row subtracts the scroll offset.
         for (i, drow) in self.display_rows().into_iter().enumerate().skip(off) {
@@ -3549,6 +3870,12 @@ impl View {
             if r >= rows {
                 break;
             }
+            // (x-b186) The density button is pinned to the top painted row, so
+            // that row COMPOSES its text into a narrower width. Reserving beats
+            // overlaying: painting the button over a finished header band ate
+            // the always-on rollup counts x-6851 exists to keep visible. The
+            // band still FILLS the full width below - only the text yields.
+            let text_w = if r == 0 { btn_reserved } else { text_w };
             let is_inert = row_is_inert(&drow);
             // x-5a52: standing "you are here" markers, always on (independent of
             // the selector/hover). The active squad header accents its caret; the
@@ -3620,6 +3947,17 @@ impl View {
                         }
                     };
                     (text, flags, fg)
+                }
+                // (x-b186) In Extended an agent row IS a table row: same lattice
+                // style and external DIM modifier, different text composition.
+                DisplayRow::Agent(a) if self.density == Density::Extended => {
+                    let st = agent_lattice_state(a);
+                    let style = lattice_style(st);
+                    let mut flags = style.flags;
+                    if a.external && st != LatticeState::Blocked {
+                        flags |= cell_flags::DIM;
+                    }
+                    (table_row_text(a, table_cols, now), flags, style.fg)
                 }
                 DisplayRow::Agent(a) => {
                     // The unified icon lattice (x-df4c): exit beats badge beats
@@ -3757,6 +4095,16 @@ impl View {
                 }
                 // (x-cd67 US3) A blank section spacer paints nothing.
                 DisplayRow::Blank => (String::new(), 0, Color::Default),
+                // (x-b186) The extended table's column header: DIM like the
+                // other inert labels, so it reads as chrome rather than a row.
+                DisplayRow::TableHead => (
+                    table_head_text(table_cols, self.agent_sort),
+                    cell_flags::DIM,
+                    Color::Default,
+                ),
+                DisplayRow::TableEmpty => {
+                    ("  no agents".to_string(), cell_flags::DIM, Color::Default)
+                }
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -3826,6 +4174,26 @@ impl View {
                 }
             }
         }
+        // (x-b186) The density button, painted LAST over the sideline's top row.
+        // Overlaying is what keeps it pinned to row 0 while the rows beneath it
+        // scroll, and it costs no display row - so the x-260a invariant (every
+        // painted line is exactly one display row) still holds and
+        // `sideline_row_at` needs no special case. The header band underneath
+        // already right-aligns a droppable rollup strip, so the two columns this
+        // takes cost at worst the least-severe rollup pair, never the label.
+        if rows > 0 {
+            if let Some(range) = self.density_button_range(panel_w) {
+                let glyph = density_glyph(self.density);
+                for (n, c) in range.clone().enumerate() {
+                    cells[c] = Cell {
+                        c: if n == 0 { ' ' } else { glyph },
+                        fg: Color::Default,
+                        bg: Color::Default,
+                        flags: cell_flags::INVERSE,
+                    };
+                }
+            }
+        }
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - x-cd67 US1.
         for r in 0..rows {
@@ -3876,6 +4244,16 @@ enum DisplayRow<'a> {
     /// (x-cd67 US3) A one-line spacer between workspace groups and before the
     /// trailing sections. Inert, like `Sub`.
     Blank,
+    /// (x-b186) The extended table's column-header line, carrying the current
+    /// sort label so a toggle is never invisible - even when the two orders
+    /// happen to coincide (one agent, or all rows in one band), the label
+    /// changes. Inert like `Sub`: one painted line, one display row, so the
+    /// x-260a hit-test math is untouched.
+    TableHead,
+    /// (x-b186) The extended table's zero-agent line. Inert, like `TableHead`:
+    /// a header with nothing under it reads as a stalled table, so the empty
+    /// state is stated rather than implied.
+    TableEmpty,
 }
 
 /// (x-1d91) A dispatched Backlog reorder verb awaiting confirmation from the feed.
@@ -4014,7 +4392,11 @@ fn view_caret(v: SectionView) -> char {
 fn row_is_inert(drow: &DisplayRow) -> bool {
     matches!(
         drow,
-        DisplayRow::Header { .. } | DisplayRow::Sub(_) | DisplayRow::Blank
+        DisplayRow::Header { .. }
+            | DisplayRow::Sub(_)
+            | DisplayRow::Blank
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty
     )
 }
 
@@ -4070,6 +4452,9 @@ enum ChromeHit {
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
     /// (x-975a) Advance one sideline section through the view cycle.
     CycleSection(SectionKey),
+    /// (x-b186) Advance the sideline density: the top-right button's click,
+    /// routed to the same mutation the keybind runs so the two cannot diverge.
+    CycleDensity,
     /// Open the sideline MENU popup anchored at the footer's menu cell (x-8ccf
     /// US4). Carries the click cell so the popup anchors under the pointer.
     OpenSidelineMenu {
@@ -4703,6 +5088,75 @@ fn humanize_ago(secs: u64) -> String {
     }
 }
 
+/// (x-b186) One extended-table row: status glyph, name, message tail, PR, and a
+/// relative last-update, each padded to its column so the table aligns.
+///
+/// EMPTY CELLS ARE THE POINT (AC4-ERR). A row with no PR, no activity stamp, or
+/// no readable transcript renders blank in that cell - never a dash placeholder,
+/// an inferred PR, or a synthesized time. An external/roster row has none of the
+/// three by construction, so its right-hand cells are simply empty, which is the
+/// honest rendering of "fno does not know", not a rendering bug.
+///
+/// `cols` decides which columns survive a narrow panel; every cell is padded and
+/// truncated (via `pad_to`) so a long tail ellipsizes on one line rather than
+/// wrapping - a wrapped cell would paint two lines for one display row and break
+/// the x-260a single-enumeration invariant.
+fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
+    let glyph = lattice_style(agent_lattice_state(a)).glyph;
+    let mut out = format!("{glyph} {}", pad_cols(&a.name, COL_NAME as usize - 1));
+    if cols.tail {
+        let tail = a.tail.as_deref().unwrap_or("");
+        out.push_str(&pad_cols(tail, COL_TAIL as usize - 1));
+        out.push(' ');
+    }
+    let pr = a.pr.map(|n| format!("#{n}")).unwrap_or_default();
+    out.push_str(&pad_cols(&pr, COL_PR as usize - 1));
+    out.push(' ');
+    if cols.time {
+        // A future stamp (clock skew) clamps to 0 rather than underflowing.
+        let age = a
+            .updated_at
+            .map(|u| humanize_ago(now_secs.saturating_sub(u)))
+            .unwrap_or_default();
+        out.push_str(&pad_cols(&age, COL_TIME as usize - 1));
+    }
+    out
+}
+
+/// (x-b186) The extended table's column-header line.
+///
+/// Carries the active sort label, which is what makes the sort toggle visible
+/// even when the two orders coincide (one agent, or every row in one band): the
+/// rows may not move, but this line always changes, so no press is inert.
+fn table_head_text(cols: TableCols, sort: AgentSort) -> String {
+    let (long, short) = match sort {
+        AgentSort::Squad => ("sort: squad", "·squad"),
+        AgentSort::Status => ("sort: status", "·status"),
+    };
+    // With the tail column dropped the label has no column of its own, so it
+    // rides the NAME header instead of being appended past the end of the row.
+    // Appending overflowed the panel by 12 columns and the painter simply cut
+    // it, which left the toggle invisible at exactly the widths where the table
+    // is hardest to read - and a press with no visible effect reads as a dead
+    // control. The name column always renders, so the marker always survives.
+    let name = if cols.tail {
+        "agent".to_string()
+    } else {
+        format!("agent {short}")
+    };
+    let mut out = format!("  {}", pad_cols(&name, COL_NAME as usize - 1));
+    if cols.tail {
+        out.push_str(&pad_cols(long, COL_TAIL as usize - 1));
+        out.push(' ');
+    }
+    out.push_str(&pad_cols("pr", COL_PR as usize - 1));
+    out.push(' ');
+    if cols.time {
+        out.push_str(&pad_cols("age", COL_TIME as usize - 1));
+    }
+    out
+}
+
 /// Wrap `s` into lines no wider than `w` display chars, breaking on spaces. A
 /// single word longer than `w` becomes its own line (pad_to ellipsizes it) - a
 /// status sentence has no such words in practice, so the simple greedy pass is
@@ -4835,6 +5289,32 @@ fn peek_overlay_lines(
 /// Truncate `s` to `w` display chars (ellipsizing) and pad with spaces to `w`,
 /// so an overlay line is a fixed-width inverse block that fully overwrites the
 /// content beneath it.
+/// (x-b186) `pad_to` measured in DISPLAY columns rather than scalar values.
+///
+/// The painter advances by `glyph_cols`, so a name or tail containing a
+/// double-width glyph would occupy more columns than `pad_to` reserved and shove
+/// every following cell out of alignment. `header_band_text` already measures
+/// this way; the table has the same contract.
+fn pad_cols(s: &str, w: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = glyph_cols(ch);
+        if used + cw > w {
+            // Ellipsis is single-width; leave room for it if anything follows.
+            if used < w {
+                out.push('…');
+                used += 1;
+            }
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push_str(&" ".repeat(w.saturating_sub(used)));
+    out
+}
+
 fn pad_to(s: &str, w: usize) -> String {
     let count = s.chars().count();
     if count > w {
@@ -5768,12 +6248,19 @@ async fn dispatch_event(
             // The unified rows are never empty - the `+ new workspace`
             // footer is always present - so an empty session opens on it
             // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
-            if view.term.1 < PANEL_W + MIN_CONTENT_COLS {
+            // Gate on the CURRENT density's width authority, not the regular
+            // width: Slim renders down to a narrower terminal than Regular, and
+            // gating on PANEL_W left that rail mouse-clickable but refusing the
+            // keyboard - the exact mouse-only trap this feature forbids.
+            view.panel_on = true;
+            if view.panel_w() == 0 {
+                view.panel_on = false;
                 let _ = raw_out(b"\x07");
             } else {
-                view.panel_on = true;
-                // Row 0 is a squad row (or the footer, never a Header).
-                view.selector = Some(0);
+                // Row 0 is NOT always actionable: Extended opens on the inert
+                // column header, where the cursor would paint nothing and Enter
+                // would only ring. Anchor onto the first actionable row instead.
+                view.selector = view.selector_anchor(0);
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
                 // not hide row 0 (x-a621).
@@ -5810,6 +6297,20 @@ async fn dispatch_event(
             write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
+        }
+        Event::CycleDensity => {
+            view.cycle_density();
+            // The panel width changed with the density, so the content area
+            // did too - same accounting as TogglePanel above.
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+        }
+        Event::ToggleAgentSort => {
+            // Pure local state: re-ordering rows changes no geometry, so unlike
+            // the density cycle this needs no resize round trip.
+            view.toggle_agent_sort();
         }
         Event::ToggleStatus => {
             view.status_on = !view.status_on;
@@ -5981,6 +6482,15 @@ async fn apply_hit(
         // Pure state flip, no I/O - usable even when the socket write path
         // is failing (x-2f99, AC1-FR).
         ChromeHit::CycleSection(key) => view.cycle_section(key),
+        // (x-b186) The density button. The panel width moved with the density,
+        // so unlike CycleSection this owes the server a new content viewport.
+        ChromeHit::CycleDensity => {
+            view.cycle_density();
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
+        }
         // x-8ccf US4: open the sideline MENU popup anchored at the clicked cell.
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
@@ -8594,6 +9104,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -8641,6 +9152,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         match agent_hit(&row, 1) {
             ChromeHit::OpenAttachPlace { id, squad } => {
@@ -8887,6 +9399,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
     }
 
@@ -9293,6 +9806,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
     }
 
@@ -9766,6 +10280,7 @@ mod tests {
             Some(ChromeHit::CycleSection(_)) => "CycleSection",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
             Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
+            Some(ChromeHit::CycleDensity) => "CycleDensity",
         }
     }
 
@@ -10051,6 +10566,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         view_with_agents(vec![
             row("live-a", false),
@@ -10219,6 +10735,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }]);
         let hdr = view
             .display_rows()
@@ -10517,6 +11034,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut view = view_with_agents(vec![
             orphan("stray-live", false),
@@ -10562,6 +11080,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
         assert!(frame_text(&view.compose()).contains("▾~ elsewhere"));
@@ -10665,6 +11184,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
@@ -10686,6 +11206,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -10706,6 +11227,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
@@ -10754,6 +11276,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -11044,6 +11567,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -11216,6 +11740,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -11478,6 +12003,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -11497,6 +12023,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: None,
@@ -11516,6 +12043,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
             ],
             focus_node: None,
@@ -11590,6 +12118,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             }
         }
         let mut view = two_pane_view();
@@ -11795,6 +12324,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: None,
@@ -11814,6 +12344,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: None,
@@ -11833,6 +12364,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
                 // load-bearing "attention is never dimmed" branch. The accent
@@ -11855,6 +12387,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
             ],
             focus_node: None,
@@ -11907,7 +12440,7 @@ mod tests {
         let mut view = two_pane_view();
         // AC6-EDGE: 60 < 28 + 40 -> panel hidden, content takes full width.
         view.term = (30, 60);
-        assert!(!view.panel_visible());
+        assert_eq!(view.panel_w(), 0);
         // 30 rows minus tab bar + status row (both visible at this height).
         assert_eq!(view.content_dims(), (28, 60));
         let frame = view.compose();
@@ -12150,6 +12683,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -12787,6 +13321,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let loading = PeekView {
             cursor: 0,
@@ -13207,6 +13742,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.set_squad_view(1, SectionView::Expanded);
@@ -13247,6 +13783,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
     }
 
@@ -13842,6 +14379,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
             AgentRow {
                 squad: Some(1),
@@ -13861,6 +14399,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -13916,6 +14455,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let bare = row("zsh", 10, None);
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
@@ -13975,6 +14515,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -14023,6 +14564,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
             AgentRow {
                 squad: Some(2),
@@ -14042,6 +14584,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
         ];
         let rows = v.nav_rows();
@@ -14125,6 +14668,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }];
         let idx = v
             .nav_rows()
@@ -14535,6 +15079,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -14692,7 +15237,593 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
+    }
+
+    // ---- x-b186: density toggle + extended agent table ----
+
+    /// A view whose terminal is wide enough for the full extended table.
+    fn wide_view(agents: Vec<AgentRow>) -> View {
+        let mut v = view_with_agents(agents);
+        v.term = (24, EXTENDED_PANEL_W + MIN_CONTENT_COLS + 10);
+        v
+    }
+
+    // AC1-HP: the cycle passes through all three states and lands back where it
+    // started, and each state renders a DISTINCT panel geometry - so no press is
+    // visually inert.
+    #[test]
+    fn density_cycle_visits_three_distinct_geometries() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        assert_eq!(v.density, Density::Regular);
+        let regular = v.panel_w();
+        v.cycle_density();
+        assert_eq!(v.density, Density::Extended);
+        let extended = v.panel_w();
+        v.cycle_density();
+        assert_eq!(v.density, Density::Slim);
+        let slim = v.panel_w();
+        v.cycle_density();
+        assert_eq!(v.density, Density::Regular, "the cycle is closed");
+        assert!(
+            slim < regular && regular < extended,
+            "each density has its own width: slim {slim}, regular {regular}, extended {extended}"
+        );
+    }
+
+    // AC1-HP: slim keeps the squad headers AND their rollup counts - the whole
+    // point of the rail is that it is legible, not blind.
+    #[test]
+    fn slim_keeps_header_bands_with_rollups_and_drops_agent_rows() {
+        let mut v = wide_view(vec![
+            agent_row("w", 4, Some(AgentBadge::Working), false),
+            agent_row("b", 5, Some(AgentBadge::Blocked), false),
+        ]);
+        v.density = Density::Slim;
+        let rows = v.display_rows();
+        assert!(
+            rows.iter()
+                .all(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
+                    || matches!(r, DisplayRow::Header { .. })),
+            "slim emits header bands only"
+        );
+        assert!(
+            !rows.is_empty(),
+            "a rail with no rows would be blind, not slim"
+        );
+        // The rollup still folds live state, so squad health reads at rail width.
+        let frame = v.compose();
+        let top = frame_text(&frame).lines().next().unwrap().to_string();
+        assert!(
+            top.contains('▲'),
+            "the blocked rollup glyph survives the rail width: {top:?}"
+        );
+    }
+
+    // AC2-HP: an fno-owned row shows every column. AC4-ERR: a row with no PR,
+    // stamp, or transcript shows EMPTY cells - never a placeholder.
+    #[test]
+    fn extended_table_renders_columns_and_leaves_unknown_cells_empty() {
+        let mut owned = agent_row("owned", 4, Some(AgentBadge::Working), false);
+        owned.pr = Some(482);
+        owned.updated_at = Some(crate::digest_overlay::now_secs().saturating_sub(120));
+        owned.tail = Some("wired the reader".into());
+        let mut external = agent_row("stranger", 5, Some(AgentBadge::Working), false);
+        external.external = true; // no pr, no stamp, no tail by construction
+
+        let mut v = wide_view(vec![owned, external]);
+        v.density = Density::Extended;
+        let frame = v.compose();
+        let text = frame_text(&frame);
+        let line = |needle: &str| {
+            text.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no row for {needle} in:\n{text}"))
+                .to_string()
+        };
+
+        let owned_line = line("owned");
+        assert!(owned_line.contains("wired the reader"), "{owned_line:?}");
+        assert!(owned_line.contains("#482"), "{owned_line:?}");
+        assert!(owned_line.contains("2m"), "{owned_line:?}");
+
+        let ext_line = line("stranger");
+        assert!(!ext_line.contains('#'), "no fabricated PR: {ext_line:?}");
+        // Nothing that reads as a value: no dash placeholder, no zero age.
+        for fake in ["-", "n/a", "0s", "?"] {
+            assert!(
+                !ext_line.contains(fake),
+                "external row must render EMPTY, not {fake:?}: {ext_line:?}"
+            );
+        }
+    }
+
+    // (codex P1) The extended table must show EVERY agent, not just the ones the
+    // tree happens to be showing. Deriving it from tree_rows() inherited the
+    // section view state, so a collapsed squad or a LiveOnly section silently
+    // dropped its rows from a view whose whole purpose is to list them all.
+    #[test]
+    fn extended_table_lists_agents_from_collapsed_and_live_only_sections() {
+        let mut exited = agent_row("dead", 6, None, false);
+        exited.exited = true;
+        let mut v = wide_view(vec![
+            agent_row("alive", 4, Some(AgentBadge::Working), false),
+            exited,
+        ]);
+        // Collapse the squad: in the tree these rows are hidden.
+        let key = squad_key(&v.layout, v.layout.active_squad).unwrap();
+        v.set_section_view(key.clone(), SectionView::Collapsed);
+        v.density = Density::Regular;
+        assert!(
+            !v.display_rows()
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Agent(_))),
+            "precondition: the collapsed tree hides its agent rows"
+        );
+
+        v.density = Density::Extended;
+        let names: Vec<String> = v
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"alive".to_string()) && names.contains(&"dead".to_string()),
+            "the table lists every agent regardless of section state: {names:?}"
+        );
+
+        // LiveOnly hides exited rows in the tree; the table still lists them.
+        v.set_section_view(key, SectionView::LiveOnly);
+        let names: Vec<String> = v
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"dead".to_string()), "{names:?}");
+    }
+
+    // AC3-UI: the sort toggle re-bands rows worst-first AND relabels the header,
+    // so the press is visible even when the two orders coincide.
+    #[test]
+    fn sort_toggle_rebands_by_severity_and_relabels() {
+        let mut v = wide_view(vec![
+            agent_row("idle", 4, None, false),
+            agent_row("done", 5, Some(AgentBadge::Done), false),
+            agent_row("blocked", 6, Some(AgentBadge::Blocked), false),
+            agent_row("working", 7, Some(AgentBadge::Working), false),
+        ]);
+        v.density = Density::Extended;
+
+        let names = |v: &View| -> Vec<String> {
+            v.display_rows()
+                .iter()
+                .filter_map(|r| match r {
+                    DisplayRow::Agent(a) => Some(a.name.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            names(&v),
+            ["idle", "done", "blocked", "working"],
+            "by-squad keeps the tree's own order"
+        );
+        assert!(frame_text(&v.compose()).contains("sort: squad"));
+
+        v.toggle_agent_sort();
+        assert_eq!(
+            names(&v),
+            ["blocked", "working", "done", "idle"],
+            "by-status bands worst-first, the x-feec severity order"
+        );
+        assert!(frame_text(&v.compose()).contains("sort: status"));
+    }
+
+    // The severity bands must come from the ONE existing authority. LatticeState
+    // declares Working before Blocked, so sorting on it instead of PaneState
+    // would silently produce the wrong order - this pins the right one.
+    #[test]
+    fn status_sort_uses_pane_state_severity_not_lattice_order() {
+        assert!(
+            PaneState::Blocked < PaneState::Working,
+            "PaneState is the severity contract"
+        );
+        let mut exited = agent_row("gone", 8, Some(AgentBadge::Blocked), false);
+        exited.exited = true;
+        let mut v = wide_view(vec![
+            exited,
+            agent_row("live", 9, Some(AgentBadge::Working), false),
+        ]);
+        v.density = Density::Extended;
+        v.agent_sort = AgentSort::Status;
+        let names: Vec<String> = v
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["live", "gone"],
+            "exited sorts last: it is the absence of a severity, not a severity"
+        );
+    }
+
+    // AC5-EDGE: extended clamps to the widest legal width and drops columns by
+    // priority (tail first, then age) rather than crushing the work panes.
+    #[test]
+    fn extended_clamps_and_drops_columns_before_starving_panes() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Extended;
+        assert_eq!(v.panel_w(), EXTENDED_PANEL_W, "wide terminal: every column");
+        assert_eq!(
+            TableCols::fitting(EXTENDED_PANEL_W - 1),
+            TableCols {
+                tail: true,
+                time: true
+            }
+        );
+
+        // Narrow enough that the full table cannot fit beside a usable pane.
+        v.term = (24, MIN_EXTENDED_PANEL_W + MIN_CONTENT_COLS + 3);
+        let w = v.panel_w();
+        assert!(w < EXTENDED_PANEL_W, "clamped down");
+        assert!(
+            v.term.1 - w >= MIN_CONTENT_COLS,
+            "the work pane keeps its minimum: term {} panel {w}",
+            v.term.1
+        );
+        // Tail goes first, then the age - status/name/pr always survive.
+        assert!(!TableCols::fitting(w - 1).tail, "tail drops first");
+
+        // Narrower still: the panel hides rather than rendering a nameless table.
+        v.term = (24, MIN_CONTENT_COLS + 4);
+        assert_eq!(v.panel_w(), 0);
+        assert!(v.content_dims().1 >= 1, "never a zero-width content area");
+    }
+
+    // AC5-EDGE at startup: a persisted Extended restored onto a now-narrow
+    // terminal degrades through the same clamp instead of corrupting the layout.
+    #[test]
+    fn persisted_extended_on_a_narrow_terminal_degrades_not_corrupts() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Extended;
+        for cols in [200u16, 120, 90, 70, 50, 30, 10] {
+            v.term = (24, cols);
+            let w = v.panel_w();
+            assert!(
+                w == 0 || cols - w >= MIN_CONTENT_COLS,
+                "cols {cols} panel {w}"
+            );
+            // The paint must not panic at any of these widths.
+            let _ = v.compose();
+        }
+    }
+
+    // The x-260a invariant in ALL THREE densities: every painted sideline line is
+    // exactly one display row, which is what keeps hit-testing honest.
+    #[test]
+    fn painted_lines_match_display_rows_in_every_density() {
+        let mut v = wide_view(vec![
+            agent_row("a", 4, Some(AgentBadge::Working), false),
+            agent_row("b", 5, Some(AgentBadge::Blocked), false),
+        ]);
+        for d in [Density::Slim, Density::Regular, Density::Extended] {
+            v.density = d;
+            let n = v.display_rows().len();
+            let panel_w = v.panel_w();
+            assert!(panel_w > 0, "{d:?} should render at this width");
+            // Every row index in range hit-tests back to ITSELF at its painted
+            // row - the property `sideline_row_at` needs to stay correct.
+            for i in 0..n.min(v.term.0 as usize) {
+                assert_eq!(
+                    v.sideline_row_at(i as u16, 0),
+                    Some(i),
+                    "{d:?}: painted row {i} must resolve to display row {i}"
+                );
+            }
+        }
+    }
+
+    // The selector follows the AGENT across a re-sort, not the row index.
+    #[test]
+    fn selector_follows_the_agent_across_a_resort() {
+        let mut v = wide_view(vec![
+            agent_row("idle", 4, None, false),
+            agent_row("blocked", 5, Some(AgentBadge::Blocked), false),
+        ]);
+        v.density = Density::Extended;
+        let idle_at = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle"))
+            .unwrap();
+        v.selector = Some(idle_at);
+        v.toggle_agent_sort();
+        let now_at = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle"))
+            .unwrap();
+        assert_ne!(now_at, idle_at, "the re-sort moved this agent");
+        assert_eq!(
+            v.selector,
+            Some(now_at),
+            "the cursor followed the agent, not the index"
+        );
+    }
+
+    // The sort toggle must stay VISIBLE at every width the table renders at.
+    // Appending the label past the last column silently overflowed the panel by
+    // 12 columns once the tail dropped, and the painter cut it - so the toggle
+    // looked like a dead control exactly where the table is hardest to read.
+    #[test]
+    fn sort_label_survives_every_column_configuration() {
+        for cols in [
+            TableCols {
+                tail: true,
+                time: true,
+            },
+            TableCols {
+                tail: false,
+                time: true,
+            },
+            TableCols {
+                tail: false,
+                time: false,
+            },
+        ] {
+            let by_squad = table_head_text(cols, AgentSort::Squad);
+            let by_status = table_head_text(cols, AgentSort::Status);
+            assert_ne!(
+                by_squad, by_status,
+                "{cols:?}: the header must change when the sort does"
+            );
+            // The header must FIT: anything past the panel width is painted away,
+            // which is how the label went missing in the first place.
+            let panel_text_w = match cols {
+                TableCols { tail: true, .. } => EXTENDED_PANEL_W - 1,
+                TableCols { time: true, .. } => COL_STATUS + COL_NAME + COL_PR + COL_TIME - 1,
+                _ => MIN_EXTENDED_PANEL_W - 1,
+            };
+            for (label, head) in [("squad", &by_squad), ("status", &by_status)] {
+                assert!(
+                    head.chars().count() <= panel_text_w as usize,
+                    "{cols:?}: header overflows {panel_text_w} cols: {head:?}"
+                );
+                // And the surviving text still names the order.
+                let visible: String = head.chars().take(panel_text_w as usize).collect();
+                assert!(
+                    visible.contains(label),
+                    "{cols:?}: {label:?} not visible in {visible:?}"
+                );
+            }
+        }
+    }
+
+    // (codex P2) Slim is the explicitly NON-hidden density, so a narrow terminal
+    // must clamp it, not make it vanish. Giving it floor == want meant cycling
+    // into the rail removed the sideline entirely below 56 columns.
+    #[test]
+    fn slim_clamps_on_a_narrow_terminal_instead_of_hiding() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Slim;
+        // Narrower than the rail wants, but wide enough to still show one.
+        v.term = (24, MIN_CONTENT_COLS + SLIM_PANEL_W - 4);
+        let w = v.panel_w();
+        assert!(w > 0, "slim must not hide here");
+        assert!(w < SLIM_PANEL_W, "and it clamped: {w}");
+        assert!(v.term.1 - w >= MIN_CONTENT_COLS, "pane keeps its minimum");
+        let _ = v.compose(); // must not panic at the clamped width
+                             // Regular at the same width still auto-hides (unchanged behaviour).
+        v.density = Density::Regular;
+        assert_eq!(v.panel_w(), 0);
+    }
+
+    // (codex P2) A column header with nothing under it reads as a stalled table.
+    #[test]
+    fn extended_zero_agents_states_the_empty_case() {
+        let mut v = wide_view(vec![]);
+        v.density = Density::Extended;
+        let rows = v.display_rows();
+        assert!(matches!(rows.first(), Some(DisplayRow::TableHead)));
+        assert!(
+            rows.iter().any(|r| matches!(r, DisplayRow::TableEmpty)),
+            "zero agents renders an explicit empty-state line"
+        );
+        assert!(frame_text(&v.compose()).contains("no agents"));
+    }
+
+    // (codex P2) The painter advances by DISPLAY columns (`glyph_cols`), so a
+    // cell padded by scalar count occupies more columns than it reserved and
+    // shoves every following cell out of alignment.
+    //
+    // Uses the trigram block, which is what `glyph_cols` actually treats as
+    // wide. A CJK name does NOT reproduce this today: `glyph_cols` reports 1 for
+    // it, so the painter and the padding agree - the sideline's width model is
+    // trigram-only, which is a pre-existing gap this table neither introduced
+    // nor fixes.
+    #[test]
+    fn table_cells_align_with_double_width_glyphs() {
+        let mut wide_name = agent_row("☰☰☰ menu", 4, Some(AgentBadge::Working), false);
+        wide_name.pr = Some(7);
+        let plain = agent_row("ascii", 5, Some(AgentBadge::Working), false);
+        let cols = TableCols {
+            tail: true,
+            time: false,
+        };
+        let a = table_row_text(&wide_name, cols, 0);
+        let b = table_row_text(&plain, cols, 0);
+        let width = |s: &str| s.chars().map(glyph_cols).sum::<usize>();
+        assert_eq!(
+            width(&a),
+            width(&b),
+            "rows must occupy equal display width:\n{a:?}\n{b:?}"
+        );
+    }
+
+    // (codex P1) A scrape tick that flips one badge RE-ORDERS a status-sorted
+    // table. Preserving only the numeric index would slide the cursor onto a
+    // different agent, so the next Enter or lifecycle key hits the wrong worker.
+    #[test]
+    fn status_sorted_selector_follows_its_agent_across_a_layout_push() {
+        let mut v = wide_view(vec![
+            agent_row("idle", 4, None, false),
+            agent_row("busy", 5, Some(AgentBadge::Working), false),
+        ]);
+        v.density = Density::Extended;
+        v.agent_sort = AgentSort::Status;
+        let at = |v: &View, name: &str| {
+            v.display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+                .unwrap()
+        };
+        let idle_at = at(&v, "idle");
+        v.selector = Some(idle_at);
+
+        // The SELECTED agent becomes blocked, so it outranks the working row
+        // and jumps up a band - the row under the cursor is the one that moves.
+        let mut next = v.layout.clone();
+        next.agents[0].badge = Some(AgentBadge::Blocked);
+        v.set_layout(next);
+
+        let now = at(&v, "idle");
+        assert_ne!(now, idle_at, "precondition: the re-sort moved this agent");
+        assert_eq!(
+            v.selector,
+            Some(now),
+            "the cursor must follow the agent, not the index"
+        );
+    }
+
+    // (codex P2) Extended puts an inert column header at index 0, so opening the
+    // selector there paints no cursor and Enter only rings.
+    #[test]
+    fn open_selector_skips_the_inert_table_header() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Extended;
+        assert!(matches!(
+            v.display_rows().first(),
+            Some(DisplayRow::TableHead)
+        ));
+        let anchored = v.selector_anchor(0).unwrap();
+        assert!(
+            !row_is_inert(&v.display_rows()[anchored]),
+            "the selector opens on an actionable row"
+        );
+        assert!(v.row_action(anchored).is_some(), "and Enter does something");
+    }
+
+    // (codex P2) Slim renders on terminals narrower than Regular needs. Gating
+    // the selector on the regular width left that rail clickable but not
+    // keyboard-reachable - the mouse-only trap this feature forbids.
+    #[test]
+    fn slim_width_that_renders_is_also_keyboard_selectable() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Slim;
+        v.term = (24, MIN_CONTENT_COLS + MIN_SLIM_PANEL_W + 1);
+        assert!(v.panel_w() > 0, "the rail renders at this width");
+        assert!(
+            v.term.1 < PANEL_W + MIN_CONTENT_COLS,
+            "and it is below the old regular-width selector gate"
+        );
+    }
+
+    // (codex P2) A re-order can push the selected agent out of the scroll
+    // window; a cursor with no visible row still takes contextual keys.
+    #[test]
+    fn resort_scrolls_the_selection_back_into_view() {
+        let agents: Vec<AgentRow> = (0..40)
+            .map(|i| {
+                agent_row(
+                    &format!("a{i:02}"),
+                    100 + i,
+                    // Only the LAST row is blocked, so a status sort yanks it to
+                    // the top from far down the list.
+                    if i == 39 {
+                        Some(AgentBadge::Blocked)
+                    } else {
+                        None
+                    },
+                    false,
+                )
+            })
+            .collect();
+        let mut v = wide_view(agents);
+        v.term = (12, EXTENDED_PANEL_W + MIN_CONTENT_COLS + 10); // short: scrolls
+        v.density = Density::Extended;
+        let at = |v: &View, n: &str| {
+            v.display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == n))
+                .unwrap()
+        };
+        v.selector = Some(at(&v, "a39"));
+        v.clamp_sideline_offset();
+        v.toggle_agent_sort();
+
+        let cur = v.selector.unwrap();
+        let visible = v.sideline_visible_rows();
+        assert!(
+            cur >= v.sideline_offset && cur < v.sideline_offset + visible,
+            "selection {cur} must stay inside the window [{}, {})",
+            v.sideline_offset,
+            v.sideline_offset + visible
+        );
+    }
+
+    // The density button is a real click target, routed to the SAME mutation the
+    // keybind runs, and it never becomes the only way in.
+    #[test]
+    fn density_button_click_routes_to_the_cycle() {
+        let v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        let range = v.density_button_range(v.panel_w() as usize).unwrap();
+        assert!(matches!(
+            v.chrome_hit(0, range.start as u16 + 1),
+            Some(ChromeHit::CycleDensity)
+        ));
+        // One row down is an ordinary sideline row again - the button is chrome
+        // pinned to row 0, not a column.
+        assert!(!matches!(
+            v.chrome_hit(1, range.start as u16 + 1),
+            Some(ChromeHit::CycleDensity)
+        ));
+        // Keybind parity (Locked 5): the gesture exists without the mouse.
+        assert_eq!(
+            crate::keys::resolve_chord(b'B'),
+            crate::keys::Event::CycleDensity
+        );
+        assert_eq!(
+            crate::keys::resolve_chord(b'o'),
+            crate::keys::Event::ToggleAgentSort
+        );
+    }
+
+    // The button must not eat the header rollup it sits beside (the regression
+    // the reserve-don't-overlay approach exists to prevent).
+    #[test]
+    fn density_button_preserves_the_top_header_rollup() {
+        let mut v = wide_view(vec![agent_row("b", 5, Some(AgentBadge::Blocked), false)]);
+        v.density = Density::Regular;
+        let top = frame_text(&v.compose()).lines().next().unwrap().to_string();
+        assert!(
+            top.contains('▲'),
+            "rollup survives beside the button: {top:?}"
+        );
+        assert!(
+            top.contains(density_glyph(Density::Regular)),
+            "and the button is there too: {top:?}"
+        );
     }
 
     fn view_with_agents(agents: Vec<AgentRow>) -> View {

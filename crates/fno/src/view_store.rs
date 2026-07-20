@@ -156,6 +156,61 @@ struct StoreFile {
     version: u32,
     #[serde(default)]
     sections: HashMap<String, serde_json::Value>,
+    /// (x-b186) Sideline density and agent-sort order. `Value`, not the typed
+    /// enums, for the same reason `sections` is: a state a newer build wrote
+    /// must survive a round-trip through this one rather than being reset to
+    /// the default on the next gesture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    density: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sort: Option<serde_json::Value>,
+}
+
+/// How much of each sideline row renders (x-b186). Orthogonal to the panel's
+/// on/off toggle: `Slim` is a narrow rail, NOT a hidden panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Density {
+    /// A narrow rail: section headers and their rollup counts only.
+    Slim,
+    /// Today's tree.
+    #[default]
+    Regular,
+    /// One table row per agent: name | status | tail | PR | last update.
+    Extended,
+}
+
+impl Density {
+    /// One press of the density key. A three-state cycle, so every press
+    /// changes both the glyph and the panel geometry - no press is inert.
+    pub fn next(self) -> Density {
+        match self {
+            Density::Slim => Density::Regular,
+            Density::Regular => Density::Extended,
+            Density::Extended => Density::Slim,
+        }
+    }
+}
+
+/// Extended-table row order (x-b186).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSort {
+    /// Tree order: rows stay under their squad.
+    #[default]
+    Squad,
+    /// Severity bands, worst first - the same ordering authority the needs-me
+    /// queue uses.
+    Status,
+}
+
+impl AgentSort {
+    pub fn toggle(self) -> AgentSort {
+        match self {
+            AgentSort::Squad => AgentSort::Status,
+            AgentSort::Status => AgentSort::Squad,
+        }
+    }
 }
 
 /// The raw file, entries untyped. Missing, empty, or corrupt all read as a
@@ -189,6 +244,35 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
         .collect()
 }
 
+/// Read the persisted density and sort (x-b186).
+///
+/// Missing, corrupt, or written by a build with a state this one cannot parse
+/// all resolve to the defaults (`Regular` + by-squad), independently per field:
+/// an unreadable `sort` never costs the operator their `density`. This is
+/// AC7-FR - the mux always starts, and the next gesture persists cleanly over
+/// whatever was there.
+pub fn load_prefs() -> (Density, AgentSort) {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return (Density::default(), AgentSort::default());
+    }
+    fn parse<T: serde::de::DeserializeOwned + Default>(v: Option<serde_json::Value>) -> T {
+        v.and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+    let file = read_raw();
+    (parse(file.density), parse(file.sort))
+}
+
+/// Persist the density and sort the operator chose. Best-effort, like every
+/// other write here: a failure leaves the session on its in-memory state.
+pub fn save_prefs(density: Density, sort: AgentSort) {
+    mutate(|file| {
+        file.density = serde_json::to_value(density).ok();
+        file.sort = serde_json::to_value(sort).ok();
+    });
+}
+
 /// Persist the sections the operator EXPLICITLY chose, merging them into the
 /// file under an exclusive lock.
 ///
@@ -214,14 +298,32 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
 /// session running on its in-memory state, because a display preference is
 /// never worth interrupting a paint over.
 pub fn save(chosen: &HashMap<SectionKey, SectionView>) {
+    if chosen.is_empty() {
+        return;
+    }
+    mutate(|file| {
+        for (k, v) in chosen {
+            if let Ok(value) = serde_json::to_value(v) {
+                file.sections.insert(k.to_wire(), value);
+            }
+        }
+    });
+}
+
+/// Apply `f` to the store under an exclusive lock and write it back atomically.
+///
+/// The locked read-modify-write core [`save`] and [`save_prefs`] share, so the
+/// two preference kinds can never clobber each other: both re-read INSIDE the
+/// lock and overlay, rather than writing a snapshot taken before the other's
+/// change. Best-effort at every step - a contended lock or any I/O failure
+/// leaves the session on its in-memory state, because a display preference is
+/// never worth interrupting a paint over.
+fn mutate(f: impl FnOnce(&mut StoreFile)) {
     // A unit test that has not explicitly pointed the store at a scratch dir
     // must never write a real `$HOME` (the whole `client.rs` view suite
     // mutates section state incidentally). Persistence is opt-in under test.
     #[cfg(test)]
     if TEST_PATH.with(|c| c.borrow().is_none()) {
-        return;
-    }
-    if chosen.is_empty() {
         return;
     }
     let path = view_path();
@@ -246,11 +348,7 @@ pub fn save(chosen: &HashMap<SectionKey, SectionView>) {
     // Re-read INSIDE the lock so the overlay lands on the current file.
     let mut file = read_raw();
     file.version = STORE_VERSION;
-    for (k, v) in chosen {
-        if let Ok(value) = serde_json::to_value(v) {
-            file.sections.insert(k.to_wire(), value);
-        }
-    }
+    f(&mut file);
     let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
         return;
     };
@@ -493,5 +591,66 @@ mod tests {
             "only the unreadable entry is dropped: {got:?}"
         );
         assert_eq!(got[&SectionKey::Squad("/a".into())], SectionView::Expanded);
+    }
+
+    // ---- x-b186: density + sort preferences ----
+
+    #[test]
+    fn prefs_default_then_round_trip() {
+        let _s = Scratch::new("prefs-roundtrip");
+        // AC7-FR: a missing file is not an error, it is the defaults.
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad));
+        save_prefs(Density::Extended, AgentSort::Status);
+        assert_eq!(load_prefs(), (Density::Extended, AgentSort::Status));
+    }
+
+    #[test]
+    fn prefs_and_sections_do_not_clobber_each_other() {
+        // Both writers overlay the same file under one lock; persisting a
+        // density must not drop a section choice, and vice versa.
+        let _s = Scratch::new("prefs-coexist");
+        let chosen: HashMap<SectionKey, SectionView> =
+            [(SectionKey::Elsewhere, SectionView::Collapsed)]
+                .into_iter()
+                .collect();
+        save(&chosen);
+        save_prefs(Density::Slim, AgentSort::Status);
+        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status));
+        assert_eq!(load()[&SectionKey::Elsewhere], SectionView::Collapsed);
+        // And the reverse order.
+        save(&chosen);
+        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status));
+    }
+
+    #[test]
+    fn corrupt_prefs_fall_back_per_field_and_never_refuse() {
+        // AC7-FR: an unparsable density resolves to Regular. Degradation is
+        // PER FIELD, so a readable sort beside it still survives.
+        let _s = Scratch::new("prefs-corrupt");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{},"density":"holographic","sort":"status"}"#,
+        )
+        .unwrap();
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Status));
+        // Wholly corrupt file: still the defaults, still no panic.
+        std::fs::write(view_path(), "{ not json").unwrap();
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad));
+        // And the next gesture writes cleanly over it.
+        save_prefs(Density::Extended, AgentSort::Squad);
+        assert_eq!(load_prefs().0, Density::Extended);
+    }
+
+    #[test]
+    fn density_cycles_three_states_and_sort_toggles() {
+        // Every press changes state, so no press can be visually inert.
+        assert_eq!(Density::Regular.next(), Density::Extended);
+        assert_eq!(Density::Extended.next(), Density::Slim);
+        assert_eq!(Density::Slim.next(), Density::Regular);
+        // Three presses return to the start: the cycle is closed.
+        let d = Density::Regular;
+        assert_eq!(d.next().next().next(), d);
+        assert_eq!(AgentSort::Squad.toggle(), AgentSort::Status);
+        assert_eq!(AgentSort::Status.toggle(), AgentSort::Squad);
     }
 }
