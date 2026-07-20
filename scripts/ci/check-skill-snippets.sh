@@ -53,7 +53,13 @@ if [[ -z "$FILES" ]]; then
   exit 0
 fi
 
-FINDINGS=$(printf '%s\n' "$FILES" | xargs awk '
+AWK_ERR="$(mktemp)"
+# No `|| true` here: an awk that crashes (a regex dialect this program does not
+# use, a broken PATH awk) would otherwise yield empty FINDINGS and print the
+# success line - a gate whose whole thesis is "silent no-ops ship bugs" being a
+# silent no-op itself. Its status is captured and hard-fails below.
+set +e
+FINDINGS=$(printf '%s\n' "$FILES" | xargs awk -v Q=\' '
 function report(cls, hint,   _) {
   # lint-ok on this line or the previous one suppresses the finding.
   if (line ~ ("# lint-ok:[ \t]*" cls) || prev ~ ("# lint-ok:[ \t]*" cls)) return
@@ -85,6 +91,11 @@ function unquoted_at(s, p,   seg, q) {
   return (q % 2) == 0
 }
 
+# Fence state is per FILE. Without this an unclosed fence in one document would
+# leak "inside a block" into every file after it (one awk process reads them all),
+# turning the rest of the tree into false positives.
+FNR == 1 { inblk = 0; prev = "" }
+
 /^[ \t]*```/ {
   if (inblk) inblk = 0
   else if ($0 ~ /^[ \t]*```(bash|sh|zsh|shell)[ \t]*$/) inblk = 1
@@ -111,9 +122,17 @@ function unquoted_at(s, p,   seg, q) {
     rest = substr(rest, r + l)
   }
 
-  # 2. empty regex alternation in a grep pattern
+  # 2. empty regex alternation in a grep pattern. Q is the single-quote char,
+  # passed in via -v: embedding one literally would need the '"'"' dance, which
+  # closes the shell quoting mid-program and turns any following metacharacter
+  # into a shell token. Fitting hazard for this file to avoid rather than dodge.
+  #
+  # The leading-alternative form requires the quote to sit where an argument
+  # OPENS (after whitespace, = or an open paren), because a closing quote
+  # followed by | is just an unspaced shell pipeline, not an empty alternation.
+  QC = "[\"" Q "]"
   if (line ~ /(^|[ \t;|&(])grep([ \t]|$)/ &&
-      (line ~ /["'"'"'][^"'"'"']*\|["'"'"']/ || line ~ /["'"'"']\|/ || line ~ /\|\|[^ \t]*["'"'"']/))
+      (line ~ (QC "[^\"" Q "]*\\|" QC) || line ~ ("[ \t=(]" QC "\\|") || line ~ ("\\|\\|[^ \t]*" QC)))
     report("empty-grep-alternation", \
       "ugrep rejects an empty (sub)expression; filter jq-side with select(. != null and . != \"\")")
 
@@ -128,8 +147,9 @@ function unquoted_at(s, p,   seg, q) {
   if (line ~ /(^|[ \t;|&(=$])stat[ \t]+-f/ && line !~ /stat[ \t]+-c/)
     report("single-spelling-stat", "BSD-only: try stat -c (GNU) as a fallback")
 
-  # 5. a mutating fno verb whose failure is swallowed
-  if (line ~ /\|\|[ \t]*true[ \t]*$/ &&
+  # 5. a mutating fno verb whose failure is swallowed. A trailing comment must
+  # not defeat the anchor - `... || true   # best effort` is the same hazard.
+  if (line ~ /\|\|[ \t]*true[ \t]*(#.*)?$/ &&
       line ~ /fno (backlog (idea|advance|reconcile|update|done|rank|capture add|session add|batch)|retro run|carveout (add|resolve)|plan reconcile-status|pr sync-canonical|skill-diff|worktree archive|state set|agents (stop|rm))/)
     report("fno-mutation-swallowed", \
       "best-effort mutation must be visible: verb || { echo \"...failed\" >&2; FAILURES+=(\"<verb>\"); }")
@@ -138,7 +158,18 @@ function unquoted_at(s, p,   seg, q) {
 }
 
 END { exit 0 }
-' 2>/dev/null || true)
+' 2>"$AWK_ERR")
+AWK_RC=$?
+set -e
+
+if [[ $AWK_RC -ne 0 ]]; then
+  echo "ERROR: the snippet scanner itself failed (awk exit $AWK_RC)." >&2
+  echo "A crashed lint is a red build, not a skipped check." >&2
+  cat "$AWK_ERR" >&2
+  rm -f "$AWK_ERR"
+  exit 2
+fi
+rm -f "$AWK_ERR"
 
 if [[ -n "$FINDINGS" ]]; then
   echo "ERROR: hazardous shell constructs in skill snippets:" >&2

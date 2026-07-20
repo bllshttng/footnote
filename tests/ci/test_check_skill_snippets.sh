@@ -87,6 +87,44 @@ echo "== a tree with no markdown passes vacuously =="
 mkdir -p "$TMP/empty"
 bash "$LINT" "$TMP/empty" >/dev/null 2>&1 && ok "vacuous pass" || fail "empty tree should pass"
 
+echo "== a crashed scanner is a red build, not a skipped check =="
+# A gate that goes quiet when its own parser breaks is the silent no-op it exists
+# to catch. Shim a failing awk onto PATH and confirm the hazard tree still fails.
+STUB="$TMP/stubbin"; mkdir -p "$STUB"
+printf '#!/bin/sh\nexit 2\n' > "$STUB/awk"; chmod +x "$STUB/awk"
+out="$(PATH="$STUB:$PATH" bash "$LINT" "$HAZ" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && ok "broken awk exits non-zero" || fail "failed open on a broken awk"
+echo "$out" | grep -q "scanner itself failed" && ok "names the scanner failure" \
+    || fail "no scanner-failure message: $out"
+
+echo "== fence state does not leak across files =="
+# One awk process reads every file, so an unclosed fence must not make the next
+# file's prose read as in-block.
+LEAK="$TMP/leak"; mkdir -p "$LEAK"
+{ echo 'prose'; echo '```bash'; echo 'echo ok'; } > "$LEAK/a-unclosed.md"
+printf 'plain prose with ${X:+--flag "$X"} in it\n' > "$LEAK/b.md"
+bash "$LINT" "$LEAK" >/dev/null 2>&1 \
+    && ok "unclosed fence does not leak into the next file" \
+    || fail "fence state leaked: $(bash "$LINT" "$LEAK" 2>&1)"
+
+echo "== an unspaced shell pipeline after a grep is not an empty alternation =="
+PIPE="$TMP/pipe"
+fixture "$PIPE/a.md" "COUNT=\$(grep -c 'foo'| wc -l)" "jq -r '.a|.b' f | grep bar" "grep -E 'a|b' file"
+bash "$LINT" "$PIPE" >/dev/null 2>&1 && ok "no false positive on 'foo'| wc" \
+    || fail "false positive: $(bash "$LINT" "$PIPE" 2>&1)"
+
+echo "== a leading empty alternative is still caught =="
+LEAD="$TMP/lead"
+fixture "$LEAD/a.md" "grep -E '|alpha' file"
+bash "$LINT" "$LEAD" >/dev/null 2>&1 && fail "missed a leading empty alternative" \
+    || ok "leading empty alternative caught"
+
+echo "== a trailing comment does not defeat the || true anchor =="
+CMT="$TMP/cmt"
+fixture "$CMT/a.md" 'fno backlog idea "x" || true   # best effort'
+bash "$LINT" "$CMT" >/dev/null 2>&1 && fail "trailing comment defeated the anchor" \
+    || ok "|| true caught behind a trailing comment"
+
 echo "== a missing scan root is a loud error, not a pass =="
 bash "$LINT" "$TMP/nope" >/dev/null 2>&1 && fail "missing root should exit non-zero" \
     || ok "missing root exits non-zero"
