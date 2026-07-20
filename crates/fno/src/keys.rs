@@ -71,6 +71,15 @@ pub enum Event {
     OpenAnswers,
     /// Show/hide the sideline (leader+b).
     TogglePanel,
+    /// (x-b186) Cycle the sideline density slim -> regular -> extended
+    /// (leader+B). Orthogonal to [`Event::TogglePanel`]: this changes how much
+    /// each row shows, that changes whether the panel renders at all.
+    CycleDensity,
+    /// (x-b186) Toggle the extended table's order between by-squad and
+    /// by-status (leader+o). Inert in the other densities, which render no
+    /// table - but the preference still persists, so the choice survives a
+    /// round trip through slim.
+    ToggleAgentSort,
     /// Show/hide the status row (leader+s). Client-local (US4, AC4-FR).
     ToggleStatus,
     /// Show the full key-table overlay (leader+?). The next keypress
@@ -435,6 +444,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         b(b'w', "w", OpenSelector, Global, "panel selector"),
         b(b'a', "a", OpenAnswers, Global, "answer queue"),
         b(b'b', "b", TogglePanel, Global, "toggle sideline"),
+        b(b'B', "B", CycleDensity, Global, "cycle sideline density"),
+        b(b'o', "o", ToggleAgentSort, Global, "sort agents: squad/status"),
         b(b's', "s", ToggleStatus, Global, "toggle status"),
         b(b'?', "?", ShowKeys, Global, "this key table"),
         b(
