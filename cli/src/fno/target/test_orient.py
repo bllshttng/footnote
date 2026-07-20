@@ -69,6 +69,68 @@ def test_attended_line_from_manifest() -> None:
     assert orient._attended_line({"attended": False}).startswith("false")
 
 
+def test_attended_line_authority_grant(monkeypatch) -> None:
+    # x-6390: `/target beastmode` stamps `authority: full`; the orienter surfaces it
+    # on the attended line so /think and /blueprint read one posture, not two.
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "live")
+    raw = {"attended": False, "authority": "full", "target_claim_key": "node:x-1"}
+    assert "authority: full" in orient._attended_line(raw)
+    assert "authority" not in orient._attended_line({"attended": False})
+
+
+def test_authority_fails_closed_on_claimless_abandoned_manifest(monkeypatch) -> None:
+    """x-6390: a free-text `/target beastmode` records NO claim, and a claimless
+    manifest with a dead transient pid reads `live` by design (right for
+    attended, wrong for authority). Without a fail-closed rule an abandoned run
+    advertises its grant forever - the x-4af4 stale-autonomy bug, reintroduced.
+    """
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    raw = {"attended": True, "authority": "full", "owner_pid": "999999"}
+    # the manifest still reads live...
+    assert orient._manifest_liveness(raw)[0] == "live"
+    # ...but the grant does not survive the missing proof of life.
+    assert orient._authority_granted(raw) is False
+    assert "authority" not in orient._attended_line(raw)
+
+
+def test_authority_granted_when_life_is_proven(monkeypatch) -> None:
+    """The converse: a live claim is real proof, so the grant stands.
+    Fail-closed must not mean never-granted."""
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "live")
+    assert orient._authority_granted(
+        {"authority": "full", "target_claim_key": "node:x-1"}
+    ) is True
+
+
+def test_a_live_owner_pid_alone_never_grants_authority(monkeypatch) -> None:
+    """owner_pid is alive for EVERY session at init time, claimless ones
+    included. A pid-based grant therefore reads granted at init and evaporates
+    minutes later, so the operator walks away holding a grant that already
+    lapsed. Only a claim proves both live-now and survives-this-process."""
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: True)
+    assert orient._authority_granted({"authority": "full", "owner_pid": "1"}) is False
+    # ...and a claim that is present but not live is equally insufficient.
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "free")
+    assert orient._authority_granted(
+        {"authority": "full", "target_claim_key": "node:x-1", "owner_pid": "1"}
+    ) is False
+
+
+def test_attended_line_dead_manifest_never_grants_authority(monkeypatch) -> None:
+    # x-4af4 liveness lesson: a defunct session's stamped grant must not survive
+    # it. Dead manifest resolves to plain attended -- no authority, no autonomy.
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "stale")
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    raw = {
+        "attended": False,
+        "authority": "full",
+        "target_claim_key": "node:x-1",
+        "owner_pid": "999999",
+    }
+    line = orient._attended_line(raw)
+    assert line.startswith("true") and "authority" not in line
+
+
 def test_attended_line_substrate(monkeypatch) -> None:
     monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
     monkeypatch.delenv("FNO_BG", raising=False)

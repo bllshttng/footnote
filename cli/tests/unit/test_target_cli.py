@@ -7,6 +7,7 @@ refuses to write a stub, plus a redirect on the substitution-prone
 """
 from __future__ import annotations
 
+import os
 
 from typer.testing import CliRunner
 
@@ -143,6 +144,92 @@ def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_DISPATCH_MODEL") == "glm-4.7"
     assert captured["env"].get("TARGET_DISPATCH_PROVIDER") == "codex"
+    _clear_root_cache()
+
+
+def test_target_init_beastmode_sets_authority_env(monkeypatch, tmp_path):
+    """x-6390: --beastmode plumbs TARGET_BEASTMODE=1 so the bash writer stamps the grant."""
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"].get("TARGET_BEASTMODE") == "1"
+    _clear_root_cache()
+
+
+def test_target_init_beast_alias_grants_too(monkeypatch, tmp_path):
+    """x-6390: `--beast` is an accepted alias of `--beastmode`.
+
+    Mobile autocorrect splits `beastmode` into `beast mode`, so the short
+    spelling has to work or an operator on a phone silently loses the grant -
+    and a dropped grant looks exactly like never asking for one.
+    """
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beast"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"].get("TARGET_BEASTMODE") == "1"
+    _clear_root_cache()
+
+
+def test_target_init_clears_ambient_beastmode_without_flag(monkeypatch, tmp_path):
+    """x-6390: an inherited TARGET_BEASTMODE must NEVER grant authority.
+
+    The flag is the sole authority. A worker spawned under an exported
+    TARGET_BEASTMODE (codex/gemini spawn with env=None and inherit wholesale) would
+    otherwise self-grant walk-away autonomy nobody asked for.
+    """
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    monkeypatch.setenv("TARGET_BEASTMODE", "1")  # the ambient grant
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"].get("TARGET_BEASTMODE") == "", (
+        "ambient TARGET_BEASTMODE must be cleared, not forwarded: "
+        f"got {captured['env'].get('TARGET_BEASTMODE')!r}"
+    )
     _clear_root_cache()
 
 
@@ -472,6 +559,164 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
     assert seen["init"] is True                     # init still runs, in place
     assert seen["setup_called"] is False            # canonical .fno never touched
     assert "base=in-place" in result.output
+
+
+def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
+    """x-6390: `/target beastmode` cold-starts through `start`, not `init`, so the
+    forward is the link that actually carries the grant in real use. Without it
+    the feature is inert while every init-level test stays green."""
+    import subprocess as _real_subprocess
+    from fno.harness_identity import HarnessIdentity
+
+    repo = tmp_path / "vault"
+    repo.mkdir()
+    _real_subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+    _real_subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "init"], check=True
+    )
+    monkeypatch.chdir(repo)
+
+    seen = {"init_cmd": None}
+    real_run = _real_subprocess.run
+
+    def _dispatch(cmd, *a, **k):
+        cmd = list(cmd)
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, *a, **k)
+        if "ensure" in cmd:
+            return _real_subprocess.CompletedProcess(cmd, 0, stdout=f"{repo.resolve()}\n", stderr="")
+        seen["init_cmd"] = cmd
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
+    )
+    monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
+
+    result = runner.invoke(app, ["target", "start", "x-yol", "--beastmode"])
+    assert result.exit_code == 0, result.output
+    assert "--beastmode" in (seen["init_cmd"] or []), f"start did not forward --beastmode: {seen['init_cmd']}"
+
+    seen["init_cmd"] = None
+    result = runner.invoke(app, ["target", "start", "x-yol"])
+    assert result.exit_code == 0, result.output
+    assert "--beastmode" not in (seen["init_cmd"] or []), "start forwarded --beastmode without the flag"
+
+
+def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
+    """x-6390: `start` no-ops inside a linked worktree and returns before it can
+    forward --beastmode, so the grant is dropped. Same silent-drop class as the init
+    path; it must say so rather than print a normal-looking receipt."""
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    manifest = fake_root / ".fno" / "target-state.md"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("---\nattended: true\n---\n")
+
+    monkeypatch.chdir(fake_root)
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda _p: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda _n: None)
+
+    result = runner.invoke(app, ["target", "start", "x-yol", "--beastmode"])
+    assert result.exit_code == 0, result.output
+    assert "already isolated" in result.output
+    assert "did NOT take" in result.output, result.output
+
+    result = runner.invoke(app, ["target", "start", "x-yol"])
+    assert result.exit_code == 0, result.output
+    assert "did NOT take" not in result.output, "warned without the flag"
+    _clear_root_cache()
+
+
+def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monkeypatch):
+    """x-6390: the manifest is write-once, so --beastmode against an initialized
+    session is a no-op - and a dropped grant looks exactly like no grant. Say it."""
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    manifest = fake_root / ".fno" / "target-state.md"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+
+    # A pre-existing manifest with no grant: the flag was dropped -> warn.
+    manifest.write_text("---\nattended: true\n---\n")
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
+    assert result.exit_code == 0, result.output
+    assert "did NOT take" in result.output, result.output
+
+    # The grant IS present AND anchored to a LIVE CLAIM: nothing to warn about.
+    # A live owner_pid alone would NOT qualify - it is alive for every session
+    # at init time, so it cannot distinguish a durable grant from a doomed one.
+    manifest.write_text(
+        '---\nattended: true\nauthority: full\n---\ntarget_claim_key: "node:x-1"\n'
+    )
+    monkeypatch.setattr(
+        "fno.target.orient._claim_state", lambda _k: "live", raising=False
+    )
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
+    assert result.exit_code == 0, result.output
+    assert "did NOT take" not in result.output, result.output
+    assert "ANCHOR IT" not in result.output, result.output
+    _clear_root_cache()
+
+
+def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
+    """x-6390: a free-text run claims no node, so `authority: full` has nothing
+    to anchor it and the orienter refuses it (fail closed). The stamp alone would
+    otherwise look like a working grant."""
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    manifest = fake_root / ".fno" / "target-state.md"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    # A REAL claimless init: no claim key, but owner_pid is ALIVE (it always is
+    # at init). A liveness-only check would suppress the warning here and let the
+    # grant evaporate silently minutes later.
+    manifest.write_text(
+        f"---\nattended: true\nauthority: full\nowner_pid: {os.getpid()}\n---\n"
+    )
+
+    result = runner.invoke(app, ["target", "init", "--input", "some idea", "--beastmode"])
+    assert result.exit_code == 0, result.output
+    assert "NOTHING LIVE TO ANCHOR IT" in result.output, result.output
+
+    # The message is an operator-facing CONTRACT, not decoration: it must name
+    # the real grant condition and must not offer owner_pid as an alternative.
+    # A message that contradicts the rule tells someone their claimless session
+    # might be fine, which is worse than saying nothing.
+    # Scope to the warning itself; the orientation report that follows legitimately
+    # mentions owner_pid as a liveness *reason*, which is a different claim.
+    warning = result.output.split("node:", 1)[0]
+    assert "LIVE CLAIM" in warning, warning
+    assert "owner_pid" not in warning, (
+        "the warning must not suggest a pid can anchor a grant: " + warning
+    )
+    _clear_root_cache()
 
 
 def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkeypatch):

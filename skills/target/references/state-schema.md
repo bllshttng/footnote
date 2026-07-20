@@ -62,6 +62,16 @@ cross_project: false     # true for cross-project pipeline runs
 scratchpad_path: ""      # path to worktree scratchpad directory (if set)
 ```
 
+### Authority grant (omitted unless granted)
+
+```yaml
+authority: full          # `/target beastmode` / `fno target init --beastmode`; absent otherwise
+```
+
+Absence is the default posture, so an ungranted session is byte-for-byte unchanged.
+Read the grant from the `attended` line of `fno target status`, never from the raw file: a dead manifest never grants authority.
+Contract: [SKILL.md §Authority](../SKILL.md#authority-the-beastmode-grant).
+
 ### Budget caps (omitted when unconfigured)
 
 ```yaml
@@ -80,7 +90,11 @@ provider_upgrade_reason: ""          # why provider was upgraded (if applicable)
 ### Session ownership (written by init; used by shim for foreign-session guard)
 
 ```yaml
-owner_pid: 12345                     # PPID of the init subprocess (dead at t+0; best-effort)
+owner_pid: 12345                     # PPID of the init subprocess; transient, best-effort.
+                                     # Alive while init runs (the orienter reports
+                                     # `live (owner_pid alive)` there), dead soon after,
+                                     # so it can PROVE life but never disprove it - and
+                                     # never anchors an authority grant.
 owner_started_at: "2026-06-05T03:00:00Z"
 owner_cwd: "~/conductor/workspaces/abilities/my-feature"
                                      # absolute path to the worktree at init time

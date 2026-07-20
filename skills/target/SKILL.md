@@ -1,7 +1,7 @@
 ---
 name: target
 description: "Use when: build this feature, get it done end-to-end, or execute a plan from idea to PR."
-argument-hint: "[S|small|M|medium|L|large] [agent|fork] [clean] [adversarial] [auto-merge | no-merge] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
+argument-hint: "[S|small|M|medium|L|large] [agent|fork] [beastmode|beast] [clean] [adversarial] [auto-merge | no-merge] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
 metadata:
   internal: true
 requires:
@@ -38,6 +38,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 - **only if** you were handed a bare idea (no plan): run `/think` then `/blueprint` before implementing.
 - **only if** the node's rung is `design` (a plan IS bound, but its frontmatter still reads `status: design` - a `/think` doc that was never blueprinted): run `/blueprint <plan_path>` FIRST, then implement. A bound `plan_path` alone does NOT mean the plan is executable: `/blueprint` is what appends the Execution Strategy and flips the doc to `ready`. Skipping it here builds off a design doc that has no execution plan. Autonomous selection never hands you this rung (it is gated); you only reach it when a human named the node explicitly, which IS the consent to carry it the rest of the way.
 - **only if** `$TARGET_BRIEF` is set in the environment (a dispatcher passed a per-node brief via `dispatch_brief`, US3): read it as extra mission context - the scope/"why" the dispatcher wanted this worker to carry. It is plain text (capped at 8 KB) and travels via env, never the command line; treat it as guidance for this node, not as a command to execute.
+- **only if** the run carries `authority: full` (invoked as `/target beastmode`, surfaced on the `attended` line of `fno target status`): a judgment call that would emit `<help>` and stall is decided and recorded instead - [§Authority: the `beastmode` grant](#authority-the-beastmode-grant).
 - **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
 - **only if** dispatching nodes fire-and-forget: [§0a Background Dispatch](#0a-background-dispatch-bg).
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
@@ -119,6 +120,86 @@ Run tests with `fno test [paths...]` (pins worktree `PYTHONPATH`, bypasses rtk, 
 
 Completion is decided by `fno-agents loop-check` from external truth (PR + CI + review), not from any file you write - you cannot self-authorize. The full machinery (immutable manifest, stop-hook shim, `done()` read list, fingerprint backstop, `TerminationReason`, degraded modes) is one Read hop away in **[references/completion-model.md](references/completion-model.md)**.
 
+## Authority: the `beastmode` grant
+
+`/target beastmode "..."` grants **walk-away authority** for the session.
+It composes with every other modifier, so `/target beastmode auto-merge "..."` is true overnight mode.
+
+**What it changes: judgment, never irreversibles.**
+An overnight walk must not stall at 2am on a call you would have made in five seconds at 9am.
+So under authority, a judgment call is *decided and recorded* instead of stopping the session.
+It grants no new powers: merge stays on the auto-merge axis, and destructive or credential-blocked work still stops.
+
+**Why this is not called `yolo`.** `--yolo` is already taken, codebase-wide: it sits in the CLI's GLOBAL short-flag register (`-Y --yolo`) whose whole contract is that a global short "means the same thing on every command and never carries a per-command meaning".
+Its one meaning is the provider dangerous-mode bypass (`fno agents spawn --yolo` -> codex `--dangerously-bypass-approvals-and-sandbox`, claude `bypassPermissions`).
+A judgment grant is a different axis entirely, so it gets a different word and deliberately carries **no short flag** at all.
+This matters most when spawning: in `/agent spawn /target <node> beastmode yolo`, `beastmode` binds to the target session's judgment and `yolo` to the spawn's permissions, with no token doing double duty.
+A beastmode session still asks the harness for permission exactly as before, and a yolo-spawned worker still stops on an architecture fork unless it also holds an authority grant.
+
+**Spellings.** `beastmode`, `beast`, and `beast mode` all mean the same modifier, case-insensitively.
+The two-word form exists because mobile autocorrect splits `beastmode`, and it is the dangerous one: the stray `mode` token must be stripped along with the modifier.
+Whatever the spelling, pass ONLY the bare node id to `fno target start --beastmode <node>` - init's node guard is anchored, so any leftover token means no node, therefore no claim, therefore a refused grant.
+The CLI accepts `--beastmode` and `--beast`.
+
+**The grant needs a BACKLOG NODE; free text cannot hold it, and neither can an unlinked plan.**
+Authority is anchored to the session's claim, and init claims only `node:<id>` - resolved from a node input, or from a plan that resolves to a node in the graph.
+A free-text run claims nothing; so does a standalone plan file that no node points at.
+In both cases there is no anchor at all: `owner_pid` does not count (it is a transient init subprocess, and its liveness says nothing about whether the grant will outlive this moment), so nothing could distinguish that session from one that crashed and left its manifest behind.
+Rather than let a grant outlive its session, an unanchored one is refused and `fno target init` says so at the point it happens.
+Bind a node first (`/think` then `/blueprint` files one), then run `/target beastmode <node>`.
+
+**How to read the grant.** Pass `--beastmode` to `fno target start` / `fno target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
+Read it back from `fno target status --json` - the `attended` line carries `; authority: full (beastmode)` when the grant is live.
+Read that line, NOT the raw manifest, and never the bare `authority:` field: authority **fails closed**, requiring a live claim where the `attended` verdict merely biases toward live.
+A live `owner_pid` is deliberately NOT enough - it is alive for every session at init time, so it cannot tell a durable grant from one about to lapse.
+That asymmetry is deliberate - a wrongly-live `attended` costs you one unnecessary prompt, while a wrongly-live authority grant silently un-prompts every future session that reads it (x-4af4: a defunct manifest once auto-locked an attended `/think` for ten days).
+
+**Under `authority: full`, the deviation rules become:**
+
+| Situation | Without authority | With `authority: full` |
+|---|---|---|
+| Bug in plan | fix inline, note it | unchanged |
+| Minor enhancement (<15 min) | implement, note it | unchanged |
+| Architecture decision, missing dependency, ambiguous requirement | STOP, emit `<help>` | **decide, record one ledger entry, continue** |
+| Interactive prompt (`AskUserQuestion`) in a composed skill | ask the operator | **take the recommended option, record it** |
+| Missing credentials, destructive ambiguity, a genuine blocker | STOP, emit `<help>` | unchanged - still stops |
+
+The split is what the session can *undo*. A wrong architecture call costs a review comment; a wrong destructive call costs data.
+When a decision is close, prefer the reversible option and say so in the entry.
+
+**Which existing `<help>` sites flip: none.**
+Every `<help>` currently written into this skill and its references is already a genuine blocker rather than a judgment call - `handoff-claim-lost` and `handoff-restore-failed` (another worker may own the node), `handoff-chain-exhausted`, `required-bot-quota-exhausted` (an external provider is out of quota), `pr-node-link-failed` (a write that did not stick), `restart-recommended` (minting and superseding graph nodes is not reversible), and `cross-project-disambiguation` (which skips one message rather than stopping the session).
+Authority changes none of them.
+It governs the decisions you would otherwise stop and ask about *without* a written `<help>` site - the architecture forks, the ambiguous requirements, the interactive prompts inside composed skills - which is exactly where an overnight walk actually stalls.
+
+**The Autonomous Decisions ledger.** Nothing enforces this section - no code reads `authority` or writes an entry, so the ledger is a behavioral contract you keep, exactly like the decide-and-record rule it records.
+That is deliberate (the grant changes judgment, and judgment has no gate), but it means a skipped entry fails silently: the session looks identical either way, and the loss shows up only when someone goes looking for a rationale that was never written.
+Treat the append as part of making the decision, not as bookkeeping after it.
+
+Every decision taken under authority appends ONE entry, immediately, before acting on it:
+
+```markdown
+## Autonomous Decisions
+
+### 2026-07-20T04:31Z - executor routing for the settings surface
+**Chose:** `impeccable` for tasks touching `app/settings/**`, `do` elsewhere.
+**Alternatives:** all-`do` (simpler, loses the a11y pass on a user-facing form).
+**Why:** the plan's File Ownership Map lists three `.tsx` files; surface inference would route them anyway.
+**Reversible:** yes - re-run the wave with `executor: do` if the polish pass is noise.
+```
+
+**Append to a DURABLE artifact: `{plan_path}.artifacts/COMPLETION.md` for a quick plan, or the plan folder's `COMPLETION.md` for a wave plan.**
+Not `.fno/SUMMARY.md`: `.fno/` is gitignored and session-state files are explicitly transient and never archived, so a ledger written there dies with the worktree when it is pruned - taking the morning review with it.
+The durable record is the plan artifact, the frontmatter stamp, `ledger.json`, and git history; the audit trail for decisions made on your behalf belongs with them.
+**Before a plan exists** (a beastmode run is node-bound, but `/think` still decides in its early steps while the plan is written in its last), stage entries in the session scratchpad (`scratchpad_path`) as `autonomous-decisions.md`.
+**Flush them to the plan's `COMPLETION.md` the moment `plan_path` is filled - not at ship.**
+Deferring the flush is what makes the window dangerous: the scratchpad is worktree-local and gitignored, and the stop hook only archives it once a plan path exists, so entries left staged through a long do phase die with the worktree if the session never reaches its gate.
+Flushing at plan-creation shrinks the exposure to the minutes between the first decision and the plan.
+If the run ends with no plan at all, carry the ledger into the PR body under `## Autonomous Decisions`, and if there is no PR either, put it in your closing summary - a decision nobody can read afterward may as well not have been recorded.
+
+Write each entry as its own append the moment the decision is made, never as an end-of-session batch: a morning review must read a complete list, and a session that dies mid-wave leaves whole entries behind rather than half of one.
+Where an entry is genuinely uncertain, say so in **Why** - a recorded doubt is the thing the morning review looks for first.
+
 ## The Full Pipeline
 
 ```
@@ -199,6 +280,8 @@ When unsure whether ceremony applies, prefer running it. But never let "did ever
 /target bg --all-ready                   # dispatch every ready, non-deferred node; planning session keeps going
 
 # Modifiers
+/target beastmode <node>                 # walk-away authority: decide judgment calls, never stall
+/target beast <node>                     # same thing (also accepts a mobile-autocorrected "beast mode")
 /target clean "feature"                  # run /simplify after execute
 /target adversarial "feature"            # add adversarial challenge
 /target auto-merge "feature"             # auto-merge after external approves
@@ -282,7 +365,7 @@ Quick summary:
   - **Attended** (`attended: true`, interactive human present): OFFER, do not just refuse. Ask `On canonical <branch> - create a worktree at ~/conductor/workspaces/<repo>/<slug> and continue there? [Y/n]`. On **y/Enter**: `git worktree add ~/conductor/workspaces/<repo>/<slug> -b feature/<slug>`, `cd` into it, `bash scripts/setup/setup-worktree.sh` (if present), then run init and the rest of the pipeline FROM the new worktree. Derive `<slug>` from the resolved backlog-node slug if one was resolved, else a filesystem-safe slug of the feature/branch; collision-check against existing conductor paths. On **any failure** of `git worktree add` / `setup-worktree.sh`: abort the offer, stay in place, and fall through to the refusal (never leave a half-relocated session). On **n**: fall through to the refusal.
   - **Unattended / headless** (`attended: false`, or no interactive surface): do NOT prompt. Rely on the `init-target-state.sh` refusal backstop. A bg `/target` self-creates its worktree before building, so it inits from inside a worktree and the verdict is `ok`.
   - **Refusal backstop:** `init-target-state.sh` itself refuses a canonical-protected branch and prints the worktree / `git checkout -b feature/<slug>` / `TARGET_LOCATION_OK=main-acknowledged` options. See backlog ab-efcde945.
-- **MANDATORY:** Bootstrap the session with `fno target init --input "<original arg>"` (add `--plan-path <path>` for plan inputs). This discoverable verb wraps the canonical `hooks/helpers/init-target-state.sh` (with `TARGET_START=1` + `TARGET_INPUT`/`TARGET_PLAN_PATH`), records the `owner_cwd` worktree binding, and REFUSES to write a stub. Do NOT substitute `fno state init` - it writes an empty stub the stop hook archives (and will redirect you here). If `fno` is unavailable, run `hooks/helpers/init-target-state.sh` directly with `TARGET_START=1` and `TARGET_INPUT` set.
+- **MANDATORY:** Bootstrap the session with `fno target init --input "<original arg>"` (add `--plan-path <path>` for plan inputs). This discoverable verb wraps the canonical `hooks/helpers/init-target-state.sh` (with `TARGET_START=1` + `TARGET_INPUT`/`TARGET_PLAN_PATH`), records the `owner_cwd` worktree binding, and REFUSES to write a stub. Do NOT substitute `fno state init` - it writes an empty stub the stop hook archives (and will redirect you here). If `fno` is unavailable, run `hooks/helpers/init-target-state.sh` directly with `TARGET_START=1` and `TARGET_INPUT` set. On this path you MUST also set `TARGET_BEASTMODE` explicitly - `1` when the invocation carried the `beastmode` / `beast` modifier, empty otherwise. The helper reads the bare env var and cannot tell an explicit grant from one inherited from an ancestor shell or a spawning parent; `fno target init` scrubs that for you, and this path has no such scrub.
 - **`fno target init` owns the node claim - do NOT claim it yourself.** Init acquires `node:<id>` via `fno claim` (TTL-anchored to the durable session PID) and records `target_claim_key`/`holder`/`ttl` in the manifest on success. A `note: legacy graph-claim skipped (non-fatal)` line is EXPECTED and is not a failure - the authoritative `fno claim` runs right after it. Never run `fno claim acquire` manually to "fix" it: a claim from a transient shell PID dies instantly and goes `stale`, clobbering init's good claim. To confirm ownership, run `fno claim status node:<id>` and check that the live `holder` equals your own session_id (`fno whoami` prints it). Do NOT trust the `target_claim_*` manifest fields for this: they are an init-time SNAPSHOT and can lie after the supervisor PID is respawned - the live lockfile holder is the only ownership truth (x-ba4b). A `suspect` state (TTL-unexpired but dead pid) still belongs to your session; it is never up for grabs.
 - For plan inputs, run `validate-plan.sh` against the plan folder. Skip for single-file (quick) plans which the validator does not understand.
 - Resolve domain from CLI flag → plan → settings → `code` default.

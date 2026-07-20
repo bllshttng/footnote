@@ -213,16 +213,42 @@ def _manifest_liveness(manifest_raw: Optional[Dict[str, Any]]) -> tuple[str, str
     return "live", "no claim key; owner_pid transient (biased live)"
 
 
+def _authority_granted(raw: Optional[Dict[str, Any]]) -> bool:
+    """Authority fails CLOSED: it requires a LIVE CLAIM, and nothing else.
+
+    Two properties have to hold at once, and only a claim delivers both. The
+    grant must be live now, and it must stay readable after this process exits.
+    ``owner_pid`` gives the first without the second: it is alive for every
+    session at init time, claimless ones included, so a pid-based check reads
+    granted at init and then silently evaporates minutes later - the operator
+    walks away believing they have a grant they no longer hold.
+
+    ``_manifest_liveness``'s bias toward live is right for ``attended`` (worst
+    case you get asked) and wrong here, where a stale grant silently un-prompts
+    every session that reads it (x-4af4: a defunct manifest once auto-locked an
+    attended /think for ten days). So: no claim, no authority - which is also
+    why a free-text run cannot hold one.
+    """
+    if not raw or str(raw.get("authority", "")).strip().lower() != "full":
+        return False
+    claim_key = str(raw.get("target_claim_key") or "").strip()
+    return bool(claim_key) and _claim_state(claim_key) in {"live", "suspect"}
+
+
 def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
     state, reason = _manifest_liveness(manifest_raw)
     # A DEAD manifest (x-4af4) means the owning session is gone -- resolve to
     # ATTENDED regardless of the stale stamped value, and NAME it so the posture
     # is not silently changed (the original bug was a silent autonomous switch).
+    # This branch also denies a dead manifest's authority grant.
     if state == "dead":
         return f"true (dead manifest: {reason}; attended)"
     if manifest_raw and "attended" in manifest_raw:
         val = str(manifest_raw["attended"]).strip().lower()
-        return f"{val} (manifest, live: {reason})"
+        line = f"{val} (manifest, live: {reason})"
+        if _authority_granted(manifest_raw):
+            line += "; authority: full (beastmode)"
+        return line
     # No manifest yet: resolve from the substrate, mirroring init-target-state.sh
     # and the spawn_think precedent -- FNO_AGENT_SELF (injected into EVERY spawned
     # worker) is the reliable "not an operator at the keyboard" signal.

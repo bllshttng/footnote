@@ -296,6 +296,15 @@ def init(
         help="Pin a provider for this session's dispatched workers. Absent, the "
         "spawn path infers it from the invoking harness at dispatch time.",
     ),
+    beastmode: bool = typer.Option(
+        False,
+        "--beastmode",
+        "--beast",
+        help="Grant walk-away authority (writes `authority: full` to the "
+        "manifest). Judgment calls that would emit <help> and stall are decided "
+        "and recorded to an Autonomous Decisions ledger instead. Never grants "
+        "irreversibles - merge stays on the --auto-merge axis.",
+    ),
 ) -> None:
     """Bootstrap a target session via the canonical init script.
 
@@ -435,13 +444,63 @@ def init(
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
     if dispatch_provider:
         env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
+    # Sole authority: an inherited TARGET_BEASTMODE must never self-grant (spawns
+    # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
+    env["TARGET_BEASTMODE"] = "1" if beastmode else ""
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if result.returncode == 0:
+        if beastmode:
+            _warn_if_authority_not_granted()
         _print_orientation_report()
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
+    """Name a --beastmode that did not take: the write-once manifest and both of
+    start's idempotent early returns drop the flag, and an ungranted session
+    looks identical to one whose flag was dropped.
+
+    Verdict comes from the orienter's own predicate, never a string match, so
+    this warning and the `attended` line can never disagree about whether the
+    grant holds - a stamped-but-stale claim denies authority in one place and
+    must not read as granted in the other. Callers on a worktree path pass their
+    own root; the cwd default is only right for init.
+    """
+    try:
+        from fno.paths import resolve_repo_root
+        from fno.target.orient import _authority_granted, _read_manifest
+
+        root = project_root or resolve_repo_root()
+        raw = _read_manifest(root)
+        if _authority_granted(raw):
+            return
+        stamped = str((raw or {}).get("authority", "")).strip().lower() == "full"
+    except Exception:  # noqa: BLE001 - a warning must never fail a run that worked
+        return
+    if stamped:
+        typer.echo(
+            "--beastmode was stamped but has NOTHING LIVE TO ANCHOR IT - this session "
+            "will not act with authority.\nAuthority needs a LIVE CLAIM: a "
+            "free-text run claims no node, and a stale claim proves nothing, so "
+            "an abandoned session would be indistinguishable from a live one. The "
+            "grant is refused rather than left to outlive its session.\nRe-run "
+            "against a backlog node (`fno target start --beastmode <node>`), or "
+            "continue without authority.",
+            err=True,
+        )
+        return
+    fix = (
+        "The manifest is write-once and one already existed, so the flag was a "
+        "no-op. To run with authority, finish or cancel this session first "
+        "(`/fno:cancel-target`), then start a fresh one."
+        if raw
+        else "No manifest was written, so nothing consumed the flag. Run "
+        "`fno target init --beastmode --input <node>` to claim this session with a grant."
+    )
+    typer.echo(f"--beastmode did NOT take - this session has no authority grant.\n{fix}", err=True)
 
 
 def _maybe_reconcile_lane_slot() -> None:
@@ -825,6 +884,10 @@ def start(
         None, "--provider", "-p",
         help="Pin a provider for this session's dispatched workers (forwarded to init).",
     ),
+    beastmode: bool = typer.Option(
+        False, "--beastmode", "--beast",
+        help="Grant walk-away authority for this session (forwarded to init).",
+    ),
 ) -> None:
     """Cold-start a worktree-isolated target session in ONE verb.
 
@@ -850,6 +913,8 @@ def start(
             _print_foreign_holder_park(node_id, holder, cwd)
             raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
+        if beastmode:
+            _warn_if_authority_not_granted()
         return
 
     repo_root_s = _git_out(cwd, "rev-parse", "--show-toplevel")
@@ -945,6 +1010,8 @@ def start(
             f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
             f"node=already-claimed"
         )
+        if beastmode:
+            _warn_if_authority_not_granted(wt_path)
         return
 
     # Project the node's model pin / tier into init's dispatch pin so a bare
@@ -966,6 +1033,8 @@ def start(
         init_cmd += ["--model", model]
     if provider:
         init_cmd += ["--provider", provider]
+    if beastmode:
+        init_cmd += ["--beastmode"]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
         typer.echo(
