@@ -129,38 +129,6 @@ def advance_cursor(name: str, msg_id: str) -> bool:
     return True
 
 
-def adopt_cursor(name: str, legacy: str) -> bool:
-    """Carry a renamed consumer's read position from ``legacy`` to ``name``, once.
-
-    The cursor filename IS the consumer's address, so renaming an address orphans
-    its cursor and the absent-cursor fail-open would replay the whole retained log
-    into the consumer exactly once. Adoption is a rename, not a consume: it never
-    moves the position forward. No-op when ``name`` already has a cursor (so this
-    is idempotent and cheap on a per-turn hook path) or when the legacy cursor is
-    absent or corrupt - corrupt degrades to the existing rescan posture, i.e. a
-    repeat, never a loss.
-    """
-    if read_cursor(name) is not None:
-        return False
-    prior = read_cursor(legacy)
-    if prior is None:
-        return False
-    # Refuse when mail addressed to the NEW name already sits at or before the
-    # legacy position. In a mixed-version window a sender can address the bare
-    # name while this consumer still drains the legacy one, and adopting would
-    # jump the cursor past that message forever. Fail open to the rescan posture:
-    # a repeat, never a silent strand.
-    for m in iter_messages(warn=False):
-        if m.to == name:
-            return False
-        if m.id == prior:
-            break
-    # Forward-only, so the unlocked check-then-write above is safe: a racing
-    # adopter that lands after a real drain cannot rewind it back to the legacy
-    # position and replay what was already consumed.
-    return advance_cursor(name, prior)
-
-
 def scan_unread(
     name: str,
     *,
@@ -170,11 +138,20 @@ def scan_unread(
 ) -> list[Envelope]:
     """Return messages addressed to ``name`` after its cursor, oldest -> newest.
 
-    ``aliases`` widens WHICH messages count as mine (any ``to`` in
-    ``{name, *aliases}``) without widening whose cursor is read - the one cursor
-    under ``name`` bounds them all, so mail addressed to a retired alias drains
-    exactly once and acks under the live key. One bus scan regardless of alias
-    count, which the every-turn notify-self hook depends on.
+    ``aliases`` are this consumer's retired addresses. They widen which messages
+    count as mine (any ``to`` in ``{name, *aliases}``), and EACH address is
+    bounded by its OWN cursor. That per-address watermark is what makes a rename
+    safe, because the cursor filename IS the address: collapsing the set onto one
+    watermark would either strand mail sent to the never-consumed new address
+    (it sits before the old address's cursor) or replay mail already consumed
+    under the old one. Neither is acceptable, and no single position avoids both.
+
+    Resolving this on the read side rather than by migrating the cursor file
+    keeps read-only surfaces (``whoami``, ``notify-self``) read-only, and leaves
+    no check-then-write for two drains to race.
+
+    Still ONE bus scan regardless of alias count, which the every-turn
+    notify-self hook depends on for its budget.
 
     If the cursor is absent or its message-id is not found in any retained
     segment (rotated out / deleted), all retained messages to ``name`` are
@@ -186,10 +163,9 @@ def scan_unread(
     (cv-d54ddd45). By-name reads pass ``exclude_from=None`` (a direct address is
     never a self-echo). Default ``None`` is byte-for-byte the prior behavior.
     """
-    cursor = read_cursor(name)
+    mine = {name, *aliases}
     msgs = list(iter_messages(warn=warn))
     excl = exclude_from or set()
-    mine = {name, *aliases}
 
     def _mine(m: Envelope) -> bool:
         if m.to not in mine:
@@ -198,17 +174,19 @@ def scan_unread(
             return False
         return True
 
-    if cursor is None:
-        return [m for m in msgs if _mine(m)]
+    # An address whose cursor is unset, or whose cursor id rotated out of the
+    # retained log, counts as never-consumed: everything retained for it is
+    # returned rather than silently skipped.
+    retained = {m.id for m in msgs}
+    cursors = {n: read_cursor(n) for n in mine}
+    passed = {n: (c is None or c not in retained) for n, c in cursors.items()}
+    ends_at = {c: n for n, c in cursors.items() if c in retained}
 
-    after: list[Envelope] = []
-    passed = False
+    out: list[Envelope] = []
     for m in msgs:
-        if passed and _mine(m):
-            after.append(m)
-        if m.id == cursor:
-            passed = True
-    if not passed:
-        # Cursor id rotated out or otherwise unresolvable: rescan retained.
-        return [m for m in msgs if _mine(m)]
-    return after
+        if _mine(m) and passed[m.to]:  # _mine first: it guards the passed lookup
+            out.append(m)
+        owner = ends_at.get(m.id)
+        if owner is not None:
+            passed[owner] = True
+    return out

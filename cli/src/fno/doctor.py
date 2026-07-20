@@ -1193,7 +1193,10 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
 _DEAD_LETTER_AGE_HOURS = 24.0
 # The canonical a2a handle form <harness>-<short8>; only these are drainable
 # recipients, so only these can dead-letter (a project name never does).
-_A2A_HANDLE_RE = re.compile(r"^(?:claude|codex|gemini)-[0-9a-fA-F]{6,}$")
+# A session address: the bare short-id, or the retired <harness>-<short8> form
+# still carried by pre-flip envelopes. Bare must be listed or the dead-letter
+# scan silently stops covering every newly generated address.
+_A2A_HANDLE_RE = re.compile(r"^(?:(?:claude|codex|gemini)-)?[0-9a-fA-F]{6,}$")
 
 
 def _plugin_hooks_json() -> Optional[Path]:

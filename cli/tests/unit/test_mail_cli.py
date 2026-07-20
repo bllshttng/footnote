@@ -152,9 +152,9 @@ def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, mon
 CODEX_SID = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
 
 
-def test_ac2_edge_legacy_cursor_adopted_no_history_replay(runner, mailbox, monkeypatch):
-    """A recipient holding only a legacy cursor sees mail AFTER that position on
-    its first post-flip drain - never the whole retained log."""
+def test_ac2_edge_legacy_read_position_honored_no_history_replay(runner, mailbox, monkeypatch):
+    """A recipient holding only a legacy cursor does not re-read what it already
+    consumed under that address on its first post-flip drain."""
     from fno.bus.cursor import read_cursor, write_cursor
 
     monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
@@ -165,15 +165,13 @@ def test_ac2_edge_legacy_cursor_adopted_no_history_replay(runner, mailbox, monke
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     assert [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])] == ["fresh"]
-    # The adopted position persisted under the new key, so the ack lands there.
-    assert read_cursor("019f48e1") is not None
+    assert read_cursor("019f48e1") is not None  # acked under the live key
 
 
-def test_adoption_refused_when_bare_mail_precedes_legacy_cursor(runner, mailbox, monkeypatch):
+def test_mixed_version_bare_mail_is_not_stranded(runner, mailbox, monkeypatch):
     """Mixed-version window: a sender that flipped early addressed the bare name
-    while this consumer was still draining the legacy one. Adopting the legacy
-    position would jump past that message forever, so adoption is refused and the
-    rescan posture delivers it - a repeat, never a silent strand."""
+    while this consumer was still draining the legacy one, so the bare message
+    sits BEFORE the legacy cursor. It must still drain."""
     from fno.bus.cursor import write_cursor
 
     monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
@@ -183,22 +181,36 @@ def test_adoption_refused_when_bare_mail_precedes_legacy_cursor(runner, mailbox,
 
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
-    assert "bare, sent early" in bodies  # not stranded behind the adopted cursor
+    assert bodies == ["bare, sent early"]  # delivered, and the consumed one is not replayed
 
 
-def test_adoption_cannot_rewind_an_already_advanced_cursor(runner, mailbox, monkeypatch):
-    """A racing adopter landing after a real drain must not rewind the cursor to
-    the legacy position and replay what was already consumed."""
-    from fno.bus.cursor import adopt_cursor, read_cursor, write_cursor
+def test_each_address_is_bounded_by_its_own_cursor(runner, mailbox, monkeypatch):
+    """Per-address watermarks: consumed legacy mail stays consumed while mail to
+    the never-consumed bare address is still delivered, even though the bare
+    message sits EARLIER in the log than the legacy cursor. One shared watermark
+    cannot do both - it either replays the first or strands the second."""
+    from fno.bus.cursor import scan_unread, write_cursor
 
-    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
-    old = _seed_bus_message(to="codex-019f48e1", from_="web", body="old")
-    write_cursor("codex-019f48e1", old.thread_id)
-    newer = _seed_bus_message(to="019f48e1", from_="web", body="newer")
-    write_cursor("019f48e1", newer.thread_id)  # a drain already got here
+    _seed_bus_message(to="019f48e1", from_="early-flipper", body="bare, never consumed")
+    consumed = _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy, consumed")
+    _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy, still unread")
+    write_cursor("codex-019f48e1", consumed.thread_id)
 
-    assert adopt_cursor("019f48e1", "codex-019f48e1") is False
-    assert read_cursor("019f48e1") == newer.thread_id  # never rewound
+    bodies = [m.body for m in scan_unread("019f48e1", aliases=("codex-019f48e1",))]
+    assert bodies == ["bare, never consumed", "legacy, still unread"]
+
+
+def test_read_only_scan_honors_legacy_position_without_writing(runner, mailbox, monkeypatch):
+    """SessionStart runs whoami before drain-self, so a read-only counter must
+    already honor the legacy read position - otherwise it reports the entire
+    retained history as unread - and it must not write a cursor to do so."""
+    from fno.bus.cursor import cursor_path, scan_unread, write_cursor
+
+    consumed = _seed_bus_message(to="codex-019f48e1", from_="web", body="already read")
+    write_cursor("codex-019f48e1", consumed.thread_id)
+
+    assert scan_unread("019f48e1", aliases=("codex-019f48e1",)) == []
+    assert not cursor_path("019f48e1").exists()  # the read stayed read-only
 
 
 def test_drain_advances_every_alias_cursor(runner, mailbox, monkeypatch):

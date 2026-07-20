@@ -1375,8 +1375,8 @@ def cmd_drain_self(
     identity in env -> silent no-op (nothing to drain), never an error, so the
     hook is safe on any surface.
     """
-    from fno.bus.cursor import adopt_cursor, advance_cursor, scan_unread
-    from fno.harness_identity import handle_aliases, legacy_handle, resolve_harness_identity
+    from fno.bus.cursor import advance_cursor, scan_unread
+    from fno.harness_identity import handle_aliases, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
@@ -1385,9 +1385,6 @@ def cmd_drain_self(
         return
 
     handle, *aliases = handle_aliases(ident.harness, ident.session_id)
-    # The handle rename orphaned the old cursor; carry its position over before
-    # the first read so the flip does not replay retained history (once, cheap).
-    adopt_cursor(handle, legacy_handle(ident.harness, ident.session_id))
     msgs = scan_unread(handle, aliases=aliases)
 
     if json_out:
@@ -1553,19 +1550,15 @@ def cmd_notify_self() -> None:
 
     No harness identity in env -> silent no-op (mirror ``drain-self``).
     """
-    from fno.bus.cursor import adopt_cursor, scan_unread
+    from fno.bus.cursor import scan_unread
     from fno.config import load_settings
-    from fno.harness_identity import handle_aliases, legacy_handle, resolve_harness_identity
+    from fno.harness_identity import handle_aliases, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
         return
 
     handle, *aliases = handle_aliases(ident.harness, ident.session_id)
-    # Adoption is a rename of the read position, not a consume, so it is safe on
-    # the nudge path - and without it the first nudge after the flip would report
-    # the whole retained log as unread.
-    adopt_cursor(handle, legacy_handle(ident.harness, ident.session_id))
     lines: list[str] = []
 
     unread = scan_unread(handle, aliases=aliases)
