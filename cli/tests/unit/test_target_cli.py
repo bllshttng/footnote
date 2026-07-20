@@ -631,10 +631,14 @@ def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypat
     assert result.exit_code == 0, result.output
     assert "did NOT take" in result.output, result.output
 
-    # The grant IS present AND anchored to PROVEN life (a live owner_pid):
-    # nothing to warn about. A present-but-stale claim would NOT qualify.
+    # The grant IS present AND anchored to a LIVE CLAIM: nothing to warn about.
+    # A live owner_pid alone would NOT qualify - it is alive for every session
+    # at init time, so it cannot distinguish a durable grant from a doomed one.
     manifest.write_text(
-        f"---\nattended: true\nauthority: full\nowner_pid: {os.getpid()}\n---\n"
+        '---\nattended: true\nauthority: full\n---\ntarget_claim_key: "node:x-1"\n'
+    )
+    monkeypatch.setattr(
+        "fno.target.orient._claim_state", lambda _k: "live", raising=False
     )
     result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
     assert result.exit_code == 0, result.output
@@ -661,7 +665,12 @@ def test_target_init_yolo_unanchored_grant_is_named(tmp_path, monkeypatch):
 
     manifest = fake_root / ".fno" / "target-state.md"
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text("---\nattended: true\nauthority: full\n---\n")  # no claim key
+    # A REAL claimless init: no claim key, but owner_pid is ALIVE (it always is
+    # at init). A liveness-only check would suppress the warning here and let the
+    # grant evaporate silently minutes later.
+    manifest.write_text(
+        f"---\nattended: true\nauthority: full\nowner_pid: {os.getpid()}\n---\n"
+    )
 
     result = runner.invoke(app, ["target", "init", "--input", "some idea", "--yolo"])
     assert result.exit_code == 0, result.output

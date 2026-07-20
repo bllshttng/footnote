@@ -214,21 +214,25 @@ def _manifest_liveness(manifest_raw: Optional[Dict[str, Any]]) -> tuple[str, str
 
 
 def _authority_granted(raw: Optional[Dict[str, Any]]) -> bool:
-    """Authority fails CLOSED: it needs PROOF of life, not the biased-live default.
+    """Authority fails CLOSED: it requires a LIVE CLAIM, and nothing else.
 
-    ``_manifest_liveness`` biases toward live when it cannot confirm death, which
-    is right for ``attended`` (worst case you get asked) and wrong here. A
-    claimless manifest whose transient owner_pid is gone reads live forever, and
-    that is exactly the abandoned-session shape that once auto-locked an attended
-    /think for ten days. A free-text ``/target yolo`` run records no claim, so
-    without this it would leave a grant behind every time it crashed.
+    Two properties have to hold at once, and only a claim delivers both. The
+    grant must be live now, and it must stay readable after this process exits.
+    ``owner_pid`` gives the first without the second: it is alive for every
+    session at init time, claimless ones included, so a pid-based check reads
+    granted at init and then silently evaporates minutes later - the operator
+    walks away believing they have a grant they no longer hold.
+
+    ``_manifest_liveness``'s bias toward live is right for ``attended`` (worst
+    case you get asked) and wrong here, where a stale grant silently un-prompts
+    every session that reads it (x-4af4: a defunct manifest once auto-locked an
+    attended /think for ten days). So: no claim, no authority - which is also
+    why a free-text run cannot hold one.
     """
     if not raw or str(raw.get("authority", "")).strip().lower() != "full":
         return False
     claim_key = str(raw.get("target_claim_key") or "").strip()
-    if claim_key:
-        return _claim_state(claim_key) in {"live", "suspect"}
-    return _pid_alive(raw.get("owner_pid"))
+    return bool(claim_key) and _claim_state(claim_key) in {"live", "suspect"}
 
 
 def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:

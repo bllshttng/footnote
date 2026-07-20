@@ -94,15 +94,26 @@ def test_authority_fails_closed_on_claimless_abandoned_manifest(monkeypatch) -> 
 
 
 def test_authority_granted_when_life_is_proven(monkeypatch) -> None:
-    """The converse: a held claim OR a live owner_pid is real proof, so the
-    grant stands. Fail-closed must not mean never-granted."""
+    """The converse: a live claim is real proof, so the grant stands.
+    Fail-closed must not mean never-granted."""
     monkeypatch.setattr(orient, "_claim_state", lambda _k: "live")
     assert orient._authority_granted(
         {"authority": "full", "target_claim_key": "node:x-1"}
     ) is True
 
+
+def test_a_live_owner_pid_alone_never_grants_authority(monkeypatch) -> None:
+    """owner_pid is alive for EVERY session at init time, claimless ones
+    included. A pid-based grant therefore reads granted at init and evaporates
+    minutes later, so the operator walks away holding a grant that already
+    lapsed. Only a claim proves both live-now and survives-this-process."""
     monkeypatch.setattr(orient, "_pid_alive", lambda _p: True)
-    assert orient._authority_granted({"authority": "full", "owner_pid": "1"}) is True
+    assert orient._authority_granted({"authority": "full", "owner_pid": "1"}) is False
+    # ...and a claim that is present but not live is equally insufficient.
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "free")
+    assert orient._authority_granted(
+        {"authority": "full", "target_claim_key": "node:x-1", "owner_pid": "1"}
+    ) is False
 
 
 def test_attended_line_dead_manifest_never_grants_authority(monkeypatch) -> None:

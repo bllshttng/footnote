@@ -144,7 +144,8 @@ Bind a node first (`/think` then `/blueprint` files one), then run `/target yolo
 
 **How to read the grant.** Pass `--yolo` to `fno target start` / `fno target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
 Read it back from `fno target status --json` - the `attended` line carries `; authority: full (yolo)` when the grant is live.
-Read that line, NOT the raw manifest, and never the bare `authority:` field: authority **fails closed**, so it requires positive proof of life (a held claim, or a live owner_pid) where the `attended` verdict merely biases toward live.
+Read that line, NOT the raw manifest, and never the bare `authority:` field: authority **fails closed**, requiring a live claim where the `attended` verdict merely biases toward live.
+A live `owner_pid` is deliberately NOT enough - it is alive for every session at init time, so it cannot tell a durable grant from one about to lapse.
 That asymmetry is deliberate - a wrongly-live `attended` costs you one unnecessary prompt, while a wrongly-live authority grant silently un-prompts every future session that reads it (x-4af4: a defunct manifest once auto-locked an attended `/think` for ten days).
 
 **Under `authority: full`, the deviation rules become:**
