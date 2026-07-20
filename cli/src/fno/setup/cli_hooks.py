@@ -1,11 +1,16 @@
-"""Install footnote's SessionStart hook into Codex / Gemini user config.
+"""Install footnote hooks into user-level CLI config.
 
-The Claude Code plugin wires SessionStart hooks via its plugin manifest, but
-Codex and Gemini read hooks from user-level config that footnote cannot ship as
-a repo file:
+Some hooks cannot be delivered by footnote's plugin manifest and must be merged
+into a user-level config file instead:
 
   * Gemini: ``~/.gemini/settings.json`` -> ``hooks.SessionStart`` (JSON).
   * Codex:  ``~/.codex/config.toml`` -> ``[[hooks.SessionStart]]`` (TOML).
+  * Claude: ``~/.claude/settings.json`` -> ``hooks.WorktreeRemove`` (JSON).
+
+Claude's SessionStart hook DOES arrive via the plugin manifest; WorktreeRemove
+does not, because ``claude rm`` runs without an agent session and the harness
+sources plugin hooks only from a live session's hook table. See
+``install_claude_worktree_remove_hook``.
 
 Both point at the SAME entry script, ``<plugin_root>/hooks/session-start.sh``,
 which detects the platform and emits the unified
@@ -33,6 +38,7 @@ from typing import Any, Optional
 # colliding with a user's hooks. The command path always ends with this.
 _HOOK_SUFFIX = "hooks/session-start.sh"
 _GEMINI_HOOK_NAME = "fno-session-start"
+_WORKTREE_REMOVE_SUFFIX = "hooks/worktree-remove.sh"
 
 
 def _wrapped_command(command: str, cli: str) -> str:
@@ -398,6 +404,78 @@ def install_gemini_hook(
     _atomic_write(settings_path, json.dumps(data, indent=2) + "\n")
     return HookInstallResult(
         cli="gemini", path=settings_path, changed=True, already_present=False,
+        backup=backup,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Claude (~/.claude/settings.json)
+# ---------------------------------------------------------------------------
+
+
+def install_claude_worktree_remove_hook(
+    command: str, *, settings_path: Path
+) -> HookInstallResult:
+    """Merge footnote's WorktreeRemove hook into a Claude settings.json.
+
+    Claude marks a hook-created worktree ``hookBased`` and will then ONLY remove
+    it by running a WorktreeRemove hook. But ``claude rm`` runs with no agent
+    session, and the harness sources plugin hooks from the live session's hook
+    table - so the plugin's own ``hooks/hooks.json`` entry is invisible there,
+    the run finds no hook, and every hook-created worktree is stranded with
+    "WorktreeRemove hook failed" forever. Settings-level hooks are read from
+    config, so wiring the same script here is what actually reaches ``claude rm``.
+
+    Idempotent (keyed on the script suffix); preserves every other hook.
+    """
+    data: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except json.JSONDecodeError as exc:
+            return HookInstallResult(
+                cli="claude",
+                path=settings_path,
+                changed=False,
+                already_present=False,
+                note=f"settings.json is malformed ({exc}); left unchanged",
+            )
+
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return HookInstallResult(
+            cli="claude", path=settings_path, changed=False, already_present=False,
+            note="`hooks` is not an object; left unchanged",
+        )
+    groups = hooks.setdefault("WorktreeRemove", [])
+    if not isinstance(groups, list):
+        return HookInstallResult(
+            cli="claude", path=settings_path, changed=False, already_present=False,
+            note="`hooks.WorktreeRemove` is not an array; left unchanged",
+        )
+
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for h in group.get("hooks", []) or []:
+            if not isinstance(h, dict):
+                continue
+            if str(h.get("command", "")).endswith(_WORKTREE_REMOVE_SUFFIX):
+                return HookInstallResult(
+                    cli="claude", path=settings_path, changed=False,
+                    already_present=True,
+                )
+
+    groups.append(
+        {"hooks": [{"type": "command", "command": f"bash {command}"}]}
+    )
+
+    backup = _backup(settings_path)
+    _atomic_write(settings_path, json.dumps(data, indent=2) + "\n")
+    return HookInstallResult(
+        cli="claude", path=settings_path, changed=True, already_present=False,
         backup=backup,
     )
 

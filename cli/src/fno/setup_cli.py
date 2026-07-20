@@ -37,13 +37,24 @@ def cli_hooks_cmd(
     codex_config: Optional[Path] = typer.Option(
         None, "--codex-config", help="Override the Codex config.toml path."
     ),
+    claude: bool = typer.Option(
+        True, "--claude/--no-claude", help="Install the Claude WorktreeRemove hook."
+    ),
+    claude_settings: Optional[Path] = typer.Option(
+        None, "--claude-settings", help="Override the Claude settings.json path."
+    ),
 ) -> None:
-    """Wire footnote's SessionStart context hook into Codex and Gemini.
+    """Wire footnote's user-level CLI hooks.
 
-    Claude Code wires this hook via its plugin manifest; Codex and Gemini read
-    hooks from user-level config (`~/.codex/config.toml`, `~/.gemini/settings.json`)
-    that footnote cannot ship as a repo file. This merges the hook in
-    idempotently, backs up the file first, and never clobbers your other hooks.
+    Codex and Gemini read the SessionStart context hook from user-level config
+    (`~/.codex/config.toml`, `~/.gemini/settings.json`) that footnote cannot ship
+    as a repo file. Claude gets its SessionStart hook from the plugin manifest,
+    but needs WorktreeRemove in `~/.claude/settings.json` so that `claude rm`
+    (which runs with no agent session, and so never loads plugin hooks) can
+    clean up hook-created worktrees.
+
+    Each merge is idempotent, backs up the file first, and never clobbers your
+    other hooks.
 
     Codex treats the hook as untrusted until you approve it, so after this runs
     you must trust the footnote SessionStart hook in Codex before it fires.
@@ -55,6 +66,8 @@ def cli_hooks_cmd(
         codex_config=codex_config,
         codex_hooks_json=None,
         migrate_legacy_hooks_json=False,
+        claude=claude,
+        claude_settings=claude_settings,
     )
 
 
@@ -91,10 +104,16 @@ def _install_cli_hooks(
     codex_config: Optional[Path],
     codex_hooks_json: Optional[Path],
     migrate_legacy_hooks_json: bool,
+    claude: bool = False,
+    claude_settings: Optional[Path] = None,
 ) -> None:
     import os
 
-    from fno.setup.cli_hooks import install_codex_hook, install_gemini_hook
+    from fno.setup.cli_hooks import (
+        install_claude_worktree_remove_hook,
+        install_codex_hook,
+        install_gemini_hook,
+    )
 
     try:
         entry = _paths.resolve_plugin_script("hooks/session-start.sh")
@@ -170,6 +189,33 @@ def _install_cli_hooks(
                 bak = f"; backed up {res.backup.name}" if res.backup else ""
                 typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
 
+    if claude:
+        try:
+            wt_entry = _paths.resolve_plugin_script("hooks/worktree-remove.sh")
+            if not wt_entry.is_file():
+                raise FileNotFoundError(wt_entry)
+        except Exception as exc:  # noqa: BLE001 - surface a clear message, never trace
+            typer.echo(f"claude: error: could not locate worktree-remove.sh ({exc})", err=True)
+            failures.append(str(exc))
+        else:
+            cpath_claude = _safe_expand(claude_settings) if claude_settings else (
+                Path.home() / ".claude" / "settings.json"
+            )
+            res = install_claude_worktree_remove_hook(
+                str(wt_entry), settings_path=cpath_claude
+            )
+            any_change = any_change or res.changed
+            if res.note:
+                typer.echo(f"claude: error: {res.note} ({res.path})", err=True)
+                failures.append(res.note)
+            elif res.already_present:
+                typer.echo(f"claude: already wired ({res.path})")
+            else:
+                bak = f"; backed up {res.backup.name}" if res.backup else ""
+                typer.echo(
+                    f"claude: wired WorktreeRemove -> {wt_entry} ({res.path}{bak})"
+                )
+
     if needs_trust:
         typer.echo(
             "\ncodex: the hook is UNTRUSTED until you approve it. Start Codex and "
@@ -187,9 +233,9 @@ def offer_cli_hooks(
     confirm_fn: Callable[[str], bool],
     install_fn: Callable[..., None] = _install_cli_hooks,
 ) -> bool:
-    """Offer the existing combined Codex/Gemini SessionStart installer."""
+    """Offer the combined user-level hook installer."""
     if not confirm_fn(
-        "Wire footnote SessionStart context into Codex and Gemini user config?"
+        "Wire footnote hooks into your Codex, Gemini, and Claude user config?"
     ):
         return False
 
@@ -200,6 +246,8 @@ def offer_cli_hooks(
         codex_config=None,
         codex_hooks_json=None,
         migrate_legacy_hooks_json=False,
+        claude=True,
+        claude_settings=None,
     )
     return True
 
