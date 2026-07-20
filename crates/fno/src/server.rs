@@ -436,9 +436,8 @@ enum CoreMsg {
     /// consumed at publish time for the `where_hint` of unroutable cards.
     BacklogCards {
         cards: Vec<BacklogCard>,
-        /// (x-1d91) The UNCAPPED card count `cards` was cut from, for the
-        /// section's exact `+N more`.
-        total: usize,
+        /// (x-1d91) The UNCAPPED per-lane card counts `cards` was cut from.
+        lanes: Vec<(String, usize)>,
         holders: HashMap<String, String>,
         /// (x-9c5f) node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
@@ -909,9 +908,9 @@ struct Core {
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
-    /// (x-1d91) The UNCAPPED queue-card count `backlog` was cut from, so the
-    /// sideline's `+N more` states a true remainder rather than a guess.
-    backlog_total: usize,
+    /// (x-1d91) The UNCAPPED per-lane card counts `backlog` was cut from, so the
+    /// sideline's `+N more` and the kanban's lane headers state true numbers.
+    backlog_lanes: Vec<(String, usize)>,
     /// Claim holder per in-flight node id (x-54fa), from the reader's sweep;
     /// joined at publish time into card routes / `where_hint`.
     backlog_holders: HashMap<String, String>,
@@ -3130,7 +3129,7 @@ impl Core {
             // The work-queue lane (x-6f77); already board-ordered by the
             // reader, routes joined on at publish time (x-54fa).
             backlog: self.routed_backlog(),
-            backlog_total: self.backlog_total,
+            backlog_lanes: self.backlog_lanes.clone(),
         }
     }
 
@@ -5718,7 +5717,7 @@ impl Core {
             }
             CoreMsg::BacklogCards {
                 cards,
-                total,
+                lanes,
                 holders,
                 prs,
                 missions,
@@ -5726,7 +5725,7 @@ impl Core {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
-                self.backlog_total = total;
+                self.backlog_lanes = lanes;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
                 self.missions = missions;
@@ -5922,7 +5921,7 @@ async fn serve(
         agents: Vec::new(),
         branch_by_cwd: HashMap::new(),
         backlog: Vec::new(),
-        backlog_total: 0,
+        backlog_lanes: Vec::new(),
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
         missions: backlog_view::MissionMap::default(),
@@ -6144,7 +6143,7 @@ async fn serve(
                     if core_tx
                         .send(CoreMsg::BacklogCards {
                             cards: queue.cards,
-                            total: queue.total,
+                            lanes: queue.lanes,
                             holders,
                             prs,
                             missions,
@@ -10295,7 +10294,7 @@ mod tests {
             agents: Vec::new(),
             branch_by_cwd: HashMap::new(),
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
             backlog_holders: HashMap::new(),
             backlog_pr: HashMap::new(),
             missions: backlog_view::MissionMap::default(),

@@ -367,9 +367,9 @@ struct LayoutView {
     /// lane; empty when the graph is unreadable or has no ready/blocked/in-flight
     /// work (the lane then renders nothing - the agents section is unaffected).
     backlog: Vec<BacklogCard>,
-    /// (v36, x-1d91) The UNCAPPED queue-card count `backlog` was cut from, for
-    /// the section's exact `+N more` line.
-    backlog_total: usize,
+    /// (v36, x-1d91) The UNCAPPED per-lane queue-card counts, feeding the
+    /// section's exact `+N more` and the mini-kanban's lane headers.
+    backlog_lanes: Vec<(String, usize)>,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -975,9 +975,11 @@ struct AuxPopup {
     actions: Vec<AuxAction>,
 }
 
-/// What a MENU / settings-modal row does. Menu entries open a surface or detach;
-/// settings entries flip a session-local view toggle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a MENU / settings-modal / mini-kanban row does. Menu entries open a
+/// surface or detach; settings entries flip a session-local view toggle; a
+/// kanban entry names a card. Not `Copy` since x-1d91 - a card action carries
+/// its node id.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AuxAction {
     OpenKeybinds,
     OpenSettings,
@@ -985,7 +987,66 @@ enum AuxAction {
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
+    /// (x-1d91) Jump the sideline selector to this Backlog card and close the
+    /// mini-kanban - the overlay is a scanning surface, so acting on a card
+    /// hands you back to the row where its full menu lives.
+    BacklogGoto(String),
 }
+
+/// (x-1d91) Build the mini-kanban: the Backlog's lanes as collapsed columns, each
+/// a header carrying its TRUE count over the cards the feed is holding.
+///
+/// Read-mostly and renders from the same `BacklogCard` feed as the section - no
+/// second data source, so a verb's effect appears here on the same refresh tick
+/// it appears in the sideline. Lanes come from `_kanban_column` (the sole column
+/// authority), never from rank, which is why floating a card reorders WITHIN a
+/// lane and never moves it across one.
+///
+/// Lanes stack vertically rather than sitting side by side: the sideline is
+/// narrow, and a stacked list needs no 2D navigation to scan. The `counts` are
+/// the uncapped per-lane totals, so a lane whose cards were cut by the feed cap
+/// still states how much work it really holds.
+fn build_kanban(cards: &[BacklogCard], counts: &[(String, usize)], anchor: Anchor) -> AuxPopup {
+    let mut rows = vec![PopupRow::Header("backlog".into()), PopupRow::Rule];
+    let mut actions = Vec::new();
+    for (lane, total) in counts {
+        rows.push(PopupRow::Header(format!("{lane}  {total}")));
+        let mut shown = 0usize;
+        for c in cards.iter().filter(|c| card_lane(c) == lane.as_str()) {
+            let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+            rows.push(PopupRow::Entry {
+                glyph: lattice_style(card_lattice_state(c.state)).glyph.into(),
+                label: label.clone(),
+                hint: if c.next {
+                    "next".into()
+                } else {
+                    c.priority.clone()
+                },
+            });
+            actions.push(AuxAction::BacklogGoto(c.id.clone()));
+            shown += 1;
+        }
+        // Say so when the lane holds more than the feed carries, rather than
+        // letting the header count silently disagree with the rows under it.
+        if *total > shown {
+            rows.push(PopupRow::Header(format!("  +{} more", total - shown)));
+        }
+    }
+    AuxPopup {
+        popup: Popup::new(rows, anchor),
+        actions,
+    }
+}
+
+/// The lane a card belongs to in the mini-kanban. A card with no
+/// `_kanban_column` still needs a home, so it gets a named one rather than
+/// vanishing from the board.
+fn card_lane(c: &BacklogCard) -> &str {
+    c.lane.as_deref().unwrap_or(UNLANED)
+}
+
+/// The bucket for cards carrying no `_kanban_column`.
+const UNLANED: &str = "unlaned";
 
 /// Build the sideline MENU popup (US4), anchored at the footer's menu cell:
 /// keybinds / settings / detach. `reload config` is intentionally absent - there
@@ -1553,6 +1614,24 @@ impl View {
                 }
             }
         }
+    }
+
+    /// (x-1d91) Every queue card the graph holds, cap included - the sum of the
+    /// per-lane counts, so the section's remainder and the kanban's lane headers
+    /// are the same number twice rather than two independent claims.
+    fn backlog_total(&self) -> usize {
+        self.layout.backlog_lanes.iter().map(|(_, n)| n).sum()
+    }
+
+    /// (x-1d91) Open the mini-kanban over the Backlog section.
+    fn open_kanban(&mut self, anchor: Anchor) {
+        self.clear_peek();
+        self.aux = Some(build_kanban(
+            &self.layout.backlog,
+            &self.layout.backlog_lanes,
+            anchor,
+        ));
+        self.aux_esc.clear();
     }
 
     /// (x-1d91) Whether this card is wearing the dispatched-verb `…` marker.
@@ -3407,10 +3486,10 @@ impl View {
                 // The reader caps its card set, so the section states the exact
                 // remainder rather than implying the backlog ends here.
                 let shown = self.layout.backlog.len();
-                if self.layout.backlog_total > shown {
+                if self.backlog_total() > shown {
                     out.push(DisplayRow::Sub(format!(
                         "+{} more",
-                        self.layout.backlog_total - shown
+                        self.backlog_total() - shown
                     )));
                 }
             }
@@ -4755,7 +4834,7 @@ async fn attach_and_run(
             agents: Vec::new(),
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         },
     );
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
@@ -4798,7 +4877,7 @@ async fn attach_and_run(
                 agents,
                 focus_node,
                 backlog,
-                backlog_total,
+                backlog_lanes,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -4809,7 +4888,7 @@ async fn attach_and_run(
                     agents,
                     focus_node,
                     backlog,
-                    backlog_total,
+                    backlog_lanes,
                 });
                 break;
             }
@@ -5034,8 +5113,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_total }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_total });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes });
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -6459,6 +6538,21 @@ async fn execute_aux_action(
             view.hover_focus = !view.hover_focus;
             view.reopen_settings_keeping_sel();
         }
+        AuxAction::BacklogGoto(node) => {
+            // (x-1d91) The overlay is for scanning; acting on a card hands you
+            // back to its sideline row, where the full reorder menu lives. A card
+            // that left the feed meanwhile says so rather than moving the cursor
+            // somewhere arbitrary.
+            view.aux = None;
+            match view
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Card(c) if c.id == node))
+            {
+                Some(i) => view.selector = Some(i),
+                None => view.set_notice(format!("{node} is no longer in the backlog")),
+            }
+        }
         AuxAction::ToggleStatus => {
             view.status_on = !view.status_on;
             // The status row changed the content area; report the new size so the
@@ -6481,7 +6575,7 @@ async fn aux_execute_selected(
     let picked = view
         .aux
         .as_ref()
-        .and_then(|m| m.actions.get(m.popup.sel).copied());
+        .and_then(|m| m.actions.get(m.popup.sel).cloned());
     match picked {
         Some(a) => execute_aux_action(view, a, sock_w).await,
         None => {
@@ -7106,6 +7200,17 @@ async fn selector_keys(
                     }
                 } else {
                     view.open_recruit();
+                }
+            }
+            b'b' => {
+                // (x-1d91) The mini-kanban: the Backlog's lanes with their true
+                // counts. A section-level view, not a row action, so it opens
+                // from anywhere in the sideline - but only when there is a
+                // backlog to show, rather than an empty board.
+                if view.layout.backlog_lanes.is_empty() {
+                    view.set_notice("the backlog is empty".into());
+                } else {
+                    view.open_kanban(Anchor::Center);
                 }
             }
             b'p' => {
@@ -8882,7 +8987,7 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
-                backlog_total: 0,
+                backlog_lanes: Vec::new(),
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -8995,7 +9100,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         let frame = view.compose();
         // The sideline still marks the active squad, so scope the check to the
@@ -9060,7 +9165,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         view
     }
@@ -9247,7 +9352,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         view
     }
@@ -9397,7 +9502,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         assert_eq!(view.hover_row, None);
     }
@@ -9435,7 +9540,7 @@ mod tests {
                 lane: None,
                 next: false,
             }],
-            backlog_total: 1,
+            backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
         });
         // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
         // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
@@ -9490,7 +9595,7 @@ mod tests {
                 card("x-blk", CardState::Blocked),
                 card("x-fly", CardState::InFlight),
             ],
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
         // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
@@ -9549,7 +9654,7 @@ mod tests {
                 card("x-ccc", None, None, Some("in flight - worked by t:abc")),
                 card("x-ddd", None, None, None),
             ],
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
         // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
@@ -9687,7 +9792,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         }
     }
 
@@ -10127,7 +10232,7 @@ mod tests {
                 agents: Vec::new(),
                 focus_node: None,
                 backlog: Vec::new(),
-                backlog_total: 0,
+                backlog_lanes: Vec::new(),
             },
         );
         // The server's first real push.
@@ -10140,7 +10245,7 @@ mod tests {
             agents: Vec::new(),
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
 
         assert_eq!(
@@ -10201,7 +10306,7 @@ mod tests {
             agents: Vec::new(),
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         assert_eq!(
             view.squad_view(2),
@@ -10250,7 +10355,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         };
         view.set_layout(layout("epic  1/5"));
         assert_eq!(
@@ -10298,7 +10403,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         view.set_squad_view(1, SectionView::Expanded);
         view.set_squad_view(2, SectionView::Collapsed);
@@ -10425,7 +10530,7 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
-                backlog_total: 0,
+                backlog_lanes: Vec::new(),
             },
         );
         let text = frame_text(&view.compose());
@@ -11334,7 +11439,7 @@ mod tests {
             ],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         let frame = view.compose();
         let text = frame_text(&frame);
@@ -11425,7 +11530,7 @@ mod tests {
             ],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         let lines: Vec<String> = frame_text(&view.compose())
             .lines()
@@ -11526,7 +11631,7 @@ mod tests {
             agents: vec![blocked_row("lb", 7, None)], // under active squad 1
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
         let mut cells = vec![Cell::default(); rows * cols];
@@ -11670,7 +11775,7 @@ mod tests {
             ],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         let frame = view.compose();
         let cols = frame.cols as usize;
@@ -11817,7 +11922,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         assert!(view.frames.contains_key(&10));
         assert!(
@@ -11851,7 +11956,7 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
-                backlog_total: 0,
+                backlog_lanes: Vec::new(),
             },
         );
         view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -11918,7 +12023,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         // Display rows are now [notes squad (auto-expanded, no agents),
         // + new workspace] (x-0090: no tab rows): the cursor clamps to the last
@@ -11985,14 +12090,23 @@ mod tests {
 
     // ---- the Backlog section (x-1d91) --------------------------------------
 
-    /// A view whose Backlog section holds `cards` out of `total` on the board.
+    /// A view whose Backlog section holds `cards` out of `total` on the board
+    /// (all in one lane unless the cards say otherwise).
     fn backlog_view(cards: Vec<BacklogCard>, total: usize) -> View {
         let mut v = two_pane_view();
-        let mut layout = two_squad_layout(1);
-        layout.backlog = cards;
-        layout.backlog_total = total;
-        v.set_layout(layout);
+        v.set_layout(backlog_layout(cards, total));
         v
+    }
+
+    fn backlog_layout(cards: Vec<BacklogCard>, total: usize) -> LayoutView {
+        let mut layout = two_squad_layout(1);
+        let lane = cards
+            .first()
+            .map(|c| card_lane(c).to_string())
+            .unwrap_or_else(|| crate::backlog_view::UNLANED.into());
+        layout.backlog = cards;
+        layout.backlog_lanes = vec![(lane, total)];
+        layout
     }
 
     fn bcard(id: &str, state: CardState) -> BacklogCard {
@@ -12187,6 +12301,92 @@ mod tests {
     }
 
     #[test]
+    fn kanban_lanes_carry_true_counts_and_flag_what_was_cut() {
+        // AC5-EDGE: the header count is the lane's REAL size, so a lane whose
+        // cards were cut by the feed cap must say so rather than let the header
+        // silently disagree with the rows beneath it.
+        let laned = |id: &str, lane: &str| {
+            let mut c = bcard(id, CardState::Ready);
+            c.lane = Some(lane.into());
+            c
+        };
+        let cards = vec![laned("x-a", "ready"), laned("x-b", "triage")];
+        let counts = vec![("ready".to_string(), 9), ("triage".to_string(), 1)];
+        let k = build_kanban(&cards, &counts, Anchor::Center);
+        let headers: Vec<&str> = k
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Header(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(headers.contains(&"ready  9"), "lane states its true size");
+        assert!(headers.contains(&"triage  1"));
+        assert!(
+            headers.iter().any(|h| h.contains("+8 more")),
+            "a lane holding more than the feed carries says so"
+        );
+        // One action per rendered card, none for the headers.
+        assert_eq!(k.actions.len(), 2);
+    }
+
+    #[test]
+    fn kanban_gives_unlaned_cards_a_home() {
+        // A card with no `_kanban_column` must still appear on the board rather
+        // than vanishing from it.
+        let cards = vec![bcard("x-a", CardState::Ready)];
+        let counts = vec![(crate::backlog_view::UNLANED.to_string(), 1)];
+        let k = build_kanban(&cards, &counts, Anchor::Center);
+        assert_eq!(
+            k.actions,
+            vec![AuxAction::BacklogGoto("x-a".into())],
+            "the unlaned card is reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn kanban_goto_moves_the_selector_to_that_card() {
+        // AC6-FR: acting on a card in the overlay hands you back to its sideline
+        // row - the same feed, so the two views can never show different orders.
+        let mut v = backlog_view(
+            vec![
+                bcard("x-a", CardState::Ready),
+                bcard("x-b", CardState::Ready),
+            ],
+            2,
+        );
+        v.open_kanban(Anchor::Center);
+        assert!(v.aux.is_some(), "the overlay opens");
+        let mut wire = Vec::new();
+        execute_aux_action(&mut v, AuxAction::BacklogGoto("x-b".into()), &mut wire)
+            .await
+            .unwrap();
+        assert!(v.aux.is_none(), "and closes on act");
+        let landed = v.selector.expect("the selector moved");
+        assert!(
+            matches!(v.display_rows().get(landed), Some(DisplayRow::Card(c)) if c.id == "x-b"),
+            "onto the card that was picked"
+        );
+    }
+
+    #[tokio::test]
+    async fn kanban_goto_on_a_vanished_card_notices_instead_of_jumping() {
+        // Concurrency: a card closed between opening the overlay and acting must
+        // not move the cursor somewhere arbitrary.
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        v.open_kanban(Anchor::Center);
+        v.layout.backlog.clear();
+        let mut wire = Vec::new();
+        execute_aux_action(&mut v, AuxAction::BacklogGoto("x-a".into()), &mut wire)
+            .await
+            .unwrap();
+        assert!(v.notice.is_some(), "says the card is gone");
+        assert!(wire.is_empty(), "and sends nothing");
+    }
+
+    #[test]
     fn selector_nav_skips_headers_and_clamps() {
         // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
         // section headers, and clamp (no wrap) at both ends.
@@ -12261,7 +12461,7 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
-                backlog_total: 0,
+                backlog_lanes: Vec::new(),
             },
         );
         assert!(
@@ -13163,7 +13363,7 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
-                backlog_total: 0,
+                backlog_lanes: Vec::new(),
             },
         );
         assert_eq!(v.display_rows().len(), 1, "footer only");
@@ -14132,7 +14332,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         let n = v.nav_rows().len();
         assert!(n < last + 1, "catalog shrank");
@@ -14590,7 +14790,7 @@ mod tests {
             agents,
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         };
         // "b" drops -> its identity is gone, so the cursor clamps to the new last.
         let l1 = with(&v, vec![blocked_row("a", 1, None)]);
@@ -15086,7 +15286,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         assert_eq!(v.selector, Some(2), "cursor follows squad 1 to its new row");
     }
@@ -15168,7 +15368,7 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
-            backlog_total: 0,
+            backlog_lanes: Vec::new(),
         });
         v.selector = Some(0);
         selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();

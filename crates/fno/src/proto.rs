@@ -186,8 +186,8 @@ use crate::tree::{Dir, Rect, TabId};
 ///
 /// v36 (x-1d91, the Backlog section): `BacklogCard { project, lane, next }` carry
 /// the sideline's `project · lane` attribution subline and the explicit on-deck
-/// marker; `Layout::backlog_total` is the UNCAPPED card count so the section can
-/// render an exact `+N more`; `Command::BacklogVerb { node, verb }`
+/// marker; `Layout::backlog_lanes` carries UNCAPPED per-lane counts, feeding both
+/// the section's exact `+N more` and the mini-kanban's lane headers; `Command::BacklogVerb { node, verb }`
 /// ([`BacklogVerb`]) shells the existing `fno backlog rank --top` / `defer`
 /// porcelain server-side - the mux never writes `graph.json` itself. All new reads
 /// are `#[serde(default)]`, keeping a v35 reader wire-tolerant.
@@ -1034,11 +1034,12 @@ pub enum ServerMsg {
         /// wire-tolerant.
         #[serde(default)]
         backlog: Vec<BacklogCard>,
-        /// (v36, x-1d91) The UNCAPPED count of queue cards the graph held, so the
-        /// Backlog section can render an exact `+N more` under the capped
-        /// `backlog` list above. Equal to `backlog.len()` when nothing was cut.
+        /// (v36, x-1d91) The UNCAPPED per-lane queue-card counts (lane name ->
+        /// count, lane-sorted). Feeds both the section's exact `+N more` under
+        /// the capped `backlog` list above and the mini-kanban's lane headers, so
+        /// the two can never disagree about how much work exists.
         #[serde(default)]
-        backlog_total: usize,
+        backlog_lanes: Vec<(String, usize)>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -2052,7 +2053,7 @@ mod tests {
                         next: true,
                     },
                 ],
-                backlog_total: 57,
+                backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

@@ -69,13 +69,27 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
     derive_queue(raw).map(|q| q.cards)
 }
 
-/// The card set plus the UNCAPPED count it was cut from (x-1d91): the section's
-/// `+N more` must state how many cards exist, not how many were dropped from a
-/// list the caller cannot see. `cards.len() <= total` always.
+/// The card set plus the UNCAPPED per-lane counts it was cut from (x-1d91).
+///
+/// Both consumers of "how much work is really there" read these: the section's
+/// `+N more` (total minus what it shows) and the mini-kanban's per-lane headers.
+/// One field rather than a separate scalar total, so the two can never disagree.
+/// Sorted by lane name for a stable render; `cards.len() <= total()` always.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Queue {
     pub cards: Vec<BacklogCard>,
-    pub total: usize,
+    pub lanes: Vec<(String, usize)>,
+}
+
+/// The lane bucket for a card carrying no `_kanban_column`. It still needs a home
+/// on the board rather than vanishing from it.
+pub const UNLANED: &str = "unlaned";
+
+impl Queue {
+    /// Every queue card the graph held, cap included.
+    pub fn total(&self) -> usize {
+        self.lanes.iter().map(|(_, n)| n).sum()
+    }
 }
 
 /// [`derive_cards`] plus the uncapped total. The single derivation; `derive_cards`
@@ -158,10 +172,20 @@ pub fn derive_queue(raw: &str) -> Option<Queue> {
             .then_with(|| a.4.cmp(&b.4))
     });
 
-    let total = rows.len();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for (.., card) in &rows {
+        *counts
+            .entry(card.lane.as_deref().unwrap_or(UNLANED))
+            .or_default() += 1;
+    }
+    let mut lanes: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(l, n)| (l.to_string(), n))
+        .collect();
+    lanes.sort();
     let mut cards: Vec<BacklogCard> = rows.into_iter().take(CARD_CAP).map(|r| r.5).collect();
     mark_next(&mut cards);
-    Some(Queue { cards, total })
+    Some(Queue { cards, lanes })
 }
 
 /// Mark the on-deck card: the first Ready card in board order, which is the pick
@@ -691,7 +715,7 @@ mod tests {
             .collect();
         let q = derive_queue(&graph(&nodes.join(","))).unwrap();
         assert_eq!(q.cards.len(), CARD_CAP, "the wire frame stays bounded");
-        assert_eq!(q.total, CARD_CAP + 7, "but the count is the whole board");
+        assert_eq!(q.total(), CARD_CAP + 7, "but the count is the whole board");
     }
 
     #[test]
