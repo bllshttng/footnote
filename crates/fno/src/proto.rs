@@ -196,7 +196,13 @@ use crate::tree::{Dir, Rect, TabId};
 /// v37 (x-b186): `AgentRow { tail }` carries the row's most recent assistant
 /// line for the extended sideline table's message column. Additive and
 /// `#[serde(default)]`, so a v36 reader parses it as `None` (no tail cell).
-pub const PROTO_VERSION: u32 = 37;
+///
+/// v38: `Command::ToggleDiffPane` (the git diff side pane). A new verb, not an
+/// additive field, so it needs the bump: a v37 server cannot deserialize it,
+/// and without a version difference the handshake would accept an upgraded
+/// client and then drop it on the first decode error instead of telling the
+/// operator to restart the server.
+pub const PROTO_VERSION: u32 = 38;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -747,6 +753,24 @@ pub enum Command {
     /// agent rows (the sideline click path); a stale id is refused fail-closed
     /// with a notice, like the other catalog-named commands.
     FocusPane(u64),
+    /// (v38) Toggle the git working-diff pane for one source worktree.
+    ///
+    /// The menu path sends the clicked row's pinned identity: `pane` when the
+    /// row has one, `agent` as its name. `pane` is what the server resolves
+    /// first - it carries its own cwd, so it reaches a row synthesized from the
+    /// tree rather than the registry, and it separates two rows sharing a name
+    /// (the server refuses an ambiguous name rather than pick one). Both `None`
+    /// is the keybind path: the focused pane's own spawn cwd.
+    ///
+    /// At most one diff pane is live at a time: a press on the same source
+    /// closes it, a press on a different one closes the old and opens the new.
+    /// Read-only - the pane only renders a diff, never writes.
+    ToggleDiffPane {
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        pane: Option<u64>,
+    },
     /// (v14) Attach a watch-only claude bg session into a fresh mux pane by its
     /// jobId (`AgentRow.attach_id`): the server spawns `claude attach <id>` as a
     /// new tab in the sender's squad and switches the sender to it. The id is
