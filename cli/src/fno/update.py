@@ -319,7 +319,9 @@ def _cargo_installed_bin() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optional[str]:
+def _installed_bin_crates_rev(
+    binary: Path, *, timeout: float = 20.0, accept_dirty: bool = False
+) -> Optional[str]:
     """The clean crates/ subtree rev the installed binary self-reports, or None.
 
     Runs ``<binary> version --json`` (the build.rs embed) and returns its
@@ -329,6 +331,12 @@ def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optiona
     ``timeout``), a non-zero exit, unparseable or non-dict JSON, a "unknown"
     rev (non-git build), or a dirty tree. Fail toward rebuild, never toward a
     false-fresh skip (the stale-marker gate's exact lie).
+
+    ``accept_dirty=True`` returns the rev even from a dirty build. Only the
+    post-deploy verify uses it: right after a rebuild from this tree, a
+    rev-matching dirty binary proves the deploy landed, and rejecting it
+    wedged every subsequent sync on a false failure. The staleness gate and
+    triad check keep the strict default.
     """
     try:
         result = subprocess.run(
@@ -349,7 +357,9 @@ def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optiona
         data = json.loads(stdout)
     except (ValueError, TypeError):
         return None
-    if not isinstance(data, dict) or data.get("dirty") is True:
+    if not isinstance(data, dict):
+        return None
+    if data.get("dirty") is True and not accept_dirty:
         return None
     rev = data.get("crates_rev")
     if not isinstance(rev, str) or rev in ("", "unknown"):
@@ -731,18 +741,32 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # is not what the runtime actually resolves) - the marker gate hid exactly
     # this class. HALT loud on mismatch with both revs printed. Skipped
     # only when subtree is undeterminable (force with no git rev to check against).
+    # accept_dirty: a rev-matching dirty build proves the deploy landed (we just
+    # built from this tree); rejecting it wedged every later sync falsely.
     if subtree is not None:
         deployed = _cargo_installed_bin()
-        verify_rev = None if deployed is None else _installed_bin_crates_rev(deployed)
+        verify_rev = (
+            None
+            if deployed is None
+            else _installed_bin_crates_rev(deployed, accept_dirty=True)
+        )
         if verify_rev != subtree:
             typer.echo(
                 "fno update: ERROR: post-deploy verify FAILED - the deployed"
-                f" fno-agents self-reports {verify_rev or 'no usable rev'} but source"
-                f" crates/ rev is {subtree[:12]}. The rebuild did not land where the"
-                f" runtime resolves it (install root {install_root}). NOT continuing.",
+                f" fno-agents self-reports"
+                f" {verify_rev or 'no usable rev (missing, unparseable, or unstamped)'}"
+                f" but source crates/ rev is {subtree[:12]}. The rebuild did not land"
+                f" where the runtime resolves it (install root {install_root})."
+                " NOT continuing.",
                 err=True,
             )
             raise typer.Exit(1)
+        if _installed_bin_crates_rev(deployed) is None:
+            typer.echo(
+                "fno update: note: deployed build is dirty (uncommitted crates/"
+                f" changes at rev {subtree[:12]}); verify passed on the rev match.",
+                err=True,
+            )
 
     # The mux front door (crates/fno -> `fno` on PATH) rides the SAME crates/
     # subtree staleness gate as the agents bins, so refresh it here too. Without

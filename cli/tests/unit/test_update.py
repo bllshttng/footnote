@@ -1602,6 +1602,19 @@ def test_installed_bin_crates_rev_dirty_is_stale(tmp_path: Path, monkeypatch: py
     assert update._installed_bin_crates_rev(b) is None
 
 
+def test_installed_bin_crates_rev_accept_dirty_returns_rev(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """accept_dirty=True (the post-deploy verify caller) reads a dirty build's
+    rev; the default strict mode stays None so the rebuild gate is unchanged."""
+    b = tmp_path / "fno-agents"
+    b.write_text("x")
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        _fake_version_run('{"crates_rev": "abc123", "dirty": true}'),
+    )
+    assert update._installed_bin_crates_rev(b, accept_dirty=True) == "abc123"
+    assert update._installed_bin_crates_rev(b) is None
+
+
 def test_installed_bin_crates_rev_unknown_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Boundary: crates_rev == "unknown" (non-git build) is stale, never fresh."""
     b = tmp_path / "fno-agents"
@@ -1665,6 +1678,43 @@ def test_post_deploy_verify_mismatch_halts(
     with pytest.raises(typer.Exit):
         update._refresh_rust_bins(source)
     assert "post-deploy verify FAILED" in capsys.readouterr().err
+
+
+def test_post_deploy_verify_accepts_dirty_build_with_matching_rev(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A rebuild from a tree with uncommitted crates/ changes self-reports its
+    rev plus dirty. The deploy demonstrably landed (rev matches source), so
+    verify passes with a note instead of wedging every later sync on a false
+    failure. The strict gate still saw the dirty install as stale (rebuild)."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    subtree = "a" * 40
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
+    monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def _fake_run(cmd, **kw):
+        if cmd and cmd[0] == "cargo":
+            return types.SimpleNamespace(returncode=0)
+        if cmd and "version" in cmd:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"crates_rev": "' + subtree + '", "dirty": true}',
+            )
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
+
+    result = update._refresh_rust_bins(source)
+    assert result == "refreshed"
+    err = capsys.readouterr().err
+    assert "post-deploy verify FAILED" not in err
+    assert "dirty" in err
 
 
 def test_sync_triad_copies_into_location_hosting_a_bin(
