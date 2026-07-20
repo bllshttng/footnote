@@ -2342,6 +2342,44 @@ impl View {
         Some(permille(at.saturating_sub(start), available))
     }
 
+    /// Grab a seam, remembering the share it currently holds so Esc can put it
+    /// back. A seam whose panes have already gone is not grabbable.
+    fn begin_seam_drag(&mut self, seam: Seam, now: Instant) {
+        let Some(start) = self.seam_permille(seam) else {
+            return;
+        };
+        self.seam_drag = Some(SeamDrag {
+            seam,
+            start_permille: start,
+            last_permille: start,
+            last_at: now,
+        });
+    }
+
+    /// The command for a drag that has reached an outer cell, or `None` when
+    /// the seam has not moved. A drag reports far more cells than the seam has
+    /// positions, so this is what keeps the wire quiet between crossings.
+    ///
+    /// The seam's span is invariant under its own resize - the pair's total
+    /// extent does not change, only the split point inside it - so the target
+    /// stays stable as the server's layout updates mid-drag, and a command lost
+    /// on the way self-heals at the next cell.
+    fn seam_drag_to(&mut self, row: u16, col: u16, now: Instant) -> Option<Command> {
+        let drag = self.seam_drag?;
+        let target = self.seam_permille_at(drag.seam, row, col)?;
+        if target == drag.last_permille {
+            return None;
+        }
+        let live = self.seam_drag.as_mut()?;
+        live.last_permille = target;
+        live.last_at = now;
+        Some(Command::ResizeSeam {
+            a: drag.seam.a,
+            b: drag.seam.b,
+            ratio_permille: target,
+        })
+    }
+
     /// The column range of the footer's `☰ menu` button (x-8ccf US4), shared by
     /// the renderer and the hit-test so a click lands where it draws. `None` when
     /// the panel is too narrow to add the button beside the `+ new workspace`
@@ -6358,6 +6396,30 @@ async fn handle_stdin(
             }
             continue;
         }
+        // x-d807: a seam drag in flight owns the mouse. The pointer routinely
+        // leaves the divider it grabbed - that is what dragging is - so this
+        // precedes every position-based route below, including the pane forward
+        // that would otherwise hand the drag to a PTY as text selection.
+        if view.seam_drag.is_some() {
+            match rep.kind {
+                MouseKind::Drag(MouseButton::Left) => {
+                    if let Some(cmd) = view.seam_drag_to(rep.row, rep.col, Instant::now()) {
+                        write_msg(sock_w, &ClientMsg::Command(cmd))
+                            .await
+                            .map_err(|e| format!("seam resize send failed: {e}"))?;
+                    }
+                    continue;
+                }
+                MouseKind::Release(MouseButton::Left) => {
+                    // The last applied ratio stands.
+                    view.seam_drag = None;
+                    continue;
+                }
+                // Anything else (a wheel, another button) means the gesture is
+                // over; drop the drag and let the event route normally.
+                _ => view.seam_drag = None,
+            }
+        }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
         // click / scroll cancels it and is SWALLOWED - it must never leak to a
         // pane underneath (the confirm prompt spans the full-width bottom row) nor
@@ -6381,6 +6443,12 @@ async fn handle_stdin(
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                 apply_hit(view, hit, sock_w).await?;
+                continue;
+            }
+            // x-d807: a press on a divider grabs the seam. After chrome_hit so
+            // sideline and tab-bar affordances still win their own cells.
+            if let Some(seam) = view.seam_at(rep.row, rep.col) {
+                view.begin_seam_drag(seam, Instant::now());
                 continue;
             }
         }
@@ -10408,6 +10476,56 @@ mod tests {
         // Past either end clamps into the pair rather than wrapping.
         assert_eq!(view.seam_permille_at(seam, 5, 28), Some(0));
         assert_eq!(view.seam_permille_at(seam, 5, 200), Some(1000));
+    }
+
+    #[test]
+    fn seam_drag_emits_one_command_per_crossing_not_per_report() {
+        // US1: a drag reports far more cells than the seam has positions. Only
+        // a real move goes on the wire; the rest are silent.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        let t0 = Instant::now();
+        view.begin_seam_drag(seam, t0);
+        assert_eq!(
+            view.seam_drag_to(5, 58, t0),
+            Some(Command::ResizeSeam {
+                a: 10,
+                b: 11,
+                ratio_permille: 652
+            }),
+            "crossing to content col 30 of 46 moves the seam"
+        );
+        assert_eq!(
+            view.seam_drag_to(6, 58, t0),
+            None,
+            "same column, different row: the seam did not move"
+        );
+        assert_eq!(
+            view.seam_drag_to(5, 59, t0),
+            Some(Command::ResizeSeam {
+                a: 10,
+                b: 11,
+                ratio_permille: 673
+            }),
+            "the next column is a new position"
+        );
+    }
+
+    #[test]
+    fn seam_drag_is_not_grabbable_once_its_panes_are_gone() {
+        let mut view = three_pane_view();
+        view.begin_seam_drag(
+            Seam {
+                a: 998,
+                b: 999,
+                axis: Axis::Horizontal,
+            },
+            Instant::now(),
+        );
+        assert!(
+            view.seam_drag.is_none(),
+            "a seam with no live panes has no share to remember, so no grab"
+        );
     }
 
     #[test]

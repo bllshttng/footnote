@@ -737,6 +737,20 @@ pub enum Command {
     ClosePane,
     FocusDir(Dir),
     ResizeDir(Dir),
+    /// (x-d807) Set one seam to an absolute share, for a mouse drag on a
+    /// divider. The seam is named by the panes flanking it (`a` left/top, `b`
+    /// right/bottom) because that is what the client can see - `Layout` carries
+    /// rects, never the tree - and the server resolves the pair to a branch
+    /// child pair, refusing a pane that has gone or a pair that no longer
+    /// flanks one seam. `ratio_permille` is `a`'s share of the pair the two
+    /// children span (0..=1000), not of the whole branch, since the client
+    /// cannot see the branch's other children.
+    ///
+    /// Absolute rather than a delta: repeated sets are idempotent, a dropped
+    /// command self-heals on the next cell crossing, and a long drag
+    /// accumulates no rounding drift. Permille rather than a float because
+    /// this enum derives `Eq`, which no float type implements.
+    ResizeSeam { a: u64, b: u64, ratio_permille: u16 },
     NewTab,
     SelectTab(TabId),
     NextTab,

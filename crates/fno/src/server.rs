@@ -4504,6 +4504,24 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::ResizeSeam {
+                a,
+                b,
+                ratio_permille,
+            } => {
+                let Some(tab) = self.viewed_tab_mut(view) else {
+                    return Flow::Continue;
+                };
+                // Silent on refusal, unlike ResizeDir: a drag streams commands
+                // and clamps against a pane minimum constantly, so a notice per
+                // rejected cell would be a wall of noise. The client reports a
+                // drag that dies on a stale address; a clamp is self-evident
+                // from the divider not moving.
+                if tree::set_seam_ratio(tab, vp, a, b, ratio_permille) {
+                    self.push_layout(true);
+                }
+                Flow::Continue
+            }
             Command::NewTab => {
                 // The new tab's first (and so far only) viewer is the
                 // sender: spawn at the sender's own content area (Locked 5's
