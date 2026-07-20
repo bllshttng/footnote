@@ -438,6 +438,9 @@ enum CoreMsg {
         cards: Vec<BacklogCard>,
         /// (x-1d91) The UNCAPPED per-lane card counts `cards` was cut from.
         lanes: Vec<(String, usize)>,
+        /// (x-1d91) These cards are last-known, not current: the graph read has
+        /// been failing.
+        stale: bool,
         holders: HashMap<String, String>,
         /// (x-9c5f) node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
@@ -911,6 +914,8 @@ struct Core {
     /// (x-1d91) The UNCAPPED per-lane card counts `backlog` was cut from, so the
     /// sideline's `+N more` and the kanban's lane headers state true numbers.
     backlog_lanes: Vec<(String, usize)>,
+    /// (x-1d91) Whether `backlog` is last-known rather than current.
+    backlog_stale: bool,
     /// Claim holder per in-flight node id (x-54fa), from the reader's sweep;
     /// joined at publish time into card routes / `where_hint`.
     backlog_holders: HashMap<String, String>,
@@ -3130,6 +3135,7 @@ impl Core {
             // reader, routes joined on at publish time (x-54fa).
             backlog: self.routed_backlog(),
             backlog_lanes: self.backlog_lanes.clone(),
+            backlog_stale: self.backlog_stale,
         }
     }
 
@@ -5718,6 +5724,7 @@ impl Core {
             CoreMsg::BacklogCards {
                 cards,
                 lanes,
+                stale,
                 holders,
                 prs,
                 missions,
@@ -5726,6 +5733,7 @@ impl Core {
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
                 self.backlog_lanes = lanes;
+                self.backlog_stale = stale;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
                 self.missions = missions;
@@ -5922,6 +5930,7 @@ async fn serve(
         branch_by_cwd: HashMap::new(),
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
+        backlog_stale: false,
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
         missions: backlog_view::MissionMap::default(),
@@ -6144,6 +6153,7 @@ async fn serve(
                         .send(CoreMsg::BacklogCards {
                             cards: queue.cards,
                             lanes: queue.lanes,
+                            stale: queue.stale,
                             holders,
                             prs,
                             missions,
@@ -10295,6 +10305,7 @@ mod tests {
             branch_by_cwd: HashMap::new(),
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
             backlog_holders: HashMap::new(),
             backlog_pr: HashMap::new(),
             missions: backlog_view::MissionMap::default(),

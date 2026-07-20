@@ -370,6 +370,10 @@ struct LayoutView {
     /// (v36, x-1d91) The UNCAPPED per-lane queue-card counts, feeding the
     /// section's exact `+N more` and the mini-kanban's lane headers.
     backlog_lanes: Vec<(String, usize)>,
+    /// (v36, x-1d91) `backlog` is last-known rather than current - the graph read
+    /// has been failing. Rendered as a header marker; the cards still show (a
+    /// blank section would be worse than an honestly-labelled stale one).
+    backlog_stale: bool,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -3465,7 +3469,14 @@ impl View {
             );
             let view = self.section_view(&SectionKey::WorkQueue);
             out.push(DisplayRow::Header {
-                label: "~ backlog",
+                // The cards still render when the graph read is failing - a blank
+                // section would be worse - but the header says they are memory
+                // rather than fact, so nobody acts on old work believing it fresh.
+                label: if self.layout.backlog_stale {
+                    "~ backlog · stale"
+                } else {
+                    "~ backlog"
+                },
                 rollup,
                 key: SectionKey::WorkQueue,
                 view,
@@ -4835,6 +4846,7 @@ async fn attach_and_run(
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         },
     );
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
@@ -4878,6 +4890,7 @@ async fn attach_and_run(
                 focus_node,
                 backlog,
                 backlog_lanes,
+                backlog_stale,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -4889,6 +4902,7 @@ async fn attach_and_run(
                     focus_node,
                     backlog,
                     backlog_lanes,
+                    backlog_stale,
                 });
                 break;
             }
@@ -5113,8 +5127,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -8988,6 +9002,7 @@ mod tests {
                 focus_node: None,
                 backlog: Vec::new(),
                 backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -9101,6 +9116,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let frame = view.compose();
         // The sideline still marks the active squad, so scope the check to the
@@ -9166,6 +9182,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         view
     }
@@ -9353,6 +9370,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         view
     }
@@ -9503,6 +9521,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert_eq!(view.hover_row, None);
     }
@@ -9541,6 +9560,7 @@ mod tests {
                 next: false,
             }],
             backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
+            backlog_stale: false,
         });
         // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
         // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
@@ -9596,6 +9616,7 @@ mod tests {
                 card("x-fly", CardState::InFlight),
             ],
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
         // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
@@ -9655,6 +9676,7 @@ mod tests {
                 card("x-ddd", None, None, None),
             ],
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
         // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
@@ -9793,6 +9815,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         }
     }
 
@@ -10233,6 +10256,7 @@ mod tests {
                 focus_node: None,
                 backlog: Vec::new(),
                 backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         // The server's first real push.
@@ -10246,6 +10270,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
 
         assert_eq!(
@@ -10307,6 +10332,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert_eq!(
             view.squad_view(2),
@@ -10356,6 +10382,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         };
         view.set_layout(layout("epic  1/5"));
         assert_eq!(
@@ -10404,6 +10431,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         view.set_squad_view(1, SectionView::Expanded);
         view.set_squad_view(2, SectionView::Collapsed);
@@ -10531,6 +10559,7 @@ mod tests {
                 focus_node: None,
                 backlog: Vec::new(),
                 backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         let text = frame_text(&view.compose());
@@ -11440,6 +11469,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let frame = view.compose();
         let text = frame_text(&frame);
@@ -11531,6 +11561,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let lines: Vec<String> = frame_text(&view.compose())
             .lines()
@@ -11632,6 +11663,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
         let mut cells = vec![Cell::default(); rows * cols];
@@ -11776,6 +11808,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let frame = view.compose();
         let cols = frame.cols as usize;
@@ -11923,6 +11956,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert!(view.frames.contains_key(&10));
         assert!(
@@ -11957,6 +11991,7 @@ mod tests {
                 focus_node: None,
                 backlog: Vec::new(),
                 backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -12024,6 +12059,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         // Display rows are now [notes squad (auto-expanded, no agents),
         // + new workspace] (x-0090: no tab rows): the cursor clamps to the last
@@ -12301,6 +12337,26 @@ mod tests {
     }
 
     #[test]
+    fn stale_feed_keeps_its_cards_and_says_so() {
+        // AC7-FR: a failing graph read must never blank the section - it keeps
+        // the last-known cards under a header that admits they are memory.
+        let mut layout = backlog_layout(vec![bcard("x-a", CardState::Ready)], 1);
+        layout.backlog_stale = true;
+        let mut v = two_pane_view();
+        v.set_layout(layout);
+        let rows = v.display_rows();
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, DisplayRow::Header { label, .. } if label.contains("stale"))),
+            "the header admits the section is stale"
+        );
+        assert!(
+            rows.iter().any(|r| matches!(r, DisplayRow::Card(_))),
+            "and the cards are still there"
+        );
+    }
+
+    #[test]
     fn kanban_lanes_carry_true_counts_and_flag_what_was_cut() {
         // AC5-EDGE: the header count is the lane's REAL size, so a lane whose
         // cards were cut by the feed cap must say so rather than let the header
@@ -12462,6 +12518,7 @@ mod tests {
                 focus_node: None,
                 backlog: Vec::new(),
                 backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         assert!(
@@ -13364,6 +13421,7 @@ mod tests {
                 focus_node: None,
                 backlog: Vec::new(),
                 backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         assert_eq!(v.display_rows().len(), 1, "footer only");
@@ -14333,6 +14391,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let n = v.nav_rows().len();
         assert!(n < last + 1, "catalog shrank");
@@ -14791,6 +14850,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         };
         // "b" drops -> its identity is gone, so the cursor clamps to the new last.
         let l1 = with(&v, vec![blocked_row("a", 1, None)]);
@@ -15287,6 +15347,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert_eq!(v.selector, Some(2), "cursor follows squad 1 to its new row");
     }
@@ -15369,6 +15430,7 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         v.selector = Some(0);
         selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();

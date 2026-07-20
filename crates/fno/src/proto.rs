@@ -187,7 +187,8 @@ use crate::tree::{Dir, Rect, TabId};
 /// v36 (x-1d91, the Backlog section): `BacklogCard { project, lane, next }` carry
 /// the sideline's `project · lane` attribution subline and the explicit on-deck
 /// marker; `Layout::backlog_lanes` carries UNCAPPED per-lane counts, feeding both
-/// the section's exact `+N more` and the mini-kanban's lane headers; `Command::BacklogVerb { node, verb }`
+/// the section's exact `+N more` and the mini-kanban's lane headers;
+/// `Layout::backlog_stale` marks the section as last-known rather than current; `Command::BacklogVerb { node, verb }`
 /// ([`BacklogVerb`]) shells the existing `fno backlog rank --top` / `defer`
 /// porcelain server-side - the mux never writes `graph.json` itself. All new reads
 /// are `#[serde(default)]`, keeping a v35 reader wire-tolerant.
@@ -1040,6 +1041,11 @@ pub enum ServerMsg {
         /// the two can never disagree about how much work exists.
         #[serde(default)]
         backlog_lanes: Vec<(String, usize)>,
+        /// (v36, x-1d91) The graph read has been failing, so `backlog` is the
+        /// last-known set rather than current fact. The section keeps rendering
+        /// it (a blank lane would be worse) but says it is stale.
+        #[serde(default)]
+        backlog_stale: bool,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -2054,6 +2060,7 @@ mod tests {
                     },
                 ],
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
+                backlog_stale: false,
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

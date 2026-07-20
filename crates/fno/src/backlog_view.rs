@@ -79,6 +79,10 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
 pub struct Queue {
     pub cards: Vec<BacklogCard>,
     pub lanes: Vec<(String, usize)>,
+    /// The graph read has been failing long enough that these cards are memory,
+    /// not fact. The section says so rather than presenting stale work as
+    /// current; it clears the moment a read succeeds again.
+    pub stale: bool,
 }
 
 /// The lane bucket for a card carrying no `_kanban_column`. It still needs a home
@@ -185,7 +189,13 @@ pub fn derive_queue(raw: &str) -> Option<Queue> {
     lanes.sort();
     let mut cards: Vec<BacklogCard> = rows.into_iter().take(CARD_CAP).map(|r| r.5).collect();
     mark_next(&mut cards);
-    Some(Queue { cards, lanes })
+    // A fresh derivation is by definition current; only `ReaderState` (which
+    // knows the read history) ever sets this.
+    Some(Queue {
+        cards,
+        lanes,
+        stale: false,
+    })
 }
 
 /// Mark the on-deck card: the first Ready card in board order, which is the pick
@@ -257,6 +267,11 @@ pub struct MissionMap {
 /// guard alone). The mission tree is only mission -> epic -> leaf; the slack
 /// plus the `seen` set terminates a malformed epic-parent cycle.
 const MISSION_DEPTH_CAP: usize = 8;
+
+/// Consecutive failed reads before the section is marked stale. The reader ticks
+/// about once a second, so this is a few seconds of a genuinely unreadable graph -
+/// past any single write race, well short of the operator acting on old work.
+const STALE_AFTER_FAILED_READS: u32 = 3;
 
 struct MissionNode<'a> {
     parent: Option<&'a str>,
@@ -460,6 +475,9 @@ pub struct ReaderState {
     /// The mission map as of the last publish, so a mission-only change is
     /// detected (a mission activating/completing with the same cards/prs).
     last_missions: Option<MissionMap>,
+    /// Consecutive ticks whose read failed while the file was still there. Feeds
+    /// [`Queue::stale`]; reset by any read that lands.
+    read_failures: u32,
 }
 
 impl ReaderState {
@@ -506,7 +524,14 @@ impl ReaderState {
                     self.missions = MissionMap::default();
                     self.cached_raw = None; // file vanished: empty the lane
                 }
-                (None, Some(_)) => {} // torn read: keep last-good AND retry next tick
+                // Torn read: keep last-good AND retry next tick. A single one is
+                // a normal race with a writer, so only a RUN of them earns the
+                // stale marker - a marker that flashes every time the graph is
+                // written would be noise, not signal.
+                (None, Some(_)) => self.read_failures = self.read_failures.saturating_add(1),
+            }
+            if self.cached_stamp == stamp {
+                self.read_failures = 0; // a committed stamp means the read landed
             }
         }
         let mut queue = match &self.cached_raw {
@@ -515,6 +540,7 @@ impl ReaderState {
                 .unwrap_or_default(),
             None => Queue::default(),
         };
+        queue.stale = self.read_failures >= STALE_AFTER_FAILED_READS;
         if let Some(live) = live {
             overlay_claims(&mut queue.cards, live);
             // The overlay can flip the on-deck card to InFlight, so re-mark:
@@ -716,6 +742,40 @@ mod tests {
         let q = derive_queue(&graph(&nodes.join(","))).unwrap();
         assert_eq!(q.cards.len(), CARD_CAP, "the wire frame stays bounded");
         assert_eq!(q.total(), CARD_CAP + 7, "but the count is the whole board");
+    }
+
+    #[test]
+    fn a_run_of_failed_reads_marks_stale_and_recovery_clears_it() {
+        // AC7-FR: a failing read keeps the last-known cards (never a blank
+        // section) but stops presenting them as current - and a read that lands
+        // again clears the marker with no restart. One torn read is a normal
+        // write race and must NOT trip it.
+        let mut st = ReaderState::default();
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        assert!(!st.tick(s0, || Some(raw.clone()), None).unwrap().0.stale);
+
+        // Each failing tick presents a new stamp (the file keeps changing) but
+        // no content. The first is just a race.
+        let bump = |n: u64| Some((std::time::SystemTime::UNIX_EPOCH, 900 + n));
+        st.tick(bump(1), || None, None);
+        assert!(
+            !st.last_sent.as_ref().unwrap().stale,
+            "one torn read is a write race, not staleness"
+        );
+        for i in 2..=STALE_AFTER_FAILED_READS as u64 {
+            st.tick(bump(i), || None, None);
+        }
+        let stale = st.last_sent.clone().unwrap();
+        assert!(stale.stale, "a run of failed reads earns the marker");
+        assert_eq!(
+            stale.cards.len(),
+            1,
+            "and the cards are KEPT, never blanked"
+        );
+
+        let fresh = st.tick(bump(9), || Some(raw.clone()), None).unwrap().0;
+        assert!(!fresh.stale, "a landed read clears the marker in place");
     }
 
     #[test]
