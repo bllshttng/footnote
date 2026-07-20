@@ -122,10 +122,13 @@ When your only outstanding work is an async external check - CI still running, o
 1. **Arm a harness-tracked watcher with a hard timeout.** Use a background task the harness re-invokes the model on when it exits - background `Bash` (`run_in_background`) or a `Monitor` - whose command embeds a hard timeout, e.g.:
 
    ```bash
-   timeout 1800 gh pr checks <PR> --watch
+   # `timeout` is GNU coreutils and is ABSENT on stock macOS, where it fails
+   # instantly ("command not found"), the watcher exits, and the session spins.
+   # This bound is portable:
+   gh pr checks <PR> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & wait $w
    ```
 
-   The timeout doubles as the heartbeat: a hung `gh` is bounded, and a killed watcher still wakes the session. Detached processes (`nohup`, `disown`, a bare `&`) are FORBIDDEN - they exit without re-invoking anyone, so the session would idle forever. The exact `gh` incantation is a template, not load-bearing (its `--watch` exit varies by version); the design depends only on the task exiting.
+   The bound doubles as the heartbeat: a hung `gh` is capped, and a killed watcher still wakes the session. Detached processes (`nohup`, `disown`, a bare `&`) are FORBIDDEN - they exit without re-invoking anyone, so the session would idle forever. The exact `gh` incantation is a template, not load-bearing (its `--watch` exit varies by version); the design depends only on the task exiting.
 
 2. **End your turn with the tag, and nothing else.** After arming the watcher, close the turn with:
 
