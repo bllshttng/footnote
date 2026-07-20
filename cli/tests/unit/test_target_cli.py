@@ -578,6 +578,34 @@ def test_target_start_forwards_yolo_to_init(tmp_path, monkeypatch):
     assert "--yolo" not in (seen["init_cmd"] or []), "start forwarded --yolo without the flag"
 
 
+def test_target_start_yolo_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
+    """x-6390: `start` no-ops inside a linked worktree and returns before it can
+    forward --yolo, so the grant is dropped. Same silent-drop class as the init
+    path; it must say so rather than print a normal-looking receipt."""
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    manifest = fake_root / ".fno" / "target-state.md"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("---\nattended: true\n---\n")
+
+    monkeypatch.chdir(fake_root)
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda _p: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda _n: None)
+
+    result = runner.invoke(app, ["target", "start", "x-yol", "--yolo"])
+    assert result.exit_code == 0, result.output
+    assert "already isolated" in result.output
+    assert "did NOT take" in result.output, result.output
+
+    result = runner.invoke(app, ["target", "start", "x-yol"])
+    assert result.exit_code == 0, result.output
+    assert "did NOT take" not in result.output, "warned without the flag"
+    _clear_root_cache()
+
+
 def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypatch):
     """x-6390: the manifest is write-once, so --yolo against an initialized
     session is a no-op - and a dropped grant looks exactly like no grant. Say it."""

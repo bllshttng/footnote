@@ -169,7 +169,11 @@ It governs the decisions you would otherwise stop and ask about *without* a writ
 **Reversible:** yes - re-run the wave with `executor: do` if the polish pass is noise.
 ```
 
-Append to `.fno/SUMMARY.md` for a wave plan, or `{plan_path}.artifacts/COMPLETION.md` for a quick plan.
+**Append to a DURABLE artifact: `{plan_path}.artifacts/COMPLETION.md` for a quick plan, or the plan folder's `COMPLETION.md` for a wave plan.**
+Not `.fno/SUMMARY.md`: `.fno/` is gitignored and session-state files are explicitly transient and never archived, so a ledger written there dies with the worktree when it is pruned - taking the morning review with it.
+The durable record is the plan artifact, the frontmatter stamp, `ledger.json`, and git history; the audit trail for decisions made on your behalf belongs with them.
+If no plan is bound, put the ledger in the PR body under `## Autonomous Decisions` - a decision nobody can read afterward may as well not have been recorded.
+
 Write each entry as its own append the moment the decision is made, never as an end-of-session batch: a morning review must read a complete list, and a session that dies mid-wave leaves whole entries behind rather than half of one.
 Where an entry is genuinely uncertain, say so in **Why** - a recorded doubt is the thing the morning review looks for first.
 

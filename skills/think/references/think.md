@@ -35,6 +35,13 @@ fi
 Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.
 </HARD-GATE>
 
+**Walk-away authority (governs EVERY interactive checkpoint in this flow, not just one).**
+If `fno target status` shows `authority: full` on the `attended` line (a live `/target yolo` session), the operator has granted the design calls away, so this flow must not block on them.
+Everywhere below that would fire `AskUserQuestion`, ask for confirmation, or wait for approval - the gate above, the Step 2 interview, the Step 3 approach confirmation, the Step 4 per-section checks, the Step 7b domain-pitfall prompts - take the recommended option and append one `## Autonomous Decisions` entry naming what was chosen and what it foreclosed.
+The design is still produced and still written down; only the waiting is removed.
+Stated once here because a per-checkpoint exception is exactly how a walk-away run ends up stalling at the one checkpoint nobody remembered to annotate.
+A dead manifest grants nothing: run fully attended then.
+
 ## Process
 
 ### 1. Understand Context
@@ -273,12 +280,10 @@ question at a time.
   call with up to 4 questions, each leading with a recommended option. Replaces
   "one question at a time" with **one *round* at a time**. On a CLI without
   `AskUserQuestion`, degrade to one prose prompt listing the round's questions.
-- **Under a walk-away authority grant, do not ask - decide.** If `fno target
-  status` shows `authority: full` on the `attended` line (a live `/target yolo`
-  session), take each question's recommended option instead of firing
-  `AskUserQuestion`, and append one `## Autonomous Decisions` entry per round
-  naming what was chosen and what it foreclosed. A dead manifest grants nothing;
-  run fully attended then.
+- **Under a walk-away authority grant, do not ask - decide.** Take each
+  question's recommended option instead of firing `AskUserQuestion`, and append
+  one `## Autonomous Decisions` entry per round. See the walk-away authority
+  rule above, which governs this checkpoint and every other one in this flow.
 - **Ask only user-only questions**: requirements, preferences, tradeoffs,
   edge-case priorities, scope calls. Anything the code or docs can answer is
   recon, not a question.

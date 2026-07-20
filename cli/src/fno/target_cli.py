@@ -299,6 +299,7 @@ def init(
     yolo: bool = typer.Option(
         False,
         "--yolo",
+        "-Y",
         help="Grant walk-away authority (writes `authority: full` to the "
         "manifest). Judgment calls that would emit <help> and stall are decided "
         "and recorded to an Autonomous Decisions ledger instead. Never grants "
@@ -458,23 +459,27 @@ def init(
 
 
 def _warn_if_authority_not_granted() -> None:
-    """Name a --yolo that did not take: the write-once manifest makes it a no-op,
-    and an ungranted session looks identical to one whose flag was dropped."""
+    """Name a --yolo that did not take: both the write-once manifest and start's
+    idempotent no-op drop the flag, and an ungranted session looks identical to
+    one whose flag was dropped."""
     try:
         from fno.paths import resolve_repo_root
 
         manifest = resolve_repo_root() / ".fno" / "target-state.md"
-        granted = "authority: full" in manifest.read_text(encoding="utf-8")
-    except Exception:  # noqa: BLE001 - a warning must never fail an init that worked
+        text = manifest.read_text(encoding="utf-8") if manifest.exists() else None
+    except Exception:  # noqa: BLE001 - a warning must never fail a run that worked
         return
-    if not granted:
-        typer.echo(
-            "fno target init: --yolo did NOT take - this session has no authority "
-            "grant.\nThe manifest is write-once and one already existed, so the "
-            "flag was a no-op. To run with authority, finish or cancel this "
-            "session first (`/fno:cancel-target`), then start a fresh one.",
-            err=True,
-        )
+    if text is not None and "authority: full" in text:
+        return
+    fix = (
+        "The manifest is write-once and one already existed, so the flag was a "
+        "no-op. To run with authority, finish or cancel this session first "
+        "(`/fno:cancel-target`), then start a fresh one."
+        if text is not None
+        else "No manifest was written, so nothing consumed the flag. Run "
+        "`fno target init --yolo --input <node>` to claim this session with a grant."
+    )
+    typer.echo(f"--yolo did NOT take - this session has no authority grant.\n{fix}", err=True)
 
 
 def _maybe_reconcile_lane_slot() -> None:
@@ -859,7 +864,7 @@ def start(
         help="Pin a provider for this session's dispatched workers (forwarded to init).",
     ),
     yolo: bool = typer.Option(
-        False, "--yolo",
+        False, "--yolo", "-Y",
         help="Grant walk-away authority for this session (forwarded to init).",
     ),
 ) -> None:
@@ -887,6 +892,8 @@ def start(
             _print_foreign_holder_park(node_id, holder, cwd)
             raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
+        if yolo:
+            _warn_if_authority_not_granted()
         return
 
     repo_root_s = _git_out(cwd, "rev-parse", "--show-toplevel")
