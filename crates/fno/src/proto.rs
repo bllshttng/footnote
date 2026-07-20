@@ -750,7 +750,11 @@ pub enum Command {
     /// command self-heals on the next cell crossing, and a long drag
     /// accumulates no rounding drift. Permille rather than a float because
     /// this enum derives `Eq`, which no float type implements.
-    ResizeSeam { a: u64, b: u64, ratio_permille: u16 },
+    ResizeSeam {
+        a: u64,
+        b: u64,
+        ratio_permille: u16,
+    },
     NewTab,
     SelectTab(TabId),
     NextTab,

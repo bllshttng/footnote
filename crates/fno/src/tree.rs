@@ -1480,15 +1480,30 @@ mod tests {
             focus: 1,
         };
         let before = tab.root.clone();
-        assert!(!set_seam_ratio(&mut tab, WIDE, 1, 99, 600), "pane 99 is gone");
-        assert!(!set_seam_ratio(&mut tab, WIDE, 1, 3, 600), "1 and 3 are not adjacent");
-        assert!(!set_seam_ratio(&mut tab, WIDE, 2, 1, 600), "reversed order is not a seam");
-        assert!(!set_seam_ratio(&mut tab, WIDE, 1, 1, 600), "a pane does not flank itself");
+        assert!(
+            !set_seam_ratio(&mut tab, WIDE, 1, 99, 600),
+            "pane 99 is gone"
+        );
+        assert!(
+            !set_seam_ratio(&mut tab, WIDE, 1, 3, 600),
+            "1 and 3 are not adjacent"
+        );
+        assert!(
+            !set_seam_ratio(&mut tab, WIDE, 2, 1, 600),
+            "reversed order is not a seam"
+        );
+        assert!(
+            !set_seam_ratio(&mut tab, WIDE, 1, 1, 600),
+            "a pane does not flank itself"
+        );
         assert_eq!(tab.root, before, "every refusal left the tree untouched");
         // The genuinely adjacent pairs still work, and only touch their pair.
         assert!(set_seam_ratio(&mut tab, WIDE, 2, 3, 800));
         let r = ratios(&tab, &[]);
-        assert!((r[0] - 0.34).abs() < 1e-4, "the uninvolved child is untouched");
+        assert!(
+            (r[0] - 0.34).abs() < 1e-4,
+            "the uninvolved child is untouched"
+        );
         assert!((r.iter().sum::<f32>() - 1.0).abs() < 1e-4);
         check_invariants(&tab).unwrap();
     }

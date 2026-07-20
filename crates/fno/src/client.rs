@@ -2291,12 +2291,20 @@ impl View {
             .checked_sub(1)
             .and_then(|l| self.pane_covering(cr, l))
             .zip(self.pane_covering(cr, cc + 1))
-            .map(|(a, b)| Seam { a, b, axis: Axis::Horizontal });
+            .map(|(a, b)| Seam {
+                a,
+                b,
+                axis: Axis::Horizontal,
+            });
         let down = cr
             .checked_sub(1)
             .and_then(|u| self.pane_covering(u, cc))
             .zip(self.pane_covering(cr + 1, cc))
-            .map(|(a, b)| Seam { a, b, axis: Axis::Vertical });
+            .map(|(a, b)| Seam {
+                a,
+                b,
+                axis: Axis::Vertical,
+            });
         match (across, down) {
             (Some(s), None) => Some(s),
             (None, Some(s)) => Some(s),
@@ -10712,11 +10720,17 @@ mod tests {
         let focus_outline = cell_at(&view, 5, 51);
         assert_eq!(idle_chrome.c, '│', "the divider glyph itself is unchanged");
         assert_eq!(idle_chrome.flags, cell_flags::DIM);
-        assert_eq!(focus_outline.flags, 0, "the focus outline is undimmed accent");
+        assert_eq!(
+            focus_outline.flags, 0,
+            "the focus outline is undimmed accent"
+        );
 
         view.on_hover(5, 75, Instant::now());
         let lit = cell_at(&view, 5, 75);
-        assert_eq!(lit.c, '│', "hover accents the divider, it does not redraw it");
+        assert_eq!(
+            lit.c, '│',
+            "hover accents the divider, it does not redraw it"
+        );
         assert_eq!(lit.flags, cell_flags::BOLD);
         assert_eq!(lit.fg, LATTICE_ACCENT);
         assert!(
@@ -10729,7 +10743,11 @@ mod tests {
              seam beside the focused pane still reads as grabbable"
         );
         // Hovering one seam does not light another.
-        assert_eq!(cell_at(&view, 5, 51).flags, 0, "still just the focus outline");
+        assert_eq!(
+            cell_at(&view, 5, 51).flags,
+            0,
+            "still just the focus outline"
+        );
 
         // Leaving the band clears it.
         view.on_hover(5, 40, Instant::now());
@@ -10781,8 +10799,14 @@ mod tests {
             backlog_lanes: Vec::new(),
             backlog_stale: false,
         });
-        assert!(view.seam_drag.is_none(), "the drag ended, it did not re-target");
-        assert!(view.hover_seam.is_none(), "a dead seam is not lit as draggable");
+        assert!(
+            view.seam_drag.is_none(),
+            "the drag ended, it did not re-target"
+        );
+        assert!(
+            view.hover_seam.is_none(),
+            "a dead seam is not lit as draggable"
+        );
         assert!(
             view.notice.is_some(),
             "the drag ending is reported, never silent"
