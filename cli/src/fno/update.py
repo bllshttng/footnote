@@ -357,6 +357,44 @@ def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optiona
     return rev
 
 
+def _no_rev_reason(binary: Optional[Path], install_root: Path, *, timeout: float = 20.0) -> str:
+    """Why ``_installed_bin_crates_rev`` returned None, as a message fragment.
+
+    It collapses five causes into one None, and only one of them is fixed by
+    committing - telling a user with a crashing binary to stash their tree is
+    the same misdiagnosis this reporting exists to end. Re-probes rather than
+    guessing; the probe only runs on the already-failing path.
+    """
+    if binary is None or not binary.is_file():
+        return f"is missing from the install root ({install_root})"
+    try:
+        result = subprocess.run(
+            [str(binary), "version", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"hung on `version --json` (>{timeout:g}s)"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"could not be executed ({exc})"
+    if result.returncode != 0:
+        return f"exited {result.returncode} on `version --json`"
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return "emitted unparseable `version --json` output"
+    if not isinstance(data, dict):
+        return "emitted unexpected `version --json` output"
+    if data.get("dirty") is True:
+        return (
+            "was built from a dirty crates/ tree - commit or stash your"
+            " crates/ changes and re-run"
+        )
+    return "carries no rev stamp (built outside a git checkout?)"
+
+
 def _triad_same_build(bindir: Path, subtree: str) -> bool:
     """True iff all three triad bins in ``bindir`` self-report ``crates_rev ==
     subtree`` (and are not dirty). Now that daemon + worker carry a ``version``
@@ -735,14 +773,10 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         deployed = _cargo_installed_bin()
         verify_rev = None if deployed is None else _installed_bin_crates_rev(deployed)
         if verify_rev != subtree:
-            # Two distinct failures reach here; a shared message misdiagnoses the
-            # first as the second and sends the reader hunting the install root.
+            # Distinct failures reach here; a shared message misdiagnoses one as
+            # another and sends the reader hunting the install root.
             if verify_rev is None:
-                detail = (
-                    "reports no usable rev - it was built from a dirty crates/"
-                    " tree, or carries no rev stamp. Commit or stash your crates/"
-                    " changes and re-run"
-                )
+                detail = _no_rev_reason(deployed, install_root)
             else:
                 detail = (
                     f"reports crates/ rev {verify_rev[:12]}, but source is"

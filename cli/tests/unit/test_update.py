@@ -1670,6 +1670,51 @@ def test_post_deploy_verify_mismatch_halts(
     assert "oldoldold" in err and "did not land" in err
 
 
+def test_no_rev_reason_missing_binary(tmp_path: Path) -> None:
+    assert "missing from the install root" in update._no_rev_reason(
+        tmp_path / "absent", tmp_path
+    )
+    assert "missing from the install root" in update._no_rev_reason(None, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "outcome, expected",
+    [
+        (types.SimpleNamespace(returncode=3, stdout=""), "exited 3"),
+        (types.SimpleNamespace(returncode=0, stdout="{not json"), "unparseable"),
+        (types.SimpleNamespace(returncode=0, stdout="[1, 2]"), "unexpected"),
+        (
+            types.SimpleNamespace(returncode=0, stdout='{"dirty": true}'),
+            "dirty crates/",
+        ),
+        (
+            types.SimpleNamespace(returncode=0, stdout='{"dirty": false}'),
+            "no rev stamp",
+        ),
+    ],
+)
+def test_no_rev_reason_distinguishes_causes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome, expected: str
+) -> None:
+    """The five causes that collapse into a None rev must not share a message:
+    only the dirty-tree one is fixed by committing."""
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: outcome)
+    assert expected in update._no_rev_reason(fake_bin, tmp_path)
+
+
+def test_no_rev_reason_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+
+    def _hang(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="version", timeout=20.0)
+
+    monkeypatch.setattr(update.subprocess, "run", _hang)
+    assert "hung" in update._no_rev_reason(fake_bin, tmp_path)
+
+
 def test_post_deploy_verify_no_rev_blames_dirty_not_install_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -1685,7 +1730,12 @@ def test_post_deploy_verify_no_rev_blames_dirty_not_install_root(
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "a" * 40)
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
-    monkeypatch.setattr(update.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0))
+    # cargo install succeeds; the probe then finds a dirty-tree build.
+    monkeypatch.setattr(
+        update.subprocess,
+        "run",
+        lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout='{"dirty": true}'),
+    )
     monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: None)
 
     with pytest.raises(typer.Exit):
