@@ -69,6 +69,10 @@ need the session to be in the registry, and `send` can reach a live session that
 never registered - if a handle mails but will not resume, `fno agents list` /
 `top` will show whether it has a row.
 
+A harness-prefixed address (`claude-<short-id>`) is refused, not translated. If
+you hit that error, something built the address the retired way - fix that,
+do not hand-edit the string and move on.
+
 ## Verb router
 
 The first whitespace token of the argument is the **verb**. Route on it, then run

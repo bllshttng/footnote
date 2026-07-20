@@ -1076,7 +1076,7 @@ def resolve_or_suggest(
     scan serves both the match and the suggestions. No exclusion: the user
     named a specific live session, so even an adopted one resolves.
     """
-    from fno.harness_identity import handle_aliases
+    from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
     sessions = discover_live_sessions(
         sessions_dir=sessions_dir,
@@ -1088,25 +1088,31 @@ def resolve_or_suggest(
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
     )
-    # Match the friendly <project>-<short8> alias, the bare hex, OR the legacy
-    # <harness>-<short8> address. The harness-prefixed form is no longer
-    # generated but stays accepted: it is what old transcripts and memory notes
-    # carry, and it still disambiguates a short-id collision across harnesses
-    # (codex-abcd never resolves a claude row).
+    # An address is the friendly <project>-<short8> alias, the bare hex short-id,
+    # or a stored row name. The retired <harness>-<short8> form is NOT accepted:
+    # nothing generates it any more, so a caller still passing one is a bug, and
+    # translating it silently would hide the bug forever.
     for s in sessions:
         if handle and (
             s.handle == handle
             or s.short_id == handle
-            or handle in handle_aliases(s.agent, s.session_id)
+            or canonical_handle(s.session_id) == handle
         ):
             return s, []
     import difflib
 
     candidates: list[str] = []
     for s in sessions:
-        for cand in (s.handle, s.short_id, *handle_aliases(s.agent, s.session_id)):
+        for cand in (s.handle, s.short_id, canonical_handle(s.session_id)):
             if cand not in candidates:
                 candidates.append(cand)
+    # Name the bug rather than emitting a bare "not found": a harness-prefixed
+    # address means some caller (a stale binary, a hardcoded string, a note
+    # copied out of an old transcript) is still building addresses the retired
+    # way. Lead the suggestions with the bare form it should have used.
+    if handle and LEGACY_HANDLE_RE.match(handle):
+        bare = handle.split("-", 1)[1][:8]
+        return None, [bare] + [c for c in candidates if c != bare][: max(limit - 1, 0)]
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
 

@@ -119,13 +119,13 @@ def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
     # AC1-EDGE: mail queued to the LEGACY <harness>-<short8> address before the
     # handle flip still drains exactly once after it, and acks under the new key.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
-    _seed_bus_message(to="codex-019f48e1", from_="claude-web", body="ack from K")
+    _seed_bus_message(to="019f48e1", from_="claude-web", body="ack from K")
 
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout.strip().splitlines()[-1])
     assert [m["body"] for m in payload] == ["ack from K"]
-    assert payload[0]["to"] == "codex-019f48e1"
+    assert payload[0]["to"] == "019f48e1"
 
     # Ack advanced the cursor: a second drain sees nothing (not re-surfaced).
     again = runner.invoke(app, ["mail", "drain-self", "--json"])
@@ -136,7 +136,7 @@ def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, mon
     # The receive-path render must show each message's id (what `reply --to`
     # correlates against) and the how-to, so a draining agent can answer.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
-    h = _seed_bus_message(to="codex-019f48e1", from_="claude-web", body="need a decision")
+    h = _seed_bus_message(to="019f48e1", from_="claude-web", body="need a decision")
 
     res = runner.invoke(app, ["mail", "drain-self"])  # human path (no --json)
     assert res.exit_code == 0, res.output
@@ -145,146 +145,58 @@ def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, mon
 
 
 # ---------------------------------------------------------------------------
-# Handle-flip migration: the cursor filename IS the address, so renaming the
-# address orphans the cursor. Adoption carries the read position over ONCE.
+# The retired <harness>-<short8> address is NOT accepted. Nothing generates one,
+# so a caller still producing one is a bug that must surface, not be translated.
 # ---------------------------------------------------------------------------
 
 CODEX_SID = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
 
 
-def test_ac2_edge_legacy_read_position_honored_no_history_replay(runner, mailbox, monkeypatch):
-    """A recipient holding only a legacy cursor does not re-read what it already
-    consumed under that address on its first post-flip drain."""
-    from fno.bus.cursor import read_cursor, write_cursor
-
+def test_legacy_addressed_mail_is_not_drained(runner, mailbox, monkeypatch):
+    """A pre-flip envelope addressed `codex-<short8>` is not this session's mail.
+    It is a dead letter `fno doctor` reports, not something drain-self absorbs -
+    absorbing it would hide the fact that something addressed it the retired way."""
     monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
-    old = _seed_bus_message(to="codex-019f48e1", from_="web", body="ancient history")
-    write_cursor("codex-019f48e1", old.thread_id)  # already consumed, pre-flip
-    _seed_bus_message(to="019f48e1", from_="web", body="fresh")
-
-    res = runner.invoke(app, ["mail", "drain-self", "--json"])
-    assert res.exit_code == 0, res.output
-    assert [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])] == ["fresh"]
-    assert read_cursor("019f48e1") is not None  # acked under the live key
-
-
-def test_mixed_version_bare_mail_is_not_stranded(runner, mailbox, monkeypatch):
-    """Mixed-version window: a sender that flipped early addressed the bare name
-    while this consumer was still draining the legacy one, so the bare message
-    sits BEFORE the legacy cursor. It must still drain."""
-    from fno.bus.cursor import write_cursor
-
-    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
-    _seed_bus_message(to="019f48e1", from_="early-flipper", body="bare, sent early")
-    legacy = _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy, consumed")
-    write_cursor("codex-019f48e1", legacy.thread_id)
-
-    res = runner.invoke(app, ["mail", "drain-self", "--json"])
-    bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
-    assert bodies == ["bare, sent early"]  # delivered, and the consumed one is not replayed
-
-
-def test_each_address_is_bounded_by_its_own_cursor(runner, mailbox, monkeypatch):
-    """Per-address watermarks: consumed legacy mail stays consumed while mail to
-    the never-consumed bare address is still delivered, even though the bare
-    message sits EARLIER in the log than the legacy cursor. One shared watermark
-    cannot do both - it either replays the first or strands the second."""
-    from fno.bus.cursor import scan_unread, write_cursor
-
-    _seed_bus_message(to="019f48e1", from_="early-flipper", body="bare, never consumed")
-    consumed = _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy, consumed")
-    _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy, still unread")
-    write_cursor("codex-019f48e1", consumed.thread_id)
-
-    bodies = [m.body for m in scan_unread("019f48e1", aliases=("codex-019f48e1",))]
-    assert bodies == ["bare, never consumed", "legacy, still unread"]
-
-
-def test_shared_cursor_id_does_not_strand_either_address(runner, mailbox, monkeypatch):
-    """A drain advances every alias to the SAME id, so both addresses routinely
-    share a cursor id. Both must resume from it - keeping one owner per id leaves
-    the other permanently unpassed and silently eats its mail."""
-    from fno.bus.cursor import scan_unread, write_cursor
-
-    shared = _seed_bus_message(to="019f48e1", from_="web", body="drained")
-    write_cursor("019f48e1", shared.thread_id)
-    write_cursor("codex-019f48e1", shared.thread_id)  # what drain-self leaves behind
-    _seed_bus_message(to="019f48e1", from_="web", body="after, bare")
-    _seed_bus_message(to="codex-019f48e1", from_="web", body="after, legacy")
-
-    bodies = [m.body for m in scan_unread("019f48e1", aliases=("codex-019f48e1",))]
-    assert bodies == ["after, bare", "after, legacy"]  # neither lane stranded
-
-
-def test_read_only_scan_honors_legacy_position_without_writing(runner, mailbox, monkeypatch):
-    """SessionStart runs whoami before drain-self, so a read-only counter must
-    already honor the legacy read position - otherwise it reports the entire
-    retained history as unread - and it must not write a cursor to do so."""
-    from fno.bus.cursor import cursor_path, scan_unread, write_cursor
-
-    consumed = _seed_bus_message(to="codex-019f48e1", from_="web", body="already read")
-    write_cursor("codex-019f48e1", consumed.thread_id)
-
-    assert scan_unread("019f48e1", aliases=("codex-019f48e1",)) == []
-    assert not cursor_path("019f48e1").exists()  # the read stayed read-only
-
-
-def test_drain_advances_every_alias_cursor(runner, mailbox, monkeypatch):
-    """The sender's unclaimed-mail check reads the cursor named by the envelope's
-    `to`, so a retired alias cursor left frozen reports delivered mail as
-    unclaimed forever."""
-    from fno.bus.cursor import read_cursor
-
-    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
-    m = _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy-addressed")
-
-    runner.invoke(app, ["mail", "drain-self", "--json"])
-    assert read_cursor("019f48e1") == m.thread_id
-    assert read_cursor("codex-019f48e1") == m.thread_id  # alias tracked, not frozen
-
-
-def test_ac1_fr_corrupt_legacy_cursor_repeats_never_loses(runner, mailbox, monkeypatch):
-    """A corrupt legacy cursor degrades to the rescan posture: everything
-    addressed to either form re-surfaces (a repeat), and the next drain is quiet."""
-    from fno.bus.cursor import cursor_path
-
-    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
-    _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy-addressed")
-    _seed_bus_message(to="019f48e1", from_="web", body="bare-addressed")
-    p = cursor_path("codex-019f48e1")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("{not json", encoding="utf-8")
+    _seed_bus_message(to="codex-019f48e1", from_="web", body="retired form")
+    _seed_bus_message(to="019f48e1", from_="web", body="real address")
 
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
-    assert bodies == ["legacy-addressed", "bare-addressed"]  # nothing lost
-    again = runner.invoke(app, ["mail", "drain-self", "--json"])
-    assert json.loads(again.stdout.strip().splitlines()[-1]) == []  # quiet after
+    assert bodies == ["real address"]
 
 
-def test_ac2_fr_interrupted_drain_resurfaces_under_new_key(runner, mailbox, monkeypatch):
-    """Inject-before-ack survives the rename: a drain that never acks re-surfaces
-    its messages rather than dropping them."""
-    from fno.bus import cursor as cursor_mod
+def test_send_target_may_be_short_id_shaped(runner, mailbox):
+    """The send path must not refuse a bare 8-hex target as a badly-shaped NAME.
 
-    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
-    _seed_bus_message(to="codex-019f48e1", from_="web", body="mid-flight")
-    # Restore by hand, not monkeypatch.undo() - undo would also revert the
-    # mailbox isolation and point the second drain at a different bus.
-    real_advance = cursor_mod.advance_cursor
+    The short-id-shape guard exists to stop an agent being NAMED like an id; the
+    canonical mailbox handle IS that shape, so applying it to a send target
+    rejects the exact string `whoami` advertises. It failed at exit 2, and the
+    fallback to handle resolution only fires on exit 16 (unknown agent), so a
+    bare-id send never even reached resolution."""
+    from fno.agents.dispatch import DispatchAskError, _validate_inputs
 
-    def _crash(*_a, **_kw):
-        raise RuntimeError("crash between print and ack")
+    with pytest.raises(DispatchAskError):  # naming an agent this way stays refused
+        _validate_inputs(name="deadbeef", message="m", from_name="web")
+    _validate_inputs(  # addressing one does not
+        name="deadbeef", message="m", from_name="web", name_is_address=True
+    )
 
-    cursor_mod.advance_cursor = _crash
-    try:
-        runner.invoke(app, ["mail", "drain-self", "--json"])  # prints, never acks
-    finally:
-        cursor_mod.advance_cursor = real_advance
+    # End to end: the target resolves nowhere, so it must fail with the
+    # unknown-handle error, NOT the name-shape one.
+    res = runner.invoke(app, ["mail", "send", "deadbeef", "hi", "--from-name", "web"])
+    assert "must not match short-id shape" not in (res.stdout + (res.stderr or ""))
 
-    res = runner.invoke(app, ["mail", "drain-self", "--json"])
-    assert [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])] == ["mid-flight"]
+
+def test_send_to_legacy_form_refuses_and_names_the_bare_id(runner, mailbox, monkeypatch, tmp_path):
+    """The refusal has to say WHAT to use, or the caller cannot act on it: lead the
+    suggestions with the bare short-id the retired address was built from."""
+    from fno.agents import discover
+
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id="9a063cd3-69d4-415a-ada5-649b0164189c")
+    resolved, suggestions = discover.resolve_or_suggest("claude-9a063cd3")
+    assert resolved is None, "the retired form must not resolve"
+    assert suggestions and suggestions[0] == "9a063cd3"
 
 
 def test_drain_self_no_harness_env_is_noop(runner, mailbox, monkeypatch):
@@ -339,7 +251,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     # A claude session sends to the codex handle (codex row is unregistered, so
     # the send falls through registry-unknown into disk resolution).
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ack from K", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ack from K", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "019f48e1" in sent.output
@@ -364,7 +276,7 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: True)
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ack from K", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ack from K", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -435,7 +347,7 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -461,7 +373,7 @@ def test_us7b_mux_pane_send_failure_falls_closed_to_durable(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -486,7 +398,7 @@ def test_us7b_unrostered_session_skips_pane_rung_silently(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -507,7 +419,7 @@ def test_us7b_working_socket_inject_preempts_pane_rung(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -532,7 +444,7 @@ def test_us7b_non_live_entry_never_pane_sends(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -580,7 +492,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     monkeypatch.setattr("fno.agents.dispatch.subprocess.run", _guard_run)
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -629,7 +541,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
 
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi bg worker", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "9a063cd3" in sent.output
@@ -652,7 +564,7 @@ def test_us3_rostered_claude_hosted_short_circuits_durable(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
 
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -693,7 +605,7 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sender_sid)
 
     # No --from-name: from + model are auto-stamped from the invoking session.
-    sent = runner.invoke(app, ["mail", "send", "claude-9a063cd3", "hello"])
+    sent = runner.invoke(app, ["mail", "send", "9a063cd3", "hello"])
     assert sent.exit_code == 0, sent.output
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
@@ -737,7 +649,7 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi bg worker", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
 

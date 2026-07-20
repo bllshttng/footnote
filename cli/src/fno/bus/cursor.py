@@ -20,7 +20,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from fno.bus.log import Envelope, iter_messages
 
@@ -134,60 +134,45 @@ def scan_unread(
     *,
     warn: bool = True,
     exclude_from: Optional[set[str]] = None,
-    aliases: Iterable[str] = (),
 ) -> list[Envelope]:
     """Return messages addressed to ``name`` after its cursor, oldest -> newest.
 
-    ``aliases`` are this consumer's retired addresses. They widen which messages
-    count as mine (any ``to`` in ``{name, *aliases}``), and EACH address is
-    bounded by its OWN cursor. That per-address watermark is what makes a rename
-    safe, because the cursor filename IS the address: collapsing the set onto one
-    watermark would either strand mail sent to the never-consumed new address
-    (it sits before the old address's cursor) or replay mail already consumed
-    under the old one. Neither is acceptable, and no single position avoids both.
+    One address, one cursor. A consumer answers to exactly the name it drains
+    under, so there is nothing to reconcile: the cursor filename IS the address,
+    and the address never changes under a live consumer.
 
-    Resolving this on the read side rather than by migrating the cursor file
-    keeps read-only surfaces (``whoami``, ``notify-self``) read-only, and leaves
-    no check-then-write for two drains to race.
-
-    Still ONE bus scan regardless of alias count, which the every-turn
-    notify-self hook depends on for its budget.
+    If the cursor is absent or its message-id is not found in any retained
+    segment (rotated out / deleted), all retained messages to ``name`` are
+    returned rather than silently skipping unprocessed mail.
 
     ``exclude_from`` drops any message whose sender matches (by ``from`` name or
     ``from_session``). This is the sender-exclusion for a ``to_kind=project``
     broadcast read - a project member must not drain its own broadcast back
     (cv-d54ddd45). By-name reads pass ``exclude_from=None`` (a direct address is
-    never a self-echo). Default ``None`` is byte-for-byte the prior behavior.
+    never a self-echo).
     """
-    mine = {name, *aliases}
+    cursor = read_cursor(name)
     msgs = list(iter_messages(warn=warn))
     excl = exclude_from or set()
 
     def _mine(m: Envelope) -> bool:
-        if m.to not in mine:
+        if m.to != name:
             return False
         if excl and (m.from_ in excl or (m.from_session and m.from_session in excl)):
             return False
         return True
 
-    # An address whose cursor is unset, or whose cursor id rotated out of the
-    # retained log, counts as never-consumed: everything retained for it is
-    # returned rather than silently skipped.
-    retained = {m.id for m in msgs}
-    cursors = {n: read_cursor(n) for n in mine}
-    passed = {n: (c is None or c not in retained) for n, c in cursors.items()}
-    # A list per id, not one owner: a drain advances every alias to the SAME id,
-    # so the shared case is the common one, and keeping a single owner would
-    # leave the other address never-passed and strand everything sent to it.
-    ends_at: dict[str, list[str]] = {}
-    for n, c in cursors.items():
-        if c in retained:
-            ends_at.setdefault(c, []).append(n)
+    if cursor is None:
+        return [m for m in msgs if _mine(m)]
 
-    out: list[Envelope] = []
+    after: list[Envelope] = []
+    passed = False
     for m in msgs:
-        if _mine(m) and passed[m.to]:  # _mine first: it guards the passed lookup
-            out.append(m)
-        for owner in ends_at.get(m.id, ()):
-            passed[owner] = True
-    return out
+        if passed and _mine(m):
+            after.append(m)
+        if m.id == cursor:
+            passed = True
+    if not passed:
+        # Cursor id rotated out or otherwise unresolvable: rescan retained.
+        return [m for m in msgs if _mine(m)]
+    return after

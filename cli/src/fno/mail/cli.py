@@ -316,16 +316,14 @@ def _sent_unclaimed_count() -> int:
     predicate; never raises (a broken read degrades to 0).
     """
     from fno.config import load_settings
-    from fno.harness_identity import handle_aliases, resolve_harness_identity
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
         return 0
     try:
-        handle, *aliases = handle_aliases(ident.harness, ident.session_id)
-        n, _ = _sent_unclaimed(
-            handle, load_settings().inbox.unclaimed_ttl, aliases=aliases
-        )
+        handle = canonical_handle(ident.session_id)
+        n, _ = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
         return n
     except Exception as exc:  # noqa: BLE001 - status is advisory; never crash on it
         # Advisory-degrade to 0, but leave a breadcrumb (matches _active_session)
@@ -873,7 +871,7 @@ def _name_lane_send(
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     if resolved is not None:
-        recipient = canonical_handle(resolved.agent, resolved.session_id)
+        recipient = canonical_handle(resolved.session_id)
         provider = resolved.agent
 
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
@@ -1058,7 +1056,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from_name = canonical_handle(ident.harness, ident.session_id)
+        from_name = canonical_handle(ident.session_id)
 
     # Inbox-kind mode: heads-up / question / fyi are inbox-style durable notes
     # the recipient's drain dispatches on (heads-up -> triage, question ->
@@ -1398,7 +1396,7 @@ def cmd_drain_self(
     hook is safe on any surface.
     """
     from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.harness_identity import handle_aliases, resolve_harness_identity
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
@@ -1406,8 +1404,8 @@ def cmd_drain_self(
             print(json.dumps([]))
         return
 
-    handle, *aliases = handle_aliases(ident.harness, ident.session_id)
-    msgs = scan_unread(handle, aliases=aliases)
+    handle = canonical_handle(ident.session_id)
+    msgs = scan_unread(handle)
 
     if json_out:
         print(
@@ -1435,13 +1433,9 @@ def cmd_drain_self(
         )
 
     # Inject-before-ack: advance the cursor to the last drained id only after
-    # the bodies are out, so a crash re-surfaces rather than drops. Every alias
-    # advances too, not just the live handle: a sender's unclaimed-mail check
-    # reads the cursor named by the envelope's `to`, so leaving a retired alias
-    # cursor frozen would report delivered mail as unclaimed forever.
+    # the bodies are out, so a crash re-surfaces rather than drops.
     if msgs:
-        for addr in (handle, *aliases):
-            advance_cursor(addr, msgs[-1].id)
+        advance_cursor(handle, msgs[-1].id)
 
 
 # ---------------------------------------------------------------------------
@@ -1488,14 +1482,9 @@ def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
         return False
 
 
-def _sent_unclaimed(
-    handle: str, ttl_seconds: int, *, aliases: Iterable[str] = ()
-) -> tuple[int, list[str]]:
+def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
     """Count + distinct recipients (first-seen) of my sent mail unclaimed past TTL.
 
-    ``aliases`` widens which ``from`` stamps count as mine (pre-flip sends carry
-    the legacy handle) by extending the comparison SET, never by adding a second
-    bus scan - the notify-self hook this shares runs on a 2s budget.
 
     Unclaimed = still past the recipient's consume cursor AND strictly older than
     ``ttl_seconds``. Reads the bus ONCE (a single ``iter_messages`` snapshot) and
@@ -1514,8 +1503,7 @@ def _sent_unclaimed(
 
     now = _dt.now(tz=_tz.utc)
     all_msgs = list(iter_messages())
-    mine = {handle, *aliases}
-    sent = [m for m in all_msgs if m.from_ in mine]
+    sent = [m for m in all_msgs if m.from_ == handle]
     if not sent:
         return 0, []
     pos = {m.id: i for i, m in enumerate(all_msgs)}
@@ -1574,16 +1562,16 @@ def cmd_notify_self() -> None:
     """
     from fno.bus.cursor import scan_unread
     from fno.config import load_settings
-    from fno.harness_identity import handle_aliases, resolve_harness_identity
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
         return
 
-    handle, *aliases = handle_aliases(ident.harness, ident.session_id)
+    handle = canonical_handle(ident.session_id)
     lines: list[str] = []
 
-    unread = scan_unread(handle, aliases=aliases)
+    unread = scan_unread(handle)
     if unread:
         senders = _bounded_names([m.from_ for m in unread])
         lines.append(
@@ -1591,7 +1579,7 @@ def cmd_notify_self() -> None:
         )
 
     ttl = load_settings().inbox.unclaimed_ttl
-    n_sent, recipients = _sent_unclaimed(handle, ttl, aliases=aliases)
+    n_sent, recipients = _sent_unclaimed(handle, ttl)
     if n_sent:
         who = _bounded_names(recipients)
         lines.append(

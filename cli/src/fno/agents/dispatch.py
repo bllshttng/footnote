@@ -270,8 +270,16 @@ class DispatchAskError(RuntimeError):
 UNKNOWN_AGENT_EXIT_CODE = 16
 
 
-def _validate_inputs(name: str, message: str, from_name: str) -> None:
-    """Reject inputs that fail the AC1-ERR / AC1-EDGE / AC2-ERR boundary checks."""
+def _validate_inputs(
+    name: str, message: str, from_name: str, *, name_is_address: bool = False
+) -> None:
+    """Reject inputs that fail the AC1-ERR / AC1-EDGE / AC2-ERR boundary checks.
+
+    ``name_is_address`` marks a caller whose ``name`` is a TARGET to resolve, not
+    a name to create. The short-id-shape rejection below guards against NAMING an
+    agent like an id; applied to a send target it rejects the canonical mailbox
+    handle itself, which is the exact string `whoami` advertises.
+    """
     if not name:
         raise DispatchAskError("agent name must not be empty", exit_code=2)
     if "/" in name or "\\" in name or ".." in name:
@@ -284,7 +292,7 @@ def _validate_inputs(name: str, message: str, from_name: str) -> None:
             f"name must be <={_NAME_MAX_LEN} chars (got {len(name)})",
             exit_code=2,
         )
-    if _SHORT_ID_NAME_SHAPE.match(name):
+    if _SHORT_ID_NAME_SHAPE.match(name) and not name_is_address:
         raise DispatchAskError(
             f"agent name {name!r} must not match short-id shape "
             f"^[0-9a-f]{{8}}$ (prevents name/id collision)",
@@ -4257,8 +4265,13 @@ def dispatch_send(
         DispatchAskError: every documented failure mode.  send never
             creates agents; unknown names get exit 16 identical to ask.
     """
-    # 1. Input validation (reuses ask's _validate_inputs).
-    _validate_inputs(name=name, message=message, from_name=from_name)
+    # 1. Input validation (reuses ask's _validate_inputs). `name` here is a
+    # target to resolve: a bare short-id is the canonical mailbox handle, so it
+    # must reach registry lookup (and then handle resolution on a miss) rather
+    # than being refused as a badly-shaped name.
+    _validate_inputs(
+        name=name, message=message, from_name=from_name, name_is_address=True
+    )
 
     # 2. Body size cap (exit 2 BEFORE any write).
     if len(message.encode("utf-8")) > _SEND_MAX_BODY_BYTES:

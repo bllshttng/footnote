@@ -1336,7 +1336,7 @@ def _notify_origin_merged(
     from fno.mail.cli import _name_lane_send
 
     harness = source_harness or "claude"
-    recipient = canonical_handle(harness, session_id)
+    recipient = canonical_handle(session_id)
     msg = (
         f"PR #{pr_number} merged; the post-merge ritual was cold-dispatched "
         f"(you were not live: {cold_reason}). A bg worker ran /fno:pr merged; "

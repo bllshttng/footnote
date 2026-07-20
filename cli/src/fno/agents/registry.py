@@ -786,7 +786,7 @@ def register_existing_session(
                 if log_path:
                     entry.log_path = log_path
                 return entries
-        base = name or canonical_handle(provider, session_id)
+        base = name or canonical_handle(session_id)
         taken = {entry.name for entry in entries}
         chosen, suffix = base, 2
         while chosen in taken:

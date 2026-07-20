@@ -276,7 +276,7 @@ class TestWhoami:
         self._isolate_bus(tmp_path, monkeypatch)
         for _ in range(3):
             write_new_thread(
-                recipient="claude-879d8d26", sender="etl", kind="send",
+                recipient="879d8d26", sender="etl", kind="send",
                 body="ping", to_kind="name",
             )
         project = _make_workspace(tmp_path, target=True)
@@ -300,7 +300,7 @@ class TestWhoami:
         monkeypatch.setenv("FNO_AGENT_SELF", "billing-worker")
         self._isolate_bus(tmp_path, monkeypatch)
         write_new_thread(  # to the canonical handle
-            recipient="claude-879d8d26", sender="etl", kind="send",
+            recipient="879d8d26", sender="etl", kind="send",
             body="ping", to_kind="name",
         )
         for _ in range(2):  # to the mesh name
@@ -349,7 +349,7 @@ class TestWhoami:
         _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         self._isolate_bus(tmp_path, monkeypatch)
         write_new_thread(
-            recipient="claude-879d8d26", sender="etl", kind="send",
+            recipient="879d8d26", sender="etl", kind="send",
             body="ping", to_kind="name",
         )
         cp = cursor_path("claude-879d8d26")

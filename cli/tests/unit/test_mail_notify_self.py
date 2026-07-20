@@ -15,7 +15,6 @@ from fno.paths_testing import use_tmpdir
 MARKERS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID")
 MY_SID = "abcd1234ffff"  # canonical_handle -> abcd1234
 MY_HANDLE = "abcd1234"
-MY_LEGACY = "claude-abcd1234"  # the retired <harness>-<short8> form, still accepted
 
 
 def _iso(dt: datetime) -> str:
@@ -81,21 +80,6 @@ def test_senders_bounded_with_plus_k_more(env, capsys):
 def test_ac2_hp_empty_is_silent(env, capsys):
     out = _run(capsys)
     assert out.strip() == ""
-
-
-# --- handle-flip migration -------------------------------------------------
-
-def test_inbound_nudge_counts_legacy_addressed_mail(env, capsys):
-    """Mail queued to the retired <harness>-<short8> form still nudges."""
-    _send("alice", MY_LEGACY, "queued before the flip")
-    assert "1 unread fno mail from alice" in _run(capsys)
-
-
-def test_sent_unclaimed_counts_legacy_from_stamps(env, capsys):
-    """My pre-flip sends carry the legacy `from`; without the alias the nudge
-    counter silently undercounts them (the plan's quiet-failure case)."""
-    _send(MY_LEGACY, "carol", "sent before the flip", ts=_ts_ago(3600))
-    assert "1 sent fno mail unclaimed" in _run(capsys)
 
 
 # --- identity guard (AC1-ERR) ---------------------------------------------

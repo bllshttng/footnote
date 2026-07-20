@@ -38,29 +38,22 @@ from fno.agent.state import (
     MissingStateFileOverrideError,
     load_agent_context,
 )
-from fno.harness_identity import handle_aliases, resolve_harness_identity
+from fno.harness_identity import canonical_handle, resolve_harness_identity
 
 
-def _mail_handle() -> tuple[Optional[str], Optional[str], tuple[str, ...]]:
-    """(canonical reply handle, harness_session_id, retired aliases) from ambient
-    identity, else (None, None, ()). Same derivation `stamp_from(None)` uses, so
-    whoami advertises the exact string a name-lane send self-stamps; the aliases
-    are accepted-only (still counted as mine, never displayed). Read-only: env +
-    a string slice, no discovery scan (whoami's md5-invariance contract)."""
+def _mail_handle() -> tuple[Optional[str], Optional[str]]:
+    """(canonical reply handle, harness_session_id) from ambient identity, else
+    (None, None). Same derivation `stamp_from(None)` uses, so whoami advertises
+    the exact string a name-lane send self-stamps. Read-only: env + a string
+    slice, no discovery scan (whoami's md5-invariance contract)."""
     ident = resolve_harness_identity()
     if ident.session_id and ident.harness:
-        handle, *legacy = handle_aliases(ident.harness, ident.session_id)
-        return handle, ident.session_id, tuple(legacy)
-    return None, None, ()
+        return canonical_handle(ident.session_id), ident.session_id
+    return None, None
 
 
 def _mail_unread_count(
-    handle: Optional[str],
-    agent_self: str,
-    session_id: Optional[str],
-    project_root: Path,
-    *,
-    legacy: tuple[str, ...] = (),
+    handle: Optional[str], agent_self: str, session_id: Optional[str], project_root: Path
 ) -> int:
     """Total unread bus messages across every durable address this session
     answers to - canonical handle, mesh name (registered-agent send lane), and
@@ -84,40 +77,28 @@ def _mail_unread_count(
     except Exception:
         return 0
 
-    def _count(
-        addr: Optional[str], exclude: Optional[set[str]], aliases: tuple[str, ...] = ()
-    ) -> int:
+    def _count(addr: Optional[str], exclude: Optional[set[str]]) -> int:
         if not addr:
             return 0
         try:
             with contextlib.redirect_stderr(io.StringIO()):
-                return len(
-                    scan_unread(addr, warn=False, exclude_from=exclude, aliases=aliases)
-                )
+                return len(scan_unread(addr, warn=False, exclude_from=exclude))
         except Exception:
             return 0
 
     total = 0
     seen: set[str] = set()
-    # The handle lane counts its retired legacy address too, under the ONE live
-    # cursor - counting the legacy address as its own lane would read the orphaned
-    # legacy cursor and double-count everything the drain already acked.
-    for addr, extra in ((handle, tuple(legacy)), (agent_self, ())):
+    for addr in (handle, agent_self):
         if addr and addr not in seen:
-            # Every alias joins `seen`, not just the address counted: a mesh name
-            # that happens to equal this session's retired handle would otherwise
-            # be scanned a second time and double-count the same lane.
-            seen.update({addr, *extra})
-            total += _count(addr, None, extra)
+            seen.add(addr)
+            total += _count(addr, None)
 
     try:
         project = resolve_project(cwd=project_root)
     except Exception:
         project = None
     if project and project not in seen:
-        # Retired aliases count as self: a pre-flip broadcast of mine carries the
-        # legacy `from`, and omitting it would read my own note as someone else's.
-        self_ids = {x for x in (handle, agent_self, session_id, *legacy) if x}
+        self_ids = {x for x in (handle, agent_self, session_id) if x}
         total += _count(project, self_ids or None)
     return total
 
@@ -254,11 +235,9 @@ def whoami_command(
         no_fleet=no_fleet,
     )
     state = _drop_layers(_load_or_exit(opts), opts)
-    mail, harness_sid, mail_legacy = _mail_handle()
+    mail, harness_sid = _mail_handle()
     agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
-    mail_unread = _mail_unread_count(
-        mail, agent_self, harness_sid, state.project_root, legacy=mail_legacy
-    )
+    mail_unread = _mail_unread_count(mail, agent_self, harness_sid, state.project_root)
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail

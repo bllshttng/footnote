@@ -90,7 +90,7 @@ A direct send to a live session injects into its pane as a notification it acts 
 Both "work", but nobody checks their voicemail.
 
 The direct form: `fno mail send <short-id> "<msg>"` - the bare 8-hex session prefix, the same id that keys resume/attach/peek.
-The retired `<harness>-<short-id>` form (`claude-<short-id>`, `codex-<short-id>`, ...) and the session's slug both still resolve, so an address copied from an old transcript keeps working.
+The session's slug also resolves. The retired `<harness>-<short-id>` form (`claude-<short-id>`, ...) does NOT: it is refused, with the bare id named in the error. Nothing generates that form any more, so a caller still producing one is a bug to fix at the source rather than something to translate silently.
 Every session prints its own handle in its startup header; find a peer's with `fno agents discovered-json` or `fno agents top`.
 Add `--from-self` to stamp your own reply handle so the answer comes back to you, and do not trust a sender's advertised `from-name` as an address - it can be stale.
 

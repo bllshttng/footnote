@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
@@ -17,43 +18,30 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-# The addressable mailbox handle is the bare first-8 of the session id - the same
-# prefix that already keys resume/attach/peek/transcripts/registry, so a session
-# has ONE identity everywhere. Harness and model ride as envelope attributes;
-# no code path may parse a harness out of a handle string - string-parsed
-# identity is fragile, so delivery-lane resolution is always a roster lookup.
+# The mailbox handle is the bare first-8 of the session id - the same prefix that
+# already keys resume/attach/peek/transcripts/registry, so a session has ONE
+# identity everywhere. The signature takes no harness ON PURPOSE: harness is an
+# envelope attribute, never part of an address, and no code path may recover it
+# from a handle string. A harness-prefixed address (`claude-<short8>`) is a
+# retired form that is NOT accepted anywhere - a caller still producing one is a
+# bug to fix at the source, so resolution refuses it by name rather than quietly
+# translating it.
 #
-# This ONE function is the single source of truth for the generated string: the
-# send-resolve path (discover), the registry row-name fallback, and the
-# receive-side drain (mail drain-self) all call it. If any two computed it
-# differently, a durably-queued message would address one handle while its
-# recipient drained another and silently strand on the bus (the one true silent
-# failure). ``harness`` is unused in the canonical form but kept in the signature
-# so it stays call-compatible with ``legacy_handle`` at every site.
-def canonical_handle(harness: str, session_id: str) -> str:
+# This ONE function is the single source of the generated string: the send-resolve
+# path (discover), the registry row-name fallback, and the receive-side drain
+# (mail drain-self) all call it. If any two computed it differently, a
+# durably-queued message would address one handle while its recipient drained
+# another and silently strand on the bus.
+def canonical_handle(session_id: str) -> str:
     """The mailbox address: the bare first-8 of the session id."""
     return session_id[:8]
 
 
-def legacy_handle(harness: str, session_id: str) -> str:
-    """The pre-flip ``<harness>-<first8>`` address, for match seams only.
-
-    The ONE source of the legacy string, held to the same single-source
-    discipline as ``canonical_handle``: match sites accept it so mail queued or
-    typed under the old form still resolves and drains. Never generated into an
-    envelope, a cursor name, or a whoami line.
-    """
-    return f"{harness}-{session_id[:8]}"
-
-
-def handle_aliases(harness: str, session_id: str) -> tuple[str, ...]:
-    """Every address a session answers to, canonical first.
-
-    Match sites take this whole tuple. Flipping ``canonical_handle`` in place
-    would otherwise DROP legacy acceptance from every site that recomputes the
-    handle at match time - acceptance does not linger by default.
-    """
-    return (canonical_handle(harness, session_id), legacy_handle(harness, session_id))
+# The retired harness-prefixed address. Kept ONLY so the send path can recognize
+# one and refuse it with a message naming the fix, and so `fno doctor` can still
+# report mail queued to one before the flip as the dead letter it is. Never an
+# accepted address, never generated.
+LEGACY_HANDLE_RE = re.compile(r"^(?:claude|codex|gemini|opencode)-[0-9a-fA-F]{6,}$")
 
 
 def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> dict:
