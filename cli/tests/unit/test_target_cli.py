@@ -675,6 +675,18 @@ def test_target_init_yolo_unanchored_grant_is_named(tmp_path, monkeypatch):
     result = runner.invoke(app, ["target", "init", "--input", "some idea", "--yolo"])
     assert result.exit_code == 0, result.output
     assert "NOTHING LIVE TO ANCHOR IT" in result.output, result.output
+
+    # The message is an operator-facing CONTRACT, not decoration: it must name
+    # the real grant condition and must not offer owner_pid as an alternative.
+    # A message that contradicts the rule tells someone their claimless session
+    # might be fine, which is worse than saying nothing.
+    # Scope to the warning itself; the orientation report that follows legitimately
+    # mentions owner_pid as a liveness *reason*, which is a different claim.
+    warning = result.output.split("node:", 1)[0]
+    assert "LIVE CLAIM" in warning, warning
+    assert "owner_pid" not in warning, (
+        "the warning must not suggest a pid can anchor a grant: " + warning
+    )
     _clear_root_cache()
 
 

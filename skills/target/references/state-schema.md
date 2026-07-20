@@ -90,7 +90,11 @@ provider_upgrade_reason: ""          # why provider was upgraded (if applicable)
 ### Session ownership (written by init; used by shim for foreign-session guard)
 
 ```yaml
-owner_pid: 12345                     # PPID of the init subprocess (dead at t+0; best-effort)
+owner_pid: 12345                     # PPID of the init subprocess; transient, best-effort.
+                                     # Alive while init runs (the orienter reports
+                                     # `live (owner_pid alive)` there), dead soon after,
+                                     # so it can PROVE life but never disprove it - and
+                                     # never anchors an authority grant.
 owner_started_at: "2026-06-05T03:00:00Z"
 owner_cwd: "~/conductor/workspaces/abilities/my-feature"
                                      # absolute path to the worktree at init time
