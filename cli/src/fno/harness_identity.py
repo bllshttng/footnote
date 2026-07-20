@@ -20,7 +20,8 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # The addressable mailbox handle is the bare first-8 of the session id - the same
 # prefix that already keys resume/attach/peek/transcripts/registry, so a session
 # has ONE identity everywhere. Harness and model ride as envelope attributes;
-# no code path may parse a harness out of a handle string (x-4082).
+# no code path may parse a harness out of a handle string - string-parsed
+# identity is fragile, so delivery-lane resolution is always a roster lookup.
 #
 # This ONE function is the single source of truth for the generated string: the
 # send-resolve path (discover), the registry row-name fallback, and the

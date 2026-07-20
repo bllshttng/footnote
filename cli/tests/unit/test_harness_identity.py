@@ -60,7 +60,7 @@ def test_ac1_hp_canonical_handle_is_bare_first8():
 
 def test_canonical_handle_is_harness_independent():
     """Same session under any harness -> same mailbox id. The harness lives in an
-    envelope attribute; no code path may recover it from the handle (x-4082)."""
+    envelope attribute; no code path may recover it from the handle."""
     sid = "019f48e1-5b09-72a0"
     assert canonical_handle("codex", sid) == canonical_handle("claude", sid)
 
