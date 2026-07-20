@@ -252,3 +252,11 @@ def test_attach_heals_an_unregistered_claude_session(_registry_home, monkeypatch
 
     assert result.exit_code == 0
     assert attached == ["c655c326"]
+
+
+def test_uppercase_uuid_still_resolves(_registry_home):
+    """An id pasted out of a log resolves; opencode ids stay case-sensitive."""
+    _write_claude_session(_registry_home, CLAUDE_UUID)
+
+    assert store_fallback.probe_stores(CLAUDE_UUID.upper())[0].session_id == CLAUDE_UUID
+    assert store_fallback._normalize("ses_AbC123") == "ses_AbC123"

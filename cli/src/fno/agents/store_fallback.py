@@ -55,10 +55,17 @@ class StoreHit:
         return self.session_id.split("-", 1)[0][:8]
 
 
+def _normalize(token: str) -> str:
+    """Trim, and lowercase a hex-shaped token. opencode ids are mixed-case by
+    construction, so they are left exactly as given."""
+    t = (token or "").strip()
+    return t if _OPENCODE_RE.match(t) else t.lower()
+
+
 def is_session_shaped(token: str) -> bool:
     """True for a token worth probing a harness store with."""
-    t = (token or "").strip()
-    return bool(_SHORT_RE.match(t) or _UUID_RE.match(t.lower()) or _OPENCODE_RE.match(t))
+    t = _normalize(token)
+    return bool(_SHORT_RE.match(t) or _UUID_RE.match(t) or _OPENCODE_RE.match(t))
 
 
 def _claude_projects_dir() -> Path:
@@ -96,7 +103,7 @@ def _probe_claude(token: str) -> list[StoreHit]:
     """
     if _OPENCODE_RE.match(token):
         return []
-    pattern = f"*/{token}.jsonl" if _UUID_RE.match(token.lower()) else f"*/{token}-*.jsonl"
+    pattern = f"*/{token}.jsonl" if _UUID_RE.match(token) else f"*/{token}-*.jsonl"
     hits: dict[str, StoreHit] = {}
     try:
         found = list(_claude_projects_dir().glob(pattern))
@@ -160,7 +167,7 @@ _PROBES = (_probe_claude, _probe_codex, _probe_opencode)
 def probe_stores(token: str) -> list[StoreHit]:
     """Every harness store's answer for ``token``. Never raises: a corrupt or
     missing store contributes no rows rather than denying the whole probe."""
-    token = (token or "").strip()
+    token = _normalize(token)
     if not is_session_shaped(token):
         return []
     hits: list[StoreHit] = []
