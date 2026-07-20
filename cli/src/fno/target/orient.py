@@ -213,6 +213,24 @@ def _manifest_liveness(manifest_raw: Optional[Dict[str, Any]]) -> tuple[str, str
     return "live", "no claim key; owner_pid transient (biased live)"
 
 
+def _authority_granted(raw: Optional[Dict[str, Any]]) -> bool:
+    """Authority fails CLOSED: it needs PROOF of life, not the biased-live default.
+
+    ``_manifest_liveness`` biases toward live when it cannot confirm death, which
+    is right for ``attended`` (worst case you get asked) and wrong here. A
+    claimless manifest whose transient owner_pid is gone reads live forever, and
+    that is exactly the abandoned-session shape that once auto-locked an attended
+    /think for ten days. A free-text ``/target yolo`` run records no claim, so
+    without this it would leave a grant behind every time it crashed.
+    """
+    if not raw or str(raw.get("authority", "")).strip().lower() != "full":
+        return False
+    claim_key = str(raw.get("target_claim_key") or "").strip()
+    if claim_key:
+        return _claim_state(claim_key) in {"live", "suspect"}
+    return _pid_alive(raw.get("owner_pid"))
+
+
 def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
     state, reason = _manifest_liveness(manifest_raw)
     # A DEAD manifest (x-4af4) means the owning session is gone -- resolve to
@@ -224,7 +242,7 @@ def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
     if manifest_raw and "attended" in manifest_raw:
         val = str(manifest_raw["attended"]).strip().lower()
         line = f"{val} (manifest, live: {reason})"
-        if str(manifest_raw.get("authority", "")).strip().lower() == "full":
+        if _authority_granted(manifest_raw):
             line += "; authority: full (yolo)"
         return line
     # No manifest yet: resolve from the substrate, mirroring init-target-state.sh

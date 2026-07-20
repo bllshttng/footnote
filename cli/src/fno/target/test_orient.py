@@ -72,10 +72,37 @@ def test_attended_line_from_manifest() -> None:
 def test_attended_line_authority_grant(monkeypatch) -> None:
     # x-6390: `/target yolo` stamps `authority: full`; the orienter surfaces it
     # on the attended line so /think and /blueprint read one posture, not two.
-    monkeypatch.setattr(orient, "_claim_state", lambda _k: "held")
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "live")
     raw = {"attended": False, "authority": "full", "target_claim_key": "node:x-1"}
     assert "authority: full" in orient._attended_line(raw)
     assert "authority" not in orient._attended_line({"attended": False})
+
+
+def test_authority_fails_closed_on_claimless_abandoned_manifest(monkeypatch) -> None:
+    """x-6390: a free-text `/target yolo` records NO claim, and a claimless
+    manifest with a dead transient pid reads `live` by design (right for
+    attended, wrong for authority). Without a fail-closed rule an abandoned run
+    advertises its grant forever - the x-4af4 stale-autonomy bug, reintroduced.
+    """
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    raw = {"attended": True, "authority": "full", "owner_pid": "999999"}
+    # the manifest still reads live...
+    assert orient._manifest_liveness(raw)[0] == "live"
+    # ...but the grant does not survive the missing proof of life.
+    assert orient._authority_granted(raw) is False
+    assert "authority" not in orient._attended_line(raw)
+
+
+def test_authority_granted_when_life_is_proven(monkeypatch) -> None:
+    """The converse: a held claim OR a live owner_pid is real proof, so the
+    grant stands. Fail-closed must not mean never-granted."""
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "live")
+    assert orient._authority_granted(
+        {"authority": "full", "target_claim_key": "node:x-1"}
+    ) is True
+
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: True)
+    assert orient._authority_granted({"authority": "full", "owner_pid": "1"}) is True
 
 
 def test_attended_line_dead_manifest_never_grants_authority(monkeypatch) -> None:

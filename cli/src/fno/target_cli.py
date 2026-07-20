@@ -458,14 +458,19 @@ def init(
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
-def _warn_if_authority_not_granted() -> None:
-    """Name a --yolo that did not take: both the write-once manifest and start's
-    idempotent no-op drop the flag, and an ungranted session looks identical to
-    one whose flag was dropped."""
+def _warn_if_authority_not_granted(manifest: Optional[Path] = None) -> None:
+    """Name a --yolo that did not take: the write-once manifest and both of
+    start's idempotent early returns drop the flag, and an ungranted session
+    looks identical to one whose flag was dropped.
+
+    Callers on a worktree fast path pass their own manifest; the cwd-relative
+    default is only right for init.
+    """
     try:
         from fno.paths import resolve_repo_root
 
-        manifest = resolve_repo_root() / ".fno" / "target-state.md"
+        if manifest is None:
+            manifest = resolve_repo_root() / ".fno" / "target-state.md"
         text = manifest.read_text(encoding="utf-8") if manifest.exists() else None
     except Exception:  # noqa: BLE001 - a warning must never fail a run that worked
         return
@@ -989,6 +994,8 @@ def start(
             f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
             f"node=already-claimed"
         )
+        if yolo:
+            _warn_if_authority_not_granted(manifest)
         return
 
     # Project the node's model pin / tier into init's dispatch pin so a bare
