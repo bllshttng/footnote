@@ -16,14 +16,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-# Binds the receipt's status vocabulary to something checkable. `cmd_groom` maps
-# a subset of these to a non-zero exit, so an unannotated new value would
-# silently exit 0 - the drift this alias exists to catch at review time.
 GroomStatus = Literal["dispatched", "degraded", "already-ran", "dry-run", "failed"]
 
 GROOM_MODEL_DEFAULT = "claude-sonnet-5"
 
-# Steady-state archive age gate; the operator tunes it via --age.
 GROOM_AGE_DEFAULT = 14
 
 # The marker must outlive the dispatching process, which cannot hold it by PID.
@@ -79,9 +75,7 @@ def groom_brief(day: str, mechanical: Optional[dict[str, str]] = None) -> str:
 
 # Exit 4 is a PARTIAL result, never "nothing to do" - every site that raises it
 # in this CLI is a degraded outcome (unresolved PR queries in reconcile, a
-# retryable gh outage, nothing intaked). The quiet paths all exit 0. The old
-# nightly script's comment claimed the opposite, which would have logged a
-# reconcile that silently stopped resolving PRs as `ok` every night.
+# retryable gh outage, nothing intaked). The quiet paths all exit 0.
 _PARTIAL_EXIT = 4
 _LEG_TIMEOUT_S = 600
 
@@ -129,7 +123,6 @@ def _run_mechanical(age: int) -> dict[str, str]:
 
 
 def _leg_trouble(mechanical: dict[str, str]) -> list[str]:
-    """The legs that did not come back clean, for the receipt and the report."""
     return sorted(name for name, outcome in mechanical.items() if outcome != "ok")
 
 
@@ -276,9 +269,8 @@ def run_groom(
             "mechanical": mechanical,
         }
 
-    # A leg that fails must reach the exit code. The receipt's only other sink is
-    # a launchd log with no reader, which is precisely how the surface this
-    # replaced went stale for ten days unnoticed.
+    # A leg that fails must reach the exit code: the receipt's only other sink is
+    # a launchd log with no reader.
     trouble = _leg_trouble(mechanical)
     receipt = {
         "status": "degraded" if trouble else "dispatched",
