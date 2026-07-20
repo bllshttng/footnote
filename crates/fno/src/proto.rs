@@ -18,7 +18,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::tree::{Dir, Rect, TabId};
@@ -1452,11 +1452,24 @@ pub fn write_msg_sync<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), 
     Ok(())
 }
 
-/// How many consecutive retryable errors a PARTIALLY-read frame tolerates
-/// before giving up. Each one costs the stream's own read timeout, so this
-/// bounds the wait for a frame that started arriving and then stalled; a peer
-/// that dies mid-frame errors out instead of spinning forever.
-const FRAME_STALL_RETRIES: u32 = 40;
+/// Wall-clock budget for finishing a frame that has started arriving.
+///
+/// A RETRY COUNT is the wrong bound here. Each retry costs the stream's own read
+/// timeout, so counting to 40 against a 2s probe timeout would block ~80s on a
+/// caller that advertises 2s - and because a byte of progress resets the count,
+/// a peer that dribbles one byte per timeout could extend that indefinitely.
+/// Time from the FIRST stall is what the caller actually cares about, and it
+/// cannot be reset by a slow peer.
+///
+/// Generous for a local unix socket, where a whole frame lands in microseconds:
+/// exceeding this means the peer is wedged, not merely slow.
+const FRAME_COMPLETION_BUDGET: Duration = Duration::from_secs(2);
+
+/// Spin guard for a zero-latency reader. A socket read timeout paces the loop in
+/// production, but an in-memory reader can return `WouldBlock` with no delay at
+/// all, where a pure wall-clock bound would spin hot. Deliberately high enough
+/// that a real socket hits the time budget first.
+const FRAME_STALL_SPINS: u32 = 100_000;
 
 /// Fill `buf` completely from `r`.
 ///
@@ -1476,6 +1489,9 @@ const FRAME_STALL_RETRIES: u32 = 40;
 fn read_fill<R: Read>(r: &mut R, buf: &mut [u8], committed: bool) -> Result<(), ProtoError> {
     let mut n = 0;
     let mut stalls = 0u32;
+    // Set at the first stall AFTER the frame is committed, and never reset, so
+    // peer progress cannot extend the bound.
+    let mut stalled_since: Option<Instant> = None;
     while n < buf.len() {
         match r.read(&mut buf[n..]) {
             Ok(0) => return Err(ProtoError::Closed),
@@ -1489,7 +1505,8 @@ fn read_fill<R: Read>(r: &mut R, buf: &mut [u8], committed: bool) -> Result<(), 
                     return Err(e.into()); // nothing consumed: safe to hand back
                 }
                 stalls += 1;
-                if stalls >= FRAME_STALL_RETRIES {
+                let since = *stalled_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= FRAME_COMPLETION_BUDGET || stalls >= FRAME_STALL_SPINS {
                     // FATAL, deliberately not the retryable error we caught.
                     // Part of the frame is already off the stream, so there is
                     // no resuming: handing back WouldBlock would tell a polling
@@ -2449,6 +2466,67 @@ mod tests {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());
         assert!(socket_path("ok-name_1").is_ok());
+    }
+
+    /// A peer that dribbles progress must NOT be able to extend the bound.
+    ///
+    /// The retry-count version reset its counter on every byte, so one byte per
+    /// timeout kept the frame alive forever. The budget runs from the first
+    /// stall and is never reset, so progress buys no extra time.
+    #[test]
+    fn frame_completion_budget_is_not_reset_by_progress() {
+        struct Trickle {
+            data: Vec<u8>,
+            pos: usize,
+            stall_next: bool,
+        }
+        impl std::io::Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                // Alternate one byte of progress with one stall, forever.
+                self.stall_next = !self.stall_next;
+                if self.stall_next || self.pos >= self.data.len() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "slow"));
+                }
+                buf[0] = self.data[self.pos];
+                self.pos += 1;
+                Ok(1)
+            }
+        }
+        // A hand-built frame whose body is far too long for the trickle to
+        // finish inside the budget: one byte per stall would need minutes.
+        let body_len = 4096usize;
+        let mut wire = (body_len as u32).to_be_bytes().to_vec();
+        wire.extend(std::iter::repeat_n(0u8, body_len));
+        let mut r = Trickle {
+            data: wire,
+            pos: 0,
+            stall_next: false,
+        };
+        // Poll like a real caller: WouldBlock before the frame is committed just
+        // means "nothing yet". Once it commits, the budget must end it.
+        let started = Instant::now();
+        let mut fatal = None;
+        while started.elapsed() < FRAME_COMPLETION_BUDGET * 4 {
+            match read_msg_sync::<_, ClientMsg>(&mut r) {
+                Err(ProtoError::Io(e)) if is_retryable(&e) => {}
+                other => {
+                    fatal = Some(other);
+                    break;
+                }
+            }
+        }
+        let took = started.elapsed();
+        match fatal {
+            Some(Err(ProtoError::Io(e))) => {
+                assert!(!is_retryable(&e), "must be fatal: {:?}", e.kind())
+            }
+            other => panic!("expected a fatal io error within the budget, got {other:?}"),
+        }
+        assert!(
+            took < FRAME_COMPLETION_BUDGET * 3,
+            "progress must not extend the bound: took {took:?}"
+        );
     }
 
     /// A stream that delivers `give` bytes and then stalls forever.

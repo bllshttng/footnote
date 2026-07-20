@@ -733,8 +733,24 @@ fn compose_tail(text: &str) -> Option<String> {
                 .flatten()
         });
         for chunk in prose {
-            if let Some(first) = chunk.lines().map(str::trim).find(|l| !l.is_empty()) {
-                return Some(first.chars().take(TAIL_MAX_CHARS).collect());
+            let Some(first) = chunk.lines().map(str::trim).find(|l| !l.is_empty()) else {
+                continue;
+            };
+            // A transcript is UNTRUSTED text that the client paints into the
+            // terminal a character at a time, so an ESC sequence in an assistant
+            // message would be replayed as terminal control rather than shown;
+            // a tab or CR merely wrecks the table's column alignment. Strip
+            // before the wire, matching `sanitize_name` / `sanitize_mail_text`
+            // on the server side. The cap applies AFTER stripping, so control
+            // padding cannot smuggle extra visible width past it.
+            let clean: String = first
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(TAIL_MAX_CHARS)
+                .collect();
+            let clean = clean.trim();
+            if !clean.is_empty() {
+                return Some(clean.to_string());
             }
         }
     }
@@ -1566,6 +1582,35 @@ mod tests {
         assert_eq!(compose_tail("not json at all"), None);
         // Present but prose-free: no cell rather than an empty-string cell.
         assert_eq!(compose_tail(&turn(r#"{"type":"text","text":"   "}"#)), None);
+    }
+
+    #[test]
+    fn compose_tail_strips_control_characters() {
+        // A transcript is untrusted text that lands in the terminal one char at
+        // a time, so an ESC sequence in an assistant message would be REPLAYED
+        // as terminal control - cursor moves, colour changes, or worse. Tabs and
+        // CRs merely wreck the table's column alignment. Same posture as
+        // `sanitize_name` / `sanitize_mail_text` on the server side.
+        let raw = turn(r#"{"type":"text","text":"safe \u001b[31mred\u001b[0m and\ttabbed"}"#);
+        let got = compose_tail(&raw).unwrap();
+        assert!(
+            !got.chars().any(char::is_control),
+            "control chars must not reach the wire: {got:?}"
+        );
+        assert!(got.contains("safe"), "visible text survives: {got:?}");
+        assert!(got.contains("red"), "{got:?}");
+    }
+
+    #[test]
+    fn compose_tail_caps_visible_chars_after_stripping() {
+        // The cap must apply to what RENDERS, so a line padded with control
+        // characters cannot smuggle extra visible width past it.
+        // `\u0007` here is a JSON escape in the fixture text, so the document
+        // stays valid JSON and the control char appears after parsing.
+        let noisy = format!("{}{}", "\\u0007".repeat(50), "y".repeat(TAIL_MAX_CHARS * 2));
+        let got = compose_tail(&turn(&format!(r#"{{"type":"text","text":"{noisy}"}}"#))).unwrap();
+        assert_eq!(got.chars().count(), TAIL_MAX_CHARS);
+        assert!(got.chars().all(|c| c == 'y'));
     }
 
     #[test]

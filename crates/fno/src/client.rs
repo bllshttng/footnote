@@ -56,6 +56,10 @@ const PANEL_W: u16 = 28;
 /// workspace name plus a rollup pair, which is what makes slim legible rather
 /// than blind.
 const SLIM_PANEL_W: u16 = 16;
+/// (x-b186) The narrowest slim rail. Below this the sideline finally hides, but
+/// between here and [`SLIM_PANEL_W`] it clamps - a rail that disappeared on a
+/// narrow terminal would contradict the one thing slim promises.
+const MIN_SLIM_PANEL_W: u16 = 8;
 /// Below this many content columns the sideline auto-hides (AC6-EDGE).
 const MIN_CONTENT_COLS: u16 = 40;
 
@@ -1950,7 +1954,12 @@ impl View {
     /// Extended, which is the state that asks for more than it may get.
     fn density_bounds(&self) -> (u16, u16) {
         match self.density {
-            Density::Slim => (SLIM_PANEL_W, SLIM_PANEL_W),
+            // Slim CLAMPS rather than hides: it is explicitly the non-hidden
+            // state, so cycling into it must never make the sideline vanish
+            // (that is what `b` is for). Its floor is the narrowest rail that
+            // still shows a caret plus a rollup pair; `header_band_text` drops
+            // the counts and then truncates the label below that.
+            Density::Slim => (SLIM_PANEL_W, MIN_SLIM_PANEL_W),
             Density::Regular => (PANEL_W, PANEL_W),
             Density::Extended => (EXTENDED_PANEL_W, MIN_EXTENDED_PANEL_W),
         }
@@ -2178,7 +2187,10 @@ impl View {
             DisplayRow::Header { key, .. } => Some(ChromeHit::CycleSection(key.clone())),
             // Inert rows (subline, spacer, table column header) resolve to no
             // action (x-cd67).
-            DisplayRow::Sub(_) | DisplayRow::Blank | DisplayRow::TableHead => None,
+            DisplayRow::Sub(_)
+            | DisplayRow::Blank
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -3662,6 +3674,11 @@ impl View {
         }
         let mut out = Vec::with_capacity(agents.len() + 1);
         out.push(DisplayRow::TableHead);
+        if agents.is_empty() {
+            // A bare column header reads as a stalled or broken table. Say so.
+            out.push(DisplayRow::TableEmpty);
+            return out;
+        }
         out.extend(agents.into_iter().map(DisplayRow::Agent));
         out
     }
@@ -4061,6 +4078,9 @@ impl View {
                     cell_flags::DIM,
                     Color::Default,
                 ),
+                DisplayRow::TableEmpty => {
+                    ("  no agents".to_string(), cell_flags::DIM, Color::Default)
+                }
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -4206,6 +4226,10 @@ enum DisplayRow<'a> {
     /// changes. Inert like `Sub`: one painted line, one display row, so the
     /// x-260a hit-test math is untouched.
     TableHead,
+    /// (x-b186) The extended table's zero-agent line. Inert, like `TableHead`:
+    /// a header with nothing under it reads as a stalled table, so the empty
+    /// state is stated rather than implied.
+    TableEmpty,
 }
 
 /// (x-1d91) A dispatched Backlog reorder verb awaiting confirmation from the feed.
@@ -4344,7 +4368,11 @@ fn view_caret(v: SectionView) -> char {
 fn row_is_inert(drow: &DisplayRow) -> bool {
     matches!(
         drow,
-        DisplayRow::Header { .. } | DisplayRow::Sub(_) | DisplayRow::Blank | DisplayRow::TableHead
+        DisplayRow::Header { .. }
+            | DisplayRow::Sub(_)
+            | DisplayRow::Blank
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty
     )
 }
 
@@ -5051,14 +5079,14 @@ fn humanize_ago(secs: u64) -> String {
 /// the x-260a single-enumeration invariant.
 fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
     let glyph = lattice_style(agent_lattice_state(a)).glyph;
-    let mut out = format!("{glyph} {}", pad_to(&a.name, COL_NAME as usize - 1));
+    let mut out = format!("{glyph} {}", pad_cols(&a.name, COL_NAME as usize - 1));
     if cols.tail {
         let tail = a.tail.as_deref().unwrap_or("");
-        out.push_str(&pad_to(tail, COL_TAIL as usize - 1));
+        out.push_str(&pad_cols(tail, COL_TAIL as usize - 1));
         out.push(' ');
     }
     let pr = a.pr.map(|n| format!("#{n}")).unwrap_or_default();
-    out.push_str(&pad_to(&pr, COL_PR as usize - 1));
+    out.push_str(&pad_cols(&pr, COL_PR as usize - 1));
     out.push(' ');
     if cols.time {
         // A future stamp (clock skew) clamps to 0 rather than underflowing.
@@ -5066,7 +5094,7 @@ fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
             .updated_at
             .map(|u| humanize_ago(now_secs.saturating_sub(u)))
             .unwrap_or_default();
-        out.push_str(&pad_to(&age, COL_TIME as usize - 1));
+        out.push_str(&pad_cols(&age, COL_TIME as usize - 1));
     }
     out
 }
@@ -5092,15 +5120,15 @@ fn table_head_text(cols: TableCols, sort: AgentSort) -> String {
     } else {
         format!("agent {short}")
     };
-    let mut out = format!("  {}", pad_to(&name, COL_NAME as usize - 1));
+    let mut out = format!("  {}", pad_cols(&name, COL_NAME as usize - 1));
     if cols.tail {
-        out.push_str(&pad_to(long, COL_TAIL as usize - 1));
+        out.push_str(&pad_cols(long, COL_TAIL as usize - 1));
         out.push(' ');
     }
-    out.push_str(&pad_to("pr", COL_PR as usize - 1));
+    out.push_str(&pad_cols("pr", COL_PR as usize - 1));
     out.push(' ');
     if cols.time {
-        out.push_str(&pad_to("age", COL_TIME as usize - 1));
+        out.push_str(&pad_cols("age", COL_TIME as usize - 1));
     }
     out
 }
@@ -5237,6 +5265,32 @@ fn peek_overlay_lines(
 /// Truncate `s` to `w` display chars (ellipsizing) and pad with spaces to `w`,
 /// so an overlay line is a fixed-width inverse block that fully overwrites the
 /// content beneath it.
+/// (x-b186) `pad_to` measured in DISPLAY columns rather than scalar values.
+///
+/// The painter advances by `glyph_cols`, so a name or tail containing a
+/// double-width glyph would occupy more columns than `pad_to` reserved and shove
+/// every following cell out of alignment. `header_band_text` already measures
+/// this way; the table has the same contract.
+fn pad_cols(s: &str, w: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = glyph_cols(ch);
+        if used + cw > w {
+            // Ellipsis is single-width; leave room for it if anything follows.
+            if used < w {
+                out.push('…');
+                used += 1;
+            }
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push_str(&" ".repeat(w.saturating_sub(used)));
+    out
+}
+
 fn pad_to(s: &str, w: usize) -> String {
     let count = s.chars().count();
     if count > w {
@@ -15523,6 +15577,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    // (codex P2) Slim is the explicitly NON-hidden density, so a narrow terminal
+    // must clamp it, not make it vanish. Giving it floor == want meant cycling
+    // into the rail removed the sideline entirely below 56 columns.
+    #[test]
+    fn slim_clamps_on_a_narrow_terminal_instead_of_hiding() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Slim;
+        // Narrower than the rail wants, but wide enough to still show one.
+        v.term = (24, MIN_CONTENT_COLS + SLIM_PANEL_W - 4);
+        let w = v.panel_w();
+        assert!(w > 0, "slim must not hide here");
+        assert!(w < SLIM_PANEL_W, "and it clamped: {w}");
+        assert!(v.term.1 - w >= MIN_CONTENT_COLS, "pane keeps its minimum");
+        let _ = v.compose(); // must not panic at the clamped width
+                             // Regular at the same width still auto-hides (unchanged behaviour).
+        v.density = Density::Regular;
+        assert_eq!(v.panel_w(), 0);
+    }
+
+    // (codex P2) A column header with nothing under it reads as a stalled table.
+    #[test]
+    fn extended_zero_agents_states_the_empty_case() {
+        let mut v = wide_view(vec![]);
+        v.density = Density::Extended;
+        let rows = v.display_rows();
+        assert!(matches!(rows.first(), Some(DisplayRow::TableHead)));
+        assert!(
+            rows.iter().any(|r| matches!(r, DisplayRow::TableEmpty)),
+            "zero agents renders an explicit empty-state line"
+        );
+        assert!(frame_text(&v.compose()).contains("no agents"));
+    }
+
+    // (codex P2) The painter advances by DISPLAY columns (`glyph_cols`), so a
+    // cell padded by scalar count occupies more columns than it reserved and
+    // shoves every following cell out of alignment.
+    //
+    // Uses the trigram block, which is what `glyph_cols` actually treats as
+    // wide. A CJK name does NOT reproduce this today: `glyph_cols` reports 1 for
+    // it, so the painter and the padding agree - the sideline's width model is
+    // trigram-only, which is a pre-existing gap this table neither introduced
+    // nor fixes.
+    #[test]
+    fn table_cells_align_with_double_width_glyphs() {
+        let mut wide_name = agent_row("☰☰☰ menu", 4, Some(AgentBadge::Working), false);
+        wide_name.pr = Some(7);
+        let plain = agent_row("ascii", 5, Some(AgentBadge::Working), false);
+        let cols = TableCols {
+            tail: true,
+            time: false,
+        };
+        let a = table_row_text(&wide_name, cols, 0);
+        let b = table_row_text(&plain, cols, 0);
+        let width = |s: &str| s.chars().map(glyph_cols).sum::<usize>();
+        assert_eq!(
+            width(&a),
+            width(&b),
+            "rows must occupy equal display width:\n{a:?}\n{b:?}"
+        );
     }
 
     // The density button is a real click target, routed to the SAME mutation the
