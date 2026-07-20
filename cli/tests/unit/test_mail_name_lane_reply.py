@@ -104,12 +104,12 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
     # I never typed the sender handle on the command line; the reply still names it.
-    assert "claude-9a063cd3" in r.output
+    assert "9a063cd3" in r.output
     assert msg in r.output  # the correlated msg-id (re:<id>)
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "claude-9a063cd3"  # addressed to the original sender
+    assert replies[0].to == "9a063cd3"  # sender resolved to its canonical handle
     assert replies[0].from_ == "claude-11111111"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 

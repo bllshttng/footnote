@@ -137,7 +137,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         return explicit
     try:
         from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-        from fno.harness_identity import canonical_handle, resolve_harness_identity
+        from fno.harness_identity import canonical_handle, handle_aliases, resolve_harness_identity
 
         ident = resolve_harness_identity()
         if not (ident.session_id and ident.harness):
@@ -148,7 +148,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         # the push would silently skip (codex P1). The per-harness session field
         # may hold the full id or its first-8 (claude stores the short), so both
         # variants are accepted; a canonically-named row still matches too.
-        my_handle = canonical_handle(ident.harness, ident.session_id)
+        my_names = set(handle_aliases(ident.harness, ident.session_id))
         session_field = HARNESS_SESSION_ID_FIELDS.get(ident.harness)
         sid_variants = {ident.session_id, ident.session_id[:8]}
         for entry in load_registry():
@@ -157,7 +157,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
                 and session_field is not None
                 and getattr(entry, session_field, None) in sid_variants
             )
-            if entry.name == my_handle or same_session:
+            if entry.name in my_names or same_session:
                 if entry.spawned_by_session and entry.spawned_by_harness:
                     return canonical_handle(entry.spawned_by_harness, entry.spawned_by_session)
                 return None

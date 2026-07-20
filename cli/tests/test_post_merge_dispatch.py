@@ -765,7 +765,7 @@ def test_default_notifier_addresses_origin_session_durably(monkeypatch):
 
     monkeypatch.setattr("fno.mail.cli._name_lane_send", _fake_send)
     rec._notify_origin_merged("abcdef1234567890", 42, "claude", "no-live-source-session")
-    assert seen["recipient"] == "claude-abcdef12"  # canonical_handle
+    assert seen["recipient"] == "abcdef12"  # canonical_handle
     assert seen["resolved"] is None  # durable floor, no live resolution
     assert seen["provider"] == "claude"
     assert seen["from_name"] == "fno"

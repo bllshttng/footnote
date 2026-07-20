@@ -17,17 +17,42 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-# The addressable cross-harness handle is ``<harness>-<first8>``. This ONE
-# function is the single source of truth for that string: the send-resolve path
-# (discover), the registry row name (register_existing_session), and the
+# The addressable mailbox handle is the bare first-8 of the session id - the same
+# prefix that already keys resume/attach/peek/transcripts/registry, so a session
+# has ONE identity everywhere. Harness and model ride as envelope attributes;
+# no code path may parse a harness out of a handle string (x-4082).
+#
+# This ONE function is the single source of truth for the generated string: the
+# send-resolve path (discover), the registry row-name fallback, and the
 # receive-side drain (mail drain-self) all call it. If any two computed it
 # differently, a durably-queued message would address one handle while its
-# recipient drained another and silently strand on the bus (the plan's one true
-# silent failure). ``session_id[:8]`` matches the registry's historical slice so
-# already-registered rows keep the same name.
+# recipient drained another and silently strand on the bus (the one true silent
+# failure). ``harness`` is unused in the canonical form but kept in the signature
+# so it stays call-compatible with ``legacy_handle`` at every site.
 def canonical_handle(harness: str, session_id: str) -> str:
-    """The cross-harness address ``<harness>-<first8-of-session-id>``."""
+    """The mailbox address: the bare first-8 of the session id."""
+    return session_id[:8]
+
+
+def legacy_handle(harness: str, session_id: str) -> str:
+    """The pre-flip ``<harness>-<first8>`` address, for match seams only.
+
+    The ONE source of the legacy string, held to the same single-source
+    discipline as ``canonical_handle``: match sites accept it so mail queued or
+    typed under the old form still resolves and drains. Never generated into an
+    envelope, a cursor name, or a whoami line.
+    """
     return f"{harness}-{session_id[:8]}"
+
+
+def handle_aliases(harness: str, session_id: str) -> tuple[str, ...]:
+    """Every address a session answers to, canonical first.
+
+    Match sites take this whole tuple. Flipping ``canonical_handle`` in place
+    would otherwise DROP legacy acceptance from every site that recomputes the
+    handle at match time - acceptance does not linger by default.
+    """
+    return (canonical_handle(harness, session_id), legacy_handle(harness, session_id))
 
 
 def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> dict:

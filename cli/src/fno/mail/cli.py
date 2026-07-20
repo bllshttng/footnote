@@ -34,7 +34,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Iterable, Optional, TypedDict
 
 import typer
 
@@ -316,14 +316,16 @@ def _sent_unclaimed_count() -> int:
     predicate; never raises (a broken read degrades to 0).
     """
     from fno.config import load_settings
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.harness_identity import handle_aliases, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
         return 0
     try:
-        handle = canonical_handle(ident.harness, ident.session_id)
-        n, _ = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
+        handle, *aliases = handle_aliases(ident.harness, ident.session_id)
+        n, _ = _sent_unclaimed(
+            handle, load_settings().inbox.unclaimed_ttl, aliases=aliases
+        )
         return n
     except Exception as exc:  # noqa: BLE001 - status is advisory; never crash on it
         # Advisory-degrade to 0, but leave a breadcrumb (matches _active_session)
@@ -1361,16 +1363,18 @@ def cmd_drain_self(
     its unread bus mail, prints it for injection into the session, then advances
     its own cursor so nothing re-surfaces next wake. Wired into each harness's
     SessionStart hook, this is what makes a codex/gemini session actually
-    RECEIVE mail addressed to ``<harness>-<id>`` -- addressability already
-    existed, drainage did not.
+    RECEIVE its mail -- addressability already existed, drainage did not.
+
+    Drains the legacy ``<harness>-<short8>`` address alongside the canonical bare
+    short-id, so mail queued before the handle flip still lands exactly once.
 
     Forward-only + inject-before-ack: a crash between print and ack re-surfaces
     the message next SessionStart (a harmless repeat), never a loss. No harness
     identity in env -> silent no-op (nothing to drain), never an error, so the
     hook is safe on any surface.
     """
-    from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.bus.cursor import adopt_cursor, advance_cursor, scan_unread
+    from fno.harness_identity import handle_aliases, legacy_handle, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
@@ -1378,8 +1382,11 @@ def cmd_drain_self(
             print(json.dumps([]))
         return
 
-    handle = canonical_handle(ident.harness, ident.session_id)
-    msgs = scan_unread(handle)
+    handle, *aliases = handle_aliases(ident.harness, ident.session_id)
+    # The handle rename orphaned the old cursor; carry its position over before
+    # the first read so the flip does not replay retained history (once, cheap).
+    adopt_cursor(handle, legacy_handle(ident.harness, ident.session_id))
+    msgs = scan_unread(handle, aliases=aliases)
 
     if json_out:
         print(
@@ -1456,8 +1463,14 @@ def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
         return False
 
 
-def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
+def _sent_unclaimed(
+    handle: str, ttl_seconds: int, *, aliases: Iterable[str] = ()
+) -> tuple[int, list[str]]:
     """Count + distinct recipients (first-seen) of my sent mail unclaimed past TTL.
+
+    ``aliases`` widens which ``from`` stamps count as mine (pre-flip sends carry
+    the legacy handle) by extending the comparison SET, never by adding a second
+    bus scan - the notify-self hook this shares runs on a 2s budget.
 
     Unclaimed = still past the recipient's consume cursor AND strictly older than
     ``ttl_seconds``. Reads the bus ONCE (a single ``iter_messages`` snapshot) and
@@ -1476,7 +1489,8 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
 
     now = _dt.now(tz=_tz.utc)
     all_msgs = list(iter_messages())
-    sent = [m for m in all_msgs if m.from_ == handle]
+    mine = {handle, *aliases}
+    sent = [m for m in all_msgs if m.from_ in mine]
     if not sent:
         return 0, []
     pos = {m.id: i for i, m in enumerate(all_msgs)}
@@ -1533,18 +1547,22 @@ def cmd_notify_self() -> None:
 
     No harness identity in env -> silent no-op (mirror ``drain-self``).
     """
-    from fno.bus.cursor import scan_unread
+    from fno.bus.cursor import adopt_cursor, scan_unread
     from fno.config import load_settings
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.harness_identity import handle_aliases, legacy_handle, resolve_harness_identity
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
         return
 
-    handle = canonical_handle(ident.harness, ident.session_id)
+    handle, *aliases = handle_aliases(ident.harness, ident.session_id)
+    # Adoption is a rename of the read position, not a consume, so it is safe on
+    # the nudge path - and without it the first nudge after the flip would report
+    # the whole retained log as unread.
+    adopt_cursor(handle, legacy_handle(ident.harness, ident.session_id))
     lines: list[str] = []
 
-    unread = scan_unread(handle)
+    unread = scan_unread(handle, aliases=aliases)
     if unread:
         senders = _bounded_names([m.from_ for m in unread])
         lines.append(
@@ -1552,7 +1570,7 @@ def cmd_notify_self() -> None:
         )
 
     ttl = load_settings().inbox.unclaimed_ttl
-    n_sent, recipients = _sent_unclaimed(handle, ttl)
+    n_sent, recipients = _sent_unclaimed(handle, ttl, aliases=aliases)
     if n_sent:
         who = _bounded_names(recipients)
         lines.append(

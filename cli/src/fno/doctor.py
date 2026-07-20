@@ -1234,14 +1234,14 @@ def _drain_hook_wired(hooks_json: Optional[Path] = None) -> Optional[bool]:
 
 
 def _live_a2a_handles() -> set[str]:
-    """Every address a live session answers to (handle, short, canonical)."""
+    """Every address a live session answers to (alias, short, canonical, legacy)."""
     out: set[str] = set()
     try:
         from fno.agents import discover
-        from fno.harness_identity import canonical_handle
+        from fno.harness_identity import handle_aliases
 
         for s in discover.discover_live_sessions():
-            out.update({s.handle, s.short_id, canonical_handle(s.agent, s.session_id)})
+            out.update({s.handle, s.short_id, *handle_aliases(s.agent, s.session_id)})
     except Exception:  # noqa: BLE001 — discovery is best-effort here
         pass
     return out

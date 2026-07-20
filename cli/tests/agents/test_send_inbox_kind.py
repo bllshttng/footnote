@@ -306,7 +306,7 @@ def test_cmd_send_from_self_stamps_canonical_handle(isolated, runner, monkeypatc
         "--body", "which auth?",
     )
     assert result.exit_code == 0, result.output
-    assert read_unread_threads("acme-docs")[0].from_project == "claude-879d8d26"
+    assert read_unread_threads("acme-docs")[0].from_project == "879d8d26"
 
 
 def test_cmd_send_from_self_with_from_name_is_usage_error(isolated, runner, monkeypatch) -> None:

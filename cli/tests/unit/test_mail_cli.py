@@ -116,7 +116,8 @@ def _seed_bus_message(*, to: str, from_: str, body: str):
 
 
 def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
-    # A live codex session with this thread id -> own handle codex-019f48e1.
+    # AC1-EDGE: mail queued to the LEGACY <harness>-<short8> address before the
+    # handle flip still drains exactly once after it, and acks under the new key.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
     _seed_bus_message(to="codex-019f48e1", from_="claude-web", body="ack from K")
 
@@ -141,6 +142,75 @@ def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, mon
     assert res.exit_code == 0, res.output
     assert f"id:{h.thread_id}" in res.output
     assert "fno mail reply --to <id>" in res.output
+
+
+# ---------------------------------------------------------------------------
+# Handle-flip migration: the cursor filename IS the address, so renaming the
+# address orphans the cursor. Adoption carries the read position over ONCE.
+# ---------------------------------------------------------------------------
+
+CODEX_SID = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+
+
+def test_ac2_edge_legacy_cursor_adopted_no_history_replay(runner, mailbox, monkeypatch):
+    """A recipient holding only a legacy cursor sees mail AFTER that position on
+    its first post-flip drain - never the whole retained log."""
+    from fno.bus.cursor import read_cursor, write_cursor
+
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
+    old = _seed_bus_message(to="codex-019f48e1", from_="web", body="ancient history")
+    write_cursor("codex-019f48e1", old.thread_id)  # already consumed, pre-flip
+    _seed_bus_message(to="019f48e1", from_="web", body="fresh")
+
+    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert res.exit_code == 0, res.output
+    assert [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])] == ["fresh"]
+    # The adopted position persisted under the new key, so the ack lands there.
+    assert read_cursor("019f48e1") is not None
+
+
+def test_ac1_fr_corrupt_legacy_cursor_repeats_never_loses(runner, mailbox, monkeypatch):
+    """A corrupt legacy cursor degrades to the rescan posture: everything
+    addressed to either form re-surfaces (a repeat), and the next drain is quiet."""
+    from fno.bus.cursor import cursor_path
+
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
+    _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy-addressed")
+    _seed_bus_message(to="019f48e1", from_="web", body="bare-addressed")
+    p = cursor_path("codex-019f48e1")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{not json", encoding="utf-8")
+
+    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert res.exit_code == 0, res.output
+    bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
+    assert bodies == ["legacy-addressed", "bare-addressed"]  # nothing lost
+    again = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert json.loads(again.stdout.strip().splitlines()[-1]) == []  # quiet after
+
+
+def test_ac2_fr_interrupted_drain_resurfaces_under_new_key(runner, mailbox, monkeypatch):
+    """Inject-before-ack survives the rename: a drain that never acks re-surfaces
+    its messages rather than dropping them."""
+    from fno.bus import cursor as cursor_mod
+
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
+    _seed_bus_message(to="codex-019f48e1", from_="web", body="mid-flight")
+    # Restore by hand, not monkeypatch.undo() - undo would also revert the
+    # mailbox isolation and point the second drain at a different bus.
+    real_advance = cursor_mod.advance_cursor
+
+    def _crash(*_a, **_kw):
+        raise RuntimeError("crash between print and ack")
+
+    cursor_mod.advance_cursor = _crash
+    try:
+        runner.invoke(app, ["mail", "drain-self", "--json"])  # prints, never acks
+    finally:
+        cursor_mod.advance_cursor = real_advance
+
+    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])] == ["mid-flight"]
 
 
 def test_drain_self_no_harness_env_is_noop(runner, mailbox, monkeypatch):
@@ -198,7 +268,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
         app, ["mail", "send", "codex-019f48e1", "ack from K", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
-    assert "codex-019f48e1" in sent.output
+    assert "019f48e1" in sent.output
     assert "queued (durable)" in sent.output
 
     # The codex session drains its own handle and sees the message.
@@ -206,7 +276,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "codex-019f48e1"
+    assert payload and payload[0]["to"] == "019f48e1"
     assert "ack from K" in payload[0]["body"]  # inside the <fno_mail> wrap
 
 
@@ -488,7 +558,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
         app, ["mail", "send", "claude-9a063cd3", "hi bg worker", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
-    assert "claude-9a063cd3" in sent.output
+    assert "9a063cd3" in sent.output
     assert "queued (durable)" in sent.output
 
     # The bg worker drains its own handle and sees the message (stamp == drain key).
@@ -496,7 +566,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "claude-9a063cd3"
+    assert payload and payload[0]["to"] == "9a063cd3"
     assert "hi bg worker" in payload[0]["body"]
 
 
@@ -555,7 +625,7 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    assert 'from="claude-abcd1234"' in body
+    assert 'from="abcd1234"' in body
     assert 'model="claude-opus-4-8"' in body
 
 
@@ -593,7 +663,7 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "claude-9a063cd3"
+    assert payload and payload[0]["to"] == "9a063cd3"
     assert "hi bg worker" in payload[0]["body"]
 
 

@@ -20,7 +20,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from fno.bus.log import Envelope, iter_messages
 
@@ -129,13 +129,40 @@ def advance_cursor(name: str, msg_id: str) -> bool:
     return True
 
 
+def adopt_cursor(name: str, legacy: str) -> bool:
+    """Carry a renamed consumer's read position from ``legacy`` to ``name``, once.
+
+    The cursor filename IS the consumer's address, so renaming an address orphans
+    its cursor and the absent-cursor fail-open would replay the whole retained log
+    into the consumer exactly once. Adoption is a rename, not a consume: it never
+    moves the position forward. No-op when ``name`` already has a cursor (so this
+    is idempotent and cheap on a per-turn hook path) or when the legacy cursor is
+    absent or corrupt - corrupt degrades to the existing rescan posture, i.e. a
+    repeat, never a loss.
+    """
+    if read_cursor(name) is not None:
+        return False
+    prior = read_cursor(legacy)
+    if prior is None:
+        return False
+    write_cursor(name, prior)
+    return True
+
+
 def scan_unread(
     name: str,
     *,
     warn: bool = True,
     exclude_from: Optional[set[str]] = None,
+    aliases: Iterable[str] = (),
 ) -> list[Envelope]:
     """Return messages addressed to ``name`` after its cursor, oldest -> newest.
+
+    ``aliases`` widens WHICH messages count as mine (any ``to`` in
+    ``{name, *aliases}``) without widening whose cursor is read - the one cursor
+    under ``name`` bounds them all, so mail addressed to a retired alias drains
+    exactly once and acks under the live key. One bus scan regardless of alias
+    count, which the every-turn notify-self hook depends on.
 
     If the cursor is absent or its message-id is not found in any retained
     segment (rotated out / deleted), all retained messages to ``name`` are
@@ -150,9 +177,10 @@ def scan_unread(
     cursor = read_cursor(name)
     msgs = list(iter_messages(warn=warn))
     excl = exclude_from or set()
+    mine = {name, *aliases}
 
     def _mine(m: Envelope) -> bool:
-        if m.to != name:
+        if m.to not in mine:
             return False
         if excl and (m.from_ in excl or (m.from_session and m.from_session in excl)):
             return False

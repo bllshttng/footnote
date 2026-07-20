@@ -1076,7 +1076,7 @@ def resolve_or_suggest(
     scan serves both the match and the suggestions. No exclusion: the user
     named a specific live session, so even an adopted one resolves.
     """
-    from fno.harness_identity import canonical_handle
+    from fno.harness_identity import handle_aliases
 
     sessions = discover_live_sessions(
         sessions_dir=sessions_dir,
@@ -1088,23 +1088,23 @@ def resolve_or_suggest(
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
     )
-    # Match the friendly handle, the bare hex, OR the cross-harness address
-    # <harness>-<short8> (US3, additive). The harness-prefixed form disambiguates
-    # a shortid collision across harnesses (codex-abcd never resolves a claude
-    # row) and is the SAME string the recipient's drain reads, so a resolved send
-    # is always drainable by its recipient.
+    # Match the friendly <project>-<short8> alias, the bare hex, OR the legacy
+    # <harness>-<short8> address. The harness-prefixed form is no longer
+    # generated but stays accepted: it is what old transcripts and memory notes
+    # carry, and it still disambiguates a short-id collision across harnesses
+    # (codex-abcd never resolves a claude row).
     for s in sessions:
         if handle and (
             s.handle == handle
             or s.short_id == handle
-            or canonical_handle(s.agent, s.session_id) == handle
+            or handle in handle_aliases(s.agent, s.session_id)
         ):
             return s, []
     import difflib
 
     candidates: list[str] = []
     for s in sessions:
-        for cand in (s.handle, s.short_id, canonical_handle(s.agent, s.session_id)):
+        for cand in (s.handle, s.short_id, *handle_aliases(s.agent, s.session_id)):
             if cand not in candidates:
                 candidates.append(cand)
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
