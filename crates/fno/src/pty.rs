@@ -17,6 +17,27 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// Serializes every PTY fork in this process.
+///
+/// `spawn_command` forks, then runs a `pre_exec` hook in the child before
+/// `exec`. Only async-signal-safe calls are legal in that window, but
+/// portable-pty's hook calls `close_random_fds`, which reads `/dev/fd` and so
+/// allocates. Forking a MULTITHREADED process while another thread holds the
+/// allocator lock is undefined behaviour, and it surfaces as the child acting on
+/// an inconsistent fd list: `EBADF` from a pty that opened fine, panes that fail
+/// to spawn for no reason. Both our processes are multithreaded - the server
+/// runs tokio, the test binary runs a thread per test - so the forks must not
+/// overlap. Held across the fork only (~1ms), never across the child's life, so
+/// concurrent panes still run concurrently once spawned.
+///
+/// Poison is recovered rather than propagated: one panicking spawn must not turn
+/// every later spawn into a second failure.
+static FORK_LOCK: Mutex<()> = Mutex::new(());
+
+fn fork_guard() -> std::sync::MutexGuard<'static, ()> {
+    FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PtyError {
     #[error("failed to open pty: {0}")]
@@ -96,6 +117,7 @@ impl PtyShell {
         let mut errors = Vec::new();
         let mut child = None;
         let mut shell_rc = None;
+        let fork = fork_guard();
         for cand in candidates {
             let mut cmd = base_command(cand, cwd, session, pane_id);
             let rc = apply_shell_integration(&mut cmd, cand, session, pane_id);
@@ -109,6 +131,7 @@ impl PtyShell {
                 Err(e) => errors.push(format!("{}: {e}", cand.to_string_lossy())),
             }
         }
+        drop(fork);
         let child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
         wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
@@ -140,10 +163,12 @@ impl PtyShell {
         for a in args {
             cmd.arg(a);
         }
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| PtyError::Spawn(format!("{program}: {e}")))?;
+        let child = {
+            let _fork = fork_guard();
+            pair.slave
+                .spawn_command(cmd)
+                .map_err(|e| PtyError::Spawn(format!("{program}: {e}")))?
+        };
         wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
 
