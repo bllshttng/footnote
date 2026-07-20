@@ -326,7 +326,10 @@ so `/review sigma` and `fno review` never disagree:
 ```bash
 # --session-id is optional; pass it when running inside a target session so the
 # implementer-provider (cross-model excludes it) is accurate.
-ROUTING="$(fno review --print-providers ${SESSION_ID:+--session-id "$SESSION_ID"})"
+# An unquoted ${VAR:+...} is bash-only: zsh passes the flag and its value as a
+single argument. The array form behaves identically under both shells.
+SID_ARG=(); [[ -n "${SESSION_ID:-}" ]] && SID_ARG=(--session-id "$SESSION_ID")
+ROUTING="$(fno review --print-providers "${SID_ARG[@]+"${SID_ARG[@]}"}")"
 ```
 
 `$ROUTING` is JSON `{ "<agent_underscore>": {"provider": "claude|codex|gemini",

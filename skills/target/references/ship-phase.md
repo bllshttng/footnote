@@ -99,6 +99,9 @@ if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && -n "${PR_NUMBER:-}" ]]; then
     link_ok=""
     for attempt in 1 2; do
       # Idempotent: re-writing the same PR_NUMBER converges (AC2-FR crash re-run).
+      # The verify+retry below reports a real failure as a promise blocker, so
+      # this swallow is bounded and visible.
+      # lint-ok: fno-mutation-swallowed
       fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" 2>/dev/null || true
       # `|| true`: a failing get (lock contention) must fall through to the retry
       # and ultimately the promise blocker, never abort the shell under set -e.

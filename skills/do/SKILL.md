@@ -93,7 +93,8 @@ if [[ "$LIVE" == live* ]]; then
   if [[ -n "$PLAN_CLAIM" && "$PLAN_CLAIM" != null && -n "$NODE_ID" && "$PLAN_CLAIM" != "$NODE_ID" ]]; then
     echo "do provenance: plan claims '$PLAN_CLAIM' != live node '$NODE_ID' - conflict, skipping do stamp (never guess)." >&2
   elif [[ -n "$NODE_ID" && "$NODE_ID" != null ]]; then
-    fno backlog session add "$NODE_ID" --phase do || true
+    fno backlog session add "$NODE_ID" --phase do \
+      || echo "do: session add failed for $NODE_ID (non-fatal, provenance not stamped)" >&2
   fi
 fi
 ```

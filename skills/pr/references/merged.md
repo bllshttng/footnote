@@ -338,16 +338,23 @@ exactly one same-repo PR-linked node and warns+skips on zero or multiple
 (Locked Decision 9: never fan out):
 
 ```bash
-# --repo scopes resolution to THIS repo: pr_number is not unique across repos in
-# the cross-project graph, so a bare number fans out to `ambiguous` and skips
-# (x-d5f9). A gh miss degrades to a bare number - a safe skip, never a wrong stamp.
-REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
-fno backlog session add --pr-number "$PR" ${REPO_SLUG:+--repo "$REPO_SLUG"} --phase ship || true
+fno backlog session add --pr-number "$PR" --phase ship \
+  || { echo "post-merge: backlog session add failed" >&2; FAILURES+=("backlog session add"); }
 ```
 
+The verb resolves THIS repo's slug itself (git origin, then `gh`), so the
+snippet carries no conditional expansion - the previous
+`${REPO_SLUG:+--repo "$REPO_SLUG"}` form word-split under bash but not under
+zsh, where the CLI received one joined argument, rejected it, and the trailing
+`|| true` swallowed the rejection (x-f47f). Scoping matters because `pr_number`
+is not unique across repos in the cross-project graph (x-d5f9); an unresolvable
+slug degrades to the bare number, which is a safe skip, never a wrong stamp.
+
 Harness + session id default from the ambient identity; idempotent (this exact
-session's `ship` entry is added once) and best-effort - a missing-identity,
-no-match, or ambiguous-PR warning skips silently and never blocks the ritual.
+session's `ship` entry is added once). A no-match or ambiguous PR is a *designed
+skip*, so the verb warns and exits 0 - it does not enter `FAILURES`. A non-zero
+exit here is a real failure (missing identity, unwritable graph) and must show
+up on the Step 7 `Failures:` line.
 
 ## Step 3: Mechanical triage harvest
 
@@ -565,32 +572,29 @@ consumes them), so they SURVIVE here for this slot to handle.
 **Scope to THIS PR's session(s) first.** The canonical ledger may hold backfills
 from several concurrent target sessions; this slot must only handle the ones the
 merged PR's build session declared, never another PR's (consuming/filing those
-under the wrong PR/project). Resolve the owning session(s) from `ledger.json`
-(which records `pr_number` / `pr_url` per session), then pass them to `list`:
+under the wrong PR/project). The verb does the `ledger.json` join itself:
 
 ```bash
-LEDGER_JSON="$(fno state path ledger || true)"   # fno.paths-resolved; honors config.paths.ledger_json (fail-open under set -e)
-SESSIONS=$(jq -r --argjson pr "$PR" '
-  .entries[]
-  | select((.pr_number == $pr) or ((.pr_url // "") | test("/" + ($pr|tostring) + "$")))
-  | ((.sessions // []) + [.session_id])[]
-' "$LEDGER_JSON" 2>/dev/null | grep -vxE 'null|' | sort -u)
-
-SESS_ARGS=(); for s in $SESSIONS; do SESS_ARGS+=(--session-id "$s"); done
-if [[ ${#SESS_ARGS[@]} -gt 0 ]]; then
-  fno carveout list --kind backfill "${SESS_ARGS[@]}" --json
-else
-  # No session resolves for this PR (manual merge with no ledger record, or a
-  # pre-ledger PR). Do NOT consume cross-session backfills under this PR: list
-  # them informationally only, and do NOT `resolve` any in this case.
-  echo "post-merge: no owning session resolved for PR #$PR; backfills (if any) shown read-only, not consumed:" >&2
-  fno carveout list --kind backfill --json
-fi
+BACKFILLS="$(fno carveout list --kind backfill --pr-number "$PR" --json)" \
+  || { echo "post-merge: carveout list failed" >&2; FAILURES+=("carveout list"); }
 ```
 
-Each line is one carve-out (`{id, need, description, priority, session_id, ...}`).
-When the session scoping succeeded (the `SESS_ARGS` branch), handle each as
-below; in the fallback branch present them read-only and skip the `resolve` step.
+One JSON object: `{pr_number, sessions_resolved, reason, consumable, carveouts}`.
+This replaced a jq pipeline whose `grep -vxE 'null|'` filter ugrep rejects
+outright (x-f47f); that made an unreadable ledger, an unresolvable repo, and a
+genuine no-match all produce the same empty variable, so a PR with a real ledger
+entry silently took the read-only branch. Now each has a distinct `reason`.
+
+Branch on `consumable`, and NEVER on an empty variable:
+
+- **`consumable: true`** - `sessions_resolved` owns this PR. Handle each entry in
+  `carveouts` as below, then `resolve` it.
+- **`consumable: false`** - print `reason` verbatim (e.g. `no ledger entry for
+  PR #480`), list the carve-outs read-only, and `resolve` NOTHING. Consuming
+  another PR's backfill under this one is the failure this branch prevents.
+
+Each entry in `carveouts` is one carve-out
+(`{id, need, description, priority, session_id, ...}`).
 **This slot NEVER auto-runs a backfill on mere detection** (a backfill that lands
 via two paths - operator-run AND this slot - would double-apply):
 

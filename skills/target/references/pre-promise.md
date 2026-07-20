@@ -104,6 +104,9 @@ if [[ -n "${NODE_ID:-}" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then
   got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
   if [[ "$got" != "$PR_NUMBER" ]]; then
     echo "pre-promise: node $NODE_ID pr_number=$got != PR #$PR_NUMBER; re-linking" >&2
+    # The read-back below turns a failure into a printed reason and a promise
+    # blocker, so this swallow is bounded and never invisible.
+    # lint-ok: fno-mutation-swallowed
     fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" 2>/dev/null || true
     got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
     if [[ "$got" != "$PR_NUMBER" ]]; then
