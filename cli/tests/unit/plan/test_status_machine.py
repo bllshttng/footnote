@@ -16,7 +16,7 @@ class TestStatusProgression:
             "design",
             "ready",
             "in_progress",
-            "in_review",
+            "shipped",
         )
 
     def test_progression_is_tuple(self):
@@ -86,15 +86,9 @@ class TestValidateTransition:
 
     def test_AC4_EDGE_error_message_is_informative(self):
         with pytest.raises(StatusTransitionError) as exc_info:
-            validate_transition("in_review", "ready")
-        assert "in_review" in str(exc_info.value)
+            validate_transition("shipped", "ready")
+        assert "shipped" in str(exc_info.value)
         assert "ready" in str(exc_info.value)
-
-    def test_legacy_shipped_is_read_as_in_review(self):
-        """Vault docs stamped with the pre-x-5d91 vocabulary keep working."""
-        validate_transition("in_progress", "shipped")  # synonym of in_review
-        with pytest.raises(StatusTransitionError):
-            validate_transition("shipped", "ready")  # still a backward move
 
 
 class TestCoerceStatusFromYaml:

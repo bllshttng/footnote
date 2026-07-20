@@ -1,16 +1,16 @@
 """Frontmatter status state machine for lean single-doc plan architecture.
 
 Enforces the monotonic progression:
-    design -> ready -> in_progress -> in_review
+    design -> ready -> in_progress -> shipped
 
-This is the SAME ladder the graph `_status` speaks (x-5d91), not a parallel
-dialect: idea -> design -> ready -> in_progress -> in_review -> done, with
-blocked/deferred/superseded orthogonal. `idea` has no plan doc so it never
-appears here, and `done`/`archived` are off-axis terminals.
+Tracks the same lifecycle ladder the graph `_status` speaks, with `shipped` as
+the plan-side name for the graph's `in_review` rung (GRAPH_TO_PLAN_STATUS is
+the alignment layer). `idea` has no plan doc so it never appears here, and
+`done`/`archived` are off-axis terminals.
 
-`reviewing`/`shipping` were pruned (x-f34f); `shipped` was renamed to
-`in_review` (x-5d91). All are folded in as read-time synonyms, so vault docs
-carrying the old vocabulary keep working untouched.
+`reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
+graph has no derived state that distinguishes them, so they never got written.
+The reconcile sweep now folds them into `shipped` as Tier-1 synonyms.
 
 Backward transitions, identity transitions, and unknown statuses all raise
 StatusTransitionError. No silent fallbacks.
@@ -24,15 +24,8 @@ STATUS_PROGRESSION: tuple[str, ...] = (
     "design",
     "ready",
     "in_progress",
-    "in_review",
+    "shipped",
 )
-
-# Legacy plan-frontmatter statuses -> current vocabulary. `shipped` was renamed
-# to `in_review` so the plan axis and the graph `_status` vocabulary are the one
-# lifecycle ladder (design -> ready -> in_progress -> in_review -> done) rather
-# than two dialects needing translation. Vault docs stamped `shipped` are read
-# as `in_review`; nothing needs rewriting on disk.
-PLAN_STATUS_SYNONYMS: dict[str, str] = {"shipped": "in_review"}
 
 # Off-axis terminals: written directly (graduate stamps `done`; the status
 # sweep stamps `archived`), NOT part of the monotonic axis. Inserting either
@@ -55,7 +48,7 @@ GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
     "in_progress": "in_progress",
     "claimed": "in_progress",  # legacy graph vocabulary, pre-x-5d91 rows
     "blocked": None,  # graph-side gate; plan keeps its current state
-    "in_review": "in_review",  # PR open = implementation complete
+    "in_review": "shipped",  # PR open = implementation complete
     "done": "done",  # merged
     "superseded": "archived",
     "deferred": None,  # pause is reversible; plan state stands
@@ -68,25 +61,20 @@ _PROJECTION_RANK: dict[str, int] = {
     "design": 0,
     "ready": 1,
     "in_progress": 2,
-    "in_review": 3,
+    "shipped": 3,
     "done": 4,
 }
 
 
 def _norm_status(raw: object) -> str:
-    """Bare lowercase token from a raw frontmatter status value.
-
-    Folds legacy synonyms (see PLAN_STATUS_SYNONYMS) so a vault doc stamped
-    with the old vocabulary compares equal to its current name.
-    """
-    token = str(raw if raw is not None else "").strip().strip("'\"").lower()
-    return PLAN_STATUS_SYNONYMS.get(token, token)
+    """Bare lowercase token from a raw frontmatter status value."""
+    return str(raw if raw is not None else "").strip().strip("'\"").lower()
 
 
 def project_plan_status(current: object, graph_status: str) -> Optional[str]:
     """Plan status to WRITE for a node in ``graph_status``, or None to leave it.
 
-    Forward-only along design < ready < in_progress < in_review < done. Returns
+    Forward-only along design < ready < in_progress < shipped < done. Returns
     None when the graph status maps to no write, the target equals the current
     status, or the target would be a backward move (graph wins forward, a human
     hand-edit wins backward). ``archived`` is written over any non-terminal
@@ -121,8 +109,6 @@ def validate_transition(old: str, new: str) -> None:
 
     Allow: forward transitions (new index > old index) by any number of steps.
     """
-    old = _norm_status(old)
-    new = _norm_status(new)
     if old not in STATUS_PROGRESSION:
         raise StatusTransitionError(
             f"Unknown status {old!r}. Valid statuses: {list(STATUS_PROGRESSION)}"
@@ -172,7 +158,7 @@ def coerce_status_from_yaml(value: Any) -> str:
     if isinstance(value, bool):
         coerced = str(value).lower()  # True -> "true", False -> "false"
     else:
-        coerced = _norm_status(value)
+        coerced = str(value)
 
     if coerced not in STATUS_PROGRESSION:
         raise StatusTransitionError(

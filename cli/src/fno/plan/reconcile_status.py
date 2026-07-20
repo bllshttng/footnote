@@ -4,7 +4,7 @@ Plans stay FLAT in the plans dir; an Obsidian Base filters by frontmatter
 ``status``. Drifted or blank statuses lie to that Base, so this one-shot-then-
 idempotent sweep rewrites them to the canonical vocabulary (x-ff83 W2):
 
-    axis:      design ready in_progress in_review
+    axis:      design ready in_progress shipped
     terminals: done archived   (off-axis, written directly)
 
 Three tiers. Tier 1 is a pure synonym rewrite (no history needed). Tier 2 (blank
@@ -46,9 +46,8 @@ _TIER1: dict[str, str] = {
     "idea": "design",
     "ready-for-blueprint": "design",
     "design-locked": "ready",
-    "reviewing": "in_review",  # pruned axis states (x-f34f)
-    "shipping": "in_review",
-    "shipped": "in_review",  # renamed axis state (x-5d91)
+    "reviewing": "shipped",  # pruned axis states (x-f34f) fold into shipped
+    "shipping": "shipped",
     "superseded": "archived",
     "superseded-by-implementation": "archived",
 }
