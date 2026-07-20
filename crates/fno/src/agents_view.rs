@@ -728,7 +728,14 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         // transport key), so this must be claude-scoped: a codex/gemini row's
         // short_id is a daemon socket key, not a claude attach target. A legacy
         // `claude_short_id` row is tolerated as a fallback (raw read, no backfill).
-        let is_claude = row.get("provider").and_then(|v| v.as_str()) == Some("claude");
+        // Registry v10 renamed this axis to `harness` and dropped `provider`
+        // from disk; reading only the departed key silently un-attached every
+        // live row, because the fixtures here still wrote the pre-v10 shape.
+        let is_claude = row
+            .get("harness")
+            .or_else(|| row.get("provider"))
+            .and_then(|v| v.as_str())
+            == Some("claude");
         let attach_id = is_claude
             .then(|| {
                 row.get("short_id")
@@ -738,12 +745,15 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             })
             .flatten()
             .map(str::to_string);
-        // (x-9c5f) The `spawn --resume` uuid for the peek `r` respawn: claude
-        // rows only (the registry writes it null on codex), so uuid presence
-        // alone gates respawn eligibility in the server arm.
+        // (x-9c5f) The `spawn --resume` uuid for the peek `r` respawn, and the
+        // transcript key for the extended table's message tail. Claude rows
+        // only: a codex row's session id is not a claude transcript name. v10
+        // moved it to `harness_session_id`; `claude_session_uuid` is the legacy
+        // pre-v10 spelling.
         let claude_session_uuid = is_claude
             .then(|| {
-                row.get("claude_session_uuid")
+                row.get("harness_session_id")
+                    .or_else(|| row.get("claude_session_uuid"))
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
             })
@@ -1312,6 +1322,31 @@ mod tests {
         assert_eq!(bg.attach_id.as_deref(), Some("c19cd2c3"));
         let plain = rows.iter().find(|r| r.name == "plain").unwrap();
         assert_eq!(plain.attach_id, None, "no jobId -> not attachable");
+    }
+
+    #[test]
+    fn claude_identity_reads_the_v10_harness_field() {
+        // Registry v10 deleted `provider` and `claude_session_uuid` from disk in
+        // favour of `harness` / `harness_session_id`. Gating claude-only fields
+        // on the departed `provider` key made EVERY live row non-attachable
+        // while the pre-v10 fixtures above kept passing.
+        let raw = reg(
+            r#"{"name":"bg","cwd":"/w","status":"live","harness":"claude",
+                "short_id":"c19cd2c3","harness_session_id":"346f5d0d-9840-473c-af21-eaf100ca9ec2"},
+               {"name":"cx","cwd":"/w","status":"live","harness":"codex",
+                "short_id":"sockkey1","harness_session_id":"0199f0c0-1111-2222-3333-444455556666"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let bg = rows.iter().find(|r| r.name == "bg").unwrap();
+        assert_eq!(bg.attach_id.as_deref(), Some("c19cd2c3"));
+        assert_eq!(
+            bg.claude_session_uuid.as_deref(),
+            Some("346f5d0d-9840-473c-af21-eaf100ca9ec2")
+        );
+        // A codex row's short_id is a daemon socket key, never an attach target.
+        let cx = rows.iter().find(|r| r.name == "cx").unwrap();
+        assert_eq!(cx.attach_id, None);
+        assert_eq!(cx.claude_session_uuid, None);
     }
 
     #[test]
