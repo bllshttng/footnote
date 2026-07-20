@@ -69,6 +69,30 @@ def test_attended_line_from_manifest() -> None:
     assert orient._attended_line({"attended": False}).startswith("false")
 
 
+def test_attended_line_authority_grant(monkeypatch) -> None:
+    # x-6390: `/target yolo` stamps `authority: full`; the orienter surfaces it
+    # on the attended line so /think and /blueprint read one posture, not two.
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "held")
+    raw = {"attended": False, "authority": "full", "target_claim_key": "node:x-1"}
+    assert "authority: full" in orient._attended_line(raw)
+    assert "authority" not in orient._attended_line({"attended": False})
+
+
+def test_attended_line_dead_manifest_never_grants_authority(monkeypatch) -> None:
+    # x-4af4 liveness lesson: a defunct session's stamped grant must not survive
+    # it. Dead manifest resolves to plain attended -- no authority, no autonomy.
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "stale")
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    raw = {
+        "attended": False,
+        "authority": "full",
+        "target_claim_key": "node:x-1",
+        "owner_pid": "999999",
+    }
+    line = orient._attended_line(raw)
+    assert line.startswith("true") and "authority" not in line
+
+
 def test_attended_line_substrate(monkeypatch) -> None:
     monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
     monkeypatch.delenv("FNO_BG", raising=False)

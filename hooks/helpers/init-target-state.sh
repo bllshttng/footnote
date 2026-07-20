@@ -881,6 +881,11 @@ EOF
     _budget_lines="${_budget_lines}budget_cost_cap_usd: ${_budget_cost}"$'\n'
   fi
 
+  # Authority grant (`/target yolo`): omitted unless granted, so absence is the
+  # default posture and no existing manifest reader changes behavior.
+  _authority_line=""
+  [[ "${TARGET_YOLO:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
+
   cat > "$local_temp" << EOF
 ---
 # fno_id = target-minted run id (canonical). session_id mirrors it for one
@@ -930,7 +935,7 @@ has_ui: $has_ui
 # Attended / advisory inputs (consumed by fno-agents loop-check)
 attended: $_attended
 advisory: $_advisory
-${_budget_lines}# Auto-merge inputs
+${_authority_line}${_budget_lines}# Auto-merge inputs
 auto_merge_enabled: $AUTO_MERGE_ENABLED
 auto_merge_approved: $AUTO_MERGE_APPROVED
 # Mission context

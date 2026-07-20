@@ -296,6 +296,14 @@ def init(
         help="Pin a provider for this session's dispatched workers. Absent, the "
         "spawn path infers it from the invoking harness at dispatch time.",
     ),
+    yolo: bool = typer.Option(
+        False,
+        "--yolo",
+        help="Grant walk-away authority (writes `authority: full` to the "
+        "manifest). Judgment calls that would emit <help> and stall are decided "
+        "and recorded to an Autonomous Decisions ledger instead. Never grants "
+        "irreversibles - merge stays on the --auto-merge axis.",
+    ),
 ) -> None:
     """Bootstrap a target session via the canonical init script.
 
@@ -435,6 +443,8 @@ def init(
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
     if dispatch_provider:
         env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
+    if yolo:
+        env["TARGET_YOLO"] = "1"
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if result.returncode == 0:
@@ -825,6 +835,10 @@ def start(
         None, "--provider", "-p",
         help="Pin a provider for this session's dispatched workers (forwarded to init).",
     ),
+    yolo: bool = typer.Option(
+        False, "--yolo",
+        help="Grant walk-away authority for this session (forwarded to init).",
+    ),
 ) -> None:
     """Cold-start a worktree-isolated target session in ONE verb.
 
@@ -966,6 +980,8 @@ def start(
         init_cmd += ["--model", model]
     if provider:
         init_cmd += ["--provider", provider]
+    if yolo:
+        init_cmd += ["--yolo"]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
         typer.echo(
