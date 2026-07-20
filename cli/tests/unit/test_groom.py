@@ -386,3 +386,12 @@ def test_install_bounces_rather_than_loads(tmp_path, monkeypatch):
     assert r["status"] == "installed"
     assert called["label"] == G.GROOM_LABEL
     assert (tmp_path / f"{G.GROOM_LABEL}.plist").exists()
+
+
+def test_skill_reads_fresh_proposals_and_reports_the_mechanical_line():
+    # The pass-to-pass interface is the live verb, not a file: a digest is what
+    # went stale for ten days unnoticed.
+    text = SKILL.read_text()
+    assert "fno backlog maintain" in text
+    assert "Mechanical" in text
+    assert "groom-digest" not in text, "the digest is retired; the skill must not resurrect it"
