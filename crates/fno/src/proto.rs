@@ -953,12 +953,9 @@ impl BacklogVerb {
     /// caller. Fixed literals: nothing here is derived from operator text.
     pub fn args(self, node: &str) -> Vec<String> {
         match self {
-            BacklogVerb::RankTop => vec![
-                "backlog".into(),
-                "rank".into(),
-                node.into(),
-                "--top".into(),
-            ],
+            BacklogVerb::RankTop => {
+                vec!["backlog".into(), "rank".into(), node.into(), "--top".into()]
+            }
             BacklogVerb::Defer => vec!["backlog".into(), "defer".into(), node.into()],
         }
     }
@@ -2037,6 +2034,10 @@ mod tests {
                         pane_id: Some(7),
                         attach_id: None,
                         where_hint: None,
+                        // (v36) attribution + on-deck ride the same frame.
+                        project: Some("fno".into()),
+                        lane: Some("in-progress".into()),
+                        next: false,
                     },
                     BacklogCard {
                         id: "ab-53c0".into(),
@@ -2046,8 +2047,12 @@ mod tests {
                         pane_id: None,
                         attach_id: None,
                         where_hint: None,
+                        project: None,
+                        lane: None,
+                        next: true,
                     },
                 ],
+                backlog_total: 57,
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

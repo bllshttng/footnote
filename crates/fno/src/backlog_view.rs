@@ -2,7 +2,7 @@
 //!
 //! Sibling of [`crate::agents_view`]: an off-loop interval task (in server.rs)
 //! parses `~/.fno/graph.json` and hands the core loop a board-ordered card set
-//! the sideline renders under a "work queue" header. Same discipline as the
+//! the sideline renders under the "Backlog" header. Same discipline as the
 //! registry reader - the core loop and the render path never touch the file;
 //! the mtime+len gate skips the 4M read until the graph actually changes (a
 //! claim/close mutation bumps mtime, so a card flips to in-flight for free).
@@ -597,7 +597,14 @@ mod tests {
         let mut st = ReaderState::default();
         let good = graph(r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s1 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
-        assert_eq!(st.tick(s1, || Some(good.clone()), None).unwrap().0.len(), 1);
+        assert_eq!(
+            st.tick(s1, || Some(good.clone()), None)
+                .unwrap()
+                .0
+                .cards
+                .len(),
+            1
+        );
         // A changed stamp but a torn (None) read keeps the last-good card AND
         // does not commit the new stamp, so the read is retried next tick.
         let s2 = Some((std::time::SystemTime::UNIX_EPOCH, 999));
@@ -608,7 +615,83 @@ mod tests {
             r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"},
                {"id":"b","slug":"t","priority":"p2","_status":"blocked"}"#,
         );
-        assert_eq!(st.tick(s2, || Some(two.clone()), None).unwrap().0.len(), 2);
+        assert_eq!(
+            st.tick(s2, || Some(two.clone()), None)
+                .unwrap()
+                .0
+                .cards
+                .len(),
+            2
+        );
+    }
+
+    // ---- attribution, on-deck, and the uncapped total (x-1d91) -------------
+
+    #[test]
+    fn attribution_reads_project_and_kanban_column() {
+        // The lane is `_kanban_column` (the board's sole column authority), and
+        // a blank/absent value is None rather than an empty label.
+        let raw = graph(
+            r#"{"id":"x-a","slug":"a","priority":"p1","_status":"ready","project":"fno","_kanban_column":"ready"},
+               {"id":"x-b","slug":"b","priority":"p2","_status":"ready","_kanban_column":"  "}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let by = |id: &str| cards.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(by("x-a").project.as_deref(), Some("fno"));
+        assert_eq!(by("x-a").lane.as_deref(), Some("ready"));
+        assert_eq!(by("x-b").project, None, "unscoped -> no project half");
+        assert_eq!(by("x-b").lane, None, "whitespace column -> no lane half");
+    }
+
+    #[test]
+    fn on_deck_is_the_first_ready_card_only() {
+        // AC1-HP: exactly one `next`, on the first READY card in board order -
+        // an in-flight card ahead of it never takes the marker.
+        let raw = graph(
+            r#"{"id":"x-fly","slug":"f","priority":"p0","_status":"claimed","project":"fno"},
+               {"id":"x-r1","slug":"r1","priority":"p1","_status":"ready","project":"fno"},
+               {"id":"x-r2","slug":"r2","priority":"p2","_status":"ready","project":"fno"}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let marked: Vec<&str> = cards
+            .iter()
+            .filter(|c| c.next)
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(marked, ["x-r1"], "one on-deck card, the first ready one");
+    }
+
+    #[test]
+    fn claiming_the_on_deck_card_hands_the_marker_down() {
+        // The overlay can flip on-deck to InFlight; the section must then point
+        // at the next card that is genuinely up for grabs, not at work already
+        // running.
+        let mut st = ReaderState::default();
+        let raw = graph(
+            r#"{"id":"x-r1","slug":"r1","priority":"p1","_status":"ready","project":"fno"},
+               {"id":"x-r2","slug":"r2","priority":"p2","_status":"ready","project":"fno"}"#,
+        );
+        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
+        assert!(first.cards[0].next && !first.cards[1].next);
+        let claimed = live(&[("x-r1", "target-session:abc")]);
+        let after = st.tick(s, || None, Some(&claimed)).unwrap().0;
+        assert!(
+            !after.cards[0].next && after.cards[1].next,
+            "the marker moves to the next ready card"
+        );
+    }
+
+    #[test]
+    fn total_counts_the_whole_board_not_the_capped_list() {
+        // AC5-EDGE: the section's `+N more` needs the uncapped count, so `total`
+        // must survive the cap.
+        let nodes: Vec<String> = (0..CARD_CAP + 7)
+            .map(|i| format!(r#"{{"id":"x-{i}","slug":"s{i}","priority":"p2","_status":"ready"}}"#))
+            .collect();
+        let q = derive_queue(&graph(&nodes.join(","))).unwrap();
+        assert_eq!(q.cards.len(), CARD_CAP, "the wire frame stays bounded");
+        assert_eq!(q.total, CARD_CAP + 7, "but the count is the whole board");
     }
 
     #[test]
@@ -687,17 +770,17 @@ mod tests {
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
-        assert_eq!(first[0].state, CardState::Ready);
+        assert_eq!(first.cards[0].state, CardState::Ready);
         // Claim appears: same stamp, no re-read, card republishes InFlight.
         let claimed = live(&[("x-a", "target-session:abc")]);
         let flipped = st.tick(s, || None, Some(&claimed)).unwrap().0;
-        assert_eq!(flipped[0].state, CardState::InFlight);
+        assert_eq!(flipped.cards[0].state, CardState::InFlight);
         // Unchanged claim set: no republish.
         assert!(st.tick(s, || None, Some(&claimed)).is_none());
         // Claim released: card reverts to Ready and republishes.
         let released = live(&[]);
         let reverted = st.tick(s, || None, Some(&released)).unwrap().0;
-        assert_eq!(reverted[0].state, CardState::Ready);
+        assert_eq!(reverted.cards[0].state, CardState::Ready);
     }
 
     #[test]
@@ -711,7 +794,7 @@ mod tests {
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(
-            first[0].state,
+            first.cards[0].state,
             CardState::InFlight,
             "graph-native in-flight"
         );

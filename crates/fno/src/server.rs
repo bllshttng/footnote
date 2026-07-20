@@ -9122,6 +9122,9 @@ mod tests {
             pane_id: None,
             attach_id: None,
             where_hint: None,
+            project: None,
+            lane: None,
+            next: false,
         };
         let backlog = [
             card("x-rdy", "ready-slug", CardState::Ready),
@@ -9300,6 +9303,9 @@ mod tests {
             pane_id: None,
             attach_id: None,
             where_hint: None,
+            project: None,
+            lane: None,
+            next: false,
         };
         let mut core = empty_core();
         core.backlog = vec![
@@ -9364,6 +9370,9 @@ mod tests {
                 pane_id: None,
                 attach_id: None,
                 where_hint: None,
+                project: None,
+                lane: None,
+                next: false,
             },
             BacklogCard {
                 id: "x-rdy".into(),
@@ -9373,6 +9382,9 @@ mod tests {
                 pane_id: None,
                 attach_id: None,
                 where_hint: None,
+                project: None,
+                lane: None,
+                next: false,
             },
         ];
         core.agents = vec![bg_row("tgt-x-aaa", "/w", Some("deadbee1"))];
@@ -9410,6 +9422,9 @@ mod tests {
             pane_id: None,
             attach_id: None,
             where_hint: None,
+            project: None,
+            lane: None,
+            next: false,
         }];
         // Nothing known at all: the default copy.
         assert_eq!(
@@ -10280,6 +10295,7 @@ mod tests {
             agents: Vec::new(),
             branch_by_cwd: HashMap::new(),
             backlog: Vec::new(),
+            backlog_total: 0,
             backlog_holders: HashMap::new(),
             backlog_pr: HashMap::new(),
             missions: backlog_view::MissionMap::default(),
