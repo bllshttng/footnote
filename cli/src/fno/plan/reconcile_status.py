@@ -149,12 +149,24 @@ def _plan_link_id(frontmatter: dict) -> Optional[str]:
     """The node id a plan links to: ``node``, then ``claims``, then
     ``graph_node_id`` (the legacy fallbacks stay for one release, until the
     US7 migration collapses the synonym keys).
+
+    Callers use the result as a dict key and a set member, so it must be a
+    string or None: some doc-generating paths write a one-element list
+    (``claims: [x-1d91]``), which unwraps here rather than raising TypeError
+    deep in the sweep. Anything else - a multi-node list, a mapping, an empty
+    list - reads as unlinked, since no single node owns the plan's status and
+    guessing one would rewrite on ambiguous evidence.
     """
-    return (
+    raw = (
         frontmatter.get("node")
         or frontmatter.get("claims")
         or frontmatter.get("graph_node_id")
     )
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], str):
+        return raw[0]
+    return None
 
 
 def _default_signal(frontmatter: dict) -> bool:

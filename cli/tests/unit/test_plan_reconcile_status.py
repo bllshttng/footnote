@@ -234,3 +234,36 @@ def test_cli_verb_registered_and_prints_summary(tmp_path: Path):
     assert "1 normalized" in result.output
     assert "[dry-run]" in result.output  # default is dry-run
     assert "PENDING" in (tmp_path / "a.md").read_text()  # not written
+
+
+# --- link normalization: a list-valued node link must not crash the sweep ----
+# A doc-generating path can emit `claims: [x-1d91]` (a one-element YAML list)
+# where a scalar is expected. The raw value used to reach `status_map.get(link)`
+# and `link in frozenset(...)`, both of which raise TypeError on an unhashable
+# list and take down the whole reconcile-status sweep.
+
+
+def test_plan_link_id_unwraps_single_element_list():
+    from fno.plan.reconcile_status import _plan_link_id
+
+    assert _plan_link_id({"claims": ["x-1d91"]}) == "x-1d91"
+    assert _plan_link_id({"node": ["x-aa95"]}) == "x-aa95"
+
+
+def test_plan_link_id_returns_none_for_unusable_link_shapes():
+    from fno.plan.reconcile_status import _plan_link_id
+
+    # Ambiguous (which node owns the status?) and malformed shapes both read as
+    # unlinked, matching the module's never-rewrite-on-absent-evidence stance.
+    assert _plan_link_id({"claims": ["x-1d91", "x-aa95"]}) is None
+    assert _plan_link_id({"claims": []}) is None
+    assert _plan_link_id({"claims": {"id": "x-1d91"}}) is None
+    assert _plan_link_id({"claims": [{"id": "x-1d91"}]}) is None
+
+
+def test_plan_link_id_hashable_so_lookups_never_raise():
+    from fno.plan.reconcile_status import _plan_link_id
+
+    link = _plan_link_id({"claims": ["x-1d91"]})
+    assert {"x-1d91": "done"}.get(link) == "done"
+    assert link in frozenset({"x-1d91"})
