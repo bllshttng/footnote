@@ -1643,11 +1643,11 @@ impl View {
         self.backlog_pending.as_ref().is_some_and(|p| p.node == id)
     }
 
-    /// Arm the pending marker for a dispatched reorder verb, snapshotting the
-    /// card set that must change for the verb to count as confirmed. Returns
-    /// `false` when one is already in flight - the double-press guard, so a
-    /// second Enter on the same card cannot fire a duplicate shellout (and a
-    /// no-op second `rank --top` cannot churn the graph).
+    /// Arm the pending marker for a dispatched reorder verb, snapshotting what
+    /// the TARGET card looked like at dispatch. Returns `false` when one is
+    /// already in flight - the double-press guard, so a second Enter on the same
+    /// card cannot fire a duplicate shellout (and a no-op second `rank --top`
+    /// cannot churn the graph).
     fn arm_backlog_pending(&mut self, node: &str, verb: BacklogVerb) -> bool {
         if self.backlog_pending.is_some() {
             return false;
@@ -1655,24 +1655,41 @@ impl View {
         self.backlog_pending = Some(BacklogPending {
             node: node.to_string(),
             verb,
-            snapshot: self.layout.backlog.clone(),
+            was: card_mark(&self.layout.backlog, node),
             deadline: Instant::now() + BACKLOG_PENDING_TTL,
         });
         true
     }
 
-    /// Clear the pending marker once the feed confirms the verb landed: the card
-    /// set differs from the dispatch-time snapshot. Called with the INCOMING
-    /// backlog before it is stored. No-op while the set is unchanged, so the
-    /// marker survives the scrape ticks that carry no backlog news.
+    /// Clear the pending marker once the feed confirms THIS verb landed: the
+    /// target card's own position or state changed, or it left the feed (what a
+    /// successful defer looks like). Called with the INCOMING backlog before it
+    /// is stored.
+    ///
+    /// Deliberately narrower than "the card set changed at all": claims and
+    /// routing fields churn the set on unrelated cards every few seconds, so a
+    /// whole-set comparison would clear the marker on someone else's news and
+    /// release the single-flight guard while this verb was still running - a
+    /// false confirmation, which is the one thing this marker exists to prevent.
     fn confirm_backlog_pending(&mut self, incoming: &[BacklogCard]) {
-        if self
+        let landed = self
             .backlog_pending
             .as_ref()
-            .is_some_and(|p| p.snapshot != incoming)
-        {
+            .is_some_and(|p| card_mark(incoming, &p.node) != p.was);
+        if landed {
             self.backlog_pending = None;
         }
+    }
+
+    /// Clear the pending marker because the verb reported its own outcome. The
+    /// server routes each verb's verdict back as one notice to the requesting
+    /// client, so a notice arriving mid-verb is that verdict: the marker must go
+    /// rather than spin out its full timeout and then replace a specific failure
+    /// ("rank x-a: lock contention") with a generic one. Clearing early on an
+    /// unrelated notice is harmless - the rendered order is never optimistic, so
+    /// the marker is the only thing at stake.
+    fn settle_backlog_pending_on_notice(&mut self) {
+        self.backlog_pending = None;
     }
 
     /// The pending marker's expiry deadline, for the select loop's timer arm.
@@ -3859,8 +3876,9 @@ enum DisplayRow<'a> {
 struct BacklogPending {
     node: String,
     verb: BacklogVerb,
-    /// The card set as of dispatch; a differing set means the feed confirmed.
-    snapshot: Vec<BacklogCard>,
+    /// What the target card looked like at dispatch; a different mark means the
+    /// feed confirmed THIS verb (see [`card_mark`]).
+    was: Option<(usize, CardState, Option<String>)>,
     deadline: Instant,
 }
 
@@ -3869,6 +3887,20 @@ struct BacklogPending {
 /// many refreshes' worth of grace - long enough that a slow verb is not called
 /// lost, short enough that a stuck row is never mistaken for a live one.
 const BACKLOG_PENDING_TTL: Duration = Duration::from_secs(10);
+
+/// (x-1d91) What a Backlog card looks like for confirmation purposes: its
+/// position, state, and lane, or `None` when it is not in the feed at all.
+///
+/// Position covers a float (the card moves), lane covers a cross-column move,
+/// state covers a claim, and absence covers a defer (which takes the node off
+/// the board). Everything a v1 verb can do shows up here, and nothing another
+/// card's churn can do does.
+fn card_mark(cards: &[BacklogCard], node: &str) -> Option<(usize, CardState, Option<String>)> {
+    cards
+        .iter()
+        .position(|c| c.id == node)
+        .map(|i| (i, cards[i].state, cards[i].lane.clone()))
+}
 
 /// (x-1d91) A Backlog card's `project · lane` attribution subline, or `None` when
 /// the card carries neither (an unscoped, unlaned node says nothing worth a
@@ -5166,6 +5198,12 @@ async fn attach_and_run(
                     }
                 }
                 Ok(ServerMsg::Notice { text }) => {
+                    // (x-1d91) A dispatched reorder verb reports its outcome as
+                    // exactly this notice, so a notice arriving mid-verb settles
+                    // the `…` marker. Without this a FAILED verb left the card
+                    // spinning and every further verb blocked until the timeout,
+                    // which then overwrote the real reason with a generic one.
+                    view.settle_backlog_pending_on_notice();
                     view.set_notice(text);
                     let _ = raw_out(b"\x07");
                     if let Err(e) = compositor.draw(&view.compose()) {
@@ -12282,9 +12320,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_clears_only_when_the_feed_actually_changes() {
-        // AC3-UI: layouts push on every scrape tick, so an unchanged card set
-        // must NOT count as confirmation - only a changed one does.
+    fn pending_clears_only_when_the_target_card_itself_moves() {
+        // AC3-UI + Concurrency: layouts push on every scrape tick, and claims
+        // churn OTHER cards constantly. Only the target card's own movement is
+        // confirmation - anything looser is a false confirm, which both lies to
+        // the operator and releases the single-flight guard mid-verb.
         let cards = vec![
             bcard("x-a", CardState::Ready),
             bcard("x-b", CardState::Ready),
@@ -12295,12 +12335,57 @@ mod tests {
         same.backlog = cards.clone();
         v.set_layout(same);
         assert!(v.card_pending("x-a"), "an unchanged feed confirms nothing");
+        // Someone else's card gets claimed: the SET changed, this verb did not.
+        let mut other_churned = two_squad_layout(1);
+        let mut churn = cards.clone();
+        churn[1].state = CardState::InFlight;
+        other_churned.backlog = churn;
+        v.set_layout(other_churned);
+        assert!(
+            v.card_pending("x-a"),
+            "another card's churn is not this verb's confirmation"
+        );
         let mut moved = two_squad_layout(1);
         moved.backlog = vec![cards[1].clone(), cards[0].clone()];
         v.set_layout(moved);
         assert!(
             !v.card_pending("x-a"),
             "the reorder landed -> marker clears"
+        );
+    }
+
+    #[test]
+    fn a_defer_confirms_by_the_card_leaving_the_feed() {
+        // A successful defer takes the node off the board, so absence is what
+        // confirmation looks like for that verb.
+        let cards = vec![
+            bcard("x-a", CardState::Ready),
+            bcard("x-b", CardState::Ready),
+        ];
+        let mut v = backlog_view(cards.clone(), 2);
+        v.arm_backlog_pending("x-a", BacklogVerb::Defer);
+        let mut gone = two_squad_layout(1);
+        gone.backlog = vec![cards[1].clone()];
+        v.set_layout(gone);
+        assert!(
+            !v.card_pending("x-a"),
+            "gone from the board is confirmation"
+        );
+    }
+
+    #[test]
+    fn a_verb_verdict_settles_the_marker_instead_of_spinning() {
+        // AC3-UI: a FAILED verb reports via a notice. Without settling here the
+        // card kept its `…`, every further verb stayed blocked behind the
+        // single-flight guard, and the timeout later replaced the real reason
+        // with a generic one.
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        v.arm_backlog_pending("x-a", BacklogVerb::RankTop);
+        v.settle_backlog_pending_on_notice();
+        assert!(!v.card_pending("x-a"), "the verdict ends the wait");
+        assert!(
+            v.arm_backlog_pending("x-a", BacklogVerb::RankTop),
+            "and the next verb is not blocked behind a stale marker"
         );
     }
 

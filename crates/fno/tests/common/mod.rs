@@ -25,6 +25,15 @@ use fno::proto::{
 use fno::tree::Rect;
 use fno::vt::{frame_text, Pane};
 
+/// One outcome of a read off the fake client's socket. Idle (nothing yet) and
+/// Closed (peer gone) must stay distinct: the wait loops retry on Idle.
+#[allow(dead_code)]
+enum Wire {
+    Msg(ServerMsg),
+    Idle,
+    Closed,
+}
+
 pub struct Scratch(pub PathBuf);
 
 impl Scratch {
@@ -574,23 +583,27 @@ impl FakeClient {
         }
     }
 
-    /// Read the next whole message, or `None` when none is available yet.
+    /// Read the next whole message.
     ///
     /// Resumable by construction: bytes land in `carry` via plain `read` (which
     /// never discards a short read) and a message is decoded only once its whole
-    /// body is buffered. A timeout mid-body is therefore just "not yet" - the
-    /// stream can never lose framing, however the reads happen to split.
-    fn next_msg(&mut self) -> Option<ServerMsg> {
+    /// body is buffered. A timeout mid-body is therefore just [`Wire::Idle`] -
+    /// the stream can never lose framing, however the reads happen to split.
+    ///
+    /// Idle and closed are distinct on purpose: the callers retry on Idle, so
+    /// collapsing the two would spin a closed socket at full tilt until the
+    /// outer deadline and report a timeout where the truth was a disconnect.
+    fn next_msg(&mut self) -> Wire {
         loop {
             if let Some(msg) = self.take_framed() {
-                return Some(msg);
+                return Wire::Msg(msg);
             }
             let mut buf = [0u8; 64 * 1024];
             match self.stream.read(&mut buf) {
-                Ok(0) => return None, // peer closed
+                Ok(0) => return Wire::Closed,
                 Ok(n) => self.carry.extend_from_slice(&buf[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
-                    return None
+                    return Wire::Idle
                 }
                 Err(e) => panic!("fake client read failed: {e}"),
             }
@@ -615,8 +628,10 @@ impl FakeClient {
     pub fn pump(&mut self, dur: Duration) {
         let deadline = Instant::now() + dur;
         while Instant::now() < deadline {
-            if let Some(m) = self.next_msg() {
-                self.absorb(m);
+            match self.next_msg() {
+                Wire::Msg(m) => self.absorb(m),
+                Wire::Idle => {}
+                Wire::Closed => return,
             }
         }
     }
@@ -639,8 +654,10 @@ impl FakeClient {
                         .collect::<Vec<_>>(),
                 );
             }
-            if let Some(m) = self.next_msg() {
-                self.absorb(m);
+            match self.next_msg() {
+                Wire::Msg(m) => self.absorb(m),
+                Wire::Idle => {}
+                Wire::Closed => panic!("server closed the stream while waiting for {what}"),
             }
         }
     }

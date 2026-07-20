@@ -85,9 +85,23 @@ pub struct Queue {
     pub stale: bool,
 }
 
-/// The lane bucket for a card the column mapping excludes. It still needs a home
-/// on the board rather than vanishing from it.
+/// The lane bucket for a card whose column the wire did not carry. Unreachable
+/// from this reader (an excluded node is dropped, never bucketed) - it exists so
+/// a card from an older/other producer still lands somewhere visible.
 pub const UNLANED: &str = "unlaned";
+
+/// Canonical board column order, mirroring `KANBAN_COLUMNS` in
+/// `graph/render.py`: Now leads (genuine today-work), Triage holds the
+/// awaiting-ack queue, Done is terminal.
+const KANBAN_COLUMNS: [&str; 5] = ["Now", "Next", "Later", "Triage", "Done"];
+
+/// A lane's position in [`KANBAN_COLUMNS`]; anything unrecognized sorts last.
+fn lane_rank(lane: &str) -> usize {
+    KANBAN_COLUMNS
+        .iter()
+        .position(|c| *c == lane)
+        .unwrap_or(KANBAN_COLUMNS.len())
+}
 
 /// The board column for a queue node, mirroring `_kanban_column` in
 /// `cli/src/fno/graph/render.py`. `None` excludes the node from the board.
@@ -209,7 +223,14 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
         // carries a column field - `_kanban_column` is a function of intent in
         // `graph/render.py`, and this mirrors it.
         let claimed = status == "claimed" || live.is_some_and(|l| l.contains_key(id));
-        let lane = kanban_column(e, claimed, underway.contains(id)).map(str::to_string);
+        // `None` EXCLUDES the node from the board (a roadmap row), exactly as it
+        // does in the Python. Dropping the card here rather than bucketing it as
+        // unlaned keeps the two boards agreeing on what is even on the board -
+        // an excluded node rendered as an actionable card would be a row the
+        // canonical board says does not exist.
+        let Some(lane) = kanban_column(e, claimed, underway.contains(id)) else {
+            continue;
+        };
         rows.push((
             project.unwrap_or("").to_string(),
             unscoped,
@@ -230,7 +251,7 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
                 attach_id: None,
                 where_hint: None,
                 project: project.map(str::to_string),
-                lane,
+                lane: Some(lane.to_string()),
                 // Set below, once the board order is known.
                 next: false,
             },
@@ -261,7 +282,10 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
         .into_iter()
         .map(|(l, n)| (l.to_string(), n))
         .collect();
-    lanes.sort();
+    // Canonical board order, not alphabetical: the overlay reads left-to-right
+    // as a lifecycle, and sorting by name would render it backwards
+    // (Later, Next, Now).
+    lanes.sort_by_key(|(l, _)| (lane_rank(l), l.clone()));
     let mut cards: Vec<BacklogCard> = rows.into_iter().take(CARD_CAP).map(|r| r.5).collect();
     mark_next(&mut cards);
     // A fresh derivation is by definition current; only `ReaderState` (which
@@ -788,7 +812,7 @@ mod tests {
         let hot = derive_queue(&raw, Some(&live(&[("x-a", "target-session:abc")]))).unwrap();
         assert_eq!(
             hot.lanes,
-            vec![("Later".to_string(), 1), ("Now".to_string(), 1)],
+            vec![("Now".to_string(), 1), ("Later".to_string(), 1)],
             "the claimed node moves lanes, count and all"
         );
         assert_eq!(hot.cards[0].state, CardState::InFlight);
@@ -879,6 +903,45 @@ mod tests {
         assert!(
             !after.cards[0].next && after.cards[1].next,
             "the marker moves to the next ready card"
+        );
+    }
+
+    #[test]
+    fn lanes_render_in_canonical_board_order() {
+        // The overlay reads left-to-right as a lifecycle, so the lane list must
+        // arrive in KANBAN_COLUMNS order. Sorting by name would render it
+        // backwards (Later, Next, Now) - the board's own order is the contract.
+        let raw = graph(
+            r#"{"id":"x-l","slug":"l","priority":"p3","_status":"ready"},
+               {"id":"x-t","slug":"t","priority":"p2","_status":"ready","queued_at":"2026-07-19T00:00:00Z"},
+               {"id":"x-n","slug":"n","priority":"p1","_status":"ready"},
+               {"id":"x-x","slug":"x","priority":"p2","_status":"ready"}"#,
+        );
+        let names: Vec<String> = derive_queue(&raw, None)
+            .unwrap()
+            .lanes
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        assert_eq!(names, ["Now", "Next", "Later", "Triage"]);
+    }
+
+    #[test]
+    fn an_excluded_node_is_not_a_card_at_all() {
+        // `kanban_column` returning None EXCLUDES a node from the board in the
+        // Python. Bucketing it as unlaned instead would render a row the
+        // canonical board says does not exist.
+        let raw = graph(
+            r#"{"id":"x-road","slug":"r","type":"roadmap","priority":"p1","_status":"ready"},
+               {"id":"x-real","slug":"n","priority":"p1","_status":"ready"}"#,
+        );
+        let q = derive_queue(&raw, None).unwrap();
+        let ids: Vec<&str> = q.cards.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["x-real"], "the roadmap row is off the board");
+        assert_eq!(q.total(), 1, "and is not counted in any lane");
+        assert!(
+            q.cards.iter().all(|c| c.lane.is_some()),
+            "every surviving card knows its lane"
         );
     }
 
