@@ -1063,8 +1063,6 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
         lambda b, **kw: crate_rev if state["built"] else None,
     )
 
-    execvp_calls: list[tuple] = []
-
     def _fake_execvp(prog, args):
         call_order.append("execvp")
 
