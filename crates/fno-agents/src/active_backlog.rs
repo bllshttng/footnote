@@ -171,6 +171,53 @@ fn defer_node(abi_bin: &str, cwd: &Path, node: &str, reason: &str) {
         .output();
 }
 
+/// Does the node carry a PR reference in graph state? Read through `fno backlog
+/// get` so node resolution stays the CLI's job. FAIL-OPEN: an unreadable or
+/// unparseable answer reports `true`, so a flaky read can never auto-defer a
+/// healthy node.
+fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
+    // retry_etxtbsy like every other shellout here: a transient busy binary
+    // (a concurrent `fno update`) must not read as "healthy, has PR" and quietly
+    // disable the guard.
+    let Ok(out) = retry_etxtbsy(|| {
+        abi_cmd(&cfg.abi_bin)
+            .args(["backlog", "get", node_id])
+            .current_dir(&cfg.cwd)
+            .output()
+    }) else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return true;
+    };
+    // A ref must be USABLE, not merely present: `pr_number` an integer and
+    // `pr_url` a non-empty string, matching what the CLI's node_pr_refs can
+    // actually derive a ref from. An empty pr_url is not evidence of a ship.
+    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
+        return true;
+    }
+    if v.get("pr_url")
+        .and_then(|u| u.as_str())
+        .is_some_and(|u| !u.trim().is_empty())
+    {
+        return true;
+    }
+    v.get("additional_prs")
+        .and_then(|a| a.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// Reconcile passes a ref-less `DonePRGreen` must persist across before it counts
+/// as a dead dispatch. `finalize` stamps `pr_number` AFTER loop-check emits the
+/// termination event, and its tail (plan stamp, handoff, verifier) has no bounded
+/// duration - so a single poll landing in that window would read a healthy ship
+/// as ref-less. Re-checking on a later tick costs nothing and never blocks the
+/// drain thread, which a sleep here would.
+const PR_STAMP_GRACE_TICKS: u32 = 3;
+
 /// Map a dispatched node's termination outcome to a [`DrainOutcome`], updating
 /// the breaker and emitting the decision event. Fed by [`reconcile_pending`]
 /// with the evidence polled from the worker's own termination event, so the
@@ -320,6 +367,9 @@ pub struct PendingDispatch {
     /// not yet taken the node claim holds none, which must not read as a death
     /// until `BOOT_GRACE_TICKS` have elapsed.
     ticks: u32,
+    /// Passes this entry has read a ref-less `DonePRGreen`. Lets the PR stamp land
+    /// before a zero-artifact verdict sticks (see `PR_STAMP_GRACE_TICKS`).
+    stamp_waits: u32,
 }
 
 /// Reconcile passes to wait for a dispatched worker to take its `node:<id>`
@@ -369,6 +419,15 @@ fn reconcile_pending(
         if let Some(sid) = p.session_id.clone() {
             match journal.find_termination(&sid) {
                 Ok(Some(ev)) => {
+                    // A ref-less DonePRGreen may just be racing finalize's stamp;
+                    // keep the entry and re-read on a later tick before deciding.
+                    if matches!(ev.reason, TerminationReason::DonePRGreen)
+                        && !node_has_pr_ref(cfg, &p.node_id)
+                        && p.stamp_waits < PR_STAMP_GRACE_TICKS
+                    {
+                        p.stamp_waits += 1;
+                        return true;
+                    }
                     resolve_dispatch(cfg, breaker, journal, &p.node_id, ev);
                     return false;
                 }
@@ -408,7 +467,16 @@ fn resolve_dispatch(
     // closes at the human merge via reconcile - map_outcome's keep-set counts
     // it as a successful dispatch. DoneBatched/DoneAwaitingMerge close at merge
     // via reconcile and are NOT marked here - map_outcome recognizes them too.
-    let close = if is_done_reason(&ev.reason) {
+    // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
+    // only runs when refs already exist, so a ref-less node would otherwise
+    // close exit 0 and score the dead dispatch as a win.
+    let close = if matches!(ev.reason, TerminationReason::DonePRGreen)
+        && !node_has_pr_ref(cfg, node_id)
+    {
+        CloseOutcome::Parked(
+            "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
+        )
+    } else if is_done_reason(&ev.reason) {
         match retry_etxtbsy(|| {
             abi_cmd(&cfg.abi_bin)
                 .args(["backlog", "done", node_id])
@@ -552,6 +620,7 @@ fn dispatch_mission(
             node_id: node_id.clone(),
             session_id: None,
             ticks: 0,
+            stamp_waits: 0,
         });
         new_ids.push(node_id.clone());
     }
@@ -1069,6 +1138,27 @@ mod tests {
         p.display().to_string()
     }
 
+    /// Like [`stub_fno`], but `backlog get` answers with `node_json` on stdout so
+    /// a test can control whether the node carries a PR ref. Every other verb
+    /// records its argv and exits 0.
+    fn stub_fno_get(dir: &std::path::Path, record: &std::path::Path, node_json: &str) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 if [ \"$2\" = \"get\" ]; then printf '%s' '{}'; exit 0; fi\n\
+                 echo \"$@\" >> \"{}\"\nexit 0\n",
+                node_json,
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
     fn test_cfg(tmp: &std::path::Path, abi_bin: String, failure_limit: u32) -> DrainConfig {
         DrainConfig {
             cwd: tmp.to_path_buf(),
@@ -1125,6 +1215,159 @@ mod tests {
         assert!(journal_lines(&project_journal)
             .iter()
             .any(|l| l.contains("active_backlog_dispatched") && l.contains("x-suc0001")));
+    }
+
+    #[test]
+    fn resolve_dispatch_done_pr_green_without_pr_ref_is_a_failure() {
+        // The dead-dispatch signature. A DonePRGreen terminal asserts a
+        // PR; a node carrying none means the worker died leaving nothing. It must
+        // count toward the streak AND must not `backlog done` (whose merged-PR
+        // cross-check is skipped entirely for a ref-less node).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-dead0001","_status":"in_review"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-dead0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "promised".to_string(),
+            },
+        );
+
+        assert_eq!(
+            breaker.consecutive_failures("x-dead0001"),
+            1,
+            "a zero-artifact DonePRGreen counts toward the streak"
+        );
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(
+            !calls.contains("backlog done"),
+            "must not close a node whose terminal lied: {calls}"
+        );
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_skip") && l.contains("x-dead0001")));
+    }
+
+    #[test]
+    fn resolve_dispatch_done_pr_green_with_pr_ref_is_success() {
+        // The healthy counterpart: a PR ref present means the terminal told the
+        // truth, so the existing close path runs untouched.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-live0001","pr_number":477}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-live0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: String::new(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-live0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-live0001"), "calls: {calls}");
+    }
+
+    #[test]
+    fn zero_artifact_check_fails_open_on_unreadable_node() {
+        // Fail-open is the safety property: an unparseable `backlog get` must
+        // never auto-defer a healthy node. `stub_fno` prints nothing, so the
+        // parse fails and the node reports as PR-bearing.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 3);
+
+        assert!(
+            node_has_pr_ref(&cfg, "x-unknown1"),
+            "unreadable node must fail open"
+        );
+    }
+
+    #[test]
+    fn pr_ref_read_unions_additional_prs() {
+        // The CLI's node_pr_refs unions additional_prs; if this predicate did not,
+        // a node whose only ref lives there would read as a dead dispatch.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-addl0001","additional_prs":[{"number":12}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+
+        assert!(node_has_pr_ref(&cfg, "x-addl0001"));
+    }
+
+    #[test]
+    fn empty_pr_url_is_not_a_ref() {
+        // A ref must be usable: `--pr-url ""` is present-but-empty and the CLI
+        // can derive no ref from it, so it must not read as evidence of a ship.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-empt0001","pr_url":"  "}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+
+        assert!(!node_has_pr_ref(&cfg, "x-empt0001"));
+    }
+
+    #[test]
+    fn resolve_dispatch_advisory_without_pr_ref_is_still_success() {
+        // DoneAdvisory is a doc terminal with no PR by design - the zero-artifact
+        // guard must not touch it, or every doc run would trip the breaker.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-doc00001","_status":"in_review"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-doc00001",
+            Evidence {
+                reason: TerminationReason::DoneAdvisory,
+                message: String::new(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-doc00001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-doc00001"), "calls: {calls}");
     }
 
     #[test]
@@ -1276,6 +1519,7 @@ mod tests {
             node_id: "x-bootgrace-never-real".to_string(),
             session_id: None,
             ticks: 0,
+            stamp_waits: 0,
         }];
 
         // Passes before the grace expires keep the dispatch and record nothing.
@@ -1295,6 +1539,52 @@ mod tests {
             "the never-booted dispatch is retired as a crash"
         );
         assert_eq!(breaker.consecutive_failures("x-bootgrace-never-real"), 1);
+    }
+
+    #[test]
+    fn refless_done_pr_green_waits_for_the_stamp_before_parking() {
+        // finalize stamps pr_number after loop-check emits termination, and its
+        // tail is unbounded - so a ref-less read is held across ticks rather than
+        // decided on the spot. Only a dispatch still ref-less after the grace is
+        // a dead dispatch.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-grace-never-real"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        std::fs::write(
+            &project_journal,
+            "{\"type\":\"termination\",\"data\":{\"session_id\":\"sid-grace\",\"reason\":\"DonePRGreen\"}}\n",
+        )
+        .unwrap();
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = vec![PendingDispatch {
+            node_id: "x-grace-never-real".to_string(),
+            session_id: Some("sid-grace".to_string()),
+            ticks: 0,
+            stamp_waits: 0,
+        }];
+
+        for _ in 0..PR_STAMP_GRACE_TICKS {
+            reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+            assert_eq!(pending.len(), 1, "held while the stamp may still land");
+            assert_eq!(breaker.consecutive_failures("x-grace-never-real"), 0);
+        }
+
+        reconcile_pending(&cfg, &mut breaker, &mut pending, &journal);
+        assert!(
+            pending.is_empty(),
+            "grace exhausted: the dispatch is retired"
+        );
+        assert_eq!(
+            breaker.consecutive_failures("x-grace-never-real"),
+            1,
+            "a still-ref-less DonePRGreen counts toward the streak"
+        );
     }
 
     #[test]
@@ -1456,6 +1746,7 @@ mod tests {
             node_id: "x-a".to_string(),
             session_id: None,
             ticks: 2,
+            stamp_waits: 0,
         }];
         dispatch_mission(&cfg, &mut pending, &journal);
         assert_eq!(pending.len(), 1, "x-a already pending must not be re-added");

@@ -2982,6 +2982,36 @@ def cmd_dispatch_lanes(
     typer.echo(json.dumps(receipts, indent=2))
 
 
+# -- groom --
+
+@cli.command("groom", hidden=True)
+def cmd_groom(
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="Model for the groom worker (default: sonnet)."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-N", help="Print the brief and day key without dispatching."
+    ),
+) -> None:
+    """Dispatch today's Sonnet grooming pass over the backlog (at most once a day).
+
+    Grooming is levers-only: the worker may supersede, defer/undefer, re-prioritize,
+    rank, promote, and file ideas - never anything else - and mails a one-screen
+    report of every mutation with its receipt. A second run on the same UTC day
+    exits 0 with an ``already-ran`` receipt and spawns nothing.
+    """
+    from fno.backlog.groom import GROOM_MODEL_DEFAULT, run_groom
+
+    receipt = run_groom(
+        cwd=os.getcwd(),
+        model=model or GROOM_MODEL_DEFAULT,
+        dry_run=dry_run,
+    )
+    typer.echo(json.dumps(receipt, indent=2))
+    if receipt.get("status") == "failed":
+        raise typer.Exit(code=1)
+
+
 # -- lanes --
 
 @cli.command("lanes", hidden=True)
