@@ -650,11 +650,18 @@ enum ConfirmKind {
     /// Remove a stopped external tombstone by `attach_id` (x-7561). Same
     /// captured-id commit; the server gates rm on a persisted `stopped` state.
     RemoveExternal { attach_id: String, name: String },
+    /// Dismiss a member TOMBSTONE from its squad's member list (x-8f11). A
+    /// tombstone is not a registry agent, so RemoveAgent cannot reach it.
+    DismissMember { squad: u64, attach_id: String },
     /// Remove every exited row in one section (x-f300). The SECTION commits, not
     /// the row list: the set is re-folded on Enter, so rows that died or were
     /// reaped while the prompt sat open are handled honestly. `dead` is the count
     /// the prompt showed, kept only to name it.
-    ClearDead { key: SectionKey, dead: usize },
+    ClearDead {
+        key: SectionKey,
+        squad: Option<u64>,
+        dead: usize,
+    },
 }
 
 /// The entity a rename overlay is editing (x-96e8 widened x-c150's tab-only
@@ -821,10 +828,13 @@ enum MenuTarget {
     /// so unlike agent names they need no disambiguation).
     Card(String),
     /// A section header (a squad name row or a `~` band). `label` is cosmetic
-    /// (the confirm prompt); `key` is the identity every action resolves through.
+    /// (the confirm prompt); `key` is the persisted section identity and `squad`
+    /// the runtime one, present for a squad/mission header and `None` for a `~`
+    /// band (which has no squad).
     Section {
         key: SectionKey,
         label: String,
+        squad: Option<u64>,
     },
 }
 
@@ -991,6 +1001,25 @@ fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
         ],
     }
 }
+/// The command that clears ONE dead row, by what kind of row it is. Three
+/// stores hold dead rows and each has its own verb: a member TOMBSTONE lives in
+/// the squad's member list (`RemoveAgent` resolves only against the agent
+/// registry, so it would answer "no such agent" and leave the row on screen), an
+/// EXTERNAL row routes by its stable attach_id (x-7561), and a registry row goes
+/// by name. One mapping so the row menu and the bulk clear cannot disagree.
+fn remove_dead(a: &AgentRow) -> Command {
+    match (a.tombstone, a.squad, a.external, a.attach_id.clone()) {
+        (true, Some(squad), _, Some(attach_id)) => Command::DismissMember { squad, attach_id },
+        (_, _, true, Some(attach_id)) => Command::RemoveExternal {
+            attach_id,
+            name: a.name.clone(),
+        },
+        _ => Command::RemoveAgent {
+            name: a.name.clone(),
+        },
+    }
+}
+
 /// How many rows one clear-dead may remove. Each row costs the server a
 /// `fno agents rm` subprocess (`agent_action` spawns one per command, unbounded),
 /// so an unbounded fan-out would let a long-lived section stampede the daemon.
@@ -1003,7 +1032,13 @@ const CLEAR_DEAD_MAX: usize = 25;
 /// the commit will run, so the two can never disagree. Caller guarantees
 /// `dead > 0` - a section with nothing to clear gets a Notice, not a menu whose
 /// only entry no-ops.
-fn build_section_menu(key: SectionKey, label: String, dead: usize, anchor: Anchor) -> RowMenu {
+fn build_section_menu(
+    key: SectionKey,
+    label: String,
+    squad: Option<u64>,
+    dead: usize,
+    anchor: Anchor,
+) -> RowMenu {
     let rows = vec![
         PopupRow::Header(label.clone()),
         PopupRow::Rule,
@@ -1015,7 +1050,7 @@ fn build_section_menu(key: SectionKey, label: String, dead: usize, anchor: Ancho
     ];
     RowMenu {
         popup: Popup::new(rows, anchor),
-        target: MenuTarget::Section { key, label },
+        target: MenuTarget::Section { key, label, squad },
         actions: vec![MenuAction::ClearDead],
     }
 }
@@ -1771,7 +1806,7 @@ impl View {
     fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
         enum Pick {
             Menu(Box<RowMenu>),
-            Section(SectionKey, String),
+            Section(SectionKey, String, Option<u64>),
         }
         // Resolve what the row needs while `display_rows()` holds the borrow, so
         // the section arm below is free to mutate `self`.
@@ -1779,8 +1814,8 @@ impl View {
             Some(DisplayRow::Agent(a)) => Some(Pick::Menu(Box::new(build_row_menu(a, anchor)))),
             // (x-1d91) A Backlog card gets the reorder menu.
             Some(DisplayRow::Card(c)) => Some(Pick::Menu(Box::new(build_card_menu(c, anchor)))),
-            Some(DisplayRow::Sel(row)) if row.tab.is_none() => {
-                squad_key(&self.layout, row.squad).map(|key| {
+            Some(DisplayRow::Sel(row)) if row.tab.is_none() => squad_key(&self.layout, row.squad)
+                .map(|key| {
                     let label = self
                         .layout
                         .squads
@@ -1788,11 +1823,10 @@ impl View {
                         .find(|s| s.id == row.squad)
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
-                    Pick::Section(key, label)
-                })
-            }
+                    Pick::Section(key, label, Some(row.squad))
+                }),
             Some(DisplayRow::Header { key, label, .. }) => {
-                Some(Pick::Section(key.clone(), (*label).to_string()))
+                Some(Pick::Section(key.clone(), (*label).to_string(), None))
             }
             _ => None,
         };
@@ -1803,7 +1837,7 @@ impl View {
                 self.row_menu_esc.clear();
                 true
             }
-            Some(Pick::Section(key, label)) => {
+            Some(Pick::Section(key, label, squad)) => {
                 // Cards have no exited state, so the work queue has no menu at
                 // all - a notice there would imply "none right now" about a
                 // section that can never have any.
@@ -1816,13 +1850,13 @@ impl View {
                 // "nothing to clear" covers both an all-live section and a key
                 // `section_dead_rows` refused as ambiguous - it never claims
                 // there are no dead rows when the truth is we won't guess which.
-                let dead = self.section_dead_rows(&key).len();
+                let dead = self.section_dead_rows(&key, squad).len();
                 if dead == 0 {
-                    self.set_notice(format!("nothing to clear in {label}"));
+                    self.set_notice(format!("no dead rows in {label}"));
                     return false;
                 }
                 self.clear_peek();
-                self.row_menu = Some(build_section_menu(key, label, dead, anchor));
+                self.row_menu = Some(build_section_menu(key, label, squad, dead, anchor));
                 self.row_menu_esc.clear();
                 true
             }
@@ -2548,7 +2582,7 @@ impl View {
     /// a restart. `has_dead` and `binary` come from the section's own rows -
     /// see [`next_view`].
     fn cycle_section(&mut self, key: SectionKey) {
-        let has_dead = !self.section_dead_rows(&key).is_empty();
+        let has_dead = !self.section_dead_rows(&key, None).is_empty();
         let next = next_view(self.section_view(&key), has_dead, &key);
         self.set_section_view(key, next);
     }
@@ -2572,22 +2606,31 @@ impl View {
     /// set the menu removes cannot drift apart. Folded live off the layout,
     /// never cached (the x-df4c drift posture), so a section whose last dead
     /// row was reaped elsewhere reports honestly on the very next click.
-    fn section_dead_rows(&self, key: &SectionKey) -> Vec<&AgentRow> {
+    /// `squad` is the caller's RUNTIME identity for a squad section, and it wins
+    /// when present. `SectionKey::Squad` carries the canonical cwd because it is
+    /// persisted and must survive a restart - but two squads can share an origin
+    /// (identity is the id, not the path), so resolving a destructive action
+    /// through the key alone could clear the sibling workspace's rows. Every
+    /// header knows its own squad (`display_rows` emits one per squad), so the
+    /// collision is structurally impossible on the paths that matter; `None`
+    /// keeps the by-key lookup for display-only callers.
+    fn section_dead_rows(&self, key: &SectionKey, squad: Option<u64>) -> Vec<&AgentRow> {
         match key {
             SectionKey::Squad(_) | SectionKey::Mission(_) => {
-                // Fail closed on an AMBIGUOUS key, exactly like the row menu's
-                // two-rows-one-name refusal. `SectionKey::Squad` carries the
-                // canonical cwd, and two squads may share an origin (identity is
-                // the id, not the path) - "first match wins" would clear the
-                // sibling workspace's rows while the prompt named this one.
-                let mut hits = self.layout.squads.iter().filter(|s| squad_matches(s, key));
-                let (Some(s), None) = (hits.next(), hits.next()) else {
+                let id = squad.or_else(|| {
+                    self.layout
+                        .squads
+                        .iter()
+                        .find(|s| squad_matches(s, key))
+                        .map(|s| s.id)
+                });
+                let Some(id) = id else {
                     return Vec::new();
                 };
                 self.layout
                     .agents
                     .iter()
-                    .filter(|a| a.squad == Some(s.id) && a.exited)
+                    .filter(|a| a.squad == Some(id) && a.exited)
                     .collect()
             }
             SectionKey::Elsewhere => self.orphans().into_iter().filter(|a| a.exited).collect(),
@@ -3294,6 +3337,7 @@ impl View {
             ConfirmKind::RemoveExternal { .. } => {
                 format!(" remove {label} and worktree? ⏎/esc")
             }
+            ConfirmKind::DismissMember { .. } => format!(" dismiss {label}? ⏎/esc"),
             ConfirmKind::ClearDead { dead, .. } => {
                 format!(" clear {dead} dead row(s) in {label}? ⏎/esc")
             }
@@ -6160,25 +6204,18 @@ async fn confirm_keys(
             ConfirmKind::RemoveExternal { attach_id, name } => {
                 vec![Command::RemoveExternal { attach_id, name }]
             }
+            ConfirmKind::DismissMember { squad, attach_id } => {
+                vec![Command::DismissMember { squad, attach_id }]
+            }
             // Re-fold on Enter, not at open: the prompt may have sat for a while
-            // and the honest set is whatever is dead NOW. An external row routes
-            // by stable attach_id (x-7561); everything else removes by name, the
-            // same split the single-row `x` verb makes.
-            ConfirmKind::ClearDead { key, .. } => {
-                let dead = view.section_dead_rows(&key);
+            // and the honest set is whatever is dead NOW.
+            ConfirmKind::ClearDead { key, squad, .. } => {
+                let dead = view.section_dead_rows(&key, squad);
                 let total = dead.len();
                 let picked: Vec<Command> = dead
                     .into_iter()
                     .take(CLEAR_DEAD_MAX)
-                    .map(|a| match (a.external, a.attach_id.clone()) {
-                        (true, Some(attach_id)) => Command::RemoveExternal {
-                            attach_id,
-                            name: a.name.clone(),
-                        },
-                        _ => Command::RemoveAgent {
-                            name: a.name.clone(),
-                        },
-                    })
+                    .map(remove_dead)
                     .collect();
                 // Say what the cap left behind - a silent truncation would read
                 // as "cleared everything" while rows stayed on screen.
@@ -6491,8 +6528,8 @@ async fn execute_row_menu_action(
         }
         // (x-f300) The section menu's only action, resolved against the section
         // rather than a single row.
-        (MenuTarget::Section { key, label }, MenuAction::ClearDead) => {
-            return clear_dead_confirm(view, key, label);
+        (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
+            return clear_dead_confirm(view, key, label, squad);
         }
         // A menu is built for exactly one target kind, so a crossed pair can only
         // come from a bug; refuse rather than guess at a target.
@@ -6575,20 +6612,29 @@ async fn execute_row_menu_action(
                 view.set_notice("terminal too short for the confirm prompt".into());
                 return Ok(());
             }
-            let kind = match (action, a.external, a.attach_id.clone()) {
-                (MenuAction::Stop, true, Some(id)) => ConfirmKind::StopExternal {
-                    attach_id: id,
-                    name: a.name.clone(),
+            let kind = match action {
+                MenuAction::Stop => match (a.external, a.attach_id.clone()) {
+                    (true, Some(id)) => ConfirmKind::StopExternal {
+                        attach_id: id,
+                        name: a.name.clone(),
+                    },
+                    _ => ConfirmKind::StopAgent {
+                        name: a.name.clone(),
+                    },
                 },
-                (MenuAction::Stop, _, _) => ConfirmKind::StopAgent {
-                    name: a.name.clone(),
-                },
-                (MenuAction::Remove, true, Some(id)) => ConfirmKind::RemoveExternal {
-                    attach_id: id,
-                    name: a.name.clone(),
-                },
-                (_, _, _) => ConfirmKind::RemoveAgent {
-                    name: a.name.clone(),
+                // Remove routes by row KIND through [`remove_dead`], the same
+                // mapping the bulk clear uses, so the single-row and section
+                // paths cannot disagree about which store owns a dead row.
+                _ => match remove_dead(&a) {
+                    Command::DismissMember { squad, attach_id } => {
+                        ConfirmKind::DismissMember { squad, attach_id }
+                    }
+                    Command::RemoveExternal { attach_id, name } => {
+                        ConfirmKind::RemoveExternal { attach_id, name }
+                    }
+                    _ => ConfirmKind::RemoveAgent {
+                        name: a.name.clone(),
+                    },
                 },
             };
             view.open_confirm(ConfirmAction {
@@ -6606,10 +6652,18 @@ async fn execute_row_menu_action(
 
 /// (x-f300) Arm the clear-dead confirm for a section, over the dead set as it
 /// stands NOW rather than as the menu found it.
-fn clear_dead_confirm(view: &mut View, key: SectionKey, label: String) -> Result<(), String> {
-    let dead = view.section_dead_rows(&key).len().min(CLEAR_DEAD_MAX);
+fn clear_dead_confirm(
+    view: &mut View,
+    key: SectionKey,
+    label: String,
+    squad: Option<u64>,
+) -> Result<(), String> {
+    let dead = view
+        .section_dead_rows(&key, squad)
+        .len()
+        .min(CLEAR_DEAD_MAX);
     if dead == 0 {
-        view.set_notice(format!("nothing to clear in {label}"));
+        view.set_notice(format!("no dead rows in {label}"));
         return Ok(());
     }
     // A confirm owns the bottom row; a too-short terminal refuses rather than
@@ -6619,7 +6673,7 @@ fn clear_dead_confirm(view: &mut View, key: SectionKey, label: String) -> Result
         return Ok(());
     }
     view.open_confirm(ConfirmAction {
-        action: ConfirmKind::ClearDead { key, dead },
+        action: ConfirmKind::ClearDead { key, squad, dead },
         label,
     });
     Ok(())
@@ -11504,18 +11558,16 @@ mod tests {
     }
 
     #[test]
-    fn clear_dead_refuses_a_section_key_two_squads_share() {
-        // Fail-closed: identity is the squad id, but SectionKey::Squad carries
-        // the canonical cwd, so two squads on one origin key alike. Guessing
-        // "first match" would clear the sibling workspace's rows under a prompt
-        // naming this one - the destructive twin of the row menu's ambiguity bug.
+    fn clear_dead_resolves_by_squad_id_when_canonical_paths_collide() {
+        // SectionKey::Squad carries the persisted cwd, and two squads may share
+        // an origin - so the key alone is ambiguous while the squad id never is.
+        // A dead row in EACH squad is what makes this bite: a by-key resolve
+        // would hand squad 2's header squad 1's row.
         let mut v = view_with_agents(vec![]);
         v.set_layout(two_squad_layout(1));
         for s in v.layout.squads.iter_mut() {
             s.canonical_cwd = "/shared".into();
         }
-        // A dead row in EACH squad is what makes this bite: keyed off squad 2,
-        // a first-match-wins resolve would hand back squad 1's row.
         let in_squad = |name: &str, squad: u64| {
             let mut r = lifecycle_row(name, true, false);
             r.squad = Some(squad);
@@ -11523,9 +11575,72 @@ mod tests {
         };
         v.layout.agents = vec![in_squad("dead-in-1", 1), in_squad("dead-in-2", 2)];
         let key = squad_key(&v.layout, 2).expect("squad 2 has a key");
+        let names =
+            |rows: Vec<&AgentRow>| -> Vec<String> { rows.iter().map(|a| a.name.clone()).collect() };
+        assert_eq!(names(v.section_dead_rows(&key, Some(2))), ["dead-in-2"]);
+        assert_eq!(names(v.section_dead_rows(&key, Some(1))), ["dead-in-1"]);
+        // The display-only caller (cycle_section's has_dead) keeps the by-key
+        // lookup: a collision must not cost the section its LiveOnly state.
         assert!(
-            v.section_dead_rows(&key).is_empty(),
-            "an ambiguous key resolves to no rows, never a guess"
+            !v.section_dead_rows(&key, None).is_empty(),
+            "LiveOnly is still offered on a collided section"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dead_dismisses_member_tombstones() {
+        // A tombstone lives in the squad's member list, not the agent registry,
+        // so RemoveAgent would answer "no such agent" and leave the gray row on
+        // screen - the exact symptom clear-dead exists to remove.
+        let mut tomb = lifecycle_row("cc-member", true, false);
+        tomb.tombstone = true;
+        tomb.attach_id = Some("deadbeef".into());
+        let mut v = view_with_agents(vec![tomb, lifecycle_row("plain-dead", true, false)]);
+        arm_clear_dead(&mut v, 1).await;
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![
+                Command::DismissMember {
+                    squad: 1,
+                    attach_id: "deadbeef".into()
+                },
+                Command::RemoveAgent {
+                    name: "plain-dead".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn row_menu_remove_dismisses_a_member_tombstone() {
+        // The single-row path shares `remove_dead`, so it must route a tombstone
+        // the same way the bulk clear does.
+        let mut tomb = lifecycle_row("cc-member", true, false);
+        tomb.tombstone = true;
+        tomb.attach_id = Some("deadbeef".into());
+        let mut v = view_with_agents(vec![tomb]);
+        let idx = agent_row_at(&v, |a| a.name == "cc-member");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Remove)
+            .expect("an exited row offers Remove");
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::DismissMember {
+                squad: 1,
+                attach_id: "deadbeef".into()
+            }]
         );
     }
 
