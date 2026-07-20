@@ -920,7 +920,13 @@ def _wake_rung(token: str, wrapped: str) -> tuple[bool, Optional[str], Optional[
         # entirely. Say so rather than misroute.
         return False, None, f"wake=unsupported-harness({reachable.agent})"
 
-    delivered, detail = wake_and_deliver(reachable.session_id, wrapped)
+    # Claude resume is cwd-scoped, so a recipient in another repo must be woken
+    # from ITS directory, not the sender's. None means no store recorded one and
+    # wake_and_deliver falls back.
+    wake_cwd = Path(reachable.cwd) if reachable.cwd else None
+    delivered, detail = wake_and_deliver(
+        reachable.session_id, wrapped, cwd=wake_cwd
+    )
     if delivered:
         return True, detail, None
 

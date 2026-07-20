@@ -1633,3 +1633,153 @@ def test_registry_source_carries_a_non_claude_harness_through(tmp_path, monkeypa
     found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
 
     assert found is not None and found.agent == "codex"
+
+
+# ---------------------------------------------------------------------------
+# Review-round fixes (PR 501): every store consulted before uniqueness, alias
+# survival, cwd propagation, case-insensitive tokens, malformed-store guards.
+# ---------------------------------------------------------------------------
+
+
+def test_short_id_colliding_across_two_stores_is_ambiguous_not_unique(
+    tmp_path, monkeypatch
+):
+    """Returning on the first source that answers is itself a guess.
+
+    A transcript hit plus a DIFFERENT uuid in the registry sharing the same
+    short id would look unique under an early return, and the never-guess rule
+    would be violated by the control flow rather than by a bad choice.
+    """
+    from fno.agents import discover
+
+    a = "c0ffee11-1111-2222-3333-444444444444"
+    b = "c0ffee11-9999-8888-7777-666666666666"
+
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{a}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    class _Row:
+        harness = "claude"
+        harness_session_id = b
+        short_id = "c0ffee11"
+        cwd = "/Users/x/other"
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()])
+
+    found, ambiguous = discover.resolve_reachable("c0ffee11", projects_dir=projects)
+
+    assert found is None, "a cross-store short-id collision resolved as unique"
+    assert sorted(ambiguous) == sorted([a, b])
+
+
+def test_friendly_alias_still_resolves_once_the_session_is_asleep(
+    tmp_path, monkeypatch
+):
+    """An address that worked while live must not vanish when the session sleeps."""
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    name_map = tmp_path / "session-names.json"
+    name_map.write_text(json.dumps({sid: "fno-5b17e2f0"}), encoding="utf-8")
+
+    found, _ = discover.resolve_reachable(
+        "fno-5b17e2f0", projects_dir=projects, name_map_path=name_map
+    )
+
+    assert found is not None, "a friendly alias stopped resolving once asleep"
+    assert found.session_id == sid
+
+
+def test_token_matching_is_case_insensitive(tmp_path):
+    """Uuids and hex short ids are case-insensitive by definition."""
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    found, _ = discover.resolve_reachable("5B17E2F0", projects_dir=projects)
+
+    assert found is not None and found.session_id == sid
+
+
+def test_roster_cwd_is_carried_so_a_wake_resumes_in_the_right_repo(
+    tmp_path, monkeypatch
+):
+    """Claude resume is cwd-scoped: waking a cross-repo recipient from the
+    sender's directory would fail to revive the resolved session."""
+    from fno.agents import discover
+
+    sid = "aa11bb22-3344-5566-7788-99aabbccddee"
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": {
+            sid[:8]: {"sessionId": sid, "pid": 1, "cwd": "/Users/x/other-repo"}
+        }}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
+
+    assert found is not None and found.cwd == "/Users/x/other-repo"
+
+
+def test_type_drifted_roster_is_unreadable_not_empty(tmp_path, monkeypatch):
+    """`workers` as a list would raise AttributeError straight out of the send."""
+    from fno.agents import discover
+
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": ["not", "a", "dict"]}), encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable(
+            "deadbeef", projects_dir=projects, registry_path=tmp_path / "reg.json"
+        )
+    assert "roster" in err.value.failed
+
+
+def test_malformed_graph_sessions_field_does_not_raise(tmp_path, monkeypatch):
+    """`sessions` as a non-list would raise TypeError mid-iteration."""
+    from fno.agents import discover
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [{"id": "x-0001", "sessions": 42}]}), encoding="utf-8"
+    )
+    monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=projects, registry_path=tmp_path / "reg.json"
+    )
+
+    assert found is None and ambiguous == []

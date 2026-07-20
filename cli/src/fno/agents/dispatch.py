@@ -4072,25 +4072,40 @@ def wake_and_deliver(
     the second wake finds the first's row live and is refused as
     ``wake-already-in-flight``.
 
-    The liveness probe below is NOT redundant with the substrate's own
-    fail-safe. That one lives inside ``_is_revival``, which runs only when a
-    same-name row ALREADY exists -- so the first wake of a session would skip
-    it entirely. And this rung fires whenever the inject probe returned False,
-    which happens for reasons unrelated to being asleep (the runtime binary
-    absent, a subprocess error, an unconfirmed poll budget), so the target may
-    well be live. Probing here is what stops that case from opening a second
-    writer on a live transcript. A probe ERROR counts as possibly-live: we wake
-    only when we can positively establish nobody is writing.
+    The uuid-scoped writer claim below is NOT redundant with the substrate's
+    own fail-safe. That one lives inside ``_is_revival``, which runs only when
+    a same-name row ALREADY exists -- and a wake derives a fresh name, so the
+    FIRST wake of a session would skip it entirely. This rung also fires
+    whenever the inject probe returned False, which happens for reasons
+    unrelated to being asleep (the runtime binary absent, a subprocess error,
+    an unconfirmed poll budget), so the target may well be live.
+
+    The claim is taken rather than a bare liveness probe because a probe is not
+    atomic: a daemon adoption or a differently-named ``--resume`` could acquire
+    ``session:<uuid>`` between the check and the spawn, and we would start a
+    second writer on one transcript anyway.
+    ``acquire_session_writer_claim`` folds the liveness check and the atomic
+    acquire into one step. Same-holder re-acquire is idempotent, so the
+    substrate taking the same claim on the revival path composes cleanly, and
+    release is a no-op when unheld.
     """
     if not session_uuid:
         return False, "no-session-uuid"
 
     from fno.agents.providers import claude as claude_mod
 
+    holder = f"revive:{os.getpid()}"
     try:
-        if claude_mod.session_is_live(session_uuid[:8]):
-            return False, "writer-possibly-live"
+        claude_mod.acquire_session_writer_claim(
+            session_uuid=session_uuid,
+            holder=holder,
+            claude_short_id=session_uuid[:8],
+        )
+    except claude_mod.SessionWriterClaimError:
+        return False, "writer-possibly-live"
     except Exception:
+        # Cannot establish single-writer safety -> do not wake. A missed wake
+        # demotes to durable; a second writer corrupts a transcript.
         return False, "writer-probe-failed"
 
     try:
@@ -4114,6 +4129,17 @@ def wake_and_deliver(
         return False, f"spawn-exit-{exc.exit_code}"
     except (OSError, RuntimeError) as exc:
         return False, f"spawn-error-{type(exc).__name__}"
+    finally:
+        # The spawned supervisor's own liveness is the ongoing single-writer
+        # guard; holding this claim past the spawn would hoard the writer and
+        # block a native attach. Idempotent, so releasing after a failed spawn
+        # is safe too.
+        try:
+            claude_mod.release_session_writer_claim(
+                session_uuid=session_uuid, holder=holder
+            )
+        except Exception:
+            pass
 
     short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
     return True, short

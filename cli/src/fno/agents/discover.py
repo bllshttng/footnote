@@ -1141,6 +1141,10 @@ class ReachableSession:
     session_id: str
     source: str  # transcript | registry | roster | graph
     agent: str = "claude"
+    # Claude resume is cwd-scoped, so a wake launched from the sender's
+    # directory would fail to revive a recipient that lives in another repo.
+    # None means no store recorded one and the caller must fall back.
+    cwd: Optional[str] = None
 
 
 class StoreReadError(Exception):
@@ -1163,7 +1167,46 @@ class StoreReadError(Exception):
 # Each helper returns ``(hits, read_ok)``. ``read_ok=False`` means the store
 # could not be consulted at all -- never that it was consulted and came back
 # empty. Collapsing those two into one empty list is what loses mail.
-_Hits = list[tuple[str, str]]  # (session_id, agent)
+_Hits = list[tuple[str, str, Optional[str]]]  # (session_id, agent, cwd)
+
+
+def _decode_project_dir(name: str) -> Optional[str]:
+    """Best-effort cwd for a transcript directory name (``-Users-x-proj``).
+
+    The encoding replaces every non-alphanumeric character with ``-``, so it is
+    lossy and cannot be inverted exactly: a real hyphen in a path is
+    indistinguishable from a separator. The decode is therefore VALIDATED --
+    only a path that exists on disk is returned. A wrong guess resolves to
+    nothing and the caller falls back rather than resuming in a bogus directory.
+    """
+    if not name.startswith("-"):
+        return None
+    candidate = "/" + name[1:].replace("-", "/")
+    try:
+        if Path(candidate).is_dir():
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> list[str]:
+    """Session ids whose persisted friendly alias equals ``token``.
+
+    A user who addressed ``<project>-<short8>`` while a session was live should
+    not lose that address the moment it falls out of the live listing. The map
+    is keyed session_id -> alias, so resolving an alias means inverting it.
+
+    Partial by nature: the alias map is pruned of non-live sessions on any scan
+    that sees at least one live session, so a long-asleep session may have no
+    alias left to resolve. That is a miss, not a wrong answer.
+    """
+    path = name_map_path or default_name_map_path()
+    try:
+        stored = _load_name_map(path)
+    except OSError:
+        return []
+    return [sid for sid, alias in stored.items() if alias == token and isinstance(sid, str)]
 
 
 def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:
@@ -1195,7 +1238,7 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
         sid = path.name[: -len(".jsonl")]
         if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
-            hits.append((sid, "claude"))
+            hits.append((sid, "claude", _decode_project_dir(path.parent.name)))
     return hits, True
 
 
@@ -1204,10 +1247,16 @@ def _token_matches(token: str, session_id: str) -> bool:
 
     Deliberately NOT a loose prefix match: a 2-char token would otherwise sweep
     in half the store and turn every send into an ambiguity error.
+
+    Case-insensitive: uuids and hex short ids are case-insensitive by
+    definition, and a token pasted from a UI or typed in caps addresses the
+    same session as its lowercase form.
     """
     if not token or not session_id:
         return False
-    return token == session_id or token == session_id[:8]
+    tok = token.lower()
+    sid = session_id.lower()
+    return tok == sid or tok == sid[:8]
 
 
 def _reachable_from_registry(
@@ -1242,7 +1291,11 @@ def _reachable_from_registry(
         sid = getattr(e, "harness_session_id", None)
         if sid and _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
-            hits.append((sid, getattr(e, "harness", None) or "claude"))
+            hits.append((
+                sid,
+                getattr(e, "harness", None) or "claude",
+                getattr(e, "cwd", None),
+            ))
     return hits, True
 
 
@@ -1269,13 +1322,22 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
         return [], False
     if not isinstance(raw, dict):
         return [], False
+    workers = raw.get("workers")
+    if workers is None:
+        return [], True
+    if not isinstance(workers, dict):
+        # A type-drifted roster is unreadable, not empty. Calling .values() on
+        # a list here would raise straight out through `fno mail send`.
+        return [], False
     hits: _Hits = []
     seen: set[str] = set()
-    for row in (raw.get("workers") or {}).values():
-        sid = (row or {}).get("sessionId") if isinstance(row, dict) else None
+    for row in workers.values():
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("sessionId")
         if sid and _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
-            hits.append((sid, "claude"))
+            hits.append((sid, "claude", row.get("cwd")))
     return hits, True
 
 
@@ -1302,13 +1364,21 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
     for node in entries or []:
         if not isinstance(node, dict):
             continue
-        for entry in node.get("sessions") or []:
+        sessions = node.get("sessions")
+        if not isinstance(sessions, list):
+            # Malformed rather than absent; iterating a non-list would raise.
+            continue
+        for entry in sessions:
             if not isinstance(entry, dict):
                 continue
             sid = entry.get("session_id")
             if sid and _token_matches(token, sid) and sid not in seen:
                 seen.add(sid)
-                hits.append((sid, entry.get("harness") or "claude"))
+                hits.append((
+                    sid,
+                    entry.get("harness") or "claude",
+                    node.get("cwd"),
+                ))
     return hits, True
 
 
@@ -1318,6 +1388,7 @@ def resolve_reachable(
     projects_dir: Optional[Path] = None,
     registry_path: Optional[Path] = None,
     daemon_dir: Optional[Path] = None,
+    name_map_path: Optional[Path] = None,
 ) -> tuple[Optional[ReachableSession], list[str]]:
     """Resolve ``token`` against the durable stores, ignoring liveness entirely.
 
@@ -1332,31 +1403,60 @@ def resolve_reachable(
     means waking a stranger's session), and ``(None, [])`` on a full miss, which
     is the only case that still earns exit 16.
 
-    Sources are consulted in descending confidence and the FIRST source that
-    answers wins; a store that is unreadable contributes nothing rather than
-    failing the resolve.
+    EVERY readable store is consulted before uniqueness is declared. Returning
+    on the first source that answers would let an 8-hex token with one
+    transcript hit and a DIFFERENT matching uuid in the registry look unique,
+    and the never-guess rule would be violated by an early return rather than
+    by a bad choice. Richer metadata wins on merge: sources are ordered by
+    confidence, so the first source to contribute a uuid also supplies its
+    agent, and a later source only fills a cwd the earlier one lacked.
     """
     if not token or not token.strip():
         return None, []
 
     pdir = projects_dir or default_projects_dir()
+    # A friendly <project>-<short8> alias must keep working once its session
+    # falls out of the live listing; resolve it to real uuids and match those
+    # alongside the raw token.
+    alias_sids = _alias_to_session_ids(token, name_map_path)
+
     sources = (
-        ("transcript", lambda: _reachable_from_transcripts(token, pdir)),
-        ("registry", lambda: _reachable_from_registry(token, registry_path)),
-        ("roster", lambda: _reachable_from_roster(token, daemon_dir)),
-        ("graph", lambda: _reachable_from_graph(token)),
+        ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
+        ("registry", lambda t: _reachable_from_registry(t, registry_path)),
+        ("roster", lambda t: _reachable_from_roster(t, daemon_dir)),
+        ("graph", lambda t: _reachable_from_graph(t)),
     )
+    tokens = [token, *alias_sids]
+
     degraded: list[str] = []
+    found: dict[str, ReachableSession] = {}
     for source, lookup in sources:
-        hits, read_ok = lookup()
-        if not read_ok:
-            degraded.append(source)
-            continue
-        if len(hits) == 1:
-            sid, agent = hits[0]
-            return ReachableSession(session_id=sid, source=source, agent=agent), []
-        if len(hits) > 1:
-            return None, sorted(sid for sid, _ in hits)
+        for tok in tokens:
+            hits, read_ok = lookup(tok)
+            if not read_ok:
+                if source not in degraded:
+                    degraded.append(source)
+                continue
+            for sid, agent, cwd in hits:
+                prior = found.get(sid)
+                if prior is None:
+                    found[sid] = ReachableSession(
+                        session_id=sid, source=source, agent=agent, cwd=cwd
+                    )
+                elif prior.cwd is None and cwd is not None:
+                    # Keep the higher-confidence source and agent; take only the
+                    # cwd it did not have.
+                    found[sid] = ReachableSession(
+                        session_id=prior.session_id,
+                        source=prior.source,
+                        agent=prior.agent,
+                        cwd=cwd,
+                    )
+
+    if len(found) == 1:
+        return next(iter(found.values())), []
+    if len(found) > 1:
+        return None, sorted(found)
     if degraded:
         # Every source that COULD be read came back empty, but at least one
         # could not be read at all -- so absence is unproven. Refusing here
