@@ -475,6 +475,21 @@ def _warn_if_authority_not_granted(manifest: Optional[Path] = None) -> None:
     except Exception:  # noqa: BLE001 - a warning must never fail a run that worked
         return
     if text is not None and "authority: full" in text:
+        # Stamped, but a grant with no claim to anchor it is inert: owner_pid is
+        # transient, so nothing can later tell this session from an abandoned
+        # one, and the orienter refuses to advertise it (fail closed). Say so
+        # here rather than let the operator discover a silently powerless grant.
+        if "target_claim_key:" in text:
+            return
+        typer.echo(
+            "--yolo was stamped but has NOTHING TO ANCHOR IT - this session will "
+            "not act with authority.\nA free-text run claims no backlog node, and "
+            "without a claim an abandoned session is indistinguishable from a live "
+            "one, so the grant is refused rather than left to outlive the session.\n"
+            "Re-run against a node or a plan (`fno target start --yolo <node>`), or "
+            "continue without authority.",
+            err=True,
+        )
         return
     fix = (
         "The manifest is write-once and one already existed, so the flag was a "

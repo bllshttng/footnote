@@ -630,11 +630,40 @@ def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypat
     assert result.exit_code == 0, result.output
     assert "did NOT take" in result.output, result.output
 
-    # The grant IS present: nothing to warn about.
-    manifest.write_text("---\nattended: true\nauthority: full\n---\n")
+    # The grant IS present AND anchored to a claim: nothing to warn about.
+    manifest.write_text(
+        '---\nattended: true\nauthority: full\n---\ntarget_claim_key: "node:x-1"\n'
+    )
     result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" not in result.output, result.output
+    assert "ANCHOR" not in result.output, result.output
+    _clear_root_cache()
+
+
+def test_target_init_yolo_unanchored_grant_is_named(tmp_path, monkeypatch):
+    """x-6390: a free-text run claims no node, so `authority: full` has nothing
+    to anchor it and the orienter refuses it (fail closed). The stamp alone would
+    otherwise look like a working grant."""
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    manifest = fake_root / ".fno" / "target-state.md"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("---\nattended: true\nauthority: full\n---\n")  # no claim key
+
+    result = runner.invoke(app, ["target", "init", "--input", "some idea", "--yolo"])
+    assert result.exit_code == 0, result.output
+    assert "NOTHING TO ANCHOR IT" in result.output, result.output
     _clear_root_cache()
 
 

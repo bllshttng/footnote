@@ -135,9 +135,16 @@ It grants no new powers: merge stays on the auto-merge axis, and destructive or 
 `fno agents spawn --yolo` grants a *permission/sandbox* bypass to a spawned worker and touches no judgment.
 Same word, orthogonal axes: a yolo target session still asks the harness for permission exactly as before, and a yolo-spawned worker still stops on an architecture fork unless it also holds an authority grant.
 
+**The grant needs a node or a plan; a free-text run cannot hold it.**
+Authority is anchored to the session's claim, and only a node-bound or plan-bound run takes one.
+A free-text `/target yolo "some idea"` claims nothing, and `owner_pid` is transient - so minutes after init nothing could distinguish that session from one that crashed and left its manifest behind.
+Rather than let a grant outlive its session, an unanchored one is refused and `fno target init` says so.
+Bind a node first (`/think` then `/blueprint`), then run `/target yolo <node>`.
+
 **How to read the grant.** Pass `--yolo` to `fno target start` / `fno target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
 Read it back from `fno target status --json` - the `attended` line carries `; authority: full (yolo)` when the grant is live.
-Read that line, NOT the raw manifest: a **dead** manifest never grants authority (x-4af4 - a defunct session once auto-locked an attended `/think` for ten days), and the orienter's liveness guard is what denies it.
+Read that line, NOT the raw manifest, and never the bare `authority:` field: authority **fails closed**, so it requires positive proof of life (a held claim, or a live owner_pid) where the `attended` verdict merely biases toward live.
+That asymmetry is deliberate - a wrongly-live `attended` costs you one unnecessary prompt, while a wrongly-live authority grant silently un-prompts every future session that reads it (x-4af4: a defunct manifest once auto-locked an attended `/think` for ten days).
 
 **Under `authority: full`, the deviation rules become:**
 
@@ -172,10 +179,11 @@ It governs the decisions you would otherwise stop and ask about *without* a writ
 **Append to a DURABLE artifact: `{plan_path}.artifacts/COMPLETION.md` for a quick plan, or the plan folder's `COMPLETION.md` for a wave plan.**
 Not `.fno/SUMMARY.md`: `.fno/` is gitignored and session-state files are explicitly transient and never archived, so a ledger written there dies with the worktree when it is pruned - taking the morning review with it.
 The durable record is the plan artifact, the frontmatter stamp, `ledger.json`, and git history; the audit trail for decisions made on your behalf belongs with them.
-**Before a plan exists**, on the bare-idea path, neither target is available yet: `/think` decides things in its early steps and the plan is not written until its last one.
-Stage those entries in the session scratchpad (`scratchpad_path` in the manifest) as `autonomous-decisions.md`, then append them to the plan's `COMPLETION.md` once the plan path exists.
-The scratchpad is the right staging ground because the stop hook already archives it into the plan folder as `scratchpad-archive/`, so an entry survives even if the session dies mid-design.
-If the run ends with no plan at all, carry the ledger into the PR body under `## Autonomous Decisions` - a decision nobody can read afterward may as well not have been recorded.
+**Before a plan exists** (a yolo run is node-bound, but `/think` still decides in its early steps while the plan is written in its last), stage entries in the session scratchpad (`scratchpad_path`) as `autonomous-decisions.md`.
+**Flush them to the plan's `COMPLETION.md` the moment `plan_path` is filled - not at ship.**
+Deferring the flush is what makes the window dangerous: the scratchpad is worktree-local and gitignored, and the stop hook only archives it once a plan path exists, so entries left staged through a long do phase die with the worktree if the session never reaches its gate.
+Flushing at plan-creation shrinks the exposure to the minutes between the first decision and the plan.
+If the run ends with no plan at all, carry the ledger into the PR body under `## Autonomous Decisions`, and if there is no PR either, put it in your closing summary - a decision nobody can read afterward may as well not have been recorded.
 
 Write each entry as its own append the moment the decision is made, never as an end-of-session batch: a morning review must read a complete list, and a session that dies mid-wave leaves whole entries behind rather than half of one.
 Where an entry is genuinely uncertain, say so in **Why** - a recorded doubt is the thing the morning review looks for first.
@@ -260,7 +268,7 @@ When unsure whether ceremony applies, prefer running it. But never let "did ever
 /target bg --all-ready                   # dispatch every ready, non-deferred node; planning session keeps going
 
 # Modifiers
-/target yolo "feature"                   # walk-away authority: decide judgment calls, never stall
+/target yolo <node|plan>                 # walk-away authority: decide judgment calls, never stall
 /target clean "feature"                  # run /simplify after execute
 /target adversarial "feature"            # add adversarial challenge
 /target auto-merge "feature"             # auto-merge after external approves
