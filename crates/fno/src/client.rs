@@ -34,7 +34,7 @@ use crate::proto::{
     ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME,
     PROTO_VERSION,
 };
-use crate::tree::{Dir, Rect, TabId};
+use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{self, next_view, AgentSort, Density, SectionKey, SectionView};
 
 /// How long to wait for a just-spawned server to accept.
@@ -128,6 +128,19 @@ fn density_glyph(d: Density) -> char {
         Density::Extended => '▦',
     }
 }
+/// `held` as a share of `available`, in permille, clamped to `0..=1000`.
+///
+/// (x-d807) Seam ratios ride the wire as permille rather than `f32` because
+/// `Command` derives `Eq`, which no float type implements. One cell on a
+/// 200-column terminal is ~5 permille, so the integer resolution is far finer
+/// than a drag can express.
+fn permille(held: u16, available: u16) -> u16 {
+    if available == 0 {
+        return 0;
+    }
+    ((held as u32 * 1000) / available as u32).min(1000) as u16
+}
+
 /// The tab bar row.
 const TAB_BAR_ROWS: u16 = 1;
 /// The status row (US4): one always-on bottom line of client-local chrome.
@@ -426,6 +439,32 @@ enum TabContext {
     Ordinal(usize),
 }
 
+/// A draggable seam between two panes, addressed by the panes flanking it:
+/// `a` is the left/top pane, `b` the right/bottom one. `axis` is the branch's
+/// axis, so `Horizontal` (children side by side) means a vertical divider line.
+///
+/// The pair addresses one branch child pair, not one pane pair: a seam can run
+/// past several panes on either side, and naming any pane from each side picks
+/// out the same two branch children (a same-axis branch never nests, so every
+/// descendant of a child shares that child's extent along the branch axis).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Seam {
+    a: u64,
+    b: u64,
+    axis: Axis,
+}
+
+/// A seam drag in flight. `start_permille` is the ratio the seam held when the
+/// drag began, kept for the Esc revert; `last_permille` suppresses duplicate
+/// commands between cell-boundary crossings.
+#[derive(Clone, Copy, Debug)]
+struct SeamDrag {
+    seam: Seam,
+    start_permille: u16,
+    last_permille: u16,
+    last_at: Instant,
+}
+
 /// The last `Layout` as the client holds it.
 #[derive(Clone)]
 struct LayoutView {
@@ -590,6 +629,18 @@ struct View {
     /// sideline, painted with the selector's INVERSE bar. Highlight-only - never
     /// switches the viewed squad/tab. `None` off the panel.
     hover_row: Option<usize>,
+    /// (x-d807) The seam under the pointer, accented so a divider reads as
+    /// draggable before the press. Terminals cannot portably change the cursor
+    /// shape, so the accent is the whole affordance.
+    hover_seam: Option<Seam>,
+    /// (x-d807) The seam drag in flight, if any. While `Some`, drag and release
+    /// reports are intercepted before they reach a pane's PTY.
+    seam_drag: Option<SeamDrag>,
+    /// (x-d807) True while the pointer is over the sideline's right border, and
+    /// the border-drag in flight. The sideline stays client-local (never on the
+    /// wire) and snaps between density states rather than taking a free width.
+    hover_sideline_border: bool,
+    sideline_drag: Option<Density>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
@@ -1329,6 +1380,10 @@ impl View {
             hover_focus: true,
             hover_pending: None,
             hover_row: None,
+            hover_seam: None,
+            seam_drag: None,
+            hover_sideline_border: false,
+            sideline_drag: None,
             confirm: None,
             create: None,
             create_esc: Vec::new(),
@@ -2183,6 +2238,108 @@ impl View {
             }
         }
         None
+    }
+
+    /// The pane covering a content-relative cell, if any. The shared primitive
+    /// behind [`View::hit_test`] and [`View::seam_at`].
+    fn pane_covering(&self, cr: u16, cc: u16) -> Option<u64> {
+        self.layout
+            .panes
+            .iter()
+            .find(|(_, r)| cr >= r.y && cr < r.y + r.rows && cc >= r.x && cc < r.x + r.cols)
+            .map(|(pid, _)| *pid)
+    }
+
+    /// The seam under an outer-terminal cell, addressed by the panes flanking it.
+    ///
+    /// The client never receives the pane tree - `Layout` carries a flat
+    /// `Vec<(PaneId, Rect)>` - so a seam cannot be addressed by branch path here.
+    /// A flanking pane pair is derivable from the rects and resolves to exactly
+    /// one branch child pair server-side, which is why it is the wire address
+    /// (`Command::ResizeSeam`) rather than the topological one the design
+    /// originally assumed.
+    ///
+    /// `None` on a covered cell, on chrome, and on a `┼` crossing, where the two
+    /// candidate seams are genuinely ambiguous and picking one would resize a
+    /// divider the operator was not pointing at.
+    fn seam_at(&self, row: u16, col: u16) -> Option<Seam> {
+        let panel_w = self.panel_w();
+        if row < TAB_BAR_ROWS || col < panel_w {
+            return None;
+        }
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        if self.pane_covering(cr, cc).is_some() {
+            return None;
+        }
+        // Horizontal axis == children side by side == a vertical divider line.
+        let across = cc
+            .checked_sub(1)
+            .and_then(|l| self.pane_covering(cr, l))
+            .zip(self.pane_covering(cr, cc + 1))
+            .map(|(a, b)| Seam { a, b, axis: Axis::Horizontal });
+        let down = cr
+            .checked_sub(1)
+            .and_then(|u| self.pane_covering(u, cc))
+            .zip(self.pane_covering(cr + 1, cc))
+            .map(|(a, b)| Seam { a, b, axis: Axis::Vertical });
+        match (across, down) {
+            (Some(s), None) => Some(s),
+            (None, Some(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The rect of a pane by id, from the last layout.
+    fn pane_rect(&self, pid: u64) -> Option<Rect> {
+        self.layout
+            .panes
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, r)| *r)
+    }
+
+    /// A seam's extent along its branch axis: `(start, available)` in content
+    /// cells, where `available` excludes the 1-cell divider. `None` if either
+    /// pane has gone.
+    ///
+    /// Reading one pane's rect as its whole branch child's extent is exact, not
+    /// an approximation: `tree::check_invariants` rejects a branch nesting a
+    /// same-axis child, so every descendant of a child shares that child's
+    /// extent along the branch axis.
+    fn seam_span(&self, seam: Seam) -> Option<(u16, u16)> {
+        let (ra, rb) = (self.pane_rect(seam.a)?, self.pane_rect(seam.b)?);
+        Some(match seam.axis {
+            Axis::Horizontal => (ra.x, ra.cols + rb.cols),
+            Axis::Vertical => (ra.y, ra.rows + rb.rows),
+        })
+    }
+
+    /// The share of the seam's pair currently held by pane `a`, in permille.
+    /// Pair-relative, not branch-relative: the client cannot see the branch's
+    /// other children, so the server rescales this against the pair's own total.
+    fn seam_permille(&self, seam: Seam) -> Option<u16> {
+        let (_, available) = self.seam_span(seam)?;
+        let held = match seam.axis {
+            Axis::Horizontal => self.pane_rect(seam.a)?.cols,
+            Axis::Vertical => self.pane_rect(seam.a)?.rows,
+        };
+        Some(permille(held, available))
+    }
+
+    /// The share pane `a` would hold with the seam dragged under an
+    /// outer-terminal cell. Clamped to the pair; the server applies the
+    /// minimum-size clamp, which is the one that must hold.
+    fn seam_permille_at(&self, seam: Seam, row: u16, col: u16) -> Option<u16> {
+        let (start, available) = self.seam_span(seam)?;
+        let (cr, cc) = (
+            row.checked_sub(TAB_BAR_ROWS)?,
+            col.checked_sub(self.panel_w())?,
+        );
+        let at = match seam.axis {
+            Axis::Horizontal => cc,
+            Axis::Vertical => cr,
+        };
+        Some(permille(at.saturating_sub(start), available))
     }
 
     /// The column range of the footer's `☰ menu` button (x-8ccf US4), shared by
@@ -10166,6 +10323,130 @@ mod tests {
         assert_eq!(view.hit_test(5, 10), None);
         // The divider column between the panes covers no pane.
         assert_eq!(view.hit_test(5, 28 + 35), None);
+    }
+
+    // A two-pane VERTICAL stack over two_pane_view's geometry: 20 above 21,
+    // divider on content row 14 (outer row 15).
+    fn stacked_view() -> View {
+        let mut view = two_pane_view();
+        let rect = |y, rows| Rect {
+            x: 0,
+            y,
+            rows,
+            cols: 72,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(20, rect(0, 14)), (21, rect(15, 14))],
+            focus: 20,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        view
+    }
+
+    #[test]
+    fn seam_at_addresses_a_divider_by_its_flanking_panes() {
+        // US5: the client never sees the tree, so a seam is addressed by the
+        // panes flanking it. Content origin is outer (1, 28); three_pane_view
+        // tiles panes 10/11/12 at content x 0/24/48, each 23 wide, so the
+        // dividers sit on content col 23 and 47 (outer 51 and 75).
+        let view = three_pane_view();
+        assert_eq!(
+            view.seam_at(5, 51),
+            Some(Seam {
+                a: 10,
+                b: 11,
+                axis: Axis::Horizontal
+            }),
+            "vertical divider line addresses the panes left and right of it"
+        );
+        assert_eq!(
+            view.seam_at(5, 75),
+            Some(Seam {
+                a: 11,
+                b: 12,
+                axis: Axis::Horizontal
+            }),
+            "the second divider addresses its own pair, not the first's"
+        );
+        // A covered cell is a pane hit, never a seam - hit_test still owns it.
+        assert_eq!(view.seam_at(5, 30), None);
+        // Chrome: tab bar row and sideline columns.
+        assert_eq!(view.seam_at(0, 51), None);
+        assert_eq!(view.seam_at(5, 10), None);
+    }
+
+    #[test]
+    fn seam_at_addresses_a_stacked_divider_on_the_vertical_axis() {
+        let view = stacked_view();
+        assert_eq!(
+            view.seam_at(15, 40),
+            Some(Seam {
+                a: 20,
+                b: 21,
+                axis: Axis::Vertical
+            }),
+            "horizontal divider line addresses the panes above and below it"
+        );
+        assert_eq!(view.seam_at(5, 40), None, "inside the top pane");
+    }
+
+    #[test]
+    fn seam_permille_reads_the_current_split_from_rects() {
+        let view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        // Panes 10 and 11 are both 23 cols: an even split of the 46-cell pair.
+        assert_eq!(view.seam_permille(seam), Some(500));
+        // Dragging to content col 30 (outer 58) gives pane 10 thirty of 46.
+        assert_eq!(view.seam_permille_at(seam, 5, 58), Some(652));
+        // Past either end clamps into the pair rather than wrapping.
+        assert_eq!(view.seam_permille_at(seam, 5, 28), Some(0));
+        assert_eq!(view.seam_permille_at(seam, 5, 200), Some(1000));
+    }
+
+    #[test]
+    fn seam_at_refuses_an_ambiguous_crossing() {
+        // A '┼' is the intersection of two seams; picking one would resize a
+        // divider the operator was not pointing at, so the cell is not a target.
+        let mut view = two_pane_view();
+        let r = |x, y, rows, cols| Rect { x, y, rows, cols };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            // A 2x2 grid: the crossing sits at content (14, 35).
+            panes: vec![
+                (30, r(0, 0, 14, 35)),
+                (31, r(36, 0, 14, 36)),
+                (32, r(0, 15, 14, 35)),
+                (33, r(36, 15, 14, 36)),
+            ],
+            focus: 30,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        // Outer (1+14, 28+35) = (15, 63) is the crossing: both axes resolve.
+        assert_eq!(view.seam_at(15, 63), None);
+        // One cell off the crossing, each seam still resolves cleanly.
+        assert_eq!(
+            view.seam_at(5, 63).map(|s| (s.a, s.b)),
+            Some((30, 31)),
+            "above the crossing the vertical divider is unambiguous"
+        );
+        assert_eq!(
+            view.seam_at(15, 40).map(|s| (s.a, s.b)),
+            Some((30, 32)),
+            "left of the crossing the horizontal divider is unambiguous"
+        );
     }
 
     // A three-pane layout over two_pane_view's geometry (focus on pane 10, so
