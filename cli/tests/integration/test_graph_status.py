@@ -67,8 +67,8 @@ def test_idea_status_derived_from_no_plan_path(tmp_graph):
     )
 
 
-def test_idea_status_overridden_by_claimed(tmp_graph):
-    """An idea-shaped node that gets claimed (session_id set) derives to claimed."""
+def test_idea_status_overridden_by_in_progress(tmp_graph):
+    """An idea-shaped node that gets claimed (session_id set) derives to in_progress."""
     add = _invoke("--json", "backlog", "add", "Claimed idea")
     node_id = json.loads(add.stdout)["id"]
 
@@ -78,8 +78,8 @@ def test_idea_status_overridden_by_claimed(tmp_graph):
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("session_id") == "session-X"
-    assert node.get("_status") == "claimed", (
-        f"claimed beats idea; got {node.get('_status')!r}"
+    assert node.get("_status") == "in_progress", (
+        f"in_progress beats idea; got {node.get('_status')!r}"
     )
 
 

@@ -254,6 +254,42 @@ def test_stale_graph_design_never_regresses_a_blueprinted_doc(tmp_path):
     assert _fm(plan) == "ready"  # blueprint survives
 
 
+def test_idea_can_skip_design_and_go_straight_to_ready(tmp_path):
+    """`/blueprint quick` on an idea node skips the design rung entirely.
+
+    The ladder is not a forced march: `design` is a state you are IN when an
+    un-blueprinted think doc is linked, not a step every node must pass
+    through. Because the probe demotes only on positive `status: design`
+    evidence, a doc that is born blueprint-complete arms immediately.
+    """
+    from fno.graph.statuses import recompute_statuses
+
+    plan = tmp_path / "quick.md"
+    plan.write_text("---\nstatus: ready\nkind: quick-plan\n---\n\n## Changes\n")
+    node = {"id": "x-a", "plan_path": str(plan)}
+
+    recompute_statuses([node])
+    assert node["_status"] == "ready"
+    assert not is_design_stage(node)
+
+
+def test_stale_idea_graph_never_stamps_design_on_a_fresh_blueprint(tmp_path):
+    """The idea -> design projection must not undo a straight-to-blueprint doc.
+
+    GRAPH_TO_PLAN_STATUS maps graph `idea` -> plan `design`, and the graph can
+    still read `idea` in the window before the next mutation recomputes it.
+    Forward-only is what keeps that from regressing the doc.
+    """
+    from fno.plan._project import project_node_to_plan
+
+    plan = tmp_path / "quick.md"
+    plan.write_text("---\nstatus: ready\ntitle: T\n---\n\n# T\n\nbody\n")
+    stale = {"id": "x-a", "plan_path": str(plan), "_status": "idea"}
+
+    assert project_node_to_plan(stale, plan) is False
+    assert _fm(plan) == "ready"
+
+
 def test_starvation_receipt_names_design_not_quarantined(tmp_path):
     """A design-stage node is a lifecycle rung, not starvation.
 

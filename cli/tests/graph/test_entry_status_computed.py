@@ -8,7 +8,7 @@ Precedence (single-entry, matching recompute_statuses):
   superseded_by set   -> "superseded"
   deferred_at set     -> "deferred"
   non-empty blocked_by -> "blocked"
-  session_id set      -> "claimed"
+  session_id set      -> "in_progress"
   no plan_path        -> "idea"
   else                -> "ready"
 """
@@ -55,10 +55,10 @@ def test_ac1_hp_blocked_by_nonempty_gives_blocked():
     assert entry._status == "blocked"
 
 
-def test_ac1_hp_session_id_gives_claimed():
-    """Given session_id is set, _status must be 'claimed'."""
+def test_ac1_hp_session_id_gives_in_progress():
+    """Given session_id is set, _status must be 'in_progress'."""
     entry = Entry(id="ab-clm", plan_path="/some/plan", session_id="sess-123")
-    assert entry._status == "claimed"
+    assert entry._status == "in_progress"
 
 
 def test_ac1_hp_no_plan_path_gives_idea():
@@ -83,7 +83,7 @@ EDGE_CASES = [
     ("superseded", {"plan_path": "/p", "superseded_by": "ab-x"}),
     ("deferred", {"plan_path": "/p", "deferred_at": "2026-05-15T00:00:00Z"}),
     ("blocked", {"plan_path": "/p", "blocked_by": ["ab-x"]}),
-    ("claimed", {"plan_path": "/p", "session_id": "sess-abc"}),
+    ("in_progress", {"plan_path": "/p", "session_id": "sess-abc"}),
     ("idea", {}),
     ("ready", {"plan_path": "/p"}),
 ]
@@ -255,11 +255,11 @@ def test_ac1_ui_round_trip_preserves_status():
 
 def test_ac1_fr_no_drift_event_for_blocked_cascade_approximation():
     """No drift event emitted when computed=='blocked' but persisted is in
-    {'ready', 'claimed', 'idea'} -- the known single-entry-vs-cascade
+    {'ready', 'design', 'in_progress', 'idea'} -- the known single-entry-vs-cascade
     approximation gap (Locked Decision #2).
 
     recompute_statuses resolves nodes with all-completed blockers to 'ready'
-    or 'claimed', writing that to disk. On reload, _derive_status still sees
+    or 'in_progress', writing that to disk. On reload, _derive_status still sees
     a non-empty blocked_by and returns 'blocked'. This mismatch is NOT a real
     drift -- it is an expected gap between single-entry approximation and the
     cascade. Emitting graph_status_drift for this case would be a false positive.
