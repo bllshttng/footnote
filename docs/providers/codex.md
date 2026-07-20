@@ -59,8 +59,11 @@ fno setup cli-hooks-codex
 The compatibility command remains available:
 
 ```bash
-fno setup cli-hooks --no-gemini
+fno setup cli-hooks --no-gemini --no-claude
 ```
+
+`--no-claude` keeps this Codex-only: without it, `cli-hooks` also wires Claude's
+WorktreeRemove hook into `~/.claude/settings.json`, which is unrelated to Codex.
 
 Native plugin hooks are preferred when the Codex build supports them. The user-level
 `$CODEX_HOME/config.toml` hook is a fallback for local development; Codex records its

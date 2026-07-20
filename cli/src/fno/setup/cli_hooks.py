@@ -493,7 +493,10 @@ def install_claude_worktree_remove_hook(
     for group in groups:
         if not isinstance(group, dict):
             continue
-        for h in group.get("hooks", []) or []:
+        entries = group.get("hooks")
+        if not isinstance(entries, list):
+            continue
+        for h in entries:
             if not isinstance(h, dict):
                 continue
             script = _footnote_worktree_script(str(h.get("command", "")))
@@ -503,7 +506,15 @@ def install_claude_worktree_remove_hook(
             # this installer fixes, wearing a different hat: `bash <dead path>`
             # exits 127 and every worktree strands again. Repair it instead of
             # reporting "already wired" and changing nothing.
-            if Path(script).is_file():
+            #
+            # A LIVE path that is simply not the resolved one is a different
+            # case, and the two callers want opposite things. An explicit
+            # install asked to converge here, so re-point it (an upgrade that
+            # leaves the old version on disk would otherwise silently keep the
+            # stale one). The automatic repair must NOT: alternating between two
+            # live roots (a dev checkout and a marketplace install) would
+            # rewrite global settings on every session.
+            if Path(script).is_file() and (repair_only or Path(script) == Path(command)):
                 return HookInstallResult(
                     cli="claude", path=settings_path, changed=False,
                     already_present=True,
@@ -514,7 +525,7 @@ def install_claude_worktree_remove_hook(
             return HookInstallResult(
                 cli="claude", path=settings_path, changed=True,
                 already_present=False, backup=backup,
-                note=f"repaired a stale hook path ({script})",
+                note=f"re-pointed from {script}",
             )
 
     if repair_only:

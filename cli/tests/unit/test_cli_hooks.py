@@ -842,28 +842,6 @@ def test_cli_wires_claude_worktree_remove(tmp_path, monkeypatch):
     data = json.loads(settings.read_text())
     command = data["hooks"]["WorktreeRemove"][0]["hooks"][0]["command"]
     assert command == f"bash {plugin / 'worktree-remove.sh'}"
-
-
-def test_claude_worktree_remove_idempotent_across_plugin_roots(tmp_path):
-    """Suffix-keyed idempotency is the contract: a live entry under a DIFFERENT
-    plugin root must not stack a second hook."""
-    live = tmp_path / "a" / "hooks" / "worktree-remove.sh"
-    live.parent.mkdir(parents=True)
-    live.write_text("#!/usr/bin/env bash\n")
-
-    settings = tmp_path / "settings.json"
-    install_claude_worktree_remove_hook(str(live), settings_path=settings)
-    before = settings.read_text()
-
-    other = tmp_path / "b" / "hooks" / "worktree-remove.sh"
-    other.parent.mkdir(parents=True)
-    other.write_text("#!/usr/bin/env bash\n")
-    res = install_claude_worktree_remove_hook(str(other), settings_path=settings)
-
-    assert res.already_present and not res.changed
-    assert settings.read_text() == before
-
-
 def test_claude_worktree_remove_repairs_a_dead_path(tmp_path):
     """An entry whose script no longer exists is the stranding bug wearing a
     different hat, so re-running must repair it rather than report success."""
@@ -1073,3 +1051,54 @@ def test_cli_repair_only_skips_codex_and_gemini(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     assert not gset.exists()  # repair-only never touches the Codex/Gemini legs
     assert not cset.exists()  # and never wires an absent Claude hook
+
+
+def test_claude_explicit_install_repoints_a_live_but_stale_version(tmp_path):
+    """An upgrade that leaves the old version on disk must not make an explicit
+    install a silent no-op pointing at the stale one."""
+    old = tmp_path / "fno" / "0.3.0" / "hooks" / "worktree-remove.sh"
+    old.parent.mkdir(parents=True)
+    old.write_text("#!/usr/bin/env bash\n")
+    new = tmp_path / "fno" / "0.3.1" / "hooks" / "worktree-remove.sh"
+    new.parent.mkdir(parents=True)
+    new.write_text("#!/usr/bin/env bash\n")
+
+    settings = tmp_path / "settings.json"
+    install_claude_worktree_remove_hook(str(old), settings_path=settings)
+    res = install_claude_worktree_remove_hook(str(new), settings_path=settings)
+
+    assert res.changed
+    groups = json.loads(settings.read_text())["hooks"]["WorktreeRemove"]
+    assert len(groups) == 1
+    assert groups[0]["hooks"][0]["command"] == f"bash {new}"
+
+
+def test_claude_repair_only_leaves_a_live_other_root_alone(tmp_path):
+    """The automatic heal must not ping-pong global settings between a dev
+    checkout and a marketplace install on alternating sessions."""
+    a = tmp_path / "a" / "hooks" / "worktree-remove.sh"
+    a.parent.mkdir(parents=True)
+    a.write_text("#!/usr/bin/env bash\n")
+    b = tmp_path / "b" / "hooks" / "worktree-remove.sh"
+    b.parent.mkdir(parents=True)
+    b.write_text("#!/usr/bin/env bash\n")
+
+    settings = tmp_path / "settings.json"
+    install_claude_worktree_remove_hook(str(a), settings_path=settings)
+    before = settings.read_text()
+    res = install_claude_worktree_remove_hook(
+        str(b), settings_path=settings, repair_only=True
+    )
+    assert res.already_present and not res.changed
+    assert settings.read_text() == before
+
+
+def test_claude_worktree_remove_survives_a_scalar_hooks_value(tmp_path):
+    """A hand-edited settings file must produce the actionable leave-unchanged
+    error, not a TypeError out of the installer."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": {"WorktreeRemove": [{"hooks": 1}]}}))
+    res = install_claude_worktree_remove_hook(WT_CMD, settings_path=settings)
+    assert res.changed  # the junk group is skipped, ours is appended
+    groups = json.loads(settings.read_text())["hooks"]["WorktreeRemove"]
+    assert groups[-1]["hooks"][0]["command"] == f"bash {WT_CMD}"
