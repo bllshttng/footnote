@@ -401,7 +401,7 @@ def test_install_escapes_a_binary_path_that_would_break_the_xml():
 
 
 def test_install_on_non_macos_reports_the_cron_fallback(monkeypatch):
-    monkeypatch.setattr(G.sys if hasattr(G, "sys") else __import__("sys"), "platform", "linux")
+    monkeypatch.setattr(__import__("sys"), "platform", "linux")
     r = G.install_groom_agent()
     assert r["status"] == "unsupported"
     assert "backlog groom" in r["cron"]
@@ -418,6 +418,7 @@ def test_install_bounces_rather_than_loads(tmp_path, monkeypatch):
     def _fake_bounce(*, plist_path, label=None, **kwargs):
         called["plist"] = plist_path
         called["label"] = label
+        called["kickstart"] = kwargs.get("kickstart", True)
         return ("bounced", 0)
 
     monkeypatch.setattr("fno.pr_watch._install.bounce", _fake_bounce)
@@ -426,6 +427,47 @@ def test_install_bounces_rather_than_loads(tmp_path, monkeypatch):
     assert r["status"] == "installed"
     assert called["label"] == G.GROOM_LABEL
     assert (tmp_path / f"{G.GROOM_LABEL}.plist").exists()
+
+
+def test_install_never_kickstarts_the_grooming_job(tmp_path, monkeypatch):
+    """Installing must not run a pass.
+
+    `bounce` ends with `launchctl kickstart -k`, which is free liveness
+    confirmation for the watcher's idempotent poll. Grooming's tick mutates the
+    backlog and burns the day's claim, so a kickstart here would groom at
+    install time and contradict the plist's own RunAtLoad=false.
+    """
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    steps: list = []
+
+    def _fake_launchctl(*args, timeout_s=None):
+        steps.append(args[0])
+        return (0, False)
+
+    from fno.pr_watch import _install
+
+    monkeypatch.setattr(_install, "_run_launchctl_timed", _fake_launchctl)
+    r = G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno", install_path="/bin")
+
+    assert r["status"] == "installed"
+    assert "bootstrap" in steps
+    assert "kickstart" not in steps, "installing must not fire a grooming pass"
+
+
+def test_watcher_install_still_kickstarts():
+    """The default is unchanged: pr_watch relies on the forced first tick."""
+    steps: list = []
+
+    def _fake_run(*args, timeout_s=None):
+        steps.append(args[0])
+        return (0, False)
+
+    from fno.pr_watch._install import bounce
+
+    bounce(plist_path=Path("/tmp/x.plist"), label="sh.fno.test", uid=501, run=_fake_run)
+    assert "kickstart" in steps
 
 
 def test_skill_reads_fresh_proposals_and_reports_the_mechanical_line():

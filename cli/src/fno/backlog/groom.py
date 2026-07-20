@@ -375,11 +375,13 @@ def install_groom_agent(
     install_path: Optional[str] = None,
     hour: int = GROOM_HOUR_DEFAULT,
 ) -> dict[str, Any]:
-    """Write the plist and bounce it into launchd. Returns a receipt.
+    """Write the plist and bootstrap it into launchd. Returns a receipt.
 
-    Reuses pr_watch's bounce (bootout -> bootstrap -> kickstart) rather than
-    `launchctl load`: an `fno update` bounce can leave a job wedged in a state
-    only a re-bootstrap clears, and the same failure class applies here.
+    Reuses pr_watch's bounce rather than `launchctl load`, because an `fno
+    update` can leave a job wedged in a state only a re-bootstrap clears. But
+    WITHOUT its kickstart: grooming's tick mutates the backlog and burns the
+    day's claim, so forcing one here would run a full pass at install time and
+    silently contradict the plist's own `RunAtLoad=false`.
     """
     import shutil
     import sys
@@ -407,7 +409,7 @@ def install_groom_agent(
     except OSError as exc:
         return {"status": "failed", "detail": f"write {plist_path}: {exc}"}
 
-    msg, rc = bounce(plist_path=plist_path, label=GROOM_LABEL)
+    msg, rc = bounce(plist_path=plist_path, label=GROOM_LABEL, kickstart=False)
     return {
         "status": "installed" if rc == 0 else "failed",
         "plist": str(plist_path),
