@@ -353,8 +353,8 @@ def cmd_spawn(
         help=(
             "Provider-specific dangerous-mode bypass. For codex: passes "
             "--dangerously-bypass-approvals-and-sandbox. "
-            "For claude: --permission-mode bypassPermissions (an explicit "
-            "--permission-mode wins)."
+            "For claude: maps to --permission-mode bypassPermissions. "
+            "Mutually exclusive with --permission-mode (pass one; exit 2)."
         ),
     ),
     fresh: bool = typer.Option(
