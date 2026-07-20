@@ -10582,16 +10582,21 @@ mod tests {
 
         // A loaded CI runner can take several seconds just to spawn the PTY +
         // start the shell; 15s matches the PTY-wait convention elsewhere and
-        // keeps this off the flake list.
+        // keeps this off the flake list. Readiness is NON-EMPTY CONTENT, not
+        // existence: `pwd > cwd.txt` creates the file on redirect, BEFORE pwd
+        // writes into it, so an exists() gate can hand the read an empty string
+        // and the canonicalize below then fails as a confusing NotFound.
+        let content = || {
+            std::fs::read_to_string(&marker)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        };
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !marker.exists() && Instant::now() < deadline {
+        while content().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(
-            marker.exists(),
-            "pane shell never wrote cwd.txt within 15s (spawn slow or failed)"
-        );
-        let reported = std::fs::read_to_string(&marker).unwrap();
+        let reported =
+            content().expect("pane shell never wrote cwd.txt within 15s (spawn slow or failed)");
         assert_eq!(
             std::fs::canonicalize(reported.trim()).unwrap(),
             std::fs::canonicalize(&child_cwd).unwrap()
@@ -10707,16 +10712,21 @@ mod tests {
 
         // A loaded CI runner can take several seconds just to spawn the PTY +
         // start the shell; 15s matches the PTY-wait convention elsewhere and
-        // keeps this off the flake list.
+        // keeps this off the flake list. Readiness is NON-EMPTY CONTENT, not
+        // existence: `pwd > cwd.txt` creates the file on redirect, BEFORE pwd
+        // writes into it, so an exists() gate can hand the read an empty string
+        // and the canonicalize below then fails as a confusing NotFound.
+        let content = || {
+            std::fs::read_to_string(&marker)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        };
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !marker.exists() && Instant::now() < deadline {
+        while content().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(
-            marker.exists(),
-            "pane shell never wrote cwd.txt within 15s (spawn slow or failed)"
-        );
-        let reported = std::fs::read_to_string(&marker).unwrap();
+        let reported =
+            content().expect("pane shell never wrote cwd.txt within 15s (spawn slow or failed)");
         assert_eq!(
             std::fs::canonicalize(reported.trim()).unwrap(),
             std::fs::canonicalize(&row_cwd).unwrap(),

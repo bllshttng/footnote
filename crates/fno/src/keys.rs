@@ -313,6 +313,11 @@ pub enum KeySection {
     Navigation,
     WorkspacesTabs,
     Panes,
+    /// (x-f300) Bare keys the sideline handles on the SELECTED row - no leader.
+    /// They are not chords, so they carry no [`KeyBinding`]; the modal shows them
+    /// through [`meta_rows`] purely as reference, which is why removing a dead
+    /// row was undiscoverable before.
+    SidelineRows,
 }
 
 impl KeySection {
@@ -323,6 +328,7 @@ impl KeySection {
             KeySection::Navigation => "navigation",
             KeySection::WorkspacesTabs => "workspaces & tabs",
             KeySection::Panes => "panes",
+            KeySection::SidelineRows => "sideline rows (no prefix)",
         }
     }
 }
@@ -473,6 +479,19 @@ pub fn meta_rows() -> &'static [(&'static str, &'static str, KeySection)] {
     &[
         ("1-9", "select tab", KeySection::WorkspacesTabs),
         ("C-b C-b", "literal Ctrl-b", KeySection::Global),
+        // (x-f300) The dead-row removal paths. Bare sideline keys, not chords -
+        // listed here so the reference names them; Enter on them BELs.
+        (
+            "x",
+            "stop a live row · remove a dead one",
+            KeySection::SidelineRows,
+        ),
+        ("X", "reap all exited agents", KeySection::SidelineRows),
+        (
+            "right-click",
+            "row menu · on a header: clear dead",
+            KeySection::SidelineRows,
+        ),
     ]
 }
 

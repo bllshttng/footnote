@@ -738,6 +738,18 @@ enum ConfirmKind {
     /// Remove a stopped external tombstone by `attach_id` (x-7561). Same
     /// captured-id commit; the server gates rm on a persisted `stopped` state.
     RemoveExternal { attach_id: String, name: String },
+    /// Dismiss a member TOMBSTONE from its squad's member list (x-8f11). A
+    /// tombstone is not a registry agent, so RemoveAgent cannot reach it.
+    DismissMember { squad: u64, attach_id: String },
+    /// Remove every exited row in one section (x-f300). The SECTION commits, not
+    /// the row list: the set is re-folded on Enter, so rows that died or were
+    /// reaped while the prompt sat open are handled honestly. `dead` is the count
+    /// the prompt showed, kept only to name it.
+    ClearDead {
+        key: SectionKey,
+        squad: Option<u64>,
+        dead: usize,
+    },
 }
 
 /// The entity a rename overlay is editing (x-96e8 widened x-c150's tab-only
@@ -843,6 +855,7 @@ fn build_keys_modal() -> KeysModal {
         KeySection::Navigation,
         KeySection::WorkspacesTabs,
         KeySection::Panes,
+        KeySection::SidelineRows,
     ] {
         add(PopupRow::Header(section.title().into()), None);
         for kb in bindings.iter().filter(|kb| kb.section == section) {
@@ -886,20 +899,31 @@ fn build_keys_modal() -> KeysModal {
 /// the popup's flat targets (`popup.sel` indexes it directly).
 struct RowMenu {
     popup: Popup,
-    /// The target's identity, pinned at open. Execution fails closed if it no
+    /// What the menu acts on, pinned at open. Execution fails closed if it no
     /// longer resolves, so a layout reshuffle between open and click can only
     /// produce a stale-target refusal, never a redirected action.
     target: MenuTarget,
     actions: Vec<MenuAction>,
 }
 
-/// What a row menu is acting on: a sideline agent row, or (x-1d91) a Backlog
-/// card pinned by node id (ids are unique in the graph, so unlike agent names
-/// they need no disambiguation).
+/// What a row menu is acting on. A right-click resolves one of these at open
+/// time; execution re-resolves it against the LIVE layout, so a target that
+/// moved or vanished becomes a Notice rather than a misrouted action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MenuTarget {
     Agent(AgentIdent),
+    /// (x-1d91) A Backlog card pinned by node id (ids are unique in the graph,
+    /// so unlike agent names they need no disambiguation).
     Card(String),
+    /// A section header (a squad name row or a `~` band). `label` is cosmetic
+    /// (the confirm prompt); `key` is the persisted section identity and `squad`
+    /// the runtime one, present for a squad/mission header and `None` for a `~`
+    /// band (which has no squad).
+    Section {
+        key: SectionKey,
+        label: String,
+        squad: Option<u64>,
+    },
 }
 
 /// The disambiguating identity of an agent row, captured when a row menu opens.
@@ -943,6 +967,9 @@ enum MenuAction {
     Remove,
     /// (x-1d91) Run a reorder verb on a Backlog card.
     Backlog(BacklogVerb),
+    /// Remove EVERY exited row in the target section (x-f300). The section comes
+    /// from [`MenuTarget::Section`], so this stays payload-free and `Copy`.
+    ClearDead,
 }
 
 /// Build the per-state row menu for the agent at `display_rows()` index `i`,
@@ -1060,6 +1087,59 @@ fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
             MenuAction::Backlog(BacklogVerb::RankTop),
             MenuAction::Backlog(BacklogVerb::Defer),
         ],
+    }
+}
+/// The command that clears ONE dead row, by what kind of row it is. Three
+/// stores hold dead rows and each has its own verb: a member TOMBSTONE lives in
+/// the squad's member list (`RemoveAgent` resolves only against the agent
+/// registry, so it would answer "no such agent" and leave the row on screen), an
+/// EXTERNAL row routes by its stable attach_id (x-7561), and a registry row goes
+/// by name. One mapping so the row menu and the bulk clear cannot disagree.
+fn remove_dead(a: &AgentRow) -> Command {
+    match (a.tombstone, a.squad, a.external, a.attach_id.clone()) {
+        (true, Some(squad), _, Some(attach_id)) => Command::DismissMember { squad, attach_id },
+        (_, _, true, Some(attach_id)) => Command::RemoveExternal {
+            attach_id,
+            name: a.name.clone(),
+        },
+        _ => Command::RemoveAgent {
+            name: a.name.clone(),
+        },
+    }
+}
+
+/// How many rows one clear-dead may remove. Each row costs the server a
+/// `fno agents rm` subprocess (`agent_action` spawns one per command, unbounded),
+/// so an unbounded fan-out would let a long-lived section stampede the daemon.
+/// ponytail: a flat cap, repeat to clear the rest; the upgrade is a section-scoped
+/// bulk verb server-side, which the single-process `ReapAgents` already models.
+const CLEAR_DEAD_MAX: usize = 25;
+
+/// (x-f300) The section-header context menu: the bulk counterpart to the row
+/// menu's single Remove. `dead` is the count the label advertises AND the number
+/// the commit will run, so the two can never disagree. Caller guarantees
+/// `dead > 0` - a section with nothing to clear gets a Notice, not a menu whose
+/// only entry no-ops.
+fn build_section_menu(
+    key: SectionKey,
+    label: String,
+    squad: Option<u64>,
+    dead: usize,
+    anchor: Anchor,
+) -> RowMenu {
+    let rows = vec![
+        PopupRow::Header(label.clone()),
+        PopupRow::Rule,
+        PopupRow::Entry {
+            glyph: "✕".into(),
+            label: format!("Clear dead ({dead})"),
+            hint: String::new(),
+        },
+    ];
+    RowMenu {
+        popup: Popup::new(rows, anchor),
+        target: MenuTarget::Section { key, label, squad },
+        actions: vec![MenuAction::ClearDead],
     }
 }
 
@@ -1813,20 +1893,69 @@ impl View {
     }
 
     /// Open the row context menu on `display_rows()` index `i`, anchored at
-    /// `anchor` (x-8ccf US2): the agent lifecycle menu, or (x-1d91) the Backlog
-    /// card's reorder menu. Returns whether it opened - `false` for any other row
-    /// (the caller then leaves the press alone / forwards it).
+    /// `anchor` (x-8ccf US2): the agent lifecycle menu, (x-1d91) the Backlog
+    /// card's reorder menu, or (x-f300) a section header's clear-dead menu (a
+    /// squad name row or a `~` band). Returns whether it opened - `false` for a
+    /// row with no menu, which the caller turns into "close whatever is open".
     fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
-        let menu = match self.display_rows().get(i) {
-            Some(DisplayRow::Agent(a)) => build_row_menu(a, anchor),
+        enum Pick {
+            Menu(Box<RowMenu>),
+            Section(SectionKey, String, Option<u64>),
+        }
+        // Resolve what the row needs while `display_rows()` holds the borrow, so
+        // the section arm below is free to mutate `self`.
+        let pick = match self.display_rows().get(i) {
+            Some(DisplayRow::Agent(a)) => Some(Pick::Menu(Box::new(build_row_menu(a, anchor)))),
             // (x-1d91) A Backlog card gets the reorder menu.
-            Some(DisplayRow::Card(c)) => build_card_menu(c, anchor),
-            _ => return false,
+            Some(DisplayRow::Card(c)) => Some(Pick::Menu(Box::new(build_card_menu(c, anchor)))),
+            Some(DisplayRow::Sel(row)) if row.tab.is_none() => squad_key(&self.layout, row.squad)
+                .map(|key| {
+                    let label = self
+                        .layout
+                        .squads
+                        .iter()
+                        .find(|s| s.id == row.squad)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    Pick::Section(key, label, Some(row.squad))
+                }),
+            Some(DisplayRow::Header { key, label, .. }) => {
+                Some(Pick::Section(key.clone(), (*label).to_string(), None))
+            }
+            _ => None,
         };
-        self.clear_peek();
-        self.row_menu = Some(menu);
-        self.row_menu_esc.clear();
-        true
+        match pick {
+            Some(Pick::Menu(m)) => {
+                self.clear_peek();
+                self.row_menu = Some(*m);
+                self.row_menu_esc.clear();
+                true
+            }
+            Some(Pick::Section(key, label, squad)) => {
+                // Cards have no exited state, so the Backlog section has no
+                // menu at all - a notice there would imply "none right now"
+                // about a section that can never have any.
+                if key == SectionKey::WorkQueue {
+                    return false;
+                }
+                // A section with nothing to clear would leave a one-entry menu
+                // whose only entry is a no-op; say so instead (the row menu's
+                // "no dead item ever renders" rule, applied to the whole menu).
+                // "nothing to clear" covers both an all-live section and a key
+                // `section_dead_rows` refused as ambiguous - it never claims
+                // there are no dead rows when the truth is we won't guess which.
+                let dead = self.section_dead_rows(&key, squad).len();
+                if dead == 0 {
+                    self.set_notice(format!("no dead rows in {label}"));
+                    return false;
+                }
+                self.clear_peek();
+                self.row_menu = Some(build_section_menu(key, label, squad, dead, anchor));
+                self.row_menu_esc.clear();
+                true
+            }
+            None => false,
+        }
     }
 
     /// The flat popup target under a screen cell while the row menu is open, for
@@ -2624,7 +2753,7 @@ impl View {
     /// a restart. `has_dead` and `binary` come from the section's own rows -
     /// see [`next_view`].
     fn cycle_section(&mut self, key: SectionKey) {
-        let has_dead = self.section_has_dead(&key);
+        let has_dead = !self.section_dead_rows(&key, None).is_empty();
         let next = next_view(self.section_view(&key), has_dead, &key);
         self.set_section_view(key, next);
     }
@@ -2709,24 +2838,41 @@ impl View {
         self.clamp_sideline_offset();
     }
 
-    /// Whether a section holds at least one exited row - the predicate that
-    /// decides if `LiveOnly` would hide anything. Folded live off the layout,
+    /// A section's exited rows. ONE predicate behind both `LiveOnly`'s hiding
+    /// and the header menu's clear-dead, so the count the caret implies and the
+    /// set the menu removes cannot drift apart. Folded live off the layout,
     /// never cached (the x-df4c drift posture), so a section whose last dead
     /// row was reaped elsewhere reports honestly on the very next click.
-    fn section_has_dead(&self, key: &SectionKey) -> bool {
+    /// `squad` is the caller's RUNTIME identity for a squad section, and it wins
+    /// when present. `SectionKey::Squad` carries the canonical cwd because it is
+    /// persisted and must survive a restart - but two squads can share an origin
+    /// (identity is the id, not the path), so resolving a destructive action
+    /// through the key alone could clear the sibling workspace's rows. Every
+    /// header knows its own squad (`display_rows` emits one per squad), so the
+    /// collision is structurally impossible on the paths that matter; `None`
+    /// keeps the by-key lookup for display-only callers.
+    fn section_dead_rows(&self, key: &SectionKey, squad: Option<u64>) -> Vec<&AgentRow> {
         match key {
             SectionKey::Squad(_) | SectionKey::Mission(_) => {
-                let Some(s) = self.layout.squads.iter().find(|s| squad_matches(s, key)) else {
-                    return false;
+                let id = squad.or_else(|| {
+                    self.layout
+                        .squads
+                        .iter()
+                        .find(|s| squad_matches(s, key))
+                        .map(|s| s.id)
+                });
+                let Some(id) = id else {
+                    return Vec::new();
                 };
                 self.layout
                     .agents
                     .iter()
-                    .any(|a| a.squad == Some(s.id) && a.exited)
+                    .filter(|a| a.squad == Some(id) && a.exited)
+                    .collect()
             }
-            SectionKey::Elsewhere => self.orphans().iter().any(|a| a.exited),
+            SectionKey::Elsewhere => self.orphans().into_iter().filter(|a| a.exited).collect(),
             // Cards have no exited state, so the Backlog section is always binary.
-            SectionKey::WorkQueue => false,
+            SectionKey::WorkQueue => Vec::new(),
         }
     }
 
@@ -3427,6 +3573,10 @@ impl View {
             ConfirmKind::StopExternal { .. } => format!(" stop {label}? ⏎/esc"),
             ConfirmKind::RemoveExternal { .. } => {
                 format!(" remove {label} and worktree? ⏎/esc")
+            }
+            ConfirmKind::DismissMember { .. } => format!(" dismiss {label}? ⏎/esc"),
+            ConfirmKind::ClearDead { dead, .. } => {
+                format!(" clear {dead} dead row(s) in {label}? ⏎/esc")
             }
         };
         for (i, ch) in text.chars().take(cols).enumerate() {
@@ -6547,25 +6697,55 @@ async fn confirm_keys(
         return Ok(StdinFlow::Continue);
     };
     if matches!(bytes.first(), Some(b'\r') | Some(b'\n')) {
-        let cmd = match action.action {
-            ConfirmKind::Dispatch { node } => Command::DispatchNode {
+        // Most confirms are one command; clear-dead (x-f300) fans out to one
+        // Remove per exited row, so the commit path speaks in a list.
+        let cmds = match action.action {
+            ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
                 node,
                 account: view.active_account.clone(),
-            },
-            ConfirmKind::RemoveSquad { squad, .. } => Command::RemoveSquad(squad),
-            ConfirmKind::StopAgent { name } => Command::StopAgent { name },
-            ConfirmKind::RemoveAgent { name } => Command::RemoveAgent { name },
-            ConfirmKind::ReapAgents => Command::ReapAgents,
+            }],
+            ConfirmKind::RemoveSquad { squad, .. } => vec![Command::RemoveSquad(squad)],
+            ConfirmKind::StopAgent { name } => vec![Command::StopAgent { name }],
+            ConfirmKind::RemoveAgent { name } => vec![Command::RemoveAgent { name }],
+            ConfirmKind::ReapAgents => vec![Command::ReapAgents],
             ConfirmKind::StopExternal { attach_id, name } => {
-                Command::StopExternal { attach_id, name }
+                vec![Command::StopExternal { attach_id, name }]
             }
             ConfirmKind::RemoveExternal { attach_id, name } => {
-                Command::RemoveExternal { attach_id, name }
+                vec![Command::RemoveExternal { attach_id, name }]
+            }
+            ConfirmKind::DismissMember { squad, attach_id } => {
+                vec![Command::DismissMember { squad, attach_id }]
+            }
+            // Re-fold on Enter, not at open: the prompt may have sat for a while
+            // and the honest set is whatever is dead NOW.
+            ConfirmKind::ClearDead { key, squad, .. } => {
+                let dead = view.section_dead_rows(&key, squad);
+                let total = dead.len();
+                let picked: Vec<Command> = dead
+                    .into_iter()
+                    .take(CLEAR_DEAD_MAX)
+                    .map(remove_dead)
+                    .collect();
+                // Say what the cap left behind - a silent truncation would read
+                // as "cleared everything" while rows stayed on screen.
+                if total > CLEAR_DEAD_MAX {
+                    let rest = total - CLEAR_DEAD_MAX;
+                    view.set_notice(format!(
+                        "clearing {CLEAR_DEAD_MAX}, {rest} left - repeat to continue"
+                    ));
+                }
+                picked
             }
         };
-        write_msg(sock_w, &ClientMsg::Command(cmd))
-            .await
-            .map_err(|e| format!("confirm-action send failed: {e}"))?;
+        if cmds.is_empty() {
+            view.set_notice("nothing left to clear".into());
+        }
+        for cmd in cmds {
+            write_msg(sock_w, &ClientMsg::Command(cmd))
+                .await
+                .map_err(|e| format!("confirm-action send failed: {e}"))?;
+        }
     }
     Ok(StdinFlow::Continue)
 }
@@ -6856,9 +7036,17 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("backlog verb send failed: {e}"))?;
             return Ok(());
         }
+        // (x-f300) The section menu's only action, resolved against the section
+        // rather than a single row.
+        (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
+            return clear_dead_confirm(view, key, label, squad);
+        }
         // A menu is built for exactly one target kind, so a crossed pair can only
         // come from a bug; refuse rather than guess at a target.
-        (MenuTarget::Card(_), _) | (_, MenuAction::Backlog(_)) => {
+        (MenuTarget::Card(_), _)
+        | (_, MenuAction::Backlog(_))
+        | (MenuTarget::Section { .. }, _)
+        | (_, MenuAction::ClearDead) => {
             view.set_notice("action does not apply to this row".into());
             return Ok(());
         }
@@ -6934,20 +7122,29 @@ async fn execute_row_menu_action(
                 view.set_notice("terminal too short for the confirm prompt".into());
                 return Ok(());
             }
-            let kind = match (action, a.external, a.attach_id.clone()) {
-                (MenuAction::Stop, true, Some(id)) => ConfirmKind::StopExternal {
-                    attach_id: id,
-                    name: a.name.clone(),
+            let kind = match action {
+                MenuAction::Stop => match (a.external, a.attach_id.clone()) {
+                    (true, Some(id)) => ConfirmKind::StopExternal {
+                        attach_id: id,
+                        name: a.name.clone(),
+                    },
+                    _ => ConfirmKind::StopAgent {
+                        name: a.name.clone(),
+                    },
                 },
-                (MenuAction::Stop, _, _) => ConfirmKind::StopAgent {
-                    name: a.name.clone(),
-                },
-                (MenuAction::Remove, true, Some(id)) => ConfirmKind::RemoveExternal {
-                    attach_id: id,
-                    name: a.name.clone(),
-                },
-                (_, _, _) => ConfirmKind::RemoveAgent {
-                    name: a.name.clone(),
+                // Remove routes by row KIND through [`remove_dead`], the same
+                // mapping the bulk clear uses, so the single-row and section
+                // paths cannot disagree about which store owns a dead row.
+                _ => match remove_dead(&a) {
+                    Command::DismissMember { squad, attach_id } => {
+                        ConfirmKind::DismissMember { squad, attach_id }
+                    }
+                    Command::RemoveExternal { attach_id, name } => {
+                        ConfirmKind::RemoveExternal { attach_id, name }
+                    }
+                    _ => ConfirmKind::RemoveAgent {
+                        name: a.name.clone(),
+                    },
                 },
             };
             view.open_confirm(ConfirmAction {
@@ -6955,7 +7152,40 @@ async fn execute_row_menu_action(
                 label: a.name.clone(),
             });
         }
+        // Only ever built alongside `MenuTarget::Section`, which returned above.
+        // A Notice rather than `unreachable!` - a panic here would take the whole
+        // multiplexer down over a menu-construction bug.
+        MenuAction::ClearDead => view.set_notice("clear dead needs a section header".into()),
     }
+    Ok(())
+}
+
+/// (x-f300) Arm the clear-dead confirm for a section, over the dead set as it
+/// stands NOW rather than as the menu found it.
+fn clear_dead_confirm(
+    view: &mut View,
+    key: SectionKey,
+    label: String,
+    squad: Option<u64>,
+) -> Result<(), String> {
+    let dead = view
+        .section_dead_rows(&key, squad)
+        .len()
+        .min(CLEAR_DEAD_MAX);
+    if dead == 0 {
+        view.set_notice(format!("no dead rows in {label}"));
+        return Ok(());
+    }
+    // A confirm owns the bottom row; a too-short terminal refuses rather than
+    // arm an invisible prompt (matching the selector's stop/reap, x-260a).
+    if view.term.0 < MIN_ROWS_FOR_STATUS {
+        view.set_notice("terminal too short for the confirm prompt".into());
+        return Ok(());
+    }
+    view.open_confirm(ConfirmAction {
+        action: ConfirmKind::ClearDead { key, squad, dead },
+        label,
+    });
     Ok(())
 }
 
@@ -11698,11 +11928,389 @@ mod tests {
 
     #[test]
     fn row_menu_opens_only_on_menu_bearing_rows() {
-        // Row 0 is a squad row - neither an agent nor a Backlog card - so the
-        // menu refuses (right-click there is swallowed as chrome).
+        // (x-f300) A squad row now opens the SECTION menu when it holds dead
+        // rows - but `unified_rows_view` has none, so the refusal here is the
+        // no-dead path (asserted by name below), not "headers never open".
         let mut v = unified_rows_view();
-        assert!(!v.open_row_menu(0, Anchor::Center));
+        let hdr = squad_header_at(&v, 1);
+        assert!(!v.open_row_menu(hdr, Anchor::Center));
         assert!(v.row_menu.is_none());
+        // A truly menu-less row (the dim subline) refuses with no notice at all.
+        // A FOREIGN cwd is what makes display_rows emit the Sub line, so the
+        // fixture has to opt in - `.expect` rather than `if let`, so a fixture
+        // that stops producing one fails loudly instead of skipping the check.
+        v.layout.agents[0].cwd_base = Some("elsewhere".into());
+        let sub = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Sub(_)))
+            .expect("a foreign-cwd agent renders a Sub row");
+        v.notice = None;
+        assert!(!v.open_row_menu(sub, Anchor::Center));
+        assert!(v.notice.is_none(), "an inert row says nothing");
+    }
+
+    /// The display index of the squad-name header row for `squad`.
+    fn squad_header_at(view: &View, squad: u64) -> usize {
+        view.display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Sel(s) if s.squad == squad && s.tab.is_none()))
+            .expect("squad header row")
+    }
+
+    /// Every command one Enter put on the wire, in order.
+    fn decode_cmds(buf: Vec<u8>) -> Vec<Command> {
+        let len = buf.len() as u64;
+        let mut cur = std::io::Cursor::new(buf);
+        let mut out = Vec::new();
+        while cur.position() < len {
+            match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+                ClientMsg::Command(c) => out.push(c),
+                other => panic!("expected a Command, got {other:?}"),
+            }
+        }
+        out
+    }
+
+    /// Open the section menu on a squad header and run its only entry.
+    async fn arm_clear_dead(v: &mut View, squad: u64) {
+        let hdr = squad_header_at(v, squad);
+        assert!(v.open_row_menu(hdr, Anchor::Center), "section menu opens");
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().actions,
+            vec![super::MenuAction::ClearDead]
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "the menu entry only arms the confirm");
+    }
+
+    #[tokio::test]
+    async fn clear_dead_removes_every_dead_row_in_the_section() {
+        // (x-f300) The header menu's clear-dead sends one Remove per exited row
+        // and leaves every live row alone.
+        let mut v = view_with_dead_interleaved();
+        arm_clear_dead(&mut v, 1).await;
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(ConfirmKind::ClearDead { dead, .. }) => assert_eq!(*dead, 2),
+            _ => panic!("expected a ClearDead confirm"),
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![
+                Command::RemoveAgent {
+                    name: "dead-a".into()
+                },
+                Command::RemoveAgent {
+                    name: "dead-b".into()
+                },
+            ],
+            "only the exited rows are removed"
+        );
+    }
+
+    #[test]
+    fn clear_dead_refuses_a_section_with_no_dead_rows() {
+        // The menu never renders an entry that would no-op: a fully-live section
+        // gets a notice instead of a one-entry menu (AC-EDGE).
+        let mut v = view_with_agents(vec![]);
+        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
+        let hdr = squad_header_at(&v, 1);
+        assert!(!v.open_row_menu(hdr, Anchor::Center));
+        assert!(v.row_menu.is_none());
+        assert!(v.notice.is_some(), "and says why");
+    }
+
+    #[tokio::test]
+    async fn clear_dead_refolds_the_set_at_commit_not_at_open() {
+        // Concurrency: the confirm pins the SECTION, not the row list. A row
+        // reaped while the prompt sat open drops out of the commit instead of
+        // sending a Remove for something already gone.
+        let mut v = view_with_dead_interleaved();
+        arm_clear_dead(&mut v, 1).await;
+        v.layout.agents.retain(|a| a.name != "dead-a");
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::RemoveAgent {
+                name: "dead-b".into()
+            }],
+            "the vanished row is not re-removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dead_routes_external_rows_by_attach_id() {
+        // An external tombstone removes by its stable attach_id (x-7561), the
+        // same split the single-row `x` verb makes - clear-dead must not flatten
+        // every row to a by-name RemoveAgent.
+        let mut ext = lifecycle_row("ext-dead", true, true);
+        ext.attach_id = Some("deadbeef".into());
+        let mut v = view_with_agents(vec![lifecycle_row("plain-dead", true, false), ext]);
+        arm_clear_dead(&mut v, 1).await;
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![
+                Command::RemoveAgent {
+                    name: "plain-dead".into()
+                },
+                Command::RemoveExternal {
+                    attach_id: "deadbeef".into(),
+                    name: "ext-dead".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dead_on_an_emptied_section_sends_nothing() {
+        // AC-ERR: every dead row vanishing between arm and Enter is a notice,
+        // not an empty-but-silent commit.
+        let mut v = view_with_dead_interleaved();
+        arm_clear_dead(&mut v, 1).await;
+        v.layout.agents.retain(|a| !a.exited);
+        v.notice = None;
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "nothing goes on the wire");
+        assert!(v.notice.is_some(), "and the operator is told");
+    }
+
+    #[test]
+    fn clear_dead_resolves_by_squad_id_when_canonical_paths_collide() {
+        // SectionKey::Squad carries the persisted cwd, and two squads may share
+        // an origin - so the key alone is ambiguous while the squad id never is.
+        // A dead row in EACH squad is what makes this bite: a by-key resolve
+        // would hand squad 2's header squad 1's row.
+        let mut v = view_with_agents(vec![]);
+        v.set_layout(two_squad_layout(1));
+        for s in v.layout.squads.iter_mut() {
+            s.canonical_cwd = "/shared".into();
+        }
+        let in_squad = |name: &str, squad: u64| {
+            let mut r = lifecycle_row(name, true, false);
+            r.squad = Some(squad);
+            r
+        };
+        v.layout.agents = vec![in_squad("dead-in-1", 1), in_squad("dead-in-2", 2)];
+        let key = squad_key(&v.layout, 2).expect("squad 2 has a key");
+        let names =
+            |rows: Vec<&AgentRow>| -> Vec<String> { rows.iter().map(|a| a.name.clone()).collect() };
+        assert_eq!(names(v.section_dead_rows(&key, Some(2))), ["dead-in-2"]);
+        assert_eq!(names(v.section_dead_rows(&key, Some(1))), ["dead-in-1"]);
+        // The display-only caller (cycle_section's has_dead) keeps the by-key
+        // lookup: a collision must not cost the section its LiveOnly state.
+        assert!(
+            !v.section_dead_rows(&key, None).is_empty(),
+            "LiveOnly is still offered on a collided section"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dead_dismisses_member_tombstones() {
+        // A tombstone lives in the squad's member list, not the agent registry,
+        // so RemoveAgent would answer "no such agent" and leave the gray row on
+        // screen - the exact symptom clear-dead exists to remove.
+        let mut tomb = lifecycle_row("cc-member", true, false);
+        tomb.tombstone = true;
+        tomb.attach_id = Some("deadbeef".into());
+        let mut v = view_with_agents(vec![tomb, lifecycle_row("plain-dead", true, false)]);
+        arm_clear_dead(&mut v, 1).await;
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![
+                Command::DismissMember {
+                    squad: 1,
+                    attach_id: "deadbeef".into()
+                },
+                Command::RemoveAgent {
+                    name: "plain-dead".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn row_menu_remove_dismisses_a_member_tombstone() {
+        // The single-row path shares `remove_dead`, so it must route a tombstone
+        // the same way the bulk clear does.
+        let mut tomb = lifecycle_row("cc-member", true, false);
+        tomb.tombstone = true;
+        tomb.attach_id = Some("deadbeef".into());
+        let mut v = view_with_agents(vec![tomb]);
+        let idx = agent_row_at(&v, |a| a.name == "cc-member");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::Remove)
+            .expect("an exited row offers Remove");
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::DismissMember {
+                squad: 1,
+                attach_id: "deadbeef".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dead_caps_the_fan_out_and_says_what_is_left() {
+        // Each row costs the server one `fno agents rm` subprocess, so the fan-out
+        // is capped - and the leftover is announced, never silently truncated.
+        let over = CLEAR_DEAD_MAX + 3;
+        let rows: Vec<AgentRow> = (0..over)
+            .map(|i| lifecycle_row(&format!("dead-{i}"), true, false))
+            .collect();
+        let mut v = view_with_agents(rows);
+        arm_clear_dead(&mut v, 1).await;
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(decode_cmds(buf).len(), CLEAR_DEAD_MAX, "the cap holds");
+        let notice = v
+            .notice
+            .as_ref()
+            .map(|(t, _)| t.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("3 left"),
+            "the remainder is surfaced: {notice}"
+        );
+    }
+
+    #[test]
+    fn backlog_header_has_no_menu_and_stays_silent() {
+        // Cards have no exited state, so a notice there would imply "none right
+        // now" about a section that can never have any. (SectionKey::WorkQueue
+        // is the pre-rename identifier for the Backlog section.)
+        let mut v = view_with_agents(vec![]);
+        // The band only renders over a non-empty backlog, so the card is what
+        // makes this test non-vacuous - `.expect` keeps it that way.
+        v.layout.backlog = vec![BacklogCard {
+            id: "x-f300".into(),
+            slug: "a-card".into(),
+            priority: "p2".into(),
+            state: CardState::Ready,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+            project: None,
+            lane: None,
+            head: false,
+        }];
+        let hdr = v
+            .display_rows()
+            .iter()
+            .position(
+                |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::WorkQueue),
+            )
+            .expect("a backlog card renders the Backlog band");
+        v.notice = None;
+        assert!(!v.open_row_menu(hdr, Anchor::Center));
+        assert!(v.notice.is_none(), "the Backlog section says nothing");
+    }
+
+    #[tokio::test]
+    async fn clear_dead_is_scoped_to_its_own_section() {
+        // The load-bearing guarantee of a SECTION clear: a sibling workspace's
+        // dead rows are none of its business. Without this, "clear dead" on one
+        // squad silently reaps the whole session's tombstones.
+        let in_squad = |name: &str, squad: u64| {
+            let mut r = lifecycle_row(name, true, false);
+            r.squad = Some(squad);
+            r
+        };
+        let mut v = view_with_agents(vec![]);
+        v.set_layout(two_squad_layout(1));
+        v.layout.agents = vec![in_squad("dead-in-1", 1), in_squad("dead-in-2", 2)];
+        arm_clear_dead(&mut v, 1).await;
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::RemoveAgent {
+                name: "dead-in-1".into()
+            }],
+            "the sibling squad's dead row is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dead_works_on_the_elsewhere_band_too() {
+        // A `~` band is a DisplayRow::Header, a different branch from a squad's
+        // Sel row - drift between the two would leave orphaned dead rows with no
+        // bulk path, the exact gap this closes.
+        let orphan = |name: &str, exited: bool| {
+            let mut r = lifecycle_row(name, exited, false);
+            r.squad = Some(99); // no such squad -> orphan
+            r
+        };
+        let mut v = view_with_agents(vec![
+            orphan("stray-live", false),
+            orphan("stray-dead", true),
+        ]);
+        let hdr = v
+            .display_rows()
+            .iter()
+            .position(
+                |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere),
+            )
+            .expect("elsewhere band");
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::RemoveAgent {
+                name: "stray-dead".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn which_key_lists_the_dead_row_removal_verbs() {
+        // (x-f300) The gap this node closed was discoverability: if the modal
+        // stops naming these, removal is invisible again.
+        let modal = build_keys_modal();
+        let labels: Vec<String> = modal
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Entry { glyph, label, .. } => Some(format!("{glyph} {label}")),
+                PopupRow::Header(h) => Some(h.clone()),
+                _ => None,
+            })
+            .collect();
+        let joined = labels.join("\n");
+        assert!(joined.contains("sideline rows"), "the section renders");
+        assert!(joined.contains("x stop a live row · remove a dead one"));
+        assert!(joined.contains("X reap all exited agents"));
+        assert!(joined.contains("on a header: clear dead"));
+        // Display-only: Enter on them must BEL, never dispatch a bogus chord.
+        for (i, r) in modal.popup.rows.iter().enumerate() {
+            if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
+                assert!(
+                    modal.row_events[i].is_none(),
+                    "a bare sideline key is not a leader chord"
+                );
+            }
+        }
     }
 
     #[tokio::test]
