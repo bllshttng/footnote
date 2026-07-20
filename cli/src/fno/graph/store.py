@@ -654,6 +654,17 @@ def _node_carries_pr(node: dict, pr_number: int) -> bool:
     )
 
 
+def _node_pr_urls(node: dict) -> "list[str]":
+    """The node's PR urls (primary + additional_prs), unparsed."""
+    urls = [node.get("pr_url")]
+    urls += [
+        extra.get("url")
+        for extra in (node.get("additional_prs") or [])
+        if isinstance(extra, dict)
+    ]
+    return [u for u in urls if isinstance(u, str)]
+
+
 def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     """True if any of the node's PR urls resolves to exactly ``(repo, pr_number)``.
 
@@ -665,15 +676,7 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     correct, not a regression.
     """
     want = repo.lower()
-    urls = [node.get("pr_url")]
-    urls += [
-        extra.get("url")
-        for extra in (node.get("additional_prs") or [])
-        if isinstance(extra, dict)
-    ]
-    for url in urls:
-        if not isinstance(url, str):
-            continue
+    for url in _node_pr_urls(node):
         # Footnote's own stamps are canonical, but a hand-passed url may carry a
         # query, fragment, or trailing slash; the repo slug is case-insensitive.
         clean = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
@@ -682,6 +685,27 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
             continue
         try:
             if int(tail) == pr_number and head.lower().endswith("/" + want):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def node_is_repo_attributable(node: dict, pr_number: int) -> bool:
+    """True when the node carries a parseable PR url for ``pr_number`` in SOME repo.
+
+    The discriminator for a safe bare-number fallback: an attributable node
+    belongs to a known repo, so matching it on the bare number would stamp
+    another repository's node. Only an UNattributable node (``pr_number`` with no
+    parseable url - the legacy, pre-``pr_url`` shape) is safe to reach that way.
+    """
+    for url in _node_pr_urls(node):
+        clean = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        _head, sep, tail = clean.rpartition("/pull/")
+        if not sep:
+            continue
+        try:
+            if int(tail) == pr_number:
                 return True
         except ValueError:
             continue

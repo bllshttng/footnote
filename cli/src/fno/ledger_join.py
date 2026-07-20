@@ -21,7 +21,14 @@ from typing import Optional
 
 def _entry_owns_pr(entry: dict, pr: int, slug_l: str) -> bool:
     url = entry.get("pr_url")
-    url_s = url.rstrip("/").lower() if isinstance(url, str) else ""
+    # A hand-written url may carry a query, fragment, or trailing slash, and the
+    # owner/repo slug is case-insensitive. Normalizing here prevents a false
+    # "no owning session" - the same silently-wrong-empty this module replaces.
+    url_s = (
+        url.split("?", 1)[0].split("#", 1)[0].strip().rstrip("/").lower()
+        if isinstance(url, str)
+        else ""
+    )
     if url_s:
         return url_s.endswith(f"/{slug_l}/pull/{pr}")
     # No url on the entry: fall back to the bare numeric field. Coerce to int so
@@ -52,10 +59,13 @@ def resolve_pr_sessions(
         return [], (
             f"repo slug unresolved, so PR #{pr} cannot be attributed across repos"
         )
-    if ledger_path is None or not Path(ledger_path).exists():
-        return [], f"no ledger at {ledger_path or '<unset>'}"
+    if ledger_path is None:
+        return [], "no ledger at <unset>"
+    path = Path(ledger_path)
+    if not path.exists():
+        return [], f"no ledger at {path}"
     try:
-        data = json.loads(Path(ledger_path).read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [], f"ledger unreadable: {exc}"
     entries = data.get("entries") if isinstance(data, dict) else data
@@ -75,7 +85,9 @@ def resolve_pr_sessions(
         if e.get("session_id"):
             sids.append(e["session_id"])
         for s in sids:
-            s = str(s)
+            # Strip: a whitespace-padded id would not match the same id elsewhere,
+            # and a whitespace-only one is junk that must not become a filter.
+            s = str(s).strip()
             if s and s not in seen:
                 seen.add(s)
                 out.append(s)

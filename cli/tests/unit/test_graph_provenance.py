@@ -1065,6 +1065,59 @@ def test_cli_session_add_pr_auto_slug_narrows_never_excludes(tmp_path, monkeypat
     assert read_graph(g)[0]["sessions"][0]["phase"] == "ship"
 
 
+def test_cli_session_add_auto_slug_never_stamps_a_foreign_repo_node(tmp_path, monkeypatch):
+    """The fallback must not stamp another repo's node.
+
+    "This repo has no node for the PR" is a normal post-merge skip. If the graph
+    holds a UNIQUE node for the same PR number belonging to a different repo,
+    dropping the auto-resolved scope would make the bare-number lookup stamp
+    that foreign node - a wrong stamp, the thing repo scoping exists to prevent.
+    """
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [
+        {"id": "ab-foreign1", "title": "t", "pr_number": 1700,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/1700"},
+    ])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, "bllshttng/footnote")
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1700", "--phase", "ship"])
+    assert r.exit_code == 0, r.output
+    assert "no-node" in r.output
+    assert read_graph(g)[0].get("sessions", []) == []
+
+
+def test_cli_session_add_auto_slug_fallback_needs_every_candidate_unattributable(
+    tmp_path, monkeypatch
+):
+    """A mix of one legacy node and one foreign-repo node blocks the fallback:
+    the bare lookup would be ambiguous at best and wrong at worst."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [
+        {"id": "ab-legacy03", "title": "t", "pr_number": 1800},
+        {"id": "ab-foreign2", "title": "u", "pr_number": 1800,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/1800"},
+    ])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, "bllshttng/footnote")
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1800", "--phase", "ship"])
+    assert r.exit_code == 0, r.output
+    assert all(e.get("sessions", []) == [] for e in read_graph(g))
+
+
 def test_cli_session_add_explicit_repo_stays_a_hard_filter(tmp_path, monkeypatch):
     """An EXPLICIT --repo must not get the narrow-never-exclude fallback: the
     caller asserted the repo, so a non-match is a skip, not a bare-number stamp."""
