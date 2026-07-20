@@ -43,6 +43,11 @@ def cli_hooks_cmd(
     claude_settings: Optional[Path] = typer.Option(
         None, "--claude-settings", help="Override the Claude settings.json path."
     ),
+    repair_only: bool = typer.Option(
+        False,
+        "--repair-only",
+        help="Only re-point an already-wired Claude hook whose script has moved.",
+    ),
 ) -> None:
     """Wire footnote's user-level CLI hooks.
 
@@ -68,6 +73,7 @@ def cli_hooks_cmd(
         migrate_legacy_hooks_json=False,
         claude=claude,
         claude_settings=claude_settings,
+        repair_only=repair_only,
     )
 
 
@@ -106,6 +112,7 @@ def _install_cli_hooks(
     migrate_legacy_hooks_json: bool,
     claude: bool = False,
     claude_settings: Optional[Path] = None,
+    repair_only: bool = False,
 ) -> None:
     import os
 
@@ -140,7 +147,7 @@ def _install_cli_hooks(
     needs_trust = False
     failures: list[str] = []
 
-    if gemini:
+    if gemini and not repair_only:
         gpath = _safe_expand(gemini_settings) if gemini_settings else (
             Path.home() / ".gemini" / "settings.json"
         )
@@ -155,7 +162,7 @@ def _install_cli_hooks(
             bak = f"; backed up {res.backup.name}" if res.backup else ""
             typer.echo(f"gemini: wired SessionStart -> {command} ({res.path}{bak})")
 
-    if codex:
+    if codex and not repair_only:
         chome = os.environ.get("CODEX_HOME")
         cpath = _safe_expand(codex_config) if codex_config else (
             (Path(chome).expanduser() if chome else Path.home() / ".codex")
@@ -204,10 +211,12 @@ def _install_cli_hooks(
                 Path.home() / ".claude" / "settings.json"
             )
             res = install_claude_worktree_remove_hook(
-                str(wt_entry), settings_path=cpath_claude
+                str(wt_entry), settings_path=cpath_claude, repair_only=repair_only
             )
             any_change = any_change or res.changed
-            if res.error:
+            if repair_only and not res.changed and res.error is None:
+                pass  # nothing wired, or already healthy - stay silent
+            elif res.error:
                 typer.echo(f"claude: error: {res.error} ({res.path})", err=True)
                 failures.append(res.error)
             elif res.already_present:

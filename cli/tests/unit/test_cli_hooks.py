@@ -1001,3 +1001,75 @@ def test_cli_no_claude_leaves_settings_untouched(tmp_path, monkeypatch):
     )
     assert res.exit_code == 0
     assert not settings.exists()
+
+
+def test_claude_repair_only_fixes_a_dead_path(tmp_path):
+    settings = tmp_path / "settings.json"
+    dead = tmp_path / "fno" / "0.3.0" / "hooks" / "worktree-remove.sh"
+    install_claude_worktree_remove_hook(str(dead), settings_path=settings)
+
+    upgraded = tmp_path / "fno" / "0.3.1" / "hooks" / "worktree-remove.sh"
+    upgraded.parent.mkdir(parents=True)
+    upgraded.write_text("#!/usr/bin/env bash\n")
+    res = install_claude_worktree_remove_hook(
+        str(upgraded), settings_path=settings, repair_only=True
+    )
+
+    assert res.changed
+    command = json.loads(settings.read_text())["hooks"]["WorktreeRemove"][0]["hooks"][0][
+        "command"
+    ]
+    assert command == f"bash {upgraded}"
+
+
+def test_claude_repair_only_never_wires_an_unwired_hook(tmp_path):
+    """Wiring a GLOBAL hook stays an explicit opt-in; repair only keeps a hook
+    the user already asked for alive."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"model": "opus"}))
+    res = install_claude_worktree_remove_hook(
+        WT_CMD, settings_path=settings, repair_only=True
+    )
+    assert not res.changed and not res.already_present
+    assert json.loads(settings.read_text()) == {"model": "opus"}
+
+
+def test_claude_repair_only_leaves_a_healthy_hook_alone(tmp_path):
+    live = tmp_path / "hooks" / "worktree-remove.sh"
+    live.parent.mkdir(parents=True)
+    live.write_text("#!/usr/bin/env bash\n")
+    settings = tmp_path / "settings.json"
+    install_claude_worktree_remove_hook(str(live), settings_path=settings)
+    before = settings.read_text()
+
+    res = install_claude_worktree_remove_hook(
+        str(live), settings_path=settings, repair_only=True
+    )
+    assert res.already_present and not res.changed
+    assert settings.read_text() == before
+
+
+def test_cli_repair_only_skips_codex_and_gemini(tmp_path, monkeypatch):
+    import fno.paths as paths
+
+    plugin = tmp_path / "plugin" / "hooks"
+    plugin.mkdir(parents=True)
+    for name in ("session-start.sh", "worktree-remove.sh"):
+        (plugin / name).write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: plugin / rel.split("/")[-1])
+    monkeypatch.setattr(
+        paths, "resolve_plugin_script_durable", lambda rel: plugin / rel.split("/")[-1]
+    )
+
+    from fno.setup_cli import app
+
+    gset = tmp_path / "gemini.json"
+    cset = tmp_path / "claude.json"
+    res = CliRunner().invoke(
+        app,
+        ["cli-hooks", "--repair-only", "--gemini-settings", str(gset),
+         "--claude-settings", str(cset)],
+    )
+    assert res.exit_code == 0, res.output
+    assert not gset.exists()  # repair-only never touches the Codex/Gemini legs
+    assert not cset.exists()  # and never wires an absent Claude hook

@@ -448,7 +448,7 @@ def install_gemini_hook(
 
 
 def install_claude_worktree_remove_hook(
-    command: str, *, settings_path: Path
+    command: str, *, settings_path: Path, repair_only: bool = False
 ) -> HookInstallResult:
     """Merge footnote's WorktreeRemove hook into a Claude settings.json.
 
@@ -461,6 +461,11 @@ def install_claude_worktree_remove_hook(
     config, so wiring the same script here is what actually reaches ``claude rm``.
 
     Idempotent (keyed on the script suffix); preserves every other hook.
+
+    ``repair_only`` re-points an existing entry whose script has gone (a plugin
+    upgrade moves the versioned install dir, so the persisted absolute path
+    dies) but never adds one that is not there. Wiring a global hook stays an
+    explicit `fno setup` action; only keeping a wired one alive is automatic.
     """
     data, note = _load_settings_for_merge(settings_path)
     if note is not None:
@@ -511,6 +516,12 @@ def install_claude_worktree_remove_hook(
                 already_present=False, backup=backup,
                 note=f"repaired a stale hook path ({script})",
             )
+
+    if repair_only:
+        return HookInstallResult(
+            cli="claude", path=settings_path, changed=False, already_present=False,
+            note="not wired; repair-only, nothing to repair",
+        )
 
     groups.append({"hooks": [{"type": "command", "command": new_command}]})
 
