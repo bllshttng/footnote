@@ -610,7 +610,11 @@ fi
    ```
 
    Read `/tmp/collisions.json`. If any entry has `severity: "high"`, present
-   them via AskUserQuestion before adopting:
+   them via AskUserQuestion before adopting - unless `fno target status` shows
+   `authority: full` on the `attended` line (a live `/target yolo` session), in
+   which case take the `recommended_action` for each entry, append one
+   `## Autonomous Decisions` entry naming the collision and the action, and
+   continue without prompting:
 
    > Your plan touches files also touched by these in-flight plans:
    >
