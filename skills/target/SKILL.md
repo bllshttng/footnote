@@ -130,6 +130,11 @@ An overnight walk must not stall at 2am on a call you would have made in five se
 So under authority, a judgment call is *decided and recorded* instead of stopping the session.
 It grants no new powers: merge stays on the auto-merge axis, and destructive or credential-blocked work still stops.
 
+**Two different `--yolo` flags exist; do not confuse them.**
+`fno target init --yolo` (this one) grants *judgment* authority and touches no permissions.
+`fno agents spawn --yolo` grants a *permission/sandbox* bypass to a spawned worker and touches no judgment.
+Same word, orthogonal axes: a yolo target session still asks the harness for permission exactly as before, and a yolo-spawned worker still stops on an architecture fork unless it also holds an authority grant.
+
 **How to read the grant.** Pass `--yolo` to `fno target start` / `fno target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
 Read it back from `fno target status --json` - the `attended` line carries `; authority: full (yolo)` when the grant is live.
 Read that line, NOT the raw manifest: a **dead** manifest never grants authority (x-4af4 - a defunct session once auto-locked an attended `/think` for ten days), and the orienter's liveness guard is what denies it.
