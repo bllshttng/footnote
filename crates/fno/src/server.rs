@@ -775,16 +775,10 @@ fn delta_in_path(path: Option<&std::ffi::OsStr>) -> bool {
     path.is_some_and(|p| std::env::split_paths(p).any(|d| is_executable_file(&d.join("delta"))))
 }
 
-#[cfg(unix)]
 fn is_executable_file(f: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     // Follows symlinks, so a dangling link is not mistaken for a binary.
     std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(f: &std::path::Path) -> bool {
-    f.is_file()
 }
 
 /// The renderer chain for a diff pane: delta when installed, git's own
@@ -9442,23 +9436,20 @@ mod tests {
             !delta_in_path(Some(d.as_os_str())),
             "a non-executable delta is not a renderer"
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert!(
-                delta_in_path(Some(d.as_os_str())),
-                "an executable delta on PATH is seen"
-            );
-            // A dangling symlink names nothing runnable either.
-            let broken = scratch_dir("pathprobe-broken");
-            std::os::unix::fs::symlink(broken.join("absent"), broken.join("delta")).unwrap();
-            assert!(
-                !delta_in_path(Some(broken.as_os_str())),
-                "a dangling delta symlink is not a renderer"
-            );
-            let _ = std::fs::remove_dir_all(&broken);
-        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            delta_in_path(Some(d.as_os_str())),
+            "an executable delta on PATH is seen"
+        );
+        // A dangling symlink names nothing runnable either.
+        let broken = scratch_dir("pathprobe-broken");
+        std::os::unix::fs::symlink(broken.join("absent"), broken.join("delta")).unwrap();
+        assert!(
+            !delta_in_path(Some(broken.as_os_str())),
+            "a dangling delta symlink is not a renderer"
+        );
+        let _ = std::fs::remove_dir_all(&broken);
         assert!(!delta_in_path(None), "no PATH at all is not a delta");
 
         assert!(diff_script("less -R").ends_with("| less -R"));
