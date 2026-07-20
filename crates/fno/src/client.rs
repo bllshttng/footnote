@@ -4235,7 +4235,9 @@ impl View {
                         Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
                         None => base,
                     };
-                    (label, cell_flags::DIM, Color::Default)
+                    // DIM is this panel's inert marker; the one actionable row
+                    // must not share it.
+                    (label, cell_flags::BOLD, Color::Default)
                 }
                 DisplayRow::Sub(sub) => {
                     // Indented 4 cells to sit under the row's name (` {mark}{glyph} `
@@ -12876,6 +12878,43 @@ mod tests {
             cell_flags::INVERSE
         );
         assert_eq!(cells[3 * cols].flags & cell_flags::DIM, cell_flags::DIM);
+    }
+
+    #[test]
+    fn footer_buttons_rest_bold_and_invert_on_hover() {
+        // The footer buttons rest BOLD; DIM is reserved for inert rows.
+        let mut view = two_pane_view();
+        view.term = (29, 72);
+        let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
+        let footer = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::NewSquad))
+            .unwrap();
+        let at = |v: &View| {
+            let mut cells = vec![Cell::default(); rows * cols];
+            v.draw_sideline(&mut cells, rows, cols, panel_w);
+            cells[(footer - v.sideline_offset) * cols].flags
+        };
+
+        let rest = at(&view);
+        assert_eq!(rest & cell_flags::BOLD, cell_flags::BOLD);
+        assert_eq!(rest & cell_flags::DIM, 0, "DIM reads as disabled");
+        assert_eq!(rest & cell_flags::INVERSE, 0);
+
+        // The `N marked ·R` variant rides the same row and the same style.
+        let mut marked = two_pane_view();
+        marked.term = (29, 72);
+        marked.marks.insert("a1".to_string());
+        let marked_flags = at(&marked);
+        assert_eq!(marked_flags & cell_flags::BOLD, cell_flags::BOLD);
+        assert_eq!(marked_flags & cell_flags::DIM, 0);
+
+        // Hover still toggles INVERSE on top of BOLD (the row is not inert).
+        view.hover_row = Some(footer);
+        let hovered = at(&view);
+        assert_eq!(hovered & cell_flags::INVERSE, cell_flags::INVERSE);
+        assert_eq!(hovered & cell_flags::BOLD, cell_flags::BOLD);
     }
 
     #[test]
