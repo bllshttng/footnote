@@ -84,7 +84,7 @@ case "$STATUS" in
     echo "do: deferred $WAVE_NODE to $WAVE_PROJECT; dispatch on blocker merge"   # AC3-UI
     ;;
   done)     echo "do: skipped $WAVE_NODE ($WAVE_PROJECT) - already shipped" ;;
-  claimed)  echo "do: skipped $WAVE_NODE ($WAVE_PROJECT) - a worker already owns it" ;;
+  in_progress|claimed)  echo "do: skipped $WAVE_NODE ($WAVE_PROJECT) - a worker already owns it" ;;
   *)        echo "do: skipped $WAVE_NODE ($WAVE_PROJECT) - status '$STATUS'" >&2 ;;
 esac
 ```

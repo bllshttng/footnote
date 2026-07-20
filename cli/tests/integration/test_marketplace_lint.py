@@ -39,6 +39,23 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
     return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
 
 
+def _shelled_python_has_yaml() -> bool:
+    """Does the bare ``python3`` this lint shells out to import yaml?
+
+    The lint runs under the system interpreter, not the project venv, and its
+    frontmatter parse requires PyYAML. CI's python3 carries it, so guarding
+    here keeps a dev machine whose system interpreter lacks it from reading as
+    a lint failure. Mirrors the same guard in test_skill_bundles.py.
+    """
+    return _run(["python3", "-c", "import yaml"]).returncode == 0
+
+
+pytestmark = pytest.mark.skipif(
+    not _shelled_python_has_yaml(),
+    reason="system python3 lacks PyYAML, required by the marketplace lint (pip install pyyaml)",
+)
+
+
 def _make_skill(tmp_root: Path, name: str, skill_md: str) -> Path:
     skill_dir = tmp_root / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)

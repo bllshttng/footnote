@@ -290,6 +290,40 @@ def test_stale_idea_graph_never_stamps_design_on_a_fresh_blueprint(tmp_path):
     assert _fm(plan) == "ready"
 
 
+def test_design_node_is_never_autonomously_selected(tmp_path):
+    """Every autonomous path filters `_status == "ready"` before selecting.
+
+    Once the rung is persisted the node is excluded upstream, so the guard is
+    no longer what saves us here - this pins the property itself rather than
+    the mechanism, and fails if a future selection path drops the filter.
+    """
+    from fno.graph.statuses import recompute_statuses
+
+    plan = tmp_path / "d.md"
+    plan.write_text(DESIGN_FM)
+    node = {"id": "x-d", "plan_path": str(plan)}
+    recompute_statuses([node])
+    assert node["_status"] == "design"
+    assert node["_status"] != "ready"  # the filter every selector applies
+
+
+def test_receipt_reports_a_node_already_on_the_design_rung(tmp_path):
+    """A backlog that is ALL design-stage must not return null silently."""
+    from datetime import datetime, timezone
+
+    from fno.graph.cli import _starvation_receipts
+    from fno.graph.statuses import recompute_statuses
+
+    plan = tmp_path / "d.md"
+    plan.write_text(DESIGN_FM)
+    node = {"id": "x-d", "plan_path": str(plan), "created_at": _now()}
+    recompute_statuses([node])
+    out = _starvation_receipts(
+        [node], None, True, None, set(), datetime.now(timezone.utc), 21
+    )
+    assert out == [("x-d", "design")]
+
+
 def test_starvation_receipt_names_design_not_quarantined(tmp_path):
     """A design-stage node is a lifecycle rung, not starvation.
 

@@ -2481,7 +2481,12 @@ def _starvation_receipts(
             continue
         if e.get("id"):
             by_id[e["id"]] = e
-        if e.get("_status") not in ("ready", "idea") or e.get("completed_at"):
+        # `design` rides along with ready/idea: it is buildable-looking work a
+        # human can still name explicitly, so a null `next` must explain it
+        # rather than drop it silently - the exact starvation this receipt
+        # exists to prevent (a backlog that is ALL design-stage would otherwise
+        # return null with nothing to say).
+        if e.get("_status") not in ("ready", "design", "idea") or e.get("completed_at"):
             continue
         if roadmap_id and e.get("roadmap_id") != roadmap_id:
             continue
@@ -2502,6 +2507,12 @@ def _starvation_receipts(
             reason = "container"
         elif nid in claimed:
             reason = "claimed"
+        elif e.get("_status") == "design":
+            # Read off the persisted rung, not the guard: the guard only fires
+            # for the stale window (graph still says `ready`, doc since edited
+            # to design), so a node already ON the rung would fall through and
+            # report nothing at all.
+            reason = "design"
         elif e.get("_status") == "ready" and (
             _has_unmerged_open_pr(e) or _is_batched_member(e)
         ):
