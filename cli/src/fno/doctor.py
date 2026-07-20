@@ -1191,11 +1191,8 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
 # --------------------------------------------------------------------------
 
 _DEAD_LETTER_AGE_HOURS = 24.0
-# The canonical a2a handle form <harness>-<short8>; only these are drainable
-# recipients, so only these can dead-letter (a project name never does).
-# A session address: the bare short-id, or the retired <harness>-<short8> form
-# still carried by pre-flip envelopes. Bare must be listed or the dead-letter
-# scan silently stops covering every newly generated address.
+# The bare short-id is the only drainable session address. Retired prefixed
+# recipients remain in this health-only pattern so pre-flip dead mail surfaces.
 def _a2a_handle_re() -> "re.Pattern[str]":
     """A session address: the bare short-id, or a retired ``<harness>-<short8>``.
 

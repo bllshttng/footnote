@@ -34,7 +34,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Iterable, Optional, TypedDict
+from typing import Optional, TypedDict
 
 import typer
 
@@ -423,7 +423,7 @@ def cmd_reply(
         from fno.agents import discover as discover_mod
 
         # from_name defaults to None so stamp_from auto-stamps THIS session's
-        # canonical handle (claude-/codex-<short>) -- the handle the original
+        # canonical bare short-id -- the handle the original
         # sender replies back to and that drain-self scans, NOT a project name.
         resolved, _ = discover_mod.resolve_or_suggest(orig.from_)
         if resolved is not None:
@@ -1396,15 +1396,12 @@ def cmd_drain_self(
     """Drain THIS session's own cross-harness inbox and mark it seen (US5).
 
     The receive side of the a2a relay: a session computes its own handle from
-    the ambient harness env markers (``canonical_handle(harness, session-id)``,
+    the ambient harness env markers (``canonical_handle(session-id)``,
     the SAME string a sender resolves and the registry registers under), reads
     its unread bus mail, prints it for injection into the session, then advances
     its own cursor so nothing re-surfaces next wake. Wired into each harness's
     SessionStart hook, this is what makes a codex/gemini session actually
     RECEIVE its mail -- addressability already existed, drainage did not.
-
-    Drains the legacy ``<harness>-<short8>`` address alongside the canonical bare
-    short-id, so mail queued before the handle flip still lands exactly once.
 
     Forward-only + inject-before-ack: a crash between print and ack re-surfaces
     the message next SessionStart (a harmless repeat), never a loss. No harness

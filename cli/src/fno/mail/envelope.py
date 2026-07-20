@@ -10,7 +10,7 @@ Rust ``wrap_fno_mail`` output so the two renderers never drift.
 
 Field rule (from G1): a field is a TAG attribute only if the recipient needs it
 AT MESSAGE TIME and cannot cheaply look it up by ``from``. Both ``from`` and
-``to`` are canonical handles (``<harness>-<short>``) -- the addressable identity;
+``to`` are canonical bare ``<short8>`` handles -- the addressable identity;
 the registry stays keyed by ``from``, and everything else (cwd, pid, lineage)
 lives there.
 """

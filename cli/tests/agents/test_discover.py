@@ -812,6 +812,7 @@ def test_retired_shape_refused_even_when_stored_as_friendly_alias(tmp_path):
 
     assert resolved is None
     assert suggestions[0] == "019f48e1"
+    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-019f48e1"
 
 
 @pytest.mark.parametrize("project", ["claude", "codex", "gemini", "agy", "opencode"])

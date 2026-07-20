@@ -116,8 +116,7 @@ def _seed_bus_message(*, to: str, from_: str, body: str):
 
 
 def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
-    # AC1-EDGE: mail queued to the LEGACY <harness>-<short8> address before the
-    # handle flip still drains exactly once after it, and acks under the new key.
+    # AC1-EDGE: the bare address drains exactly once and acks under that key.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
     _seed_bus_message(to="019f48e1", from_="claude-web", body="ack from K")
 

@@ -505,7 +505,7 @@ def _discover_from_registry(
     """Registered fno-agent sessions, resolvable by canonical handle (US2, x-605c).
 
     A spawned worker registered under a name (e.g. ``x-d899-us8-build``) also
-    answers to its ``<harness>-<short8>`` handle, because its harness session id
+    answers to its bare ``<short8>`` handle, because its harness session id
     is surfaced as a discover row. The harness -> id mapping is
     ``HARNESS_SESSION_ID_FIELDS`` (the single source of truth also read by the
     resume path), so a new harness needs a field there, not a resolver edit. For
@@ -963,6 +963,7 @@ def _resolve_aliases(
     falls back to the in-memory aliases rather than crashing the list.
     """
     import fcntl
+    from fno.harness_identity import LEGACY_HANDLE_RE
 
     # No live sessions: nothing to render and nothing to retire against. Do NOT
     # rewrite the map here — a transient empty scan (e.g. a simultaneous psutil
@@ -986,7 +987,12 @@ def _resolve_aliases(
                 pruned = {sid: nm for sid, nm in stored.items() if sid in live_sids}
                 for r in live:
                     sid = r["session_id"]
-                    if sid in pruned and isinstance(pruned[sid], str) and pruned[sid]:
+                    if (
+                        sid in pruned
+                        and isinstance(pruned[sid], str)
+                        and pruned[sid]
+                        and not LEGACY_HANDLE_RE.fullmatch(pruned[sid])
+                    ):
                         aliases[sid] = pruned[sid]
                     else:
                         aliases[sid] = _default_alias(r.get("project"), r["short_id"])
