@@ -395,3 +395,21 @@ def test_skill_reads_fresh_proposals_and_reports_the_mechanical_line():
     assert "fno backlog maintain" in text
     assert "Mechanical" in text
     assert "groom-digest" not in text, "the digest is retired; the skill must not resurrect it"
+
+
+def test_the_old_nightly_script_is_a_shim_that_defers():
+    # AC2-HP: one surface owns grooming. The shim must hand off, not re-sequence
+    # the legs itself, and must never resurrect the retired digest.
+    script = Path(__file__).resolve().parents[3] / "scripts" / "nightly-groom.sh"
+    text = script.read_text()
+
+    assert "DEPRECATED" in text
+    assert "exec" in text and "backlog groom" in text
+    assert "groom-digest" not in text
+
+    # Comments may still explain what moved; the executable body must not do it.
+    body = "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+    for retired in ("archive", "reconcile", "maintain", "relatedness", "DIGEST"):
+        assert retired not in body, f"the shim must not still run {retired!r} itself"
