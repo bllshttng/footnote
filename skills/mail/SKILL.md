@@ -40,28 +40,34 @@ it this turn. Only when there is no live inject path does the envelope fall to
 the durable `messages.jsonl` log, where it waits on a drain the recipient may
 never run. Both exit 0, so **read the receipt, not the exit code**:
 
-- `msg-<id> delivered (hosted)` - it landed. This is the normal outcome.
-- `msg-<id> queued (durable)` - **not delivered.** Nobody checks their voicemail.
+- `msg-<id> delivered (hosted)` - the inject was confirmed into the recipient's
+  session. This is the normal outcome.
+- `msg-<id> queued (durable)` - live delivery was **not confirmed**, so treat it
+  as not delivered. Nobody checks their voicemail.
 
 The recipient's own `unread` / `ack` / `drain-self` verbs exist to consume that
 fallback queue, which is why they read like a mailbox. They are the recovery
 path, not the main one.
 
-### A miss is recoverable now - do not wait
+### A miss is recoverable now - look before you re-send
 
-A durable receipt usually means the session is idle rather than gone, and an
-idle session can be brought back. There is no reason to wait on a drain when you
-can get an answer immediately:
+A durable receipt usually means the session is idle rather than gone, and an idle
+session can be brought back, so waiting on a drain is the last resort. But
+"not confirmed" is not the same as "not delivered": a BUSY recipient can queue
+the injected turn past the confirm budget and still receive it later, so a blind
+re-send is how you double-deliver. Check first, then act:
 
 ```bash
-fno agents peek <short-id>     # read-only: is it actually alive?
+fno agents peek <short-id>     # did the turn actually land? is it alive?
 fno agents resume <short-id>   # idle -> live, then re-send
 fno agents attach <short-id>   # drive it yourself (claude)
 ```
 
-The address you send to IS the id these take: one bare 8-hex short-id keys mail,
-resume, attach, peek, and the transcript. If a send missed, the same string gets
-you in.
+The address you send to is normally the same bare 8-hex short-id these take, so
+the id that failed to deliver is the id that gets you in. `resume` / `attach`
+need the session to be in the registry, and `send` can reach a live session that
+never registered - if a handle mails but will not resume, `fno agents list` /
+`top` will show whether it has a row.
 
 ## Verb router
 

@@ -823,6 +823,11 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
     leaving the sender to wait: a session that is merely idle can be brought
     back and re-sent to immediately, which beats waiting on a drain every time.
 
+    It leads with `peek`, not `resume`, because the fallback fires on an
+    UNCONFIRMED live inject, not a proven failure: a busy recipient can record
+    the injected turn past the confirm budget and receive it anyway, so a blind
+    re-send is the documented double-delivery edge rather than a fix.
+
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     if project:
         msg = (
@@ -835,10 +840,10 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
         msg = (
             f"mail: {target} has no live pane; queued durably - "
             "delivery waits for its next SessionStart drain\n"
-            "  this is NOT delivery. Do not wait for a reply - recover:\n"
+            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
+            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
             f"    fno agents resume {target}   # idle session -> live, then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)\n"
-            f"    fno agents peek {target}     # read-only, is it actually alive?"
+            f"    fno agents attach {target}   # drive it yourself (claude)"
         )
     print(msg, file=sys.stderr)
 
@@ -879,8 +884,8 @@ def _name_lane_send(
         # Through harness_for_provider like every other send path: the wire
         # vocabulary is claude-code, and stamping a raw "claude" here made the
         # name lane the one producer disagreeing with dispatch, the relay, and
-        # the Rust contract. "cli" survives as the honest no-harness value -
-        # harness_for_provider would guess claude-code for an unknown provider.
+        # the Rust contract. "cli" survives as the honest no-harness value: the
+        # mapper defaults a MISSING provider to claude-code, a guess we avoid.
         harness=harness_for_provider(h) if (h := infer_invoking_harness()) else "cli",
         model=resolve_self_model(),
         to=recipient,
