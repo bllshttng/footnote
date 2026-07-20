@@ -639,9 +639,7 @@ fn claude_projects_dir() -> PathBuf {
 /// lands in a path join, so anything but the transcript filename shape is
 /// refused before it can escape the projects dir.
 fn transcript_uuid_shaped(uuid: &str) -> bool {
-    !uuid.is_empty()
-        && uuid.len() <= 64
-        && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    !uuid.is_empty() && uuid.len() <= 64 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 
 /// Locate the transcripts for `uuids` in ONE pass over the project dirs.
@@ -1533,7 +1531,10 @@ mod tests {
     fn compose_tail_degrades_on_torn_and_empty_input() {
         // A bounded tail read starts mid-file, so a partial leading line is the
         // normal case, not an error (AC6-FR: degrade, never blank the sideline).
-        let raw = format!("{{\"type\":\"assis\n{}", turn(r#"{"type":"text","text":"ok"}"#));
+        let raw = format!(
+            "{{\"type\":\"assis\n{}",
+            turn(r#"{"type":"text","text":"ok"}"#)
+        );
         assert_eq!(compose_tail(&raw).as_deref(), Some("ok"));
         assert_eq!(compose_tail(""), None);
         assert_eq!(compose_tail("not json at all"), None);
@@ -2715,4 +2716,3 @@ config_dir = "~/.claude-alt"
         std::fs::remove_dir_all(&dangling).unwrap();
     }
 }
-

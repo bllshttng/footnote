@@ -6101,11 +6101,10 @@ async fn serve(
                         .iter()
                         .filter_map(|r| r.claude_session_uuid.clone())
                         .collect();
-                    let tails = tokio::task::spawn_blocking(move || {
-                        agents_view::session_tails(&uuids)
-                    })
-                    .await
-                    .unwrap_or_default();
+                    let tails =
+                        tokio::task::spawn_blocking(move || agents_view::session_tails(&uuids))
+                            .await
+                            .unwrap_or_default();
                     if core_tx
                         .send(CoreMsg::AgentRows {
                             rows,
@@ -10383,7 +10382,7 @@ mod tests {
             self_tx,
             agents: Vec::new(),
             branch_by_cwd: HashMap::new(),
-        tail_by_session: HashMap::new(),
+            tail_by_session: HashMap::new(),
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,

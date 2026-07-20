@@ -445,7 +445,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         b(b'a', "a", OpenAnswers, Global, "answer queue"),
         b(b'b', "b", TogglePanel, Global, "toggle sideline"),
         b(b'B', "B", CycleDensity, Global, "cycle sideline density"),
-        b(b'o', "o", ToggleAgentSort, Global, "sort agents: squad/status"),
+        b(
+            b'o',
+            "o",
+            ToggleAgentSort,
+            Global,
+            "sort agents: squad/status",
+        ),
         b(b's', "s", ToggleStatus, Global, "toggle status"),
         b(b'?', "?", ShowKeys, Global, "this key table"),
         b(

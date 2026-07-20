@@ -100,7 +100,6 @@ impl TableCols {
             }
         }
     }
-
 }
 
 /// (x-b186) The full extended-table panel width (every column plus the divider),
@@ -3905,11 +3904,7 @@ impl View {
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    (
-                        table_row_text(a, table_cols, now),
-                        flags,
-                        style.fg,
-                    )
+                    (table_row_text(a, table_cols, now), flags, style.fg)
                 }
                 DisplayRow::Agent(a) => {
                     // The unified icon lattice (x-df4c): exit beats badge beats
@@ -15144,7 +15139,6 @@ mod tests {
         }
     }
 
-
     // ---- x-b186: density toggle + extended agent table ----
 
     /// A view whose terminal is wide enough for the full extended table.
@@ -15187,8 +15181,9 @@ mod tests {
         v.density = Density::Slim;
         let rows = v.display_rows();
         assert!(
-            rows.iter().all(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
-                || matches!(r, DisplayRow::Header { .. })),
+            rows.iter()
+                .all(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
+                    || matches!(r, DisplayRow::Header { .. })),
             "slim emits header bands only"
         );
         assert!(
@@ -15320,7 +15315,10 @@ mod tests {
         assert_eq!(v.panel_w(), EXTENDED_PANEL_W, "wide terminal: every column");
         assert_eq!(
             TableCols::fitting(EXTENDED_PANEL_W - 1),
-            TableCols { tail: true, time: true }
+            TableCols {
+                tail: true,
+                time: true
+            }
         );
 
         // Narrow enough that the full table cannot fit beside a usable pane.
@@ -15350,7 +15348,10 @@ mod tests {
         for cols in [200u16, 120, 90, 70, 50, 30, 10] {
             v.term = (24, cols);
             let w = v.panel_w();
-            assert!(w == 0 || cols - w >= MIN_CONTENT_COLS, "cols {cols} panel {w}");
+            assert!(
+                w == 0 || cols - w >= MIN_CONTENT_COLS,
+                "cols {cols} panel {w}"
+            );
             // The paint must not panic at any of these widths.
             let _ = v.compose();
         }
@@ -15426,7 +15427,10 @@ mod tests {
             Some(ChromeHit::CycleDensity)
         ));
         // Keybind parity (Locked 5): the gesture exists without the mouse.
-        assert_eq!(crate::keys::resolve_chord(b'B'), crate::keys::Event::CycleDensity);
+        assert_eq!(
+            crate::keys::resolve_chord(b'B'),
+            crate::keys::Event::CycleDensity
+        );
         assert_eq!(
             crate::keys::resolve_chord(b'o'),
             crate::keys::Event::ToggleAgentSort
@@ -15440,7 +15444,10 @@ mod tests {
         let mut v = wide_view(vec![agent_row("b", 5, Some(AgentBadge::Blocked), false)]);
         v.density = Density::Regular;
         let top = frame_text(&v.compose()).lines().next().unwrap().to_string();
-        assert!(top.contains('▲'), "rollup survives beside the button: {top:?}");
+        assert!(
+            top.contains('▲'),
+            "rollup survives beside the button: {top:?}"
+        );
         assert!(
             top.contains(density_glyph(Density::Regular)),
             "and the button is there too: {top:?}"

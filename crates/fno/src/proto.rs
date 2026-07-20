@@ -2460,7 +2460,10 @@ mod tests {
             // Alternate: one short read, then one WouldBlock, then more.
             self.stall = !self.stall;
             if !self.stall {
-                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "partial"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "partial",
+                ));
             }
             let n = self.chunk.min(buf.len()).min(self.data.len() - self.pos);
             buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
@@ -2522,5 +2525,4 @@ mod tests {
             "idle stream must stay pollable, got {got:?}"
         );
     }
-
 }
