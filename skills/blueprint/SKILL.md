@@ -340,7 +340,8 @@ finalized, stamp the lifecycle provenance so the graph records which
 session/harness planned the node (idempotent, append-only, best-effort):
 
 ```bash
-[[ -n "$NODE_ID" ]] && fno backlog session add "$NODE_ID" --phase blueprint || true
+[[ -n "$NODE_ID" ]] && { fno backlog session add "$NODE_ID" --phase blueprint \
+  || echo "blueprint: session add failed for $NODE_ID (non-fatal, provenance not stamped)" >&2; }
 ```
 
 Harness + session id default from the ambient identity. A missing-identity

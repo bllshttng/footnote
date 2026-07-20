@@ -326,7 +326,15 @@ so `/review sigma` and `fno review` never disagree:
 ```bash
 # --session-id is optional; pass it when running inside a target session so the
 # implementer-provider (cross-model excludes it) is accurate.
-ROUTING="$(fno review --print-providers ${SESSION_ID:+--session-id "$SESSION_ID"})"
+# Branch rather than build an argv array. An unquoted ${VAR:+...} is bash-only
+# (zsh passes flag+value as ONE argument), and no array form is portable either:
+# plain "${a[@]}" errors under bash set -u, and the guarded "${a[@]+...}" form
+# passes one EMPTY argument under zsh.
+if [ -n "${SESSION_ID:-}" ]; then
+  ROUTING="$(fno review --print-providers --session-id "$SESSION_ID")"
+else
+  ROUTING="$(fno review --print-providers)"
+fi
 ```
 
 `$ROUTING` is JSON `{ "<agent_underscore>": {"provider": "claude|codex|gemini",

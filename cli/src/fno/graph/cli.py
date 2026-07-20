@@ -3428,7 +3428,8 @@ def cmd_session_add(
     ),
     repo: Optional[str] = typer.Option(
         None, "--repo", help="Scope --pr-number resolution to an <owner>/<repo> slug "
-                             "(pr_number is not unique across repos in a cross-project graph)."
+                             "(pr_number is not unique across repos in a cross-project graph). "
+                             "Omit and the verb resolves the current checkout's slug itself."
     ),
     harness: Optional[str] = typer.Option(
         None, "--harness", help="Override harness (default: ambient session identity)."
@@ -3444,14 +3445,24 @@ def cmd_session_add(
     """Stamp a node with a lifecycle phase record (idempotent, append-only).
 
     Identify the node by NODE (id/slug/hex) or by ``--pr-number <n>`` (the unique
-    PR-linked node) -- exactly one of the two. Harness + session id default to the
+    PR-linked node) -- exactly one of the two. With ``--pr-number`` and no
+    ``--repo`` the verb resolves the current checkout's slug itself, so a caller
+    needs no conditional flag (x-f47f). Harness + session id default to the
     ambient session identity; with neither an env marker nor an explicit flag the
     stamp is skipped and a warning names the node/PR and phase (provenance is
     never invented, AC2-ERR). Exit 0 on append or duplicate; exit 2 on missing
-    identity, ambiguous/absent node, unknown phase, or bad input.
+    identity, an unresolvable NODE, unknown phase, or bad input. A ``--pr-number``
+    that maps to zero or several nodes is a best-effort SKIP, not an error: it
+    warns (naming the candidates) and exits 0, because refusing to guess is the
+    designed outcome and a caller must not log it as a failure (x-f47f AC3-ERR).
     """
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import append_session_record, read_graph, stamp_session_for_pr
+    from fno.graph.store import (
+        append_session_record,
+        find_nodes_for_pr,
+        read_graph,
+        stamp_session_for_pr,
+    )
 
     if (node is None) == (pr is None):
         typer.echo("session add: pass exactly one of NODE or --pr-number.", err=True)
@@ -3469,6 +3480,26 @@ def cmd_session_add(
         )
         raise typer.Exit(code=2)
 
+    # After the identity guard: resolution shells out to git and possibly gh, and
+    # a run with no identity is about to skip anyway.
+    if pr is not None and repo is None:
+        from fno.graph._reconcile import resolve_current_repo_slug
+
+        repo = resolve_current_repo_slug()
+        if repo is None:
+            typer.echo(
+                f"session add: could not resolve this checkout's repo slug for pr#{pr}; "
+                "matching on the bare PR number (skips on cross-repo ambiguity).",
+                err=True,
+            )
+        # No bare-number fallback once a slug resolves. The graph is GLOBAL and
+        # cross-project, so a url-less node is unattributable to ANY repo - a
+        # fallback cannot tell "this repo's legacy node" from "another project's
+        # legacy node with the same PR number", and stamping the latter is the
+        # wrong-node write repo scoping exists to prevent. Refusing to guess
+        # costs a stamp on a legacy node; guessing costs a corrupted one, and
+        # the skip is now LOUD (it names the candidates), so nothing is silent.
+
     try:
         if pr is not None:
             node_id, status = stamp_session_for_pr(
@@ -3476,12 +3507,20 @@ def cmd_session_add(
                 harness=eff_harness, session_id=eff_session, at=at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
+                cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
+                detail = f" (candidates: {', '.join(cands)})" if cands else ""
                 typer.echo(
-                    f"session add: PR {pr} maps to {status} (phase={phase}); "
+                    f"session add: PR {pr} maps to {status}{detail} (phase={phase}); "
                     "resolution is exact and never fans out. Skipped.",
                     err=True,
                 )
-                raise typer.Exit(code=2)
+                if json_out:
+                    typer.echo(json.dumps({
+                        "node_id": None, "status": status, "phase": phase,
+                        "harness": eff_harness, "session_id": eff_session,
+                        "added": False, "candidates": cands,
+                    }))
+                return
             added = status == "added"
         else:
             match = resolve_node(node, read_graph(_graph_path()))
@@ -3502,7 +3541,8 @@ def cmd_session_add(
 
     if json_out:
         typer.echo(json.dumps({
-            "node_id": node_id, "phase": phase, "harness": eff_harness,
+            "node_id": node_id, "status": "added" if added else "duplicate",
+            "phase": phase, "harness": eff_harness,
             "session_id": eff_session, "added": added,
         }))
     else:

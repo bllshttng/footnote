@@ -654,6 +654,17 @@ def _node_carries_pr(node: dict, pr_number: int) -> bool:
     )
 
 
+def _node_pr_urls(node: dict) -> "list[str]":
+    """The node's PR urls (primary + additional_prs), unparsed."""
+    urls = [node.get("pr_url")]
+    urls += [
+        extra.get("url")
+        for extra in (node.get("additional_prs") or [])
+        if isinstance(extra, dict)
+    ]
+    return [u for u in urls if isinstance(u, str)]
+
+
 def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     """True if any of the node's PR urls resolves to exactly ``(repo, pr_number)``.
 
@@ -665,15 +676,7 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
     correct, not a regression.
     """
     want = repo.lower()
-    urls = [node.get("pr_url")]
-    urls += [
-        extra.get("url")
-        for extra in (node.get("additional_prs") or [])
-        if isinstance(extra, dict)
-    ]
-    for url in urls:
-        if not isinstance(url, str):
-            continue
+    for url in _node_pr_urls(node):
         # Footnote's own stamps are canonical, but a hand-passed url may carry a
         # query, fragment, or trailing slash; the repo slug is case-insensitive.
         clean = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
@@ -686,6 +689,25 @@ def _node_matches_repo_pr(node: dict, pr_number: int, repo: str) -> bool:
         except ValueError:
             continue
     return False
+
+
+def find_nodes_for_pr(
+    path: Path, pr_number: int, *, repo: "str | None" = None
+) -> "list[str]":
+    """Node ids carrying ``pr_number``, optionally narrowed to one repo slug.
+
+    Split out of :func:`stamp_session_for_pr` so a caller reporting an ambiguous
+    resolution can name the candidates without re-deriving the match rule.
+    """
+    return [
+        e["id"] for e in read_graph(path)
+        if isinstance(e.get("id"), str)
+        and (
+            _node_matches_repo_pr(e, pr_number, repo)
+            if repo
+            else _node_carries_pr(e, pr_number)
+        )
+    ]
 
 
 def stamp_session_for_pr(
@@ -714,15 +736,7 @@ def stamp_session_for_pr(
     preserves the bare-``pr_number`` match (single-repo / manual / tests); the
     repo-scoped set is strictly narrower, so it never introduces a false match.
     """
-    matches = [
-        e["id"] for e in read_graph(path)
-        if isinstance(e.get("id"), str)
-        and (
-            _node_matches_repo_pr(e, pr_number, repo)
-            if repo
-            else _node_carries_pr(e, pr_number)
-        )
-    ]
+    matches = find_nodes_for_pr(path, pr_number, repo=repo)
     if not matches:
         return None, "no-node"
     if len(matches) > 1:

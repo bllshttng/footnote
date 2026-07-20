@@ -905,9 +905,13 @@ def test_cli_session_add_pr_mode_resolves_node(tmp_path, monkeypatch):
     import fno.graph.cli as C
     from fno.graph.store import read_graph
 
-    g = _make_graph(tmp_path, [{"id": "ab-prcli001", "title": "t", "pr_number": 1200}])
+    g = _make_graph(tmp_path, [
+        {"id": "ab-prcli001", "title": "t", "pr_number": 1200,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/1200"},
+    ])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, "bllshttng/footnote")
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
 
@@ -945,9 +949,60 @@ def test_cli_session_add_pr_repo_scopes_resolution(tmp_path, monkeypatch):
     assert by_id["ab-cliabil1"].get("sessions", []) == []  # other repo untouched
 
 
-def test_cli_session_add_pr_ambiguous_exits_nonzero(tmp_path, monkeypatch):
+def _stub_slug(monkeypatch, slug):
+    """Pin the auto-resolved repo slug (x-f47f US1) so tests never shell out."""
+    import fno.graph._reconcile as R
+    monkeypatch.setattr(R, "resolve_current_repo_slug", lambda *a, **k: slug)
+
+
+# -- resolve_current_repo_slug (x-f47f US1: git origin first, gh fallback) --
+
+
+@pytest.mark.parametrize("url,want", [
+    ("git@github.com:bllshttng/footnote.git\n", "bllshttng/footnote"),
+    ("https://github.com/bllshttng/footnote.git\n", "bllshttng/footnote"),
+    ("https://github.com/bllshttng/footnote\n", "bllshttng/footnote"),
+])
+def test_resolve_repo_slug_from_git_origin(url, want):
+    from fno.graph._reconcile import resolve_current_repo_slug
+
+    calls = []
+
+    def runner(argv, cwd):
+        calls.append(argv[0])
+        return (0, url) if argv[0] == "git" else (0, "wrong/repo\n")
+
+    assert resolve_current_repo_slug(runner=runner) == want
+    assert calls == ["git"]  # gh is never consulted when git answers
+
+
+def test_resolve_repo_slug_falls_back_to_gh():
+    """No origin remote (or a non-GitHub one) -> gh repo view answers."""
+    from fno.graph._reconcile import resolve_current_repo_slug
+
+    def runner(argv, cwd):
+        return (128, "") if argv[0] == "git" else (0, "bllshttng/footnote\n")
+
+    assert resolve_current_repo_slug(runner=runner) == "bllshttng/footnote"
+
+
+def test_resolve_repo_slug_none_when_both_fail():
+    """gh missing/unauthed AND no git origin -> None (caller degrades, never guesses)."""
+    from fno.graph._reconcile import resolve_current_repo_slug
+
+    assert resolve_current_repo_slug(runner=lambda argv, cwd: (127, "")) is None
+
+
+def test_cli_session_add_pr_ambiguous_skips_and_exits_zero(tmp_path, monkeypatch):
+    """AC3-ERR (x-f47f): an unresolvable repo + cross-repo collision is a SKIP.
+
+    Exit 0 with an ambiguous warning naming both candidates: refusing to guess is
+    the designed outcome, so the caller's Failures line must not log it as a
+    failure. Nothing is stamped.
+    """
     from typer.testing import CliRunner
     import fno.graph.cli as C
+    from fno.graph.store import read_graph
 
     g = _make_graph(tmp_path, [
         {"id": "ab-prcli002", "title": "t", "pr_number": 1300},
@@ -955,12 +1010,162 @@ def test_cli_session_add_pr_ambiguous_exits_nonzero(tmp_path, monkeypatch):
     ])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, None)
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
 
     r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1300", "--phase", "ship"])
-    assert r.exit_code != 0
-    assert "1300" in r.output
+    assert r.exit_code == 0, r.output
+    assert "ambiguous" in r.output and "1300" in r.output
+    assert "ab-prcli002" in r.output and "ab-prcli003" in r.output
+    assert all(e.get("sessions", []) == [] for e in read_graph(g))
+
+
+def test_cli_session_add_pr_auto_resolves_repo_slug(tmp_path, monkeypatch):
+    """US1: no --repo needed - the verb resolves this checkout's slug itself."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [
+        {"id": "x-autofoot", "title": "t", "pr_number": 480,
+         "pr_url": "https://github.com/bllshttng/footnote/pull/480"},
+        {"id": "ab-autoabil", "title": "u", "pr_number": 480,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/480"},
+    ])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, "bllshttng/footnote")
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "--pr-number", "480", "--phase", "ship", "--json",
+    ])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["node_id"] == "x-autofoot"
+    by_id = {e["id"]: e for e in read_graph(g)}
+    assert by_id["ab-autoabil"].get("sessions", []) == []
+
+
+def test_cli_session_add_resolved_slug_never_falls_back_to_bare(tmp_path, monkeypatch):
+    """A url-less node is unattributable to ANY repo, and the graph is global and
+    cross-project, so a RESOLVED slug must not fall back to the bare number.
+
+    The fallback cannot tell this repo's legacy node from another project's
+    same-numbered one, and stamping the latter is the wrong-node write that repo
+    scoping exists to prevent. The cost is a legacy node going unstamped, and the
+    skip prints its reason - so it is a visible skip, not a silent one.
+    """
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-legacy01", "title": "t", "pr_number": 1500}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, "bllshttng/footnote")
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1500", "--phase", "ship"])
+    assert r.exit_code == 0, r.output
+    assert "no-node" in r.output
+    assert read_graph(g)[0].get("sessions", []) == []
+
+
+def test_cli_session_add_unresolvable_slug_still_matches_bare(tmp_path, monkeypatch):
+    """With NO slug there is nothing to scope by, so the bare number is all there
+    is - it still skips on ambiguity rather than guessing."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-legacy09", "title": "t", "pr_number": 1550}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, None)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1550", "--phase", "ship"])
+    assert r.exit_code == 0, r.output
+    assert read_graph(g)[0]["sessions"][0]["phase"] == "ship"
+
+
+def test_cli_session_add_auto_slug_never_stamps_a_foreign_repo_node(tmp_path, monkeypatch):
+    """The fallback must not stamp another repo's node.
+
+    "This repo has no node for the PR" is a normal post-merge skip. If the graph
+    holds a UNIQUE node for the same PR number belonging to a different repo,
+    dropping the auto-resolved scope would make the bare-number lookup stamp
+    that foreign node - a wrong stamp, the thing repo scoping exists to prevent.
+    """
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [
+        {"id": "ab-foreign1", "title": "t", "pr_number": 1700,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/1700"},
+    ])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, "bllshttng/footnote")
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1700", "--phase", "ship"])
+    assert r.exit_code == 0, r.output
+    assert "no-node" in r.output
+    assert read_graph(g)[0].get("sessions", []) == []
+
+
+def test_cli_session_add_auto_slug_fallback_needs_every_candidate_unattributable(
+    tmp_path, monkeypatch
+):
+    """A mix of one legacy node and one foreign-repo node blocks the fallback:
+    the bare lookup would be ambiguous at best and wrong at worst."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [
+        {"id": "ab-legacy03", "title": "t", "pr_number": 1800},
+        {"id": "ab-foreign2", "title": "u", "pr_number": 1800,
+         "pr_url": "https://github.com/bllshttng/abilities/pull/1800"},
+    ])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _stub_slug(monkeypatch, "bllshttng/footnote")
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, ["session", "add", "--pr-number", "1800", "--phase", "ship"])
+    assert r.exit_code == 0, r.output
+    assert all(e.get("sessions", []) == [] for e in read_graph(g))
+
+
+def test_cli_session_add_explicit_repo_stays_a_hard_filter(tmp_path, monkeypatch):
+    """An EXPLICIT --repo must not get the narrow-never-exclude fallback: the
+    caller asserted the repo, so a non-match is a skip, not a bare-number stamp."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-legacy02", "title": "t", "pr_number": 1600}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-pr")
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "--pr-number", "1600", "--repo", "bllshttng/footnote",
+        "--phase", "ship",
+    ])
+    assert r.exit_code == 0, r.output
+    assert "no-node" in r.output
+    assert read_graph(g)[0].get("sessions", []) == []
 
 
 def test_cli_session_add_requires_node_or_pr(tmp_path, monkeypatch):
