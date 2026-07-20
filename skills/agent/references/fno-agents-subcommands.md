@@ -26,7 +26,7 @@ So "declutter the human `--help`" only touches the handful of *Python-registered
 | `stop` | yes | Terminate a worker (confirm). |
 | `watch` / `list` / `logs` | yes | Observe. |
 | `whoami` | yes | This session's registered mesh identity. |
-| `register` | raw (via `/fno-me`) | Join THIS hand-started session to the roster under its canonical `<harness>-<shortid>` handle, so peers can `fno mail send` to it. The write-side counterpart of `whoami`. |
+| `register` | raw (via `/fno-me`) | Join THIS hand-started session to the roster under its canonical bare `<shortid>` handle, so peers can `fno mail send` to it. The write-side counterpart of `whoami`. |
 | `status` | raw | Daemon liveness + per-agent state. |
 | `rm` / `restart` / `resume` / `attach` | raw | Registry / session admin. |
 | `top` | raw | Live agent-activity view. |
@@ -59,7 +59,7 @@ A subcommand with zero shell call sites is *not-yet-wired*, not dead: cutting re
 
 Agent-to-agent mail is a protocol, not a transport the caller reasons about. It has exactly two halves:
 
-- **Inbound is self-addressed.** A message lands as `<fno_mail from="H" harness="..." model="...">body`. `H` is the sender's canonical handle (`<harness>-<short8>`), the ONE string its `mail drain-self` cursor also reads.
+- **Inbound is self-addressed.** A message lands as `<fno_mail from="H" harness="..." model="...">body`. `H` is the sender's canonical handle (the bare `<short8>`; harness and model ride as their own attributes), the ONE string its `mail drain-self` cursor also reads.
 - **Reply by handle.** Run `fno mail send H "..."`. Never inspect `harness`/`model` to pick a transport; the CLI resolves `H`. The outbound envelope auto-stamps the *invoking* session's own handle + real model (from its transcript store), so the reply is itself self-addressed.
 
 **Resolution ladder** (`discover.resolve_or_suggest`, one scan serving match + suggestions):

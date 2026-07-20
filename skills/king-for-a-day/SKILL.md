@@ -89,7 +89,8 @@ Mail a live pane directly; everything else is voicemail.
 A direct send to a live session injects into its pane as a notification it acts on this turn; a durable queue waits for a drain the recipient may never run.
 Both "work", but nobody checks their voicemail.
 
-The direct form: `fno mail send <harness>-<short-id> "<msg>"` (`claude-<short-id>`, `codex-<short-id>`, `opencode-<short-id>`, ...), or the session's slug if you know it.
+The direct form: `fno mail send <short-id> "<msg>"` - the bare 8-hex session prefix, the same id that keys resume/attach/peek.
+The retired `<harness>-<short-id>` form (`claude-<short-id>`, `codex-<short-id>`, ...) and the session's slug both still resolve, so an address copied from an old transcript keeps working.
 Every session prints its own handle in its startup header; find a peer's with `fno agents discovered-json` or `fno agents top`.
 Add `--from-self` to stamp your own reply handle so the answer comes back to you, and do not trust a sender's advertised `from-name` as an address - it can be stale.
 
