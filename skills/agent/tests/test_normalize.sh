@@ -28,6 +28,8 @@ run() { bash "$NORM" --input "$1" "${@:2}"; }
 # host's installed fno and its config (e.g. dispatch.auto_merge=true would
 # otherwise flip allow_merge via the x-4391 rung-2 read).
 _de43_stub="$(mktemp -d)"
+# Guard the mktemp: an empty _de43_stub would write the stub to /fno.
+[[ -n "$_de43_stub" && -d "$_de43_stub" ]] || { echo "mktemp -d failed" >&2; exit 1; }
 printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
 trap 'rm -rf "$_de43_stub"' EXIT
 run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
