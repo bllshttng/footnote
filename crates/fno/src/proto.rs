@@ -1490,7 +1490,16 @@ fn read_fill<R: Read>(r: &mut R, buf: &mut [u8], committed: bool) -> Result<(), 
                 }
                 stalls += 1;
                 if stalls >= FRAME_STALL_RETRIES {
-                    return Err(e.into());
+                    // FATAL, deliberately not the retryable error we caught.
+                    // Part of the frame is already off the stream, so there is
+                    // no resuming: handing back WouldBlock would tell a polling
+                    // caller "nothing yet", and its retry would resume mid-frame
+                    // and read the body as a length - the very desync this
+                    // function exists to prevent, just moved into the stall path.
+                    return Err(ProtoError::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "frame read stalled mid-frame; stream is desynchronised",
+                    )));
                 }
             }
             Err(e) => return Err(e.into()),
@@ -2440,6 +2449,53 @@ mod tests {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());
         assert!(socket_path("ok-name_1").is_ok());
+    }
+
+    /// A stream that delivers `give` bytes and then stalls forever.
+    struct StallAfter {
+        data: Vec<u8>,
+        pos: usize,
+        give: usize,
+    }
+
+    impl std::io::Read for StallAfter {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.give {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "stalled",
+                ));
+            }
+            let n = buf.len().min(self.give - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    /// A frame that starts arriving and then stalls must fail FATALLY.
+    ///
+    /// Handing back WouldBlock here would be worse than the original bug: the
+    /// prefix is already off the stream, but every polling caller reads that
+    /// error as "nothing yet" and retries - resuming mid-frame and decoding the
+    /// body as a length. The stall exit must therefore be non-retryable.
+    #[test]
+    fn read_msg_sync_stalled_frame_fails_fatally_not_retryably() {
+        let wire = encode(&ClientMsg::Command(Command::NewTab)).unwrap();
+        let mut r = StallAfter {
+            data: wire,
+            pos: 0,
+            give: 6, // length prefix + 2 body bytes, then silence
+        };
+        let got: Result<ClientMsg, _> = read_msg_sync(&mut r);
+        match got {
+            Err(ProtoError::Io(e)) => assert!(
+                !is_retryable(&e),
+                "a desynchronised stream must not report a retryable error: {:?}",
+                e.kind()
+            ),
+            other => panic!("expected a fatal io error, got {other:?}"),
+        }
     }
 
     /// A reader that dribbles bytes out `chunk` at a time and returns

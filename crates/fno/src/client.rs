@@ -5065,25 +5065,30 @@ fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
 /// even when the two orders coincide (one agent, or every row in one band): the
 /// rows may not move, but this line always changes, so no press is inert.
 fn table_head_text(cols: TableCols, sort: AgentSort) -> String {
-    let label = match sort {
-        AgentSort::Squad => "sort: squad",
-        AgentSort::Status => "sort: status",
+    let (long, short) = match sort {
+        AgentSort::Squad => ("sort: squad", "·squad"),
+        AgentSort::Status => ("sort: status", "·status"),
     };
-    let mut out = format!("  {}", pad_to("agent", COL_NAME as usize - 1));
+    // With the tail column dropped the label has no column of its own, so it
+    // rides the NAME header instead of being appended past the end of the row.
+    // Appending overflowed the panel by 12 columns and the painter simply cut
+    // it, which left the toggle invisible at exactly the widths where the table
+    // is hardest to read - and a press with no visible effect reads as a dead
+    // control. The name column always renders, so the marker always survives.
+    let name = if cols.tail {
+        "agent".to_string()
+    } else {
+        format!("agent {short}")
+    };
+    let mut out = format!("  {}", pad_to(&name, COL_NAME as usize - 1));
     if cols.tail {
-        out.push_str(&pad_to(label, COL_TAIL as usize - 1));
+        out.push_str(&pad_to(long, COL_TAIL as usize - 1));
         out.push(' ');
     }
     out.push_str(&pad_to("pr", COL_PR as usize - 1));
     out.push(' ');
     if cols.time {
         out.push_str(&pad_to("age", COL_TIME as usize - 1));
-    }
-    // With the tail column dropped there is nowhere to put the sort label
-    // inline, so it takes the header's own tail - the toggle must stay visible
-    // at every width.
-    if !cols.tail {
-        out.push_str(&format!(" {label}"));
     }
     out
 }
@@ -15408,6 +15413,54 @@ mod tests {
             Some(now_at),
             "the cursor followed the agent, not the index"
         );
+    }
+
+    // The sort toggle must stay VISIBLE at every width the table renders at.
+    // Appending the label past the last column silently overflowed the panel by
+    // 12 columns once the tail dropped, and the painter cut it - so the toggle
+    // looked like a dead control exactly where the table is hardest to read.
+    #[test]
+    fn sort_label_survives_every_column_configuration() {
+        for cols in [
+            TableCols {
+                tail: true,
+                time: true,
+            },
+            TableCols {
+                tail: false,
+                time: true,
+            },
+            TableCols {
+                tail: false,
+                time: false,
+            },
+        ] {
+            let by_squad = table_head_text(cols, AgentSort::Squad);
+            let by_status = table_head_text(cols, AgentSort::Status);
+            assert_ne!(
+                by_squad, by_status,
+                "{cols:?}: the header must change when the sort does"
+            );
+            // The header must FIT: anything past the panel width is painted away,
+            // which is how the label went missing in the first place.
+            let panel_text_w = match cols {
+                TableCols { tail: true, .. } => EXTENDED_PANEL_W - 1,
+                TableCols { time: true, .. } => COL_STATUS + COL_NAME + COL_PR + COL_TIME - 1,
+                _ => MIN_EXTENDED_PANEL_W - 1,
+            };
+            for (label, head) in [("squad", &by_squad), ("status", &by_status)] {
+                assert!(
+                    head.chars().count() <= panel_text_w as usize,
+                    "{cols:?}: header overflows {panel_text_w} cols: {head:?}"
+                );
+                // And the surviving text still names the order.
+                let visible: String = head.chars().take(panel_text_w as usize).collect();
+                assert!(
+                    visible.contains(label),
+                    "{cols:?}: {label:?} not visible in {visible:?}"
+                );
+            }
+        }
     }
 
     // The density button is a real click target, routed to the SAME mutation the
