@@ -4085,11 +4085,8 @@ impl View {
                         Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
                         None => base,
                     };
-                    // (x-44a1) BOLD, not DIM: the footer's two buttons are the
-                    // only actionable row in the sideline's chrome, and DIM is
-                    // this panel's inert marker (Sub/TableHead/Blank), so DIM
-                    // read as disabled. Bands are INVERSE+DIM, inert is DIM,
-                    // actionable is BOLD - three distinct rests.
+                    // DIM is this panel's inert marker; the one actionable row
+                    // must not share it.
                     (label, cell_flags::BOLD, Color::Default)
                 }
                 DisplayRow::Sub(sub) => {
@@ -12277,9 +12274,7 @@ mod tests {
 
     #[test]
     fn footer_buttons_rest_bold_and_invert_on_hover() {
-        // x-44a1: the footer's `+ new workspace` / `☰ menu` buttons are the
-        // sideline's only actionable chrome, so they rest BOLD - never DIM,
-        // which this panel reserves for inert rows and which read as disabled.
+        // The footer buttons rest BOLD; DIM is reserved for inert rows.
         let mut view = two_pane_view();
         view.term = (29, 72);
         let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
