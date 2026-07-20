@@ -2342,6 +2342,14 @@ impl View {
         Some(permille(at.saturating_sub(start), available))
     }
 
+    /// True on the sideline's right border column - the grab band for the
+    /// density drag. False when the sideline is hidden: there is no border to
+    /// grab, so revealing it stays on the existing toggle.
+    fn on_sideline_border(&self, row: u16, col: u16) -> bool {
+        let panel_w = self.panel_w();
+        panel_w > 0 && row >= TAB_BAR_ROWS && col == panel_w - 1
+    }
+
     /// Grab a seam, remembering the share it currently holds so Esc can put it
     /// back. A seam whose panes have already gone is not grabbable.
     fn begin_seam_drag(&mut self, seam: Seam, now: Instant) {
@@ -2777,6 +2785,14 @@ impl View {
         // a cell off the sideline text column clears it.
         self.hover_row = self.sideline_row_at(row, col);
 
+        // x-d807: accent the divider under the pointer. Terminals cannot
+        // portably change the cursor shape, so this accent is the entire
+        // draggability affordance - without it a seam gives no sign it can be
+        // grabbed. Always on, like the sideline highlight, and independent of
+        // the focus-follow off-switch below.
+        self.hover_seam = self.seam_at(row, col);
+        self.hover_sideline_border = self.on_sideline_border(row, col);
+
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
         // steals focus - only moving over pane content does.
@@ -2929,6 +2945,21 @@ impl View {
             if !self.layout.panes.iter().any(|(id, _)| *id == pane) {
                 self.hover_pending = None;
             }
+        }
+        // (x-d807) Same for a seam: a split or close elsewhere can retire the
+        // pair that addressed it, and a seam whose panes are gone must not stay
+        // lit as draggable. The drag itself re-anchors here too - it survives a
+        // layout push that leaves its pair intact, and ends when one does not.
+        let live_seam = |s: &Seam| {
+            let live = |id: u64| self.layout.panes.iter().any(|(p, _)| *p == id);
+            live(s.a) && live(s.b)
+        };
+        if self.hover_seam.is_some_and(|s| !live_seam(&s)) {
+            self.hover_seam = None;
+        }
+        if self.seam_drag.is_some_and(|d| !live_seam(&d.seam)) {
+            self.seam_drag = None;
+            self.set_notice("divider gone: layout changed".into());
         }
         // (x-0f9d US1) Last, after every re-anchor: if a bare NewTab is
         // pending, the layout that just added the tab opens rename on it. Last
@@ -3381,6 +3412,9 @@ impl View {
         // placeholder: no filler until the first real Layout names a bound.
         let (a_rows, a_cols) = self.layout.area;
         let boxed = self.layout.area != (0, 0);
+        // A drag keeps the accent on the seam it grabbed even as the pointer
+        // runs ahead of it, so the thing being moved stays the thing lit.
+        let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
         // Divider glyphs for in-area content cells no pane covers: pick by
         // which neighbors are panes so vertical strips read '│', horizontal
         // '─', crossings '┼'. Dim so chrome never shouts over content.
@@ -3416,7 +3450,16 @@ impl View {
                     || c + 1 < cols && focused[r * cols + c + 1]
                     || r > origin_r && focused[(r - 1) * cols + c]
                     || r + 1 < rows && focused[(r + 1) * cols + c];
-                let (fg, flags) = if outline {
+                // x-d807: the seam under the pointer (or held in a drag) reads
+                // BOLD, distinct from both idle DIM chrome and the focus
+                // outline's plain accent. A terminal cannot portably change the
+                // cursor shape, so this is the only signal a divider is
+                // draggable before the press.
+                let grabbable =
+                    active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
+                let (fg, flags) = if grabbable {
+                    (LATTICE_ACCENT, cell_flags::BOLD)
+                } else if outline {
                     (LATTICE_ACCENT, 0)
                 } else {
                     (Color::Default, cell_flags::DIM)
@@ -10509,6 +10552,131 @@ mod tests {
             }),
             "the next column is a new position"
         );
+    }
+
+    #[test]
+    fn hovered_seam_renders_a_distinct_accent_in_compose() {
+        // AC3-UI: the accent is the whole draggability affordance (a terminal
+        // cursor cannot portably change shape), so it must be visibly distinct
+        // from idle chrome and assertable in the compose output.
+        let mut view = three_pane_view();
+        let cell_at = |view: &View, row: usize, col: usize| {
+            let f = view.compose();
+            f.cells[row * f.cols as usize + col]
+        };
+        // Two different idle states exist. The seam at col 75 (between the
+        // unfocused 11 and 12) is plain dim chrome; the one at col 51 borders
+        // the focused pane 10, so it already wears x-5a52's standing outline.
+        // The hover accent has to be distinct from BOTH.
+        let idle_chrome = cell_at(&view, 5, 75);
+        let focus_outline = cell_at(&view, 5, 51);
+        assert_eq!(idle_chrome.c, '│', "the divider glyph itself is unchanged");
+        assert_eq!(idle_chrome.flags, cell_flags::DIM);
+        assert_eq!(focus_outline.flags, 0, "the focus outline is undimmed accent");
+
+        view.on_hover(5, 75, Instant::now());
+        let lit = cell_at(&view, 5, 75);
+        assert_eq!(lit.c, '│', "hover accents the divider, it does not redraw it");
+        assert_eq!(lit.flags, cell_flags::BOLD);
+        assert_eq!(lit.fg, LATTICE_ACCENT);
+        assert!(
+            (lit.flags, lit.fg) != (idle_chrome.flags, idle_chrome.fg),
+            "distinct from idle chrome"
+        );
+        assert!(
+            (lit.flags, lit.fg) != (focus_outline.flags, focus_outline.fg),
+            "distinct from the focused pane's standing outline, so a hovered \
+             seam beside the focused pane still reads as grabbable"
+        );
+        // Hovering one seam does not light another.
+        assert_eq!(cell_at(&view, 5, 51).flags, 0, "still just the focus outline");
+
+        // Leaving the band clears it.
+        view.on_hover(5, 40, Instant::now());
+        assert_eq!(cell_at(&view, 5, 75).flags, cell_flags::DIM);
+    }
+
+    #[test]
+    fn drag_keeps_the_accent_on_the_seam_it_grabbed() {
+        // The pointer routinely runs ahead of the divider during a drag; the
+        // thing being moved must stay the thing lit.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        view.on_hover(5, 60, Instant::now()); // pointer now over a pane
+        let f = view.compose();
+        assert_eq!(
+            f.cells[5 * f.cols as usize + 51].flags,
+            cell_flags::BOLD,
+            "the grabbed seam stays accented while the pointer is off it"
+        );
+    }
+
+    #[test]
+    fn layout_change_ends_a_drag_whose_seam_is_gone() {
+        // AC4-ERR (client half): a concurrent close retires the pair, so the
+        // drag ends visibly rather than resizing something else.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        view.on_hover(5, 51, Instant::now());
+        assert!(view.seam_drag.is_some() && view.hover_seam.is_some());
+
+        // Pane 11 closes elsewhere; 10 and 12 now tile the area.
+        let rect = |x, cols| Rect {
+            x,
+            y: 0,
+            rows: 29,
+            cols,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(10, rect(0, 35)), (12, rect(36, 36))],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        assert!(view.seam_drag.is_none(), "the drag ended, it did not re-target");
+        assert!(view.hover_seam.is_none(), "a dead seam is not lit as draggable");
+        assert!(
+            view.notice.is_some(),
+            "the drag ending is reported, never silent"
+        );
+    }
+
+    #[test]
+    fn drag_survives_a_layout_push_that_keeps_its_pair() {
+        // The common case: every applied resize broadcasts a layout, and the
+        // drag must ride through its own updates.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        let rect = |x, cols| Rect {
+            x,
+            y: 0,
+            rows: 29,
+            cols,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            // 10 grew, 11 shrank: the same pair, a moved seam.
+            panes: vec![(10, rect(0, 30)), (11, rect(31, 16)), (12, rect(48, 23))],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        assert!(view.seam_drag.is_some(), "the drag survives its own resize");
+        assert!(view.notice.is_none(), "a normal resize is not an error");
     }
 
     #[test]
