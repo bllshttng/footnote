@@ -3429,6 +3429,20 @@ def cmd_session_add(
         typer.echo("session add: pass exactly one of NODE or --pr-number.", err=True)
         raise typer.Exit(code=2)
 
+    who = node if node is not None else f"pr#{pr}"
+    ident = resolve_harness_identity()
+    eff_harness = (harness or ident.harness or "").strip()
+    eff_session = (session_id or ident.session_id or "").strip()
+    if not eff_harness or not eff_session:
+        typer.echo(
+            f"session add: no ambient identity for {who} phase={phase}; "
+            "pass --harness/--session-id or run inside a session. Skipped.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # After the identity guard: resolution shells out to git and possibly gh, and
+    # a run with no identity is about to skip anyway.
     if pr is not None and repo is None:
         from fno.graph._reconcile import resolve_current_repo_slug
 
@@ -3446,18 +3460,6 @@ def cmd_session_add(
             # stamping it - the same invisible no-op this verb change exists to
             # kill. An explicit --repo stays a hard filter.
             repo = None
-
-    who = node if node is not None else f"pr#{pr}"
-    ident = resolve_harness_identity()
-    eff_harness = (harness or ident.harness or "").strip()
-    eff_session = (session_id or ident.session_id or "").strip()
-    if not eff_harness or not eff_session:
-        typer.echo(
-            f"session add: no ambient identity for {who} phase={phase}; "
-            "pass --harness/--session-id or run inside a session. Skipped.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
 
     try:
         if pr is not None:
