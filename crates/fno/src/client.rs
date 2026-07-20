@@ -1838,9 +1838,9 @@ impl View {
                 true
             }
             Some(Pick::Section(key, label, squad)) => {
-                // Cards have no exited state, so the work queue has no menu at
-                // all - a notice there would imply "none right now" about a
-                // section that can never have any.
+                // Cards have no exited state, so the Backlog section has no
+                // menu at all - a notice there would imply "none right now"
+                // about a section that can never have any.
                 if key == SectionKey::WorkQueue {
                     return false;
                 }
@@ -11669,9 +11669,10 @@ mod tests {
     }
 
     #[test]
-    fn work_queue_header_has_no_menu_and_stays_silent() {
+    fn backlog_header_has_no_menu_and_stays_silent() {
         // Cards have no exited state, so a notice there would imply "none right
-        // now" about a section that can never have any.
+        // now" about a section that can never have any. (SectionKey::WorkQueue
+        // is the pre-rename identifier for the Backlog section.)
         let mut v = view_with_agents(vec![]);
         // The band only renders over a non-empty backlog, so the card is what
         // makes this test non-vacuous - `.expect` keeps it that way.
@@ -11693,10 +11694,10 @@ mod tests {
             .position(
                 |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::WorkQueue),
             )
-            .expect("a backlog card renders the work-queue band");
+            .expect("a backlog card renders the Backlog band");
         v.notice = None;
         assert!(!v.open_row_menu(hdr, Anchor::Center));
-        assert!(v.notice.is_none(), "the work queue says nothing");
+        assert!(v.notice.is_none(), "the Backlog section says nothing");
     }
 
     #[tokio::test]
