@@ -29,9 +29,10 @@ use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Sca
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
-    AnswerablePrompt, BacklogCard, BlockDir, CardState, Cell, ClientMsg, Color, Command, Frame,
-    MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget, ProtoError, ServerMsg,
-    SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
+    AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
+    Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget, ProtoError,
+    ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    PROTO_VERSION,
 };
 use crate::tree::{Dir, Rect, TabId};
 use crate::view_store::{self, next_view, SectionKey, SectionView};
@@ -366,6 +367,13 @@ struct LayoutView {
     /// lane; empty when the graph is unreadable or has no ready/blocked/in-flight
     /// work (the lane then renders nothing - the agents section is unaffected).
     backlog: Vec<BacklogCard>,
+    /// (v36, x-1d91) The UNCAPPED per-lane queue-card counts, feeding the
+    /// section's exact `+N more` and the mini-kanban's lane headers.
+    backlog_lanes: Vec<(String, usize)>,
+    /// (v36, x-1d91) `backlog` is last-known rather than current - the graph read
+    /// has been failing. Rendered as a header marker; the cards still show (a
+    /// blank section would be worse than an honestly-labelled stale one).
+    backlog_stale: bool,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -479,6 +487,10 @@ struct View {
     /// arrow sequence can never half-close the search or leak its tail into the
     /// pane (same split-arrow safety as [`View::sel_esc`]).
     search_esc: Vec<u8>,
+    /// (x-1d91) The one dispatched-but-unconfirmed Backlog reorder verb, if any.
+    /// At most one: the marker doubles as the double-press guard, so a second
+    /// dispatch on the same card cannot fire until the first resolves.
+    backlog_pending: Option<BacklogPending>,
     /// (x-a496) `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
@@ -786,12 +798,20 @@ fn build_keys_modal() -> KeysModal {
 /// the popup's flat targets (`popup.sel` indexes it directly).
 struct RowMenu {
     popup: Popup,
-    /// The target agent's identity, pinned at open. Names ALONE are ambiguous
-    /// (the daemon roster can surface two rows with the same name), so the
-    /// pane_id / attach_id disambiguate; execution fails closed if this identity
-    /// does not resolve to exactly one live row (never acts on the wrong agent).
-    target: AgentIdent,
+    /// The target's identity, pinned at open. Execution fails closed if it no
+    /// longer resolves, so a layout reshuffle between open and click can only
+    /// produce a stale-target refusal, never a redirected action.
+    target: MenuTarget,
     actions: Vec<MenuAction>,
+}
+
+/// What a row menu is acting on: a sideline agent row, or (x-1d91) a Backlog
+/// card pinned by node id (ids are unique in the graph, so unlike agent names
+/// they need no disambiguation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MenuTarget {
+    Agent(AgentIdent),
+    Card(String),
 }
 
 /// The disambiguating identity of an agent row, captured when a row menu opens.
@@ -833,6 +853,8 @@ enum MenuAction {
     Stop,
     /// Remove an exited row (RemoveAgent, or RemoveExternal for a roster row).
     Remove,
+    /// (x-1d91) Run a reorder verb on a Backlog card.
+    Backlog(BacklogVerb),
 }
 
 /// Build the per-state row menu for the agent at `display_rows()` index `i`,
@@ -901,8 +923,55 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     }
     RowMenu {
         popup: Popup::new(rows, anchor),
-        target: AgentIdent::of(agent),
+        target: MenuTarget::Agent(AgentIdent::of(agent)),
         actions,
+    }
+}
+
+/// (x-1d91) The v1 reorder menu for a Backlog card: float to top, defer. Both
+/// route through `fno backlog` server-side; the mux never writes the graph.
+///
+/// Floating a READY card to the top can make the active dispatcher pick it up
+/// within about a minute, so those carry a hint saying so - the gesture is an
+/// implicit dispatch request, and the operator should know that before pressing
+/// rather than discover it when a session appears.
+///
+/// The hint says "may dispatch", not "will": the picker applies guards the mux
+/// does not model (containers, batched members, stale/dead-ancestor candidates,
+/// project scoping), so a floated card is not certain to be taken. Warning about
+/// a possibility is the useful half; promising a certainty would be a claim this
+/// code cannot keep.
+fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
+    let label = if card.slug.is_empty() {
+        &card.id
+    } else {
+        &card.slug
+    };
+    let float_hint = match card.state {
+        CardState::Ready => "may dispatch",
+        _ => "",
+    };
+    let rows = vec![
+        PopupRow::Header(label.clone()),
+        PopupRow::Rule,
+        PopupRow::Entry {
+            glyph: "▲".into(),
+            label: "Float to top".into(),
+            hint: float_hint.into(),
+        },
+        PopupRow::Entry {
+            glyph: "⏸".into(),
+            label: "Defer".into(),
+            hint: String::new(),
+        },
+    ];
+    RowMenu {
+        popup: Popup::new(rows, anchor),
+        target: MenuTarget::Card(card.id.clone()),
+        actions: vec![
+            MenuAction::Backlog(BacklogVerb::RankTop),
+            MenuAction::Backlog(BacklogVerb::Defer),
+        ],
     }
 }
 
@@ -914,9 +983,11 @@ struct AuxPopup {
     actions: Vec<AuxAction>,
 }
 
-/// What a MENU / settings-modal row does. Menu entries open a surface or detach;
-/// settings entries flip a session-local view toggle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a MENU / settings-modal / mini-kanban row does. Menu entries open a
+/// surface or detach; settings entries flip a session-local view toggle; a
+/// kanban entry names a card. Not `Copy` since x-1d91 - a card action carries
+/// its node id.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AuxAction {
     OpenKeybinds,
     OpenSettings,
@@ -924,7 +995,73 @@ enum AuxAction {
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
+    /// (x-1d91) Jump the sideline selector to this Backlog card and close the
+    /// mini-kanban - the overlay is a scanning surface, so acting on a card
+    /// hands you back to the row where its full menu lives.
+    BacklogGoto(String),
 }
+
+/// (x-1d91) Build the mini-kanban: the Backlog's lanes as collapsed columns, each
+/// a header carrying its TRUE count over the cards the feed is holding.
+///
+/// Read-mostly and renders from the same `BacklogCard` feed as the section - no
+/// second data source, so a verb's effect appears here on the same refresh tick
+/// it appears in the sideline. Lanes come from `_kanban_column` (the sole column
+/// authority), never from rank, which is why floating a card reorders WITHIN a
+/// lane and never moves it across one.
+///
+/// It is the QUEUE's lanes, not the whole board's. The feed carries only
+/// actionable work (ready / blocked / in-flight), so done and idea nodes never
+/// reach it and a `Done` column never appears - this is a scan of what is up for
+/// grabs, and `fno backlog board` remains the full-board view. The counts are
+/// true for what they claim: every queue card, including those past the render
+/// cap.
+///
+/// Lanes stack vertically rather than sitting side by side: the sideline is
+/// narrow, and a stacked list needs no 2D navigation to scan. The `counts` are
+/// the uncapped per-lane totals, so a lane whose cards were cut by the feed cap
+/// still states how much work it really holds.
+fn build_kanban(cards: &[BacklogCard], counts: &[(String, usize)], anchor: Anchor) -> AuxPopup {
+    let mut rows = vec![PopupRow::Header("backlog".into()), PopupRow::Rule];
+    let mut actions = Vec::new();
+    for (lane, total) in counts {
+        rows.push(PopupRow::Header(format!("{lane}  {total}")));
+        let mut shown = 0usize;
+        for c in cards.iter().filter(|c| card_lane(c) == lane.as_str()) {
+            let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+            rows.push(PopupRow::Entry {
+                glyph: lattice_style(card_lattice_state(c.state)).glyph.into(),
+                label: label.clone(),
+                hint: if c.head {
+                    "head".into()
+                } else {
+                    c.priority.clone()
+                },
+            });
+            actions.push(AuxAction::BacklogGoto(c.id.clone()));
+            shown += 1;
+        }
+        // Say so when the lane holds more than the feed carries, rather than
+        // letting the header count silently disagree with the rows under it.
+        if *total > shown {
+            rows.push(PopupRow::Header(format!("  +{} more", total - shown)));
+        }
+    }
+    AuxPopup {
+        popup: Popup::new(rows, anchor),
+        actions,
+    }
+}
+
+/// The lane a card belongs to in the mini-kanban. A card with no
+/// `_kanban_column` still needs a home, so it gets a named one rather than
+/// vanishing from the board.
+fn card_lane(c: &BacklogCard) -> &str {
+    c.lane.as_deref().unwrap_or(UNLANED)
+}
+
+/// The bucket for cards carrying no `_kanban_column`.
+const UNLANED: &str = "unlaned";
 
 /// Build the sideline MENU popup (US4), anchored at the footer's menu cell:
 /// keybinds / settings / detach. `reload config` is intentionally absent - there
@@ -977,6 +1114,7 @@ impl View {
             section_view.entry(key).or_insert(SectionView::Expanded);
         }
         View {
+            backlog_pending: None,
             term,
             session,
             layout,
@@ -1493,16 +1631,106 @@ impl View {
         }
     }
 
+    /// (x-1d91) Every queue card the graph holds, cap included - the sum of the
+    /// per-lane counts, so the section's remainder and the kanban's lane headers
+    /// are the same number twice rather than two independent claims.
+    fn backlog_total(&self) -> usize {
+        self.layout.backlog_lanes.iter().map(|(_, n)| n).sum()
+    }
+
+    /// (x-1d91) Open the mini-kanban over the Backlog section.
+    fn open_kanban(&mut self, anchor: Anchor) {
+        self.clear_peek();
+        self.aux = Some(build_kanban(
+            &self.layout.backlog,
+            &self.layout.backlog_lanes,
+            anchor,
+        ));
+        self.aux_esc.clear();
+    }
+
+    /// (x-1d91) Whether this card is wearing the dispatched-verb `…` marker.
+    fn card_pending(&self, id: &str) -> bool {
+        self.backlog_pending.as_ref().is_some_and(|p| p.node == id)
+    }
+
+    /// Arm the pending marker for a dispatched reorder verb, snapshotting what
+    /// the TARGET card looked like at dispatch. Returns `false` when one is
+    /// already in flight - the double-press guard, so a second Enter on the same
+    /// card cannot fire a duplicate shellout (and a no-op second `rank --top`
+    /// cannot churn the graph).
+    fn arm_backlog_pending(&mut self, node: &str, verb: BacklogVerb) -> bool {
+        if self.backlog_pending.is_some() {
+            return false;
+        }
+        self.backlog_pending = Some(BacklogPending {
+            node: node.to_string(),
+            verb,
+            was: card_mark(&self.layout.backlog, node),
+            deadline: Instant::now() + BACKLOG_PENDING_TTL,
+        });
+        true
+    }
+
+    /// Clear the pending marker once the feed confirms THIS verb landed: the
+    /// target card's own position or state changed, or it left the feed (what a
+    /// successful defer looks like). Called with the INCOMING backlog before it
+    /// is stored.
+    ///
+    /// Deliberately narrower than "the card set changed at all": claims and
+    /// routing fields churn the set on unrelated cards every few seconds, so a
+    /// whole-set comparison would clear the marker on someone else's news and
+    /// release the single-flight guard while this verb was still running - a
+    /// false confirmation, which is the one thing this marker exists to prevent.
+    fn confirm_backlog_pending(&mut self, incoming: &[BacklogCard]) {
+        let landed = self
+            .backlog_pending
+            .as_ref()
+            .is_some_and(|p| card_mark(incoming, &p.node) != p.was);
+        if landed {
+            self.backlog_pending = None;
+        }
+    }
+
+    /// Clear the pending marker because the verb reported its own outcome. The
+    /// server routes each verb's verdict back as one notice to the requesting
+    /// client, so a notice arriving mid-verb is that verdict: the marker must go
+    /// rather than spin out its full timeout and then replace a specific failure
+    /// ("rank x-a: lock contention") with a generic one. Clearing early on an
+    /// unrelated notice is harmless - the rendered order is never optimistic, so
+    /// the marker is the only thing at stake.
+    fn settle_backlog_pending_on_notice(&mut self) {
+        self.backlog_pending = None;
+    }
+
+    /// The pending marker's expiry deadline, for the select loop's timer arm.
+    fn backlog_pending_deadline(&self) -> Option<Instant> {
+        self.backlog_pending.as_ref().map(|p| p.deadline)
+    }
+
+    /// Declare an unconfirmed verb lost: clear the marker and say so. The row
+    /// must never keep a `…` the feed will not resolve, and silence would read
+    /// as success (this is the same fail-loud stance as the verb's own error
+    /// notice - the order is already truthful; only the marker was a claim).
+    fn expire_backlog_pending(&mut self) {
+        if let Some(p) = self.backlog_pending.take() {
+            self.set_notice(format!("{} {}: no confirmation", p.verb.label(), p.node));
+        }
+    }
+
     /// Open the row context menu on `display_rows()` index `i`, anchored at
-    /// `anchor` (x-8ccf US2). Returns whether it opened - `false` for a non-agent
-    /// row (the caller then leaves the press alone / forwards it).
+    /// `anchor` (x-8ccf US2): the agent lifecycle menu, or (x-1d91) the Backlog
+    /// card's reorder menu. Returns whether it opened - `false` for any other row
+    /// (the caller then leaves the press alone / forwards it).
     fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
-        let agent = match self.display_rows().get(i) {
-            Some(DisplayRow::Agent(a)) => (*a).clone(),
+        let menu = match self.display_rows().get(i) {
+            Some(DisplayRow::Agent(a)) => build_row_menu(a, anchor),
+            // (x-1d91) A Backlog card gets the reorder menu.
+            Some(DisplayRow::Card(c)) => build_card_menu(c, anchor),
             _ => return false,
         };
         self.clear_peek();
-        self.row_menu = Some(build_row_menu(&agent, anchor));
+        self.row_menu = Some(menu);
         self.row_menu_esc.clear();
         true
     }
@@ -2103,6 +2331,10 @@ impl View {
         // generation it belongs to).
         let live: HashSet<u64> = layout.panes.iter().map(|(id, _)| *id).collect();
         self.frames.retain(|id, _| live.contains(id));
+        // (x-1d91) A changed card set is the ONLY confirmation a dispatched
+        // reorder verb gets. Checked against the incoming backlog before it is
+        // stored, since the comparison is against the dispatch-time snapshot.
+        self.confirm_backlog_pending(&layout.backlog);
         // The FIRST real layout is initialization, not an operator gesture: the
         // attach path builds this View against an empty placeholder, so every
         // squad and mission below would read as brand-new and its seed would
@@ -2256,7 +2488,7 @@ impl View {
                     .any(|a| a.squad == Some(s.id) && a.exited)
             }
             SectionKey::Elsewhere => self.orphans().iter().any(|a| a.exited),
-            // Cards have no exited state, so the work queue is always binary.
+            // Cards have no exited state, so the Backlog section is always binary.
             SectionKey::WorkQueue => false,
         }
     }
@@ -3205,7 +3437,7 @@ impl View {
                     // project basename - the foreign-cwd join worth flagging. A
                     // same-project agent stays one clean row.
                     if agent_is_foreign(a, section_base) {
-                        out.push(DisplayRow::Sub(a));
+                        out.push(DisplayRow::Sub(a.cwd_base.clone().unwrap_or_default()));
                     }
                 }
             }
@@ -3249,9 +3481,10 @@ impl View {
                 }
             }
         }
-        // The work-queue lane (x-6f77): board-ordered ready/blocked/in-flight
-        // cards under their own header. Empty (unreadable/no-work graph) renders
-        // nothing - the agents section above is unaffected (AC-edge fail-open).
+        // The Backlog section (x-6f77, renamed x-1d91): board-ordered
+        // ready/blocked/in-flight cards under their own header. Empty
+        // (unreadable/no-work graph) renders nothing - the agents section above
+        // is unaffected (AC-edge fail-open).
         if !self.layout.backlog.is_empty() {
             if multi_squad {
                 out.push(DisplayRow::Blank);
@@ -3264,7 +3497,14 @@ impl View {
             );
             let view = self.section_view(&SectionKey::WorkQueue);
             out.push(DisplayRow::Header {
-                label: "~ work queue",
+                // The cards still render when the graph read is failing - a blank
+                // section would be worse - but the header says they are memory
+                // rather than fact, so nobody acts on old work believing it fresh.
+                label: if self.layout.backlog_stale {
+                    "~ backlog · stale"
+                } else {
+                    "~ backlog"
+                },
                 rollup,
                 key: SectionKey::WorkQueue,
                 view,
@@ -3272,7 +3512,25 @@ impl View {
             // Binary: a card has no exited state, so the queue never enters
             // `LiveOnly` (see [`next_view`]) and only `Collapsed` hides rows.
             if view != SectionView::Collapsed {
-                out.extend(self.layout.backlog.iter().map(DisplayRow::Card));
+                for c in &self.layout.backlog {
+                    out.push(DisplayRow::Card(c));
+                    // (x-1d91) Line 2: which backlog this row belongs to. Emitted
+                    // only when there is something to say - an unscoped, unlaned
+                    // card stays one clean row, the same exception-based stance
+                    // the agent sublines take.
+                    if let Some(attr) = card_attribution(c) {
+                        out.push(DisplayRow::Sub(attr));
+                    }
+                }
+                // The reader caps its card set, so the section states the exact
+                // remainder rather than implying the backlog ends here.
+                let shown = self.layout.backlog.len();
+                if self.backlog_total() > shown {
+                    out.push(DisplayRow::Sub(format!(
+                        "+{} more",
+                        self.backlog_total() - shown
+                    )));
+                }
             }
         }
         out
@@ -3439,8 +3697,22 @@ impl View {
                     let style = lattice_style(card_lattice_state(c.state));
                     let glyph = style.glyph;
                     let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+                    // (x-1d91) The head of the queue is stated, not inferred from
+                    // position: the section can be scrolled or the top card
+                    // claimed, and either would make "first row" a lie. Labelled
+                    // `head` rather than `next` on purpose - it names the board's
+                    // head, and the dispatcher's actual pick can differ (see
+                    // BacklogCard::head). A dispatched-but-unconfirmed verb shows
+                    // `…` instead, so no reorder is ever invisible.
+                    let mark = if self.card_pending(&c.id) {
+                        " …"
+                    } else if c.head {
+                        " head"
+                    } else {
+                        ""
+                    };
                     (
-                        format!("  {glyph} {label} {}", c.priority),
+                        format!("  {glyph} {label} {}{mark}", c.priority),
                         style.flags,
                         style.fg,
                     )
@@ -3477,13 +3749,10 @@ impl View {
                     };
                     (label, cell_flags::DIM, Color::Default)
                 }
-                DisplayRow::Sub(a) => {
-                    // (x-6851 US3) The dim line-2 subline is the FOREIGN cwd_base
-                    // alone (no branch), indented 4 cells to sit under the agent
-                    // name (` {mark}{glyph} ` is 4 cells wide). A Sub row is only
-                    // emitted for a foreign-cwd row, so cwd_base is present. The
-                    // server-composed `subline` is no longer consumed here.
-                    let sub = a.cwd_base.as_deref().unwrap_or("");
+                DisplayRow::Sub(sub) => {
+                    // Indented 4 cells to sit under the row's name (` {mark}{glyph} `
+                    // is 4 cells wide). The painter truncates to the panel width,
+                    // so a long attribution ellipses rather than wrapping.
                     (format!("    {sub}"), cell_flags::DIM, Color::Default)
                 }
                 // (x-cd67 US3) A blank section spacer paints nothing.
@@ -3597,14 +3866,67 @@ enum DisplayRow<'a> {
     /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
-    /// (x-cd67 US2) The dim line-2 subline under an agent row, carrying the
-    /// server-composed `<branch> · <cwd-tail>`. Inert: every painted line stays
-    /// one display row (the x-260a single-enumeration invariant), so scroll,
-    /// hover, and hit-test index math are untouched.
-    Sub(&'a AgentRow),
+    /// (x-cd67 US2) The dim, 4-cell-indented line-2 under a row: an agent's
+    /// foreign `cwd_base`, or (x-1d91) a Backlog card's `project · lane`
+    /// attribution and the section's `+N more` remainder. Owns its text so any
+    /// section can emit one without the painter learning a new row type. Inert:
+    /// every painted line stays one display row (the x-260a single-enumeration
+    /// invariant), so scroll, hover, and hit-test index math are untouched.
+    Sub(String),
     /// (x-cd67 US3) A one-line spacer between workspace groups and before the
     /// trailing sections. Inert, like `Sub`.
     Blank,
+}
+
+/// (x-1d91) A dispatched Backlog reorder verb awaiting confirmation from the feed.
+///
+/// There is no optimistic reorder: the rendered order changes only when the graph
+/// reader republishes, so between dispatch and that republish the card wears a `…`
+/// marker. The card set AT DISPATCH is the confirm signal - layouts push on every
+/// scrape tick, so "any layout arrived" would clear the marker instantly and prove
+/// nothing. `deadline` bounds the wait: a verb whose effect never lands (it failed
+/// silently, or was a server-side no-op like floating an already-top card) must
+/// clear with a visible notice rather than leave the row spinning forever.
+struct BacklogPending {
+    node: String,
+    verb: BacklogVerb,
+    /// What the target card looked like at dispatch; a different mark means the
+    /// feed confirmed THIS verb (see [`card_mark`]).
+    was: Option<(usize, CardState, Option<String>)>,
+    deadline: Instant,
+}
+
+/// How long a dispatched reorder verb may sit unconfirmed before the marker
+/// clears with a notice. The graph reader ticks about once a second, so this is
+/// many refreshes' worth of grace - long enough that a slow verb is not called
+/// lost, short enough that a stuck row is never mistaken for a live one.
+const BACKLOG_PENDING_TTL: Duration = Duration::from_secs(10);
+
+/// (x-1d91) What a Backlog card looks like for confirmation purposes: its
+/// position, state, and lane, or `None` when it is not in the feed at all.
+///
+/// Position covers a float (the card moves), lane covers a cross-column move,
+/// state covers a claim, and absence covers a defer (which takes the node off
+/// the board). Everything a v1 verb can do shows up here, and nothing another
+/// card's churn can do does.
+fn card_mark(cards: &[BacklogCard], node: &str) -> Option<(usize, CardState, Option<String>)> {
+    cards
+        .iter()
+        .position(|c| c.id == node)
+        .map(|i| (i, cards[i].state, cards[i].lane.clone()))
+}
+
+/// (x-1d91) A Backlog card's `project · lane` attribution subline, or `None` when
+/// the card carries neither (an unscoped, unlaned node says nothing worth a
+/// second row). Either half alone renders alone - the separator only appears
+/// between two present values.
+fn card_attribution(c: &BacklogCard) -> Option<String> {
+    match (c.project.as_deref(), c.lane.as_deref()) {
+        (Some(p), Some(l)) => Some(format!("{p} · {l}")),
+        (Some(p), None) => Some(p.to_string()),
+        (None, Some(l)) => Some(l.to_string()),
+        (None, None) => None,
+    }
 }
 
 /// (x-cd67) True for a non-actionable sideline row: the selector skips it, it is
@@ -4264,7 +4586,7 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
 }
 
 /// (x-6851 US1) The flag set for a section-header band: a full-panel-width
-/// INVERSE band so every section header (squad, `~ elsewhere`, `~ work queue`)
+/// INVERSE band so every section header (squad, `~ elsewhere`, `~ backlog`)
 /// reads visually dominant over the agent rows below it. The active squad adds
 /// BOLD, every inactive section adds DIM - the text is identical, only weight
 /// differs, so a weak-BOLD theme still separates active from inactive by the
@@ -4569,6 +4891,8 @@ async fn attach_and_run(
             agents: Vec::new(),
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         },
     );
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
@@ -4611,6 +4935,8 @@ async fn attach_and_run(
                 agents,
                 focus_node,
                 backlog,
+                backlog_lanes,
+                backlog_stale,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -4621,6 +4947,8 @@ async fn attach_and_run(
                     agents,
                     focus_node,
                     backlog,
+                    backlog_lanes,
+                    backlog_stale,
                 });
                 break;
             }
@@ -4823,6 +5151,9 @@ async fn attach_and_run(
         // its landing time + the debounce, re-armed each loop from the latest
         // pending, so a fast sweep's earlier panes are dropped before they fire.
         let hover_deadline = view.hover_pending.map(|(_, t0)| t0 + HOVER_DEBOUNCE);
+        // (x-1d91) A dispatched reorder verb the feed never confirmed: the `…`
+        // marker must clear with a notice rather than spin forever.
+        let backlog_deadline = view.backlog_pending_deadline();
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -4842,8 +5173,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -4881,6 +5212,12 @@ async fn attach_and_run(
                     }
                 }
                 Ok(ServerMsg::Notice { text }) => {
+                    // (x-1d91) A dispatched reorder verb reports its outcome as
+                    // exactly this notice, so a notice arriving mid-verb settles
+                    // the `…` marker. Without this a FAILED verb left the card
+                    // spinning and every further verb blocked until the timeout,
+                    // which then overwrote the real reason with a generic one.
+                    view.settle_backlog_pending_on_notice();
                     view.set_notice(text);
                     let _ = raw_out(b"\x07");
                     if let Err(e) = compositor.draw(&view.compose()) {
@@ -5126,6 +5463,17 @@ async fn attach_and_run(
                 }
             }, if hint_deadline.is_some() => {
                 view.hint = true;
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
+                match backlog_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if backlog_deadline.is_some() => {
+                view.expire_backlog_pending();
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -5973,9 +6321,39 @@ async fn keys_modal_mouse(
 async fn execute_row_menu_action(
     view: &mut View,
     action: MenuAction,
-    target: AgentIdent,
+    target: MenuTarget,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
+    let target = match (target, action) {
+        // (x-1d91) A Backlog reorder verb: refuse a card that left the feed
+        // between menu-open and Enter, arm the pending marker (which is also the
+        // double-press guard), then send. The server re-validates and owns the
+        // shellout; the order changes only when the feed republishes.
+        (MenuTarget::Card(node), MenuAction::Backlog(verb)) => {
+            if !view.layout.backlog.iter().any(|c| c.id == node) {
+                view.set_notice(format!("{node} is no longer in the backlog"));
+                return Ok(());
+            }
+            if !view.arm_backlog_pending(&node, verb) {
+                view.set_notice("a backlog verb is already in flight".into());
+                return Ok(());
+            }
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::BacklogVerb { node, verb }),
+            )
+            .await
+            .map_err(|e| format!("backlog verb send failed: {e}"))?;
+            return Ok(());
+        }
+        // A menu is built for exactly one target kind, so a crossed pair can only
+        // come from a bug; refuse rather than guess at a target.
+        (MenuTarget::Card(_), _) | (_, MenuAction::Backlog(_)) => {
+            view.set_notice("action does not apply to this row".into());
+            return Ok(());
+        }
+        (MenuTarget::Agent(a), _) => a,
+    };
     // Fail closed unless the identity resolves to EXACTLY one live row: two rows
     // sharing a name must never let a menu act on the wrong one (codex P1).
     let mut hits = view.layout.agents.iter().filter(|a| target.matches(a));
@@ -6035,6 +6413,10 @@ async fn execute_row_menu_action(
                 None => view.set_notice("agent is no longer here".into()),
             }
         }
+        // Unreachable: the crossed-pair guard above returns before an agent
+        // target ever reaches a Backlog verb. Kept as a visible refusal rather
+        // than a silent no-op, so a future miswiring says something.
+        MenuAction::Backlog(_) => view.set_notice("action does not apply to an agent".into()),
         MenuAction::Stop | MenuAction::Remove => {
             // A confirm owns the bottom row; a too-short terminal refuses rather
             // than arm an invisible prompt (matching the selector's stop/reap).
@@ -6222,6 +6604,21 @@ async fn execute_aux_action(
             view.hover_focus = !view.hover_focus;
             view.reopen_settings_keeping_sel();
         }
+        AuxAction::BacklogGoto(node) => {
+            // (x-1d91) The overlay is for scanning; acting on a card hands you
+            // back to its sideline row, where the full reorder menu lives. A card
+            // that left the feed meanwhile says so rather than moving the cursor
+            // somewhere arbitrary.
+            view.aux = None;
+            match view
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Card(c) if c.id == node))
+            {
+                Some(i) => view.selector = Some(i),
+                None => view.set_notice(format!("{node} is no longer in the backlog")),
+            }
+        }
         AuxAction::ToggleStatus => {
             view.status_on = !view.status_on;
             // The status row changed the content area; report the new size so the
@@ -6244,7 +6641,7 @@ async fn aux_execute_selected(
     let picked = view
         .aux
         .as_ref()
-        .and_then(|m| m.actions.get(m.popup.sel).copied());
+        .and_then(|m| m.actions.get(m.popup.sel).cloned());
     match picked {
         Some(a) => execute_aux_action(view, a, sock_w).await,
         None => {
@@ -6871,6 +7268,17 @@ async fn selector_keys(
                     view.open_recruit();
                 }
             }
+            b'b' => {
+                // (x-1d91) The mini-kanban: the Backlog's lanes with their true
+                // counts. A section-level view, not a row action, so it opens
+                // from anywhere in the sideline - but only when there is a
+                // backlog to show, rather than an empty board.
+                if view.layout.backlog_lanes.is_empty() {
+                    view.set_notice("the backlog is empty".into());
+                } else {
+                    view.open_kanban(Anchor::Center);
+                }
+            }
             b'p' => {
                 let picked = match view.display_rows().get(cur) {
                     Some(DisplayRow::Agent(a))
@@ -7045,10 +7453,14 @@ async fn selector_keys(
                 }
             }
             b'm' => {
-                // x-8ccf US2: `m` on an AGENT row opens its context menu
-                // (mouse-off parity), anchored at the row and sitting over the
-                // selector like peek; Esc drops back into the selector.
-                if matches!(view.display_rows().get(cur), Some(DisplayRow::Agent(_))) {
+                // x-8ccf US2: `m` on an agent row - or (x-1d91) a Backlog card -
+                // opens its context menu (mouse-off parity), anchored at the row
+                // and sitting over the selector like peek; Esc drops back into
+                // the selector.
+                if matches!(
+                    view.display_rows().get(cur),
+                    Some(DisplayRow::Agent(_) | DisplayRow::Card(_))
+                ) {
                     let arow =
                         (TAB_BAR_ROWS as usize + cur.saturating_sub(view.sideline_offset)) as u16;
                     view.open_row_menu(cur, Anchor::At { row: arow, col: 1 });
@@ -8641,6 +9053,8 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
+                backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -8753,6 +9167,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let frame = view.compose();
         // The sideline still marks the active squad, so scope the check to the
@@ -8817,6 +9233,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         view
     }
@@ -9003,6 +9421,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         view
     }
@@ -9152,6 +9572,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert_eq!(view.hover_row, None);
     }
@@ -9185,7 +9607,12 @@ mod tests {
                 pane_id: None,
                 attach_id: None,
                 where_hint: None,
+                project: None,
+                lane: None,
+                head: false,
             }],
+            backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
+            backlog_stale: false,
         });
         // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
         // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
@@ -9216,6 +9643,9 @@ mod tests {
             pane_id: None,
             attach_id: None,
             where_hint: None,
+            project: None,
+            lane: None,
+            head: false,
         };
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)],
@@ -9237,6 +9667,8 @@ mod tests {
                 card("x-blk", CardState::Blocked),
                 card("x-fly", CardState::InFlight),
             ],
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
         // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
@@ -9267,6 +9699,9 @@ mod tests {
                 pane_id: pane,
                 attach_id: attach.map(str::to_owned),
                 where_hint: hint.map(str::to_owned),
+                project: None,
+                lane: None,
+                head: false,
             };
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)],
@@ -9292,6 +9727,8 @@ mod tests {
                 card("x-ccc", None, None, Some("in flight - worked by t:abc")),
                 card("x-ddd", None, None, None),
             ],
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
         // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
@@ -9429,6 +9866,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         }
     }
 
@@ -9717,7 +10156,7 @@ mod tests {
         assert!(frame_text(&view.compose()).contains("▸*footnote"));
     }
 
-    // The work queue is binary in both directions: a card has no exited state,
+    // The Backlog section is binary in both directions: a card has no exited state,
     // so LiveOnly would be meaningless there.
     #[test]
     fn work_queue_section_is_binary_and_hides_cards_when_collapsed() {
@@ -9730,6 +10169,9 @@ mod tests {
             pane_id: None,
             attach_id: None,
             where_hint: None,
+            project: None,
+            lane: None,
+            head: false,
         }];
         let cards = |v: &View| {
             v.display_rows()
@@ -9865,6 +10307,8 @@ mod tests {
                 agents: Vec::new(),
                 focus_node: None,
                 backlog: Vec::new(),
+                backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         // The server's first real push.
@@ -9877,6 +10321,8 @@ mod tests {
             agents: Vec::new(),
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
 
         assert_eq!(
@@ -9937,6 +10383,8 @@ mod tests {
             agents: Vec::new(),
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert_eq!(
             view.squad_view(2),
@@ -9985,6 +10433,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         };
         view.set_layout(layout("epic  1/5"));
         assert_eq!(
@@ -10032,6 +10482,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         view.set_squad_view(1, SectionView::Expanded);
         view.set_squad_view(2, SectionView::Collapsed);
@@ -10158,6 +10610,8 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
+                backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         let text = frame_text(&view.compose());
@@ -10719,9 +11173,9 @@ mod tests {
     }
 
     #[test]
-    fn row_menu_opens_only_on_agent_rows() {
-        // Row 0 is a squad row, not an agent - the menu refuses (right-click
-        // there is swallowed as chrome).
+    fn row_menu_opens_only_on_menu_bearing_rows() {
+        // Row 0 is a squad row - neither an agent nor a Backlog card - so the
+        // menu refuses (right-click there is swallowed as chrome).
         let mut v = unified_rows_view();
         assert!(!v.open_row_menu(0, Anchor::Center));
         assert!(v.row_menu.is_none());
@@ -11066,6 +11520,8 @@ mod tests {
             ],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let frame = view.compose();
         let text = frame_text(&frame);
@@ -11156,6 +11612,8 @@ mod tests {
             ],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let lines: Vec<String> = frame_text(&view.compose())
             .lines()
@@ -11256,6 +11714,8 @@ mod tests {
             agents: vec![blocked_row("lb", 7, None)], // under active squad 1
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
         let mut cells = vec![Cell::default(); rows * cols];
@@ -11399,6 +11859,8 @@ mod tests {
             ],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let frame = view.compose();
         let cols = frame.cols as usize;
@@ -11545,6 +12007,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert!(view.frames.contains_key(&10));
         assert!(
@@ -11578,6 +12042,8 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
+                backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -11644,6 +12110,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         // Display rows are now [notes squad (auto-expanded, no agents),
         // + new workspace] (x-0090: no tab rows): the cursor clamps to the last
@@ -11662,7 +12130,7 @@ mod tests {
     /// headers since there are 2 squads):
     /// 0 sq1 · 1 hosted agent · 2 Blank · 3 sq2 · 4 "+ new workspace" ·
     /// 5 Blank · 6 "~ elsewhere" · 7 bg-attach · 8 bg-plain · 9 Blank ·
-    /// 10 "~ work queue" · 11 ready card · 12 blocked card · 13 in-flight card.
+    /// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
             squad,
@@ -11691,6 +12159,9 @@ mod tests {
             pane_id: None,
             attach_id: None,
             where_hint: None,
+            project: None,
+            lane: None,
+            head: false,
         };
         let mut v = view_with_agents(vec![
             agent(Some(1), "worker", Some(10), None),
@@ -11705,6 +12176,371 @@ mod tests {
         v
     }
 
+    // ---- the Backlog section (x-1d91) --------------------------------------
+
+    /// A view whose Backlog section holds `cards` out of `total` on the board
+    /// (all in one lane unless the cards say otherwise).
+    fn backlog_view(cards: Vec<BacklogCard>, total: usize) -> View {
+        let mut v = two_pane_view();
+        v.set_layout(backlog_layout(cards, total));
+        v
+    }
+
+    fn backlog_layout(cards: Vec<BacklogCard>, total: usize) -> LayoutView {
+        let mut layout = two_squad_layout(1);
+        let lane = cards
+            .first()
+            .map(|c| card_lane(c).to_string())
+            .unwrap_or_else(|| crate::backlog_view::UNLANED.into());
+        layout.backlog = cards;
+        layout.backlog_lanes = vec![(lane, total)];
+        layout
+    }
+
+    fn bcard(id: &str, state: CardState) -> BacklogCard {
+        BacklogCard {
+            id: id.into(),
+            slug: format!("{id}-slug"),
+            priority: "p2".into(),
+            state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+            project: None,
+            lane: None,
+            head: false,
+        }
+    }
+
+    fn sublines(v: &View) -> Vec<String> {
+        v.display_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                DisplayRow::Sub(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn section_header_reads_backlog() {
+        // AC1-HP: the section is titled "Backlog", not "work queue".
+        let v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        assert!(
+            v.display_rows().iter().any(
+                |r| matches!(r, DisplayRow::Header { label, .. } if label.contains("backlog"))
+            ),
+            "the section header names the Backlog"
+        );
+    }
+
+    #[test]
+    fn card_attribution_subline_renders_present_halves_only() {
+        // AC1-HP: `project · lane` on line 2 - but an unscoped, unlaned card
+        // stays ONE row rather than emitting a blank subline, and either half
+        // alone renders without a dangling separator.
+        let with = |p: Option<&str>, l: Option<&str>| {
+            let mut c = bcard("x-a", CardState::Ready);
+            c.project = p.map(Into::into);
+            c.lane = l.map(Into::into);
+            c
+        };
+        assert_eq!(
+            card_attribution(&with(Some("fno"), Some("ready"))).as_deref(),
+            Some("fno · ready")
+        );
+        assert_eq!(
+            card_attribution(&with(Some("fno"), None)).as_deref(),
+            Some("fno")
+        );
+        assert_eq!(
+            card_attribution(&with(None, Some("ready"))).as_deref(),
+            Some("ready")
+        );
+        assert_eq!(card_attribution(&with(None, None)), None);
+        // And the subline actually reaches display_rows.
+        let v = backlog_view(vec![with(Some("fno"), Some("ready"))], 1);
+        assert!(sublines(&v).contains(&"fno · ready".to_string()));
+    }
+
+    #[test]
+    fn overflow_line_states_the_exact_remainder() {
+        // AC5-EDGE: the count is total-minus-shown exactly, and no line appears
+        // when the whole board fits.
+        let cards = vec![
+            bcard("x-a", CardState::Ready),
+            bcard("x-b", CardState::Blocked),
+        ];
+        let v = backlog_view(cards.clone(), 57);
+        assert!(
+            sublines(&v).contains(&"+55 more".to_string()),
+            "57 on the board, 2 shown -> +55"
+        );
+        let exact = backlog_view(cards, 2);
+        assert!(
+            !sublines(&exact).iter().any(|s| s.ends_with("more")),
+            "nothing cut -> no remainder line"
+        );
+    }
+
+    #[tokio::test]
+    async fn card_menu_float_sends_verb_and_arms_pending() {
+        // AC2-HP + AC3-UI: the menu's float entry sends BacklogVerb::RankTop for
+        // the pinned node and the card immediately wears the pending marker.
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        let i = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Card(_)))
+            .expect("a card row");
+        assert!(v.open_row_menu(i, Anchor::Center), "cards open the menu");
+        let mut wire = Vec::new();
+        row_menu_execute_selected(&mut v, &mut wire).await.unwrap();
+        let sent = String::from_utf8_lossy(&wire);
+        assert!(sent.contains("BacklogVerb") && sent.contains("RankTop") && sent.contains("x-a"));
+        assert!(v.card_pending("x-a"), "the card shows it dispatched");
+        assert!(v.row_menu.is_none(), "the menu closes after execute");
+    }
+
+    #[tokio::test]
+    async fn card_menu_refuses_a_card_that_left_the_feed() {
+        // Concurrency: a card claimed/dispatched between menu-open and Enter is a
+        // notice, and NOTHING goes on the wire (no shellout for a gone node).
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        let i = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Card(_)))
+            .expect("a card row");
+        v.open_row_menu(i, Anchor::Center);
+        v.layout.backlog.clear(); // the card races out
+        let mut wire = Vec::new();
+        row_menu_execute_selected(&mut v, &mut wire).await.unwrap();
+        assert!(wire.is_empty(), "a stale card sends nothing");
+        assert!(v.notice.is_some(), "and says so");
+        assert!(!v.card_pending("x-a"), "no marker for a verb never sent");
+    }
+
+    #[test]
+    fn second_dispatch_is_suppressed_until_the_first_resolves() {
+        // Concurrency: a double-press must not fire two shellouts (nor churn rank
+        // with a no-op second `--top`).
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        assert!(v.arm_backlog_pending("x-a", BacklogVerb::RankTop));
+        assert!(
+            !v.arm_backlog_pending("x-a", BacklogVerb::RankTop),
+            "one verb in flight at a time"
+        );
+    }
+
+    #[test]
+    fn pending_clears_only_when_the_target_card_itself_moves() {
+        // AC3-UI + Concurrency: layouts push on every scrape tick, and claims
+        // churn OTHER cards constantly. Only the target card's own movement is
+        // confirmation - anything looser is a false confirm, which both lies to
+        // the operator and releases the single-flight guard mid-verb.
+        let cards = vec![
+            bcard("x-a", CardState::Ready),
+            bcard("x-b", CardState::Ready),
+        ];
+        let mut v = backlog_view(cards.clone(), 2);
+        v.arm_backlog_pending("x-a", BacklogVerb::RankTop);
+        let mut same = two_squad_layout(1);
+        same.backlog = cards.clone();
+        v.set_layout(same);
+        assert!(v.card_pending("x-a"), "an unchanged feed confirms nothing");
+        // Someone else's card gets claimed: the SET changed, this verb did not.
+        let mut other_churned = two_squad_layout(1);
+        let mut churn = cards.clone();
+        churn[1].state = CardState::InFlight;
+        other_churned.backlog = churn;
+        v.set_layout(other_churned);
+        assert!(
+            v.card_pending("x-a"),
+            "another card's churn is not this verb's confirmation"
+        );
+        let mut moved = two_squad_layout(1);
+        moved.backlog = vec![cards[1].clone(), cards[0].clone()];
+        v.set_layout(moved);
+        assert!(
+            !v.card_pending("x-a"),
+            "the reorder landed -> marker clears"
+        );
+    }
+
+    #[test]
+    fn a_defer_confirms_by_the_card_leaving_the_feed() {
+        // A successful defer takes the node off the board, so absence is what
+        // confirmation looks like for that verb.
+        let cards = vec![
+            bcard("x-a", CardState::Ready),
+            bcard("x-b", CardState::Ready),
+        ];
+        let mut v = backlog_view(cards.clone(), 2);
+        v.arm_backlog_pending("x-a", BacklogVerb::Defer);
+        let mut gone = two_squad_layout(1);
+        gone.backlog = vec![cards[1].clone()];
+        v.set_layout(gone);
+        assert!(
+            !v.card_pending("x-a"),
+            "gone from the board is confirmation"
+        );
+    }
+
+    #[test]
+    fn a_verb_verdict_settles_the_marker_instead_of_spinning() {
+        // AC3-UI: a FAILED verb reports via a notice. Without settling here the
+        // card kept its `…`, every further verb stayed blocked behind the
+        // single-flight guard, and the timeout later replaced the real reason
+        // with a generic one.
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        v.arm_backlog_pending("x-a", BacklogVerb::RankTop);
+        v.settle_backlog_pending_on_notice();
+        assert!(!v.card_pending("x-a"), "the verdict ends the wait");
+        assert!(
+            v.arm_backlog_pending("x-a", BacklogVerb::RankTop),
+            "and the next verb is not blocked behind a stale marker"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_verb_expires_loudly() {
+        // AC3-UI: a verb the feed never confirms clears with a notice - the row
+        // must never keep a `…` nothing will resolve, and silence would read as
+        // success.
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        v.arm_backlog_pending("x-a", BacklogVerb::Defer);
+        assert!(
+            v.backlog_pending_deadline().is_some(),
+            "the wait is bounded"
+        );
+        v.expire_backlog_pending();
+        assert!(!v.card_pending("x-a"));
+        assert!(v.notice.is_some(), "expiry is never silent");
+    }
+
+    #[test]
+    fn float_hint_only_on_ready_cards() {
+        // Domain pitfall: floating a READY card to the top makes it the
+        // dispatcher's next pick, so that entry says so; a blocked card carries
+        // no such consequence and no such hint.
+        let hint_of = |state| {
+            let m = build_card_menu(&bcard("x-a", state), Anchor::Center);
+            match &m.popup.rows[2] {
+                PopupRow::Entry { hint, .. } => hint.clone(),
+                other => panic!("expected the float entry, got {other:?}"),
+            }
+        };
+        assert_eq!(hint_of(CardState::Ready), "may dispatch");
+        assert_eq!(hint_of(CardState::Blocked), "");
+    }
+
+    #[test]
+    fn stale_feed_keeps_its_cards_and_says_so() {
+        // AC7-FR: a failing graph read must never blank the section - it keeps
+        // the last-known cards under a header that admits they are memory.
+        let mut layout = backlog_layout(vec![bcard("x-a", CardState::Ready)], 1);
+        layout.backlog_stale = true;
+        let mut v = two_pane_view();
+        v.set_layout(layout);
+        let rows = v.display_rows();
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, DisplayRow::Header { label, .. } if label.contains("stale"))),
+            "the header admits the section is stale"
+        );
+        assert!(
+            rows.iter().any(|r| matches!(r, DisplayRow::Card(_))),
+            "and the cards are still there"
+        );
+    }
+
+    #[test]
+    fn kanban_lanes_carry_true_counts_and_flag_what_was_cut() {
+        // AC5-EDGE: the header count is the lane's REAL size, so a lane whose
+        // cards were cut by the feed cap must say so rather than let the header
+        // silently disagree with the rows beneath it.
+        let laned = |id: &str, lane: &str| {
+            let mut c = bcard(id, CardState::Ready);
+            c.lane = Some(lane.into());
+            c
+        };
+        let cards = vec![laned("x-a", "ready"), laned("x-b", "triage")];
+        let counts = vec![("ready".to_string(), 9), ("triage".to_string(), 1)];
+        let k = build_kanban(&cards, &counts, Anchor::Center);
+        let headers: Vec<&str> = k
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Header(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(headers.contains(&"ready  9"), "lane states its true size");
+        assert!(headers.contains(&"triage  1"));
+        assert!(
+            headers.iter().any(|h| h.contains("+8 more")),
+            "a lane holding more than the feed carries says so"
+        );
+        // One action per rendered card, none for the headers.
+        assert_eq!(k.actions.len(), 2);
+    }
+
+    #[test]
+    fn kanban_gives_unlaned_cards_a_home() {
+        // A card with no `_kanban_column` must still appear on the board rather
+        // than vanishing from it.
+        let cards = vec![bcard("x-a", CardState::Ready)];
+        let counts = vec![(crate::backlog_view::UNLANED.to_string(), 1)];
+        let k = build_kanban(&cards, &counts, Anchor::Center);
+        assert_eq!(
+            k.actions,
+            vec![AuxAction::BacklogGoto("x-a".into())],
+            "the unlaned card is reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn kanban_goto_moves_the_selector_to_that_card() {
+        // AC6-FR: acting on a card in the overlay hands you back to its sideline
+        // row - the same feed, so the two views can never show different orders.
+        let mut v = backlog_view(
+            vec![
+                bcard("x-a", CardState::Ready),
+                bcard("x-b", CardState::Ready),
+            ],
+            2,
+        );
+        v.open_kanban(Anchor::Center);
+        assert!(v.aux.is_some(), "the overlay opens");
+        let mut wire = Vec::new();
+        execute_aux_action(&mut v, AuxAction::BacklogGoto("x-b".into()), &mut wire)
+            .await
+            .unwrap();
+        assert!(v.aux.is_none(), "and closes on act");
+        let landed = v.selector.expect("the selector moved");
+        assert!(
+            matches!(v.display_rows().get(landed), Some(DisplayRow::Card(c)) if c.id == "x-b"),
+            "onto the card that was picked"
+        );
+    }
+
+    #[tokio::test]
+    async fn kanban_goto_on_a_vanished_card_notices_instead_of_jumping() {
+        // Concurrency: a card closed between opening the overlay and acting must
+        // not move the cursor somewhere arbitrary.
+        let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
+        v.open_kanban(Anchor::Center);
+        v.layout.backlog.clear();
+        let mut wire = Vec::new();
+        execute_aux_action(&mut v, AuxAction::BacklogGoto("x-a".into()), &mut wire)
+            .await
+            .unwrap();
+        assert!(v.notice.is_some(), "says the card is gone");
+        assert!(wire.is_empty(), "and sends nothing");
+    }
+
     #[test]
     fn selector_nav_skips_headers_and_clamps() {
         // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
@@ -11717,18 +12553,10 @@ mod tests {
             8,
             "j from the footer skips the spacer + '~ elsewhere'"
         );
-        assert_eq!(
-            v.selector_down(9),
-            12,
-            "j skips the spacer + '~ work queue'"
-        );
+        assert_eq!(v.selector_down(9), 12, "j skips the spacer + '~ backlog'");
         assert_eq!(v.selector_down(14), 14, "clamp at the last row");
         assert_eq!(v.selector_up(8), 5, "k skips '~ elsewhere' + spacer upward");
-        assert_eq!(
-            v.selector_up(12),
-            9,
-            "k skips '~ work queue' + spacer upward"
-        );
+        assert_eq!(v.selector_up(12), 9, "k skips '~ backlog' + spacer upward");
         assert_eq!(v.selector_up(0), 0, "clamp at the top");
     }
 
@@ -11749,7 +12577,7 @@ mod tests {
     // never doubled; with a single squad there are no spacers at all.
     #[test]
     fn blank_spacers_separate_groups_only_when_multi_squad() {
-        let v = unified_rows_view(); // 2 squads, orphan section, work queue
+        let v = unified_rows_view(); // 2 squads, orphan section, backlog
         let rows = v.display_rows();
         let blanks = rows
             .iter()
@@ -11788,6 +12616,8 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
+                backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         assert!(
@@ -12689,6 +13519,8 @@ mod tests {
                 agents: vec![],
                 focus_node: None,
                 backlog: Vec::new(),
+                backlog_lanes: Vec::new(),
+                backlog_stale: false,
             },
         );
         assert_eq!(v.display_rows().len(), 1, "footer only");
@@ -13657,6 +14489,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         let n = v.nav_rows().len();
         assert!(n < last + 1, "catalog shrank");
@@ -14114,6 +14948,8 @@ mod tests {
             agents,
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         };
         // "b" drops -> its identity is gone, so the cursor clamps to the new last.
         let l1 = with(&v, vec![blocked_row("a", 1, None)]);
@@ -14609,6 +15445,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         assert_eq!(v.selector, Some(2), "cursor follows squad 1 to its new row");
     }
@@ -14690,6 +15528,8 @@ mod tests {
             agents: vec![],
             focus_node: None,
             backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
         });
         v.selector = Some(0);
         selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();

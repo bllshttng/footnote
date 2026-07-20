@@ -2,7 +2,7 @@
 //!
 //! Sibling of [`crate::agents_view`]: an off-loop interval task (in server.rs)
 //! parses `~/.fno/graph.json` and hands the core loop a board-ordered card set
-//! the sideline renders under a "work queue" header. Same discipline as the
+//! the sideline renders under the "Backlog" header. Same discipline as the
 //! registry reader - the core loop and the render path never touch the file;
 //! the mtime+len gate skips the 4M read until the graph actually changes (a
 //! claim/close mutation bumps mtime, so a card flips to in-flight for free).
@@ -71,11 +71,133 @@ fn priority_rank(p: &str) -> u8 {
 /// (`docs/architecture/backlog-board-ordering.md`): project lane (unscoped
 /// last), rank band (ranked before unranked, ascending), priority, created_at.
 pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
+    derive_queue(raw, None).map(|q| q.cards)
+}
+
+/// The card set plus the UNCAPPED per-lane counts it was cut from (x-1d91).
+///
+/// Both consumers of "how much work is really there" read these: the section's
+/// `+N more` (total minus what it shows) and the mini-kanban's per-lane headers.
+/// One field rather than a separate scalar total, so the two can never disagree.
+/// Sorted by lane name for a stable render; `cards.len() <= total()` always.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Queue {
+    pub cards: Vec<BacklogCard>,
+    pub lanes: Vec<(String, usize)>,
+    /// The graph read has been failing long enough that these cards are memory,
+    /// not fact. The section says so rather than presenting stale work as
+    /// current; it clears the moment a read succeeds again.
+    pub stale: bool,
+}
+
+/// The lane bucket for a card whose column the wire did not carry. Unreachable
+/// from this reader (an excluded node is dropped, never bucketed) - it exists so
+/// a card from an older/other producer still lands somewhere visible.
+pub const UNLANED: &str = "unlaned";
+
+/// Canonical board column order, mirroring `KANBAN_COLUMNS` in
+/// `graph/render.py`: Now leads (genuine today-work), Triage holds the
+/// awaiting-ack queue, Done is terminal.
+const KANBAN_COLUMNS: [&str; 5] = ["Now", "Next", "Later", "Triage", "Done"];
+
+/// A lane's position in [`KANBAN_COLUMNS`]; anything unrecognized sorts last.
+fn lane_rank(lane: &str) -> usize {
+    KANBAN_COLUMNS
+        .iter()
+        .position(|c| *c == lane)
+        .unwrap_or(KANBAN_COLUMNS.len())
+}
+
+/// The board column for a queue node, mirroring `_kanban_column` in
+/// `cli/src/fno/graph/render.py`. `None` excludes the node from the board.
+///
+/// This is DERIVED, not read: no graph node carries a column field. The Python
+/// board computes it from intent on every render, so the mux computes the same
+/// function rather than inventing a second answer - the two boards must name the
+/// same lane for the same node or the sideline is quietly lying about where work
+/// sits. Kept deliberately close to the Python, ordering included, so a change
+/// there is easy to mirror here.
+///
+/// `claimed` folds the graph `_status` and the live-lockfile claim together (a
+/// node another session drives may never write a graph status - x-4845);
+/// `underway` is [`in_progress_epics`] membership.
+fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option<&'static str> {
+    if e.get("type").and_then(|v| v.as_str()) == Some("roadmap") {
+        return None;
+    }
+    if has_stamp(e, "completed_at") {
+        return Some("Done");
+    }
+    let status = e.get("_status").and_then(|v| v.as_str()).unwrap_or("ready");
+    if matches!(status, "deferred" | "superseded") {
+        return None; // off-board until reactivated
+    }
+    if claimed || underway {
+        return Some("Now");
+    }
+    // Queued is orthogonal to `_status`: a node awaiting human ack is not active
+    // work, so it must not inflate Now - but a claimed node stays in Now.
+    if has_stamp(e, "queued_at") {
+        return Some("Triage");
+    }
+    match e.get("priority").and_then(|v| v.as_str()).unwrap_or("p2") {
+        "p0" | "p1" => Some("Now"),
+        "p3" => Some("Later"),
+        _ => Some("Next"),
+    }
+}
+
+/// Whether a timestamp field carries an actual stamp. The Python board tests
+/// these with bare truthiness (`if entry.get("completed_at")`), which is false
+/// for an empty string as well as for null and absent - so a null check alone
+/// would classify `""` as Done/Triage where the board would not, and the two
+/// boards would name different lanes for the same node.
+fn has_stamp(e: &serde_json::Value, field: &str) -> bool {
+    e.get(field)
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// Parent ids whose work is underway: an epic with a done or claimed child.
+/// Mirrors `in_progress_epic_ids` in `graph/render.py` - sessions claim an epic's
+/// leaf CHILDREN, never the container, so an in-progress epic carries no claim of
+/// its own and would otherwise sit in its priority column.
+fn in_progress_epics(entries: &[serde_json::Value]) -> HashSet<&str> {
+    let mut underway = HashSet::new();
+    for e in entries {
+        let Some(parent) = e.get("parent").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let done = has_stamp(e, "completed_at")
+            || e.get("_status").and_then(|v| v.as_str()) == Some("claimed");
+        if done {
+            underway.insert(parent);
+        }
+    }
+    underway
+}
+
+impl Queue {
+    /// Every queue card the graph held, cap included.
+    pub fn total(&self) -> usize {
+        self.lanes.iter().map(|(_, n)| n).sum()
+    }
+}
+
+/// [`derive_cards`] plus the uncapped lane counts. The single derivation;
+/// `derive_cards` is the cards-only view of it.
+///
+/// `live` is the claim sweep's node-id -> holder map (x-54fa). It is folded in
+/// HERE, not applied to the finished card list, so a claim reaches the lane
+/// counts too - those are computed over every queue node, and a card past the
+/// render cap would otherwise be counted in the wrong lane.
+pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option<Queue> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let entries = doc
         .get("entries")
         .or_else(|| doc.get("nodes"))?
         .as_array()?;
+    let underway = in_progress_epics(entries);
 
     // (project, is_unscoped, rank, prio, created_at, card) - the tuple carries
     // the sort keys so the comparator never re-reads the JSON.
@@ -102,6 +224,18 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
         let unscoped = project.is_none();
         let rank = e.get("rank").and_then(|v| v.as_f64());
         let created = e.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        // The board's column authority (x-1d91). DERIVED, never read: no node
+        // carries a column field - `_kanban_column` is a function of intent in
+        // `graph/render.py`, and this mirrors it.
+        let claimed = status == "claimed" || live.is_some_and(|l| l.contains_key(id));
+        // `None` EXCLUDES the node from the board (a roadmap row), exactly as it
+        // does in the Python. Dropping the card here rather than bucketing it as
+        // unlaned keeps the two boards agreeing on what is even on the board -
+        // an excluded node rendered as an actionable card would be a row the
+        // canonical board says does not exist.
+        let Some(lane) = kanban_column(e, claimed, underway.contains(id)) else {
+            continue;
+        };
         rows.push((
             project.unwrap_or("").to_string(),
             unscoped,
@@ -112,12 +246,19 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
                 id: id.to_string(),
                 slug: slug.to_string(),
                 priority: priority.to_string(),
-                state,
+                // A live lockfile claim marks a node in flight even when its
+                // graph `_status` never says so (x-54fa / x-4845): the claim is
+                // the fact, the status is a report.
+                state: if claimed { CardState::InFlight } else { state },
                 // Routes are a publish-time server join (panes/registry),
                 // not graph state - the reader always derives them empty.
                 pane_id: None,
                 attach_id: None,
                 where_hint: None,
+                project: project.map(str::to_string),
+                lane: Some(lane.to_string()),
+                // Set below, once the board order is known.
+                head: false,
             },
         ));
     }
@@ -136,7 +277,43 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
             .then_with(|| a.4.cmp(&b.4))
     });
 
-    Some(rows.into_iter().take(CARD_CAP).map(|r| r.5).collect())
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for (.., card) in &rows {
+        *counts
+            .entry(card.lane.as_deref().unwrap_or(UNLANED))
+            .or_default() += 1;
+    }
+    let mut lanes: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(l, n)| (l.to_string(), n))
+        .collect();
+    // Canonical board order, not alphabetical: the overlay reads left-to-right
+    // as a lifecycle, and sorting by name would render it backwards
+    // (Later, Next, Now).
+    lanes.sort_by_key(|(l, _)| (lane_rank(l), l.clone()));
+    let mut cards: Vec<BacklogCard> = rows.into_iter().take(CARD_CAP).map(|r| r.5).collect();
+    mark_head(&mut cards);
+    // A fresh derivation is by definition current; only `ReaderState` (which
+    // knows the read history) ever sets this.
+    Some(Queue {
+        cards,
+        lanes,
+        stale: false,
+    })
+}
+
+/// Mark the head of the queue: the first Ready card in BOARD order. Runs after
+/// the live-claim fold, so a claimed head hands the marker to the next genuinely
+/// -ready card rather than pointing at work already in flight.
+///
+/// This is the board's head, NOT the dispatcher's next pick - see
+/// [`BacklogCard::head`] for why the two orderings differ.
+fn mark_head(cards: &mut [BacklogCard]) {
+    let mut seen = false;
+    for c in cards.iter_mut() {
+        c.head = !seen && c.state == CardState::Ready;
+        seen |= c.head;
+    }
 }
 
 /// (x-9c5f) node id -> `pr_number` from the same graph read `derive_cards`
@@ -196,6 +373,11 @@ pub struct MissionMap {
 /// guard alone). The mission tree is only mission -> epic -> leaf; the slack
 /// plus the `seen` set terminates a malformed epic-parent cycle.
 const MISSION_DEPTH_CAP: usize = 8;
+
+/// Consecutive failed reads before the section is marked stale. The reader ticks
+/// about once a second, so this is a few seconds of a genuinely unreadable graph -
+/// past any single write race, well short of the operator acting on old work.
+const STALE_AFTER_FAILED_READS: u32 = 3;
 
 struct MissionNode<'a> {
     parent: Option<&'a str>,
@@ -360,19 +542,6 @@ pub fn live_claims_from_sweep(stdout: &str) -> Option<HashMap<String, String>> {
     Some(live)
 }
 
-/// Overlay live lockfile claims onto graph-derived cards (x-54fa): a card
-/// whose id holds a live `node:`/`dispatch:` claim renders InFlight,
-/// overriding Ready AND Blocked (a claimed node with a stale `blocked_by` is
-/// in-flight — this module's documented stance). Pure; ids not in the card
-/// set are ignored (no phantom cards), ids join by node id only.
-pub fn overlay_claims(cards: &mut [BacklogCard], live: &HashMap<String, String>) {
-    for c in cards.iter_mut() {
-        if live.contains_key(&c.id) {
-            c.state = CardState::InFlight;
-        }
-    }
-}
-
 /// The reader's between-tick memory (mtime-gated document cache + last-sent
 /// cards), mirroring [`crate::agents_view::ReaderState`]. The interval task
 /// lives in server.rs (it owns the `CoreMsg` sender); this keeps the derivation
@@ -381,7 +550,7 @@ pub fn overlay_claims(cards: &mut [BacklogCard], live: &HashMap<String, String>)
 pub struct ReaderState {
     cached_raw: Option<String>,
     cached_stamp: Option<(std::time::SystemTime, u64)>,
-    last_sent: Option<Vec<BacklogCard>>,
+    last_sent: Option<Queue>,
     /// The live-claims map as of the last publish. Holders ride the publish
     /// (they feed the server's `where_hint` join), so a holder-only change -
     /// same card states, different/new holder - must republish too, not wait
@@ -399,6 +568,9 @@ pub struct ReaderState {
     /// The mission map as of the last publish, so a mission-only change is
     /// detected (a mission activating/completing with the same cards/prs).
     last_missions: Option<MissionMap>,
+    /// Consecutive ticks whose read failed while the file was still there. Feeds
+    /// [`Queue::stale`]; reset by any read that lands.
+    read_failures: u32,
 }
 
 impl ReaderState {
@@ -422,7 +594,12 @@ impl ReaderState {
         stamp: Option<(std::time::SystemTime, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
-    ) -> Option<(Vec<BacklogCard>, HashMap<String, u64>, MissionMap)> {
+    ) -> Option<(Queue, HashMap<String, u64>, MissionMap)> {
+        // Whether THIS tick pulled fresh bytes off disk. Only a fresh read that
+        // also parses clears the failure counter: re-deriving the cached document
+        // succeeds every tick by definition, so treating that as success would
+        // erase a torn-read run before it ever reached the stale threshold.
+        let mut fresh_read = false;
         if stamp != self.cached_stamp {
             match (read_if_changed(), stamp) {
                 // Only commit the new stamp once we have matching content, so a
@@ -432,6 +609,7 @@ impl ReaderState {
                 // improves on the older agents_view reader's advance-anyway).
                 (Some(raw), _) => {
                     self.cached_stamp = stamp;
+                    fresh_read = true;
                     // (x-9c5f) The pr map derives from the SAME read; recompute it
                     // only here, not per tick, so we never parse the 4M graph
                     // twice a second.
@@ -445,18 +623,43 @@ impl ReaderState {
                     self.missions = MissionMap::default();
                     self.cached_raw = None; // file vanished: empty the lane
                 }
-                (None, Some(_)) => {} // torn read: keep last-good AND retry next tick
+                // Torn read: keep last-good AND retry next tick. A single one is
+                // a normal race with a writer, so only a RUN of them earns the
+                // stale marker - a marker that flashes every time the graph is
+                // written would be noise, not signal.
+                (None, Some(_)) => self.read_failures = self.read_failures.saturating_add(1),
             }
         }
-        let mut cards = match &self.cached_raw {
-            Some(raw) => derive_cards(raw)
-                .or_else(|| self.last_sent.clone())
-                .unwrap_or_default(),
-            None => Vec::new(),
+        // Re-derived every tick (not only on a fresh read) so a claim
+        // appearing/releasing reaches the cards, their lanes, AND the lane counts
+        // even when the graph file itself never changed.
+        //
+        // A read that lands but will not PARSE counts as a failure too. It
+        // commits a stamp, so treating a committed stamp as success would reset
+        // the counter and leave a persistently corrupt graph showing old cards
+        // forever with no stale marker - the reader cannot derive current state
+        // either way, which is exactly what the marker is for.
+        let mut queue = match &self.cached_raw {
+            Some(raw) => match derive_queue(raw, live) {
+                Some(q) => {
+                    if fresh_read {
+                        self.read_failures = 0;
+                    }
+                    q
+                }
+                None => {
+                    self.read_failures = self.read_failures.saturating_add(1);
+                    self.last_sent.clone().unwrap_or_default()
+                }
+            },
+            None => {
+                // A vanished file is a KNOWN state (an empty lane), not a
+                // failure to read one.
+                self.read_failures = 0;
+                Queue::default()
+            }
         };
-        if let Some(live) = live {
-            overlay_claims(&mut cards, live);
-        }
+        queue.stale = self.read_failures >= STALE_AFTER_FAILED_READS;
         // A holder-only change (same cards, new/different claim holder) also
         // republishes: the holders map travels with the cards and feeds the
         // publish-time `where_hint` join. `live: None` (no sweep yet, or a
@@ -471,12 +674,12 @@ impl ReaderState {
         // unrelated card/claim flip (x-9c5f).
         let pr_changed = self.last_pr.as_ref() != Some(&self.pr);
         let missions_changed = self.last_missions.as_ref() != Some(&self.missions);
-        if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&cards)
+        if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&queue)
         {
-            self.last_sent = Some(cards.clone());
+            self.last_sent = Some(queue.clone());
             self.last_pr = Some(self.pr.clone());
             self.last_missions = Some(self.missions.clone());
-            Some((cards, self.pr.clone(), self.missions.clone()))
+            Some((queue, self.pr.clone(), self.missions.clone()))
         } else {
             None
         }
@@ -557,7 +760,14 @@ mod tests {
         let mut st = ReaderState::default();
         let good = graph(r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s1 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
-        assert_eq!(st.tick(s1, || Some(good.clone()), None).unwrap().0.len(), 1);
+        assert_eq!(
+            st.tick(s1, || Some(good.clone()), None)
+                .unwrap()
+                .0
+                .cards
+                .len(),
+            1
+        );
         // A changed stamp but a torn (None) read keeps the last-good card AND
         // does not commit the new stamp, so the read is retried next tick.
         let s2 = Some((std::time::SystemTime::UNIX_EPOCH, 999));
@@ -568,7 +778,276 @@ mod tests {
             r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"},
                {"id":"b","slug":"t","priority":"p2","_status":"blocked"}"#,
         );
-        assert_eq!(st.tick(s2, || Some(two.clone()), None).unwrap().0.len(), 2);
+        assert_eq!(
+            st.tick(s2, || Some(two.clone()), None)
+                .unwrap()
+                .0
+                .cards
+                .len(),
+            2
+        );
+    }
+
+    // ---- attribution, on-deck, and the uncapped total (x-1d91) -------------
+
+    #[test]
+    fn attribution_derives_the_column_it_never_reads() {
+        // No graph node carries a column field - the lane is `_kanban_column`'s
+        // intent mapping, computed here to match `graph/render.py`. Getting this
+        // wrong renders every attribution blank, so pin the mapping.
+        let raw = graph(
+            r#"{"id":"x-now","slug":"n","priority":"p1","_status":"ready","project":"fno"},
+               {"id":"x-next","slug":"x","priority":"p2","_status":"ready"},
+               {"id":"x-later","slug":"l","priority":"p3","_status":"ready"},
+               {"id":"x-tri","slug":"t","priority":"p2","_status":"ready","queued_at":"2026-07-19T00:00:00Z"},
+               {"id":"x-held","slug":"h","priority":"p2","_status":"claimed"}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let lane = |id: &str| {
+            cards
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .lane
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(lane("x-now"), "Now", "p0/p1 is today-ish");
+        assert_eq!(lane("x-next"), "Next");
+        assert_eq!(lane("x-later"), "Later");
+        assert_eq!(
+            lane("x-tri"),
+            "Triage",
+            "queued awaits ack, never inflates Now"
+        );
+        assert_eq!(lane("x-held"), "Now", "a claimed node is underway");
+        // The project half is the node's own, absent when unscoped.
+        let project = |id: &str| cards.iter().find(|c| c.id == id).unwrap().project.clone();
+        assert_eq!(project("x-now").as_deref(), Some("fno"));
+        assert_eq!(project("x-next"), None);
+    }
+
+    #[test]
+    fn a_live_claim_moves_the_node_to_now_and_takes_its_count_with_it() {
+        // x-4845: a node another session drives holds a live lockfile but may
+        // never write a graph status. Folding the claim into the DERIVATION (not
+        // onto the finished card list) is what keeps the lane counts honest - a
+        // card past the render cap would otherwise be counted in the wrong lane.
+        let raw = graph(
+            r#"{"id":"x-a","slug":"a","priority":"p3","_status":"ready"},
+               {"id":"x-b","slug":"b","priority":"p3","_status":"ready"}"#,
+        );
+        let cold = derive_queue(&raw, None).unwrap();
+        assert_eq!(cold.lanes, vec![("Later".to_string(), 2)]);
+        let hot = derive_queue(&raw, Some(&live(&[("x-a", "target-session:abc")]))).unwrap();
+        assert_eq!(
+            hot.lanes,
+            vec![("Now".to_string(), 1), ("Later".to_string(), 1)],
+            "the claimed node moves lanes, count and all"
+        );
+        assert_eq!(hot.cards[0].state, CardState::InFlight);
+    }
+
+    #[test]
+    fn an_empty_timestamp_is_no_timestamp() {
+        // The Python board tests these fields with bare truthiness, so `""` is
+        // absent there. A null-only check here would send an empty-stamped node
+        // to Done/Triage while the board left it in its priority column - the two
+        // boards must never name different lanes for the same node.
+        let raw = graph(
+            r#"{"id":"x-a","slug":"a","priority":"p2","_status":"ready","completed_at":""},
+               {"id":"x-b","slug":"b","priority":"p2","_status":"ready","queued_at":""},
+               {"id":"x-kid","slug":"k","priority":"p2","_status":"ready","parent":"x-e","completed_at":""},
+               {"id":"x-e","slug":"e","type":"epic","priority":"p2","_status":"ready"}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let lane = |id: &str| cards.iter().find(|c| c.id == id).unwrap().lane.clone();
+        assert_eq!(
+            lane("x-a").as_deref(),
+            Some("Next"),
+            "empty completed_at is not Done"
+        );
+        assert_eq!(
+            lane("x-b").as_deref(),
+            Some("Next"),
+            "empty queued_at is not Triage"
+        );
+        assert_eq!(
+            lane("x-e").as_deref(),
+            Some("Next"),
+            "an empty-stamped child does not make its epic underway"
+        );
+    }
+
+    #[test]
+    fn an_epic_with_a_claimed_child_is_underway() {
+        // Sessions claim an epic's leaf CHILDREN, never the container, so an
+        // in-progress epic carries no claim of its own and would otherwise sit in
+        // its priority column (mirrors in_progress_epic_ids).
+        let raw = graph(
+            r#"{"id":"x-epic","slug":"e","type":"epic","priority":"p3","_status":"ready"},
+               {"id":"x-kid","slug":"k","priority":"p2","_status":"claimed","parent":"x-epic"}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let epic = cards.iter().find(|c| c.id == "x-epic").unwrap();
+        assert_eq!(
+            epic.lane.as_deref(),
+            Some("Now"),
+            "a p3 epic with a claimed child is underway, not long-tail"
+        );
+    }
+
+    #[test]
+    fn head_is_the_first_ready_card_only() {
+        // AC1-HP: exactly one `next`, on the first READY card in board order -
+        // an in-flight card ahead of it never takes the marker.
+        let raw = graph(
+            r#"{"id":"x-fly","slug":"f","priority":"p0","_status":"claimed","project":"fno"},
+               {"id":"x-r1","slug":"r1","priority":"p1","_status":"ready","project":"fno"},
+               {"id":"x-r2","slug":"r2","priority":"p2","_status":"ready","project":"fno"}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let marked: Vec<&str> = cards
+            .iter()
+            .filter(|c| c.head)
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(marked, ["x-r1"], "one on-deck card, the first ready one");
+    }
+
+    #[test]
+    fn claiming_the_head_card_hands_the_marker_down() {
+        // The overlay can flip on-deck to InFlight; the section must then point
+        // at the next card that is genuinely up for grabs, not at work already
+        // running.
+        let mut st = ReaderState::default();
+        let raw = graph(
+            r#"{"id":"x-r1","slug":"r1","priority":"p1","_status":"ready","project":"fno"},
+               {"id":"x-r2","slug":"r2","priority":"p2","_status":"ready","project":"fno"}"#,
+        );
+        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
+        assert!(first.cards[0].head && !first.cards[1].head);
+        let claimed = live(&[("x-r1", "target-session:abc")]);
+        let after = st.tick(s, || None, Some(&claimed)).unwrap().0;
+        assert!(
+            !after.cards[0].head && after.cards[1].head,
+            "the marker moves to the next ready card"
+        );
+    }
+
+    #[test]
+    fn lanes_render_in_canonical_board_order() {
+        // The overlay reads left-to-right as a lifecycle, so the lane list must
+        // arrive in KANBAN_COLUMNS order. Sorting by name would render it
+        // backwards (Later, Next, Now) - the board's own order is the contract.
+        let raw = graph(
+            r#"{"id":"x-l","slug":"l","priority":"p3","_status":"ready"},
+               {"id":"x-t","slug":"t","priority":"p2","_status":"ready","queued_at":"2026-07-19T00:00:00Z"},
+               {"id":"x-n","slug":"n","priority":"p1","_status":"ready"},
+               {"id":"x-x","slug":"x","priority":"p2","_status":"ready"}"#,
+        );
+        let names: Vec<String> = derive_queue(&raw, None)
+            .unwrap()
+            .lanes
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        assert_eq!(names, ["Now", "Next", "Later", "Triage"]);
+    }
+
+    #[test]
+    fn an_excluded_node_is_not_a_card_at_all() {
+        // `kanban_column` returning None EXCLUDES a node from the board in the
+        // Python. Bucketing it as unlaned instead would render a row the
+        // canonical board says does not exist.
+        let raw = graph(
+            r#"{"id":"x-road","slug":"r","type":"roadmap","priority":"p1","_status":"ready"},
+               {"id":"x-real","slug":"n","priority":"p1","_status":"ready"}"#,
+        );
+        let q = derive_queue(&raw, None).unwrap();
+        let ids: Vec<&str> = q.cards.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["x-real"], "the roadmap row is off the board");
+        assert_eq!(q.total(), 1, "and is not counted in any lane");
+        assert!(
+            q.cards.iter().all(|c| c.lane.is_some()),
+            "every surviving card knows its lane"
+        );
+    }
+
+    #[test]
+    fn total_counts_the_whole_board_not_the_capped_list() {
+        // AC5-EDGE: the section's `+N more` needs the uncapped count, so `total`
+        // must survive the cap.
+        let nodes: Vec<String> = (0..CARD_CAP + 7)
+            .map(|i| format!(r#"{{"id":"x-{i}","slug":"s{i}","priority":"p2","_status":"ready"}}"#))
+            .collect();
+        let q = derive_queue(&graph(&nodes.join(",")), None).unwrap();
+        assert_eq!(q.cards.len(), CARD_CAP, "the wire frame stays bounded");
+        assert_eq!(q.total(), CARD_CAP + 7, "but the count is the whole board");
+    }
+
+    #[test]
+    fn a_run_of_failed_reads_marks_stale_and_recovery_clears_it() {
+        // AC7-FR: a failing read keeps the last-known cards (never a blank
+        // section) but stops presenting them as current - and a read that lands
+        // again clears the marker with no restart. One torn read is a normal
+        // write race and must NOT trip it.
+        let mut st = ReaderState::default();
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        assert!(!st.tick(s0, || Some(raw.clone()), None).unwrap().0.stale);
+
+        // Each failing tick presents a new stamp (the file keeps changing) but
+        // no content. The first is just a race.
+        let bump = |n: u64| Some((std::time::SystemTime::UNIX_EPOCH, 900 + n));
+        st.tick(bump(1), || None, None);
+        assert!(
+            !st.last_sent.as_ref().unwrap().stale,
+            "one torn read is a write race, not staleness"
+        );
+        for i in 2..=STALE_AFTER_FAILED_READS as u64 {
+            st.tick(bump(i), || None, None);
+        }
+        let stale = st.last_sent.clone().unwrap();
+        assert!(stale.stale, "a run of failed reads earns the marker");
+        assert_eq!(
+            stale.cards.len(),
+            1,
+            "and the cards are KEPT, never blanked"
+        );
+
+        let fresh = st.tick(bump(9), || Some(raw.clone()), None).unwrap().0;
+        assert!(!fresh.stale, "a landed read clears the marker in place");
+    }
+
+    #[test]
+    fn a_graph_that_reads_but_will_not_parse_also_goes_stale() {
+        // A corrupt graph lands bytes and commits a stamp, so "the read landed"
+        // is not the same question as "we can derive current state". Treating a
+        // committed stamp as success left a persistently corrupt graph showing
+        // old cards forever with no marker - the exact situation the marker is
+        // for.
+        let mut st = ReaderState::default();
+        let good = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
+        assert!(!st.tick(s0, || Some(good.clone()), None).unwrap().0.stale);
+
+        // Successive reads land, but the document is garbage each time.
+        for i in 1..=STALE_AFTER_FAILED_READS as u64 {
+            let stamp = Some((std::time::SystemTime::UNIX_EPOCH, 800 + i));
+            st.tick(stamp, || Some("{ not json".to_string()), None);
+        }
+        let held = st.last_sent.clone().unwrap();
+        assert!(
+            held.stale,
+            "unparseable is a failure, not a successful read"
+        );
+        assert_eq!(held.cards.len(), 1, "and the last-good cards are kept");
+
+        // A parseable read clears it in place.
+        let ok = Some((std::time::SystemTime::UNIX_EPOCH, 999));
+        assert!(!st.tick(ok, || Some(good.clone()), None).unwrap().0.stale);
     }
 
     #[test]
@@ -623,15 +1102,16 @@ mod tests {
                {"id":"x-blk","slug":"b","priority":"p2","_status":"blocked","blocked_by":["x-rdy"]},
                {"id":"x-free","slug":"f","priority":"p2","_status":"ready"}"#,
         );
-        let mut cards = derive_cards(&raw).unwrap();
-        overlay_claims(
-            &mut cards,
-            &live(&[
+        let cards = derive_queue(
+            &raw,
+            Some(&live(&[
                 ("x-rdy", "target-session:abc"),
                 ("x-blk", "dispatch-node:1"),
                 ("x-ghost", "nobody"),
-            ]),
-        );
+            ])),
+        )
+        .unwrap()
+        .cards;
         let by_id = |id: &str| cards.iter().find(|c| c.id == id).unwrap().state;
         assert_eq!(by_id("x-rdy"), CardState::InFlight);
         assert_eq!(by_id("x-blk"), CardState::InFlight);
@@ -647,17 +1127,17 @@ mod tests {
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
-        assert_eq!(first[0].state, CardState::Ready);
+        assert_eq!(first.cards[0].state, CardState::Ready);
         // Claim appears: same stamp, no re-read, card republishes InFlight.
         let claimed = live(&[("x-a", "target-session:abc")]);
         let flipped = st.tick(s, || None, Some(&claimed)).unwrap().0;
-        assert_eq!(flipped[0].state, CardState::InFlight);
+        assert_eq!(flipped.cards[0].state, CardState::InFlight);
         // Unchanged claim set: no republish.
         assert!(st.tick(s, || None, Some(&claimed)).is_none());
         // Claim released: card reverts to Ready and republishes.
         let released = live(&[]);
         let reverted = st.tick(s, || None, Some(&released)).unwrap().0;
-        assert_eq!(reverted[0].state, CardState::Ready);
+        assert_eq!(reverted.cards[0].state, CardState::Ready);
     }
 
     #[test]
@@ -671,7 +1151,7 @@ mod tests {
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(
-            first[0].state,
+            first.cards[0].state,
             CardState::InFlight,
             "graph-native in-flight"
         );

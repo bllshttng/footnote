@@ -41,7 +41,7 @@ pub enum SectionKey {
     Mission(u64),
     /// The `~ elsewhere` catch-all for agents matched to no squad.
     Elsewhere,
-    /// The `~ work queue` backlog lane.
+    /// The `~ backlog` lane.
     WorkQueue,
 }
 
@@ -74,7 +74,7 @@ impl SectionKey {
     }
 
     /// Whether this section's cycle is binary (expanded <-> collapsed). The
-    /// work queue's rows are cards, which have no exited state, so its middle
+    /// Backlog section's rows are cards, which have no exited state, so its middle
     /// state would hide nothing.
     fn is_binary(&self) -> bool {
         matches!(self, SectionKey::WorkQueue)
@@ -355,7 +355,7 @@ mod tests {
     }
 
     // AC5-EDGE: a section with no dead rows skips LiveOnly entirely, and the
-    // work queue is binary in both directions.
+    // the Backlog section is binary in both directions.
     #[test]
     fn next_view_skips_live_only_without_dead() {
         use SectionView::*;
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(
             next_view(Expanded, true, &SectionKey::WorkQueue),
             Collapsed,
-            "work queue binary even when told rows are dead"
+            "backlog binary even when told rows are dead"
         );
     }
 

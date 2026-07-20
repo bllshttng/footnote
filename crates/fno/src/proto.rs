@@ -183,7 +183,16 @@ use crate::tree::{Dir, Rect, TabId};
 /// and `Command::RespawnAgent { name }` are the two new off-loop server verbs;
 /// `AgentRow { updated_at, pr }` carry the peek header's `changed Ns ago` stamp
 /// and `PR #N` label.
-pub const PROTO_VERSION: u32 = 35;
+///
+/// v36 (x-1d91, the Backlog section): `BacklogCard { project, lane, head }` carry
+/// the sideline's `project · lane` attribution subline and the explicit on-deck
+/// head-of-queue marker; `Layout::backlog_lanes` carries UNCAPPED per-lane counts, feeding both
+/// the section's exact `+N more` and the mini-kanban's lane headers;
+/// `Layout::backlog_stale` marks the section as last-known rather than current; `Command::BacklogVerb { node, verb }`
+/// ([`BacklogVerb`]) shells the existing `fno backlog rank --top` / `defer`
+/// porcelain server-side - the mux never writes `graph.json` itself. All new reads
+/// are `#[serde(default)]`, keeping a v35 reader wire-tolerant.
+pub const PROTO_VERSION: u32 = 36;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -622,6 +631,28 @@ pub struct BacklogCard {
     /// known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_hint: Option<String>,
+    /// (v36) The node's `project`, for the row's `project · lane` attribution
+    /// subline. `None` for an unscoped node (the board's UNSCOPED lane).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// (v36) The node's kanban column (`_kanban_column`) - the lane half of the
+    /// attribution subline, and the grouping key of the mini-kanban overlay.
+    /// `_kanban_column` is the sole column authority; rank never changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    /// (v36) The head of the queue: the first Ready card in BOARD order. Marked
+    /// explicitly so it reads as a fact rather than being inferred from row
+    /// position, which lies once the section is scrolled or the top card is
+    /// claimed.
+    ///
+    /// Deliberately NOT "what the dispatcher will run next". The picker
+    /// (`_intake.make_selection_sort_key`) orders by rank band then epics-first,
+    /// with no project-lane grouping, and then applies guards the mux does not
+    /// model (containers, batched members, stale/dead-ancestor candidates). Only
+    /// the rank band is shared with the board, so a floated node does lead both -
+    /// but an unranked board head is not a promise about the next dispatch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub head: bool,
 }
 
 /// The queue state a card renders as. Classified from `_status` alone
@@ -900,6 +931,65 @@ pub enum Command {
     RespawnAgent {
         name: String,
     },
+    /// (v36, x-1d91) Run one reorder verb against a Backlog card. The server
+    /// validates `node` against its own card set (fail-closed: a card that raced
+    /// out between menu-open and dispatch launches no subprocess), then shells the
+    /// fixed [`BacklogVerb`] argv OFF-loop and surfaces the CLI's verdict as a
+    /// notice. `verb` is an enum, never operator text, so no argv is composed from
+    /// the wire. The mux never writes `graph.json`; `fno backlog` is the only
+    /// writer, and there is no optimistic reorder - the order changes when the
+    /// graph reader republishes.
+    BacklogVerb {
+        node: String,
+        verb: BacklogVerb,
+    },
+}
+
+/// (v36, x-1d91) The v1 reorder verb set on a Backlog card, each a fixed
+/// `fno backlog` invocation. An enum (not a string) so the wire can never widen
+/// the server's argv.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BacklogVerb {
+    /// `fno backlog rank <node> --top` - float the card to the head of its column.
+    /// Never changes the column (`_kanban_column` is the sole column authority).
+    RankTop,
+    /// `fno backlog defer <node> --reason <why>` - pause the node (reversible via
+    /// `undefer`). The reason is REQUIRED by the CLI and rejected when blank, so
+    /// the mux supplies one naming where the deferral came from; omitting it
+    /// makes every defer exit with a missing-option error.
+    Defer,
+}
+
+/// The deferral reason the mux supplies (the CLI requires a non-blank one). It
+/// names the surface rather than inventing an intent nobody expressed - triage
+/// reads these, so "who deferred this and from where" is the useful fact.
+pub const DEFER_REASON: &str = "deferred from the mux backlog sideline";
+
+impl BacklogVerb {
+    /// The `fno backlog` argv tail for this verb, `<node>` interpolated by the
+    /// caller. Fixed literals: nothing here is derived from operator text.
+    pub fn args(self, node: &str) -> Vec<String> {
+        match self {
+            BacklogVerb::RankTop => {
+                vec!["backlog".into(), "rank".into(), node.into(), "--top".into()]
+            }
+            BacklogVerb::Defer => vec![
+                "backlog".into(),
+                "defer".into(),
+                node.into(),
+                "--reason".into(),
+                DEFER_REASON.into(),
+            ],
+        }
+    }
+
+    /// The verb's human label, for the menu entry and the outcome notice.
+    pub fn label(self) -> &'static str {
+        match self {
+            BacklogVerb::RankTop => "float to top",
+            BacklogVerb::Defer => "defer",
+        }
+    }
 }
 
 impl Command {
@@ -967,6 +1057,17 @@ pub enum ServerMsg {
         /// wire-tolerant.
         #[serde(default)]
         backlog: Vec<BacklogCard>,
+        /// (v36, x-1d91) The UNCAPPED per-lane queue-card counts (lane name ->
+        /// count, lane-sorted). Feeds both the section's exact `+N more` under
+        /// the capped `backlog` list above and the mini-kanban's lane headers, so
+        /// the two can never disagree about how much work exists.
+        #[serde(default)]
+        backlog_lanes: Vec<(String, usize)>,
+        /// (v36, x-1d91) The graph read has been failing, so `backlog` is the
+        /// last-known set rather than current fact. The section keeps rendering
+        /// it (a blank lane would be worse) but says it is stale.
+        #[serde(default)]
+        backlog_stale: bool,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -1962,6 +2063,10 @@ mod tests {
                         pane_id: Some(7),
                         attach_id: None,
                         where_hint: None,
+                        // (v36) attribution + on-deck ride the same frame.
+                        project: Some("fno".into()),
+                        lane: Some("in-progress".into()),
+                        head: false,
                     },
                     BacklogCard {
                         id: "ab-53c0".into(),
@@ -1971,8 +2076,13 @@ mod tests {
                         pane_id: None,
                         attach_id: None,
                         where_hint: None,
+                        project: None,
+                        lane: None,
+                        head: true,
                     },
                 ],
+                backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
+                backlog_stale: false,
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
