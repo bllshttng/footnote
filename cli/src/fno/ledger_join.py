@@ -18,6 +18,12 @@ import json
 from pathlib import Path
 from typing import Optional
 
+#: Prefix marking a reason as an INFRA failure - the ledger is there but
+#: unusable - as opposed to a benign no-match. A caller that only prints
+#: `reason` on demand keys off this to WARN unconditionally, so a corrupt
+#: ledger never reads as "no owning session" (x-aabe).
+UNUSABLE_REASON_PREFIX = "ledger "
+
 
 def _entry_owns_pr(entry: dict, pr: int, slug_l: str, allow_unattributed: bool) -> bool:
     url = entry.get("pr_url")
@@ -83,10 +89,10 @@ def resolve_pr_sessions(
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return [], f"ledger unreadable: {exc}"
+        return [], f"{UNUSABLE_REASON_PREFIX}unreadable: {exc}"
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
-        return [], "ledger malformed: no entries list"
+        return [], f"{UNUSABLE_REASON_PREFIX}malformed: no entries list"
 
     slug_l = repo_slug.lower()
     out: list[str] = []

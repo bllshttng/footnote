@@ -400,6 +400,23 @@ def test_resolve_pr_session_ids_requires_repo_scope(tmp_path):
     assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2"]
 
 
+def test_resolve_pr_session_ids_warns_on_unreadable_ledger(tmp_path, capsys):
+    """A present-but-unparseable ledger still returns [] (read-only), but says so.
+    Without the WARN an infra failure is indistinguishable from the ordinary
+    no-owning-session case and nobody investigates (x-aabe)."""
+    led = tmp_path / "ledger.json"
+    led.write_text("{not json", encoding="utf-8")
+    assert _resolve_pr_session_ids(led, 522, "o/r") == []
+    err = capsys.readouterr().err
+    assert len([ln for ln in err.splitlines() if ln.startswith("WARN")]) == 1
+    assert "ledger unreadable" in err
+
+    # A benign no-match is silent - the WARN must mean "infra broke", not "no owner".
+    led.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    assert _resolve_pr_session_ids(led, 522, "o/r") == []
+    assert "WARN" not in capsys.readouterr().err
+
+
 def test_triage_carveouts_readonly_not_landed_or_consumed(tmp_path):
     """carveouts_readonly=True: the stray carve-out is surfaced read-only, NOT
     landed and NOT in harvested_carveout_ids (so the caller never consumes it).
