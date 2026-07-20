@@ -138,7 +138,7 @@ Same word, orthogonal axes: a yolo target session still asks the harness for per
 **The grant needs a BACKLOG NODE; free text cannot hold it, and neither can an unlinked plan.**
 Authority is anchored to the session's claim, and init claims only `node:<id>` - resolved from a node input, or from a plan that resolves to a node in the graph.
 A free-text run claims nothing; so does a standalone plan file that no node points at.
-In both cases `owner_pid` is the only anchor and it is transient, so minutes after init nothing could distinguish that session from one that crashed and left its manifest behind.
+In both cases there is no anchor at all: `owner_pid` does not count (it is a transient init subprocess, and its liveness says nothing about whether the grant will outlive this moment), so nothing could distinguish that session from one that crashed and left its manifest behind.
 Rather than let a grant outlive its session, an unanchored one is refused and `fno target init` says so at the point it happens.
 Bind a node first (`/think` then `/blueprint` files one), then run `/target yolo <node>`.
 

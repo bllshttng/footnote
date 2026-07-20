@@ -483,12 +483,12 @@ def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
     if stamped:
         typer.echo(
             "--yolo was stamped but has NOTHING LIVE TO ANCHOR IT - this session "
-            "will not act with authority.\nAuthority needs a held claim (or a live "
-            "owner_pid): a free-text run claims no node, and a stale claim proves "
-            "nothing, so an abandoned session would be indistinguishable from a "
-            "live one. The grant is refused rather than left to outlive its "
-            "session.\nRe-run against a backlog node (`fno target start --yolo "
-            "<node>`), or continue without authority.",
+            "will not act with authority.\nAuthority needs a LIVE CLAIM: a "
+            "free-text run claims no node, and a stale claim proves nothing, so "
+            "an abandoned session would be indistinguishable from a live one. The "
+            "grant is refused rather than left to outlive its session.\nRe-run "
+            "against a backlog node (`fno target start --yolo <node>`), or "
+            "continue without authority.",
             err=True,
         )
         return
