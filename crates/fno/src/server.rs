@@ -764,16 +764,27 @@ fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
     }
 }
 
-/// Is `delta` on `path`? Takes the PATH value rather than reading the
-/// environment so a test can probe a scratch dir without mutating process-wide
-/// state that its parallel siblings share.
+/// Is an executable `delta` on `path`? Takes the PATH value rather than reading
+/// the environment so a test can probe a scratch dir without mutating
+/// process-wide state that its parallel siblings share.
+///
+/// The execute bit is the point: a non-executable `delta` (a half-finished
+/// install, a data file of that name) would be selected as the renderer and
+/// then fail to exec, losing the diff into a dead pipe.
 fn delta_in_path(path: Option<&std::ffi::OsStr>) -> bool {
-    path.is_some_and(|p| {
-        std::env::split_paths(p).any(|d| {
-            let f = d.join("delta");
-            f.is_file() || f.is_symlink()
-        })
-    })
+    path.is_some_and(|p| std::env::split_paths(p).any(|d| is_executable_file(&d.join("delta"))))
+}
+
+#[cfg(unix)]
+fn is_executable_file(f: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    // Follows symlinks, so a dangling link is not mistaken for a binary.
+    std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(f: &std::path::Path) -> bool {
+    f.is_file()
 }
 
 /// The renderer chain for a diff pane: delta when installed, git's own
@@ -790,16 +801,6 @@ fn diff_pager() -> &'static str {
     }
 }
 
-/// The diff pane's shell script, rendering the working diff into
-/// `pager`. Pure so the behavioral tests can run it for real with `cat`.
-///
-/// Every branch prints something. A pane that exits with no output is the
-/// silent failure this feature is most exposed to: an empty diff, a repo with
-/// no commits yet, and a non-git cwd would all produce one, and the operator
-/// reads the flash-and-exit as "the feature is broken" rather than "there is
-/// nothing to show". So the clean case states itself, an unborn HEAD diffs
-/// against the empty tree, and a non-repo lets git's own error text through.
-/// Untracked files are invisible to `git diff`, hence the header count.
 #[cfg(test)]
 thread_local! {
     /// Test override for the diff pane's shell program (see [`diff_argv`]):
@@ -825,6 +826,16 @@ fn diff_argv() -> Vec<String> {
     vec![sh, "-c".to_string(), diff_script(diff_pager())]
 }
 
+/// The diff pane's shell script, rendering the working diff into `pager`. Pure
+/// so the behavioral tests can run it for real with `cat`.
+///
+/// Every branch prints something. A pane that exits with no output is the
+/// silent failure this feature is most exposed to: an empty diff, a repo with
+/// no commits yet, and a non-git cwd would all produce one, and the operator
+/// reads the flash-and-exit as "the feature is broken" rather than "there is
+/// nothing to show". So the clean case states itself, an unborn HEAD diffs
+/// against the empty tree, and a non-repo lets git's own error text through.
+/// Untracked files are invisible to `git diff`, hence the header count.
 fn diff_script(pager: &str) -> String {
     format!(
         r#"{{
@@ -1086,6 +1097,11 @@ struct Core {
     /// time by construction, so the "at most one pane per source" invariant
     /// needs no per-source map and no GC: a stale id (the pane was closed by
     /// any other path) reads as closed, and the next toggle opens fresh.
+    ///
+    /// Scope is the whole session, not a view: opening a diff on one tab
+    /// closes one open on another. Deliberate for v1 - a diff pane is a
+    /// glance, and one operator wanting two at once is the case to hear about
+    /// before building per-view state for it.
     diff_pane: Option<(String, u64)>,
     /// (x-8f11) Durable membership of each PERSISTED named squad: squad id ->
     /// its recruited members (attach-ids + tombstone bits). Populated only by
@@ -4355,7 +4371,12 @@ impl Core {
             }
         };
         let Some(tab) = self.viewed_tab_mut(view) else {
+            // Reachable on a source switch: closing the old diff pane can empty
+            // its tab, which retires the tab and re-anchors the view, leaving
+            // the id captured before the close pointing at nothing. Say so -
+            // reaping in silence here would read as a dead keybind.
             self.reap_pane(pid);
+            self.notice(client_id, "diff pane: the tab closed under the toggle");
             return Flow::Continue;
         };
         match tree::split(tab, vp, Axis::Horizontal, pid) {
@@ -9412,11 +9433,32 @@ mod tests {
             !delta_in_path(Some(d.as_os_str())),
             "an empty dir has no delta"
         );
-        std::fs::write(d.join("delta"), "#!/bin/sh\n").unwrap();
+        // A non-executable file of the right name must NOT be selected: it
+        // would be picked as the renderer and then fail to exec, losing the
+        // diff into a dead pipe.
+        let bin = d.join("delta");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
         assert!(
-            delta_in_path(Some(d.as_os_str())),
-            "a delta on PATH is seen"
+            !delta_in_path(Some(d.as_os_str())),
+            "a non-executable delta is not a renderer"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                delta_in_path(Some(d.as_os_str())),
+                "an executable delta on PATH is seen"
+            );
+            // A dangling symlink names nothing runnable either.
+            let broken = scratch_dir("pathprobe-broken");
+            std::os::unix::fs::symlink(broken.join("absent"), broken.join("delta")).unwrap();
+            assert!(
+                !delta_in_path(Some(broken.as_os_str())),
+                "a dangling delta symlink is not a renderer"
+            );
+            let _ = std::fs::remove_dir_all(&broken);
+        }
         assert!(!delta_in_path(None), "no PATH at all is not a delta");
 
         assert!(diff_script("less -R").ends_with("| less -R"));
@@ -9430,8 +9472,15 @@ mod tests {
 
     /// A `seen_test_core` whose single agent row points at a real repo, so the
     /// toggle's cwd resolution and spawn both run for real.
+    ///
+    /// The pane program is stubbed to one that exits immediately. These tests
+    /// are about the toggle and the layout, and the real chain ends in a pager
+    /// that parks on the PTY waiting for input no test will send - which hangs
+    /// the run rather than failing it. The script's own behavior is covered by
+    /// the `diff_script_*` tests, which execute it for real with `cat`.
     fn diff_test_core(tag: &str) -> (Core, u64, std::path::PathBuf, mpsc::Receiver<ServerMsg>) {
         let repo = scratch_repo(tag);
+        set_diff_shell("/bin/echo");
         let (mut core, client_id, _p1, _p2, rx) = seen_test_core();
         core.agents = vec![bg_row("worker", repo.to_str().unwrap(), None)];
         (core, client_id, repo, rx)
@@ -9527,8 +9576,9 @@ mod tests {
     fn diff_pane_spawn_failure_leaves_the_layout_untouched() {
         // AC2-ERR: the spawn fails - no split, no dead pane, and the sender is
         // told. Spawn-first ordering is what makes this hold with no rollback.
-        set_diff_shell("/nonexistent/definitely-not-a-shell-xyz");
         let (mut core, client_id, repo, mut rx) = diff_test_core("spawnfail");
+        // After the helper, which sets its own stub program.
+        set_diff_shell("/nonexistent/definitely-not-a-shell-xyz");
         let view = core.client_view(client_id).unwrap();
         let root_before = core.viewed_tab(view).unwrap().root.clone();
         let panes_before = core.panes.len();
@@ -9587,6 +9637,32 @@ mod tests {
     }
 
     #[test]
+    fn diff_pane_on_a_non_repo_still_opens_and_closes() {
+        // AC1-ERR, the half the script test cannot reach: a source that is not
+        // a git repo is a real directory, so the pane opens (rendering git's
+        // error) and the toggle must still be able to close it. A pane the
+        // toggle cannot clear would strand the layout.
+        let dir = scratch_dir("norepo-cycle");
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![bg_row("worker", dir.to_str().unwrap(), None)];
+        let view = core.client_view(client_id).unwrap();
+        let root_before = core.viewed_tab(view).unwrap().root.clone();
+
+        toggle_diff(&mut core, client_id);
+        let pid = core
+            .diff_pane
+            .as_ref()
+            .map(|(_, p)| *p)
+            .expect("opens on a non-repo dir");
+        toggle_diff(&mut core, client_id);
+
+        assert!(core.diff_pane.is_none(), "the toggle closes it");
+        assert!(!core.panes.contains_key(&pid));
+        assert_eq!(core.viewed_tab(view).unwrap().root, root_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn diff_pane_switching_source_never_leaves_two_panes() {
         // Invariant: at most one live diff pane. Toggling a second row closes
         // the first's pane rather than accumulating one per source.
@@ -9635,6 +9711,58 @@ mod tests {
         assert_ne!(second, first, "the next press opens, not closes a ghost");
         core.reap_pane(second);
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn diff_pane_says_so_when_the_tab_dies_under_the_toggle() {
+        // AC1-UI, the path that is easiest to leave silent: switching source
+        // closes the old pane first, and if that pane was the tab's last one
+        // the tab retires and the view re-anchors - so the reopen has no tab
+        // to split. The press must still say something.
+        let (mut core, client_id, repo_a, mut rx) = diff_test_core("tabdies");
+        let repo_b = scratch_repo("tabdies-b");
+        core.agents
+            .push(bg_row("worker-b", repo_b.to_str().unwrap(), None));
+        let view = core.client_view(client_id).unwrap();
+
+        toggle_diff(&mut core, client_id);
+        let first = core.diff_pane.as_ref().map(|(_, p)| *p).expect("first");
+        // Close everything else in the tab, leaving the diff pane alone in it.
+        let others: Vec<u64> =
+            tree::layout(&core.viewed_tab(view).unwrap().root, vp_of(&core, view))
+                .into_iter()
+                .map(|(p, _)| p)
+                .filter(|p| *p != first)
+                .collect();
+        for p in others {
+            core.close_pane(p);
+        }
+        let _ = drain_notices(&mut rx);
+
+        core.command(
+            client_id,
+            Command::ToggleDiffPane {
+                agent: Some("worker-b".into()),
+            },
+        );
+
+        assert!(
+            drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("diff pane")),
+            "a press that cannot land still reports"
+        );
+        assert!(
+            core.diff_pane.is_none(),
+            "no phantom record for a pane that never landed"
+        );
+        let _ = std::fs::remove_dir_all(&repo_a);
+        let _ = std::fs::remove_dir_all(&repo_b);
+    }
+
+    /// The viewport the core would tile `view`'s tab into.
+    fn vp_of(core: &Core, view: (u64, TabId)) -> tree::Rect {
+        core.tab_rect(view.1)
     }
 
     #[test]
