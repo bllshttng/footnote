@@ -136,19 +136,55 @@ chmod +x "$UBIN/fno"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$UBIN/python3"
 chmod +x "$UBIN/python3"
 
+# `git` and `gh` are shimmed so the scan's repo scoping is driven by the
+# fixtures, not by whatever checkout the suite happens to run from. Without
+# this every scoping assertion below would read the real footnote remote and
+# pass or fail depending on the developer's cwd.
+cat > "$UBIN/git" <<'SHIM'
+#!/usr/bin/env bash
+case "$*" in
+  "remote get-url origin")
+    [ -n "${FAKE_ORIGIN_URL:-}" ] || exit 1
+    printf '%s\n' "$FAKE_ORIGIN_URL" ;;
+  *--git-common-dir*)
+    [ -n "${FAKE_GIT_COMMON_DIR:-}" ] || exit 1
+    printf '%s\n' "$FAKE_GIT_COMMON_DIR" ;;
+  *) exit 1 ;;
+esac
+SHIM
+chmod +x "$UBIN/git"
+# gh must never be the silent rescuer: if a scoping assertion only passes
+# because gh reached the network, the git-first path is untested.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$UBIN/gh"
+chmod +x "$UBIN/gh"
+
+# A real directory, because the block derives the repo root by cd-ing to
+# "<git-common-dir>/.." and running `pwd -P`. Capture the same resolved form
+# the block will produce (on macOS /tmp is a symlink, so the literal path and
+# its `pwd -P` are different strings).
+mkdir -p "$TMP/repo/.git"
+REPO_FIXTURE="$(cd "$TMP/repo" && pwd -P)"
+ORIGIN_FIXTURE="https://github.com/o/r.git"
+
 UHOME="$TMP/home"; mkdir -p "$UHOME/.fno"
 run_step2() {
   # run_step2 <reconcile_json> <graph_json> <pr> -> prints resulting NODE_IDS
   printf '%s' "$2" > "$UHOME/.fno/graph.json"
   local runner="$TMP/step2-run.sh"; cp "$STEP2" "$runner"
   printf '\nprintf "%%s" "$NODE_IDS"\n' >> "$runner"
-  FAKE_RECONCILE_JSON="$1" PR="$3" HOME="$UHOME" PATH="$UBIN:$PATH" bash "$runner"
+  FAKE_RECONCILE_JSON="$1" PR="$3" HOME="$UHOME" PATH="$UBIN:$PATH" \
+    FAKE_ORIGIN_URL="${FAKE_ORIGIN_URL-$ORIGIN_FIXTURE}" \
+    FAKE_GIT_COMMON_DIR="${FAKE_GIT_COMMON_DIR-$TMP/repo/.git}" \
+    TMPDIR="$TMP" bash "$runner"
 }
 count_id() { printf '%s' "$1" | tr ' ' '\n' | grep -c "^$2\$"; }
 
 # Real schema: nodes are stored flat under `.entries`, NOT `.nodes` (a `.nodes`
 # scan silently yields empty and the reap never fires - the bug codex caught).
-GRAPH_MATCH='{"entries":[{"id":"x-1234","pr_number":292}]}'
+# Nodes carry a pr_url because graph.json is CROSS-PROJECT: a bare pr_number is
+# ambiguous across repos, so the scan admits a node only on a matching origin
+# slug, or on cwd for a url-less one.
+GRAPH_MATCH='{"entries":[{"id":"x-1234","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"}]}'
 
 # AC1 (the bug): reconcile .closed[] empty, pr_number matches -> node unioned in.
 NI="$(run_step2 '{"closed":[]}' "$GRAPH_MATCH" 292)"
@@ -175,13 +211,66 @@ NI="$(run_step2 '{"closed":[{"node_id":"x-aaaa"}]}' "$GRAPH_MATCH" 292)"
   && pass "AC2b: union appends the PR node without clobbering reconcile's closed ids" \
   || fail "AC2b: expected both x-aaaa and x-1234, got: $(printf '%q' "$NI")"
 
-# AC2c (collision): pr_number is not unique - two ids match -> union BOTH, so
-# the reap fires for every candidate (head -1 would drop one; this is PR 315's
-# own dogfood case where two fno nodes share the PR number).
-NI="$(run_step2 '{"closed":[]}' '{"entries":[{"id":"x-1234","pr_number":292},{"id":"x-5678","pr_number":292}]}' 292)"
+# AC2c (collision): pr_number is not unique - two SAME-REPO ids match -> union
+# BOTH, so the reap fires for every candidate (head -1 would drop one).
+NI="$(run_step2 '{"closed":[]}' '{"entries":[
+  {"id":"x-1234","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"},
+  {"id":"x-5678","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"}]}' 292)"
 [[ "$(count_id "$NI" x-1234)" == "1" && "$(count_id "$NI" x-5678)" == "1" ]] \
   && pass "AC2c: a non-unique pr_number unions every matching id (no head -1 drop)" \
   || fail "AC2c: expected both x-1234 and x-5678, got: $(printf '%q' "$NI")"
+
+# --- Repo scoping: a PR number is unique only WITHIN a repo ----------------
+# The reason this scan is scoped at all. Under config.post_merge.self_reap a
+# foreign id in NODE_IDS makes Step 8a stop+rm ANOTHER repo's build-worker row,
+# and that row being non-live is exactly what makes it eligible - so the reap
+# loop's live-guard bounds the damage without scoping it.
+NI="$(run_step2 '{"closed":[]}' '{"entries":[
+  {"id":"x-mine","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"},
+  {"id":"x-theirs","pr_number":292,"pr_url":"https://github.com/other/repo/pull/292"}]}' 292)"
+[[ "$(count_id "$NI" x-mine)" == "1" && "$(count_id "$NI" x-theirs)" == "0" ]] \
+  && pass "AC4: a same-numbered PR in a FOREIGN repo is excluded from NODE_IDS" \
+  || fail "AC4: expected only x-mine, got: $(printf '%q' "$NI")"
+
+# Slug matching is a substring between anchors, so a repo whose name merely
+# extends ours must not match, and case must not matter (git and gh disagree
+# on case for the same remote).
+NI="$(run_step2 '{"closed":[]}' '{"entries":[
+  {"id":"x-super","pr_number":292,"pr_url":"https://github.com/o/r-extra/pull/292"},
+  {"id":"x-upper","pr_number":292,"pr_url":"https://github.com/O/R/pull/292"}]}' 292)"
+[[ "$(count_id "$NI" x-super)" == "0" && "$(count_id "$NI" x-upper)" == "1" ]] \
+  && pass "AC5: a superstring slug is excluded; a case-differing slug still matches" \
+  || fail "AC5: expected only x-upper, got: $(printf '%q' "$NI")"
+
+# A url-less node is the pr_number backstop: admitted only when its cwd IS this
+# repo. A foreign cwd, or no cwd at all, is dropped - fail closed, never a guess.
+NI="$(run_step2 '{"closed":[]}' '{"entries":[
+  {"id":"x-here","pr_number":292,"cwd":"'"$REPO_FIXTURE"'"},
+  {"id":"x-elsewhere","pr_number":292,"cwd":"/some/other/repo"},
+  {"id":"x-nothing","pr_number":292}]}' 292)"
+[[ "$(count_id "$NI" x-here)" == "1" && "$(count_id "$NI" x-elsewhere)" == "0" \
+   && "$(count_id "$NI" x-nothing)" == "0" ]] \
+  && pass "AC6: a url-less node unions only when its cwd is this repo" \
+  || fail "AC6: expected only x-here, got: $(printf '%q' "$NI")"
+
+# A hand-edited graph can hold a non-string pr_url. jq's ascii_downcase raises
+# on one and aborts the WHOLE program, so a single corrupt node would silently
+# drop every legitimate node after it - the union must survive it.
+NI="$(run_step2 '{"closed":[]}' '{"entries":[
+  {"id":"x-corrupt","pr_number":292,"pr_url":{"not":"a string"}},
+  {"id":"x-good","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"}]}' 292)"
+[[ "$(count_id "$NI" x-good)" == "1" && "$(count_id "$NI" x-corrupt)" == "0" ]] \
+  && pass "AC7: a corrupt non-string pr_url is skipped, not fatal to the scan" \
+  || fail "AC7: expected x-good despite the corrupt node, got: $(printf '%q' "$NI")"
+
+# No resolvable origin: the union is skipped WHOLESALE rather than falling back
+# to an unscoped match, and says so. Under-reaping is recoverable; reaping
+# another repo's row is not.
+NI="$(FAKE_ORIGIN_URL="" run_step2 '{"closed":[{"node_id":"x-closed"}]}' "$GRAPH_MATCH" 292 2>"$TMP/noslug.err")"
+[[ "$(count_id "$NI" x-1234)" == "0" && "$(count_id "$NI" x-closed)" == "1" ]] \
+  && grep -q "union SKIPPED" "$TMP/noslug.err" \
+  && pass "AC8: no origin slug skips the union loudly, keeping reconcile-closed ids" \
+  || fail "AC8: expected only x-closed + a SKIPPED line, got: $(printf '%q' "$NI")"
 
 # AC3 (no node): pr_number matches nothing -> NODE_IDS stays empty.
 NI="$(run_step2 '{"closed":[]}' '{"entries":[{"id":"x-9999","pr_number":999}]}' 292)"

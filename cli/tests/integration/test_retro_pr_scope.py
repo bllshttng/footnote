@@ -400,21 +400,74 @@ def test_resolve_pr_session_ids_requires_repo_scope(tmp_path):
     assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2"]
 
 
-def test_resolve_pr_session_ids_warns_on_unreadable_ledger(tmp_path, capsys):
-    """A present-but-unparseable ledger still returns [] (read-only), but says so.
-    Without the WARN an infra failure is indistinguishable from the ordinary
-    no-owning-session case and nobody investigates (x-aabe)."""
+def test_resolve_pr_session_ids_warns_on_infra_failure(tmp_path, capsys):
+    """A broken environment still returns [] (read-only), but says so. Without the
+    WARN it is indistinguishable from the ordinary no-owning-session case and
+    nobody investigates. Each case asserts the COUNT, so a duplicated warn fails
+    too, and each benign case asserts silence - a WARN that fires on a clean miss
+    is noise the operator learns to ignore."""
     led = tmp_path / "ledger.json"
-    led.write_text("{not json", encoding="utf-8")
-    assert _resolve_pr_session_ids(led, 522, "o/r") == []
-    err = capsys.readouterr().err
-    assert len([ln for ln in err.splitlines() if ln.startswith("WARN")]) == 1
-    assert "ledger unreadable" in err
 
-    # A benign no-match is silent - the WARN must mean "infra broke", not "no owner".
+    def warns(*args) -> list[str]:
+        assert _resolve_pr_session_ids(*args) == []
+        return [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("WARN")]
+
+    # infra: unparseable, structurally wrong, and no resolvable repo.
+    led.write_text("{not json", encoding="utf-8")
+    assert len(warns(led, 522, "o/r")) == 1
+
+    led.write_text(json.dumps({"entries": "not-a-list"}), encoding="utf-8")
+    assert len(warns(led, 522, "o/r")) == 1
+
     led.write_text(json.dumps({"entries": []}), encoding="utf-8")
-    assert _resolve_pr_session_ids(led, 522, "o/r") == []
-    assert "WARN" not in capsys.readouterr().err
+    assert len(warns(led, 522, None)) == 1
+
+    # benign: the ledger is fine and simply holds no entry for this PR, or is
+    # absent entirely. Both are the designed read-only path, so both stay quiet.
+    assert warns(led, 522, "o/r") == []
+    assert warns(tmp_path / "nope.json", 522, "o/r") == []
+
+
+def test_infra_reason_classification_covers_every_return_site(tmp_path):
+    """Every reason resolve_pr_sessions can return is classified deliberately.
+
+    The classifier keys off each reason's opening words, so rewording one is
+    exactly how this silently breaks: a benign reason reworded to open with
+    "ledger ..." starts warning, and an infra reason reworded stops. Driving all
+    five sites here means a reword must update this test rather than slip
+    through with the suite still green.
+    """
+    from fno.ledger_join import reason_is_infra_failure, resolve_pr_sessions
+
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": []}), encoding="utf-8")
+
+    def reason_for(*args) -> str:
+        sessions, reason = resolve_pr_sessions(*args)
+        assert sessions == [] and reason is not None
+        return reason
+
+    infra = {
+        "no repo scope": reason_for(led, 522, None),
+        "unreadable": None,
+        "malformed": None,
+    }
+    led.write_text("{not json", encoding="utf-8")
+    infra["unreadable"] = reason_for(led, 522, "o/r")
+    led.write_text(json.dumps({"entries": "not-a-list"}), encoding="utf-8")
+    infra["malformed"] = reason_for(led, 522, "o/r")
+
+    led.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    benign = {
+        "no matching entry": reason_for(led, 522, "o/r"),
+        "absent ledger": reason_for(tmp_path / "nope.json", 522, "o/r"),
+        "unset ledger": reason_for(None, 522, "o/r"),
+    }
+
+    for label, reason in infra.items():
+        assert reason_is_infra_failure(reason), f"{label!r} must warn: {reason!r}"
+    for label, reason in benign.items():
+        assert not reason_is_infra_failure(reason), f"{label!r} must stay quiet: {reason!r}"
 
 
 def test_triage_carveouts_readonly_not_landed_or_consumed(tmp_path):

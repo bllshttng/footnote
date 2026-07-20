@@ -90,7 +90,7 @@ def _resolve_pr_session_ids(
     :mod:`fno.ledger_join` (shared with ``fno carveout list --pr-number``); this
     wrapper keeps retro's flatten-to-empty contract.
     """
-    from fno.ledger_join import UNUSABLE_REASON_PREFIX, resolve_pr_sessions
+    from fno.ledger_join import reason_is_infra_failure, resolve_pr_sessions
 
     # allow_unattributed: retro's harvest is additive (it files nodes), never
     # destructive, so it keeps the legacy bare-number match for url-less rows.
@@ -98,9 +98,9 @@ def _resolve_pr_session_ids(
         ledger_path, pr, repo_slug, allow_unattributed=True
     )
     # Flattening to [] hides WHY. A benign no-match is the designed read-only
-    # case and stays quiet, but a ledger that would not parse is an infra
-    # failure that must not read as "no owning session" (x-aabe).
-    if reason and reason.startswith(UNUSABLE_REASON_PREFIX):
+    # case and stays quiet; a broken environment must not read as "no owning
+    # session", or nobody ever investigates it.
+    if reason_is_infra_failure(reason):
         typer.echo(f"WARN {reason}", err=True)
     return sessions
 

@@ -70,6 +70,14 @@ uv build'
 bash tests/lib/test_infer_has_ui.sh
 bash tests/lib/test_resolve_plan_executor.sh'
     step "config global-precedence harness (ab-5d6c3d47)" "." 'bash tests/lib/test_config_global_precedence.sh'
+    # These extract fenced blocks out of skills/pr/references/merged.md and run
+    # them, so they are the ONLY thing that executes the post-merge ritual's
+    # shell. They sat unregistered, and a change to the Step 2 scan broke three
+    # assertions without anything noticing. 77 is the harnesses' own "skipped,
+    # no jq" code and must not read as a failure.
+    step "post-merge ritual harness (merged.md Step 2 scan + Step 8a reap)" "." 'for t in tests/post-merge/test_reap_build_worker.sh tests/post-merge/test_watch.sh; do
+  bash "$t" || { rc=$?; [ "$rc" = 77 ] && echo "skipped: $t (missing jq)" || exit "$rc"; }
+done'
     step "cost-accuracy harness (ab-c0f92987)" "." 'uv run --project cli python tests/lib/test_cost_tracker_pricing.py
 uv run --project cli python tests/metrics/test_session_cost_dedup.py
 uv run --project cli python tests/metrics/test_backfill_cost_recompute.py
