@@ -1,4 +1,4 @@
-"""Per-harness session teardown in ``fno agents rm`` (x-e4bc).
+"""Per-harness session teardown in ``fno agents rm``.
 
 ``rm`` used to be registry-only for every non-claude harness, so a removed
 codex/opencode session kept resurfacing in discovery. These cover the real

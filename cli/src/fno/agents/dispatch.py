@@ -2558,15 +2558,18 @@ def _teardown_harness_session(
     sid = existing.harness_session_id
 
     def _fail(message: str, *, exit_code: int) -> None:
+        # Emit on BOTH paths: a forced removal is exactly the case a later
+        # registry-vs-store diff has to explain, so it must leave a greppable
+        # record, not just a stderr line the operator saw once.
+        events.emit(
+            "agent_removed",
+            name=name,
+            provider=harness,
+            force=force,
+            registry_changed=force,
+            teardown_error=message,
+        )
         if not force:
-            events.emit(
-                "agent_removed",
-                name=name,
-                provider=harness,
-                force=False,
-                registry_changed=False,
-                teardown_error=message,
-            )
             raise DispatchAskError(message, exit_code=exit_code)
         sys.stderr.write(
             f"WARN: {message}; --force given, removing registry only. "
@@ -2593,8 +2596,12 @@ def _teardown_harness_session(
         except OSError as exc:
             _fail(f"codex session index rewrite failed: {exc}", exit_code=1)
             return
-        if removed:
-            print(f"torn down: codex session index entry {sid}", flush=True)
+        print(
+            f"torn down: codex session index entry {sid}"
+            if removed
+            else f"already gone: codex session index entry {sid}",
+            flush=True,
+        )
         return
 
     if harness == "opencode":
@@ -2622,7 +2629,9 @@ def _teardown_harness_session(
             return
         if rc == 0:
             print(f"torn down: opencode session {sid}", flush=True)
-        elif not opencode_mod.looks_already_gone(output):
+        elif opencode_mod.looks_already_gone(output, sid):
+            print(f"already gone: opencode session {sid}", flush=True)
+        else:
             _fail(
                 f"opencode session delete {sid} exited {rc}: {output.strip()}",
                 exit_code=1,

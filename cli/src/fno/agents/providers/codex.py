@@ -860,7 +860,10 @@ def remove_session_index_entry(
     try:
         tmp.write_text("".join(kept), encoding="utf-8")
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:
+        # BaseException, not OSError: a KeyboardInterrupt landing between the
+        # write and the rename would otherwise strand the temp file next to
+        # the index, and nothing sweeps it.
         tmp.unlink(missing_ok=True)
         raise
     return True

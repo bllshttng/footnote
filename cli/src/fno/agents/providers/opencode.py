@@ -42,15 +42,18 @@ def is_session_id(value: str) -> bool:
     return bool(_SESSION_ID_RE.fullmatch(value or ""))
 
 
-def looks_already_gone(output: str) -> bool:
+def looks_already_gone(output: str, session_id: str) -> bool:
     """True iff a failed delete failed only because the session was absent.
 
     opencode reports this as ``Error: Session not found: <id>``. Matching
     the message is unavoidable -- the exit code (1) is shared with real
     failures -- so it is kept to the stable half of the string and
     re-verified whenever the pinned opencode version moves.
+
+    Anchored to the id so an unrelated failure that merely quotes the
+    phrase cannot be misread as success.
     """
-    return "session not found" in (output or "").lower()
+    return f"session not found: {session_id}".lower() in (output or "").lower()
 
 
 def session_delete(session_id: str, *, timeout: float = 30.0) -> tuple[int, str]:

@@ -51,21 +51,35 @@ fno agents rm worker-claude --force
 
 `--force` drops the registry row regardless of claude's exit code, leaving the supervisor session orphaned. You are responsible for the manual `claude rm 7c5dcf5d` (the stderr WARN spells it out).
 
-For **codex** agents, `rm` is registry-only: the on-disk session files at `~/.codex/sessions/<date>/<id>` stay where they are. Clean them manually if desired.
+The same ordering holds for **codex** and **opencode**, which tear down their own session record before the registry row is dropped:
 
-For **gemini**, same as codex: registry-only.
+| Harness | What teardown removes |
+|---------|-----------------------|
+| claude | `claude rm <short_id>` (session record + worktree, via claude's own delegation contract) |
+| codex | the session's entry in `~/.codex/session_index.jsonl` |
+| opencode | the session, via `opencode session delete <ses_...>` |
+| gemini | nothing; registry-only (no teardown arm for a deprecated provider) |
+
+Teardown is record-only.
+Transcripts always stay on disk: codex rollout files under `~/.codex/sessions/<date>/<id>` and opencode session JSON are never touched, so `rm` cleans up discovery without destroying history.
+Removing an agent also does not stop a running session; use `fno agents stop` for that.
+
+A harness record that is already gone counts as success, so re-running `rm` after a manual cleanup will not wedge.
+
+Worktrees are not removed here for non-claude harnesses.
+Nothing on the registry row distinguishes an isolated worktree from the canonical checkout, so `rm` will not guess; reap them with `fno worktree cleanup --merged --apply`.
 
 **Common exit codes:**
 
 | Code | Meaning |
 |------|---------|
-| 0 | row removed (claude success, codex / gemini always, or `--force` override) |
-| 1 | claude rm refused and `--force` was not passed (registry unchanged) |
-| 2 | agent not found, or invalid name |
+| 0 | row removed (teardown succeeded, was already gone, or `--force` override) |
+| 1 | teardown failed and `--force` was not passed (registry unchanged) |
+| 2 | agent not found, invalid name, or a harness with no rm arm |
 | 11 | flock timeout |
-| 12 | registry write failed (stderr names the underlying error) |
-| 14 | claude not on PATH |
-| 15 | claude rm exceeded 30s timeout |
+| 12 | registry write failed, or the stored session id is malformed (stderr names the underlying error) |
+| 14 | the harness CLI is not on PATH |
+| 15 | teardown exceeded the 30s timeout |
 
 ## `fno agents reconcile` — sync registry with provider reality
 
