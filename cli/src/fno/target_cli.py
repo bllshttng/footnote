@@ -443,15 +443,49 @@ def init(
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
     if dispatch_provider:
         env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
-    if yolo:
-        env["TARGET_YOLO"] = "1"
+    # The flag is the SOLE authority: an ambient TARGET_YOLO (exported in a
+    # shell, or inherited by a spawned worker - codex/gemini spawn with env=None
+    # and inherit the parent's wholesale) must never grant autonomy nobody asked
+    # for. Clearing it here covers every spawn path at the one choke point they
+    # all pass through, which per-provider scrubbing cannot. Losing a grant costs
+    # one prompt; gaining one costs decisions no operator made.
+    env["TARGET_YOLO"] = "1" if yolo else ""
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if result.returncode == 0:
+        if yolo:
+            _warn_if_authority_not_granted()
         _print_orientation_report()
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def _warn_if_authority_not_granted() -> None:
+    """Name a --yolo that did not take, instead of returning a normal-looking receipt.
+
+    The manifest is write-once: init leaves a pre-existing one untouched, so
+    ``--yolo`` against an already-initialized session is a silent no-op. Absence
+    of the grant is also how an ungranted session looks, so the operator would be
+    distinguishing the two postures by noticing a missing line. Say it instead --
+    the read side already refuses to change posture silently (orient.py's
+    dead-manifest branch names itself), and the write side owes the same.
+    """
+    try:
+        from fno.paths import resolve_repo_root
+
+        manifest = resolve_repo_root() / ".fno" / "target-state.md"
+        granted = "authority: full" in manifest.read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 - a warning must never fail an init that worked
+        return
+    if not granted:
+        typer.echo(
+            "fno target init: --yolo did NOT take - this session has no authority "
+            "grant.\nThe manifest is write-once and one already existed, so the "
+            "flag was a no-op. To run with authority, finish or cancel this "
+            "session first (`/fno:cancel-target`), then start a fresh one.",
+            err=True,
+        )
 
 
 def _maybe_reconcile_lane_slot() -> None:

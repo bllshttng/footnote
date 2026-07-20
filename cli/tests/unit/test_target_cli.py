@@ -146,6 +146,63 @@ def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
     _clear_root_cache()
 
 
+def test_target_init_yolo_sets_authority_env(monkeypatch, tmp_path):
+    """x-6390: --yolo plumbs TARGET_YOLO=1 so the bash writer stamps the grant."""
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"].get("TARGET_YOLO") == "1"
+    _clear_root_cache()
+
+
+def test_target_init_clears_ambient_yolo_without_flag(monkeypatch, tmp_path):
+    """x-6390: an inherited TARGET_YOLO must NEVER grant authority.
+
+    The flag is the sole authority. A worker spawned under an exported
+    TARGET_YOLO (codex/gemini spawn with env=None and inherit wholesale) would
+    otherwise self-grant walk-away autonomy nobody asked for.
+    """
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    monkeypatch.setenv("TARGET_YOLO", "1")  # the ambient grant
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"].get("TARGET_YOLO") == "", (
+        "ambient TARGET_YOLO must be cleared, not forwarded: "
+        f"got {captured['env'].get('TARGET_YOLO')!r}"
+    )
+    _clear_root_cache()
+
+
 def test_target_init_no_pins_no_dispatch_env(monkeypatch, tmp_path):
     """Byte-for-byte: without pins the dispatch env vars are absent."""
     captured = {}
