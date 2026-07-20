@@ -346,12 +346,37 @@ NODE_IDS="$(printf '%s' "$RECONCILE_JSON" | jq -r '.closed[]?.node_id // empty' 
 # PR already maps to (read-only pr_number scan of the graph) so Step 8a still
 # reaps its build-worker row. Deduped so the out-of-gate case reaps once.
 GJ="$(python3 -c 'from fno.paths import graph_json; print(graph_json())' 2>/dev/null || echo "$HOME/.fno/graph.json")"
-# graph.json stores nodes flat under `.entries`, and pr_number is not unique
-# (same PR can map to multiple ids), so union EVERY match - the reap loop below
-# already iterates NODE_IDS and skips non-live/absent rows, making extra ids safe.
-for PR_NODE in $(jq -r --argjson pr "$PR" '.entries[]? | select(.pr_number == $pr) | .id' "$GJ" 2>/dev/null || true); do
-  case " $NODE_IDS " in *" $PR_NODE "*) : ;; *) NODE_IDS="${NODE_IDS}${NODE_IDS:+ }$PR_NODE" ;; esac
-done
+# graph.json is CROSS-PROJECT and pr_number is unique only WITHIN a repo, so the
+# match must be scoped to this checkout's origin (x-aabe). An unscoped union put
+# a foreign repo's node in NODE_IDS, and Step 8a under `self_reap` would stop+rm
+# that repo's build-worker row - the reap loop's non-live skip bounds the damage
+# but never scopes it, because a finished foreign row is exactly a non-live row.
+ORIGIN_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+# Canonical repo root, NOT `--show-toplevel`: the ritual usually runs from a
+# worktree, while graph `cwd` values point at the canonical checkout.
+GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+REPO_ROOT=""
+if [ -n "$GIT_COMMON_DIR" ]; then
+  REPO_ROOT="$(cd "$GIT_COMMON_DIR/.." 2>/dev/null && pwd -P || true)"
+fi
+if [ -n "$ORIGIN_SLUG" ]; then
+  # `contains` not `test`: a slug may carry regex metacharacters (org/repo.js).
+  # The surrounding /.../pull/ anchors keep a superstring slug from matching.
+  # A url-less node is admitted only when its cwd IS this repo (x-280d backstop);
+  # one with neither url nor cwd is dropped - fail closed, never a guess.
+  for PR_NODE in $(jq -r --argjson pr "$PR" --arg slug "$ORIGIN_SLUG" --arg root "$REPO_ROOT" '
+      .entries[]?
+      | select(.pr_number == $pr)
+      | select(
+          ((.pr_url // "") | ascii_downcase | contains("/" + ($slug | ascii_downcase) + "/pull/"))
+          or (((.pr_url // "") == "") and ($root != "") and (.cwd == $root))
+        )
+      | .id' "$GJ" 2>/dev/null || true); do
+    case " $NODE_IDS " in *" $PR_NODE "*) : ;; *) NODE_IDS="${NODE_IDS}${NODE_IDS:+ }$PR_NODE" ;; esac
+  done
+else
+  echo "post-merge: origin slug unresolved (gh down?); graph pr_number union SKIPPED - reconcile-closed ids still reaped" >&2
+fi
 # full sweep above, or scope it: fno backlog reconcile --node ab-XXXXXXXX --json
 ```
 
