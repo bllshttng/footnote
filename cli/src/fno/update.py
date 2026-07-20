@@ -735,11 +735,23 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         deployed = _cargo_installed_bin()
         verify_rev = None if deployed is None else _installed_bin_crates_rev(deployed)
         if verify_rev != subtree:
+            # Two distinct failures reach here; a shared message misdiagnoses the
+            # first as the second and sends the reader hunting the install root.
+            if verify_rev is None:
+                detail = (
+                    "reports no usable rev - it was built from a dirty crates/"
+                    " tree, or carries no rev stamp. Commit or stash your crates/"
+                    " changes and re-run"
+                )
+            else:
+                detail = (
+                    f"reports crates/ rev {verify_rev[:12]}, but source is"
+                    f" {subtree[:12]} - the rebuild did not land where the runtime"
+                    f" resolves it (install root {install_root})"
+                )
             typer.echo(
-                "fno update: ERROR: post-deploy verify FAILED - the deployed"
-                f" fno-agents self-reports {verify_rev or 'no usable rev'} but source"
-                f" crates/ rev is {subtree[:12]}. The rebuild did not land where the"
-                f" runtime resolves it (install root {install_root}). NOT continuing.",
+                f"fno update: ERROR: post-deploy verify FAILED - the deployed fno-agents {detail}."
+                " NOT continuing.",
                 err=True,
             )
             raise typer.Exit(1)

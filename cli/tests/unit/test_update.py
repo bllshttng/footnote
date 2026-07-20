@@ -1664,7 +1664,35 @@ def test_post_deploy_verify_mismatch_halts(
 
     with pytest.raises(typer.Exit):
         update._refresh_rust_bins(source)
-    assert "post-deploy verify FAILED" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "post-deploy verify FAILED" in err
+    # A real rev mismatch IS the "did not land" case - keep naming both revs.
+    assert "oldoldold" in err and "did not land" in err
+
+
+def test_post_deploy_verify_no_rev_blames_dirty_not_install_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A binary that reports no usable rev (dirty crates/ tree) must not be
+    diagnosed as 'the rebuild did not land' - that sent three post-merge rituals
+    hunting the install root while the deployed rev matched source exactly."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "a" * 40)
+    monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(update.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: None)
+
+    with pytest.raises(typer.Exit):
+        update._refresh_rust_bins(source)
+    err = capsys.readouterr().err
+    assert "dirty crates/" in err
+    assert "did not land" not in err
 
 
 def test_sync_triad_copies_into_location_hosting_a_bin(
