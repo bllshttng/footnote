@@ -66,7 +66,7 @@ fn priority_rank(p: &str) -> u8 {
 /// (`docs/architecture/backlog-board-ordering.md`): project lane (unscoped
 /// last), rank band (ranked before unranked, ascending), priority, created_at.
 pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
-    derive_queue(raw).map(|q| q.cards)
+    derive_queue(raw, None).map(|q| q.cards)
 }
 
 /// The card set plus the UNCAPPED per-lane counts it was cut from (x-1d91).
@@ -85,9 +85,67 @@ pub struct Queue {
     pub stale: bool,
 }
 
-/// The lane bucket for a card carrying no `_kanban_column`. It still needs a home
+/// The lane bucket for a card the column mapping excludes. It still needs a home
 /// on the board rather than vanishing from it.
 pub const UNLANED: &str = "unlaned";
+
+/// The board column for a queue node, mirroring `_kanban_column` in
+/// `cli/src/fno/graph/render.py`. `None` excludes the node from the board.
+///
+/// This is DERIVED, not read: no graph node carries a column field. The Python
+/// board computes it from intent on every render, so the mux computes the same
+/// function rather than inventing a second answer - the two boards must name the
+/// same lane for the same node or the sideline is quietly lying about where work
+/// sits. Kept deliberately close to the Python, ordering included, so a change
+/// there is easy to mirror here.
+///
+/// `claimed` folds the graph `_status` and the live-lockfile claim together (a
+/// node another session drives may never write a graph status - x-4845);
+/// `underway` is [`in_progress_epics`] membership.
+fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option<&'static str> {
+    if e.get("type").and_then(|v| v.as_str()) == Some("roadmap") {
+        return None;
+    }
+    if e.get("completed_at").is_some_and(|v| !v.is_null()) {
+        return Some("Done");
+    }
+    let status = e.get("_status").and_then(|v| v.as_str()).unwrap_or("ready");
+    if matches!(status, "deferred" | "superseded") {
+        return None; // off-board until reactivated
+    }
+    if claimed || underway {
+        return Some("Now");
+    }
+    // Queued is orthogonal to `_status`: a node awaiting human ack is not active
+    // work, so it must not inflate Now - but a claimed node stays in Now.
+    if e.get("queued_at").is_some_and(|v| !v.is_null()) {
+        return Some("Triage");
+    }
+    match e.get("priority").and_then(|v| v.as_str()).unwrap_or("p2") {
+        "p0" | "p1" => Some("Now"),
+        "p3" => Some("Later"),
+        _ => Some("Next"),
+    }
+}
+
+/// Parent ids whose work is underway: an epic with a done or claimed child.
+/// Mirrors `in_progress_epic_ids` in `graph/render.py` - sessions claim an epic's
+/// leaf CHILDREN, never the container, so an in-progress epic carries no claim of
+/// its own and would otherwise sit in its priority column.
+fn in_progress_epics(entries: &[serde_json::Value]) -> HashSet<&str> {
+    let mut underway = HashSet::new();
+    for e in entries {
+        let Some(parent) = e.get("parent").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let done = e.get("completed_at").is_some_and(|v| !v.is_null())
+            || e.get("_status").and_then(|v| v.as_str()) == Some("claimed");
+        if done {
+            underway.insert(parent);
+        }
+    }
+    underway
+}
 
 impl Queue {
     /// Every queue card the graph held, cap included.
@@ -96,14 +154,20 @@ impl Queue {
     }
 }
 
-/// [`derive_cards`] plus the uncapped total. The single derivation; `derive_cards`
-/// is the cards-only view of it.
-pub fn derive_queue(raw: &str) -> Option<Queue> {
+/// [`derive_cards`] plus the uncapped lane counts. The single derivation;
+/// `derive_cards` is the cards-only view of it.
+///
+/// `live` is the claim sweep's node-id -> holder map (x-54fa). It is folded in
+/// HERE, not applied to the finished card list, so a claim reaches the lane
+/// counts too - those are computed over every queue node, and a card past the
+/// render cap would otherwise be counted in the wrong lane.
+pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option<Queue> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let entries = doc
         .get("entries")
         .or_else(|| doc.get("nodes"))?
         .as_array()?;
+    let underway = in_progress_epics(entries);
 
     // (project, is_unscoped, rank, prio, created_at, card) - the tuple carries
     // the sort keys so the comparator never re-reads the JSON.
@@ -130,14 +194,11 @@ pub fn derive_queue(raw: &str) -> Option<Queue> {
         let unscoped = project.is_none();
         let rank = e.get("rank").and_then(|v| v.as_f64());
         let created = e.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        // The board's column authority (x-1d91): the lane half of the row's
-        // attribution and the mini-kanban's grouping key. Rank never moves it.
-        let lane = e
-            .get("_kanban_column")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string);
+        // The board's column authority (x-1d91). DERIVED, never read: no node
+        // carries a column field - `_kanban_column` is a function of intent in
+        // `graph/render.py`, and this mirrors it.
+        let claimed = status == "claimed" || live.is_some_and(|l| l.contains_key(id));
+        let lane = kanban_column(e, claimed, underway.contains(id)).map(str::to_string);
         rows.push((
             project.unwrap_or("").to_string(),
             unscoped,
@@ -148,7 +209,10 @@ pub fn derive_queue(raw: &str) -> Option<Queue> {
                 id: id.to_string(),
                 slug: slug.to_string(),
                 priority: priority.to_string(),
-                state,
+                // A live lockfile claim marks a node in flight even when its
+                // graph `_status` never says so (x-54fa / x-4845): the claim is
+                // the fact, the status is a report.
+                state: if claimed { CardState::InFlight } else { state },
                 // Routes are a publish-time server join (panes/registry),
                 // not graph state - the reader always derives them empty.
                 pane_id: None,
@@ -199,10 +263,10 @@ pub fn derive_queue(raw: &str) -> Option<Queue> {
 }
 
 /// Mark the on-deck card: the first Ready card in board order, which is the pick
-/// `fno backlog next` makes. Applied AFTER the claims overlay too, so a claimed
+/// `fno backlog next` makes. Runs after the live-claim fold, so a claimed
 /// head-of-queue card hands the marker to the next genuinely-ready one rather
 /// than leaving the section pointing at work already in flight.
-pub fn mark_next(cards: &mut [BacklogCard]) {
+fn mark_next(cards: &mut [BacklogCard]) {
     let mut seen = false;
     for c in cards.iter_mut() {
         c.next = !seen && c.state == CardState::Ready;
@@ -436,19 +500,6 @@ pub fn live_claims_from_sweep(stdout: &str) -> Option<HashMap<String, String>> {
     Some(live)
 }
 
-/// Overlay live lockfile claims onto graph-derived cards (x-54fa): a card
-/// whose id holds a live `node:`/`dispatch:` claim renders InFlight,
-/// overriding Ready AND Blocked (a claimed node with a stale `blocked_by` is
-/// in-flight — this module's documented stance). Pure; ids not in the card
-/// set are ignored (no phantom cards), ids join by node id only.
-pub fn overlay_claims(cards: &mut [BacklogCard], live: &HashMap<String, String>) {
-    for c in cards.iter_mut() {
-        if live.contains_key(&c.id) {
-            c.state = CardState::InFlight;
-        }
-    }
-}
-
 /// The reader's between-tick memory (mtime-gated document cache + last-sent
 /// cards), mirroring [`crate::agents_view::ReaderState`]. The interval task
 /// lives in server.rs (it owns the `CoreMsg` sender); this keeps the derivation
@@ -534,19 +585,16 @@ impl ReaderState {
                 self.read_failures = 0; // a committed stamp means the read landed
             }
         }
+        // Re-derived every tick (not only on a fresh read) so a claim
+        // appearing/releasing reaches the cards, their lanes, AND the lane counts
+        // even when the graph file itself never changed.
         let mut queue = match &self.cached_raw {
-            Some(raw) => derive_queue(raw)
+            Some(raw) => derive_queue(raw, live)
                 .or_else(|| self.last_sent.clone())
                 .unwrap_or_default(),
             None => Queue::default(),
         };
         queue.stale = self.read_failures >= STALE_AFTER_FAILED_READS;
-        if let Some(live) = live {
-            overlay_claims(&mut queue.cards, live);
-            // The overlay can flip the on-deck card to InFlight, so re-mark:
-            // on-deck must name work that is actually still up for grabs.
-            mark_next(&mut queue.cards);
-        }
         // A holder-only change (same cards, new/different claim holder) also
         // republishes: the holders map travels with the cards and feeds the
         // publish-time `where_hint` join. `live: None` (no sweep yet, or a
@@ -678,19 +726,79 @@ mod tests {
     // ---- attribution, on-deck, and the uncapped total (x-1d91) -------------
 
     #[test]
-    fn attribution_reads_project_and_kanban_column() {
-        // The lane is `_kanban_column` (the board's sole column authority), and
-        // a blank/absent value is None rather than an empty label.
+    fn attribution_derives_the_column_it_never_reads() {
+        // No graph node carries a column field - the lane is `_kanban_column`'s
+        // intent mapping, computed here to match `graph/render.py`. Getting this
+        // wrong renders every attribution blank, so pin the mapping.
         let raw = graph(
-            r#"{"id":"x-a","slug":"a","priority":"p1","_status":"ready","project":"fno","_kanban_column":"ready"},
-               {"id":"x-b","slug":"b","priority":"p2","_status":"ready","_kanban_column":"  "}"#,
+            r#"{"id":"x-now","slug":"n","priority":"p1","_status":"ready","project":"fno"},
+               {"id":"x-next","slug":"x","priority":"p2","_status":"ready"},
+               {"id":"x-later","slug":"l","priority":"p3","_status":"ready"},
+               {"id":"x-tri","slug":"t","priority":"p2","_status":"ready","queued_at":"2026-07-19T00:00:00Z"},
+               {"id":"x-held","slug":"h","priority":"p2","_status":"claimed"}"#,
         );
         let cards = derive_cards(&raw).unwrap();
-        let by = |id: &str| cards.iter().find(|c| c.id == id).unwrap();
-        assert_eq!(by("x-a").project.as_deref(), Some("fno"));
-        assert_eq!(by("x-a").lane.as_deref(), Some("ready"));
-        assert_eq!(by("x-b").project, None, "unscoped -> no project half");
-        assert_eq!(by("x-b").lane, None, "whitespace column -> no lane half");
+        let lane = |id: &str| {
+            cards
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .lane
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(lane("x-now"), "Now", "p0/p1 is today-ish");
+        assert_eq!(lane("x-next"), "Next");
+        assert_eq!(lane("x-later"), "Later");
+        assert_eq!(
+            lane("x-tri"),
+            "Triage",
+            "queued awaits ack, never inflates Now"
+        );
+        assert_eq!(lane("x-held"), "Now", "a claimed node is underway");
+        // The project half is the node's own, absent when unscoped.
+        let project = |id: &str| cards.iter().find(|c| c.id == id).unwrap().project.clone();
+        assert_eq!(project("x-now").as_deref(), Some("fno"));
+        assert_eq!(project("x-next"), None);
+    }
+
+    #[test]
+    fn a_live_claim_moves_the_node_to_now_and_takes_its_count_with_it() {
+        // x-4845: a node another session drives holds a live lockfile but may
+        // never write a graph status. Folding the claim into the DERIVATION (not
+        // onto the finished card list) is what keeps the lane counts honest - a
+        // card past the render cap would otherwise be counted in the wrong lane.
+        let raw = graph(
+            r#"{"id":"x-a","slug":"a","priority":"p3","_status":"ready"},
+               {"id":"x-b","slug":"b","priority":"p3","_status":"ready"}"#,
+        );
+        let cold = derive_queue(&raw, None).unwrap();
+        assert_eq!(cold.lanes, vec![("Later".to_string(), 2)]);
+        let hot = derive_queue(&raw, Some(&live(&[("x-a", "target-session:abc")]))).unwrap();
+        assert_eq!(
+            hot.lanes,
+            vec![("Later".to_string(), 1), ("Now".to_string(), 1)],
+            "the claimed node moves lanes, count and all"
+        );
+        assert_eq!(hot.cards[0].state, CardState::InFlight);
+    }
+
+    #[test]
+    fn an_epic_with_a_claimed_child_is_underway() {
+        // Sessions claim an epic's leaf CHILDREN, never the container, so an
+        // in-progress epic carries no claim of its own and would otherwise sit in
+        // its priority column (mirrors in_progress_epic_ids).
+        let raw = graph(
+            r#"{"id":"x-epic","slug":"e","type":"epic","priority":"p3","_status":"ready"},
+               {"id":"x-kid","slug":"k","priority":"p2","_status":"claimed","parent":"x-epic"}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let epic = cards.iter().find(|c| c.id == "x-epic").unwrap();
+        assert_eq!(
+            epic.lane.as_deref(),
+            Some("Now"),
+            "a p3 epic with a claimed child is underway, not long-tail"
+        );
     }
 
     #[test]
@@ -739,7 +847,7 @@ mod tests {
         let nodes: Vec<String> = (0..CARD_CAP + 7)
             .map(|i| format!(r#"{{"id":"x-{i}","slug":"s{i}","priority":"p2","_status":"ready"}}"#))
             .collect();
-        let q = derive_queue(&graph(&nodes.join(","))).unwrap();
+        let q = derive_queue(&graph(&nodes.join(",")), None).unwrap();
         assert_eq!(q.cards.len(), CARD_CAP, "the wire frame stays bounded");
         assert_eq!(q.total(), CARD_CAP + 7, "but the count is the whole board");
     }
@@ -830,15 +938,16 @@ mod tests {
                {"id":"x-blk","slug":"b","priority":"p2","_status":"blocked","blocked_by":["x-rdy"]},
                {"id":"x-free","slug":"f","priority":"p2","_status":"ready"}"#,
         );
-        let mut cards = derive_cards(&raw).unwrap();
-        overlay_claims(
-            &mut cards,
-            &live(&[
+        let cards = derive_queue(
+            &raw,
+            Some(&live(&[
                 ("x-rdy", "target-session:abc"),
                 ("x-blk", "dispatch-node:1"),
                 ("x-ghost", "nobody"),
-            ]),
-        );
+            ])),
+        )
+        .unwrap()
+        .cards;
         let by_id = |id: &str| cards.iter().find(|c| c.id == id).unwrap().state;
         assert_eq!(by_id("x-rdy"), CardState::InFlight);
         assert_eq!(by_id("x-blk"), CardState::InFlight);
