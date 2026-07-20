@@ -853,7 +853,7 @@ def _name_lane_send(
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import write_new_thread
-    from fno.mail.envelope import wrap_fno_mail
+    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     if resolved is not None:
         recipient = canonical_handle(resolved.agent, resolved.session_id)
@@ -864,7 +864,12 @@ def _name_lane_send(
     wrapped = wrap_fno_mail(
         message,
         from_=stamp_from(from_name),
-        harness=infer_invoking_harness() or "cli",
+        # Through harness_for_provider like every other send path: the wire
+        # vocabulary is claude-code, and stamping a raw "claude" here made the
+        # name lane the one producer disagreeing with dispatch, the relay, and
+        # the Rust contract. "cli" survives as the honest no-harness value -
+        # harness_for_provider would guess claude-code for an unknown provider.
+        harness=harness_for_provider(h) if (h := infer_invoking_harness()) else "cli",
         model=resolve_self_model(),
         to=recipient,
         reply_to=reply_to,

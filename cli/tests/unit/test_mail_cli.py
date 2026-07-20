@@ -701,6 +701,13 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
     assert 'from="abcd1234"' in body
     assert 'model="claude-opus-4-8"' in body
+    # Pinned to the shared mapper, not spelled literally: the name lane once
+    # stamped a raw "claude" here while dispatch, the relay, and the Rust
+    # contract all said "claude-code", and no test noticed.
+    from fno.mail.envelope import harness_for_provider
+
+    assert f'harness="{harness_for_provider("claude")}"' in body
+    assert 'harness="claude-code"' in body
 
 
 # ---------------------------------------------------------------------------
