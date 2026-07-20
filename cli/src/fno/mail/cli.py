@@ -864,6 +864,65 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
     print(msg, file=sys.stderr)
 
 
+class AmbiguousTokenError(Exception):
+    """A token matched two stored sessions. Never guess which one to wake."""
+
+    def __init__(self, candidates: list[str]) -> None:
+        super().__init__("ambiguous session token")
+        self.candidates = candidates
+
+
+class UnreachableTokenError(Exception):
+    """Every rung missed AND no durable store knows the token.
+
+    Distinct from a failed delivery: a failed delivery still has a real
+    recipient and earns a durable copy, while this is a token that names
+    nothing at all -- almost always a typo. Queuing for it would strand an
+    envelope nobody will ever drain, so it exits 16 having sent nothing.
+    """
+
+
+def _is_self_send(recipient: Optional[str]) -> bool:
+    """True when the sender is addressing its own session."""
+    own = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if not own or not recipient:
+        return False
+    from fno.harness_identity import canonical_handle
+
+    return canonical_handle(own) == recipient
+
+
+def _wake_rung(token: str, wrapped: str) -> tuple[bool, Optional[str], Optional[str]]:
+    """Resolve ``token`` against the durable stores and wake it if it is asleep.
+
+    Returns ``(delivered, revived_short_id, lane_note)``. A miss on every store
+    leaves the caller to demote; an ambiguous token raises rather than picking,
+    because guessing between two sessions that share a short id means waking a
+    stranger's session.
+    """
+    from fno.agents import discover as discover_mod
+    from fno.agents.dispatch import _mail_inject_claude, wake_and_deliver
+
+    reachable, ambiguous = discover_mod.resolve_reachable(token)
+    if ambiguous:
+        raise AmbiguousTokenError(ambiguous)
+    if reachable is None:
+        raise UnreachableTokenError(token)
+
+    delivered, detail = wake_and_deliver(reachable.session_id, wrapped)
+    if delivered:
+        return True, detail, None
+
+    # The asleep->live race: the session woke up on its own between the probe
+    # and the wake, so the wake correctly refused rather than opening a second
+    # writer. Retry the socket ONCE -- it is now the right lane.
+    if detail in ("writer-possibly-live", "wake-already-in-flight"):
+        if _mail_inject_claude(reachable.session_id, wrapped):
+            return True, None, None
+
+    return False, None, f"wake={detail}"
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -872,6 +931,7 @@ def _name_lane_send(
     recipient: Optional[str] = None,
     provider: Optional[str] = None,
     reply_to: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply``. When ``resolved`` (a live ``DiscoveredSession``) is set:
@@ -891,6 +951,12 @@ def _name_lane_send(
     if resolved is not None:
         recipient = canonical_handle(resolved.session_id)
         provider = resolved.agent
+    elif token is not None:
+        # Address the canonical handle up front, before any lane runs: it is
+        # what the recipient's own drain-self reads, so the durable copy stays
+        # drainable no matter which rung ends up demoting.
+        recipient = canonical_handle(token)
+        provider = provider or "claude"
 
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
     # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
@@ -909,6 +975,30 @@ def _name_lane_send(
     )
 
     injected = False
+    woken_as: Optional[str] = None
+    lanes: list[str] = []
+
+    if resolved is None and token is not None:
+        # The ladder below the discovery miss. Discovery is a liveness-gated
+        # LISTING, so a miss means "not listed", never "not reachable" -- and
+        # demoting here without attempting a live rung is the wall this whole
+        # node exists to remove.
+        if _is_self_send(recipient):
+            # A session can neither inject into nor wake itself; attempting it
+            # deadlocks a live session and revives a second writer on an asleep
+            # one. Durable is the only honest lane.
+            lanes.append("self-send")
+        else:
+            # Rung 3: inject-as-probe. The socket is its own source of truth --
+            # a confirmed delivery IS the receipt, so no roster query is needed
+            # and a miss costs one cheap, side-effect-free call.
+            injected = _mail_inject_claude(token, wrapped)
+            if not injected:
+                lanes.append("inject=not-delivered")
+                injected, woken_as, wake_lane = _wake_rung(token, wrapped)
+                if wake_lane:
+                    lanes.append(wake_lane)
+
     if resolved is not None:
         if provider == "claude":
             injected = _mail_inject_claude(resolved.session_id, wrapped)
@@ -933,9 +1023,18 @@ def _name_lane_send(
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
+    if injected and woken_as:
+        print(f"delivered (woken) to {recipient}{corr} [revived as bg thread {woken_as}]")
+        return
     if injected:
         print(f"delivered (hosted) to {recipient}{live}{corr}")
         return
+
+    # Every live rung that applied has now been attempted and missed. Durable is
+    # a demotion, so the receipt names WHY each lane failed -- a delivery bug has
+    # to be diagnosable from the sender's own terminal, without a daemon log.
+    if lanes:
+        print(f"lanes tried: {', '.join(lanes)}", file=sys.stderr)
 
     try:
         th = write_new_thread(
@@ -1286,16 +1385,46 @@ def cmd_send(
             _name_lane_send(message, from_name=from_name, resolved=resolved)
             return
 
-        # AC2-ERR: not a registered agent, not a discovered handle. Error with
-        # the closest live-session handles, sending nothing.
-        hint = ""
-        if suggestions:
-            hint = f" Closest live sessions: {', '.join(suggestions)}."
-        print(
-            f"unknown agent or live-session handle: {name!r}.{hint}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=exc.exit_code) from exc
+        # A caller-TYPED retired <harness>-<short8> address is refused outright,
+        # before any lane runs. Nothing mints that form any more, so a typed one
+        # is a caller bug worth surfacing rather than silently translating. (A
+        # retired form READ off a stored record is the opposite case: a data
+        # artifact, migrated and delivered. Caller-error vs data-artifact is the
+        # discriminator, and the two directions must never blur.)
+        from fno.harness_identity import LEGACY_HANDLE_RE
+
+        if LEGACY_HANDLE_RE.fullmatch(name or ""):
+            hint = f" Use the bare id instead: {', '.join(suggestions)}." if suggestions else ""
+            print(f"retired handle form: {name!r}.{hint}", file=sys.stderr)
+            raise typer.Exit(code=exc.exit_code) from exc
+
+        # Discovery missed -- but discovery is a liveness-gated LISTING, so this
+        # means "not listed", NOT "not reachable". Fall INTO the shared choke
+        # point carrying the raw token so the socket and the disk stores each
+        # get their turn. Exit 16 now lives at the BOTTOM of that ladder, where
+        # matrix cell 5 (resolves nowhere) actually belongs, instead of here
+        # where it used to pre-empt every live rung.
+        try:
+            _name_lane_send(message, from_name=from_name, resolved=None, token=name)
+        except AmbiguousTokenError as amb:
+            print(
+                f"ambiguous session token {name!r}: matches "
+                f"{', '.join(amb.candidates)}. Send to a full session id.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from amb
+        except UnreachableTokenError:
+            # AC2-ERR: not a registered agent, not discoverable, and no durable
+            # store knows it. Error with the closest live handles, sending nothing.
+            hint = ""
+            if suggestions:
+                hint = f" Closest live sessions: {', '.join(suggestions)}."
+            print(
+                f"unknown agent or live-session handle: {name!r}.{hint}",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=exc.exit_code) from exc
+        return
 
     # AC3-UI: distinguish delivered vs queued on stdout.
     if result.delivery == "hosted":
