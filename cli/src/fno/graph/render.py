@@ -88,7 +88,7 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
             children_by_parent.setdefault(pid, []).append(e)
     return frozenset(
         pid for pid, kids in children_by_parent.items()
-        if any(k.get("completed_at") or k.get("_status") == "claimed" for k in kids)
+        if any(k.get("completed_at") or k.get("_status") == "in_progress" for k in kids)
     )
 
 
@@ -122,7 +122,7 @@ def _kanban_column(
     status = entry.get("_status", "ready")
     if status in ("deferred", "superseded"):
         return None
-    if status == "claimed":
+    if status == "in_progress":
         return "Now"
     # In-progress epic (x-33b2): a container with a done/claimed child has no
     # claim of its own (sessions claim the children) but is genuinely underway,
@@ -132,7 +132,7 @@ def _kanban_column(
         return "Now"
     # Live-claim overlay (x-4845): a node another session is actively driving
     # holds a LIVE `node:<id>` lockfile but may never write a graph session_id,
-    # so its `_status` is not "claimed" and it would otherwise route by bare
+    # so its `_status` is not "in_progress" and it would otherwise route by bare
     # priority. Surface it in Now off the lockfile truth. Display-only — the
     # graph `_status` is never mutated (x-33b2: claimed => session_id stays a
     # pure derivation). Additive: placed below the exclusions so a dead/off-board

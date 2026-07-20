@@ -14,7 +14,7 @@ from typing import Any
 # Derived `_status` buckets. Everything not named here (ready/idea/deferred/
 # superseded) counts toward the total only.
 _DONE = "done"
-_IN_FLIGHT = frozenset({"claimed", "in_review"})
+_IN_FLIGHT = frozenset({"in_progress", "claimed", "in_review"})  # claimed = pre-x-5d91
 _BLOCKED = "blocked"
 
 ROLLUP_KEYS: tuple[str, ...] = (

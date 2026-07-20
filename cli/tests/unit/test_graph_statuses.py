@@ -99,7 +99,7 @@ def test_ac1_hp_recompute_claimed():
     now = datetime.now(timezone.utc).isoformat()
     entries = [_entry("ab-gggggggg", session_id="sess-active", claimed_at=now)]
     result = recompute_statuses(entries)
-    assert result[0]["_status"] == "claimed"
+    assert result[0]["_status"] == "in_progress"
 
 
 def test_ac1_hp_recompute_stale_lock_cleared():
@@ -159,7 +159,7 @@ def test_ac4_edge_idea_overridden_by_claimed():
         claimed_at=now,
     )
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "claimed"
+    assert result[0]["_status"] == "in_progress"
 
 
 def test_ac4_edge_idea_overridden_by_blocked():

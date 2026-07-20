@@ -338,18 +338,15 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
         return True
     if entry.get("locked_by") or entry.get("claimed_at"):
         return True
-    plan_path = entry.get("plan_path")
-    if plan_path and isinstance(plan_path, str):
-        # Resolve the freshness probe the way the node itself would: strip a
-        # `#anchor` fragment and resolve a repo-relative path against the node's
-        # own `cwd` (not this command's), so a recently-edited plan is not
-        # mis-read as unmoved. A directory plan_path still probes the dir mtime -
-        # a documented gap (folder plans are rare; the outcome is reversible).
-        probe = plan_path.split("#", 1)[0]
-        if probe and not os.path.isabs(probe):
-            cwd = entry.get("cwd")
-            if isinstance(cwd, str) and cwd:
-                probe = os.path.join(cwd, probe)
+    # Resolve the freshness probe the way the node itself would (fragment
+    # stripped, `~` expanded, relative resolved against the node's own `cwd`,
+    # not this command's) so a recently-edited plan is not mis-read as unmoved.
+    # A directory plan_path still probes the dir mtime - a documented gap
+    # (folder plans are rare; the outcome is reversible).
+    from fno.graph.ladder import resolve_plan_probe
+
+    probe = resolve_plan_probe(entry)
+    if probe:
         try:
             mtime = os.path.getmtime(probe)
             age_days = (now - datetime.fromtimestamp(mtime, tz=timezone.utc)).days
@@ -381,11 +378,22 @@ def is_stale_ready(entry: dict, now: datetime, staleness_days: int) -> bool:
       never starve live work; the untimestamped abandoned node is instead left
       for a human via the propose-only maintain leg + triage pile.
 
+    A design-stage node is likewise never stale: it is gated by being pre-ready,
+    not abandoned, so it accrues none of the movement signals autonomous
+    dispatch used to supply and would otherwise be quarantined for sitting
+    exactly where it belongs. Lives in the predicate rather than in
+    ``detect_stale_ready`` so every caller inherits it - the detector, the
+    selection guard, and the under-lock recheck in ``maintain --apply``.
+
     Caller guarantees the entry is ready-status; this does not re-check
     ``_status`` so it stays reusable by the selection guard AND the maintain leg.
     """
+    from fno.graph.ladder import is_design_stage
+
     if entry.get("blocked_by"):
         return False  # was gated by a dependency, not abandoned
+    if is_design_stage(entry):
+        return False  # gated by being pre-ready, not abandoned
     if node_has_movement(entry, now, staleness_days):
         return False
     created = _parse_ts(entry.get("created_at"))

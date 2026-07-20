@@ -648,6 +648,19 @@ Save to the path printed by `fno plan path --slug "<feature-slug>" [--node "<nod
 - **Node-seeded** (`/think <node-id>`): pass `--node` - the canonical node id is the filename suffix so a roadmap base keyed on the node id can find the doc (`/think x-8af8` → `…-x-8af8.md`; the configured prefix/width is preserved verbatim, never re-prefixed). First **reuse if claimed**: if a plans-dir file already carries this node in its frontmatter (`claims:`/`graph_node_id:`) or already ends `-<node-id>.md`, finalize INTO that file instead of minting a second one (a pre-created roadmap stub is the doc's home; a re-dispatch after a slug edit reuses the same doc). An empty slug degrades cleanly (the verb collapses the dangling separator), never a `--<node-id>.md`.
 - **Raw prose** (no node): omit `--node` for the id-less name. If `/blueprint` later intakes it and assigns a node id, its step 3b-bis renames the artifact to carry the id and repoints `plan_path` - so the final invariant (id in both filename and `plan_path`) is reached either way.
 
+**Link the doc to its node (node-seeded only).** After the file is written, point the backlog node at it so the design is visible from the board and `/blueprint <node>` can find it without being handed a path:
+
+```bash
+# Node-seeded runs only. Raw prose has no node yet - /blueprint intakes it later.
+[[ -n "$NODE_ID" ]] && fno backlog update "$NODE_ID" --plan-path "$DOC_PATH"
+```
+
+This is safe, and only became safe with the `design` rung (x-5d91). The node now derives `design` - visible but NOT autonomously dispatchable - because this doc's frontmatter says `status: design`. Before that rung existed, linking a design doc flipped the node to `ready` and the dispatcher claimed it within ~a minute, which is why the old advice was to leave plans unlinked until blueprint. That workaround is retired: link freely.
+
+Two invariants make it hold, so do not "simplify" either away:
+- **The doc must carry `status: design`** in its frontmatter (it does - stamped with the other keys below). The probe demotes only on that positive evidence, so a doc with no status key, or one stamped `ready`, would ARM the node instead of parking it.
+- **Autonomous selection is gated on the rung, not on `plan_path`.** `next` / `--all-ready` / converge / lane-fill / the daemon drain all skip `design`. An explicitly-named node still dispatches from any rung (naming is the consent), and `/target` runs `/blueprint` first when it lands on `design`.
+
 Stamp the resolved type into the doc's frontmatter as `deliverable_type: feature | bug | investigation | epic` (Step 1f).
 An **epic** additionally stamps `scope: epic` - that second key is `/blueprint`'s auto-group trigger; without it an epic silently collapses into the single-PR lean mutation, shipping a multi-wave epic as one PR.
 Stamp both keys on every epic doc.

@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field, computed_field, field_validator, model_va
 
 class Status(str, Enum):
     ready = "ready"
-    claimed = "claimed"
+    design = "design"
+    in_progress = "in_progress"
     blocked = "blocked"
     done = "done"
     superseded = "superseded"  # Fix 2: added to match _derive_status bare-string return
@@ -69,9 +70,13 @@ def _derive_status(data: dict) -> str:
     # locked_by-first; tolerate a raw pre-rename dict passed straight in (not via
     # the store normalize) that still carries only the legacy session_id.
     if data.get("locked_by") or data.get("session_id"):
-        return "claimed"
+        return "in_progress"
     if not data.get("plan_path"):
         return "idea"
+    from fno.graph.ladder import is_design_stage
+
+    if is_design_stage(data):
+        return "design"
     return "ready"
 
 
@@ -236,12 +241,12 @@ class Entry(BaseModel):
         if persisted != computed:
             # Fix 1 (Locked Decision #2): suppress the known single-entry-vs-cascade
             # approximation gap. recompute_statuses resolves nodes whose blocked_by
-            # siblings are all completed to "ready"/"claimed" and writes that to disk.
+            # siblings are all completed to "ready"/"in_progress" and writes that to disk.
             # On reload, _derive_status still sees a non-empty blocked_by list and
             # returns "blocked" -- a single-entry approximation, not a real drift.
             # Emitting graph_status_drift here would be a false positive; the cascade
             # in recompute_statuses is authoritative for that case.
-            if computed == "blocked" and persisted in {"ready", "claimed", "idea"}:
+            if computed == "blocked" and persisted in {"ready", "design", "in_progress", "idea"}:
                 return data
 
             try:
@@ -280,8 +285,9 @@ class Entry(BaseModel):
               (single-entry cannot verify sibling completed_at -- just
                a non-empty list is the best approximation here;
                cascade-wide open-blocker check stays in recompute_statuses)
-          locked_by set       -> "claimed"
+          locked_by set       -> "in_progress"
           no plan_path        -> "idea"
+          plan says design    -> "design"
           else                -> "ready"
         """
         return _derive_status({
@@ -294,4 +300,6 @@ class Entry(BaseModel):
             # this Entry was built from a pre-rename node not yet normalized.
             "locked_by": self.locked_by or self.session_id,
             "plan_path": self.plan_path,
+            # Needed to resolve a repo-relative plan_path for the design probe.
+            "cwd": self.cwd,
         })

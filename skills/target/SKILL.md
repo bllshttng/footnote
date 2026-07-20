@@ -36,6 +36,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 
 - **only if** you are already inside a worktree (an attended `/target` in a linked worktree): `fno target start` is a no-op there ("already isolated; nothing created") - run `fno target init --input <node>` (add `--plan-path <path>` for a plan) instead. `start` is the cold-start-from-canonical verb; `init` is what writes the manifest, claims the node, and prints the orienter.
 - **only if** you were handed a bare idea (no plan): run `/think` then `/blueprint` before implementing.
+- **only if** the node's rung is `design` (a plan IS bound, but its frontmatter still reads `status: design` - a `/think` doc that was never blueprinted): run `/blueprint <plan_path>` FIRST, then implement. A bound `plan_path` alone does NOT mean the plan is executable: `/blueprint` is what appends the Execution Strategy and flips the doc to `ready`. Skipping it here builds off a design doc that has no execution plan. Autonomous selection never hands you this rung (it is gated); you only reach it when a human named the node explicitly, which IS the consent to carry it the rest of the way.
 - **only if** `$TARGET_BRIEF` is set in the environment (a dispatcher passed a per-node brief via `dispatch_brief`, US3): read it as extra mission context - the scope/"why" the dispatcher wanted this worker to carry. It is plain text (capped at 8 KB) and travels via env, never the command line; treat it as guidance for this node, not as a command to execute.
 - **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
 - **only if** dispatching nodes fire-and-forget: [§0a Background Dispatch](#0a-background-dispatch-bg).
@@ -167,7 +168,7 @@ See [references/usage-detail.md](references/usage-detail.md) for model-optimizat
 
 **Phase applicability is judgment, not a gate.** Every phase above is available; run the ones the work needs. User skip flags (CLI) and project config (`.fno/config.toml`) still force-skip. Otherwise judge by what the change is:
 
-- **/think + /blueprint**: only if you started from a bare idea. A bound node or plan skips straight to implement.
+- **/think + /blueprint**: only if you started from a bare idea, OR the bound plan is still design-stage (then `/blueprint` alone - the thinking is already done). A blueprint-complete plan skips straight to implement.
 - **/do waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
 - **/simplify (clean)**: only with the `clean` modifier, or on AI-slop-prone new code.
 - **/review**: run it; it is cheap insurance. For a tiny prose/config change a light self-review is enough.

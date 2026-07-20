@@ -183,7 +183,7 @@ def test_tier3_forward_only(tmp_path: Path):
     """A node that regressed never rewrites a plan backward."""
     p = tmp_path / "a.md"
     p.write_text(_linked_plan("shipped"))
-    res = sweep(tmp_path, apply=True, status_map={"x-1": "claimed"})
+    res = sweep(tmp_path, apply=True, status_map={"x-1": "in_progress"})
     assert res.skipped == 1
     assert "status: shipped" in p.read_text()
 

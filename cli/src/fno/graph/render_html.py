@@ -239,9 +239,9 @@ def _card_flags(entry: dict) -> list[tuple[str, str]]:
     """
     flags: list[tuple[str, str]] = []
     status = entry.get("_status") or "ready"
-    if status == "claimed":
+    if status == "in_progress":
         flags.append(("flag-claimed", "in session"))
-    if entry.get("queued_at") and status not in ("done", "claimed"):
+    if entry.get("queued_at") and status not in ("done", "in_progress"):
         flags.append(("flag-queued", "queued"))
     if status == "blocked":
         open_blockers = [b for b in (entry.get("blocked_by") or []) if isinstance(b, str)]

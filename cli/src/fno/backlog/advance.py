@@ -194,6 +194,14 @@ def selection_guards(
         here; the reversible defer is owned by ``maintain --apply`` (guards
         never mutate the graph as a selection side effect - epic LD1/LD2).
 
+      design-stage: the linked plan is still a design doc (frontmatter
+        ``status: design``), so the node is planned but not blueprinted ->
+        ``design-stage``. Only AUTONOMOUS selection routes through this
+        function; an explicitly-named node dispatches from any rung, naming
+        being the consent (epic LD8). This is what retires the
+        keep-plans-unlinked workaround: linking a design doc now lands a
+        visible-but-unarmed node instead of arming dispatch.
+
     Fail-open (epic Errors): any read failure returns None and emits one loud
     stderr line - the daemon staying alive and dispatching outranks guard
     completeness. A guard that silently swallowed its own bug would starve the
@@ -227,9 +235,19 @@ def selection_guards(
             steps += 1
 
         from fno.graph import maintain as _maintain
+        from fno.graph.ladder import is_design_stage
 
         if now is None:
             now = datetime.now(timezone.utc)
+
+        # BEFORE the stale check: a design node is unarmed by design, so it
+        # accrues none of the movement signals (sessions, pr_number, claims)
+        # that dispatch used to supply, and would age into `stale-quarantine` -
+        # reporting the wrong reason and letting `maintain --apply` auto-defer
+        # a perfectly healthy design doc off the board.
+        if entry.get("_status") == "ready" and is_design_stage(entry):
+            return "design-stage"
+
         if entry.get("_status") == "ready" and _maintain.is_stale_ready(
             entry, now, staleness_days
         ):

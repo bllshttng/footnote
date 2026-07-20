@@ -26,6 +26,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -796,7 +797,41 @@ def mutate(
     except OSError as exc:
         return 3, f"Atomic write failed: {exc}"
 
+    _sync_graph_status(new_fm.get("node"), resolved)
+
     return 0, proposed_doc
+
+
+def _sync_graph_status(node_id: object, plan_path: Path) -> None:
+    """Re-derive the node's graph ``_status`` now that the doc is blueprinted.
+
+    The graph derives `_status` FROM this doc, but ``read_graph`` does not
+    recompute - only a graph mutation does. Without this, a node the doc just
+    moved design -> ready keeps reading `design` on every board until something
+    unrelated happens to touch the graph. Re-asserting ``plan_path`` is the
+    mutation that triggers the recompute, and it doubles as a self-heal for a
+    path the node-id rename step moved.
+
+    Best-effort by design: the doc is already durably written, so a missing CLI
+    or a failed call warns and never fails the blueprint.
+    """
+    if not isinstance(node_id, str) or not node_id.strip():
+        return  # unbound design doc - nothing on the graph to sync yet
+    if shutil.which("fno") is None:
+        return
+    try:
+        proc = subprocess.run(
+            ["fno", "backlog", "update", node_id.strip(),
+             "--plan-path", str(plan_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            sys.stderr.write(
+                f"Warning: graph status refresh failed for {node_id}: "
+                f"{proc.stderr.strip()[:200]}\n"
+            )
+    except Exception as exc:  # noqa: BLE001 - never fail a written doc
+        sys.stderr.write(f"Warning: graph status refresh failed for {node_id}: {exc}\n")
 
 
 # ---------------------------------------------------------------------------

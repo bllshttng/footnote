@@ -1733,6 +1733,48 @@ def test_selection_guards_fail_open_on_error(monkeypatch, capsys):
     assert "selecting anyway" in capsys.readouterr().err
 
 
+def _design_plan(tmp_path, status="design"):
+    p = tmp_path / "plan.md"
+    p.write_text(f"---\nstatus: {status}\n---\n\n# Doc\n")
+    return str(p)
+
+
+def test_selection_guards_design_stage_not_autonomously_selected(tmp_path):
+    # A linked design doc is planned, not blueprinted: visible but not armed.
+    now = _gnow()
+    node = {
+        "id": "c",
+        "_status": "ready",
+        "plan_path": _design_plan(tmp_path),
+        "created_at": now.isoformat(),
+    }
+    assert adv.selection_guards(node, {"c": node}, now) == "design-stage"
+
+
+def test_selection_guards_blueprinted_plan_is_armed(tmp_path):
+    now = _gnow()
+    node = {
+        "id": "c",
+        "_status": "ready",
+        "plan_path": _design_plan(tmp_path, status="ready"),
+        "created_at": now.isoformat(),
+    }
+    assert adv.selection_guards(node, {"c": node}, now) is None
+
+
+def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
+    # Fail OPEN: plans live in a symlinked vault, so an unreadable plan must
+    # never quarantine the node (an unmounted vault would starve the backlog).
+    now = _gnow()
+    node = {
+        "id": "c",
+        "_status": "ready",
+        "plan_path": str(tmp_path / "gone.md"),
+        "created_at": now.isoformat(),
+    }
+    assert adv.selection_guards(node, {"c": node}, now) is None
+
+
 def test_selection_guards_dead_ancestor_via_field_not_status():
     # Robust to read_graph NOT recomputing _status: an ancestor carrying only
     # the underlying superseded_by / deferred_at field is still a dead ancestor.

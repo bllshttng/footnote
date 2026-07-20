@@ -3,6 +3,11 @@
 Enforces the monotonic progression:
     design -> ready -> in_progress -> shipped
 
+Tracks the same lifecycle ladder the graph `_status` speaks, with `shipped` as
+the plan-side name for the graph's `in_review` rung (GRAPH_TO_PLAN_STATUS is
+the alignment layer). `idea` has no plan doc so it never appears here, and
+`done`/`archived` are off-axis terminals.
+
 `reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
 graph has no derived state that distinguishes them, so they never got written.
 The reconcile sweep now folds them into `shipped` as Tier-1 synonyms.
@@ -33,12 +38,15 @@ KNOWN_STATUSES: frozenset[str] = frozenset(STATUS_PROGRESSION) | frozenset(TERMI
 
 # Graph derived `_status` -> plan `status` projection (x-f34f). Total over the
 # graph vocabulary; None means "no plan write" (a graph-side gate that must not
-# touch plan state). The graph vocabulary is NOT renamed - this map IS the
-# alignment layer between the two.
+# touch plan state). Since x-5d91 the two vocabularies are the same ladder, so
+# this is near-identity - it survives to carry the genuinely non-identity rows
+# (idea -> design, superseded -> archived, and the two None gates).
 GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
-    "idea": "design",  # node exists, blueprint pending
+    "idea": "design",  # node exists, no plan doc yet
+    "design": "design",  # doc exists but is still a design doc
     "ready": "ready",
-    "claimed": "in_progress",
+    "in_progress": "in_progress",
+    "claimed": "in_progress",  # legacy graph vocabulary, pre-x-5d91 rows
     "blocked": None,  # graph-side gate; plan keeps its current state
     "in_review": "shipped",  # PR open = implementation complete
     "done": "done",  # merged

@@ -258,16 +258,21 @@ for id in "${NODES[@]}"; do
       echo "skipped-done $id reason=\"node superseded\""
       n_done=$((n_done + 1))
       continue ;;
-    ready|claimed)
-      # ready => dispatchable. claimed => a worker may already hold it; the
-      # live-claim check below reports already-running, or (stale claim => dead
-      # worker) falls through to re-dispatch as recovery.
+    ready|in_progress|claimed)
+      # ready => dispatchable. in_progress (legacy: claimed) => a worker may
+      # already hold it; the live-claim check below reports already-running, or
+      # (stale claim => dead worker) falls through to re-dispatch as recovery.
+      # Both spellings are accepted: a graph row persisted before the
+      # claimed -> in_progress rename still reads the old token until its next
+      # mutation recomputes it.
       : ;;
-    idea)
-      # Explicitly naming an idea node (the triage pile is idea-status; there is
-      # no distinct `triage` status) IS the human's vet: dispatch it and let the
-      # /target worker run think->blueprint->do. --all-ready stays ready-only
-      # (its enumeration never yields idea; this guard makes that fail-safe).
+    design|idea)
+      # Explicitly naming a pre-ready node (the triage pile is idea-status;
+      # `design` is a linked-but-unblueprinted doc) IS the human's vet: dispatch
+      # it and let the /target worker run the phases the rung still needs -
+      # think->blueprint->do from `idea`, blueprint->do from `design`.
+      # --all-ready stays ready-only (its enumeration yields neither rung;
+      # this guard makes that fail-safe).
       if [[ "$ALL_READY" -eq 1 ]]; then
         echo "parked $id reason=\"$status (not up-next)\""
         n_parked=$((n_parked + 1))

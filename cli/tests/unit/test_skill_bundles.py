@@ -37,6 +37,25 @@ def _run(cmd: list[str], cwd: Path | None = None, env: dict | None = None) -> su
     return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, env=env, check=False)
 
 
+def _shelled_python_has_yaml() -> bool:
+    """Does the bare ``python3`` these scripts shell out to import yaml?
+
+    The generator and its helpers run under the system interpreter, not the
+    project venv, and PyYAML is required by design for anything beyond a
+    files-only manifest: ``bundle-frontmatter.py`` always needs it, and the
+    manifest parser's stdlib fallback cannot handle ``references:``/``agents:``
+    blocks. CI's python3 carries it, so guarding here keeps a dev machine whose
+    system interpreter lacks it from reading as a code failure.
+    """
+    return _run(["python3", "-c", "import yaml"]).returncode == 0
+
+
+requires_shelled_yaml = pytest.mark.skipif(
+    not _shelled_python_has_yaml(),
+    reason="system python3 lacks PyYAML, required for references/agents bundling (pip install pyyaml)",
+)
+
+
 def test_manifest_parser_emits_5col_tsv():
     """The parser emits 5-column TSV: type, skill, source, dest, meta_json."""
     result = _run(["python3", str(PARSER), str(MANIFEST)])
@@ -148,6 +167,7 @@ def test_parser_emits_clean_error_on_malformed_manifest(tmp_path):
     assert "Traceback" not in result.stderr
 
 
+@requires_shelled_yaml
 def test_generator_fails_on_missing_source(tmp_path):
     """AC4-EDGE: a manifest entry pointing at a nonexistent canonical fails."""
     fake_root = tmp_path / "fake-repo"
@@ -180,6 +200,7 @@ def test_generator_fails_on_missing_source(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@requires_shelled_yaml
 def test_strip_removes_frontmatter(tmp_path):
     """`strip` removes the YAML frontmatter block, keeping the body verbatim."""
     src = tmp_path / "input.md"
@@ -189,6 +210,7 @@ def test_strip_removes_frontmatter(tmp_path):
     assert result.stdout == "Body content\n"
 
 
+@requires_shelled_yaml
 def test_strip_passthrough_when_no_frontmatter(tmp_path):
     """`strip` is a no-op on a file that has no frontmatter block."""
     src = tmp_path / "input.md"
@@ -198,6 +220,7 @@ def test_strip_passthrough_when_no_frontmatter(tmp_path):
     assert result.stdout == "# Heading\nLine two.\n"
 
 
+@requires_shelled_yaml
 def test_rewrite_replaces_frontmatter(tmp_path):
     """`rewrite --as subagent` strips source frontmatter and prepends new
     subagent frontmatter rendered from the meta file."""
@@ -224,6 +247,7 @@ def test_rewrite_replaces_frontmatter(tmp_path):
     assert "description: original" not in result.stdout
 
 
+@requires_shelled_yaml
 def test_rewrite_rejects_missing_required_fields(tmp_path):
     """`rewrite --as subagent` requires name, description, model, tools."""
     src = tmp_path / "input.md"
@@ -241,6 +265,7 @@ def test_rewrite_rejects_missing_required_fields(tmp_path):
     assert "tools" in result.stderr
 
 
+@requires_shelled_yaml
 def test_rewrite_rejects_scalar_tools(tmp_path):
     """`tools` must be a YAML list. A bare scalar would silently produce a
     broken subagent frontmatter at runtime; the helper fails loudly."""
@@ -262,6 +287,7 @@ def test_rewrite_rejects_scalar_tools(tmp_path):
     assert "'tools' must be a YAML list" in result.stderr
 
 
+@requires_shelled_yaml
 def test_rewrite_rejects_non_string_tools_entries(tmp_path):
     """`tools` entries must be strings. Numeric or null entries fail."""
     src = tmp_path / "input.md"
@@ -282,6 +308,7 @@ def test_rewrite_rejects_non_string_tools_entries(tmp_path):
     assert "'tools' entries must be strings" in result.stderr
 
 
+@requires_shelled_yaml
 def test_strip_fails_loudly_on_unterminated_frontmatter(tmp_path):
     """A source that opens with --- but never closes is corrupt. Treating
     the whole file as body would ship YAML-looking content as prose. Fail."""
@@ -294,6 +321,7 @@ def test_strip_fails_loudly_on_unterminated_frontmatter(tmp_path):
     assert str(src) in result.stderr
 
 
+@requires_shelled_yaml
 def test_rewrite_fails_loudly_on_unterminated_frontmatter(tmp_path):
     """Same invariant on the rewrite path."""
     src = tmp_path / "input.md"
@@ -319,6 +347,7 @@ def test_rewrite_fails_loudly_on_unterminated_frontmatter(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@requires_shelled_yaml
 def test_parser_handles_references_block(tmp_path):
     """A manifest with references: emits reference-type rows."""
     src = tmp_path / "src.md"
@@ -343,6 +372,7 @@ def test_parser_handles_references_block(tmp_path):
     assert meta == ""
 
 
+@requires_shelled_yaml
 def test_parser_handles_agents_block(tmp_path):
     """A manifest with agents: emits agent-type rows with JSON-encoded meta."""
     manifest = tmp_path / "skill-bundles.yaml"
@@ -374,6 +404,7 @@ def test_parser_handles_agents_block(tmp_path):
     assert meta_obj["tools"] == ["Read", "Write", "Edit", "Bash"]
 
 
+@requires_shelled_yaml
 def test_parser_rejects_agent_missing_rewrite_frontmatter(tmp_path):
     """Agent entries must declare `rewrite_frontmatter: subagent`."""
     manifest = tmp_path / "skill-bundles.yaml"
@@ -396,6 +427,7 @@ def test_parser_rejects_agent_missing_rewrite_frontmatter(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@requires_shelled_yaml
 def test_generator_handles_mixed_manifest(tmp_path):
     """A synthetic manifest with file, reference, and agent entries generates
     each correctly. AC1-HP for references and agents.

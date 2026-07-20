@@ -2458,8 +2458,9 @@ def _starvation_receipts(
     Zero-silent-starvation (x-3236, epic Success Definition 2): when ``next``
     returns null but buildable-looking nodes exist, name why each was excluded
     so an operator is never left guessing. Reasons: ``plan-less`` | ``container``
-    | ``claimed`` | ``quarantined`` | ``dead-ancestor``. A node genuinely in
-    review (open PR) or committed to a batch is not starved and gets no line.
+    | ``claimed`` | ``design`` | ``quarantined`` | ``dead-ancestor``. A node
+    genuinely in review (open PR) or committed to a batch is not starved and
+    gets no line.
     Pure over the injected ``claimed`` set + ``now`` so it is unit-testable.
 
     Mirrors ``_pick_ready``'s SCOPING (project, parent subtree via ``scope_ids``,
@@ -2480,7 +2481,12 @@ def _starvation_receipts(
             continue
         if e.get("id"):
             by_id[e["id"]] = e
-        if e.get("_status") not in ("ready", "idea") or e.get("completed_at"):
+        # `design` rides along with ready/idea: it is buildable-looking work a
+        # human can still name explicitly, so a null `next` must explain it
+        # rather than drop it silently - the exact starvation this receipt
+        # exists to prevent (a backlog that is ALL design-stage would otherwise
+        # return null with nothing to say).
+        if e.get("_status") not in ("ready", "design", "idea") or e.get("completed_at"):
             continue
         if roadmap_id and e.get("roadmap_id") != roadmap_id:
             continue
@@ -2501,6 +2507,12 @@ def _starvation_receipts(
             reason = "container"
         elif nid in claimed:
             reason = "claimed"
+        elif e.get("_status") == "design":
+            # Read off the persisted rung, not the guard: the guard only fires
+            # for the stale window (graph still says `ready`, doc since edited
+            # to design), so a node already ON the rung would fall through and
+            # report nothing at all.
+            reason = "design"
         elif e.get("_status") == "ready" and (
             _has_unmerged_open_pr(e) or _is_batched_member(e)
         ):
@@ -2509,7 +2521,14 @@ def _starvation_receipts(
             g = selection_guards(e, by_id, now, staleness_days=staleness_days)
             if not g:
                 continue  # no known exclusion (would have been selected)
-            reason = "dead-ancestor" if g.startswith("dead-ancestor") else "quarantined"
+            if g.startswith("dead-ancestor"):
+                reason = "dead-ancestor"
+            elif g == "design-stage":
+                # Not starvation: planned but not blueprinted, so it reads as
+                # its own rung rather than the generic quarantine bucket.
+                reason = "design"
+            else:
+                reason = "quarantined"
         out.append((nid, reason))
     return out
 
@@ -3538,7 +3557,7 @@ def cmd_tree(
 
     STATUS_ICONS = {
         "done": "[x]",
-        "claimed": "[~]",
+        "in_progress": "[~]",
         "ready": "[ ]",
         "blocked": "[B]",
         "idea": "[i]",
@@ -3621,7 +3640,7 @@ def cmd_status(
     for proj_name, proj_entries in sorted(projects.items()):
         features = [e for e in proj_entries if e.get("type") == "feature"]
         done = sum(1 for e in features if e.get("_status") == "done")
-        claimed = sum(1 for e in features if e.get("_status") == "claimed")
+        claimed = sum(1 for e in features if e.get("_status") == "in_progress")
         ready = sum(1 for e in features if e.get("_status") == "ready")
         ideas = sum(1 for e in features if e.get("_status") == "idea")
         blocked = sum(1 for e in features if e.get("_status") == "blocked")

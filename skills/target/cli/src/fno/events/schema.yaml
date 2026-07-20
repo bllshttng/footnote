@@ -1917,24 +1917,30 @@ event_types:
         cross_project:
           type: boolean
           description: "True when this dispatch followed a blocked_by edge into a DIFFERENT project (G1 advance_dependents), spawned with --cwd the dependent's own work-map root. False for a same-project dispatch: either the next-node advance, or a same-project direct dependent spawned with --cwd its own project root (RC1/x-33b2; work-map resolved, recorded cwd as fallback)."
+        mission:
+          type: string
+          description: "The epic id whose epic advance / mission drain dispatched this child (x-9608 K1). Present only on a mission dispatch; omitted on the merge-advance and next-node paths."
     consumers: [operator]
 
   - name: advance_skipped
-    description: "Emitted by `fno backlog advance` (and advance_dependents) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the dependent-path reasons unmapped-project / no-project / no-cwd / dependents-error / closed-project-unknown. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
+    description: "Emitted by `fno backlog advance` (and advance_dependents / epic advance) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the dependent-path reasons unmapped-project / no-project / no-cwd / dependents-error / closed-project-unknown and the epic-advance-path reasons lane-cap / children-error. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
     sources: [backlog]
     data:
       required: [reason]
       properties:
         reason:
           type: string
-          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred]
-          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on (x-5d3e), so it stays ready until the reset."
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error]
+          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on (x-5d3e), so it stays ready until the reset. The epic-advance-path reasons (epic advance, x-9608 K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed."
         node_id:
           type: string
-          description: "The candidate next node, when a reason references one (already-claimed, quota-deferred)."
+          description: "The candidate next node, when a reason references one (already-claimed, quota-deferred, lane-cap, unmapped-project)."
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance."
+        mission:
+          type: string
+          description: "The epic id whose epic advance / mission drain produced this skip (x-9608 K1). Present only on a mission skip."
         provider:
           type: string
           description: "The resolved provider record id whose quota drove a quota-deferred skip (x-5d3e)."
@@ -1961,6 +1967,38 @@ event_types:
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance."
+        mission:
+          type: string
+          description: "The epic id whose epic advance / mission drain attempted this child (x-9608 K1). Present only on a mission dispatch failure."
+    consumers: [operator]
+
+  - name: mission_activated
+    description: "Emitted by `fno backlog advance --epic <id>` (x-9608 K1) on the first epic advance of an epic mission: the epic node is marked mission_active=true (a durable graph field K2's drain loop reads) and converge pass 1 begins. Emitted once per activation - a re-run of an already-active mission runs the idempotent converge pass without re-emitting this. A mission is an epic node plus its transitive children (the parent edge is the mission key; mission_id is untouched)."
+    sources: [backlog]
+    data:
+      required: [epic_id]
+      properties:
+        epic_id:
+          type: string
+          description: "The epic (container) node id marked active."
+    consumers: [operator]
+
+  - name: mission_deactivated
+    description: "Emitted by `fno backlog advance --epic <id>` (x-9608 K1) when a mission is deactivated: an explicit `--stop` (reason=stop), or an epic advance on an epic whose children are all already done (reason=complete). The durable mission_active field is cleared. The cascade-close path (a mission's last child merging) also clears mission_active but does not emit this event - the child's close events carry that."
+    sources: [backlog]
+    data:
+      required: [epic_id, reason]
+      properties:
+        epic_id:
+          type: string
+          description: "The epic (container) node id deactivated."
+        reason:
+          type: string
+          enum: [stop, complete]
+          description: "stop = explicit `--epic <id> --stop`; complete = an epic advance found every child already done (mission finished)."
+        epic_closed:
+          type: boolean
+          description: "On reason=complete, whether the epic node itself is already closed (completed_at set). False flags a stranded all-done epic for reconcile self-heal."
     consumers: [operator]
 
   - name: dispatch_failover
@@ -2311,8 +2349,8 @@ event_types:
           description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
         dimension:
           type: string
-          enum: [structural_validity, collision_free, shipped_outcome, finding_precision]
-          description: "Which rubric dimension this finding scores. structural_validity/collision_free/shipped_outcome are blueprint dimensions (replay scores the first two only, per Review Amendment A1); finding_precision is the review dimension (sweep-only, per Review Amendment A2)."
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged]
+          description: "Which rubric dimension this finding scores. structural_validity/collision_free/shipped_outcome are blueprint dimensions (replay scores the first two only, per Review Amendment A1); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (x-6ff0, sweep-only)."
         verdict:
           type: string
           enum: [pass, degraded, fail]
@@ -2567,6 +2605,15 @@ event_types:
       required: []
       properties:
         error:
+          type: string
+
+  - name: active_backlog_mission_retired
+    description: "A mission drain loop retired: its epic mission was deactivated (operator --stop) or all children are done, so the daemon stops ticking that mission (x-a4dc K2)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        mission:
           type: string
 
   - name: daemon_exe_fingerprint_unavailable

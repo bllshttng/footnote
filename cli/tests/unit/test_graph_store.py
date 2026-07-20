@@ -87,7 +87,7 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
     saved = json.loads(p.read_text())["entries"][0]
     assert saved["locked_by"] == "worker-7"
     assert saved["session_id"] == "worker-7"  # mirror written
-    assert saved["_status"] == "claimed"
+    assert saved["_status"] == "in_progress"
 
 
 def test_ac1_hp_lock_path_is_tmp_abilities_graph_lock():
