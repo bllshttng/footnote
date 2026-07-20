@@ -58,11 +58,20 @@ fn git_rev() -> Option<String> {
     }
 }
 
-/// True when the working tree has uncommitted changes. Conservative: any git
-/// failure reports `false` (a published/CI build is treated as clean rather
-/// than spuriously flagged dirty).
+/// True when `crates/` has uncommitted changes. Scoped to the same pathspec as
+/// `git_crates_rev`, so dirty means exactly "the stamped crates_rev does not
+/// fully describe this build" - an unrelated dirty file elsewhere in the repo
+/// must not fail the post-deploy verify. Conservative: any git failure reports
+/// `false` (a published/CI build is treated as clean rather than spuriously
+/// flagged dirty).
 fn git_dirty() -> bool {
-    match run("git", &["status", "--porcelain"]) {
+    let Some(top) = run("git", &["rev-parse", "--show-toplevel"]) else {
+        return false;
+    };
+    match run(
+        "git",
+        &["-C", top.trim(), "status", "--porcelain", "--", "crates/"],
+    ) {
         Some(s) => !s.trim().is_empty(),
         None => false,
     }
