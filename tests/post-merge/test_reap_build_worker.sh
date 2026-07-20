@@ -152,6 +152,9 @@ case "$*" in
   *--show-toplevel*)
     [ -n "${FAKE_GIT_TOPLEVEL:-}" ] || exit 1
     printf '%s\n' "$FAKE_GIT_TOPLEVEL" ;;
+  "worktree list --porcelain")
+    [ -n "${FAKE_WORKTREE_LIST:-}" ] || exit 1
+    printf '%s\n' "$FAKE_WORKTREE_LIST" ;;
   *) exit 1 ;;
 esac
 SHIM
@@ -185,8 +188,9 @@ run_step2() {
     FAKE_ORIGIN_URL="${FAKE_ORIGIN_URL-$ORIGIN_FIXTURE}" \
     FAKE_GIT_COMMON_DIR="${FAKE_GIT_COMMON_DIR-$TMP/repo/.git}" \
     FAKE_GIT_TOPLEVEL="${FAKE_GIT_TOPLEVEL-$TMP/repo}" \
+    FAKE_WORKTREE_LIST="${FAKE_WORKTREE_LIST-worktree $TMP/repo}" \
     FAKE_GH_SLUG="${FAKE_GH_SLUG-}" \
-    TMPDIR="$TMP" bash "$runner"
+    TMPDIR="$TMP" "${STEP2_SHELL:-bash}" "$runner"
 }
 count_id() { printf '%s' "$1" | tr ' ' '\n' | grep -c "^$2\$"; }
 
@@ -292,15 +296,30 @@ NI="$(FAKE_ORIGIN_URL="git@gitlab.com:mirror/x.git" FAKE_GH_SLUG="o/r" \
   && pass "AC9: a non-GitHub origin falls through to gh instead of scoping on a bad slug" \
   || fail "AC9: expected x-1234 via the gh fallback, got: $(printf '%q' "$NI")"
 
-# Every GitHub remote form resolves without gh. If the git-side regex ever
+# Every GitHub remote form resolves without gh. If the git-side parse ever
 # regresses, gh is unset here so the assertion cannot pass by accident.
-for U in "git@github.com:o/r.git" "https://github.com/o/r" "ssh://git@github.com/o/r.git" "git://github.com/o/r"; do
+for U in "git@github.com:o/r.git" "https://github.com/o/r" "ssh://git@github.com/o/r.git" \
+         "git://github.com/o/r" "https://GitHub.com/O/R.git" "ssh://git@github.com:22/o/r.git" \
+         "https://user:tok@github.com/o/r.git" "https://github.com/o/r.git/"; do
   NI="$(FAKE_ORIGIN_URL="$U" FAKE_GH_SLUG="" run_step2 '{"closed":[]}' "$GRAPH_MATCH" 292)"
   [[ "$(count_id "$NI" x-1234)" == "1" ]] \
     || { fail "AC9b: origin form '$U' did not resolve, got: $(printf '%q' "$NI")"; BAD_FORM=1; }
 done
 [[ "${BAD_FORM:-0}" == "0" ]] \
-  && pass "AC9b: scp, https, ssh and git:// GitHub remotes all resolve without gh"
+  && pass "AC9b: every GitHub remote form (scp, https, ssh, git://, port, creds, case, trailing /) resolves"
+
+# The host must be EXACTLY github.com. A substring match accepts a lookalike
+# domain or a path segment, which hands back a confident slug that suppresses
+# the gh fallback and can admit a foreign repo's node - the very bug class this
+# scan exists to close. gh is unset, so a leaked match shows up as x-1234.
+for U in "https://notgithub.com/o/r.git" "https://gitlab.com/mirrors/github.com/o/r.git" \
+         "/tmp/github.com/o/r.git" "https://github.com.evil.test/o/r.git"; do
+  NI="$(FAKE_ORIGIN_URL="$U" FAKE_GH_SLUG="" run_step2 '{"closed":[]}' "$GRAPH_MATCH" 292)"
+  [[ -z "${NI// }" ]] \
+    || { fail "AC9c: lookalike origin '$U' produced a slug, got: $(printf '%q' "$NI")"; BAD_HOST=1; }
+done
+[[ "${BAD_HOST:-0}" == "0" ]] \
+  && pass "AC9c: a lookalike host or a github.com path segment yields no slug"
 
 # `git init --separate-git-dir` puts the common dir OUTSIDE the checkout, so its
 # parent is not a working tree. Deriving the root as "<common-dir>/.." would
@@ -313,11 +332,64 @@ NI="$(FAKE_GIT_COMMON_DIR="$TMP/external-gitdir" run_step2 '{"closed":[]}' \
   && pass "AC10: separate-git-dir falls back to the real checkout for the repo root" \
   || fail "AC10: expected x-sep via the --show-toplevel fallback, got: $(printf '%q' "$NI")"
 
+# The nastier separate-git-dir shape: the external git dir sits INSIDE another
+# checkout. "<common-dir>/.." is then a real working tree that passes a bare
+# .git probe, so deriving the root that way would silently adopt the WRONG
+# repo and admit its same-numbered url-less node. Resolving from
+# `git worktree list` instead never consults the common dir's parent at all.
+mkdir -p "$TMP/other-checkout/.git" "$TMP/other-checkout/gitdata"
+NI="$(FAKE_GIT_COMMON_DIR="$TMP/other-checkout/gitdata" \
+      FAKE_WORKTREE_LIST="worktree $TMP/other-checkout/gitdata" \
+      run_step2 '{"closed":[]}' \
+      '{"entries":[{"id":"x-foreign-root","pr_number":292,"cwd":"'"$(cd "$TMP/other-checkout" && pwd -P)"'"}]}' 292)"
+[[ "$(count_id "$NI" x-foreign-root)" == "0" ]] \
+  && pass "AC10b: a git dir nested in ANOTHER checkout does not make that checkout the root" \
+  || fail "AC10b: adopted a foreign checkout as REPO_ROOT, got: $(printf '%q' "$NI")"
+
 # AC3 (no node): pr_number matches nothing -> NODE_IDS stays empty.
 NI="$(run_step2 '{"closed":[]}' '{"entries":[{"id":"x-9999","pr_number":999}]}' 292)"
 [[ -z "${NI// }" ]] \
   && pass "AC3: PR mapping to no node leaves NODE_IDS empty (Step 8a skips)" \
   || fail "AC3: expected empty NODE_IDS, got: $(printf '%q' "$NI")"
+
+# --- Same block under zsh -------------------------------------------------
+# The operator's shell is zsh, and the two shells disagree in ways that produce
+# a plausible no-op rather than an error: zsh does not word-split a scalar
+# expansion, so `for id in $IDS` silently collapses every id into one. Running
+# the multi-id and dedup cases under zsh is what catches that class; asserting
+# only under bash is how it ships.
+if command -v zsh >/dev/null 2>&1; then
+  ZSH_OK=1
+  NI="$(STEP2_SHELL=zsh run_step2 '{"closed":[]}' '{"entries":[
+    {"id":"x-1234","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"},
+    {"id":"x-5678","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"}]}' 292)"
+  [[ "$(count_id "$NI" x-1234)" == "1" && "$(count_id "$NI" x-5678)" == "1" ]] \
+    || { fail "AC11: zsh dropped an id from the union, got: $(printf '%q' "$NI")"; ZSH_OK=0; }
+  # NODE_IDS must be SPACE-separated on one line. Under the collapse both ids
+  # are still present as a single embedded-newline token, and count_id (which
+  # tokenizes on newlines too) reports them as found - so the id counts above
+  # cannot detect this on their own. Step 8a splits on spaces, so a newline
+  # here is a real break, and asserting it is what makes this pass non-vacuous.
+  case "$NI" in
+    *"
+"*) fail "AC11: zsh collapsed the union into one newline-joined id: $(printf '%q' "$NI")"; ZSH_OK=0 ;;
+  esac
+
+  NI="$(STEP2_SHELL=zsh run_step2 '{"closed":[{"node_id":"x-1234"}]}' "$GRAPH_MATCH" 292)"
+  [[ "$(count_id "$NI" x-1234)" == "1" ]] \
+    || { fail "AC11: zsh dedup failed, got: $(printf '%q' "$NI")"; ZSH_OK=0; }
+
+  NI="$(STEP2_SHELL=zsh run_step2 '{"closed":[]}' '{"entries":[
+    {"id":"x-mine","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"},
+    {"id":"x-theirs","pr_number":292,"pr_url":"https://github.com/other/repo/pull/292"}]}' 292)"
+  [[ "$(count_id "$NI" x-mine)" == "1" && "$(count_id "$NI" x-theirs)" == "0" ]] \
+    || { fail "AC11: zsh scoping admitted a foreign node, got: $(printf '%q' "$NI")"; ZSH_OK=0; }
+
+  [[ "$ZSH_OK" == "1" ]] \
+    && pass "AC11: union, dedup and repo scoping behave identically under zsh"
+else
+  printf '[reap-build-worker] NOTE: zsh absent, skipping the zsh parity pass\n' >&2
+fi
 
 # --- Static guards: ordering invariant + live guard present ---------------
 STOP_LN="$(awk '/fno agents stop/ {print NR; exit}' "$BLOCK")"

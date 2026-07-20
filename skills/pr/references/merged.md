@@ -353,31 +353,54 @@ GJ="$(python3 -c 'from fno.paths import graph_json; print(graph_json())' 2>/dev/
 # but never scopes it, because a finished foreign row is exactly a non-live row.
 # git remote FIRST: it needs no network and no auth, so an offline or
 # unauthenticated run still scopes the scan instead of skipping it wholesale.
-# Anchored on github.com so a non-GitHub remote (a gitlab mirror, a local path)
-# yields nothing and falls through to gh, rather than producing a confident slug
-# that no pr_url can ever match. Mirrors resolve_current_repo_slug.
-ORIGIN_SLUG="$(git remote get-url origin 2>/dev/null \
-  | sed -n 's#.*github\.com[:/]\([^/][^/]*\)/\(.*\)#\1/\2#p' | sed -e 's#\.git$##' -e 's#/$##')"
+# The HOST must be exactly github.com once the scheme, any user@, and any :port
+# are stripped - a substring match would accept notgithub.com and
+# gitlab.com/mirrors/github.com/o/r, handing back a confident `o/r` that
+# suppresses the gh fallback and can admit a foreign node. Lowercased because
+# the host is case-insensitive and the jq comparison downcases both sides.
+ORIGIN_SLUG="$(git remote get-url origin 2>/dev/null | tr 'A-Z' 'a-z' \
+  | sed -e 's#^[a-z][a-z0-9+.-]*://##' -e 's#^[^/@]*@##' \
+  | sed -n 's#^github\.com\(:[0-9][0-9]*\)\{0,1\}[:/]\(.*\)$#\2#p' \
+  | sed -e 's#/\{1,\}$##' -e 's#\.git$##')"
+# owner/repo exactly: anything deeper is a path we do not understand, and
+# guessing is how a foreign node gets in.
+case "$ORIGIN_SLUG" in
+  */*/*) ORIGIN_SLUG="" ;;
+  ?*/?*) : ;;
+  *) ORIGIN_SLUG="" ;;
+esac
 if [ -z "$ORIGIN_SLUG" ]; then
   ORIGIN_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
 fi
 # Canonical repo root, NOT `--show-toplevel`: the ritual usually runs from a
-# worktree, while graph `cwd` values point at the canonical checkout. Resolved
-# via cd/pwd because --path-format=absolute is git >= 2.31 only (same reason as
-# Step 1). Under `git init --separate-git-dir` the common dir is EXTERNAL, so
-# its parent is not a checkout at all - the .git probe detects that and takes
-# the working tree git reports for this cwd instead.
-GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+# worktree, while graph `cwd` values point at the canonical checkout. Taken from
+# `git worktree list` (the first record that is a real working tree) rather than
+# "<git-common-dir>/..", which is only the root by convention - under
+# `git init --separate-git-dir` the common dir is EXTERNAL, and if it happens to
+# sit inside ANOTHER checkout that checkout would pass a bare .git probe and
+# become the root. Mirrors resolve_canonical_worktree, including its fallback.
+# read-loop, not `for x in $VAR`: zsh does not word-split a scalar expansion, so
+# the for-loop form silently collapses every id into one.
 REPO_ROOT=""
-if [ -n "$GIT_COMMON_DIR" ]; then
-  REPO_ROOT="$(cd "$GIT_COMMON_DIR/.." 2>/dev/null && pwd -P || true)"
+WORKTREE_LIST="$(git worktree list --porcelain 2>/dev/null || true)"
+while IFS= read -r WT_LINE; do
+  case "$WT_LINE" in
+    "worktree "*)
+      WT_CAND="${WT_LINE#worktree }"
+      # A bare repo and a separate-git-dir metadata dir both appear here and
+      # neither has a .git child, so the probe skips exactly those.
+      if [ -e "$WT_CAND/.git" ]; then REPO_ROOT="$WT_CAND"; break; fi ;;
+  esac
+done <<EOF
+$WORKTREE_LIST
+EOF
+if [ -z "$REPO_ROOT" ]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 fi
-if [ -z "$REPO_ROOT" ] || [ ! -e "$REPO_ROOT/.git" ]; then
-  GIT_TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  REPO_ROOT=""
-  if [ -n "$GIT_TOPLEVEL" ]; then
-    REPO_ROOT="$(cd "$GIT_TOPLEVEL" 2>/dev/null && pwd -P || true)"
-  fi
+if [ -n "$REPO_ROOT" ]; then
+  # Resolved via cd/pwd because --path-format=absolute is git >= 2.31 only
+  # (same reason as Step 1).
+  REPO_ROOT="$(cd "$REPO_ROOT" 2>/dev/null && pwd -P || true)"
 fi
 if [ -z "$REPO_ROOT" ]; then
   echo "post-merge: repo root unresolved; url-less nodes cannot be scoped and are SKIPPED (pr_url matches still union)" >&2
@@ -403,9 +426,15 @@ if [ -n "$ORIGIN_SLUG" ]; then
     echo "graph pr_number scan" >> "$FAILURES_FILE"
   fi
   rm -f "$SCAN_ERR"
-  for PR_NODE in $PR_NODES; do
+  # read-loop, not `for PR_NODE in $PR_NODES`: zsh does not word-split a scalar
+  # expansion, so the for-loop form collapses every id into one multiline string
+  # and the dedup below silently never matches.
+  while IFS= read -r PR_NODE; do
+    [ -n "$PR_NODE" ] || continue
     case " $NODE_IDS " in *" $PR_NODE "*) : ;; *) NODE_IDS="${NODE_IDS}${NODE_IDS:+ }$PR_NODE" ;; esac
-  done
+  done <<EOF
+$PR_NODES
+EOF
 else
   echo "post-merge: origin slug unresolved (no git remote, gh down?); graph pr_number union SKIPPED - reconcile-closed ids still reaped" >&2
 fi
