@@ -104,7 +104,10 @@ def _mail_unread_count(
     # legacy cursor and double-count everything the drain already acked.
     for addr, extra in ((handle, tuple(legacy)), (agent_self, ())):
         if addr and addr not in seen:
-            seen.add(addr)
+            # Every alias joins `seen`, not just the address counted: a mesh name
+            # that happens to equal this session's retired handle would otherwise
+            # be scanned a second time and double-count the same lane.
+            seen.update({addr, *extra})
             total += _count(addr, None, extra)
 
     try:
@@ -112,7 +115,9 @@ def _mail_unread_count(
     except Exception:
         project = None
     if project and project not in seen:
-        self_ids = {x for x in (handle, agent_self, session_id) if x}
+        # Retired aliases count as self: a pre-flip broadcast of mine carries the
+        # legacy `from`, and omitting it would read my own note as someone else's.
+        self_ids = {x for x in (handle, agent_self, session_id, *legacy) if x}
         total += _count(project, self_ids or None)
     return total
 

@@ -145,8 +145,20 @@ def adopt_cursor(name: str, legacy: str) -> bool:
     prior = read_cursor(legacy)
     if prior is None:
         return False
-    write_cursor(name, prior)
-    return True
+    # Refuse when mail addressed to the NEW name already sits at or before the
+    # legacy position. In a mixed-version window a sender can address the bare
+    # name while this consumer still drains the legacy one, and adopting would
+    # jump the cursor past that message forever. Fail open to the rescan posture:
+    # a repeat, never a silent strand.
+    for m in iter_messages(warn=False):
+        if m.to == name:
+            return False
+        if m.id == prior:
+            break
+    # Forward-only, so the unlocked check-then-write above is safe: a racing
+    # adopter that lands after a real drain cannot rewind it back to the legacy
+    # position and replay what was already consumed.
+    return advance_cursor(name, prior)
 
 
 def scan_unread(

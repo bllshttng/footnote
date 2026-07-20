@@ -169,6 +169,52 @@ def test_ac2_edge_legacy_cursor_adopted_no_history_replay(runner, mailbox, monke
     assert read_cursor("019f48e1") is not None
 
 
+def test_adoption_refused_when_bare_mail_precedes_legacy_cursor(runner, mailbox, monkeypatch):
+    """Mixed-version window: a sender that flipped early addressed the bare name
+    while this consumer was still draining the legacy one. Adopting the legacy
+    position would jump past that message forever, so adoption is refused and the
+    rescan posture delivers it - a repeat, never a silent strand."""
+    from fno.bus.cursor import write_cursor
+
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
+    _seed_bus_message(to="019f48e1", from_="early-flipper", body="bare, sent early")
+    legacy = _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy, consumed")
+    write_cursor("codex-019f48e1", legacy.thread_id)
+
+    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
+    assert "bare, sent early" in bodies  # not stranded behind the adopted cursor
+
+
+def test_adoption_cannot_rewind_an_already_advanced_cursor(runner, mailbox, monkeypatch):
+    """A racing adopter landing after a real drain must not rewind the cursor to
+    the legacy position and replay what was already consumed."""
+    from fno.bus.cursor import adopt_cursor, read_cursor, write_cursor
+
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
+    old = _seed_bus_message(to="codex-019f48e1", from_="web", body="old")
+    write_cursor("codex-019f48e1", old.thread_id)
+    newer = _seed_bus_message(to="019f48e1", from_="web", body="newer")
+    write_cursor("019f48e1", newer.thread_id)  # a drain already got here
+
+    assert adopt_cursor("019f48e1", "codex-019f48e1") is False
+    assert read_cursor("019f48e1") == newer.thread_id  # never rewound
+
+
+def test_drain_advances_every_alias_cursor(runner, mailbox, monkeypatch):
+    """The sender's unclaimed-mail check reads the cursor named by the envelope's
+    `to`, so a retired alias cursor left frozen reports delivered mail as
+    unclaimed forever."""
+    from fno.bus.cursor import read_cursor
+
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
+    m = _seed_bus_message(to="codex-019f48e1", from_="web", body="legacy-addressed")
+
+    runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert read_cursor("019f48e1") == m.thread_id
+    assert read_cursor("codex-019f48e1") == m.thread_id  # alias tracked, not frozen
+
+
 def test_ac1_fr_corrupt_legacy_cursor_repeats_never_loses(runner, mailbox, monkeypatch):
     """A corrupt legacy cursor degrades to the rescan posture: everything
     addressed to either form re-surfaces (a repeat), and the next drain is quiet."""

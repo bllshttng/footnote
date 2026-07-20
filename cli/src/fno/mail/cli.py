@@ -433,13 +433,15 @@ def cmd_reply(
         else:
             # AC1-FR: the original sender is no longer live -> durable floor
             # addressed to their canonical handle (orig.from_), still drainable.
-            prov = orig.from_.split("-", 1)[0] if "-" in orig.from_ else None
+            # No provider: it is only consulted on the live-inject path, which a
+            # None `resolved` already skipped. Deriving one by splitting the
+            # handle string is the string-parsed identity this addressing scheme
+            # exists to remove, and a bare short-id has nothing to split anyway.
             _name_lane_send(
                 body_text,
                 from_name=from_project,
                 resolved=None,
                 recipient=orig.from_,
-                provider=prov,
                 reply_to=to_msg,
             )
         return
@@ -1414,9 +1416,13 @@ def cmd_drain_self(
         )
 
     # Inject-before-ack: advance the cursor to the last drained id only after
-    # the bodies are out, so a crash re-surfaces rather than drops.
+    # the bodies are out, so a crash re-surfaces rather than drops. Every alias
+    # advances too, not just the live handle: a sender's unclaimed-mail check
+    # reads the cursor named by the envelope's `to`, so leaving a retired alias
+    # cursor frozen would report delivered mail as unclaimed forever.
     if msgs:
-        advance_cursor(handle, msgs[-1].id)
+        for addr in (handle, *aliases):
+            advance_cursor(addr, msgs[-1].id)
 
 
 # ---------------------------------------------------------------------------

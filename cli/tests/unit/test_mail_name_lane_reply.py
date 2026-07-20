@@ -110,7 +110,7 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
     assert replies[0].to == "9a063cd3"  # sender resolved to its canonical handle
-    assert replies[0].from_ == "claude-11111111"  # my canonical handle, not a project
+    assert replies[0].from_ == "11111111"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 
 
