@@ -27,7 +27,7 @@ resolve node  →  fno target start <node>   worktree off origin/main + claim + 
               →  /review                     internal sigma panel (cheap insurance)
               →  validate                    fno test  (real exit code; not bare pytest)
               →  /pr create                  Haiku worker opens the PR
-              →  <promise>MISSION COMPLETE...  PR green + reviewed = done; you're bg, so hand the merge to a human
+              →  <promise>MISSION COMPLETE...  PR green + reviewed = done; merge if config.auto_merge.enabled
 ```
 
 That is the whole job when a backlog node or plan is already bound. `fno target start` prints an orientation report (node, worktree, tests, done-when) - read it and go. Everything below is detail on a spine step or an **"only if"** branch you skip unless its trigger fires:
@@ -75,7 +75,7 @@ The wrapper re-invokes the CLI until the session terminates (DonePRGreen, Budget
 
 ## Completion: what you do
 
-Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is green - **promise early**, the external reads hold it. An unsatisfied read just blocks-and-retries naming what is missing; a premature promise never short-circuits the gate. **While waiting on an async check with nothing to do, arm ONE watcher and idle on a `<watching>` tag** (the exact protocol is [How to end every turn](#how-to-end-every-turn) below) - never re-read the poller and re-post the same status on a nudge; that is pure noise. You are a bg/unattended agent, so your terminal state is a **green, reviewed, mergeable PR**, not a merged one: hand the merge to a human (any out-of-band merge also satisfies `done()`). The gate reads `config.review.required_bots`; the loop-check code default is empty `[]` (no review gate, so a fresh install never hangs on an unconfigured bot), and a maintainer sets it explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. Internal `/review` is advisory.
+Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is green - **promise early**, the external reads hold it. An unsatisfied read just blocks-and-retries naming what is missing; a premature promise never short-circuits the gate. **While waiting on an async check with nothing to do, arm ONE watcher and idle on a `<watching>` tag** (the exact protocol is [How to end every turn](#how-to-end-every-turn) below) - never re-read the poller and re-post the same status on a nudge; that is pure noise. **Read `fno config get auto_merge` before you promise** - merge authority is config-driven, NOT bg-vs-attended, and nothing in the merge path checks attendance. With `auto_merge.enabled: true` and `require_checks_pass` satisfied, MERGE (`fno pr merge <n>`, then `fno backlog reconcile`): the config set once IS the standing authorization, and re-asking re-imposes the step it was configured to delete. With auto-merge off (the default), stop at a **green, reviewed, mergeable PR** and hand the merge to a human (any out-of-band merge also satisfies `done()`). Never write "handing the merge to a human" without having read the config in that same turn. The gate reads `config.review.required_bots`; the loop-check code default is empty `[]` (no review gate, so a fresh install never hangs on an unconfigured bot), and a maintainer sets it explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. Internal `/review` is advisory.
 
 ### How to end every turn
 
