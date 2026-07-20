@@ -531,6 +531,85 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
     assert "base=in-place" in result.output
 
 
+def test_target_start_forwards_yolo_to_init(tmp_path, monkeypatch):
+    """x-6390: `/target yolo` cold-starts through `start`, not `init`, so the
+    forward is the link that actually carries the grant in real use. Without it
+    the feature is inert while every init-level test stays green."""
+    import subprocess as _real_subprocess
+    from fno.harness_identity import HarnessIdentity
+
+    repo = tmp_path / "vault"
+    repo.mkdir()
+    _real_subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+    _real_subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "init"], check=True
+    )
+    monkeypatch.chdir(repo)
+
+    seen = {"init_cmd": None}
+    real_run = _real_subprocess.run
+
+    def _dispatch(cmd, *a, **k):
+        cmd = list(cmd)
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, *a, **k)
+        if "ensure" in cmd:
+            return _real_subprocess.CompletedProcess(cmd, 0, stdout=f"{repo.resolve()}\n", stderr="")
+        seen["init_cmd"] = cmd
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
+    )
+    monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
+
+    result = runner.invoke(app, ["target", "start", "x-yol", "--yolo"])
+    assert result.exit_code == 0, result.output
+    assert "--yolo" in (seen["init_cmd"] or []), f"start did not forward --yolo: {seen['init_cmd']}"
+
+    seen["init_cmd"] = None
+    result = runner.invoke(app, ["target", "start", "x-yol"])
+    assert result.exit_code == 0, result.output
+    assert "--yolo" not in (seen["init_cmd"] or []), "start forwarded --yolo without the flag"
+
+
+def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypatch):
+    """x-6390: the manifest is write-once, so --yolo against an initialized
+    session is a no-op - and a dropped grant looks exactly like no grant. Say it."""
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    manifest = fake_root / ".fno" / "target-state.md"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+
+    # A pre-existing manifest with no grant: the flag was dropped -> warn.
+    manifest.write_text("---\nattended: true\n---\n")
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
+    assert result.exit_code == 0, result.output
+    assert "did NOT take" in result.output, result.output
+
+    # The grant IS present: nothing to warn about.
+    manifest.write_text("---\nattended: true\nauthority: full\n---\n")
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
+    assert result.exit_code == 0, result.output
+    assert "did NOT take" not in result.output, result.output
+    _clear_root_cache()
+
+
 def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkeypatch):
     """In-place (policy=never) uses the SHARED canonical .fno, so a manifest for a
     DIFFERENT node must refuse rather than report already-claimed and run under

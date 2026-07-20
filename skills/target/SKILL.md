@@ -1,7 +1,7 @@
 ---
 name: target
 description: "Use when: build this feature, get it done end-to-end, or execute a plan from idea to PR."
-argument-hint: "[S|small|M|medium|L|large] [agent|fork] [clean] [adversarial] [auto-merge | no-merge] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
+argument-hint: "[S|small|M|medium|L|large] [agent|fork] [yolo] [clean] [adversarial] [auto-merge | no-merge] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
 metadata:
   internal: true
 requires:
@@ -147,7 +147,10 @@ Read that line, NOT the raw manifest: a **dead** manifest never grants authority
 The split is what the session can *undo*. A wrong architecture call costs a review comment; a wrong destructive call costs data.
 When a decision is close, prefer the reversible option and say so in the entry.
 
-**Which existing `<help>` sites flip: none.** Every `<help>` currently written into this skill and its references is already a genuine blocker rather than a judgment call - `handoff-claim-lost` and `handoff-restore-failed` (another worker may own the node), `handoff-chain-exhausted`, `required-bot-quota-exhausted` (an external provider is out of quota), `pr-node-link-failed` (a write that did not stick), `restart-recommended` (minting and superseding graph nodes is not reversible), and `cross-project-disambiguation` (which skips one message rather than stopping the session). Authority changes none of them. It governs the decisions you would otherwise stop and ask about *without* a written `<help>` site - the architecture forks, the ambiguous requirements, the interactive prompts inside composed skills - which is exactly where an overnight walk actually stalls.
+**Which existing `<help>` sites flip: none.**
+Every `<help>` currently written into this skill and its references is already a genuine blocker rather than a judgment call - `handoff-claim-lost` and `handoff-restore-failed` (another worker may own the node), `handoff-chain-exhausted`, `required-bot-quota-exhausted` (an external provider is out of quota), `pr-node-link-failed` (a write that did not stick), `restart-recommended` (minting and superseding graph nodes is not reversible), and `cross-project-disambiguation` (which skips one message rather than stopping the session).
+Authority changes none of them.
+It governs the decisions you would otherwise stop and ask about *without* a written `<help>` site - the architecture forks, the ambiguous requirements, the interactive prompts inside composed skills - which is exactly where an overnight walk actually stalls.
 
 **The Autonomous Decisions ledger.** Every decision taken under authority appends ONE entry, immediately, before acting on it:
 

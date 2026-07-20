@@ -443,12 +443,8 @@ def init(
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
     if dispatch_provider:
         env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
-    # The flag is the SOLE authority: an ambient TARGET_YOLO (exported in a
-    # shell, or inherited by a spawned worker - codex/gemini spawn with env=None
-    # and inherit the parent's wholesale) must never grant autonomy nobody asked
-    # for. Clearing it here covers every spawn path at the one choke point they
-    # all pass through, which per-provider scrubbing cannot. Losing a grant costs
-    # one prompt; gaining one costs decisions no operator made.
+    # Sole authority: an inherited TARGET_YOLO must never self-grant (spawns
+    # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
     env["TARGET_YOLO"] = "1" if yolo else ""
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
@@ -462,15 +458,8 @@ def init(
 
 
 def _warn_if_authority_not_granted() -> None:
-    """Name a --yolo that did not take, instead of returning a normal-looking receipt.
-
-    The manifest is write-once: init leaves a pre-existing one untouched, so
-    ``--yolo`` against an already-initialized session is a silent no-op. Absence
-    of the grant is also how an ungranted session looks, so the operator would be
-    distinguishing the two postures by noticing a missing line. Say it instead --
-    the read side already refuses to change posture silently (orient.py's
-    dead-manifest branch names itself), and the write side owes the same.
-    """
+    """Name a --yolo that did not take: the write-once manifest makes it a no-op,
+    and an ungranted session looks identical to one whose flag was dropped."""
     try:
         from fno.paths import resolve_repo_root
 

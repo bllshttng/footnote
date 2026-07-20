@@ -218,8 +218,7 @@ def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
     # A DEAD manifest (x-4af4) means the owning session is gone -- resolve to
     # ATTENDED regardless of the stale stamped value, and NAME it so the posture
     # is not silently changed (the original bug was a silent autonomous switch).
-    # The same guard denies a dead manifest's authority grant: `authority: full`
-    # is only ever appended below, on the live branch.
+    # This branch also denies a dead manifest's authority grant.
     if state == "dead":
         return f"true (dead manifest: {reason}; attended)"
     if manifest_raw and "attended" in manifest_raw:

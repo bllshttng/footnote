@@ -123,7 +123,9 @@ Preferred (claude): a JSON object in a fenced ```json block (or `<result>{...}</
 
 Bug in plan → fix inline, note in SUMMARY.md. Minor enhancement (<15 min) → implement, note it. Architecture decision or missing dependency → STOP, emit `<help reason="..." evidence="...">` so the user decides.
 
-Under a walk-away authority grant (`/target yolo` → `authority: full` in the manifest) that last rule inverts: decide, append one entry to the `## Autonomous Decisions` ledger, and continue. Genuine blockers (missing credentials, destructive ambiguity) still stop. Full contract: [skills/target/SKILL.md](skills/target/SKILL.md#authority-the-yolo-grant).
+Under a walk-away authority grant (`/target yolo` → `authority: full` in the manifest) that last rule inverts: decide, append one entry to the `## Autonomous Decisions` ledger, and continue.
+Genuine blockers (missing credentials, destructive ambiguity) still stop.
+Full contract: [skills/target/SKILL.md](skills/target/SKILL.md#authority-the-yolo-grant).
 
 ## CLI subsystems (summary + doc)
 
