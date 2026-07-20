@@ -190,19 +190,42 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     assert f'reply_to="{msg}"' in rep.body  # wrapped-body wire attr (never split)
 
 
-def test_reply_to_retired_sender_refuses_instead_of_queuing_dead_mail(
+def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     runner, mailbox, monkeypatch, tmp_path
 ):
+    """A pre-flip record's retired `from` is migrated to the bare id and DELIVERED
+    to the live sender - not refused.
+
+    The retired form is not an address a caller may pass, but this one came off an
+    old record, and the address it would carry today is a substring. Refusing would
+    be a wall invented at a knowledge boundary: a human doing a translation the
+    code can do, and a live peer treated as unreachable."""
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+
+    msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-9a063cd3", body="ping")
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert r.exit_code == 0, r.output
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert len(replies) == 1
+    assert replies[0].to == "9a063cd3"  # migrated, never the retired string
+
+
+def test_reply_to_retired_sender_offline_still_addresses_the_bare_id(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Even with nothing live, the durable floor carries the MIGRATED address, so
+    the record is drainable if that session ever wakes - the old string never is."""
     _isolate_empty_discovery(monkeypatch, tmp_path)
-    msg = _seed_name_lane_inbound(
-        to="meeeeeee", from_="claude-deadbeef", body="ping"
-    )
+    msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-deadbeef", body="ping")
 
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert r.exit_code == 16
-    assert "deadbeef" in r.output
-    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
+    assert r.exit_code == 0, r.output
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert [m.to for m in replies] == ["deadbeef"]
 
 
 def test_ac1fr_offline_full_uuid_handle_wire_to_matches_durable(

@@ -422,40 +422,42 @@ def cmd_reply(
     if orig is not None and orig.to_kind == "name":
         from fno.agents import discover as discover_mod
 
+        # A stored sender predating the address flip carries the retired
+        # `<harness>-<short8>` form. That is a fact about an old RECORD, not a
+        # mistake by whoever is replying, and the address it would carry today is
+        # a substring - so migrate it and deliver. Refusing here would invent a
+        # wall at a knowledge boundary: making a human perform a translation the
+        # code can do is how a resumable peer gets treated as voicemail.
+        # (Not the harness-parsing this scheme forbids: the harness is discarded,
+        # the short-id is what routes, and routing is still a roster lookup.)
+        target = orig.from_ or ""
+        if LEGACY_HANDLE_RE.match(target):
+            migrated = target.split("-", 1)[1][:8]
+            print(
+                f"note: stored sender {target!r} is a retired address form "
+                f"(pre-flip record); replying to {migrated!r}.",
+                file=sys.stderr,
+            )
+            target = migrated
+
         # from_name defaults to None so stamp_from auto-stamps THIS session's
         # canonical bare short-id -- the handle the original
         # sender replies back to and that drain-self scans, NOT a project name.
-        resolved, _ = discover_mod.resolve_or_suggest(orig.from_)
+        resolved, _ = discover_mod.resolve_or_suggest(target)
         if resolved is not None:
             _name_lane_send(
                 body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
             )
         else:
-            # A retired `<harness>-<short8>` sender is not an address any more:
-            # nothing drains one, so queuing here would write mail that can never
-            # be delivered and report it as success. Refuse instead, and name the
-            # bare id so the reply can be re-aimed by hand.
-            if LEGACY_HANDLE_RE.match(orig.from_ or ""):
-                bare = orig.from_.split("-", 1)[1][:8]
-                print(
-                    f"error: {orig.from_!r} is a retired address form; nothing "
-                    f"drains it, so this reply would be undeliverable. The sender's "
-                    f"address is {bare!r} - if it is live, "
-                    f'`fno mail send {bare} "..."`.',
-                    file=sys.stderr,
-                )
-                raise typer.Exit(code=16)
             # AC1-FR: the original sender is no longer live -> durable floor
-            # addressed to their canonical handle (orig.from_), still drainable.
+            # addressed to their canonical handle, still drainable.
             # No provider: it is only consulted on the live-inject path, which a
-            # None `resolved` already skipped. Deriving one by splitting the
-            # handle string is the string-parsed identity this addressing scheme
-            # exists to remove, and a bare short-id has nothing to split anyway.
+            # None `resolved` already skipped.
             _name_lane_send(
                 body_text,
                 from_name=from_project,
                 resolved=None,
-                recipient=orig.from_,
+                recipient=target,
                 reply_to=to_msg,
             )
         return
