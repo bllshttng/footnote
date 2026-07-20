@@ -934,12 +934,24 @@ def _name_lane_send(
     token: Optional[str] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
-    ``mail reply``. When ``resolved`` (a live ``DiscoveredSession``) is set:
-    live-inject-first, durable floor on miss, addressed to its canonical handle.
-    When ``resolved`` is None: durable-only, addressed to ``recipient`` (a reply
-    to an offline sender). ``reply_to`` stamps BOTH the wire ``reply_to`` attr and
-    the bus ``in_reply_to`` from ONE msg-id -- never one set, the other null.
-    Exits 12 on a durable-floor write failure."""
+    ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
+
+    Three modes, by which of ``resolved`` / ``token`` is set:
+
+    - ``resolved`` (a live ``DiscoveredSession``): live-inject first, mux pane
+      next, durable floor on miss, addressed to its canonical handle.
+    - ``token`` (discovery MISSED, but a miss from a liveness-gated listing is
+      not a verdict on reachability): the full ladder -- inject-as-probe, then
+      asleep resolution, then wake-and-deliver, then a durable demotion naming
+      each failed lane. Raises ``UnreachableTokenError`` when no store knows the
+      token at all, so the caller can exit 16 having queued nothing, and
+      ``AmbiguousTokenError`` rather than guessing between two sessions.
+    - neither: durable-only, addressed to ``recipient`` (a reply to an offline
+      sender).
+
+    ``reply_to`` stamps BOTH the wire ``reply_to`` attr and the bus
+    ``in_reply_to`` from ONE msg-id -- never one set, the other null. Exits 12 on
+    a durable-floor write failure."""
     from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex, _mux_pane_send
     from fno.agents.provider_resolve import infer_invoking_harness
     from fno.agents.registry import AgentResolutionError, resolve_agent
