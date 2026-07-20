@@ -816,3 +816,51 @@ def session_index_exists(*, session_index_path: Optional[Path] = None) -> bool:
     """
     path = session_index_path or default_session_index_path()
     return path.exists()
+
+
+def remove_session_index_entry(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> bool:
+    """Drop ``session_id``'s line(s) from codex's session index.
+
+    Record-only teardown: the rollout/transcript files under
+    ``~/.codex/sessions/`` are never touched. Returns True if the index
+    changed, False if the id was already absent (idempotent success --
+    a manually-cleaned index must not fail ``fno agents rm``).
+
+    The id must be UUID-shaped. That guard is load-bearing, not
+    defensive noise: matching is substring containment (mirroring
+    :func:`load_known_session_ids`, which deliberately does not pin a
+    JSON field name), so an empty or truncated id would match every
+    line and silently wipe the index.
+
+    The rewrite is surgical (drops only lines containing the id) and
+    atomic (temp file in the same directory + ``os.replace``), so a
+    concurrent codex append can never observe a half-written index.
+
+    Raises:
+        ValueError: id is not UUID-shaped.
+        OSError: index present but unreadable/unwritable (caller surfaces).
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id or ""):
+        raise ValueError(
+            f"refusing to rewrite codex session index: {session_id!r} is not "
+            "a UUID-shaped session id"
+        )
+    path = session_index_path or default_session_index_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        # Fresh codex install / index never written: nothing to tear down.
+        return False
+    kept = [ln for ln in lines if session_id not in ln]
+    if len(kept) == len(lines):
+        return False
+    tmp = path.with_name(f"{path.name}.fno-rm.{os.getpid()}.tmp")
+    try:
+        tmp.write_text("".join(kept), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    return True
