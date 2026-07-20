@@ -767,6 +767,49 @@ the entire run (prose AND triage) for a PR already processed. So never run
 Step 6 if Step 5 reported the section already exists; that guard, not
 `backlog idea`, is what prevents duplicate nodes on a re-fire.
 
+### Filing rule: route by provenance (x-f47f)
+
+The per-PR marker is the right idempotency scope for **diff-derived** findings -
+a diff is processed exactly once, so (a) and (b) above are correct as written.
+It is the WRONG scope for **environment failures** (a ritual step itself
+breaking), because the same broken verb re-fires on every merge and each merge
+is a fresh PR with a fresh marker. That is how one `fno plan reconcile-status`
+crash accumulated four backlog nodes.
+
+- **Diff-derived** (a follow-up the merged PR's content implies) -> `capture add`
+  for below-node items, `backlog idea` for node-worthy work, as above. Run
+  `fno backlog find` first (the search-first rule).
+- **Environment failure** (anything in `FAILURES`) -> **NEVER `backlog idea`.**
+  It gets the Step 7 `Failures:` line plus exactly one deduped capture item with
+  a mechanically derived key:
+
+  ```bash
+  # cd to CANON_ROOT for the same reason as (a): capture add resolves its target
+  # file from cwd, so a lane-local override would hide the item from dedup.
+  ( cd "$CANON_ROOT" && fno backlog capture add "ritual failure: <verb>" \
+      --where "<verb>" --source "PR#$PR" --why "<one line: the stderr tail>" ) \
+    || echo "post-merge: capture add failed for ritual failure: <verb>" >&2
+  ```
+
+  The dedup key is (title + where), and BOTH come from the failing verb name,
+  never from your phrasing - so the Nth ritual hitting the same broken verb
+  returns the existing `fu-*` id (`deduped: true`) instead of minting another
+  clone. `--why` is required and carries the error text; it is outside the key,
+  so a differing message never splits the item. `<verb>` must be non-empty -
+  never file a bare `ritual failure: ` with a blank key.
+
+  Two root causes behind one verb name collapse onto one item. That is the
+  intended trade (one signal per broken verb, recurrence visible on the item,
+  root-cause split happens at triage). Do NOT "fix" it by folding the error text
+  into the key - that resurrects per-phrasing duplicates, which is the bug.
+
+  Promotion to a real node happens once, at triage, via `capture promote`, by
+  someone who can see the recurrence count.
+
+`backlog idea` stays append-only by design: fuzzy dedup at the node tier would
+silently swallow legitimately distinct nodes. Dedup belongs in the intake
+(capture) tier, which already has it.
+
 ## Step 6b: Handoff slot (offer a handoff before close)
 
 Before the session closes, offer to capture a handoff so end-of-session knowledge
