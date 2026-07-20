@@ -143,18 +143,30 @@ def resume_logic(
 
     # Resolve by any of the three address forms (x-1b1e): name, full session id,
     # or 8-hex short. The shared core keeps Rust `find_agent_entry` in parity.
-    from fno.agents.registry import AgentResolutionError, resolve_agent_in
+    from fno.agents.registry import (
+        AgentResolutionError,
+        resolve_agent_in,
+        resolve_from_harness_store,
+    )
 
     try:
         entry = resolve_agent_in(entries, name).entry
     except AgentResolutionError as exc:
-        return ResumeResult(
-            exit_code=13,
-            stderr=(
-                f"fno agents resume: {exc}. "
-                f"Use `fno agents list` to see registered agents.\n"
-            ),
-        )
+        # Registry miss: the harness's own store may still know this session
+        # (x-9cc5). An ambiguous token raises from here and is reported as-is --
+        # refusing to guess is the answer, not a miss.
+        try:
+            entry = resolve_from_harness_store(name)
+        except AgentResolutionError as ambiguous:
+            exc, entry = ambiguous, None
+        if entry is None:
+            return ResumeResult(
+                exit_code=13,
+                stderr=(
+                    f"fno agents resume: {exc}. "
+                    f"Use `fno agents list` to see registered agents.\n"
+                ),
+            )
 
     # Identity is one axis (x-8dfc): resume keys on harness (provider fallback
     # for a not-yet-backfilled row); harness == provider on every current row.

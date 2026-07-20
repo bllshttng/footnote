@@ -3211,6 +3211,10 @@ def attach_agent(name: str) -> AttachResult:
     concurrent attach safety natively.
     """
     _validate_lifecycle_name(name)
+    # Through the shared translator like stop/rm, so attach takes all three
+    # address forms (x-1b1e) and reaches the harness-store heal (x-9cc5) instead
+    # of refusing a real session that simply has no roster row.
+    name = _canonical_agent_name(name)
     existing = _resolve_registry_entry(name)
 
     if existing.harness in ("codex", "gemini"):
