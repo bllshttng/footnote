@@ -38,6 +38,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 - **only if** you were handed a bare idea (no plan): run `/think` then `/blueprint` before implementing.
 - **only if** the node's rung is `design` (a plan IS bound, but its frontmatter still reads `status: design` - a `/think` doc that was never blueprinted): run `/blueprint <plan_path>` FIRST, then implement. A bound `plan_path` alone does NOT mean the plan is executable: `/blueprint` is what appends the Execution Strategy and flips the doc to `ready`. Skipping it here builds off a design doc that has no execution plan. Autonomous selection never hands you this rung (it is gated); you only reach it when a human named the node explicitly, which IS the consent to carry it the rest of the way.
 - **only if** `$TARGET_BRIEF` is set in the environment (a dispatcher passed a per-node brief via `dispatch_brief`, US3): read it as extra mission context - the scope/"why" the dispatcher wanted this worker to carry. It is plain text (capped at 8 KB) and travels via env, never the command line; treat it as guidance for this node, not as a command to execute.
+- **only if** the run carries `authority: full` (invoked as `/target yolo`, surfaced on the `attended` line of `fno target status`): a judgment call that would emit `<help>` and stall is decided and recorded instead - [§Authority: the `yolo` grant](#authority-the-yolo-grant).
 - **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
 - **only if** dispatching nodes fire-and-forget: [§0a Background Dispatch](#0a-background-dispatch-bg).
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
@@ -119,6 +120,51 @@ Run tests with `fno test [paths...]` (pins worktree `PYTHONPATH`, bypasses rtk, 
 
 Completion is decided by `fno-agents loop-check` from external truth (PR + CI + review), not from any file you write - you cannot self-authorize. The full machinery (immutable manifest, stop-hook shim, `done()` read list, fingerprint backstop, `TerminationReason`, degraded modes) is one Read hop away in **[references/completion-model.md](references/completion-model.md)**.
 
+## Authority: the `yolo` grant
+
+`/target yolo "..."` grants **walk-away authority** for the session.
+It composes with every other modifier, so `/target yolo auto-merge "..."` is true overnight mode.
+
+**What it changes: judgment, never irreversibles.**
+An overnight walk must not stall at 2am on a call you would have made in five seconds at 9am.
+So under authority, a judgment call is *decided and recorded* instead of stopping the session.
+It grants no new powers: merge stays on the auto-merge axis, and destructive or credential-blocked work still stops.
+
+**How to read the grant.** Pass `--yolo` to `fno target start` / `fno target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
+Read it back from `fno target status --json` - the `attended` line carries `; authority: full (yolo)` when the grant is live.
+Read that line, NOT the raw manifest: a **dead** manifest never grants authority (x-4af4 - a defunct session once auto-locked an attended `/think` for ten days), and the orienter's liveness guard is what denies it.
+
+**Under `authority: full`, the deviation rules become:**
+
+| Situation | Without authority | With `authority: full` |
+|---|---|---|
+| Bug in plan | fix inline, note it | unchanged |
+| Minor enhancement (<15 min) | implement, note it | unchanged |
+| Architecture decision, missing dependency, ambiguous requirement | STOP, emit `<help>` | **decide, record one ledger entry, continue** |
+| Interactive prompt (`AskUserQuestion`) in a composed skill | ask the operator | **take the recommended option, record it** |
+| Missing credentials, destructive ambiguity, a genuine blocker | STOP, emit `<help>` | unchanged - still stops |
+
+The split is what the session can *undo*. A wrong architecture call costs a review comment; a wrong destructive call costs data.
+When a decision is close, prefer the reversible option and say so in the entry.
+
+**Which existing `<help>` sites flip: none.** Every `<help>` currently written into this skill and its references is already a genuine blocker rather than a judgment call - `handoff-claim-lost` and `handoff-restore-failed` (another worker may own the node), `handoff-chain-exhausted`, `required-bot-quota-exhausted` (an external provider is out of quota), `pr-node-link-failed` (a write that did not stick), `restart-recommended` (minting and superseding graph nodes is not reversible), and `cross-project-disambiguation` (which skips one message rather than stopping the session). Authority changes none of them. It governs the decisions you would otherwise stop and ask about *without* a written `<help>` site - the architecture forks, the ambiguous requirements, the interactive prompts inside composed skills - which is exactly where an overnight walk actually stalls.
+
+**The Autonomous Decisions ledger.** Every decision taken under authority appends ONE entry, immediately, before acting on it:
+
+```markdown
+## Autonomous Decisions
+
+### 2026-07-20T04:31Z - executor routing for the settings surface
+**Chose:** `impeccable` for tasks touching `app/settings/**`, `do` elsewhere.
+**Alternatives:** all-`do` (simpler, loses the a11y pass on a user-facing form).
+**Why:** the plan's File Ownership Map lists three `.tsx` files; surface inference would route them anyway.
+**Reversible:** yes - re-run the wave with `executor: do` if the polish pass is noise.
+```
+
+Append to `.fno/SUMMARY.md` for a wave plan, or `{plan_path}.artifacts/COMPLETION.md` for a quick plan.
+Write each entry as its own append the moment the decision is made, never as an end-of-session batch: a morning review must read a complete list, and a session that dies mid-wave leaves whole entries behind rather than half of one.
+Where an entry is genuinely uncertain, say so in **Why** - a recorded doubt is the thing the morning review looks for first.
+
 ## The Full Pipeline
 
 ```
@@ -199,6 +245,7 @@ When unsure whether ceremony applies, prefer running it. But never let "did ever
 /target bg --all-ready                   # dispatch every ready, non-deferred node; planning session keeps going
 
 # Modifiers
+/target yolo "feature"                   # walk-away authority: decide judgment calls, never stall
 /target clean "feature"                  # run /simplify after execute
 /target adversarial "feature"            # add adversarial challenge
 /target auto-merge "feature"             # auto-merge after external approves

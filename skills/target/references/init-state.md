@@ -73,6 +73,8 @@ Pass `TARGET_INPUT` and (if the input is an existing plan path) `TARGET_PLAN_PAT
 
 Also pass `TARGET_SIZE` (the size resolved in Step 1c — `S`, `M`, or `L`) so the helper renders the live skip-flag block and the `skip_flags_initial` provenance snapshot from the same source. This is REQUIRED for the snapshot to match the resolved profile; without it, the snapshot freezes to the legacy `M`-shaped defaults and the drift detector will block any later phase-skip the size profile actually requires (the failure mode that produced the BLOCKED-reject loop in inbox msg-b5312b / PR #500).
 
+Pass `--yolo` (or `TARGET_YOLO=1`) when the invocation carried the `yolo` modifier, so init stamps `authority: full`. Without it the field is absent and the session keeps the default stop-and-ask posture. See [SKILL.md §Authority](../SKILL.md#authority-the-yolo-grant).
+
 Per-flag CLI overrides from Step 1c (e.g. `--no-docs`) can be layered on top via `TARGET_NO_EXTERNAL`, `TARGET_NO_DOCS`, `TARGET_NO_SHIP`, `TARGET_NO_BROWSER`, `TARGET_NO_CLEAN`, `TARGET_NO_HOW_TO`, `TARGET_NO_MEMORY` (any of `1` / `true` / `yes` to set the flag, empty / unset to keep the profile default).
 
 ```bash

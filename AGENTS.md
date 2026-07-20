@@ -123,6 +123,8 @@ Preferred (claude): a JSON object in a fenced ```json block (or `<result>{...}</
 
 Bug in plan → fix inline, note in SUMMARY.md. Minor enhancement (<15 min) → implement, note it. Architecture decision or missing dependency → STOP, emit `<help reason="..." evidence="...">` so the user decides.
 
+Under a walk-away authority grant (`/target yolo` → `authority: full` in the manifest) that last rule inverts: decide, append one entry to the `## Autonomous Decisions` ledger, and continue. Genuine blockers (missing credentials, destructive ambiguity) still stop. Full contract: [skills/target/SKILL.md](skills/target/SKILL.md#authority-the-yolo-grant).
+
 ## CLI subsystems (summary + doc)
 
 - **`fno claim`** — the single work-claim primitive (`node:<id>`, `walker:<root>`, `fleet:<id>`); atomic lockfiles under `.fno/claims/`, PID or TTL liveness. `fno target init` already claims the node — never `fno claim acquire` manually. [coordination](docs/architecture/coordination.md).
