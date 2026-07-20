@@ -427,6 +427,7 @@ enum TabContext {
 }
 
 /// The last `Layout` as the client holds it.
+#[derive(Clone)]
 struct LayoutView {
     squads: Vec<SquadMeta>,
     active_squad: u64,
@@ -2532,6 +2533,14 @@ impl View {
         // Capture the selected needs-row identity against the OLD layout, before
         // the swap, so the cursor can re-anchor to the same item afterward.
         let needs_prev = self.answers_selected_id();
+        // (x-b186) Same, for the sideline cursor when the table is status-sorted:
+        // a scrape tick that flips one badge RE-ORDERS the rows, so preserving
+        // only the numeric index would silently move the cursor onto a different
+        // agent and point the next Enter / lifecycle key at the wrong worker.
+        let agent_prev = (self.density == Density::Extended
+            && self.agent_sort == AgentSort::Status)
+            .then(|| self.selected_agent_name())
+            .flatten();
         self.layout = layout;
         // Selector re-anchors to a live, actionable row on catalog change
         // (AC6-FR): clamp into the unified rows, then step off an inert Header
@@ -2542,7 +2551,15 @@ impl View {
         if self.selector.is_some() {
             let anchored = match self.sel_follow.and_then(|sq| self.squad_row(sq)) {
                 Some(row) => Some(row),
-                None => self.selector.and_then(|cur| self.selector_anchor(cur)),
+                // Identity first when a status re-sort could have moved the row
+                // under the cursor; the index clamp is the fallback.
+                None => agent_prev
+                    .and_then(|name| {
+                        self.display_rows()
+                            .iter()
+                            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+                    })
+                    .or_else(|| self.selector.and_then(|cur| self.selector_anchor(cur))),
             };
             self.selector = anchored;
         }
@@ -2624,9 +2641,11 @@ impl View {
         view_store::save_prefs(self.density, self.agent_sort);
         // The row set changes with the density (slim suppresses agent rows,
         // extended adds a column header), so a scrolled sideline must re-clamp
-        // or it can sit past the new last row (x-a621).
-        self.clamp_sideline_offset();
+        // or it can sit past the new last row (x-a621). Ordering matters: the
+        // clamp scrolls TO the selector, so it has to run after the re-anchor
+        // has decided where the selector is - `reanchor_selector` owns both.
         self.reanchor_selector(held);
+        self.clamp_sideline_offset();
     }
 
     /// (x-b186) One press of the sort control. Persisted even outside Extended
@@ -2665,10 +2684,15 @@ impl View {
                 .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
             {
                 self.selector = Some(i);
+                // A re-order can move the agent outside the scroll window, and a
+                // cursor with no visible row still takes contextual keys - so
+                // scroll to it rather than leaving it off-screen.
+                self.clamp_sideline_offset();
                 return;
             }
         }
         self.selector = self.selector.and_then(|cur| self.selector_anchor(cur));
+        self.clamp_sideline_offset();
     }
 
     /// Put a section in an explicit view state (the selector's `l`/`h`), then
@@ -6224,12 +6248,19 @@ async fn dispatch_event(
             // The unified rows are never empty - the `+ new workspace`
             // footer is always present - so an empty session opens on it
             // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
-            if view.term.1 < PANEL_W + MIN_CONTENT_COLS {
+            // Gate on the CURRENT density's width authority, not the regular
+            // width: Slim renders down to a narrower terminal than Regular, and
+            // gating on PANEL_W left that rail mouse-clickable but refusing the
+            // keyboard - the exact mouse-only trap this feature forbids.
+            view.panel_on = true;
+            if view.panel_w() == 0 {
+                view.panel_on = false;
                 let _ = raw_out(b"\x07");
             } else {
-                view.panel_on = true;
-                // Row 0 is a squad row (or the footer, never a Header).
-                view.selector = Some(0);
+                // Row 0 is NOT always actionable: Extended opens on the inert
+                // column header, where the cursor would paint nothing and Enter
+                // would only ring. Anchor onto the first actionable row instead.
+                view.selector = view.selector_anchor(0);
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
                 // not hide row 0 (x-a621).
@@ -15637,6 +15668,117 @@ mod tests {
             width(&a),
             width(&b),
             "rows must occupy equal display width:\n{a:?}\n{b:?}"
+        );
+    }
+
+    // (codex P1) A scrape tick that flips one badge RE-ORDERS a status-sorted
+    // table. Preserving only the numeric index would slide the cursor onto a
+    // different agent, so the next Enter or lifecycle key hits the wrong worker.
+    #[test]
+    fn status_sorted_selector_follows_its_agent_across_a_layout_push() {
+        let mut v = wide_view(vec![
+            agent_row("idle", 4, None, false),
+            agent_row("busy", 5, Some(AgentBadge::Working), false),
+        ]);
+        v.density = Density::Extended;
+        v.agent_sort = AgentSort::Status;
+        let at = |v: &View, name: &str| {
+            v.display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+                .unwrap()
+        };
+        let idle_at = at(&v, "idle");
+        v.selector = Some(idle_at);
+
+        // The SELECTED agent becomes blocked, so it outranks the working row
+        // and jumps up a band - the row under the cursor is the one that moves.
+        let mut next = v.layout.clone();
+        next.agents[0].badge = Some(AgentBadge::Blocked);
+        v.set_layout(next);
+
+        let now = at(&v, "idle");
+        assert_ne!(now, idle_at, "precondition: the re-sort moved this agent");
+        assert_eq!(
+            v.selector,
+            Some(now),
+            "the cursor must follow the agent, not the index"
+        );
+    }
+
+    // (codex P2) Extended puts an inert column header at index 0, so opening the
+    // selector there paints no cursor and Enter only rings.
+    #[test]
+    fn open_selector_skips_the_inert_table_header() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Extended;
+        assert!(matches!(
+            v.display_rows().first(),
+            Some(DisplayRow::TableHead)
+        ));
+        let anchored = v.selector_anchor(0).unwrap();
+        assert!(
+            !row_is_inert(&v.display_rows()[anchored]),
+            "the selector opens on an actionable row"
+        );
+        assert!(v.row_action(anchored).is_some(), "and Enter does something");
+    }
+
+    // (codex P2) Slim renders on terminals narrower than Regular needs. Gating
+    // the selector on the regular width left that rail clickable but not
+    // keyboard-reachable - the mouse-only trap this feature forbids.
+    #[test]
+    fn slim_width_that_renders_is_also_keyboard_selectable() {
+        let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        v.density = Density::Slim;
+        v.term = (24, MIN_CONTENT_COLS + MIN_SLIM_PANEL_W + 1);
+        assert!(v.panel_w() > 0, "the rail renders at this width");
+        assert!(
+            v.term.1 < PANEL_W + MIN_CONTENT_COLS,
+            "and it is below the old regular-width selector gate"
+        );
+    }
+
+    // (codex P2) A re-order can push the selected agent out of the scroll
+    // window; a cursor with no visible row still takes contextual keys.
+    #[test]
+    fn resort_scrolls_the_selection_back_into_view() {
+        let agents: Vec<AgentRow> = (0..40)
+            .map(|i| {
+                agent_row(
+                    &format!("a{i:02}"),
+                    100 + i,
+                    // Only the LAST row is blocked, so a status sort yanks it to
+                    // the top from far down the list.
+                    if i == 39 {
+                        Some(AgentBadge::Blocked)
+                    } else {
+                        None
+                    },
+                    false,
+                )
+            })
+            .collect();
+        let mut v = wide_view(agents);
+        v.term = (12, EXTENDED_PANEL_W + MIN_CONTENT_COLS + 10); // short: scrolls
+        v.density = Density::Extended;
+        let at = |v: &View, n: &str| {
+            v.display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == n))
+                .unwrap()
+        };
+        v.selector = Some(at(&v, "a39"));
+        v.clamp_sideline_offset();
+        v.toggle_agent_sort();
+
+        let cur = v.selector.unwrap();
+        let visible = v.sideline_visible_rows();
+        assert!(
+            cur >= v.sideline_offset && cur < v.sideline_offset + visible,
+            "selection {cur} must stay inside the window [{}, {})",
+            v.sideline_offset,
+            v.sideline_offset + visible
         );
     }
 
