@@ -70,7 +70,7 @@ def test_attended_line_from_manifest() -> None:
 
 
 def test_attended_line_authority_grant(monkeypatch) -> None:
-    # x-6390: `/target yolo` stamps `authority: full`; the orienter surfaces it
+    # x-6390: `/target beastmode` stamps `authority: full`; the orienter surfaces it
     # on the attended line so /think and /blueprint read one posture, not two.
     monkeypatch.setattr(orient, "_claim_state", lambda _k: "live")
     raw = {"attended": False, "authority": "full", "target_claim_key": "node:x-1"}
@@ -79,7 +79,7 @@ def test_attended_line_authority_grant(monkeypatch) -> None:
 
 
 def test_authority_fails_closed_on_claimless_abandoned_manifest(monkeypatch) -> None:
-    """x-6390: a free-text `/target yolo` records NO claim, and a claimless
+    """x-6390: a free-text `/target beastmode` records NO claim, and a claimless
     manifest with a dead transient pid reads `live` by design (right for
     attended, wrong for authority). Without a fail-closed rule an abandoned run
     advertises its grant forever - the x-4af4 stale-autonomy bug, reintroduced.

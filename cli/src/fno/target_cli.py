@@ -296,10 +296,9 @@ def init(
         help="Pin a provider for this session's dispatched workers. Absent, the "
         "spawn path infers it from the invoking harness at dispatch time.",
     ),
-    yolo: bool = typer.Option(
+    beastmode: bool = typer.Option(
         False,
-        "--yolo",
-        "-Y",
+        "--beastmode",
         help="Grant walk-away authority (writes `authority: full` to the "
         "manifest). Judgment calls that would emit <help> and stall are decided "
         "and recorded to an Autonomous Decisions ledger instead. Never grants "
@@ -444,13 +443,13 @@ def init(
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
     if dispatch_provider:
         env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
-    # Sole authority: an inherited TARGET_YOLO must never self-grant (spawns
+    # Sole authority: an inherited TARGET_BEASTMODE must never self-grant (spawns
     # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
-    env["TARGET_YOLO"] = "1" if yolo else ""
+    env["TARGET_BEASTMODE"] = "1" if beastmode else ""
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if result.returncode == 0:
-        if yolo:
+        if beastmode:
             _warn_if_authority_not_granted()
         _print_orientation_report()
         _maybe_dispatch_work_start()
@@ -459,7 +458,7 @@ def init(
 
 
 def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
-    """Name a --yolo that did not take: the write-once manifest and both of
+    """Name a --beastmode that did not take: the write-once manifest and both of
     start's idempotent early returns drop the flag, and an ungranted session
     looks identical to one whose flag was dropped.
 
@@ -482,12 +481,12 @@ def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
         return
     if stamped:
         typer.echo(
-            "--yolo was stamped but has NOTHING LIVE TO ANCHOR IT - this session "
+            "--beastmode was stamped but has NOTHING LIVE TO ANCHOR IT - this session "
             "will not act with authority.\nAuthority needs a LIVE CLAIM: a "
             "free-text run claims no node, and a stale claim proves nothing, so "
             "an abandoned session would be indistinguishable from a live one. The "
             "grant is refused rather than left to outlive its session.\nRe-run "
-            "against a backlog node (`fno target start --yolo <node>`), or "
+            "against a backlog node (`fno target start --beastmode <node>`), or "
             "continue without authority.",
             err=True,
         )
@@ -498,9 +497,9 @@ def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
         "(`/fno:cancel-target`), then start a fresh one."
         if raw
         else "No manifest was written, so nothing consumed the flag. Run "
-        "`fno target init --yolo --input <node>` to claim this session with a grant."
+        "`fno target init --beastmode --input <node>` to claim this session with a grant."
     )
-    typer.echo(f"--yolo did NOT take - this session has no authority grant.\n{fix}", err=True)
+    typer.echo(f"--beastmode did NOT take - this session has no authority grant.\n{fix}", err=True)
 
 
 def _maybe_reconcile_lane_slot() -> None:
@@ -884,8 +883,8 @@ def start(
         None, "--provider", "-p",
         help="Pin a provider for this session's dispatched workers (forwarded to init).",
     ),
-    yolo: bool = typer.Option(
-        False, "--yolo", "-Y",
+    beastmode: bool = typer.Option(
+        False, "--beastmode",
         help="Grant walk-away authority for this session (forwarded to init).",
     ),
 ) -> None:
@@ -913,7 +912,7 @@ def start(
             _print_foreign_holder_park(node_id, holder, cwd)
             raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
-        if yolo:
+        if beastmode:
             _warn_if_authority_not_granted()
         return
 
@@ -1010,7 +1009,7 @@ def start(
             f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
             f"node=already-claimed"
         )
-        if yolo:
+        if beastmode:
             _warn_if_authority_not_granted(wt_path)
         return
 
@@ -1033,8 +1032,8 @@ def start(
         init_cmd += ["--model", model]
     if provider:
         init_cmd += ["--provider", provider]
-    if yolo:
-        init_cmd += ["--yolo"]
+    if beastmode:
+        init_cmd += ["--beastmode"]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
         typer.echo(

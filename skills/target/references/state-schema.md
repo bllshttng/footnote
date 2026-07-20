@@ -65,12 +65,12 @@ scratchpad_path: ""      # path to worktree scratchpad directory (if set)
 ### Authority grant (omitted unless granted)
 
 ```yaml
-authority: full          # `/target yolo` / `fno target init --yolo`; absent otherwise
+authority: full          # `/target beastmode` / `fno target init --beastmode`; absent otherwise
 ```
 
 Absence is the default posture, so an ungranted session is byte-for-byte unchanged.
 Read the grant from the `attended` line of `fno target status`, never from the raw file: a dead manifest never grants authority.
-Contract: [SKILL.md §Authority](../SKILL.md#authority-the-yolo-grant).
+Contract: [SKILL.md §Authority](../SKILL.md#authority-the-beastmode-grant).
 
 ### Budget caps (omitted when unconfigured)
 

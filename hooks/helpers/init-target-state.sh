@@ -882,7 +882,7 @@ EOF
   fi
   # Authority grant (`/target yolo`): omitted unless granted, so absence is the default.
   _authority_line=""
-  [[ "${TARGET_YOLO:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
+  [[ "${TARGET_BEASTMODE:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
 
   cat > "$local_temp" << EOF
 ---

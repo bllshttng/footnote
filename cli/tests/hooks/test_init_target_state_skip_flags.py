@@ -201,8 +201,8 @@ def test_no_phase_init_event_emitted(tmp_path):
     # If events.jsonl doesn't exist at all, that's also correct.
 
 
-def test_authority_absent_without_yolo(tmp_path):
-    """x-6390: no TARGET_YOLO -> the `authority` key is absent entirely.
+def test_authority_absent_without_beastmode(tmp_path):
+    """x-6390: no TARGET_BEASTMODE -> the `authority` key is absent entirely.
 
     Absence (not `authority: none`) is the default posture, so every existing
     manifest reader is byte-for-byte unaffected by this feature.
@@ -211,17 +211,17 @@ def test_authority_absent_without_yolo(tmp_path):
     assert proc.returncode == 0, f"stderr: {proc.stderr[:500]}"
 
     fm = _parse_target_state_frontmatter(tmp_path / ".fno" / "target-state.md")
-    assert "authority" not in fm, f"authority must be absent without yolo; got {fm.get('authority')!r}"
+    assert "authority" not in fm, f"authority must be absent without beastmode; got {fm.get('authority')!r}"
 
 
-def test_authority_full_with_yolo(tmp_path):
-    """x-6390: TARGET_YOLO=1 -> `authority: full` round-trips through the manifest."""
-    proc = _run_init_script(tmp_path, {"TARGET_SIZE": "M", "TARGET_YOLO": "1"})
+def test_authority_full_with_beastmode(tmp_path):
+    """x-6390: TARGET_BEASTMODE=1 -> `authority: full` round-trips through the manifest."""
+    proc = _run_init_script(tmp_path, {"TARGET_SIZE": "M", "TARGET_BEASTMODE": "1"})
     assert proc.returncode == 0, f"stderr: {proc.stderr[:500]}"
 
     fm = _parse_target_state_frontmatter(tmp_path / ".fno" / "target-state.md")
     assert fm.get("authority") == "full", f"expected authority=full, got {fm.get('authority')!r}"
-    # The grant is orthogonal to auto-merge: yolo spends judgment, never
+    # The grant is orthogonal to auto-merge: beastmode spends judgment, never
     # irreversibles (epic G8).
     assert fm.get("auto_merge_approved") is False
 

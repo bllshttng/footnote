@@ -247,7 +247,7 @@ def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
         val = str(manifest_raw["attended"]).strip().lower()
         line = f"{val} (manifest, live: {reason})"
         if _authority_granted(manifest_raw):
-            line += "; authority: full (yolo)"
+            line += "; authority: full (beastmode)"
         return line
     # No manifest yet: resolve from the substrate, mirroring init-target-state.sh
     # and the spawn_think precedent -- FNO_AGENT_SELF (injected into EVERY spawned

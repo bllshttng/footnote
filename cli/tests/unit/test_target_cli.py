@@ -147,8 +147,8 @@ def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
     _clear_root_cache()
 
 
-def test_target_init_yolo_sets_authority_env(monkeypatch, tmp_path):
-    """x-6390: --yolo plumbs TARGET_YOLO=1 so the bash writer stamps the grant."""
+def test_target_init_beastmode_sets_authority_env(monkeypatch, tmp_path):
+    """x-6390: --beastmode plumbs TARGET_BEASTMODE=1 so the bash writer stamps the grant."""
     captured = {}
 
     class _Result:
@@ -165,17 +165,17 @@ def test_target_init_yolo_sets_authority_env(monkeypatch, tmp_path):
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
-    assert captured["env"].get("TARGET_YOLO") == "1"
+    assert captured["env"].get("TARGET_BEASTMODE") == "1"
     _clear_root_cache()
 
 
-def test_target_init_clears_ambient_yolo_without_flag(monkeypatch, tmp_path):
-    """x-6390: an inherited TARGET_YOLO must NEVER grant authority.
+def test_target_init_clears_ambient_beastmode_without_flag(monkeypatch, tmp_path):
+    """x-6390: an inherited TARGET_BEASTMODE must NEVER grant authority.
 
     The flag is the sole authority. A worker spawned under an exported
-    TARGET_YOLO (codex/gemini spawn with env=None and inherit wholesale) would
+    TARGET_BEASTMODE (codex/gemini spawn with env=None and inherit wholesale) would
     otherwise self-grant walk-away autonomy nobody asked for.
     """
     captured = {}
@@ -191,15 +191,15 @@ def test_target_init_clears_ambient_yolo_without_flag(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    monkeypatch.setenv("TARGET_YOLO", "1")  # the ambient grant
+    monkeypatch.setenv("TARGET_BEASTMODE", "1")  # the ambient grant
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["target", "init", "--input", "x"])
     assert result.exit_code == 0, result.output
-    assert captured["env"].get("TARGET_YOLO") == "", (
-        "ambient TARGET_YOLO must be cleared, not forwarded: "
-        f"got {captured['env'].get('TARGET_YOLO')!r}"
+    assert captured["env"].get("TARGET_BEASTMODE") == "", (
+        "ambient TARGET_BEASTMODE must be cleared, not forwarded: "
+        f"got {captured['env'].get('TARGET_BEASTMODE')!r}"
     )
     _clear_root_cache()
 
@@ -532,8 +532,8 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
     assert "base=in-place" in result.output
 
 
-def test_target_start_forwards_yolo_to_init(tmp_path, monkeypatch):
-    """x-6390: `/target yolo` cold-starts through `start`, not `init`, so the
+def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
+    """x-6390: `/target beastmode` cold-starts through `start`, not `init`, so the
     forward is the link that actually carries the grant in real use. Without it
     the feature is inert while every init-level test stays green."""
     import subprocess as _real_subprocess
@@ -569,19 +569,19 @@ def test_target_start_forwards_yolo_to_init(tmp_path, monkeypatch):
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
 
-    result = runner.invoke(app, ["target", "start", "x-yol", "--yolo"])
+    result = runner.invoke(app, ["target", "start", "x-yol", "--beastmode"])
     assert result.exit_code == 0, result.output
-    assert "--yolo" in (seen["init_cmd"] or []), f"start did not forward --yolo: {seen['init_cmd']}"
+    assert "--beastmode" in (seen["init_cmd"] or []), f"start did not forward --beastmode: {seen['init_cmd']}"
 
     seen["init_cmd"] = None
     result = runner.invoke(app, ["target", "start", "x-yol"])
     assert result.exit_code == 0, result.output
-    assert "--yolo" not in (seen["init_cmd"] or []), "start forwarded --yolo without the flag"
+    assert "--beastmode" not in (seen["init_cmd"] or []), "start forwarded --beastmode without the flag"
 
 
-def test_target_start_yolo_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
+def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
     """x-6390: `start` no-ops inside a linked worktree and returns before it can
-    forward --yolo, so the grant is dropped. Same silent-drop class as the init
+    forward --beastmode, so the grant is dropped. Same silent-drop class as the init
     path; it must say so rather than print a normal-looking receipt."""
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
@@ -596,7 +596,7 @@ def test_target_start_yolo_noop_when_already_isolated_is_named(tmp_path, monkeyp
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda _n: None)
 
-    result = runner.invoke(app, ["target", "start", "x-yol", "--yolo"])
+    result = runner.invoke(app, ["target", "start", "x-yol", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "already isolated" in result.output
     assert "did NOT take" in result.output, result.output
@@ -607,8 +607,8 @@ def test_target_start_yolo_noop_when_already_isolated_is_named(tmp_path, monkeyp
     _clear_root_cache()
 
 
-def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypatch):
-    """x-6390: the manifest is write-once, so --yolo against an initialized
+def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monkeypatch):
+    """x-6390: the manifest is write-once, so --beastmode against an initialized
     session is a no-op - and a dropped grant looks exactly like no grant. Say it."""
     class _Result:
         returncode = 0
@@ -627,7 +627,7 @@ def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypat
 
     # A pre-existing manifest with no grant: the flag was dropped -> warn.
     manifest.write_text("---\nattended: true\n---\n")
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" in result.output, result.output
 
@@ -640,14 +640,14 @@ def test_target_init_yolo_noop_on_existing_manifest_is_named(tmp_path, monkeypat
     monkeypatch.setattr(
         "fno.target.orient._claim_state", lambda _k: "live", raising=False
     )
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--yolo"])
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" not in result.output, result.output
     assert "ANCHOR IT" not in result.output, result.output
     _clear_root_cache()
 
 
-def test_target_init_yolo_unanchored_grant_is_named(tmp_path, monkeypatch):
+def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
     """x-6390: a free-text run claims no node, so `authority: full` has nothing
     to anchor it and the orienter refuses it (fail closed). The stamp alone would
     otherwise look like a working grant."""
@@ -672,7 +672,7 @@ def test_target_init_yolo_unanchored_grant_is_named(tmp_path, monkeypatch):
         f"---\nattended: true\nauthority: full\nowner_pid: {os.getpid()}\n---\n"
     )
 
-    result = runner.invoke(app, ["target", "init", "--input", "some idea", "--yolo"])
+    result = runner.invoke(app, ["target", "init", "--input", "some idea", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "NOTHING LIVE TO ANCHOR IT" in result.output, result.output
 

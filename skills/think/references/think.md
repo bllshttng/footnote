@@ -36,7 +36,7 @@ Do NOT invoke any implementation skill, write any code, scaffold any project, or
 </HARD-GATE>
 
 **Walk-away authority (governs EVERY interactive checkpoint in this flow, not just one).**
-If `fno target status` shows `authority: full` on the `attended` line (a live `/target yolo` session), the operator has granted the design calls away, so this flow must not block on them.
+If `fno target status` shows `authority: full` on the `attended` line (a live `/target beastmode` session), the operator has granted the design calls away, so this flow must not block on them.
 Everywhere below that would fire `AskUserQuestion`, ask for confirmation, or wait for approval - the gate above, the Step 2 interview, the Step 3 approach confirmation, the Step 4 per-section checks, the Step 7b domain-pitfall prompts - take the recommended option and append one `## Autonomous Decisions` entry naming what was chosen and what it foreclosed.
 The design is still produced and still written down; only the waiting is removed.
 Stated once here because a per-checkpoint exception is exactly how a walk-away run ends up stalling at the one checkpoint nobody remembered to annotate.
