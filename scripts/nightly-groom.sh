@@ -14,4 +14,15 @@ set -u
 echo "nightly-groom.sh is DEPRECATED - use \`fno backlog groom\` (it now runs the mechanical legs too)." >&2
 echo "Install the daily cadence once with: fno backlog groom --install-agent" >&2
 
-exec "${FNO:-fno}" backlog groom "$@"
+# This script's dry-run short flag was -n; the verb's is -N. Translate it, or an
+# existing `nightly-groom.sh -n` would start MUTATING the graph instead of
+# previewing it. Everything else passes through untouched.
+args=()
+for a in "$@"; do
+  case "$a" in
+    -n) args+=(--dry-run) ;;
+    *) args+=("$a") ;;
+  esac
+done
+
+exec "${FNO:-fno}" backlog groom ${args[@]+"${args[@]}"}

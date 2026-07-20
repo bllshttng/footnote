@@ -90,7 +90,11 @@ def _mechanical_legs(age: int) -> list[tuple[str, list[str]]]:
     return [
         ("archive", ["archive", "--apply", "--older-than-days", str(age)]),
         ("reconcile", ["reconcile"]),
-        ("maintain", ["maintain", "--apply"]),
+        # --no-validity is load-bearing: the validity sweep watermarks the pile
+        # it reviews, so running it here would leave the worker's own read-only
+        # `maintain` with zero eligible candidates and its proposals would never
+        # reach the report. The sweep belongs to the pass that can report it.
+        ("maintain", ["maintain", "--apply", "--no-validity"]),
         ("relatedness", ["relatedness", "build"]),
     ]
 
@@ -338,8 +342,11 @@ _GROOM_PLIST = """\
   <key>ProcessType</key>
   <string>Background</string>
 
+  <!-- A repo root, not $HOME: maintain's validity sweep resolves its git
+       evidence root from the cwd, and from a non-repo it records every symbol
+       "unavailable" while the leg still reports ok. -->
   <key>WorkingDirectory</key>
-  <string>{home}</string>
+  <string>{workdir}</string>
 
   <key>StandardOutPath</key>
   <string>{log_out}</string>
@@ -351,7 +358,13 @@ _GROOM_PLIST = """\
 """
 
 
-def render_groom_plist(*, fno_binary: str, install_path: str, hour: int = GROOM_HOUR_DEFAULT) -> str:
+def render_groom_plist(
+    *,
+    fno_binary: str,
+    install_path: str,
+    hour: int = GROOM_HOUR_DEFAULT,
+    workdir: Optional[str] = None,
+) -> str:
     """Render the daily groom LaunchAgent plist. No filesystem writes."""
     from fno.pr_watch._install import _augment_path, _xml_escape
 
@@ -362,6 +375,7 @@ def render_groom_plist(*, fno_binary: str, install_path: str, hour: int = GROOM_
         fno_binary=_xml_escape(fno_binary),
         path=_xml_escape(_augment_path(install_path)),
         home=_xml_escape(home),
+        workdir=_xml_escape(workdir or home),
         hour=int(hour),
         log_out=_xml_escape(str(state / "groom.out.log")),
         log_err=_xml_escape(str(state / "groom.err.log")),
@@ -399,11 +413,26 @@ def install_groom_agent(
     fno_binary = fno_binary or shutil.which("fno") or "fno"
     install_path = install_path if install_path is not None else os.environ.get("PATH", "")
 
+    # Captured at install time: the scheduled run has no cwd of its own, and
+    # maintain's validity sweep needs a real repo to read source evidence from.
+    workdir: Optional[str] = None
+    try:
+        from fno.paths import resolve_repo_root
+
+        workdir = str(resolve_repo_root())
+    except Exception:  # noqa: BLE001 - falls back to $HOME, same as before
+        workdir = None
+
     plist_path = launch_agents_dir / f"{GROOM_LABEL}.plist"
     try:
         launch_agents_dir.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(
-            render_groom_plist(fno_binary=fno_binary, install_path=install_path, hour=hour),
+            render_groom_plist(
+                fno_binary=fno_binary,
+                install_path=install_path,
+                hour=hour,
+                workdir=workdir,
+            ),
             encoding="utf-8",
         )
     except OSError as exc:

@@ -578,3 +578,47 @@ def test_a_lost_correlation_id_is_flagged_not_silent(claims_root, monkeypatch):
     r = G.run_groom(cwd="/tmp", today=DAY)
 
     assert r["short_id_lost"] is True
+
+
+def test_maintain_leg_leaves_the_validity_sweep_to_the_worker():
+    """The sweep watermarks the pile it reviews.
+
+    Running it in the dispatcher would leave the worker's own read-only
+    `maintain` with zero eligible candidates, so its proposals would never reach
+    the report - silently defeating the point of re-deriving them live.
+    """
+    legs = dict((name, args) for name, args in G._mechanical_legs(14))
+    assert "--no-validity" in legs["maintain"]
+
+
+def test_scheduled_run_works_from_a_repo_not_home(tmp_path, monkeypatch):
+    """maintain's validity sweep reads git evidence from the cwd.
+
+    From a non-repo it records every symbol unavailable while the leg still
+    reports ok, so the plist must carry a real repo root.
+    """
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+
+    G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno", install_path="/bin")
+    xml = (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+    assert "<key>WorkingDirectory</key>\n  <string>/repo/footnote</string>" in xml
+
+
+def test_shim_translates_the_old_dry_run_short_flag():
+    """The old script's -n meant dry-run; the verb's short flag is -N.
+
+    Passing -n through unchanged would turn a preview into a mutating run.
+    """
+    import subprocess as sp
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "nightly-groom.sh"
+    proc = sp.run(
+        ["bash", str(script), "-n"],
+        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "FNO": "echo"},
+    )
+    assert "backlog groom --dry-run" in proc.stdout, proc.stdout
