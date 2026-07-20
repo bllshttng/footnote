@@ -413,3 +413,31 @@ def test_the_old_nightly_script_is_a_shim_that_defers():
     )
     for retired in ("archive", "reconcile", "maintain", "relatedness", "DIGEST"):
         assert retired not in body, f"the shim must not still run {retired!r} itself"
+
+
+def test_every_mechanical_leg_exists_on_the_real_cli():
+    """Bind the leg table to the actual commands.
+
+    A leg runs unattended and its failure is swallowed into a receipt string, so
+    a renamed verb or dropped flag would degrade to `failed: 2` every night and
+    read as a flaky leg rather than a typo. Only this binding catches it.
+    """
+    import click
+    import typer.main
+
+    from fno.graph.cli import cli as graph_cli
+
+    root = typer.main.get_command(graph_cli)
+    ctx = click.Context(root)
+
+    for name, args in G._mechanical_legs(14):
+        cmd = root.get_command(ctx, args[0])
+        assert cmd is not None, f"`fno backlog {args[0]}` does not exist ({name} leg)"
+
+        if len(args) > 1 and not args[1].startswith("-"):
+            sub = cmd.get_command(click.Context(cmd), args[1])
+            assert sub is not None, f"`fno backlog {args[0]} {args[1]}` does not exist"
+
+        available = {opt for param in cmd.params for opt in param.opts}
+        missing = [a for a in args[1:] if a.startswith("--") and a not in available]
+        assert not missing, f"`fno backlog {args[0]}` has no {missing}"
