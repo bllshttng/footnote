@@ -346,12 +346,98 @@ NODE_IDS="$(printf '%s' "$RECONCILE_JSON" | jq -r '.closed[]?.node_id // empty' 
 # PR already maps to (read-only pr_number scan of the graph) so Step 8a still
 # reaps its build-worker row. Deduped so the out-of-gate case reaps once.
 GJ="$(python3 -c 'from fno.paths import graph_json; print(graph_json())' 2>/dev/null || echo "$HOME/.fno/graph.json")"
-# graph.json stores nodes flat under `.entries`, and pr_number is not unique
-# (same PR can map to multiple ids), so union EVERY match - the reap loop below
-# already iterates NODE_IDS and skips non-live/absent rows, making extra ids safe.
-for PR_NODE in $(jq -r --argjson pr "$PR" '.entries[]? | select(.pr_number == $pr) | .id' "$GJ" 2>/dev/null || true); do
-  case " $NODE_IDS " in *" $PR_NODE "*) : ;; *) NODE_IDS="${NODE_IDS}${NODE_IDS:+ }$PR_NODE" ;; esac
-done
+# graph.json is CROSS-PROJECT and a pr_number is unique only WITHIN a repo, so
+# the match must be scoped to this checkout's origin. An unscoped union put a
+# foreign repo's node in NODE_IDS, and Step 8a under `self_reap` would stop+rm
+# that repo's build-worker row - the reap loop's non-live skip bounds the damage
+# but never scopes it, because a finished foreign row is exactly a non-live row.
+# git remote FIRST: it needs no network and no auth, so an offline or
+# unauthenticated run still scopes the scan instead of skipping it wholesale.
+# The HOST must be exactly github.com once the scheme, any user@, and any :port
+# are stripped - a substring match would accept notgithub.com and
+# gitlab.com/mirrors/github.com/o/r, handing back a confident `o/r` that
+# suppresses the gh fallback and can admit a foreign node. Lowercased because
+# the host is case-insensitive and the jq comparison downcases both sides.
+ORIGIN_SLUG="$(git remote get-url origin 2>/dev/null | tr 'A-Z' 'a-z' \
+  | sed -e 's#^[a-z][a-z0-9+.-]*://##' -e 's#^[^/@]*@##' \
+  | sed -n 's#^github\.com\(:[0-9][0-9]*\)\{0,1\}[:/]\(.*\)$#\2#p' \
+  | sed -e 's#/\{1,\}$##' -e 's#\.git$##')"
+# owner/repo exactly: anything deeper is a path we do not understand, and
+# guessing is how a foreign node gets in.
+case "$ORIGIN_SLUG" in
+  */*/*) ORIGIN_SLUG="" ;;
+  ?*/?*) : ;;
+  *) ORIGIN_SLUG="" ;;
+esac
+if [ -z "$ORIGIN_SLUG" ]; then
+  ORIGIN_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+fi
+# Canonical repo root, NOT `--show-toplevel`: the ritual usually runs from a
+# worktree, while graph `cwd` values point at the canonical checkout. Taken from
+# `git worktree list` (the first record that is a real working tree) rather than
+# "<git-common-dir>/..", which is only the root by convention - under
+# `git init --separate-git-dir` the common dir is EXTERNAL, and if it happens to
+# sit inside ANOTHER checkout that checkout would pass a bare .git probe and
+# become the root. Mirrors resolve_canonical_worktree, including its fallback.
+# read-loop, not `for x in $VAR`: zsh does not word-split a scalar expansion, so
+# the for-loop form silently collapses every id into one.
+REPO_ROOT=""
+WORKTREE_LIST="$(git worktree list --porcelain 2>/dev/null || true)"
+while IFS= read -r WT_LINE; do
+  case "$WT_LINE" in
+    "worktree "*)
+      WT_CAND="${WT_LINE#worktree }"
+      # A bare repo and a separate-git-dir metadata dir both appear here and
+      # neither has a .git child, so the probe skips exactly those.
+      if [ -e "$WT_CAND/.git" ]; then REPO_ROOT="$WT_CAND"; break; fi ;;
+  esac
+done <<EOF
+$WORKTREE_LIST
+EOF
+if [ -z "$REPO_ROOT" ]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [ -n "$REPO_ROOT" ]; then
+  # Resolved via cd/pwd because --path-format=absolute is git >= 2.31 only
+  # (same reason as Step 1).
+  REPO_ROOT="$(cd "$REPO_ROOT" 2>/dev/null && pwd -P || true)"
+fi
+if [ -z "$REPO_ROOT" ]; then
+  echo "post-merge: repo root unresolved; url-less nodes cannot be scoped and are SKIPPED (pr_url matches still union)" >&2
+fi
+if [ -n "$ORIGIN_SLUG" ]; then
+  # `contains` not `test`: a slug may carry regex metacharacters (org/repo.js).
+  # The surrounding /.../pull/ anchors keep a superstring slug from matching.
+  # `strings` not `//`: a hand-edited graph can hold a non-string pr_url, and
+  # ascii_downcase on one aborts the WHOLE program, silently dropping every
+  # legitimate node after it. A node with neither url nor cwd is dropped too -
+  # fail closed, never a guess.
+  SCAN_ERR="$(mktemp)"
+  if ! PR_NODES="$(jq -r --argjson pr "$PR" --arg slug "$ORIGIN_SLUG" --arg root "$REPO_ROOT" '
+      .entries[]?
+      | select(.pr_number == $pr)
+      | select(
+          (((.pr_url | strings) // "") | ascii_downcase | contains("/" + ($slug | ascii_downcase) + "/pull/"))
+          or ((((.pr_url | strings) // "") == "") and ($root != "") and ((.cwd | strings) == $root))
+        )
+      | .id' "$GJ" 2>"$SCAN_ERR")"; then
+    echo "post-merge: graph pr_number scan FAILED - no graph-derived id reaped" >&2
+    cat "$SCAN_ERR" >&2
+    echo "graph pr_number scan" >> "$FAILURES_FILE"
+  fi
+  rm -f "$SCAN_ERR"
+  # read-loop, not `for PR_NODE in $PR_NODES`: zsh does not word-split a scalar
+  # expansion, so the for-loop form collapses every id into one multiline string
+  # and the dedup below silently never matches.
+  while IFS= read -r PR_NODE; do
+    [ -n "$PR_NODE" ] || continue
+    case " $NODE_IDS " in *" $PR_NODE "*) : ;; *) NODE_IDS="${NODE_IDS}${NODE_IDS:+ }$PR_NODE" ;; esac
+  done <<EOF
+$PR_NODES
+EOF
+else
+  echo "post-merge: origin slug unresolved (no git remote, gh down?); graph pr_number union SKIPPED - reconcile-closed ids still reaped" >&2
+fi
 # full sweep above, or scope it: fno backlog reconcile --node ab-XXXXXXXX --json
 ```
 

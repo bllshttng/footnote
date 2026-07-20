@@ -18,6 +18,25 @@ import json
 from pathlib import Path
 from typing import Optional
 
+#: Opening words of every reason that names an INFRA failure - something that
+#: should have worked did not - as opposed to a benign no-match. Kept beside the
+#: return sites that produce them so the two cannot drift apart silently.
+_INFRA_REASON_OPENERS = (
+    "repo slug unresolved",
+    "ledger unreadable",
+    "ledger malformed",
+)
+
+
+def reason_is_infra_failure(reason: Optional[str]) -> bool:
+    """Whether ``reason`` names a broken environment rather than a clean miss.
+
+    A caller that flattens the result to a bare list needs this: without it a
+    ledger that would not parse reads exactly like "this PR has no owning
+    session", and the infra failure is never investigated.
+    """
+    return bool(reason) and reason.startswith(_INFRA_REASON_OPENERS)
+
 
 def _entry_owns_pr(entry: dict, pr: int, slug_l: str, allow_unattributed: bool) -> bool:
     url = entry.get("pr_url")
