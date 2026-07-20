@@ -14,7 +14,12 @@ import os
 import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+
+# Binds the receipt's status vocabulary to something checkable. `cmd_groom` maps
+# a subset of these to a non-zero exit, so an unannotated new value would
+# silently exit 0 - the drift this alias exists to catch at review time.
+GroomStatus = Literal["dispatched", "degraded", "already-ran", "dry-run", "failed"]
 
 GROOM_MODEL_DEFAULT = "claude-sonnet-5"
 
@@ -199,7 +204,8 @@ def run_groom(
             "key": key,
             "model": model,
             "brief": groom_brief(day),
-            "mechanical": [name for name, _ in _mechanical_legs(age)],
+            # Same shape as a real pass, so a consumer never has to branch on it.
+            "mechanical": {name: "pending" for name, _ in _mechanical_legs(age)},
         }
 
     holder = f"groom:{os.getpid()}"

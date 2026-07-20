@@ -350,8 +350,35 @@ def test_spawn_failure_keeps_mechanical_results_in_the_receipt(claims_root, monk
 
 def test_dry_run_names_the_legs_without_running_them(claims_root, spawns, legs):
     r = G.run_groom(cwd="/tmp", today=DAY, dry_run=True)
-    assert r["mechanical"] == ["archive", "reconcile", "maintain", "relatedness"]
+    # Same shape as a real pass: a consumer must never branch on which run it was.
+    assert r["mechanical"] == {
+        "archive": "pending",
+        "reconcile": "pending",
+        "maintain": "pending",
+        "relatedness": "pending",
+    }
     assert not legs
+
+
+def test_every_receipt_status_is_in_the_declared_vocabulary(claims_root, spawns, monkeypatch):
+    """`cmd_groom` maps a subset of these to a non-zero exit.
+
+    A status added here without updating that tuple degrades to a silent exit 0,
+    which on an unattended nightly job means the break is invisible.
+    """
+    import typing
+
+    declared = set(typing.get_args(G.GroomStatus))
+    seen = {
+        G.run_groom(cwd="/tmp", today=DAY, dry_run=True)["status"],
+        G.run_groom(cwd="/tmp", today=DAY)["status"],
+        G.run_groom(cwd="/tmp", today=DAY)["status"],
+    }
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: {"archive": "failed: 1: x"})
+    seen.add(G.run_groom(cwd="/tmp", today=date(2026, 7, 21))["status"])
+
+    assert seen <= declared, f"undeclared status: {seen - declared}"
+    assert {"dry-run", "dispatched", "already-ran", "degraded"} <= seen
 
 
 # ── cadence installer ───────────────────────────────────────────────────────
