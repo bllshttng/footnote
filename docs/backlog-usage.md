@@ -158,6 +158,39 @@ fno backlog maintain --apply       # recurring sweep: re-scope, prune, auto-defe
 fno backlog reconcile              # close nodes whose PR merged outside the gate
 ```
 
+### The daily pass
+
+`fno backlog groom` is the single grooming surface, and it runs the whole pass:
+
+1. The mechanical legs, in order - `archive --apply` (age-gated, `--age`, default 14 days), `reconcile`, `maintain --apply`, then `relatedness build` last so the map reflects the post-groom graph.
+   Best-effort: one failing leg is named in the receipt and does not cost you the other three.
+   A leg is `ok` only on exit 0; exit 4 is recorded as `partial` (in this CLI it always means a degraded result, such as PR queries `reconcile` could not resolve, never "nothing to do").
+   If any leg comes back other than `ok` the receipt status is `degraded` and the verb exits non-zero, and the worker names the leg in its report - a scheduler log nobody reads is not a signal.
+2. One Sonnet worker for the judgment calls, working from a fixed allowlist of reversible levers, finishing by mailing a one-screen report that leads with the mechanical outcomes.
+
+A UTC-day claim, not the scheduler, enforces once-a-day, so a double-fire or a manual run on a day that already groomed is a no-op (`already-ran`, zero subprocesses).
+That makes the cadence boring to install:
+
+```bash
+fno backlog groom --install-agent          # daily LaunchAgent at 2am local (macOS)
+fno backlog groom --install-agent --hour 3 # pick another hour
+```
+
+`fno update` re-renders the agent onto the freshly-installed binary (`--refresh-agent`, run automatically at the tail of an update alongside the pr-watch refresh), preserving the hour and working directory you installed with.
+Without that, an update replaces the binary the plist points at and a migration that breaks the old entry point leaves the agent wedged with no self-heal.
+The verb is a no-op when no agent is installed, so it costs nothing if you schedule grooming another way.
+
+Non-macOS gets a cron line instead; the verb itself is scheduler-agnostic:
+
+```cron
+0 2 * * * fno backlog groom
+```
+
+Two notes on what this replaced.
+`scripts/nightly-groom.sh` is a deprecation shim that execs this verb and will be deleted next release.
+`~/.fno/groom-digest.md` is retired - nothing writes or reads it, and you can delete it.
+The worker re-derives its proposals by running read-only `fno backlog maintain` at pass start, so there is no intermediate file left to go stale.
+
 ## Parallel lanes
 
 With `config.parallel.max_lanes >= 2`, the active-backlog daemon dispatches up

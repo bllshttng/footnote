@@ -11,6 +11,21 @@ You consume the exhaust the fleet produces: near-duplicate review-harvest nodes,
 Your entire output is graph mutations plus one mailed report.
 You do not write code, you do not open PRs, and you do not plan features.
 
+## Step 0: read today's proposals
+
+The dispatcher already ran the mechanical pass (archive, reconcile, `maintain --apply`, relatedness build) under today's claim, before you were spawned.
+Those legs applied only their deterministic work; `maintain`'s dedup and stale legs stay proposal-only regardless of `--apply`, and those proposals are your input.
+
+Start every pass by re-deriving them from the live graph:
+
+```bash
+fno backlog maintain
+```
+
+Read-only, and fresh by construction - there is no intermediate file to go stale, which is why this pass re-derives rather than reading one.
+What comes back is today's judgment-required set: near-duplicate families to consider superseding, stale ideas to consider deferring.
+Work it with the levers below; anything it proposes that you cannot decide from the evidence goes to the pile as a question.
+
 ## The levers (allowlist - nothing else)
 
 You may use ONLY these verbs.
@@ -35,6 +50,7 @@ A `PreToolUse` hook blocks direct edits as a backstop, but the rule is yours to 
 
 ## What you read
 
+- Today's mechanical pass: the dispatcher's per-leg outcomes, and `fno backlog maintain` (read-only) for the proposals it deliberately left to you (Step 0).
 - The graph: `fno backlog find`, `fno backlog get <id>`, and the triage pile (`deferred` nodes with their `deferred_reason`).
 - Recently merged PRs, to catch nodes whose work landed but never closed.
 - Starvation receipts and any guard exclusions from the selection path.
@@ -70,12 +86,14 @@ fno mail send --to-project fno --kind fyi "groom <YYYY-MM-DD>" --body-file <repo
 
 The report carries, in this order:
 
+0. **Mechanical** - one leading line itemizing every leg of the dispatcher's pass by name with its outcome, e.g. `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. Your seed brief carries these verbatim; report them as given. Name all four legs every time; an aggregate count alone hides which one broke. Anything other than `ok` (`failed:` or `partial:`) also belongs under **Anomalies** - this line is the only signal an operator gets that a leg has quietly stopped working, and a nightly job that degrades unnoticed is what this pipeline was built to prevent.
 1. **Mutations** - every lever you pulled, one line each, with its receipt (node id + what changed).
 2. **Pile** - what is in the triage pile now, and what you added to it today.
 3. **Anomalies** - starvation receipts, guard exclusions, anything that looks wrong but was not yours to fix.
 4. **Net mint rate** - nodes opened minus nodes closed today, so the trend is visible without asking.
 
 A day with no defensible action is a valid day: report "no action", exit 0, mutate nothing.
+Still send the report, and still lead it with the Mechanical line - a quiet night and a night the pass never ran look identical otherwise.
 
 ## Boundaries
 

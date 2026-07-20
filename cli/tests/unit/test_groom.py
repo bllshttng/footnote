@@ -24,6 +24,17 @@ def claims_root(tmp_path, monkeypatch) -> Path:
     return root
 
 
+# Bound before the autouse stub replaces the module attribute, so the tests that
+# exercise the real leg runner reach it rather than the stub.
+REAL_MECHANICAL = G._run_mechanical
+
+
+@pytest.fixture(autouse=True)
+def no_real_mechanical(monkeypatch):
+    """Never shell out to the real CLI; tests that care use REAL_MECHANICAL."""
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: {"archive": "ok"})
+
+
 @pytest.fixture
 def spawns(monkeypatch) -> list:
     """Capture spawn calls instead of launching a real worker."""
@@ -235,3 +246,429 @@ def test_skill_forbids_direct_state_edits():
     assert "graph.json" in text and "Never" in text
     for forbidden in ("jq -i", "sed -i"):
         assert forbidden in text, "the brief must name the direct-edit paths it forbids"
+
+
+# ── the mechanical pass ─────────────────────────────────────────────────────
+
+
+class _Proc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+@pytest.fixture
+def legs(monkeypatch) -> list:
+    """Capture mechanical leg subprocesses; returns the recorded commands."""
+    monkeypatch.undo()  # drop the autouse stub so the real _run_mechanical runs
+    calls: list = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    return calls
+
+
+def test_mechanical_legs_run_in_order_after_the_claim(claims_root, spawns, monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: seen.append(age) or {"archive": "ok"})
+
+    r = G.run_groom(cwd="/tmp", today=DAY, age=7)
+
+    assert r["status"] == "dispatched"
+    assert seen == [7], "--age must reach the archive leg"
+    assert r["mechanical"] == {"archive": "ok"}
+
+
+def test_relatedness_builds_last_over_the_post_groom_graph():
+    # Build must see the post-archive corpus, or this run's archived nodes stay
+    # in the map as dangling edges until tomorrow.
+    names = [name for name, _ in G._mechanical_legs(14)]
+    assert names == ["archive", "reconcile", "maintain", "relatedness"]
+
+
+def test_quiet_night_legs_are_ok(monkeypatch):
+    # The quiet paths all exit 0: reconcile prints "Backlog is in sync." and
+    # returns, archive/maintain report nothing to do and return.
+    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=0))
+    assert set(REAL_MECHANICAL(14).values()) == {"ok"}
+
+
+def test_exit_4_is_partial_not_ok(monkeypatch):
+    # Every exit-4 site in this CLI is a DEGRADED outcome, never "nothing to do":
+    # reconcile raises it when PR queries could not be resolved. Recording that
+    # as `ok` would log a reconcile that silently stopped closing nodes as
+    # healthy every night - the exact staleness this pipeline exists to kill.
+    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=4, stderr="2 node(s) could not be resolved"))
+    results = REAL_MECHANICAL(14)
+
+    assert all(v.startswith("partial: 4:") for v in results.values()), results
+    assert G._leg_trouble(results) == ["archive", "maintain", "reconcile", "relatedness"]
+
+
+def test_one_failing_leg_does_not_abort_the_rest(monkeypatch):
+    def _fake_run(cmd, **kwargs):
+        if "reconcile" in cmd:
+            return _Proc(returncode=1, stderr="boom")
+        return _Proc()
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    results = REAL_MECHANICAL(14)
+
+    assert results["reconcile"].startswith("failed: 1: boom")
+    assert results["maintain"] == "ok" and results["relatedness"] == "ok"
+
+
+def test_a_wedged_leg_is_named_not_raised(monkeypatch):
+    def _boom(cmd, **kwargs):
+        raise G.subprocess.TimeoutExpired(cmd="fno", timeout=G._LEG_TIMEOUT_S)
+
+    monkeypatch.setattr(G.subprocess, "run", _boom)
+    assert "TimeoutExpired" in REAL_MECHANICAL(14)["archive"]
+
+
+def test_same_day_rerun_runs_zero_mechanical_verbs(claims_root, spawns, legs):
+    # AC1-EDGE: the claim guards the WHOLE pipeline, so a second run must not
+    # re-mutate the graph, not merely skip the worker.
+    G.run_groom(cwd="/tmp", today=DAY)
+    before = len(legs)
+    assert G.run_groom(cwd="/tmp", today=DAY)["status"] == "already-ran"
+    assert len(legs) == before, "already-ran must spawn no mechanical subprocess"
+
+
+def test_spawn_failure_keeps_mechanical_results_in_the_receipt(claims_root, monkeypatch):
+    # AC1-ERR: the mutations already landed; the receipt must still report them.
+    monkeypatch.setattr(G, "_spawn_groom_worker", lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+    r = G.run_groom(cwd="/tmp", today=DAY)
+
+    assert r["status"] == "failed" and r["released"] is True
+    assert r["mechanical"] == {"archive": "ok"}
+
+
+def test_dry_run_names_the_legs_without_running_them(claims_root, spawns, legs):
+    r = G.run_groom(cwd="/tmp", today=DAY, dry_run=True)
+    # Same shape as a real pass: a consumer must never branch on which run it was.
+    assert r["mechanical"] == {
+        "archive": "pending",
+        "reconcile": "pending",
+        "maintain": "pending",
+        "relatedness": "pending",
+    }
+    assert not legs
+
+
+def test_every_receipt_status_is_in_the_declared_vocabulary(claims_root, spawns, monkeypatch):
+    """`cmd_groom` maps a subset of these to a non-zero exit.
+
+    A status added here without updating that tuple degrades to a silent exit 0,
+    which on an unattended nightly job means the break is invisible.
+    """
+    import typing
+
+    declared = set(typing.get_args(G.GroomStatus))
+    seen = {
+        G.run_groom(cwd="/tmp", today=DAY, dry_run=True)["status"],
+        G.run_groom(cwd="/tmp", today=DAY)["status"],
+        G.run_groom(cwd="/tmp", today=DAY)["status"],
+    }
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: {"archive": "failed: 1: x"})
+    seen.add(G.run_groom(cwd="/tmp", today=date(2026, 7, 21))["status"])
+
+    assert seen <= declared, f"undeclared status: {seen - declared}"
+    assert {"dry-run", "dispatched", "already-ran", "degraded"} <= seen
+
+
+# ── cadence installer ───────────────────────────────────────────────────────
+
+
+def test_install_renders_a_daily_plist_at_the_requested_hour():
+    xml = G.render_groom_plist(fno_binary="/usr/local/bin/fno", install_path="/bin", hour=3)
+
+    assert f"<string>{G.GROOM_LABEL}</string>" in xml
+    assert "<key>StartCalendarInterval</key>" in xml
+    assert "<integer>3</integer>" in xml
+    # RunAtLoad false: installing at 4pm must not fire a pass immediately.
+    assert "<key>RunAtLoad</key>\n  <false/>" in xml
+    assert "backlog" in xml and "groom" in xml
+
+
+def test_install_escapes_a_binary_path_that_would_break_the_xml():
+    xml = G.render_groom_plist(fno_binary="/opt/a&b/fno", install_path="/bin")
+    assert "/opt/a&amp;b/fno" in xml
+
+
+def test_install_on_non_macos_reports_the_cron_fallback(monkeypatch):
+    monkeypatch.setattr(__import__("sys"), "platform", "linux")
+    r = G.install_groom_agent()
+    assert r["status"] == "unsupported"
+    assert "backlog groom" in r["cron"]
+
+
+def test_install_bounces_rather_than_loads(tmp_path, monkeypatch):
+    # `launchctl load` cannot cure the wedge class an `fno update` bounce leaves
+    # behind; reusing pr_watch's bootout->bootstrap->kickstart is the point.
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    called: dict = {}
+
+    def _fake_bounce(*, plist_path, label=None, **kwargs):
+        called["plist"] = plist_path
+        called["label"] = label
+        called["kickstart"] = kwargs.get("kickstart", True)
+        return ("bounced", 0)
+
+    monkeypatch.setattr("fno.pr_watch._install.bounce", _fake_bounce)
+    r = G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno", install_path="/bin")
+
+    assert r["status"] == "installed"
+    assert called["label"] == G.GROOM_LABEL
+    assert (tmp_path / f"{G.GROOM_LABEL}.plist").exists()
+
+
+def test_install_never_kickstarts_the_grooming_job(tmp_path, monkeypatch):
+    """Installing must not run a pass.
+
+    `bounce` ends with `launchctl kickstart -k`, which is free liveness
+    confirmation for the watcher's idempotent poll. Grooming's tick mutates the
+    backlog and burns the day's claim, so a kickstart here would groom at
+    install time and contradict the plist's own RunAtLoad=false.
+    """
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    steps: list = []
+
+    def _fake_launchctl(*args, timeout_s=None):
+        steps.append(args[0])
+        return (0, False)
+
+    from fno.pr_watch import _install
+
+    monkeypatch.setattr(_install, "_run_launchctl_timed", _fake_launchctl)
+    r = G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno", install_path="/bin")
+
+    assert r["status"] == "installed"
+    assert "bootstrap" in steps
+    assert "kickstart" not in steps, "installing must not fire a grooming pass"
+
+
+def test_watcher_install_still_kickstarts():
+    """The default is unchanged: pr_watch relies on the forced first tick."""
+    steps: list = []
+
+    def _fake_run(*args, timeout_s=None):
+        steps.append(args[0])
+        return (0, False)
+
+    from fno.pr_watch._install import bounce
+
+    bounce(plist_path=Path("/tmp/x.plist"), label="sh.fno.test", uid=501, run=_fake_run)
+    assert "kickstart" in steps
+
+
+def test_skill_reads_fresh_proposals_and_reports_the_mechanical_line():
+    # The pass-to-pass interface is the live verb, not a file: a digest is what
+    # went stale for ten days unnoticed.
+    text = SKILL.read_text()
+    assert "fno backlog maintain" in text
+    assert "Mechanical" in text
+    assert "groom-digest" not in text, "the digest is retired; the skill must not resurrect it"
+
+
+def test_the_old_nightly_script_is_a_shim_that_defers():
+    # AC2-HP: one surface owns grooming. The shim must hand off, not re-sequence
+    # the legs itself, and must never resurrect the retired digest.
+    script = Path(__file__).resolve().parents[3] / "scripts" / "nightly-groom.sh"
+    text = script.read_text()
+
+    assert "DEPRECATED" in text
+    assert "exec" in text and "backlog groom" in text
+    assert "groom-digest" not in text
+
+    # Comments may still explain what moved; the executable body must not do it.
+    body = "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+    for retired in ("archive", "reconcile", "maintain", "relatedness", "DIGEST"):
+        assert retired not in body, f"the shim must not still run {retired!r} itself"
+
+
+def test_every_mechanical_leg_exists_on_the_real_cli():
+    """Bind the leg table to the actual commands.
+
+    A leg runs unattended and its failure is swallowed into a receipt string, so
+    a renamed verb or dropped flag would degrade to `failed: 2` every night and
+    read as a flaky leg rather than a typo. Only this binding catches it.
+    """
+    import click
+    import typer.main
+
+    from fno.graph.cli import cli as graph_cli
+
+    root = typer.main.get_command(graph_cli)
+    ctx = click.Context(root)
+
+    for name, args in G._mechanical_legs(14):
+        cmd = root.get_command(ctx, args[0])
+        assert cmd is not None, f"`fno backlog {args[0]}` does not exist ({name} leg)"
+
+        if len(args) > 1 and not args[1].startswith("-"):
+            sub = cmd.get_command(click.Context(cmd), args[1])
+            assert sub is not None, f"`fno backlog {args[0]} {args[1]}` does not exist"
+
+        available = {opt for param in cmd.params for opt in param.opts}
+        missing = [a for a in args[1:] if a.startswith("--") and a not in available]
+        assert not missing, f"`fno backlog {args[0]}` has no {missing}"
+
+
+# ── a broken leg must reach a human ─────────────────────────────────────────
+
+
+def test_a_failed_leg_degrades_the_receipt(claims_root, spawns, monkeypatch):
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: {"archive": "ok", "reconcile": "failed: 1: boom"})
+    r = G.run_groom(cwd="/tmp", today=DAY)
+
+    # The worker still dispatched - the pass is best-effort - but the status must
+    # not read clean, because status is what reaches the exit code.
+    assert r["status"] == "degraded"
+    assert r["degraded_legs"] == ["reconcile"]
+
+
+def test_degraded_exits_nonzero_so_the_break_is_not_log_only(monkeypatch):
+    # The receipt's only other sink under launchd is a log file with no reader.
+    from typer.testing import CliRunner
+
+    from fno.graph.cli import cli as graph_cli
+
+    monkeypatch.setattr(
+        "fno.backlog.groom.run_groom",
+        lambda **kw: {"status": "degraded", "day": "2026-07-19", "mechanical": {"reconcile": "failed: 1: x"}},
+    )
+    result = CliRunner().invoke(graph_cli, ["groom"])
+    assert result.exit_code == 1
+
+
+def test_the_worker_is_told_what_the_mechanical_pass_did(claims_root, spawns, monkeypatch):
+    # AC1-HP asks the mailed report to itemize every leg. The worker is the only
+    # thing that reaches a human, and it cannot report outcomes it never got.
+    monkeypatch.setattr(
+        G, "_run_mechanical", lambda age: {"archive": "ok", "reconcile": "failed: 1: boom"}
+    )
+    G.run_groom(cwd="/tmp", today=DAY)
+
+    brief = spawns[0]["brief"]
+    assert "archive ok" in brief
+    assert "reconcile failed: 1: boom" in brief
+    assert "Mechanical" in brief
+
+
+def test_a_clean_pass_leaves_the_brief_unadorned(claims_root, spawns):
+    G.run_groom(cwd="/tmp", today=DAY)
+    assert "fno:groom" in spawns[0]["brief"]
+
+
+def test_a_lost_correlation_id_is_flagged_not_silent(claims_root, monkeypatch):
+    # The worker launched, so the pass stands; but `fno agents logs` has no
+    # handle, which is worth counting rather than reading as a normal dispatch.
+    monkeypatch.setattr(G, "_spawn_groom_worker", lambda *a, **k: "unknown")
+    r = G.run_groom(cwd="/tmp", today=DAY)
+
+    assert r["short_id_lost"] is True
+
+
+def test_maintain_leg_leaves_the_validity_sweep_to_the_worker():
+    """The sweep watermarks the pile it reviews.
+
+    Running it in the dispatcher would leave the worker's own read-only
+    `maintain` with zero eligible candidates, so its proposals would never reach
+    the report - silently defeating the point of re-deriving them live.
+    """
+    legs = dict((name, args) for name, args in G._mechanical_legs(14))
+    assert "--no-validity" in legs["maintain"]
+
+
+def test_scheduled_run_works_from_a_repo_not_home(tmp_path, monkeypatch):
+    """maintain's validity sweep reads git evidence from the cwd.
+
+    From a non-repo it records every symbol unavailable while the leg still
+    reports ok, so the plist must carry a real repo root.
+    """
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+
+    G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno", install_path="/bin")
+    xml = (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+    assert "<key>WorkingDirectory</key>\n  <string>/repo/footnote</string>" in xml
+
+
+def test_shim_translates_the_old_dry_run_short_flag():
+    """The old script's -n meant dry-run; the verb's short flag is -N.
+
+    Passing -n through unchanged would turn a preview into a mutating run.
+    """
+    import subprocess as sp
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "nightly-groom.sh"
+    proc = sp.run(
+        ["bash", str(script), "-n"],
+        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "FNO": "echo"},
+    )
+    assert "backlog groom --dry-run" in proc.stdout, proc.stdout
+
+
+# ── refresh onto a new binary (fno update tail) ─────────────────────────────
+
+
+def test_refresh_is_a_no_op_when_no_agent_is_installed(tmp_path):
+    # An operator who never ran --install-agent must get nothing from an update.
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+    assert r["status"] == "skipped"
+
+
+def test_refresh_preserves_the_installed_hour_and_workdir(tmp_path, monkeypatch):
+    """A refresh re-renders, so it must not reset the operator's schedule.
+
+    Re-resolving would also point WorkingDirectory at whatever directory
+    `fno update` happened to run from.
+    """
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/original"))
+
+    G.install_groom_agent(
+        launch_agents_dir=tmp_path, fno_binary="/old/fno", install_path="/bin", hour=5
+    )
+
+    # An update runs from somewhere else entirely, with a new binary on PATH.
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/somewhere/else"))
+    monkeypatch.setattr(G.shutil if hasattr(G, "shutil") else __import__("shutil"), "which", lambda _: "/new/fno")
+
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+    xml = (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+    assert r["status"] == "installed"
+    assert "<integer>5</integer>" in xml, "the operator's hour must survive a refresh"
+    assert "/repo/original" in xml, "the installed workdir must survive a refresh"
+    assert "/new/fno" in xml, "the point of a refresh is picking up the new binary"
+
+
+def test_refresh_survives_a_corrupt_plist(tmp_path, monkeypatch):
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+    (tmp_path / f"{G.GROOM_LABEL}.plist").write_text("not a plist")
+
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+    assert r["status"] == "installed"
+    assert r["hour"] == G.GROOM_HOUR_DEFAULT

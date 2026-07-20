@@ -233,6 +233,7 @@ def bounce(
     run: Optional[Callable[..., tuple[int, bool]]] = None,
     sleep: Callable[[float], None] = time.sleep,
     timeout_s: float = _LAUNCHCTL_TIMEOUT_S,
+    kickstart: bool = True,
 ) -> tuple[str, int]:
     """bootout -> bootstrap -> kickstart to cure a wedged launchd job.
 
@@ -243,6 +244,11 @@ def bounce(
     (bootout failure tolerated). Every call is timeout-guarded; on a hang it
     reports the wedged step and returns a nonzero exit code. Returns
     ``(message, exit_code)``. ``run`` is injected in tests.
+
+    ``kickstart=False`` stops after bootstrap, for a job whose tick is not a
+    harmless poll. The watcher's tick is idempotent, so forcing one is free
+    liveness confirmation; a job that mutates shared state on each fire would
+    instead perform that work at install time, against the plist's own schedule.
     """
     if uid is None:
         uid = os.getuid()
@@ -272,6 +278,9 @@ def bounce(
             sleep(0.25 * (attempt + 1))
     else:
         return (f"`launchctl bootstrap {domain} {plist_path}` failed (rc={rc})", 1)
+
+    if not kickstart:
+        return (f"bootstrapped {target}; first run at its scheduled time", 0)
 
     # 3. kickstart -k restarts if running; forces the first run so a fresh tick
     #    confirms liveness rather than waiting a full StartInterval.
