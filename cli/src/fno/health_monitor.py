@@ -43,11 +43,12 @@ MetricKey = Literal[
     "failure_prone_nodes",
     "collisions",
     "project_cwd_mismatch",
+    "orphan_feature_rate",
 ]
 
 
 # Breach kind: count-based threshold vs presence-based filter.
-BreachKind = Literal["count", "presence"]
+BreachKind = Literal["count", "presence", "rate"]
 
 
 # Default config block applied when settings.yaml omits keys. Derived from the
@@ -155,9 +156,21 @@ def _classify_severity(
     threshold to scale against; threshold value here is the upstream
     filter, not a breach cutoff).
 
+    ``kind="rate"``: a fraction in [0, 1], so the count ratio is useless -
+    actual/threshold can never exceed 1/threshold, and a 0.6 threshold could
+    therefore never escape `info` no matter how bad the rate got. Classified
+    instead by how much of the remaining headroom above the threshold is
+    consumed.
+
     Brackets: ratio < 2.0 -> info; 2.0 <= ratio < 5.0 -> warn;
     ratio >= 5.0 -> alert.
     """
+    if kind == "rate":
+        headroom = 1.0 - threshold
+        consumed = 1.0 if headroom <= 0 else (actual - threshold) / headroom
+        if consumed >= 0.5:
+            return "alert"
+        return "warn" if consumed >= 0.25 else "info"
     if kind == "count":
         if threshold <= 0:
             ratio = 5.0  # any breach of a zero threshold is full severity
@@ -300,6 +313,22 @@ def evaluate_thresholds(
             kind="count",
             hint="project/cwd disagree on pending nodes; producer regression?",
         ))
+
+    # 6. orphan feature rate (rate > N; default 1.0, i.e. off). Absent from a
+    # report whose rollup scoring failed - a missing metric never breaches.
+    if "orphan_feature_rate" in report:
+        orphan_actual = float(report["orphan_feature_rate"])
+        orphan_thresh = thresh.get(
+            "orphan_feature_rate", DEFAULT_CONFIG["thresholds"]["orphan_feature_rate"]
+        )
+        if orphan_actual > orphan_thresh:
+            breaches.append(_make_breach(
+                "orphan_feature_rate",
+                actual=orphan_actual,
+                threshold=orphan_thresh,
+                kind="rate",
+                hint="open features that resolve no mission edge",
+            ))
 
     return breaches
 

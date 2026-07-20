@@ -54,18 +54,42 @@ def _lane_order_key(project: str) -> tuple:
     return (project == UNSCOPED_LABEL, project)
 
 
-def _lane_sort_key(entry: dict) -> tuple:
+def _orphan_ids(entries: list[dict]) -> frozenset[str]:
+    """Orphan ids for the board, or empty if rollup is unavailable.
+
+    Board rendering runs inside `locked_mutate_graph`, so an exception here
+    would break every backlog write. Rollup is a display signal; it fails open
+    to the pre-rollup board rather than taking mutations down with it.
+    """
+    try:
+        from fno.graph.rollup import orphan_ids
+
+        return orphan_ids(entries)
+    except Exception:  # noqa: BLE001 - display signal; never break a mutation
+        return frozenset()
+
+
+def _lane_sort_key(entry: dict, orphans: frozenset[str] = frozenset()) -> tuple:
     """Shared within-column ordering key, consumed by both renderers.
 
     Orders a column's cards by ``(project_lane, rank_band, priority,
-    created_at)``: cluster by project, then ranked-before-unranked
-    (ascending rank), then today's ``_graph_sort_key`` fallback. Rank is
-    therefore scoped per ``(column, project)`` lane.
+    orphan_last, created_at)``: cluster by project, then ranked-before-unranked
+    (ascending rank), then priority, then mission-linked before orphan, then
+    ``created_at``. Rank is therefore scoped per ``(column, project)`` lane.
+
+    The orphan term sits AFTER priority, so it only ever breaks a tie within a
+    priority band - a p0 orphan still outranks a p1 mission-linked node. Pass
+    ``orphans`` (from ``rollup.orphan_ids``) to enable it; the default empty set
+    reproduces the pre-rollup ordering exactly, which is what callers that do
+    not care about rollup get.
     """
+    priority, created_at = _graph_sort_key(entry)
     return (
         _lane_order_key(_project_key(entry)),
         _rank_band(entry),
-        _graph_sort_key(entry),
+        priority,
+        entry.get("id") in orphans,
+        created_at,
     )
 
 
@@ -154,7 +178,9 @@ def _kanban_column(
     return "Next"
 
 
-def _kanban_card(entry: dict, id_to_entry: dict[str, dict]) -> str:
+def _kanban_card(
+    entry: dict, id_to_entry: dict[str, dict], orphans: frozenset[str] = frozenset()
+) -> str:
     """Format a single kanban card line for an entry."""
     title = (entry.get("title") or "").replace("\n", " ").strip() or "(untitled)"
     eid = entry.get("id", "?")
@@ -168,6 +194,8 @@ def _kanban_card(entry: dict, id_to_entry: dict[str, dict]) -> str:
     # plus clustered sort order is the honest ceiling for swimlanes - ab-95a4a479).
     project = _project_key(entry)
     header = f"- {marker} **{title}** `{eid}` · {project} · {priority}"
+    if eid in orphans:
+        header += " · [orphan]"
     body_lines: list[str] = []
 
     plan_path = entry.get("plan_path")
@@ -234,6 +262,7 @@ def render_graph_md(
 
     epics = in_progress_epic_ids(entries)
     live_claimed = frozenset(live_claimed_node_ids())
+    orphans = _orphan_ids(entries)
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
         col = _kanban_column(entry, epics, live_claimed)
@@ -248,7 +277,7 @@ def render_graph_md(
             items.sort(key=lambda e: e.get("completed_at") or "", reverse=True)
             del items[10:]
         else:
-            items.sort(key=_lane_sort_key)
+            items.sort(key=lambda e: _lane_sort_key(e, orphans))
 
     lines: list[str] = ["---", "kanban-plugin: board", "---", ""] if obsidian else []
     for col in KANBAN_COLUMNS:
@@ -258,7 +287,7 @@ def render_graph_md(
             lines.append("")
             continue
         for entry in columns[col]:
-            lines.append(_kanban_card(entry, id_to_entry))
+            lines.append(_kanban_card(entry, id_to_entry, orphans))
             lines.append("")
 
     if obsidian:

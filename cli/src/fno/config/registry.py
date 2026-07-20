@@ -294,6 +294,7 @@ FIELD_META: dict[str, Meta] = {
     "health_monitor.thresholds.failure_prone_attempts": Meta("never", "Breach threshold: failure-prone attempts."),
     "health_monitor.thresholds.collision_count": Meta("never", "Breach threshold: collision count."),
     "health_monitor.thresholds.project_cwd_mismatch": Meta("never", "Breach threshold: project/cwd mismatch count."),
+    "health_monitor.thresholds.orphan_feature_rate": Meta("never", "Breach threshold: fraction of open features with no mission edge (1.0 = off)."),
     "health_monitor.notifications.surfaces": Meta("never", "Health notification surfaces (terminal/discord/webhook/log_only)."),
     "health_monitor.notifications.discord_channel": Meta("never", "Discord channel for health notifications."),
     "health_monitor.notifications.webhook_url": Meta("never", "Webhook URL for health notifications."),

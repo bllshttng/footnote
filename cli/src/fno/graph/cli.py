@@ -673,6 +673,8 @@ def _create_node_impl(
 
     new_id_holder: list[Optional[str]] = [None]
     node_holder: list[Optional[dict]] = [None]
+    rollup_lines: list[str] = []
+    rollup_error: list[Optional[str]] = [None]
 
     def mutator(entries):
         new_id = mint_node_id({e.get("id") for e in entries})
@@ -714,9 +716,54 @@ def _create_node_impl(
                 raise typer.Exit(code=1)
         entries.append(node)
         node_holder[0] = node
+        # Rollup resolution runs INSIDE the mutator: it reads the same locked
+        # snapshot the node was born into and applies an auto-link in the same
+        # write, so no second lock and no window where the node exists unlinked.
+        # Strictly non-fatal - any failure degrades to the orphan line (AC4).
+        try:
+            from fno.graph import rollup as _rollup
+            from fno.graph._intake import (
+                _find_node,
+                _would_create_cycle,
+                _would_exceed_epic_depth,
+            )
+
+            resolution = _rollup.resolve(node, entries)
+            link_to: Optional[str] = None
+            if resolution.kind == "linked":
+                target = _find_node(entries, resolution.epic_id or "")
+                # A brand-new leaf can neither cycle nor deepen epic nesting,
+                # but honor the same guards the update path applies rather than
+                # trusting that; a refusal falls back to suggest.
+                if target is not None and not _would_exceed_epic_depth(
+                    entries, node, target
+                ) and not _would_create_cycle(entries, node["id"], target["id"]):
+                    link_to = target["id"]
+                else:
+                    resolution = resolution._replace(kind="suggest")
+            index = {
+                e["id"]: e for e in entries
+                if isinstance(e, dict) and isinstance(e.get("id"), str)
+            }
+            # Receipt FIRST, then the edge: an auto-link is only safe because a
+            # human reads the receipt and can undo it, so a link must never land
+            # without one. Anything that raises above leaves the node unlinked.
+            rollup_lines[:] = _rollup.receipt_lines(resolution, node["id"], index)
+            if link_to is not None:
+                node["parent"] = link_to
+        except Exception as exc:  # noqa: BLE001 - rollup never breaks intake
+            rollup_error[0] = str(exc)
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    if rollup_error[0] is not None:
+        typer.echo(f"warning: rollup skipped ({rollup_error[0]})", err=True)
+    # stderr, not stdout: this verb's stdout is a machine-readable JSON payload
+    # that callers pipe through `json.loads` / `jq`. The receipt is advisory
+    # human output and must not corrupt that contract.
+    for line in rollup_lines:
+        typer.echo(line, err=True)
 
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
@@ -1811,6 +1858,11 @@ def cmd_update(
         "--batch",
         help="Set the batch id this node is a member of (marks node.batch, batch-lane Wave 2). Pass 'null' to clear (requeue for individual ship on abandon).",
     ),
+    orphan_ok: Optional[str] = typer.Option(
+        None,
+        "--orphan-ok",
+        help="Record why this node deliberately serves no mission, exempting it from the orphan metric, the board flag, and the ordering tiebreaker. Pass 'null' to clear.",
+    ),
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
@@ -2073,6 +2125,18 @@ def cmd_update(
             # 'null' clears the mark (requeue as individual ship on abandon); any
             # other value records the batch id this node is a member of.
             node["batch"] = None if batch.lower() == "null" else batch
+        if orphan_ok is not None:
+            # The reason IS the opt-out: an empty string would read as unset and
+            # silently leave the node counted, so refuse it rather than no-op.
+            if orphan_ok.lower() == "null":
+                node["orphan_ok"] = None
+            elif not orphan_ok.strip():
+                typer.echo(
+                    "Error: --orphan-ok needs a reason (or 'null' to clear)", err=True
+                )
+                raise typer.Exit(code=2)
+            else:
+                node["orphan_ok"] = orphan_ok
         # Dispatch overrides (US3). Stored permissively; the resolver is the trust
         # boundary (allowlist + 8 KB cap at dispatch time, not write time).
         if dispatch_verb is not None:
@@ -6118,6 +6182,12 @@ def cmd_maintain(
     rescope_fixes = _maintain.detect_rescope_fixes(entries, workspaces)
     prune_ids = _maintain.detect_temp_leaks(entries)
     dup_groups = _maintain.detect_dup_groups(entries)
+    # Propose-only in v1 even under --apply: a bulk reparent has no human
+    # reading a receipt the way intake's one-at-a-time auto-link does.
+    try:
+        rollup_cands = _maintain.detect_rollup_candidates(entries)
+    except Exception:  # noqa: BLE001 - advisory leg; maintain must not break
+        rollup_cands = []
 
     try:
         from fno.config import load_settings
@@ -6354,6 +6424,7 @@ def cmd_maintain(
         "rescoped": len(applied_rescope) if apply else len(rescope_fixes),
         "pruned": len(applied_prune) if apply else len(prune_ids),
         "dedup_groups": len(dup_groups),
+        "rollup_candidates": len(rollup_cands),
         "stale_ideas": len(stale),
         "now_overflow": list(overflow) if overflow else None,
         "skipped_claimed": len(skipped_claimed),
@@ -6396,6 +6467,9 @@ def cmd_maintain(
                 "candidates": prune_ids,
             },
             "dedup_groups": dup_groups,
+            "rollup_candidates": [
+                {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
+            ],
             "stale_ideas": [{"node_id": s.node_id, "age_days": s.age_days} for s in stale],
             "now_overflow": list(overflow) if overflow else None,
             "skipped_claimed": skipped_claimed,
@@ -6435,7 +6509,8 @@ def cmd_maintain(
             f"re-scoped {len(applied_rescope)} | pruned {len(applied_prune)} | "
             f"auto-deferred {len(applied_defers)} | "
             f"stale-ready-deferred {len(applied_stale_ready)} | "
-            f"dedup-groups {len(dup_groups)} | stale-ideas {len(stale)} | "
+            f"dedup-groups {len(dup_groups)} | rollup-candidates "
+            f"{len(rollup_cands)} | stale-ideas {len(stale)} | "
             f"now-overflow {'yes' if overflow else 'no'} | "
             f"skipped-claimed {len(skipped_claimed)}"
         )
@@ -6444,7 +6519,8 @@ def cmd_maintain(
             f"re-scope candidates {len(rescope_fixes)} | prune candidates "
             f"{len(prune_ids)} | auto-defer candidates {len(defer_cands)} | "
             f"stale-ready candidates {len(stale_ready_cands)} | "
-            f"dedup-groups {len(dup_groups)} | stale-ideas "
+            f"dedup-groups {len(dup_groups)} | rollup-candidates "
+            f"{len(rollup_cands)} | stale-ideas "
             f"{len(stale)} | now-overflow {'yes' if overflow else 'no'}  "
             f"(run with --apply to apply the deterministic legs)"
         )
@@ -6494,6 +6570,11 @@ def cmd_maintain(
         )
     for group in dup_groups:
         typer.echo(f"  near-duplicate ideas (merge/supersede by hand): {', '.join(group)}")
+    for nid, epic_id, score in rollup_cands:
+        typer.echo(
+            f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
+            f"fno backlog update {nid} --parent {epic_id}"
+        )
     for s in stale:
         typer.echo(
             f"  stale idea {s.node_id} ({s.age_days}d): "

@@ -27,6 +27,7 @@ from fno.graph.render import (
     UNSCOPED_LABEL,
     _kanban_column,
     _lane_sort_key,
+    _orphan_ids,
     _project_key,
     in_progress_epic_ids,
     live_claimed_node_ids,
@@ -207,10 +208,20 @@ def _column_for(
     return _kanban_column(entry, epics, live_claimed)
 
 
-def _bucket(entries: list[dict]) -> dict[str, list[dict]]:
-    """Partition entries into the kanban columns, sorted per column."""
+def _bucket(
+    entries: list[dict], orphans: frozenset[str] | None = None
+) -> dict[str, list[dict]]:
+    """Partition entries into the kanban columns, sorted per column.
+
+    ``orphans`` MUST be passed when ``entries`` is a subset of the graph (the
+    per-project sections). Orphanhood is a whole-graph property - a feature
+    whose parent epic sits in another project has no reachable ancestor inside
+    a project-scoped slice, so computing it from the subset invents orphans.
+    """
     epics = in_progress_epic_ids(entries)
     live_claimed = frozenset(live_claimed_node_ids())
+    if orphans is None:
+        orphans = _orphan_ids(entries)
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
         col = _column_for(e, epics, live_claimed)
@@ -226,11 +237,13 @@ def _bucket(entries: list[dict]) -> dict[str, list[dict]]:
         else:
             # Shared lane key: cluster by project, ranked-before-unranked, then
             # the (priority, created_at) fallback - same order as the md board.
-            items.sort(key=_lane_sort_key)
+            items.sort(key=lambda e: _lane_sort_key(e, orphans))
     return cols
 
 
-def _card_flags(entry: dict) -> list[tuple[str, str]]:
+def _card_flags(
+    entry: dict, orphans: frozenset[str] = frozenset()
+) -> list[tuple[str, str]]:
     """Compute the visual flag chips for a card: (css_class, label) pairs.
 
     Surfaces side-states that no longer claim their own column under the
@@ -249,17 +262,24 @@ def _card_flags(entry: dict) -> list[tuple[str, str]]:
         flags.append(("flag-blocked", f"blocked ({n})" if n else "blocked"))
     if status == "idea":
         flags.append(("flag-idea", "needs plan"))
+    if entry.get("id") in orphans:
+        flags.append(("flag-orphan", "orphan"))
     return flags
 
 
-def _card_html(entry: dict, id_to_entry: dict[str, dict], vault: str | None = None) -> str:
+def _card_html(
+    entry: dict,
+    id_to_entry: dict[str, dict],
+    vault: str | None = None,
+    orphans: frozenset[str] = frozenset(),
+) -> str:
     eid = html.escape(str(entry.get("id", "?")))
     title = html.escape((entry.get("title") or "").replace("\n", " ").strip() or "(untitled)")
     priority = html.escape(str(entry.get("priority") or "p2"))
     project = _project_key(entry)
     chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
     chip_label = html.escape(project)
-    flags = _card_flags(entry)
+    flags = _card_flags(entry, orphans)
     # card-level class encodes the side-state for theming the whole card
     # (e.g., left border tint on claimed / blocked / idea entries).
     card_classes = ["card"]
@@ -407,6 +427,7 @@ def _board_html(
     Cards are pre-sorted by the shared lane key, so a divider on each
     project change yields contiguous, labeled runs.
     """
+    orphans = _orphan_ids(list(id_to_entry.values()))
     out: list[str] = ['<div class="cols">']
     for col in COLUMNS:
         col_class = f"col col-{col.lower()}"
@@ -428,7 +449,7 @@ def _board_html(
                 if proj != last_proj:
                     out.append(_lane_divider_html(proj))
                     last_proj = proj
-            out.append(_card_html(entry, id_to_entry, vault=vault))
+            out.append(_card_html(entry, id_to_entry, vault=vault, orphans=orphans))
         out.append("</details>")
     out.append("</div>")
     return "".join(out)
@@ -518,6 +539,8 @@ details.col[open] > summary { margin-bottom: 0.5rem }
 .flag-queued { background: #d5f3d8; color: #2a5a2a; border: 1px solid #7fc587 }
 .flag-blocked { background: #ffd6d6; color: #872020; border: 1px solid #e88a8a }
 .flag-idea { background: #e4e8f3; color: #4a5474; border: 1px solid #b7c0d8 }
+/* Muted on purpose: an orphan is a question to answer, not an alarm. */
+.flag-orphan { background: #f0ece4; color: #6b5f4a; border: 1px solid #d3c7b0 }
 .card.flag-claimed { border-left-color: #e0b850 }
 .card.flag-queued { border-left-color: #7fc587 }
 .card.flag-blocked { border-left-color: #e88a8a }
@@ -733,9 +756,12 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     if UNSCOPED_LABEL in projects:
         project_order.append(UNSCOPED_LABEL)
 
+    # Computed over the FULL graph, then handed to each project slice: the
+    # per-project sort and the card flags must agree about who is an orphan.
+    all_orphans = _orphan_ids(entries)
     for project in project_order:
         proj_entries = [e for e in entries if _project_key(e) == project]
-        cols = _bucket(proj_entries)
+        cols = _bucket(proj_entries, all_orphans)
         chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
         summary = (
             f'<summary><span class="chip" style="background:{chip_color}">'

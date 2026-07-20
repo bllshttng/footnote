@@ -227,7 +227,7 @@ def _graph_sort_key_fn(e: dict) -> tuple:
     return (PRIORITY_ORDER.get(e.get("priority", "p2"), 2), e.get("created_at", ""))
 
 
-def make_selection_sort_key(entries: list[dict]):
+def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str]] = None):
     """Build the rank-then-epics-first selection sort key (Locked Decision 7, C3).
 
     Returns a key function for sorting *ready candidates* by selection
@@ -259,6 +259,17 @@ def make_selection_sort_key(entries: list[dict]):
         for e in entries
         if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
+    # Board == work order: `next` must demote orphans exactly where the board
+    # does, or the board shows one order and the walker works another. Computed
+    # here (not passed by every caller) so no call site can forget it; fails
+    # open to "no orphans", which reproduces the pre-rollup ordering.
+    if orphans is None:
+        try:
+            from fno.graph.rollup import orphan_ids
+
+            orphans = orphan_ids(entries)
+        except Exception:  # noqa: BLE001 - ordering signal; never break selection
+            orphans = frozenset()
     children_by_parent: dict[str, list[dict]] = {}
     for e in entries:
         if not isinstance(e, dict):
@@ -287,6 +298,7 @@ def make_selection_sort_key(entries: list[dict]):
         # the existing epics-first key below decides their order byte-for-byte.
         band = _rank_band(node)
         child_prio = _prio(node)
+        child_orphan = node.get("id") in orphans
         child_created = node.get("created_at", "") or ""
         pid = node.get("parent")
         epic = id_to_entry.get(pid) if pid else None
@@ -299,13 +311,20 @@ def make_selection_sort_key(entries: list[dict]):
                 _prio(epic),             # highest-priority epic first
                 epic.get("created_at", "") or "",  # group one epic together
                 child_prio,
+                child_orphan,        # in-band: after priority, before created_at
                 child_created,
             )
         # Loose node: tier 1. Middle fields mirror the child fields so the
         # tuple stays comparable; tier already separates loose from epic
         # children, so loose nodes only ever compare among themselves and
         # resolve on flat (priority, created_at).
-        return (band, 1, 0, child_prio, child_created, child_prio, child_created)
+        # Decision fields lead: priority, then orphan-last, then created_at.
+        # The trailing pair only pads the tuple to the epic branch's arity;
+        # tier (index 1) already separates the two, so it is never compared.
+        return (
+            band, 1, 0, child_prio, child_orphan, child_created,
+            child_prio, child_created,
+        )
 
     return key
 

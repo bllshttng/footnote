@@ -293,6 +293,47 @@ def detect_dup_groups(entries: list[dict]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Leg 3b: rollup backfill (propose-only, even under --apply)
+# ---------------------------------------------------------------------------
+
+# Backfill stays a proposal in v1 on purpose. Intake auto-links one node at a
+# time under a printed receipt a human is reading; a bulk pass over a standing
+# backlog has no such reader, and a wrong mass-reparent is far more expensive to
+# unpick than an orphan is to leave alone.
+ROLLUP_PROPOSAL_CAP = 20
+
+
+def detect_rollup_candidates(
+    entries: list[dict], limit: int = ROLLUP_PROPOSAL_CAP
+) -> list[tuple[str, str, float]]:
+    """Existing orphans whose best epic candidate is worth a human look.
+
+    Returns ``(node_id, epic_id, score)`` best-first, capped. Never mutates.
+    Orphans with no candidate at all are absent: this leg proposes links, and
+    the health metric already counts the ones nothing can be proposed for.
+    """
+    from fno.graph.rollup import is_orphan
+    from fno.graph.relatedness import epic_candidates
+
+    index = {
+        e["id"]: e
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    proposals: list[tuple[str, str, float]] = []
+    for nid, entry in index.items():
+        if entry.get("_status") in ("done", "superseded", "deferred"):
+            continue
+        if not is_orphan(entry, index):
+            continue
+        candidates = epic_candidates(entry, entries, k=1)
+        if candidates:
+            proposals.append((nid, candidates[0][0], candidates[0][1]))
+    proposals.sort(key=lambda p: (-p[2], p[0]))
+    return proposals[:limit]
+
+
+# ---------------------------------------------------------------------------
 # Leg 4: drain stale ideas (propose-only)
 # ---------------------------------------------------------------------------
 
