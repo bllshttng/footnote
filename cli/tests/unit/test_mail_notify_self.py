@@ -13,8 +13,8 @@ import pytest
 from fno.paths_testing import use_tmpdir
 
 MARKERS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID")
-MY_SID = "abcd1234ffff"  # canonical_handle -> claude-abcd1234
-MY_HANDLE = "claude-abcd1234"
+MY_SID = "abcd1234ffff"  # canonical_handle -> abcd1234
+MY_HANDLE = "abcd1234"
 
 
 def _iso(dt: datetime) -> str:

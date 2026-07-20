@@ -221,13 +221,16 @@ class TestWhoami:
         project = _make_workspace(tmp_path, target=True)
         result = _invoke(runner, project, monkeypatch, "whoami")
         assert result.exit_code == 0, result.stdout + result.stderr
-        assert "mail:     claude-879d8d26" in result.stdout
+        # AC1-UI: the bare short-id only - no harness-prefixed form anywhere on
+        # the line, including a parenthetical "legacy" annotation.
+        assert "mail:     879d8d26  (reply handle" in result.stdout
+        assert "claude-879d8d26" not in result.stdout
         # the run: relabel replaced the session-misnomer human line
         assert "run:" in result.stdout and "session:" not in result.stdout
         payload = json.loads(
             _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
         )
-        assert payload["mail_handle"] == "claude-879d8d26" == stamp_from(None)
+        assert payload["mail_handle"] == "879d8d26" == stamp_from(None)
         assert payload["harness_session_id"] == "879d8d26-2505-4977-9b87-000000000000"
 
     def test_ac4_fr_degrades_without_identity(self, tmp_path, runner, monkeypatch):
@@ -254,7 +257,7 @@ class TestWhoami:
         result = _invoke(runner, project, monkeypatch, "whoami")
         assert result.exit_code == 0, result.stdout + result.stderr
         assert "agent:    myworker (mesh)" in result.stdout
-        assert "mail:     claude-879d8d26" in result.stdout
+        assert "mail:     879d8d26" in result.stdout
 
     # --- x-730d: dead-letterbox visibility (unread count) --------------------
 
@@ -273,7 +276,7 @@ class TestWhoami:
         self._isolate_bus(tmp_path, monkeypatch)
         for _ in range(3):
             write_new_thread(
-                recipient="claude-879d8d26", sender="etl", kind="send",
+                recipient="879d8d26", sender="etl", kind="send",
                 body="ping", to_kind="name",
             )
         project = _make_workspace(tmp_path, target=True)
@@ -297,7 +300,7 @@ class TestWhoami:
         monkeypatch.setenv("FNO_AGENT_SELF", "billing-worker")
         self._isolate_bus(tmp_path, monkeypatch)
         write_new_thread(  # to the canonical handle
-            recipient="claude-879d8d26", sender="etl", kind="send",
+            recipient="879d8d26", sender="etl", kind="send",
             body="ping", to_kind="name",
         )
         for _ in range(2):  # to the mesh name
@@ -346,7 +349,7 @@ class TestWhoami:
         _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         self._isolate_bus(tmp_path, monkeypatch)
         write_new_thread(
-            recipient="claude-879d8d26", sender="etl", kind="send",
+            recipient="879d8d26", sender="etl", kind="send",
             body="ping", to_kind="name",
         )
         cp = cursor_path("claude-879d8d26")

@@ -322,7 +322,7 @@ def _sent_unclaimed_count() -> int:
     if not ident.harness or not ident.session_id:
         return 0
     try:
-        handle = canonical_handle(ident.harness, ident.session_id)
+        handle = canonical_handle(ident.session_id)
         n, _ = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
         return n
     except Exception as exc:  # noqa: BLE001 - status is advisory; never crash on it
@@ -416,28 +416,48 @@ def cmd_reply(
     # in_reply_to. Anything else falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
 
+    from fno.harness_identity import LEGACY_HANDLE_RE
+
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
     if orig is not None and orig.to_kind == "name":
         from fno.agents import discover as discover_mod
 
+        # A stored sender predating the address flip carries the retired
+        # `<harness>-<short8>` form. That is a fact about an old RECORD, not a
+        # mistake by whoever is replying, and the address it would carry today is
+        # a substring - so migrate it and deliver. Refusing here would invent a
+        # wall at a knowledge boundary: making a human perform a translation the
+        # code can do is how a resumable peer gets treated as voicemail.
+        # (Not the harness-parsing this scheme forbids: the harness is discarded,
+        # the short-id is what routes, and routing is still a roster lookup.)
+        target = orig.from_ or ""
+        if LEGACY_HANDLE_RE.match(target):
+            migrated = target.split("-", 1)[1][:8]
+            print(
+                f"note: stored sender {target!r} is a retired address form "
+                f"(pre-flip record); replying to {migrated!r}.",
+                file=sys.stderr,
+            )
+            target = migrated
+
         # from_name defaults to None so stamp_from auto-stamps THIS session's
-        # canonical handle (claude-/codex-<short>) -- the handle the original
+        # canonical bare short-id -- the handle the original
         # sender replies back to and that drain-self scans, NOT a project name.
-        resolved, _ = discover_mod.resolve_or_suggest(orig.from_)
+        resolved, _ = discover_mod.resolve_or_suggest(target)
         if resolved is not None:
             _name_lane_send(
                 body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
             )
         else:
             # AC1-FR: the original sender is no longer live -> durable floor
-            # addressed to their canonical handle (orig.from_), still drainable.
-            prov = orig.from_.split("-", 1)[0] if "-" in orig.from_ else None
+            # addressed to their canonical handle, still drainable.
+            # No provider: it is only consulted on the live-inject path, which a
+            # None `resolved` already skipped.
             _name_lane_send(
                 body_text,
                 from_name=from_project,
                 resolved=None,
-                recipient=orig.from_,
-                provider=prov,
+                recipient=target,
                 reply_to=to_msg,
             )
         return
@@ -813,16 +833,33 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
     """Fail loud on a dead-letter miss: the envelope hit only the durable floor
     with no live inject path, so the sender learns delivery deferred instead of
     the message vanishing silently until the recipient's next SessionStart drain.
+
+    The durable copy is RECOVERY, not delivery - it waits on a drain the
+    recipient may never run. So this names the recovery ladder rather than
+    leaving the sender to wait: a session that is merely idle can be brought
+    back and re-sent to immediately, which beats waiting on a drain every time.
+
+    It leads with `peek`, not `resume`, because the fallback fires on an
+    UNCONFIRMED live inject, not a proven failure: a busy recipient can record
+    the injected turn past the confirm budget and receive it anyway, so a blind
+    re-send is the documented double-delivery edge rather than a fix.
+
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     if project:
         msg = (
             f"mail: project inbox {target} has no live drain; queued durably - "
-            "delivery waits for a drain"
+            "delivery waits for a drain\n"
+            "  this is NOT delivery. Address a live session instead: "
+            "`fno agents top` to find one, then `fno mail send <short-id>`"
         )
     else:
         msg = (
             f"mail: {target} has no live pane; queued durably - "
-            "delivery waits for its next SessionStart drain"
+            "delivery waits for its next SessionStart drain\n"
+            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
+            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
+            f"    fno agents resume {target}   # idle session -> live, then re-send\n"
+            f"    fno agents attach {target}   # drive it yourself (claude)"
         )
     print(msg, file=sys.stderr)
 
@@ -849,10 +886,10 @@ def _name_lane_send(
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import write_new_thread
-    from fno.mail.envelope import wrap_fno_mail
+    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     if resolved is not None:
-        recipient = canonical_handle(resolved.agent, resolved.session_id)
+        recipient = canonical_handle(resolved.session_id)
         provider = resolved.agent
 
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
@@ -860,7 +897,12 @@ def _name_lane_send(
     wrapped = wrap_fno_mail(
         message,
         from_=stamp_from(from_name),
-        harness=infer_invoking_harness() or "cli",
+        # Through harness_for_provider like every other send path: the wire
+        # vocabulary is claude-code, and stamping a raw "claude" here made the
+        # name lane the one producer disagreeing with dispatch, the relay, and
+        # the Rust contract. "cli" survives as the honest no-harness value: the
+        # mapper defaults a MISSING provider to claude-code, a guess we avoid.
+        harness=harness_for_provider(h) if (h := infer_invoking_harness()) else "cli",
         model=resolve_self_model(),
         to=recipient,
         reply_to=reply_to,
@@ -1032,7 +1074,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from_name = canonical_handle(ident.harness, ident.session_id)
+        from_name = canonical_handle(ident.session_id)
 
     # Inbox-kind mode: heads-up / question / fyi are inbox-style durable notes
     # the recipient's drain dispatches on (heads-up -> triage, question ->
@@ -1356,13 +1398,12 @@ def cmd_drain_self(
     """Drain THIS session's own cross-harness inbox and mark it seen (US5).
 
     The receive side of the a2a relay: a session computes its own handle from
-    the ambient harness env markers (``canonical_handle(harness, session-id)``,
+    the ambient harness env markers (``canonical_handle(session-id)``,
     the SAME string a sender resolves and the registry registers under), reads
     its unread bus mail, prints it for injection into the session, then advances
     its own cursor so nothing re-surfaces next wake. Wired into each harness's
     SessionStart hook, this is what makes a codex/gemini session actually
-    RECEIVE mail addressed to ``<harness>-<id>`` -- addressability already
-    existed, drainage did not.
+    RECEIVE its mail -- addressability already existed, drainage did not.
 
     Forward-only + inject-before-ack: a crash between print and ack re-surfaces
     the message next SessionStart (a harmless repeat), never a loss. No harness
@@ -1378,7 +1419,7 @@ def cmd_drain_self(
             print(json.dumps([]))
         return
 
-    handle = canonical_handle(ident.harness, ident.session_id)
+    handle = canonical_handle(ident.session_id)
     msgs = scan_unread(handle)
 
     if json_out:
@@ -1458,6 +1499,7 @@ def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
 
 def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
     """Count + distinct recipients (first-seen) of my sent mail unclaimed past TTL.
+
 
     Unclaimed = still past the recipient's consume cursor AND strictly older than
     ``ttl_seconds``. Reads the bus ONCE (a single ``iter_messages`` snapshot) and
@@ -1541,7 +1583,7 @@ def cmd_notify_self() -> None:
     if not ident.harness or not ident.session_id:
         return
 
-    handle = canonical_handle(ident.harness, ident.session_id)
+    handle = canonical_handle(ident.session_id)
     lines: list[str] = []
 
     unread = scan_unread(handle)

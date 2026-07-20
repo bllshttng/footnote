@@ -48,8 +48,8 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     # must not be a resolve_to_project anycast target (else default sends
     # dead-letter to inbox/<agent-name>/, which its wake hook never reads).
     assert entry.status == "idle"
-    # Derived name is non-empty and provider-prefixed so a peer can address it.
-    assert entry.name.startswith("claude-")
+    # Derived name is the bare short-id, the one mailbox id a peer addresses.
+    assert entry.name == "ef9982cc"
 
     # AC7-UI: a fresh load shows the row with provider/cwd/status intact.
     rows = load_registry()
@@ -101,8 +101,8 @@ def test_ac7_edge_name_collision_disambiguated(tmp_path: Path, monkeypatch) -> N
     a = register_existing_session(provider="claude", session_id="abcd1234-XXXX", cwd="/s")
     b = register_existing_session(provider="claude", session_id="abcd1234-YYYY", cwd="/s")
 
-    assert a.name == "claude-abcd1234"
-    assert b.name == "claude-abcd1234-2"  # suffix disambiguation
+    assert a.name == "abcd1234"
+    assert b.name == "abcd1234-2"  # suffix disambiguation
     assert len(load_registry()) == 2
 
 
@@ -222,7 +222,7 @@ _MARKERS = (
 
 
 def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch) -> None:
-    """A claude session self-registers under `claude-<first8>` from its ambient id."""
+    """A claude session self-registers under its bare `<first8>` ambient id."""
     use_tmpdir(monkeypatch, tmp_path)
     for m in _MARKERS:
         monkeypatch.delenv(m, raising=False)
@@ -235,9 +235,9 @@ def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(agents_app, ["register"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload == {"registered": True, "name": "claude-deadbeef", "provider": "claude"}
+    assert payload == {"registered": True, "name": "deadbeef", "provider": "claude"}
     rows = load_registry()
-    assert len(rows) == 1 and rows[0].name == "claude-deadbeef" and rows[0].status == "idle"
+    assert len(rows) == 1 and rows[0].name == "deadbeef" and rows[0].status == "idle"
 
 
 def test_register_then_whoami_reports_registered(tmp_path: Path, monkeypatch) -> None:
@@ -259,7 +259,7 @@ def test_register_then_whoami_reports_registered(tmp_path: Path, monkeypatch) ->
     result = runner.invoke(agents_app, ["whoami", "--json"])
     assert result.exit_code == 0, result.output  # exit 3 == unregistered (the bug)
     assert '"registered": true' in result.output
-    assert '"name": "claude-ef9982cc"' in result.output
+    assert '"name": "ef9982cc"' in result.output
 
 
 def test_register_verb_exit3_without_ambient_identity(tmp_path: Path, monkeypatch) -> None:

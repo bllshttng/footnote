@@ -48,7 +48,7 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     slice, no discovery scan (whoami's md5-invariance contract)."""
     ident = resolve_harness_identity()
     if ident.session_id and ident.harness:
-        return canonical_handle(ident.harness, ident.session_id), ident.session_id
+        return canonical_handle(ident.session_id), ident.session_id
     return None, None
 
 

@@ -53,7 +53,7 @@ def test_stamp_from_auto_canonical_handle(monkeypatch):
         "CLAUDE_CODE_SESSION_ID",
         "9a063cd3-aaaa-bbbb-cccc-dddddddddddd",
     )
-    assert self_stamp.stamp_from(None) == "claude-9a063cd3"
+    assert self_stamp.stamp_from(None) == "9a063cd3"
 
 
 def test_ac2_edge_no_ambient_identity_floors(monkeypatch):

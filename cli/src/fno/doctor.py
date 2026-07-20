@@ -1191,9 +1191,22 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
 # --------------------------------------------------------------------------
 
 _DEAD_LETTER_AGE_HOURS = 24.0
-# The canonical a2a handle form <harness>-<short8>; only these are drainable
-# recipients, so only these can dead-letter (a project name never does).
-_A2A_HANDLE_RE = re.compile(r"^(?:claude|codex|gemini)-[0-9a-fA-F]{6,}$")
+# The bare short-id is the only drainable session address. Retired prefixed
+# recipients remain in this health-only pattern so pre-flip dead mail surfaces.
+def _a2a_handle_re() -> "re.Pattern[str]":
+    """A session address: the bare short-id, or a retired ``<harness>-<short8>``.
+
+    The retired form is still MATCHED here on purpose - mail queued to one before
+    the flip is undeliverable, so the dead-letter report is the only thing that
+    surfaces it. Prefixes come from the harness map so adding a harness cannot
+    silently drop it out of the scan.
+    """
+    from fno.agents.harness_map import known_harnesses
+
+    return re.compile(rf"^(?:(?:{'|'.join(known_harnesses())})-)?[0-9a-fA-F]{{6,}}$")
+
+
+_A2A_HANDLE_RE = _a2a_handle_re()
 
 
 def _plugin_hooks_json() -> Optional[Path]:
@@ -1234,14 +1247,14 @@ def _drain_hook_wired(hooks_json: Optional[Path] = None) -> Optional[bool]:
 
 
 def _live_a2a_handles() -> set[str]:
-    """Every address a live session answers to (handle, short, canonical)."""
+    """Every address a live session answers to (alias, short, canonical)."""
     out: set[str] = set()
     try:
         from fno.agents import discover
         from fno.harness_identity import canonical_handle
 
         for s in discover.discover_live_sessions():
-            out.update({s.handle, s.short_id, canonical_handle(s.agent, s.session_id)})
+            out.update({s.handle, s.short_id, canonical_handle(s.session_id)})
     except Exception:  # noqa: BLE001 — discovery is best-effort here
         pass
     return out
@@ -1278,6 +1291,11 @@ def _stale_dead_letters(
     try:
         for m in iter_messages(warn=False):
             to = getattr(m, "to", "") or ""
+            # A project broadcast is never a dead session handle, and an all-hex
+            # project name matches the bare-handle shape. Only the prefixed form
+            # was unambiguous, so widening the pattern makes to_kind load-bearing.
+            if getattr(m, "to_kind", "name") == "project":
+                continue
             if _A2A_HANDLE_RE.match(to) and to not in live:
                 dead_recips.add(to)
     except Exception:  # noqa: BLE001 — a torn bus contributes no findings

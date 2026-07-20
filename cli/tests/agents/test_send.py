@@ -837,7 +837,7 @@ def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     assert "queued (durable)" in res.output
     # Addressed to the canonical handle, not a project.
-    assert "claude-uuid-tgt" in res.output
+    assert "uuid-tgt" in res.output
 
 
 def test_us2_unknown_handle_errors_with_suggestions(runner, tmp_path, monkeypatch):

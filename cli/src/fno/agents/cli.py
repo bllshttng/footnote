@@ -1435,7 +1435,7 @@ def cmd_logs(
 def cmd_peek(
     handle: str = typer.Argument(
         ...,
-        help="Peer handle (same as `fno mail send`: alias, hex short-id, or <harness>-<short8>).",
+        help="Peer handle (same as `fno mail send`: alias or bare hex short-id).",
     ),
     lines: int = typer.Option(
         15, "--lines", "-n", help="Show the last N transcript records (default 15; 0 for none)."
@@ -1563,7 +1563,7 @@ def cmd_register(
     The self-service seam behind ``/fno-me``: a session a human started by hand
     has no spawn-created roster row. This resolves the ambient harness identity
     (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / ...) and writes an ``idle`` row
-    named by the canonical ``<harness>-<shortid>`` handle, the same string the
+    named by the canonical bare ``<shortid>`` handle, the same string the
     session self-stamps and drains, so a durable ``fno mail send`` to it lands.
     ``fno agents whoami`` then reports ``registered: true`` via its session-id
     fallback, no ``FNO_AGENT_SELF`` env needed.

@@ -2,7 +2,7 @@
 # SessionStart hook: drain THIS session's own cross-harness mail (US5).
 #
 # The receive side of the a2a relay. `fno mail drain-self` computes this
-# session's <harness>-<id> handle from the ambient env markers and prints any
+# session's <short-id> handle from the ambient env markers and prints any
 # unread bus mail addressed to it, then advances its own cursor. Wired here so a
 # codex/gemini session actually RECEIVES mail sent to `fno mail send <handle>`,
 # not just becomes addressable. Silent when there is no harness identity in env

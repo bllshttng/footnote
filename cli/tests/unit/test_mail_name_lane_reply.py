@@ -99,18 +99,18 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(
-        to="claude-meeeeeee", from_="claude-9a063cd3", body="ping"
+        to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
     # I never typed the sender handle on the command line; the reply still names it.
-    assert "claude-9a063cd3" in r.output
+    assert "9a063cd3" in r.output
     assert msg in r.output  # the correlated msg-id (re:<id>)
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "claude-9a063cd3"  # addressed to the original sender
-    assert replies[0].from_ == "claude-11111111"  # my canonical handle, not a project
+    assert replies[0].to == "9a063cd3"  # sender resolved to its canonical handle
+    assert replies[0].from_ == "11111111"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 
 
@@ -153,7 +153,7 @@ def test_ac2edge_two_replies_to_one_message_both_thread(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
 
     msg = _seed_name_lane_inbound(
-        to="claude-meeeeeee", from_="claude-9a063cd3", body="ping"
+        to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
     for body in ("first reply", "second reply"):
         r = runner.invoke(
@@ -174,7 +174,7 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     _isolate_empty_discovery(monkeypatch, tmp_path)  # resolves to nothing (offline)
 
     msg = _seed_name_lane_inbound(
-        to="claude-meeeeeee", from_="claude-deadbeef", body="ping"
+        to="claude-meeeeeee", from_="deadbeef", body="ping"
     )
     r = runner.invoke(
         app, ["mail", "reply", "--to", msg, "--body", "ack"]
@@ -185,9 +185,47 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
     rep = replies[0]
-    assert rep.to == "claude-deadbeef"  # sender's canonical handle
+    assert rep.to == "deadbeef"  # sender's canonical handle
     assert rep.in_reply_to == msg  # bus correlation
     assert f'reply_to="{msg}"' in rep.body  # wrapped-body wire attr (never split)
+
+
+def test_reply_to_retired_sender_migrates_the_address_and_delivers(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A pre-flip record's retired `from` is migrated to the bare id and DELIVERED
+    to the live sender - not refused.
+
+    The retired form is not an address a caller may pass, but this one came off an
+    old record, and the address it would carry today is a substring. Refusing would
+    be a wall invented at a knowledge boundary: a human doing a translation the
+    code can do, and a live peer treated as unreachable."""
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+
+    msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-9a063cd3", body="ping")
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert r.exit_code == 0, r.output
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert len(replies) == 1
+    assert replies[0].to == "9a063cd3"  # migrated, never the retired string
+
+
+def test_reply_to_retired_sender_offline_still_addresses_the_bare_id(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Even with nothing live, the durable floor carries the MIGRATED address, so
+    the record is drainable if that session ever wakes - the old string never is."""
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-deadbeef", body="ping")
+
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert r.exit_code == 0, r.output
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert [m.to for m in replies] == ["deadbeef"]
 
 
 def test_ac1fr_offline_full_uuid_handle_wire_to_matches_durable(
@@ -224,7 +262,7 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(
-        to="claude-meeeeeee", from_="claude-9a063cd3", body="ping"
+        to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
@@ -240,7 +278,7 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(
-        to="claude-meeeeeee", from_="claude-9a063cd3", body="ping"
+        to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output

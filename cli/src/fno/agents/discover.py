@@ -505,7 +505,7 @@ def _discover_from_registry(
     """Registered fno-agent sessions, resolvable by canonical handle (US2, x-605c).
 
     A spawned worker registered under a name (e.g. ``x-d899-us8-build``) also
-    answers to its ``<harness>-<short8>`` handle, because its harness session id
+    answers to its bare ``<short8>`` handle, because its harness session id
     is surfaced as a discover row. The harness -> id mapping is
     ``HARNESS_SESSION_ID_FIELDS`` (the single source of truth also read by the
     resume path), so a new harness needs a field there, not a resolver edit. For
@@ -936,7 +936,10 @@ def _default_alias(project: Optional[str], short_id: str) -> str:
     construction; the disambiguation pass only fires on hand-edited collisions.
     """
     base = os.path.basename(project) if project else "session"
-    return f"{base}-{short_id}"
+    alias = f"{base}-{short_id}"
+    from fno.harness_identity import LEGACY_HANDLE_RE
+
+    return f"project-{alias}" if LEGACY_HANDLE_RE.fullmatch(alias) else alias
 
 
 def _load_name_map(path: Path) -> dict:
@@ -960,6 +963,7 @@ def _resolve_aliases(
     falls back to the in-memory aliases rather than crashing the list.
     """
     import fcntl
+    from fno.harness_identity import LEGACY_HANDLE_RE
 
     # No live sessions: nothing to render and nothing to retire against. Do NOT
     # rewrite the map here — a transient empty scan (e.g. a simultaneous psutil
@@ -983,7 +987,12 @@ def _resolve_aliases(
                 pruned = {sid: nm for sid, nm in stored.items() if sid in live_sids}
                 for r in live:
                     sid = r["session_id"]
-                    if sid in pruned and isinstance(pruned[sid], str) and pruned[sid]:
+                    if (
+                        sid in pruned
+                        and isinstance(pruned[sid], str)
+                        and pruned[sid]
+                        and not LEGACY_HANDLE_RE.fullmatch(pruned[sid])
+                    ):
                         aliases[sid] = pruned[sid]
                     else:
                         aliases[sid] = _default_alias(r.get("project"), r["short_id"])
@@ -1076,7 +1085,7 @@ def resolve_or_suggest(
     scan serves both the match and the suggestions. No exclusion: the user
     named a specific live session, so even an adopted one resolves.
     """
-    from fno.harness_identity import canonical_handle
+    from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
     sessions = discover_live_sessions(
         sessions_dir=sessions_dir,
@@ -1088,25 +1097,33 @@ def resolve_or_suggest(
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
     )
-    # Match the friendly handle, the bare hex, OR the cross-harness address
-    # <harness>-<short8> (US3, additive). The harness-prefixed form disambiguates
-    # a shortid collision across harnesses (codex-abcd never resolves a claude
-    # row) and is the SAME string the recipient's drain reads, so a resolved send
-    # is always drainable by its recipient.
-    for s in sessions:
-        if handle and (
-            s.handle == handle
-            or s.short_id == handle
-            or canonical_handle(s.agent, s.session_id) == handle
-        ):
-            return s, []
+    retired = bool(handle and LEGACY_HANDLE_RE.fullmatch(handle))
+    # An address is the friendly <project>-<short8> alias, the bare hex short-id,
+    # or a stored row name. The retired <harness>-<short8> form is NOT accepted:
+    # nothing generates it any more, so a caller still passing one is a bug, and
+    # translating it silently would hide the bug forever.
+    if not retired:
+        for s in sessions:
+            if handle and (
+                s.handle == handle
+                or s.short_id == handle
+                or canonical_handle(s.session_id) == handle
+            ):
+                return s, []
     import difflib
 
     candidates: list[str] = []
     for s in sessions:
-        for cand in (s.handle, s.short_id, canonical_handle(s.agent, s.session_id)):
+        for cand in (s.handle, s.short_id, canonical_handle(s.session_id)):
             if cand not in candidates:
                 candidates.append(cand)
+    # Name the bug rather than emitting a bare "not found": a harness-prefixed
+    # address means some caller (a stale binary, a hardcoded string, a note
+    # copied out of an old transcript) is still building addresses the retired
+    # way. Lead the suggestions with the bare form it should have used.
+    if retired:
+        bare = handle.split("-", 1)[1][:8]
+        return None, [bare] + [c for c in candidates if c != bare][: max(limit - 1, 0)]
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
 

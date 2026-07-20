@@ -32,7 +32,7 @@ def stamp_from(from_name: Optional[str]) -> str:
         return from_name
     ident = resolve_harness_identity()
     if ident.session_id and ident.harness:
-        return canonical_handle(ident.harness, ident.session_id)
+        return canonical_handle(ident.session_id)
     return "fno"
 
 

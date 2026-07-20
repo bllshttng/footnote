@@ -137,6 +137,10 @@ def scan_unread(
 ) -> list[Envelope]:
     """Return messages addressed to ``name`` after its cursor, oldest -> newest.
 
+    One address, one cursor. A consumer answers to exactly the name it drains
+    under, so there is nothing to reconcile: the cursor filename IS the address,
+    and the address never changes under a live consumer.
+
     If the cursor is absent or its message-id is not found in any retained
     segment (rotated out / deleted), all retained messages to ``name`` are
     returned rather than silently skipping unprocessed mail.
@@ -145,7 +149,7 @@ def scan_unread(
     ``from_session``). This is the sender-exclusion for a ``to_kind=project``
     broadcast read - a project member must not drain its own broadcast back
     (cv-d54ddd45). By-name reads pass ``exclude_from=None`` (a direct address is
-    never a self-echo). Default ``None`` is byte-for-byte the prior behavior.
+    never a self-echo).
     """
     cursor = read_cursor(name)
     msgs = list(iter_messages(warn=warn))

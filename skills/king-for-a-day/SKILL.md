@@ -89,13 +89,16 @@ Mail a live pane directly; everything else is voicemail.
 A direct send to a live session injects into its pane as a notification it acts on this turn; a durable queue waits for a drain the recipient may never run.
 Both "work", but nobody checks their voicemail.
 
-The direct form: `fno mail send <harness>-<short-id> "<msg>"` (`claude-<short-id>`, `codex-<short-id>`, `opencode-<short-id>`, ...), or the session's slug if you know it.
+The direct form: `fno mail send <short-id> "<msg>"` - the bare 8-hex session prefix, the same id that keys resume/attach/peek.
+The session's slug also resolves. The retired `<harness>-<short-id>` form (`claude-<short-id>`, ...) does NOT: it is refused, with the bare id named in the error. Nothing generates that form any more, so a caller still producing one is a bug to fix at the source rather than something to translate silently.
 Every session prints its own handle in its startup header; find a peer's with `fno agents discovered-json` or `fno agents top`.
 Add `--from-self` to stamp your own reply handle so the answer comes back to you, and do not trust a sender's advertised `from-name` as an address - it can be stale.
 
 The fallbacks, and why they rank below: `fno mail send <name>` reaches a registered agent (fine when the name resolves); `--to-project <X>` is anycast that queues durable into what may be a ghost inbox when no live peer resolves - and the receipt still reads like success.
-The envelope is always written before delivery is attempted, so a send survives a dead recipient; that durability is recovery, not delivery.
+A live inject writes nothing to the bus; the durable envelope is written only when the inject misses, so it survives a dead recipient as recovery, not delivery.
 **Treat any receipt that is not `delivered (hosted)` as not delivered: re-resolve the handle and send again, do not re-queue.**
+And do not settle for the queue when the peer is merely idle - the handle you mailed is the same id these take, so bring it back and get the answer now:
+`fno agents peek <short-id>` (alive?) · `resume <short-id>` (idle -> live, then re-send) · `attach <short-id>` (drive it yourself, claude).
 
 **Observe (read-only, never drive).**
 `fno agents list` · `status` (daemon liveness + per-agent state) · `top` (every live worker process, fno-spawned and foreign alike) · `logs <name>` · `peek <handle>` (read-only observation of any peer you could message) · `needs` (the needs-me queue) · `digest --session <s>` (catch-up fold) · `trace <name>` (dispatch lifecycle).

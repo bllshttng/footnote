@@ -36,10 +36,8 @@ type-specific payload stays in `data`. The family validates with
 
 ## Handle grammar
 
-A canonical handle addresses a session across harnesses: `<harness>-<first8>`,
-where `<harness>` is `claude` \| `codex` \| `gemini` and `<first8>` is the first
-eight characters of the session id (e.g. `claude-03401fb3`). `from` and `parent`
-carry canonical handles.
+A canonical handle addresses a session across harnesses as the bare first eight characters of its session id (for example, `03401fb3`).
+`from` and `parent` carry canonical handles; the harness is separate metadata, never part of the address.
 
 ## Event kinds and `data`
 

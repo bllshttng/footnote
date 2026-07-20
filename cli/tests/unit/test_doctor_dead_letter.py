@@ -67,6 +67,14 @@ def test_doctor_dead_letter_stale_unread_surfaces(bus):
     assert [f["handle"] for f in found] == ["claude-deadbeef"]
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "agy", "opencode"])
+def test_doctor_dead_letter_covers_every_retired_provider_prefix(bus, provider):
+    handle = f"{provider}-deadbeef"
+    _seed(handle, "stranded", ts="2020-01-01T00:00:00Z")
+
+    assert [f["handle"] for f in doctor._stale_dead_letters(live_handles=set())] == [handle]
+
+
 def test_doctor_dead_letter_fresh_mail_not_flagged(bus):
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _seed("claude-deadbeef", "just sent", ts=now)
@@ -82,6 +90,25 @@ def test_doctor_dead_letter_live_handle_not_flagged(bus):
 def test_doctor_dead_letter_project_recipient_never_flagged(bus):
     # A project-addressed durable note is not an a2a handle; never a dead letter.
     _seed("web", "project note", ts="2020-01-01T00:00:00Z")
+    assert doctor._stale_dead_letters(live_handles=set()) == []
+
+
+def test_doctor_dead_letter_bare_handle_surfaces(bus):
+    # The bare short-id is the generated address now; if the scan only admitted
+    # the prefixed form the diagnostic would go quiet for every new session.
+    _seed("deadbeef", "stranded", ts="2020-01-01T00:00:00Z")
+    assert [f["handle"] for f in doctor._stale_dead_letters(live_handles=set())] == ["deadbeef"]
+
+
+def test_doctor_dead_letter_all_hex_project_not_flagged(bus):
+    # An all-hex project name matches the bare-handle shape, so to_kind is what
+    # keeps a project broadcast from being reported as mail to a dead session.
+    from fno.bus.log import Envelope, append
+
+    append(Envelope.new(
+        from_="claude-cafe0001", to="deadbeef", kind="send", body="project note",
+        ts="2020-01-01T00:00:00Z", to_kind="project",
+    ))
     assert doctor._stale_dead_letters(live_handles=set()) == []
 
 

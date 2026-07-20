@@ -116,15 +116,15 @@ def _seed_bus_message(*, to: str, from_: str, body: str):
 
 
 def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
-    # A live codex session with this thread id -> own handle codex-019f48e1.
+    # AC1-EDGE: the bare address drains exactly once and acks under that key.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
-    _seed_bus_message(to="codex-019f48e1", from_="claude-web", body="ack from K")
+    _seed_bus_message(to="019f48e1", from_="claude-web", body="ack from K")
 
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout.strip().splitlines()[-1])
     assert [m["body"] for m in payload] == ["ack from K"]
-    assert payload[0]["to"] == "codex-019f48e1"
+    assert payload[0]["to"] == "019f48e1"
 
     # Ack advanced the cursor: a second drain sees nothing (not re-surfaced).
     again = runner.invoke(app, ["mail", "drain-self", "--json"])
@@ -135,12 +135,67 @@ def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, mon
     # The receive-path render must show each message's id (what `reply --to`
     # correlates against) and the how-to, so a draining agent can answer.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
-    h = _seed_bus_message(to="codex-019f48e1", from_="claude-web", body="need a decision")
+    h = _seed_bus_message(to="019f48e1", from_="claude-web", body="need a decision")
 
     res = runner.invoke(app, ["mail", "drain-self"])  # human path (no --json)
     assert res.exit_code == 0, res.output
     assert f"id:{h.thread_id}" in res.output
     assert "fno mail reply --to <id>" in res.output
+
+
+# ---------------------------------------------------------------------------
+# The retired <harness>-<short8> address is NOT accepted. Nothing generates one,
+# so a caller still producing one is a bug that must surface, not be translated.
+# ---------------------------------------------------------------------------
+
+CODEX_SID = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+
+
+def test_legacy_addressed_mail_is_not_drained(runner, mailbox, monkeypatch):
+    """A pre-flip envelope addressed `codex-<short8>` is not this session's mail.
+    It is a dead letter `fno doctor` reports, not something drain-self absorbs -
+    absorbing it would hide the fact that something addressed it the retired way."""
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
+    _seed_bus_message(to="codex-019f48e1", from_="web", body="retired form")
+    _seed_bus_message(to="019f48e1", from_="web", body="real address")
+
+    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert res.exit_code == 0, res.output
+    bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
+    assert bodies == ["real address"]
+
+
+def test_send_target_may_be_short_id_shaped(runner, mailbox):
+    """The send path must not refuse a bare 8-hex target as a badly-shaped NAME.
+
+    The short-id-shape guard exists to stop an agent being NAMED like an id; the
+    canonical mailbox handle IS that shape, so applying it to a send target
+    rejects the exact string `whoami` advertises. It failed at exit 2, and the
+    fallback to handle resolution only fires on exit 16 (unknown agent), so a
+    bare-id send never even reached resolution."""
+    from fno.agents.dispatch import DispatchAskError, _validate_inputs
+
+    with pytest.raises(DispatchAskError):  # naming an agent this way stays refused
+        _validate_inputs(name="deadbeef", message="m", from_name="web")
+    _validate_inputs(  # addressing one does not
+        name="deadbeef", message="m", from_name="web", name_is_address=True
+    )
+
+    # End to end: the target resolves nowhere, so it must fail with the
+    # unknown-handle error, NOT the name-shape one.
+    res = runner.invoke(app, ["mail", "send", "deadbeef", "hi", "--from-name", "web"])
+    assert "must not match short-id shape" not in (res.stdout + (res.stderr or ""))
+
+
+def test_send_to_legacy_form_refuses_and_names_the_bare_id(runner, mailbox, monkeypatch, tmp_path):
+    """The refusal has to say WHAT to use, or the caller cannot act on it: lead the
+    suggestions with the bare short-id the retired address was built from."""
+    from fno.agents import discover
+
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id="9a063cd3-69d4-415a-ada5-649b0164189c")
+    resolved, suggestions = discover.resolve_or_suggest("claude-9a063cd3")
+    assert resolved is None, "the retired form must not resolve"
+    assert suggestions and suggestions[0] == "9a063cd3"
 
 
 def test_drain_self_no_harness_env_is_noop(runner, mailbox, monkeypatch):
@@ -195,10 +250,10 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     # A claude session sends to the codex handle (codex row is unregistered, so
     # the send falls through registry-unknown into disk resolution).
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ack from K", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ack from K", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
-    assert "codex-019f48e1" in sent.output
+    assert "019f48e1" in sent.output
     assert "queued (durable)" in sent.output
 
     # The codex session drains its own handle and sees the message.
@@ -206,7 +261,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "codex-019f48e1"
+    assert payload and payload[0]["to"] == "019f48e1"
     assert "ack from K" in payload[0]["body"]  # inside the <fno_mail> wrap
 
 
@@ -220,7 +275,7 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: True)
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ack from K", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ack from K", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -291,7 +346,7 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -317,7 +372,7 @@ def test_us7b_mux_pane_send_failure_falls_closed_to_durable(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -342,7 +397,7 @@ def test_us7b_unrostered_session_skips_pane_rung_silently(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -363,7 +418,7 @@ def test_us7b_working_socket_inject_preempts_pane_rung(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -388,7 +443,7 @@ def test_us7b_non_live_entry_never_pane_sends(
     )
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -436,7 +491,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     monkeypatch.setattr("fno.agents.dispatch.subprocess.run", _guard_run)
 
     sent = runner.invoke(
-        app, ["mail", "send", "codex-019f48e1", "ping", "--from-name", "web"]
+        app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "queued (durable)" in sent.output
@@ -485,10 +540,10 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
 
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi bg worker", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
-    assert "claude-9a063cd3" in sent.output
+    assert "9a063cd3" in sent.output
     assert "queued (durable)" in sent.output
 
     # The bg worker drains its own handle and sees the message (stamp == drain key).
@@ -496,7 +551,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "claude-9a063cd3"
+    assert payload and payload[0]["to"] == "9a063cd3"
     assert "hi bg worker" in payload[0]["body"]
 
 
@@ -508,7 +563,7 @@ def test_us3_rostered_claude_hosted_short_circuits_durable(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
 
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
     assert "delivered (hosted)" in sent.output
@@ -549,14 +604,21 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sender_sid)
 
     # No --from-name: from + model are auto-stamped from the invoking session.
-    sent = runner.invoke(app, ["mail", "send", "claude-9a063cd3", "hello"])
+    sent = runner.invoke(app, ["mail", "send", "9a063cd3", "hello"])
     assert sent.exit_code == 0, sent.output
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    assert 'from="claude-abcd1234"' in body
+    assert 'from="abcd1234"' in body
     assert 'model="claude-opus-4-8"' in body
+    # Pinned to the shared mapper, not spelled literally: the name lane once
+    # stamped a raw "claude" here while dispatch, the relay, and the Rust
+    # contract all said "claude-code", and no test noticed.
+    from fno.mail.envelope import harness_for_provider
+
+    assert f'harness="{harness_for_provider("claude")}"' in body
+    assert 'harness="claude-code"' in body
 
 
 # ---------------------------------------------------------------------------
@@ -586,14 +648,14 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
     sent = runner.invoke(
-        app, ["mail", "send", "claude-9a063cd3", "hi bg worker", "--from-name", "web"]
+        app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "claude-9a063cd3"
+    assert payload and payload[0]["to"] == "9a063cd3"
     assert "hi bg worker" in payload[0]["body"]
 
 

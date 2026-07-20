@@ -662,7 +662,7 @@ def test_loaded_daemon_thread_resolves_with_stale_rollout(tmp_path, monkeypatch)
     )
 
     resolved, _ = discover.resolve_or_suggest(
-        "codex-019f4d0c",
+        "019f4d0c",
         sessions_dir=tmp_path / "no-sessions",
         projects_dir=tmp_path / "no-projects",
         codex_sessions_dir=codex,
@@ -766,13 +766,15 @@ def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):
     assert [s.short_id for s in sessions] == ["019abcde"]
 
 
-def test_us3_resolve_cross_harness_handle(tmp_path):
+def test_us3_resolve_bare_short_id_across_harnesses(tmp_path):
+    """A codex session answers to the same bare short-id a claude one does - the
+    address does not encode the harness. The retired prefixed form is refused,
+    and the refusal leads with the bare id so the caller can fix what it built."""
     codex = tmp_path / "codex"
     _write_codex_rollout(
         codex, session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", cwd="/x",
     )
-    resolved, suggestions = discover.resolve_or_suggest(
-        "codex-019f48e1",
+    seams = dict(
         sessions_dir=tmp_path / "no-sessions",
         projects_dir=tmp_path / "no-projects",
         codex_sessions_dir=codex,
@@ -780,18 +782,62 @@ def test_us3_resolve_cross_harness_handle(tmp_path):
         psutil_mod=_FakePsutil(alive={}),
         project_resolver=lambda c: None,
     )
+    resolved, _ = discover.resolve_or_suggest("019f48e1", **seams)
     assert resolved is not None
     assert resolved.agent == "codex"
     assert resolved.session_id == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
 
+    refused, suggestions = discover.resolve_or_suggest("codex-019f48e1", **seams)
+    assert refused is None
+    assert suggestions[0] == "019f48e1"
 
-def test_ac2_edge_harness_prefix_disambiguation(tmp_path):
-    # A claude session and a codex session whose shortids both start abcd1234.
+
+def test_retired_shape_refused_even_when_stored_as_friendly_alias(tmp_path):
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id=sid, cwd="/x")
+    name_map = tmp_path / ".fno" / "session-names.json"
+    name_map.parent.mkdir(parents=True)
+    name_map.write_text(json.dumps({sid: "codex-019f48e1"}), encoding="utf-8")
+
+    resolved, suggestions = discover.resolve_or_suggest(
+        "codex-019f48e1",
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=name_map,
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda c: None,
+    )
+
+    assert resolved is None
+    assert suggestions[0] == "019f48e1"
+    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-019f48e1"
+
+
+@pytest.mark.parametrize("project", ["claude", "codex", "gemini", "agy", "opencode"])
+def test_default_alias_never_generates_retired_handle_shape(project):
+    from fno.harness_identity import LEGACY_HANDLE_RE
+
+    alias = discover._default_alias(project, "deadbeef")
+
+    assert not LEGACY_HANDLE_RE.fullmatch(alias)
+
+
+def test_ac2_edge_harness_prefix_no_longer_disambiguates(tmp_path):
+    """The harness prefix used to break an 8-hex collision across harnesses. It
+    is not an address any more, so it is refused like any other retired form and
+    that disambiguator is gone.
+
+    The collision itself stays unresolved rather than silently mis-delivering to
+    whichever row scanned first: two live sessions sharing an 8-hex prefix is
+    ~n^2/2^32 across live sessions, and first-match-wins was already the bare-id
+    behavior before this change."""
     codex = tmp_path / "codex"
     _write_codex_rollout(codex, session_id="abcd1234-codex-side", cwd="/x")
     projects = tmp_path / "claude-projects"
     _write_transcript(projects, cwd="/Users/y/repo", session_id="abcd1234-cccc-dddd")
-    resolved, _ = discover.resolve_or_suggest(
+    resolved, suggestions = discover.resolve_or_suggest(
         "codex-abcd1234",
         sessions_dir=tmp_path / "no-sessions",
         projects_dir=projects,
@@ -800,8 +846,8 @@ def test_ac2_edge_harness_prefix_disambiguation(tmp_path):
         psutil_mod=_FakeProcsPsutil(procs={4242: (["claude"], "/Users/y/repo")}),
         project_resolver=lambda c: None,
     )
-    assert resolved is not None
-    assert resolved.agent == "codex"  # codex- prefix picks the codex row, not claude
+    assert resolved is None
+    assert suggestions[0] == "abcd1234"
 
 
 # --------------------------------------------------------------------------
@@ -845,7 +891,7 @@ def test_us1_roster_source_resolves_bg_worker(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
-    resolved, _ = discover.resolve_or_suggest("claude-9a063cd3", **_empty_seams(tmp_path))
+    resolved, _ = discover.resolve_or_suggest("9a063cd3", **_empty_seams(tmp_path))
     assert resolved is not None
     assert resolved.agent == "claude"
     assert resolved.short_id == "9a063cd3"
@@ -860,7 +906,7 @@ def test_us1_torn_roster_yields_zero_rows(tmp_path, monkeypatch):
     (daemon / "roster.json").write_text("{not json", encoding="utf-8")
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
     resolved, suggestions = discover.resolve_or_suggest(
-        "claude-9a063cd3", **_empty_seams(tmp_path)
+        "9a063cd3", **_empty_seams(tmp_path)
     )
     assert resolved is None
     assert suggestions == []
@@ -887,7 +933,7 @@ def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
     resolved, _ = discover.resolve_or_suggest(
-        "claude-9a063cd3", registry_path=reg, **_empty_seams(tmp_path)
+        "9a063cd3", registry_path=reg, **_empty_seams(tmp_path)
     )
     assert resolved is not None
     assert resolved.short_id == "9a063cd3"
@@ -1024,9 +1070,10 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     assert by_job is not None
     assert by_job.short_id == "j0b1d001"
     assert by_job.session_id == "aaaabbbb-1111-2222-3333-444444444444"
-    # ...and by the canonical handle derived from the uuid.
+    # ...and by the canonical handle derived from the uuid, which differs from
+    # the jobId short_id, so this exercises the derived-handle branch on its own.
     by_canon, _ = discover.resolve_or_suggest(
-        "claude-aaaabbbb", registry_path=reg, **_empty_seams(tmp_path)
+        "aaaabbbb", registry_path=reg, **_empty_seams(tmp_path)
     )
     assert by_canon is not None
 

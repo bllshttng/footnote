@@ -112,7 +112,7 @@ def _stamp_protocol_envelope(
 
         ident = resolve_harness_identity()
         if ident.session_id and ident.harness:
-            env["from"] = canonical_handle(ident.harness, ident.session_id)
+            env["from"] = canonical_handle(ident.session_id)
             env["model"] = resolve_self_model()
     except Exception:
         pass
@@ -148,7 +148,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         # the push would silently skip (codex P1). The per-harness session field
         # may hold the full id or its first-8 (claude stores the short), so both
         # variants are accepted; a canonically-named row still matches too.
-        my_handle = canonical_handle(ident.harness, ident.session_id)
+        my_handle = canonical_handle(ident.session_id)
         session_field = HARNESS_SESSION_ID_FIELDS.get(ident.harness)
         sid_variants = {ident.session_id, ident.session_id[:8]}
         for entry in load_registry():
@@ -159,7 +159,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
             )
             if entry.name == my_handle or same_session:
                 if entry.spawned_by_session and entry.spawned_by_harness:
-                    return canonical_handle(entry.spawned_by_harness, entry.spawned_by_session)
+                    return canonical_handle(entry.spawned_by_session)
                 return None
     except Exception:
         return None

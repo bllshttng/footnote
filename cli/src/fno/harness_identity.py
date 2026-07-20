@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
@@ -17,17 +18,40 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-# The addressable cross-harness handle is ``<harness>-<first8>``. This ONE
-# function is the single source of truth for that string: the send-resolve path
-# (discover), the registry row name (register_existing_session), and the
-# receive-side drain (mail drain-self) all call it. If any two computed it
-# differently, a durably-queued message would address one handle while its
-# recipient drained another and silently strand on the bus (the plan's one true
-# silent failure). ``session_id[:8]`` matches the registry's historical slice so
-# already-registered rows keep the same name.
-def canonical_handle(harness: str, session_id: str) -> str:
-    """The cross-harness address ``<harness>-<first8-of-session-id>``."""
-    return f"{harness}-{session_id[:8]}"
+# The mailbox handle is the bare first-8 of the session id - the same prefix that
+# already keys resume/attach/peek/transcripts/registry, so a session has ONE
+# identity everywhere. The signature takes no harness ON PURPOSE: harness is an
+# envelope attribute, never part of an address, and no code path may recover it
+# from a handle string. A harness-prefixed address (`claude-<short8>`) is a
+# retired form that is NOT accepted anywhere - a caller still producing one is a
+# bug to fix at the source, so resolution refuses it by name rather than quietly
+# translating it.
+#
+# This ONE function is the single source of the generated string: the send-resolve
+# path (discover), the registry row-name fallback, and the receive-side drain
+# (mail drain-self) all call it. If any two computed it differently, a
+# durably-queued message would address one handle while its recipient drained
+# another and silently strand on the bus.
+def canonical_handle(session_id: str) -> str:
+    """The mailbox address: the bare first-8 of the session id."""
+    return session_id[:8]
+
+
+# The retired harness-prefixed address. Kept ONLY so the send path can recognize
+# one and refuse it with a message naming the fix, and so `fno doctor` can still
+# report mail queued to one before the flip as the dead letter it is. Never an
+# accepted address, never generated.
+#
+# Built from the harness map rather than a literal list: a hardcoded copy silently
+# stops covering a harness the moment one is added, which is the same drift that
+# produced the two-conventions mess this address change exists to end.
+def _legacy_handle_re() -> "re.Pattern[str]":
+    from fno.agents.harness_map import known_harnesses
+
+    return re.compile(rf"^(?:{'|'.join(known_harnesses())})-[0-9a-fA-F]{{6,}}$")
+
+
+LEGACY_HANDLE_RE = _legacy_handle_re()
 
 
 def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> dict:

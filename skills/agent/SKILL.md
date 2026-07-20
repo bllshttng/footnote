@@ -591,11 +591,14 @@ instantly.
    #   fno mail send --to-project "<project>" "<message>"
    ```
 
-4. **REPORT** the real outcome line. `fno mail send` prints exactly one line
+4. **REPORT** the real outcome line. `fno mail send` prints one line
    (`msg-<id> delivered (hosted)` or `msg-<id> queued (durable)`); relay the
    message id and the resolved recipient so delivery is auditable. Exit 0 covers
-   both delivered and queued (a not-currently-live recipient is queued durably
-   and drained later - that is success, not an error).
+   both, so the receipt is the only signal: `delivered (hosted)` landed in the
+   recipient's session; `queued (durable)` did NOT, and waits on a drain that may
+   never come. Report a durable receipt as not delivered and offer the recovery
+   ladder the CLI prints (`peek` / `resume` + re-send / `attach`) - an idle
+   session can be brought back now instead of waiting on it.
    - **Unknown name** (`fno mail send` exits 16): report "unknown agent
      <name>" and that nothing was written. Do NOT guess a recipient.
    - Any other nonzero exit: report FAILED with the captured stderr; never
