@@ -184,9 +184,9 @@ use crate::tree::{Dir, Rect, TabId};
 /// `AgentRow { updated_at, pr }` carry the peek header's `changed Ns ago` stamp
 /// and `PR #N` label.
 ///
-/// v36 (x-1d91, the Backlog section): `BacklogCard { project, lane, next }` carry
+/// v36 (x-1d91, the Backlog section): `BacklogCard { project, lane, head }` carry
 /// the sideline's `project · lane` attribution subline and the explicit on-deck
-/// marker; `Layout::backlog_lanes` carries UNCAPPED per-lane counts, feeding both
+/// head-of-queue marker; `Layout::backlog_lanes` carries UNCAPPED per-lane counts, feeding both
 /// the section's exact `+N more` and the mini-kanban's lane headers;
 /// `Layout::backlog_stale` marks the section as last-known rather than current; `Command::BacklogVerb { node, verb }`
 /// ([`BacklogVerb`]) shells the existing `fno backlog rank --top` / `defer`
@@ -640,11 +640,19 @@ pub struct BacklogCard {
     /// `_kanban_column` is the sole column authority; rank never changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<String>,
-    /// (v36) The on-deck card: the first Ready card in board order, which is what
-    /// `fno backlog next` would pick. Marked explicitly so on-deck reads as a fact
-    /// rather than being inferred from row position.
+    /// (v36) The head of the queue: the first Ready card in BOARD order. Marked
+    /// explicitly so it reads as a fact rather than being inferred from row
+    /// position, which lies once the section is scrolled or the top card is
+    /// claimed.
+    ///
+    /// Deliberately NOT "what the dispatcher will run next". The picker
+    /// (`_intake.make_selection_sort_key`) orders by rank band then epics-first,
+    /// with no project-lane grouping, and then applies guards the mux does not
+    /// model (containers, batched members, stale/dead-ancestor candidates). Only
+    /// the rank band is shared with the board, so a floated node does lead both -
+    /// but an unranked board head is not a promise about the next dispatch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub next: bool,
+    pub head: bool,
 }
 
 /// The queue state a card renders as. Classified from `_status` alone
@@ -945,9 +953,17 @@ pub enum BacklogVerb {
     /// `fno backlog rank <node> --top` - float the card to the head of its column.
     /// Never changes the column (`_kanban_column` is the sole column authority).
     RankTop,
-    /// `fno backlog defer <node>` - pause the node (reversible via `undefer`).
+    /// `fno backlog defer <node> --reason <why>` - pause the node (reversible via
+    /// `undefer`). The reason is REQUIRED by the CLI and rejected when blank, so
+    /// the mux supplies one naming where the deferral came from; omitting it
+    /// makes every defer exit with a missing-option error.
     Defer,
 }
+
+/// The deferral reason the mux supplies (the CLI requires a non-blank one). It
+/// names the surface rather than inventing an intent nobody expressed - triage
+/// reads these, so "who deferred this and from where" is the useful fact.
+pub const DEFER_REASON: &str = "deferred from the mux backlog sideline";
 
 impl BacklogVerb {
     /// The `fno backlog` argv tail for this verb, `<node>` interpolated by the
@@ -957,7 +973,13 @@ impl BacklogVerb {
             BacklogVerb::RankTop => {
                 vec!["backlog".into(), "rank".into(), node.into(), "--top".into()]
             }
-            BacklogVerb::Defer => vec!["backlog".into(), "defer".into(), node.into()],
+            BacklogVerb::Defer => vec![
+                "backlog".into(),
+                "defer".into(),
+                node.into(),
+                "--reason".into(),
+                DEFER_REASON.into(),
+            ],
         }
     }
 
@@ -2044,7 +2066,7 @@ mod tests {
                         // (v36) attribution + on-deck ride the same frame.
                         project: Some("fno".into()),
                         lane: Some("in-progress".into()),
-                        next: false,
+                        head: false,
                     },
                     BacklogCard {
                         id: "ab-53c0".into(),
@@ -2056,7 +2078,7 @@ mod tests {
                         where_hint: None,
                         project: None,
                         lane: None,
-                        next: true,
+                        head: true,
                     },
                 ],
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],

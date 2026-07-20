@@ -931,12 +931,16 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
 /// (x-1d91) The v1 reorder menu for a Backlog card: float to top, defer. Both
 /// route through `fno backlog` server-side; the mux never writes the graph.
 ///
-/// Floating a READY card to the top makes it the active dispatcher's next pick
-/// within about a minute, so on those the float entry carries a hint saying so -
-/// the gesture is an implicit dispatch request, and the operator should know that
-/// before pressing rather than discover it when a session appears. (The hint
-/// keys off Ready rather than plan-linkage: the card feed carries no plan, and
-/// "a ready card floated to the top gets dispatched" is true of all of them.)
+/// Floating a READY card to the top can make the active dispatcher pick it up
+/// within about a minute, so those carry a hint saying so - the gesture is an
+/// implicit dispatch request, and the operator should know that before pressing
+/// rather than discover it when a session appears.
+///
+/// The hint says "may dispatch", not "will": the picker applies guards the mux
+/// does not model (containers, batched members, stale/dead-ancestor candidates,
+/// project scoping), so a floated card is not certain to be taken. Warning about
+/// a possibility is the useful half; promising a certainty would be a claim this
+/// code cannot keep.
 fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
     let label = if card.slug.is_empty() {
         &card.id
@@ -944,7 +948,7 @@ fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
         &card.slug
     };
     let float_hint = match card.state {
-        CardState::Ready => "dispatches it",
+        CardState::Ready => "may dispatch",
         _ => "",
     };
     let rows = vec![
@@ -1028,8 +1032,8 @@ fn build_kanban(cards: &[BacklogCard], counts: &[(String, usize)], anchor: Ancho
             rows.push(PopupRow::Entry {
                 glyph: lattice_style(card_lattice_state(c.state)).glyph.into(),
                 label: label.clone(),
-                hint: if c.next {
-                    "next".into()
+                hint: if c.head {
+                    "head".into()
                 } else {
                     c.priority.clone()
                 },
@@ -3693,14 +3697,17 @@ impl View {
                     let style = lattice_style(card_lattice_state(c.state));
                     let glyph = style.glyph;
                     let label = if c.slug.is_empty() { &c.id } else { &c.slug };
-                    // (x-1d91) On-deck is stated, not inferred from position: the
-                    // section can be scrolled or the head card claimed, and either
-                    // would make "first row" a lie. A dispatched-but-unconfirmed
-                    // verb shows `…` instead, so no reorder is ever invisible.
+                    // (x-1d91) The head of the queue is stated, not inferred from
+                    // position: the section can be scrolled or the top card
+                    // claimed, and either would make "first row" a lie. Labelled
+                    // `head` rather than `next` on purpose - it names the board's
+                    // head, and the dispatcher's actual pick can differ (see
+                    // BacklogCard::head). A dispatched-but-unconfirmed verb shows
+                    // `…` instead, so no reorder is ever invisible.
                     let mark = if self.card_pending(&c.id) {
                         " …"
-                    } else if c.next {
-                        " next"
+                    } else if c.head {
+                        " head"
                     } else {
                         ""
                     };
@@ -9602,7 +9609,7 @@ mod tests {
                 where_hint: None,
                 project: None,
                 lane: None,
-                next: false,
+                head: false,
             }],
             backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
             backlog_stale: false,
@@ -9638,7 +9645,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
-            next: false,
+            head: false,
         };
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)],
@@ -9694,7 +9701,7 @@ mod tests {
                 where_hint: hint.map(str::to_owned),
                 project: None,
                 lane: None,
-                next: false,
+                head: false,
             };
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)],
@@ -10164,7 +10171,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
-            next: false,
+            head: false,
         }];
         let cards = |v: &View| {
             v.display_rows()
@@ -12154,7 +12161,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
-            next: false,
+            head: false,
         };
         let mut v = view_with_agents(vec![
             agent(Some(1), "worker", Some(10), None),
@@ -12201,7 +12208,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
-            next: false,
+            head: false,
         }
     }
 
@@ -12424,7 +12431,7 @@ mod tests {
                 other => panic!("expected the float entry, got {other:?}"),
             }
         };
-        assert_eq!(hint_of(CardState::Ready), "dispatches it");
+        assert_eq!(hint_of(CardState::Ready), "may dispatch");
         assert_eq!(hint_of(CardState::Blocked), "");
     }
 

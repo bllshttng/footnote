@@ -253,7 +253,7 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
                 project: project.map(str::to_string),
                 lane: Some(lane.to_string()),
                 // Set below, once the board order is known.
-                next: false,
+                head: false,
             },
         ));
     }
@@ -287,7 +287,7 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
     // (Later, Next, Now).
     lanes.sort_by_key(|(l, _)| (lane_rank(l), l.clone()));
     let mut cards: Vec<BacklogCard> = rows.into_iter().take(CARD_CAP).map(|r| r.5).collect();
-    mark_next(&mut cards);
+    mark_head(&mut cards);
     // A fresh derivation is by definition current; only `ReaderState` (which
     // knows the read history) ever sets this.
     Some(Queue {
@@ -297,15 +297,17 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
     })
 }
 
-/// Mark the on-deck card: the first Ready card in board order, which is the pick
-/// `fno backlog next` makes. Runs after the live-claim fold, so a claimed
-/// head-of-queue card hands the marker to the next genuinely-ready one rather
-/// than leaving the section pointing at work already in flight.
-fn mark_next(cards: &mut [BacklogCard]) {
+/// Mark the head of the queue: the first Ready card in BOARD order. Runs after
+/// the live-claim fold, so a claimed head hands the marker to the next genuinely
+/// -ready card rather than pointing at work already in flight.
+///
+/// This is the board's head, NOT the dispatcher's next pick - see
+/// [`BacklogCard::head`] for why the two orderings differ.
+fn mark_head(cards: &mut [BacklogCard]) {
     let mut seen = false;
     for c in cards.iter_mut() {
-        c.next = !seen && c.state == CardState::Ready;
-        seen |= c.next;
+        c.head = !seen && c.state == CardState::Ready;
+        seen |= c.head;
     }
 }
 
@@ -588,6 +590,11 @@ impl ReaderState {
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
     ) -> Option<(Queue, HashMap<String, u64>, MissionMap)> {
+        // Whether THIS tick pulled fresh bytes off disk. Only a fresh read that
+        // also parses clears the failure counter: re-deriving the cached document
+        // succeeds every tick by definition, so treating that as success would
+        // erase a torn-read run before it ever reached the stale threshold.
+        let mut fresh_read = false;
         if stamp != self.cached_stamp {
             match (read_if_changed(), stamp) {
                 // Only commit the new stamp once we have matching content, so a
@@ -597,6 +604,7 @@ impl ReaderState {
                 // improves on the older agents_view reader's advance-anyway).
                 (Some(raw), _) => {
                     self.cached_stamp = stamp;
+                    fresh_read = true;
                     // (x-9c5f) The pr map derives from the SAME read; recompute it
                     // only here, not per tick, so we never parse the 4M graph
                     // twice a second.
@@ -616,18 +624,35 @@ impl ReaderState {
                 // written would be noise, not signal.
                 (None, Some(_)) => self.read_failures = self.read_failures.saturating_add(1),
             }
-            if self.cached_stamp == stamp {
-                self.read_failures = 0; // a committed stamp means the read landed
-            }
         }
         // Re-derived every tick (not only on a fresh read) so a claim
         // appearing/releasing reaches the cards, their lanes, AND the lane counts
         // even when the graph file itself never changed.
+        //
+        // A read that lands but will not PARSE counts as a failure too. It
+        // commits a stamp, so treating a committed stamp as success would reset
+        // the counter and leave a persistently corrupt graph showing old cards
+        // forever with no stale marker - the reader cannot derive current state
+        // either way, which is exactly what the marker is for.
         let mut queue = match &self.cached_raw {
-            Some(raw) => derive_queue(raw, live)
-                .or_else(|| self.last_sent.clone())
-                .unwrap_or_default(),
-            None => Queue::default(),
+            Some(raw) => match derive_queue(raw, live) {
+                Some(q) => {
+                    if fresh_read {
+                        self.read_failures = 0;
+                    }
+                    q
+                }
+                None => {
+                    self.read_failures = self.read_failures.saturating_add(1);
+                    self.last_sent.clone().unwrap_or_default()
+                }
+            },
+            None => {
+                // A vanished file is a KNOWN state (an empty lane), not a
+                // failure to read one.
+                self.read_failures = 0;
+                Queue::default()
+            }
         };
         queue.stale = self.read_failures >= STALE_AFTER_FAILED_READS;
         // A holder-only change (same cards, new/different claim holder) also
@@ -868,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn on_deck_is_the_first_ready_card_only() {
+    fn head_is_the_first_ready_card_only() {
         // AC1-HP: exactly one `next`, on the first READY card in board order -
         // an in-flight card ahead of it never takes the marker.
         let raw = graph(
@@ -879,14 +904,14 @@ mod tests {
         let cards = derive_cards(&raw).unwrap();
         let marked: Vec<&str> = cards
             .iter()
-            .filter(|c| c.next)
+            .filter(|c| c.head)
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(marked, ["x-r1"], "one on-deck card, the first ready one");
     }
 
     #[test]
-    fn claiming_the_on_deck_card_hands_the_marker_down() {
+    fn claiming_the_head_card_hands_the_marker_down() {
         // The overlay can flip on-deck to InFlight; the section must then point
         // at the next card that is genuinely up for grabs, not at work already
         // running.
@@ -897,11 +922,11 @@ mod tests {
         );
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
-        assert!(first.cards[0].next && !first.cards[1].next);
+        assert!(first.cards[0].head && !first.cards[1].head);
         let claimed = live(&[("x-r1", "target-session:abc")]);
         let after = st.tick(s, || None, Some(&claimed)).unwrap().0;
         assert!(
-            !after.cards[0].next && after.cards[1].next,
+            !after.cards[0].head && after.cards[1].head,
             "the marker moves to the next ready card"
         );
     }
@@ -989,6 +1014,35 @@ mod tests {
 
         let fresh = st.tick(bump(9), || Some(raw.clone()), None).unwrap().0;
         assert!(!fresh.stale, "a landed read clears the marker in place");
+    }
+
+    #[test]
+    fn a_graph_that_reads_but_will_not_parse_also_goes_stale() {
+        // A corrupt graph lands bytes and commits a stamp, so "the read landed"
+        // is not the same question as "we can derive current state". Treating a
+        // committed stamp as success left a persistently corrupt graph showing
+        // old cards forever with no marker - the exact situation the marker is
+        // for.
+        let mut st = ReaderState::default();
+        let good = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
+        assert!(!st.tick(s0, || Some(good.clone()), None).unwrap().0.stale);
+
+        // Successive reads land, but the document is garbage each time.
+        for i in 1..=STALE_AFTER_FAILED_READS as u64 {
+            let stamp = Some((std::time::SystemTime::UNIX_EPOCH, 800 + i));
+            st.tick(stamp, || Some("{ not json".to_string()), None);
+        }
+        let held = st.last_sent.clone().unwrap();
+        assert!(
+            held.stale,
+            "unparseable is a failure, not a successful read"
+        );
+        assert_eq!(held.cards.len(), 1, "and the last-good cards are kept");
+
+        // A parseable read clears it in place.
+        let ok = Some((std::time::SystemTime::UNIX_EPOCH, 999));
+        assert!(!st.tick(ok, || Some(good.clone()), None).unwrap().0.stale);
     }
 
     #[test]
