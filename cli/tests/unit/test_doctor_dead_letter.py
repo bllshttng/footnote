@@ -85,6 +85,25 @@ def test_doctor_dead_letter_project_recipient_never_flagged(bus):
     assert doctor._stale_dead_letters(live_handles=set()) == []
 
 
+def test_doctor_dead_letter_bare_handle_surfaces(bus):
+    # The bare short-id is the generated address now; if the scan only admitted
+    # the prefixed form the diagnostic would go quiet for every new session.
+    _seed("deadbeef", "stranded", ts="2020-01-01T00:00:00Z")
+    assert [f["handle"] for f in doctor._stale_dead_letters(live_handles=set())] == ["deadbeef"]
+
+
+def test_doctor_dead_letter_all_hex_project_not_flagged(bus):
+    # An all-hex project name matches the bare-handle shape, so to_kind is what
+    # keeps a project broadcast from being reported as mail to a dead session.
+    from fno.bus.log import Envelope, append
+
+    append(Envelope.new(
+        from_="claude-cafe0001", to="deadbeef", kind="send", body="project note",
+        ts="2020-01-01T00:00:00Z", to_kind="project",
+    ))
+    assert doctor._stale_dead_letters(live_handles=set()) == []
+
+
 def test_doctor_dead_letter_both_findings_surface(bus, tmp_path, monkeypatch):
     # The plan's verify: a stale unread envelope + a hooks config without
     # drain-self -> both findings surface in the report (advisory, never blocks).

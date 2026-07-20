@@ -200,6 +200,22 @@ def test_each_address_is_bounded_by_its_own_cursor(runner, mailbox, monkeypatch)
     assert bodies == ["bare, never consumed", "legacy, still unread"]
 
 
+def test_shared_cursor_id_does_not_strand_either_address(runner, mailbox, monkeypatch):
+    """A drain advances every alias to the SAME id, so both addresses routinely
+    share a cursor id. Both must resume from it - keeping one owner per id leaves
+    the other permanently unpassed and silently eats its mail."""
+    from fno.bus.cursor import scan_unread, write_cursor
+
+    shared = _seed_bus_message(to="019f48e1", from_="web", body="drained")
+    write_cursor("019f48e1", shared.thread_id)
+    write_cursor("codex-019f48e1", shared.thread_id)  # what drain-self leaves behind
+    _seed_bus_message(to="019f48e1", from_="web", body="after, bare")
+    _seed_bus_message(to="codex-019f48e1", from_="web", body="after, legacy")
+
+    bodies = [m.body for m in scan_unread("019f48e1", aliases=("codex-019f48e1",))]
+    assert bodies == ["after, bare", "after, legacy"]  # neither lane stranded
+
+
 def test_read_only_scan_honors_legacy_position_without_writing(runner, mailbox, monkeypatch):
     """SessionStart runs whoami before drain-self, so a read-only counter must
     already honor the legacy read position - otherwise it reports the entire

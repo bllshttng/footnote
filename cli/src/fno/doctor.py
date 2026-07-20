@@ -1281,6 +1281,11 @@ def _stale_dead_letters(
     try:
         for m in iter_messages(warn=False):
             to = getattr(m, "to", "") or ""
+            # A project broadcast is never a dead session handle, and an all-hex
+            # project name matches the bare-handle shape. Only the prefixed form
+            # was unambiguous, so widening the pattern makes to_kind load-bearing.
+            if getattr(m, "to_kind", "name") == "project":
+                continue
             if _A2A_HANDLE_RE.match(to) and to not in live:
                 dead_recips.add(to)
     except Exception:  # noqa: BLE001 — a torn bus contributes no findings

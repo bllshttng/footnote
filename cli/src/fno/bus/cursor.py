@@ -180,13 +180,18 @@ def scan_unread(
     retained = {m.id for m in msgs}
     cursors = {n: read_cursor(n) for n in mine}
     passed = {n: (c is None or c not in retained) for n, c in cursors.items()}
-    ends_at = {c: n for n, c in cursors.items() if c in retained}
+    # A list per id, not one owner: a drain advances every alias to the SAME id,
+    # so the shared case is the common one, and keeping a single owner would
+    # leave the other address never-passed and strand everything sent to it.
+    ends_at: dict[str, list[str]] = {}
+    for n, c in cursors.items():
+        if c in retained:
+            ends_at.setdefault(c, []).append(n)
 
     out: list[Envelope] = []
     for m in msgs:
         if _mine(m) and passed[m.to]:  # _mine first: it guards the passed lookup
             out.append(m)
-        owner = ends_at.get(m.id)
-        if owner is not None:
+        for owner in ends_at.get(m.id, ()):
             passed[owner] = True
     return out
