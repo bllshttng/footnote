@@ -495,6 +495,70 @@ def test_ambiguous_short_id_wakes_nothing_and_names_both_candidates(
 # ---------------------------------------------------------------------------
 
 
+def test_an_unreadable_store_demotes_durably_rather_than_exiting_16(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Mail loss guard: exit 16 requires PROVEN absence, not a failed lookup.
+
+    Exit 16 queues nothing, so treating "could not read the store" as "the
+    token names nothing" destroys the message. The asymmetry decides it: a
+    wrong durable copy strands one envelope nobody drains, while a wrong exit
+    16 loses a real message permanently. When absence cannot be proven, keep
+    the mail.
+    """
+    from fno.agents import discover
+
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (_ for _ in ()).throw(discover.StoreReadError(["transcript"])),
+    )
+
+    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    assert "queued (durable)" in res.output
+    assert "stores-unreadable" in (res.output + (res.stderr or ""))
+    assert _drain_as(runner, monkeypatch, ASLEEP_SID), "the message was lost"
+
+
+def test_a_non_claude_session_is_not_woken_as_claude(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """Wake is claude-only (a locked scope decision).
+
+    The registry and graph sources hold rows for every provider, so a codex
+    thread id can resolve here. Feeding it to a claude resume would revive the
+    wrong session; the honest answer is a durable copy naming the reason.
+    """
+    from fno.agents import discover
+
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (
+            discover.ReachableSession(
+                session_id=ASLEEP_SID, source="registry", agent="codex"
+            ),
+            [],
+        ),
+    )
+    woke = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *_a, **_k: (woke.append(1), (True, "x"))[1],
+    )
+
+    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    assert not woke, "a codex session was handed to a claude resume"
+    assert "unsupported-harness" in (res.output + (res.stderr or ""))
+    assert "queued (durable)" in res.output
+
+
 CANONICAL_ADDRESS_FORMS = [
     pytest.param("9a063cd3", id="bare-8-hex"),
     pytest.param("9a063cd3-69d4-415a-ada5-649b0164189c", id="full-uuid"),

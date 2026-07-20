@@ -903,11 +903,22 @@ def _wake_rung(token: str, wrapped: str) -> tuple[bool, Optional[str], Optional[
     from fno.agents import discover as discover_mod
     from fno.agents.dispatch import _mail_inject_claude, wake_and_deliver
 
-    reachable, ambiguous = discover_mod.resolve_reachable(token)
+    try:
+        reachable, ambiguous = discover_mod.resolve_reachable(token)
+    except discover_mod.StoreReadError as exc:
+        # A store we could not read is not proof the token names nothing, and
+        # exit 16 queues nothing. Fall toward keeping the mail: demote durably
+        # and name the stores that were unreadable.
+        return False, None, f"wake=stores-unreadable({','.join(exc.failed)})"
     if ambiguous:
         raise AmbiguousTokenError(ambiguous)
     if reachable is None:
         raise UnreachableTokenError(token)
+    if reachable.agent != "claude":
+        # Wake is claude-only: the revive substrate resumes a claude session,
+        # so handing it a codex/opencode id would resume the wrong thing
+        # entirely. Say so rather than misroute.
+        return False, None, f"wake=unsupported-harness({reachable.agent})"
 
     delivered, detail = wake_and_deliver(reachable.session_id, wrapped)
     if delivered:

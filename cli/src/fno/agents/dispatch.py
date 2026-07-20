@@ -4060,20 +4060,38 @@ def wake_and_deliver(
     ``(False, reason)`` where the reason is a lane-failure token the sender's
     receipt prints verbatim.
 
-    Rides the existing revive-in-place substrate rather than shelling ``claude
-    -r`` by hand, which buys three things the hand-rolled version lacks: the
-    session-writer claim, the liveness fail-safe that refuses to open a second
-    writer on one transcript, and the per-name flock that serializes two senders
-    waking the same session. ``claude -p`` is never reachable from here -- a
+    Rides the existing revive-in-place spawn substrate rather than shelling
+    ``claude -r`` by hand. ``claude -p`` is never reachable from here -- a
     one-shot cannot host the multi-turn session the recipient resumes into.
 
     The name is derived from the uuid so concurrent wakes of one session collide
     on the same flock: spawn dedup scopes NAME, so a fresh random name per wake
-    would defeat the very serialization this depends on. It is prefixed rather
-    than bare hex because a bare 8-hex name is refused as an id/name collision.
+    would defeat the serialization this depends on. It is prefixed rather than
+    bare hex because a bare 8-hex name is refused as an id/name collision. That
+    flock plus the same-name collision check is what serializes two senders --
+    the second wake finds the first's row live and is refused as
+    ``wake-already-in-flight``.
+
+    The liveness probe below is NOT redundant with the substrate's own
+    fail-safe. That one lives inside ``_is_revival``, which runs only when a
+    same-name row ALREADY exists -- so the first wake of a session would skip
+    it entirely. And this rung fires whenever the inject probe returned False,
+    which happens for reasons unrelated to being asleep (the runtime binary
+    absent, a subprocess error, an unconfirmed poll budget), so the target may
+    well be live. Probing here is what stops that case from opening a second
+    writer on a live transcript. A probe ERROR counts as possibly-live: we wake
+    only when we can positively establish nobody is writing.
     """
     if not session_uuid:
         return False, "no-session-uuid"
+
+    from fno.agents.providers import claude as claude_mod
+
+    try:
+        if claude_mod.session_is_live(session_uuid[:8]):
+            return False, "writer-possibly-live"
+    except Exception:
+        return False, "writer-probe-failed"
 
     try:
         result = dispatch_spawn(

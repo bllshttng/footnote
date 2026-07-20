@@ -1143,24 +1143,60 @@ class ReachableSession:
     agent: str = "claude"
 
 
-def _reachable_from_transcripts(token: str, projects_dir: Path) -> list[str]:
+class StoreReadError(Exception):
+    """A reachability store could not be read, so absence cannot be proven.
+
+    The distinction this exists to preserve: "read the store, the token is not
+    there" and "could not read the store" look identical as an empty list, but
+    they must not be treated identically. The first earns exit 16 (nothing is
+    queued, because nothing would ever drain it); the second must NOT, because
+    demoting to the durable queue costs one stranded envelope while a wrong
+    exit 16 costs the message permanently. When we cannot prove unreachable, we
+    fall toward keeping the mail.
+    """
+
+    def __init__(self, failed: list[str]) -> None:
+        super().__init__(f"unreadable reachability stores: {', '.join(failed)}")
+        self.failed = failed
+
+
+# Each helper returns ``(hits, read_ok)``. ``read_ok=False`` means the store
+# could not be consulted at all -- never that it was consulted and came back
+# empty. Collapsing those two into one empty list is what loses mail.
+_Hits = list[tuple[str, str]]  # (session_id, agent)
+
+
+def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:
     """Session uuids whose transcript file exists on disk, matched on token.
 
     The transcript store is the broadest source: a session that ever ran wrote a
     ``<uuid>.jsonl`` here, and the file outlives the process. No recency cutoff
     is applied -- staleness is precisely what makes a session asleep rather than
     absent.
+
+    An ABSENT directory is a definitive empty answer, not a read failure: no
+    transcript store means no claude session ever ran under this HOME, so
+    "nothing is reachable" is true rather than unknown. A directory that exists
+    but cannot be read (permissions, EIO, a torn mount) IS a read failure --
+    that is the case where absence is unproven.
+
+    The distinction matters in both directions. Treating absent as unreadable
+    makes every typo queue durably on a host that has never run claude, which
+    strands envelopes and destroys the exit-16 typo guard. Treating a read
+    ERROR as empty loses real mail.
     """
-    hits: list[str] = []
+    hits: _Hits = []
     try:
         entries = list(projects_dir.glob("*/*.jsonl"))
     except OSError:
-        return hits
+        return [], False
+    seen: set[str] = set()
     for path in entries:
         sid = path.name[: -len(".jsonl")]
-        if _token_matches(token, sid) and sid not in hits:
-            hits.append(sid)
-    return hits
+        if _token_matches(token, sid) and sid not in seen:
+            seen.add(sid)
+            hits.append((sid, "claude"))
+    return hits, True
 
 
 def _token_matches(token: str, session_id: str) -> bool:
@@ -1174,29 +1210,43 @@ def _token_matches(token: str, session_id: str) -> bool:
     return token == session_id or token == session_id[:8]
 
 
-def _reachable_from_registry(token: str, registry_path: Optional[Path]) -> list[str]:
+def _reachable_from_registry(
+    token: str, registry_path: Optional[Path]
+) -> tuple[_Hits, bool]:
     """Registry rows including dead-pid and exited ones.
 
     An exited row is exactly the case the live lane drops and this lane keeps:
     the row is a durable record that this uuid exists, not a liveness claim.
+
+    Carries each row's harness through: the registry holds rows for every
+    provider, and waking a codex thread as claude would resume the wrong
+    session entirely.
     """
     from fno.agents.registry import RegistryVersionError, load_registry
 
     try:
         entries = load_registry(registry_path)
     except (OSError, ValueError, RegistryVersionError):
-        # A torn or version-drifted registry contributes no rows; the other
-        # sources still answer. Never let one unreadable store refuse a send.
-        return []
-    hits: list[str] = []
+        # A torn or version-drifted registry cannot be consulted. It reports
+        # unreadable rather than empty, so the aggregate can tell "this token
+        # is unknown" from "we could not look".
+        return [], False
+    hits: _Hits = []
+    seen: set[str] = set()
     for e in entries:
-        sid = getattr(e, "session_id", None)
-        if sid and _token_matches(token, sid) and sid not in hits:
-            hits.append(sid)
-    return hits
+        # NOT ``AgentEntry.session_id``: that property is harness-polymorphic
+        # and resolves to ``short_id`` for claude -- the 8-hex daemon transport
+        # key, not a resumable uuid. Feeding it to a wake would run
+        # ``claude -r <jobId>`` against a session id that does not exist.
+        # ``harness_session_id`` is the canonical uuid for every harness.
+        sid = getattr(e, "harness_session_id", None)
+        if sid and _token_matches(token, sid) and sid not in seen:
+            seen.add(sid)
+            hits.append((sid, getattr(e, "harness", None) or "claude"))
+    return hits, True
 
 
-def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> list[str]:
+def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hits, bool]:
     """Daemon roster rows, including ones stamped exited.
 
     Resolves the daemon dir the same way every other roster reader does. An
@@ -1209,21 +1259,27 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> list[str]:
     if base is None:
         override = os.environ.get("FNO_CLAUDE_DAEMON_DIR")
         base = Path(override) if override else Path.home() / ".claude" / "daemon"
+    if not (base / "roster.json").exists():
+        # No roster file is a real, readable answer: the claude daemon is not
+        # running, so it hosts nothing. Distinct from an unreadable one.
+        return [], True
     try:
         raw = json.loads((base / "roster.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
-        return []
+        return [], False
     if not isinstance(raw, dict):
-        return []
-    hits: list[str] = []
+        return [], False
+    hits: _Hits = []
+    seen: set[str] = set()
     for row in (raw.get("workers") or {}).values():
-        sid = (row or {}).get("sessionId")
-        if sid and _token_matches(token, sid) and sid not in hits:
-            hits.append(sid)
-    return hits
+        sid = (row or {}).get("sessionId") if isinstance(row, dict) else None
+        if sid and _token_matches(token, sid) and sid not in seen:
+            seen.add(sid)
+            hits.append((sid, "claude"))
+    return hits, True
 
 
-def _reachable_from_graph(token: str) -> list[str]:
+def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
     """Session ids stamped onto backlog nodes (``sessions[]`` provenance).
 
     The weakest source and the last consulted: a node stamp proves a session
@@ -1231,25 +1287,29 @@ def _reachable_from_graph(token: str) -> list[str]:
     but never enough to claim liveness.
     """
     try:
-        from fno.graph.load import load_graph
+        from fno.graph.load import GraphCorruptionError, load_graph
     except ImportError:
-        return []
+        return [], False
     try:
         entries = load_graph()
-    except Exception:
-        # A corrupt or hash-mismatched graph raises; it contributes no rows
-        # rather than failing the resolve, since three other sources still
-        # have an answer and this is the weakest of the four.
-        return []
-    hits: list[str] = []
+    except (OSError, ValueError, GraphCorruptionError):
+        # Corrupt, torn, or hash-mismatched: unreadable, NOT empty. Reporting
+        # empty here would let a graph problem masquerade as "this token names
+        # nothing" and drop the mail.
+        return [], False
+    hits: _Hits = []
+    seen: set[str] = set()
     for node in entries or []:
         if not isinstance(node, dict):
             continue
         for entry in node.get("sessions") or []:
-            sid = (entry or {}).get("session_id") if isinstance(entry, dict) else None
-            if sid and _token_matches(token, sid) and sid not in hits:
-                hits.append(sid)
-    return hits
+            if not isinstance(entry, dict):
+                continue
+            sid = entry.get("session_id")
+            if sid and _token_matches(token, sid) and sid not in seen:
+                seen.add(sid)
+                hits.append((sid, entry.get("harness") or "claude"))
+    return hits, True
 
 
 def resolve_reachable(
@@ -1286,12 +1346,22 @@ def resolve_reachable(
         ("roster", lambda: _reachable_from_roster(token, daemon_dir)),
         ("graph", lambda: _reachable_from_graph(token)),
     )
+    degraded: list[str] = []
     for source, lookup in sources:
-        hits = lookup()
+        hits, read_ok = lookup()
+        if not read_ok:
+            degraded.append(source)
+            continue
         if len(hits) == 1:
-            return ReachableSession(session_id=hits[0], source=source), []
+            sid, agent = hits[0]
+            return ReachableSession(session_id=sid, source=source, agent=agent), []
         if len(hits) > 1:
-            return None, sorted(hits)
+            return None, sorted(sid for sid, _ in hits)
+    if degraded:
+        # Every source that COULD be read came back empty, but at least one
+        # could not be read at all -- so absence is unproven. Refusing here
+        # would exit 16 and queue nothing; the caller demotes durably instead.
+        raise StoreReadError(degraded)
     return None, []
 
 

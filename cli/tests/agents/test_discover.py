@@ -143,8 +143,8 @@ def test_ac1_fr_vanished_or_dead_pid_not_live(tmp_path, monkeypatch):
     """AC1-FR: a session whose PID is no longer running is dropped, not phantom."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct = _write_session(sdir, 401, session_id="uuid-dead", job_id="dead0000",
-                        cwd="/Users/x/code/proj")
+    _write_session(sdir, 401, session_id="uuid-dead", job_id="dead0000",
+                   cwd="/Users/x/code/proj")
     # 401 is NOT in the alive map -> dead.
     sessions = _run(sdir, {}, tmp_path)
     assert sessions == []
@@ -1413,7 +1413,9 @@ def test_resolve_reachable_reads_the_roster_without_an_env_override(tmp_path, mo
     )
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
-    found, _ = discover.resolve_reachable(sid[:8], projects_dir=tmp_path / "no-projects")
+    empty_projects = tmp_path / "no-projects"
+    empty_projects.mkdir()
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=empty_projects)
 
     assert found is not None, "the roster source did not fire on its default dir"
     assert found.session_id == sid and found.source == "roster"
@@ -1441,7 +1443,9 @@ def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
 
-    found, _ = discover.resolve_reachable(sid[:8], projects_dir=tmp_path / "no-projects")
+    empty_projects = tmp_path / "no-projects"
+    empty_projects.mkdir()
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=empty_projects)
 
     assert found is not None, "the graph source did not fire"
     assert found.session_id == sid and found.source == "graph"
@@ -1466,11 +1470,18 @@ def test_resolve_reachable_reports_ambiguity_instead_of_guessing(tmp_path, monke
     assert sorted(ambiguous) == sorted([a, b])
 
 
-def test_resolve_reachable_misses_cleanly_on_an_unknown_token(tmp_path):
+def test_resolve_reachable_misses_cleanly_on_an_unknown_token(tmp_path, monkeypatch):
+    """A clean miss across READABLE stores is the only case that earns exit 16."""
     from fno.agents import discover
 
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
     found, ambiguous = discover.resolve_reachable(
-        "deadbeef", projects_dir=tmp_path / "nothing"
+        "deadbeef", projects_dir=projects, registry_path=tmp_path / "registry.json"
     )
 
     assert found is None and ambiguous == []
@@ -1490,3 +1501,135 @@ def test_resolve_reachable_does_not_match_on_a_short_prefix(tmp_path):
     found, _ = discover.resolve_reachable("5b", projects_dir=tmp_path / "projects")
 
     assert found is None
+
+
+def test_unreadable_store_raises_instead_of_reporting_absence(tmp_path, monkeypatch):
+    """The mail-loss guard: a store that ERRORS must not read as 'not found'.
+
+    The caller turns a clean miss into exit 16 and queues nothing, so absence
+    has to be proven rather than assumed. A torn registry is the realistic
+    trigger: it raises, and reporting that as "no rows" would drop mail for a
+    session the registry actually knows about.
+    """
+    from fno.agents import discover
+    from fno.agents.registry import RegistryVersionError
+
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+    def _torn(*_a, **_k):
+        raise RegistryVersionError("schema drift")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _torn)
+
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable("deadbeef", projects_dir=projects)
+    assert "registry" in err.value.failed
+
+
+def test_an_absent_store_is_a_clean_answer_not_a_read_failure(tmp_path, monkeypatch):
+    """An absent transcript store means no claude session ever ran here.
+
+    That is definitive, so it must stay a clean miss. Classifying it as
+    unreadable would make every typo queue durably on a host that has never
+    run claude, stranding envelopes and destroying the exit-16 typo guard.
+    """
+    from fno.agents import discover
+
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef",
+        projects_dir=tmp_path / "never-created",
+        registry_path=tmp_path / "registry.json",
+    )
+
+    assert found is None and ambiguous == []
+
+
+def test_a_hit_still_wins_over_a_degraded_earlier_source(tmp_path, monkeypatch):
+    """A degraded source must not mask a later source that DID answer."""
+    from fno.agents import discover
+
+    sid = "aa11bb22-3344-5566-7788-99aabbccddee"
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": {sid[:8]: {"sessionId": sid, "pid": 1}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+    def _torn(*_a, **_k):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _torn)
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
+
+    assert found is not None and found.source == "roster"
+
+
+def test_registry_source_yields_the_resumable_uuid_not_the_job_id(tmp_path, monkeypatch):
+    """`AgentEntry.session_id` is harness-polymorphic: for claude it resolves to
+    `short_id`, the 8-hex daemon transport key, NOT a resumable uuid. Waking on
+    that value would run `claude -r <jobId>` against a session that does not
+    exist, so this source must read `harness_session_id` directly.
+    """
+    from fno.agents import discover
+
+    sid = "bb22cc33-4455-6677-8899-aabbccddeeff"
+
+    class _Row:
+        harness = "claude"
+        harness_session_id = sid
+        short_id = "deadbeef"
+
+        @property
+        def session_id(self):  # what the buggy version read
+            return self.short_id
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()]
+    )
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
+
+    assert found is not None
+    assert found.session_id == sid, "resolved the job id instead of the uuid"
+    assert found.agent == "claude"
+
+
+def test_registry_source_carries_a_non_claude_harness_through(tmp_path, monkeypatch):
+    """The harness must survive resolution so the wake lane can refuse it.
+
+    The registry holds rows for every provider; handing a codex thread id to a
+    claude resume would revive the wrong session entirely.
+    """
+    from fno.agents import discover
+
+    sid = "cc33dd44-5566-7788-99aa-bbccddeeff00"
+
+    class _Row:
+        harness = "codex"
+        harness_session_id = sid
+        short_id = "cc33dd44"
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()]
+    )
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
+
+    assert found is not None and found.agent == "codex"
