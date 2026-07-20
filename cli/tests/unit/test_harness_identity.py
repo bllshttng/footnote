@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from fno.harness_identity import (
+    HARNESS_SESSION_MARKERS,
     HarnessIdentity,
     LEGACY_HANDLE_RE,
     canonical_handle,
@@ -99,3 +100,39 @@ def test_ac1_fr_registry_name_equals_canonical_handle(tmp_path):
         registry_path=tmp_path / "agents.json",
     )
     assert entry.name == canonical_handle(sid) == "019f48e1"
+
+
+def test_no_generating_surface_produces_a_retired_address(tmp_path, monkeypatch):
+    """Every surface that MINTS an address must produce the bare form.
+
+    The retired `<harness>-<short8>` is refused on the read side, but a refusal is
+    only a backstop - the real fix is that nothing mints one. That was prose in a
+    commit message until this test; now a reintroduced generator fails CI instead
+    of quietly writing mail nothing can drain.
+    """
+    from fno.agents.registry import register_existing_session
+    from fno.agents.self_stamp import stamp_from
+    from fno.mail.envelope import wrap_fno_mail
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    for marker, _ in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+
+    minted = [
+        canonical_handle(sid),
+        stamp_from(None),
+        register_existing_session(
+            provider="claude", session_id=sid, cwd="/tmp",
+            registry_path=tmp_path / "agents.json",
+        ).name,
+    ]
+    for value in minted:
+        assert not LEGACY_HANDLE_RE.match(value), f"{value!r} is a retired address"
+
+    # The wire envelope's from/to too - the bus columns drifted from this once.
+    body = wrap_fno_mail("hi", from_=stamp_from(None), harness="claude-code",
+                         model="m", to=canonical_handle(sid))
+    assert 'from="019f48e1"' in body and 'to="019f48e1"' in body
