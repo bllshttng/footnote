@@ -3546,7 +3546,7 @@ def cmd_tree(
 
     STATUS_ICONS = {
         "done": "[x]",
-        "claimed": "[~]",
+        "in_progress": "[~]",
         "ready": "[ ]",
         "blocked": "[B]",
         "idea": "[i]",
@@ -3629,7 +3629,7 @@ def cmd_status(
     for proj_name, proj_entries in sorted(projects.items()):
         features = [e for e in proj_entries if e.get("type") == "feature"]
         done = sum(1 for e in features if e.get("_status") == "done")
-        claimed = sum(1 for e in features if e.get("_status") == "claimed")
+        claimed = sum(1 for e in features if e.get("_status") == "in_progress")
         ready = sum(1 for e in features if e.get("_status") == "ready")
         ideas = sum(1 for e in features if e.get("_status") == "idea")
         blocked = sum(1 for e in features if e.get("_status") == "blocked")

@@ -64,7 +64,7 @@ def test_column_ready_p3_goes_later():
 
 def test_column_claimed_overrides_priority():
     """A claimed (in-session) node lands in Now even if it'd otherwise be Later."""
-    e = _entry("ab-22222222", _status="claimed", priority="p3")
+    e = _entry("ab-22222222", _status="in_progress", priority="p3")
     assert _kanban_column(e) == "Now"
 
 
@@ -83,7 +83,7 @@ def test_column_claimed_beats_queued():
     it also carries queued_at."""
     e = _entry(
         "ab-2222222b",
-        _status="claimed",
+        _status="in_progress",
         priority="p3",
         queued_at="2026-05-12T12:00:00Z",
     )
@@ -150,7 +150,7 @@ def test_ac1_hp_column_roadmap_excluded():
 def test_in_progress_epic_ids_detects_done_or_claimed_child():
     entries = [
         _entry("ab-epic0001"),                                   # in-progress (claimed child)
-        _entry("ab-kid00001", _status="claimed", parent="ab-epic0001"),
+        _entry("ab-kid00001", _status="in_progress", parent="ab-epic0001"),
         _entry("ab-epic0002"),                                   # in-progress (done child)
         _entry("ab-kid00002", completed_at="2026-01-01T00:00:00Z", parent="ab-epic0002"),
         _entry("ab-epic0003"),                                   # NOT in progress (ready child)
@@ -166,7 +166,7 @@ def test_column_in_progress_epic_goes_now():
     from its children - its own _status is left untouched (still `ready`)."""
     epic = _entry("ab-epic0001", priority="p3")  # would be Later by priority
     assert _kanban_column(epic, frozenset({"ab-epic0001"})) == "Now"
-    # _status was never mutated to a session-less "claimed".
+    # _status was never mutated to a session-less "in_progress".
     assert epic["_status"] == "ready"
 
 
@@ -462,7 +462,7 @@ def test_overlay_absent_for_unclaimed_node():
 def test_overlay_never_demotes_claimed():
     """AC: a node whose _status is already 'claimed' stays in Now regardless of
     the overlay (additive, never demotes)."""
-    e = _entry("x-cccc", session_id="s1", _status="claimed")
+    e = _entry("x-cccc", session_id="s1", _status="in_progress")
     assert _kanban_column(e, frozenset(), frozenset()) == "Now"
     assert _kanban_column(e, frozenset(), frozenset({"x-cccc"})) == "Now"
 

@@ -54,7 +54,7 @@ def test_card_flags_claimed(tmp_path: Path):
         _entry(
             "ab-flagged1",
             project="fno",
-            _status="claimed",
+            _status="in_progress",
             session_id="some-session",
         ),
     ]

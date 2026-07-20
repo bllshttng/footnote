@@ -175,7 +175,7 @@ def test_us6_harness_stamp_written_and_cleared(tmp_path, monkeypatch):
     assert node["session_id"] == "new-owner"          # mirror synced
     assert node["locked_by_harness"] == "claude"
     assert node["locked_by_harness_session"] == "uuid-9"
-    assert node["_status"] == "claimed"
+    assert node["_status"] == "in_progress"
 
     r2 = CliRunner().invoke(C.cli, ["update", "ab-harnes01", "--locked-by", "null"])
     assert r2.exit_code == 0, r2.output

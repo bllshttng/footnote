@@ -1,11 +1,16 @@
 """Frontmatter status state machine for lean single-doc plan architecture.
 
 Enforces the monotonic progression:
-    design -> ready -> in_progress -> shipped
+    design -> ready -> in_progress -> in_review
 
-`reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
-graph has no derived state that distinguishes them, so they never got written.
-The reconcile sweep now folds them into `shipped` as Tier-1 synonyms.
+This is the SAME ladder the graph `_status` speaks (x-5d91), not a parallel
+dialect: idea -> design -> ready -> in_progress -> in_review -> done, with
+blocked/deferred/superseded orthogonal. `idea` has no plan doc so it never
+appears here, and `done`/`archived` are off-axis terminals.
+
+`reviewing`/`shipping` were pruned (x-f34f); `shipped` was renamed to
+`in_review` (x-5d91). All are folded in as read-time synonyms, so vault docs
+carrying the old vocabulary keep working untouched.
 
 Backward transitions, identity transitions, and unknown statuses all raise
 StatusTransitionError. No silent fallbacks.
@@ -19,8 +24,15 @@ STATUS_PROGRESSION: tuple[str, ...] = (
     "design",
     "ready",
     "in_progress",
-    "shipped",
+    "in_review",
 )
+
+# Legacy plan-frontmatter statuses -> current vocabulary. `shipped` was renamed
+# to `in_review` so the plan axis and the graph `_status` vocabulary are the one
+# lifecycle ladder (design -> ready -> in_progress -> in_review -> done) rather
+# than two dialects needing translation. Vault docs stamped `shipped` are read
+# as `in_review`; nothing needs rewriting on disk.
+PLAN_STATUS_SYNONYMS: dict[str, str] = {"shipped": "in_review"}
 
 # Off-axis terminals: written directly (graduate stamps `done`; the status
 # sweep stamps `archived`), NOT part of the monotonic axis. Inserting either
@@ -33,14 +45,17 @@ KNOWN_STATUSES: frozenset[str] = frozenset(STATUS_PROGRESSION) | frozenset(TERMI
 
 # Graph derived `_status` -> plan `status` projection (x-f34f). Total over the
 # graph vocabulary; None means "no plan write" (a graph-side gate that must not
-# touch plan state). The graph vocabulary is NOT renamed - this map IS the
-# alignment layer between the two.
+# touch plan state). Since x-5d91 the two vocabularies are the same ladder, so
+# this is near-identity - it survives to carry the genuinely non-identity rows
+# (idea -> design, superseded -> archived, and the two None gates).
 GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
-    "idea": "design",  # node exists, blueprint pending
+    "idea": "design",  # node exists, no plan doc yet
+    "design": "design",  # doc exists but is still a design doc
     "ready": "ready",
-    "claimed": "in_progress",
+    "in_progress": "in_progress",
+    "claimed": "in_progress",  # legacy graph vocabulary, pre-x-5d91 rows
     "blocked": None,  # graph-side gate; plan keeps its current state
-    "in_review": "shipped",  # PR open = implementation complete
+    "in_review": "in_review",  # PR open = implementation complete
     "done": "done",  # merged
     "superseded": "archived",
     "deferred": None,  # pause is reversible; plan state stands
@@ -53,20 +68,25 @@ _PROJECTION_RANK: dict[str, int] = {
     "design": 0,
     "ready": 1,
     "in_progress": 2,
-    "shipped": 3,
+    "in_review": 3,
     "done": 4,
 }
 
 
 def _norm_status(raw: object) -> str:
-    """Bare lowercase token from a raw frontmatter status value."""
-    return str(raw if raw is not None else "").strip().strip("'\"").lower()
+    """Bare lowercase token from a raw frontmatter status value.
+
+    Folds legacy synonyms (see PLAN_STATUS_SYNONYMS) so a vault doc stamped
+    with the old vocabulary compares equal to its current name.
+    """
+    token = str(raw if raw is not None else "").strip().strip("'\"").lower()
+    return PLAN_STATUS_SYNONYMS.get(token, token)
 
 
 def project_plan_status(current: object, graph_status: str) -> Optional[str]:
     """Plan status to WRITE for a node in ``graph_status``, or None to leave it.
 
-    Forward-only along design < ready < in_progress < shipped < done. Returns
+    Forward-only along design < ready < in_progress < in_review < done. Returns
     None when the graph status maps to no write, the target equals the current
     status, or the target would be a backward move (graph wins forward, a human
     hand-edit wins backward). ``archived`` is written over any non-terminal
@@ -101,6 +121,8 @@ def validate_transition(old: str, new: str) -> None:
 
     Allow: forward transitions (new index > old index) by any number of steps.
     """
+    old = _norm_status(old)
+    new = _norm_status(new)
     if old not in STATUS_PROGRESSION:
         raise StatusTransitionError(
             f"Unknown status {old!r}. Valid statuses: {list(STATUS_PROGRESSION)}"
@@ -150,7 +172,7 @@ def coerce_status_from_yaml(value: Any) -> str:
     if isinstance(value, bool):
         coerced = str(value).lower()  # True -> "true", False -> "false"
     else:
-        coerced = str(value)
+        coerced = _norm_status(value)
 
     if coerced not in STATUS_PROGRESSION:
         raise StatusTransitionError(

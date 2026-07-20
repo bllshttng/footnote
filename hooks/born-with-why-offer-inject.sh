@@ -101,7 +101,7 @@ try:
     # would make d.get raise AttributeError outside the try. Keep the whole
     # access inside the try so any unexpected shape exits 1 -> surface (gemini).
     underway = isinstance(d, dict) and (
-        bool(d.get("pr_number")) or d.get("_status") in {"claimed", "next", "done", "superseded"}
+        bool(d.get("pr_number")) or d.get("_status") in {"in_progress", "claimed", "next", "done", "superseded"}
     )
     sys.exit(0 if underway else 1)
 except Exception:

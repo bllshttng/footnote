@@ -40,8 +40,8 @@ def test_archived_is_a_known_terminal_not_on_the_axis():
     ("draft", "design"),
     ("designed", "design"),        # typo
     ("design-locked", "ready"),
-    ("reviewing", "shipped"),      # pruned axis states (x-f34f) fold into shipped
-    ("shipping", "shipped"),
+    ("reviewing", "in_review"),      # pruned axis states (x-f34f)
+    ("shipping", "in_review"),
     ("superseded", "archived"),
 ])
 def test_tier1_synonyms(raw, expected):
@@ -111,7 +111,7 @@ def test_sweep_dry_run_reports_without_writing(tmp_path: Path):
 def test_sweep_apply_normalizes_and_summarizes(tmp_path: Path):
     (tmp_path / "a.md").write_text(_plan("status: PENDING"))
     (tmp_path / "b.md").write_text(_plan(""))  # blank -> archived (no signal)
-    (tmp_path / "c.md").write_text(_plan("status: shipped"))  # canonical -> skip
+    (tmp_path / "c.md").write_text(_plan("status: in_review"))  # canonical -> skip
     res = sweep(tmp_path, apply=True, signal_for=lambda fm: False)
     assert res.summary() == "1 normalized, 1 archived, 1 skipped"
     assert 'status: "design"' in (tmp_path / "a.md").read_text()
@@ -182,10 +182,19 @@ def test_tier3_disabled_when_graph_absent(tmp_path: Path):
 def test_tier3_forward_only(tmp_path: Path):
     """A node that regressed never rewrites a plan backward."""
     p = tmp_path / "a.md"
-    p.write_text(_linked_plan("shipped"))
-    res = sweep(tmp_path, apply=True, status_map={"x-1": "claimed"})
+    p.write_text(_linked_plan("in_review"))
+    res = sweep(tmp_path, apply=True, status_map={"x-1": "in_progress"})
     assert res.skipped == 1
-    assert "status: shipped" in p.read_text()
+    assert "status: in_review" in p.read_text()
+
+
+def test_tier1_migrates_legacy_shipped_to_in_review(tmp_path: Path):
+    """x-5d91 renamed the axis state; the sweep converges vault docs to it."""
+    p = tmp_path / "a.md"
+    p.write_text(_plan("status: shipped"))
+    res = sweep(tmp_path, apply=True, signal_for=lambda fm: False)
+    assert res.normalized == 1
+    assert 'status: "in_review"' in p.read_text()
 
 
 def test_tier3_unlinked_plan_skipped(tmp_path: Path):

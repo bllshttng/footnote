@@ -45,6 +45,11 @@ fn classify(status: &str) -> Option<CardState> {
         "claimed" | "in-progress" | "in_progress" => Some(CardState::InFlight),
         "ready" | "next" => Some(CardState::Ready),
         "blocked" => Some(CardState::Blocked),
+        // `design` (plan doc linked but not yet blueprinted) is deliberately
+        // NOT queue work: it is not autonomously dispatchable, so showing it as
+        // Ready would advertise work the dispatcher will never pick up. Drops
+        // alongside `idea`, the rung below it.
+        "design" => None,
         _ => None,
     }
 }

@@ -11,6 +11,12 @@ from fno.graph.ladder import is_design_stage
 DESIGN_FM = "---\nstatus: design\n---\n\n# Doc\n"
 
 
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _plan(tmp_path, body: str, name: str = "p.md") -> dict:
     """A node entry carrying an absolute plan_path (the simplest form)."""
     target = tmp_path / name
@@ -150,6 +156,32 @@ def test_design_node_is_never_stale_ready(tmp_path):
     }
     assert not is_stale_ready(node, now, 21)
     assert detect_stale_ready([node], 21, now) == []
+
+
+def test_recompute_persists_the_design_rung(tmp_path):
+    """The rung is persisted so every reader sees it, including the Rust mux."""
+    from fno.graph.statuses import recompute_statuses
+
+    design = tmp_path / "d.md"
+    design.write_text(DESIGN_FM)
+    blueprint = tmp_path / "b.md"
+    blueprint.write_text("---\nstatus: ready\n---\n")
+    entries = [
+        {"id": "x-i", "plan_path": None},
+        {"id": "x-d", "plan_path": str(design)},
+        {"id": "x-r", "plan_path": str(blueprint)},
+        {"id": "x-p", "plan_path": str(design), "locked_by": "w", "claimed_at": _now()},
+    ]
+    got = {e["id"]: e["_status"] for e in recompute_statuses(entries)}
+    assert got == {"x-i": "idea", "x-d": "design", "x-r": "ready", "x-p": "in_progress"}
+
+
+def test_legacy_claimed_status_migrates_on_read(tmp_path):
+    """A row persisted before the rename still reads as the current vocabulary."""
+    from fno.graph.store import _apply_graph_defaults
+
+    entries = _apply_graph_defaults([{"id": "x-a", "_status": "claimed"}])
+    assert entries[0]["_status"] == "in_progress"
 
 
 def test_starvation_receipt_names_design_not_quarantined(tmp_path):

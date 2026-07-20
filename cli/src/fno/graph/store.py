@@ -316,10 +316,17 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
     # mutate path still rewrites priority on disk; this just keeps the
     # read path honest in the gap before that happens.
     from fno.graph._constants import PRIORITY_MIGRATION
+    from fno.graph.statuses import STATUS_MIGRATION
     for e in entries:
         old_priority = e.get("priority")
         if old_priority in PRIORITY_MIGRATION:
             e["priority"] = PRIORITY_MIGRATION[old_priority]
+        # Same idea for the renamed `claimed` -> `in_progress` status: the read
+        # path must speak the current vocabulary even for a row whose on-disk
+        # `_status` predates the rename and has not been re-mutated yet.
+        old_status = e.get("_status")
+        if old_status in STATUS_MIGRATION:
+            e["_status"] = STATUS_MIGRATION[old_status]
     for e in entries:
         e.setdefault("parent", None)
         e.setdefault("tags", [])
