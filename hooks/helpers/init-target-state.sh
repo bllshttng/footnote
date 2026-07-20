@@ -880,9 +880,7 @@ EOF
   if [[ -n "$_budget_cost" ]]; then
     _budget_lines="${_budget_lines}budget_cost_cap_usd: ${_budget_cost}"$'\n'
   fi
-
-  # Authority grant (`/target yolo`): omitted unless granted, so absence is the
-  # default posture and no existing manifest reader changes behavior.
+  # Authority grant (`/target yolo`): omitted unless granted, so absence is the default.
   _authority_line=""
   [[ "${TARGET_YOLO:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
 
