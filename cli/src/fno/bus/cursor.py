@@ -153,10 +153,6 @@ def scan_unread(
     Still ONE bus scan regardless of alias count, which the every-turn
     notify-self hook depends on for its budget.
 
-    If the cursor is absent or its message-id is not found in any retained
-    segment (rotated out / deleted), all retained messages to ``name`` are
-    returned rather than silently skipping unprocessed mail.
-
     ``exclude_from`` drops any message whose sender matches (by ``from`` name or
     ``from_session``). This is the sender-exclusion for a ``to_kind=project``
     broadcast read - a project member must not drain its own broadcast back
