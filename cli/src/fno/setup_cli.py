@@ -191,7 +191,9 @@ def _install_cli_hooks(
 
     if claude:
         try:
-            wt_entry = _paths.resolve_plugin_script("hooks/worktree-remove.sh")
+            # _durable: this path is persisted into GLOBAL settings, so it must
+            # not be a worktree path that dies when the worktree is archived.
+            wt_entry = _paths.resolve_plugin_script_durable("hooks/worktree-remove.sh")
             if not wt_entry.is_file():
                 raise FileNotFoundError(wt_entry)
         except Exception as exc:  # noqa: BLE001 - surface a clear message, never trace
@@ -205,15 +207,16 @@ def _install_cli_hooks(
                 str(wt_entry), settings_path=cpath_claude
             )
             any_change = any_change or res.changed
-            if res.note:
-                typer.echo(f"claude: error: {res.note} ({res.path})", err=True)
-                failures.append(res.note)
+            if res.error:
+                typer.echo(f"claude: error: {res.error} ({res.path})", err=True)
+                failures.append(res.error)
             elif res.already_present:
                 typer.echo(f"claude: already wired ({res.path})")
             else:
                 bak = f"; backed up {res.backup.name}" if res.backup else ""
+                fixed = f"; {res.note}" if res.note else ""
                 typer.echo(
-                    f"claude: wired WorktreeRemove -> {wt_entry} ({res.path}{bak})"
+                    f"claude: wired WorktreeRemove -> {wt_entry} ({res.path}{bak}{fixed})"
                 )
 
     if needs_trust:
@@ -592,7 +595,7 @@ def wizard_cmd(
     # only appends on explicit yes. Engine-neutral - starship is not assumed.
     offer_prompt_provenance(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
 
-    typer.echo("\nCodex/Gemini SessionStart context hooks:")
+    typer.echo("\nUser-level CLI hooks:")
     offer_cli_hooks(confirm_fn=rules_confirm_fn)
 
     # Optional capstone: append a marker-fenced footnote guidance block to the

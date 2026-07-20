@@ -28,6 +28,7 @@ returns ``needs_trust=True`` so the caller can surface that instruction.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import tomllib
 from dataclasses import dataclass
@@ -139,6 +140,47 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise json.JSONDecodeError("expected a JSON object", text, 0)
     return data
+
+
+def _load_settings_for_merge(path: Path) -> tuple[dict[str, Any], Optional[str]]:
+    """Load a settings.json to merge into, or explain why we must not.
+
+    Returns ``({}, None)`` when the file is absent (a fresh write is safe) and
+    ``({}, note)`` when it exists but cannot be merged. Treating an unreadable
+    or non-object file as "empty" would let the caller write a fresh object over
+    real user settings and report success; every such case has to become a note
+    the caller surfaces as an error instead.
+    """
+    if not path.exists():
+        return {}, None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {}, f"settings.json is malformed ({exc}); left unchanged"
+    except (OSError, UnicodeError) as exc:
+        return {}, f"settings.json could not be read ({exc}); left unchanged"
+    if not isinstance(loaded, dict):
+        return {}, (
+            f"settings.json root is {type(loaded).__name__}, not an object; "
+            "left unchanged"
+        )
+    return loaded, None
+
+
+def _footnote_worktree_script(command: str) -> Optional[str]:
+    """Return the worktree-remove script a WorktreeRemove command runs, if any.
+
+    Splits the command so a quoted path or a trailing argument cannot defeat the
+    match the way a bare ``endswith`` on the whole string would.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:  # unbalanced quotes - not a command we wrote
+        return None
+    for token in tokens:
+        if token.endswith(_WORKTREE_REMOVE_SUFFIX):
+            return token
+    return None
 
 
 def _is_footnote_codex_command(command: str) -> bool:
@@ -340,20 +382,12 @@ def install_gemini_hook(
     ``name`` is the footnote marker. Idempotent (keyed on the name); preserves
     any other hooks and settings.
     """
-    data: dict[str, Any] = {}
-    if settings_path.exists():
-        try:
-            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except json.JSONDecodeError as exc:
-            return HookInstallResult(
-                cli="gemini",
-                path=settings_path,
-                changed=False,
-                already_present=False,
-                note=f"settings.json is malformed ({exc}); left unchanged",
-            )
+    data, note = _load_settings_for_merge(settings_path)
+    if note is not None:
+        return HookInstallResult(
+            cli="gemini", path=settings_path, changed=False, already_present=False,
+            note=note,
+        )
 
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -428,49 +462,57 @@ def install_claude_worktree_remove_hook(
 
     Idempotent (keyed on the script suffix); preserves every other hook.
     """
-    data: dict[str, Any] = {}
-    if settings_path.exists():
-        try:
-            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except json.JSONDecodeError as exc:
-            return HookInstallResult(
-                cli="claude",
-                path=settings_path,
-                changed=False,
-                already_present=False,
-                note=f"settings.json is malformed ({exc}); left unchanged",
-            )
+    data, note = _load_settings_for_merge(settings_path)
+    if note is not None:
+        return HookInstallResult(
+            cli="claude", path=settings_path, changed=False, already_present=False,
+            note=note, error=note,
+        )
 
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         return HookInstallResult(
             cli="claude", path=settings_path, changed=False, already_present=False,
             note="`hooks` is not an object; left unchanged",
+            error="`hooks` is not an object; left unchanged",
         )
     groups = hooks.setdefault("WorktreeRemove", [])
     if not isinstance(groups, list):
         return HookInstallResult(
             cli="claude", path=settings_path, changed=False, already_present=False,
             note="`hooks.WorktreeRemove` is not an array; left unchanged",
+            error="`hooks.WorktreeRemove` is not an array; left unchanged",
         )
 
+    new_command = f"bash {shlex.quote(command)}"
     for group in groups:
         if not isinstance(group, dict):
             continue
         for h in group.get("hooks", []) or []:
             if not isinstance(h, dict):
                 continue
-            if str(h.get("command", "")).endswith(_WORKTREE_REMOVE_SUFFIX):
+            script = _footnote_worktree_script(str(h.get("command", "")))
+            if script is None:
+                continue
+            # An entry pointing at a script that no longer exists is the bug
+            # this installer fixes, wearing a different hat: `bash <dead path>`
+            # exits 127 and every worktree strands again. Repair it instead of
+            # reporting "already wired" and changing nothing.
+            if Path(script).is_file():
                 return HookInstallResult(
                     cli="claude", path=settings_path, changed=False,
                     already_present=True,
                 )
+            h["command"] = new_command
+            backup = _backup(settings_path)
+            _atomic_write(settings_path, json.dumps(data, indent=2) + "\n")
+            return HookInstallResult(
+                cli="claude", path=settings_path, changed=True,
+                already_present=False, backup=backup,
+                note=f"repaired a stale hook path ({script})",
+            )
 
-    groups.append(
-        {"hooks": [{"type": "command", "command": f"bash {command}"}]}
-    )
+    groups.append({"hooks": [{"type": "command", "command": new_command}]})
 
     backup = _backup(settings_path)
     _atomic_write(settings_path, json.dumps(data, indent=2) + "\n")
