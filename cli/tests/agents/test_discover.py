@@ -823,6 +823,7 @@ def _empty_seams(tmp_path: Path) -> dict:
         sessions_dir=tmp_path / "no-sessions",
         projects_dir=tmp_path / "no-projects",
         codex_sessions_dir=tmp_path / "no-codex",
+        opencode_storage_dir=tmp_path / "no-opencode",
         name_map_path=tmp_path / ".fno" / "session-names.json",
         psutil_mod=_FakePsutil({}),
         project_resolver=lambda c: None,
@@ -977,3 +978,286 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
         "claude-aaaabbbb", registry_path=reg, **_empty_seams(tmp_path)
     )
     assert by_canon is not None
+
+
+# --------------------------------------------------------------------------
+# US6 — opencode disk discovery
+# --------------------------------------------------------------------------
+
+
+def _write_opencode_session(
+    storage: Path,
+    *,
+    session_id: str,
+    cwd: str,
+    mtime_age: float,
+    project_id: str = "proj0001",
+    messages: int = 1,
+    info: bool = True,
+) -> Path:
+    """Build a storage tree matching a real opencode install (1.0.223).
+
+    Layout verified on disk: session info at ``session/<projectID>/<ses>.json``
+    with the cwd under ``directory``; messages at ``message/<ses>/<msg>.json``.
+    """
+    sdir = storage / "session" / project_id
+    sdir.mkdir(parents=True, exist_ok=True)
+    f = sdir / f"{session_id}.json"
+    body = (
+        {"id": session_id, "directory": cwd, "time": {"created": 1, "updated": 2}}
+        if info
+        else {"no": "id"}
+    )
+    f.write_text(json.dumps(body), encoding="utf-8")
+    mt = time.time() - mtime_age
+    mdir = storage / "message" / session_id
+    if messages:
+        mdir.mkdir(parents=True, exist_ok=True)
+        for i in range(messages):
+            m = mdir / f"msg_{i}.json"
+            m.write_text(
+                json.dumps({"id": f"msg_{i}", "role": "user", "time": {"created": i}}),
+                encoding="utf-8",
+            )
+            os.utime(m, (mt, mt))
+        os.utime(mdir, (mt, mt))
+    os.utime(f, (mt, mt))
+    return f
+
+
+def _run_opencode(tmp_path, storage, **kw):
+    """Discover with every other source empty so only opencode rows surface."""
+    return discover.discover_live_sessions(
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=tmp_path / "no-codex",
+        opencode_storage_dir=storage,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=kw.pop("project_resolver", lambda c: None),
+        **kw,
+    )
+
+
+def test_us6_opencode_session_surfaces_live(tmp_path):
+    """AC-HP: a session touched inside the recency window is discovered."""
+    storage = tmp_path / "opencode"
+    sid = "ses_47ba2e9d1ffel6XimfURzbam25"
+    _write_opencode_session(storage, session_id=sid, cwd="/Users/x/proj", mtime_age=5.0)
+    sessions = _run_opencode(tmp_path, storage)
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.agent == "opencode"
+    assert s.session_id == sid
+    assert s.short_id == sid[:8]
+    assert s.cwd == "/Users/x/proj"  # from `directory`, not `cwd`
+    assert s.pid == 0  # no OS handle, mirroring the codex lane
+
+
+def test_us6_opencode_stale_session_not_surfaced(tmp_path):
+    """AC-EDGE: outside the recency window it is not live."""
+    storage = tmp_path / "opencode"
+    _write_opencode_session(
+        storage, session_id="ses_dead", cwd="/x", mtime_age=10_000.0
+    )
+    assert _run_opencode(tmp_path, storage) == []
+
+
+def test_us6_opencode_fresh_messages_keep_stale_info_live(tmp_path):
+    """A session mid-turn stays live off its message dir even when the info
+    file has not been rewritten (why discovery maxes the two mtimes)."""
+    storage = tmp_path / "opencode"
+    sid = "ses_talking"
+    f = _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=10_000.0
+    )
+    mdir = storage / "message" / sid
+    fresh = time.time() - 5.0
+    os.utime(mdir, (fresh, fresh))
+    assert f.stat().st_mtime < fresh  # info file genuinely stale
+    sessions = _run_opencode(tmp_path, storage)
+    assert [s.session_id for s in sessions] == [sid]
+
+
+def test_us6_opencode_malformed_info_skipped_not_fatal(tmp_path):
+    """AC-ERR: an info file with no ``id`` contributes no row and never raises."""
+    storage = tmp_path / "opencode"
+    _write_opencode_session(
+        storage, session_id="ses_bad", cwd="/x", mtime_age=5.0, info=False
+    )
+    (storage / "session" / "proj0001" / "torn.json").write_text("{not json", encoding="utf-8")
+    assert _run_opencode(tmp_path, storage) == []
+
+
+def test_us6_opencode_absent_store_contributes_nothing(tmp_path):
+    """Zero-effect on a host with no opencode install."""
+    assert _run_opencode(tmp_path, tmp_path / "never-installed") == []
+
+
+def _touch(path: Path, age: float) -> None:
+    mt = time.time() - age
+    os.utime(path, (mt, mt))
+
+
+def test_us6_opencode_streaming_turn_stays_live_via_part_mtime(tmp_path):
+    """A long turn writes into part/<msg_id>/, which moves neither the session
+    info nor the message dir. Without the deeper look such a session ages out
+    of discovery and becomes unaddressable while still alive."""
+    storage = tmp_path / "opencode"
+    sid = "ses_streaming"
+    info = _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=1800.0, messages=1
+    )
+    # Both cheap signals are stale (well past the 600s window)...
+    assert info.stat().st_mtime < time.time() - 600
+    assert (storage / "message" / sid).stat().st_mtime < time.time() - 600
+    # ...but the newest message's parts are being written right now.
+    pdir = storage / "part" / "msg_0"
+    pdir.mkdir(parents=True)
+    (pdir / "prt_000.json").write_text('{"type":"text","text":"streaming"}', encoding="utf-8")
+    _touch(pdir, 5.0)
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
+
+
+def test_us6_opencode_deep_scan_is_bounded_to_recent_sessions(tmp_path):
+    """The deeper scan must not run for a store full of old sessions, so a
+    session far outside the slack band stays dead even with fresh parts."""
+    storage = tmp_path / "opencode"
+    sid = "ses_ancient"
+    _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=86_400.0 * 30, messages=1
+    )
+    pdir = storage / "part" / "msg_0"
+    pdir.mkdir(parents=True)
+    (pdir / "prt_000.json").write_text('{"type":"text","text":"x"}', encoding="utf-8")
+    _touch(pdir, 5.0)
+    assert _run_opencode(tmp_path, storage) == []
+
+
+def test_us6_opencode_dedups_and_honors_exclusions(tmp_path):
+    """The dedup/exclusion guard is this lane's only expression of the
+    "live but un-adopted" contract, so pin both halves of it."""
+    storage = tmp_path / "opencode"
+    sid = "ses_dupe"
+    # Same session id recorded under two project dirs -> one row, not two.
+    _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projA"
+    )
+    _write_opencode_session(
+        storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projB"
+    )
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
+    # An already-adopted session is excluded from the discovered lane.
+    assert _run_opencode(tmp_path, storage, exclude_session_ids={sid}) == []
+
+
+# --------------------------------------------------------------------------
+# opencode SQLite store (current opencode; the JSON tree above is legacy)
+# --------------------------------------------------------------------------
+
+
+def _write_opencode_db(storage: Path, sessions, messages=(), parts=()) -> Path:
+    """Build an opencode.db matching the real 1.14.50 schema.
+
+    Timestamps are milliseconds, as opencode stores them.
+    """
+    import sqlite3
+
+    storage.mkdir(parents=True, exist_ok=True)
+    db = storage.parent / "opencode.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER,"
+        " time_updated INTEGER)"
+    )
+    con.execute(
+        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER,"
+        " data TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT,"
+        " time_created INTEGER, data TEXT)"
+    )
+    for sid, directory, age in sessions:
+        updated = int((time.time() - age) * 1000)
+        con.execute(
+            "INSERT INTO session VALUES (?,?,?,?)", (sid, directory, updated, updated)
+        )
+    for mid, sid, created, data in messages:
+        con.execute(
+            "INSERT INTO message VALUES (?,?,?,?)", (mid, sid, created, json.dumps(data))
+        )
+    for pid, mid, created, data in parts:
+        con.execute(
+            "INSERT INTO part VALUES (?,?,?,?,?)",
+            (pid, mid, "", created, json.dumps(data)),
+        )
+    con.commit()
+    con.close()
+    return db
+
+
+def test_opencode_db_surfaces_live_session(tmp_path):
+    """The SQLite store is where current opencode writes; time_updated is an
+    explicit activity timestamp, so no mtime inference is involved."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_db(
+        storage,
+        [("ses_live", "/Users/x/proj", 5.0), ("ses_stale", "/Users/x/old", 10_000.0)],
+    )
+    sessions = _run_opencode(tmp_path, storage)
+    assert [(s.session_id, s.cwd, s.agent) for s in sessions] == [
+        ("ses_live", "/Users/x/proj", "opencode")
+    ]
+
+
+def test_opencode_db_wins_over_legacy_tree(tmp_path):
+    """A host mid-migration has both; the database is authoritative because the
+    JSON tree stops being written once opencode moves to SQLite."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
+    )
+    _write_opencode_db(storage, [("ses_db", "/current", 5.0)])
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == ["ses_db"]
+
+
+def test_opencode_legacy_tree_used_when_no_db(tmp_path):
+    """An install old enough to have no database still resolves."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_old", cwd="/legacy", mtime_age=5.0
+    )
+    assert [s.session_id for s in _run_opencode(tmp_path, storage)] == ["ses_old"]
+
+
+def test_opencode_db_unreadable_degrades_to_no_rows(tmp_path):
+    """A corrupt or future-schema database contributes nothing, never raises."""
+    storage = tmp_path / "opencode" / "storage"
+    storage.mkdir(parents=True)
+    (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
+    assert _run_opencode(tmp_path, storage) == []
+
+
+def test_opencode_empty_db_does_not_resurrect_legacy_sessions(tmp_path):
+    """A database that exists but yields nothing means "nothing is live", NOT
+    "no database". Falling back here would surface the legacy tree's long-dead
+    sessions as live."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
+    )
+    _write_opencode_db(storage, [])  # real store, no live sessions
+    assert _run_opencode(tmp_path, storage) == []
+
+
+def test_opencode_broken_db_does_not_resurrect_legacy_sessions(tmp_path):
+    """Same for a locked/corrupt/schema-drifted store: an error reads as empty,
+    and must not be mistaken for "this host has no database"."""
+    storage = tmp_path / "opencode" / "storage"
+    _write_opencode_session(
+        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
+    )
+    storage.mkdir(parents=True, exist_ok=True)
+    (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
+    assert _run_opencode(tmp_path, storage) == []

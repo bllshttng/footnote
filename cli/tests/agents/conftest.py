@@ -23,6 +23,13 @@ def _isolate_session_discovery(monkeypatch, tmp_path_factory):
     empty_codex = tmp_path_factory.mktemp("empty-codex-sessions")
     monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty_codex))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("empty-codex-home")))
+    # Same for the opencode lane. Defense-in-depth, NOT the load-bearing
+    # barrier: the parent conftest redirects $HOME before any test module
+    # imports, and the default resolves through expanduser("~"), so the real
+    # store is already out of reach. This pins the lane directly so it survives
+    # a refactor away from expanduser.
+    empty_opencode = tmp_path_factory.mktemp("empty-opencode-storage")
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty_opencode))
 
 
 @pytest.fixture(autouse=True)

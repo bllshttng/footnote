@@ -1959,7 +1959,10 @@ fn format_success(
             // helper (which has psutil's cross-platform reuse-safe liveness) and
             // folds the result in. Fail-open: an empty lane on any error.
             let discovered = if discover {
-                fetch_discovered_sessions(filters.get("cwd").and_then(|v| v.as_str()))
+                fetch_discovered_sessions(
+                    filters.get("cwd").and_then(|v| v.as_str()),
+                    filters.get("provider").and_then(|v| v.as_str()),
+                )
             } else {
                 Vec::new()
             };
@@ -2041,7 +2044,10 @@ fn render_list_json(agents: &Value, filters_applied: &Value, discovered: &[Value
 /// non-zero exit, or unparseable output yields an empty lane so `list` is
 /// never broken by discovery (US5). `FNO_AGENTS_RUNTIME=python` pins the child
 /// to the Python dispatch so it cannot recurse back into this binary.
-fn fetch_discovered_sessions(cwd_filter: Option<&str>) -> Vec<Value> {
+fn fetch_discovered_sessions(
+    cwd_filter: Option<&str>,
+    provider_filter: Option<&str>,
+) -> Vec<Value> {
     use std::process::Command;
 
     let mut cmd = Command::new("fno");
@@ -2049,6 +2055,13 @@ fn fetch_discovered_sessions(cwd_filter: Option<&str>) -> Vec<Value> {
     cmd.env("FNO_AGENTS_RUNTIME", "python");
     if let Some(c) = cwd_filter {
         cmd.args(["--cwd", c]);
+    }
+    // Without this the rendered surface disagrees with the Python one:
+    // `--provider claude` would list every discovered codex/opencode session.
+    // An empty value is "no filter" on the Python side, so forwarding it would
+    // make the two runtimes disagree again in the other direction.
+    if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
+        cmd.args(["--provider", p]);
     }
     let output = match cmd.output() {
         Ok(o) if o.status.success() => o.stdout,

@@ -1296,6 +1296,9 @@ def cmd_list(
 @agents_app.command("discovered-json", hidden=True)
 def cmd_discovered_json(
     cwd: str = typer.Option(None, "--cwd", help="Filter discovered rows by cwd."),
+    provider: str = typer.Option(
+        None, "--provider", help="Filter discovered rows by harness."
+    ),
 ) -> None:
     """Internal: emit the discovered-live-sessions lane as JSON.
 
@@ -1329,6 +1332,8 @@ def cmd_discovered_json(
                 exclude_short_ids=exclude, exclude_session_ids=exclude_sids
             )
         ]
+        if provider:
+            rows = [r for r in rows if r.get("agent") == provider]
         if cwd:
             try:
                 resolved = str(_Path(cwd).resolve())

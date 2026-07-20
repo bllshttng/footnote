@@ -314,3 +314,67 @@ def test_list_agents_does_not_mutate_registry(
     after = paths.agents_registry_path().read_text(encoding="utf-8")
 
     assert before == after
+
+
+# --------------------------------------------------------------------------
+# Discovered-lane provider filter
+# --------------------------------------------------------------------------
+
+
+class _Discovered:
+    """Minimal DiscoveredSession stand-in (list_agents calls .to_row())."""
+
+    def __init__(self, agent: str, short_id: str):
+        self.agent = agent
+        self.short_id = short_id
+        self.cwd = ""
+
+    def to_row(self) -> dict:
+        return {"agent": self.agent, "short_id": self.short_id, "handle": self.short_id}
+
+
+@pytest.fixture
+def _patch_discovery(monkeypatch):
+    def _install(sessions):
+        from fno.agents import discover as discover_mod
+
+        monkeypatch.setattr(
+            discover_mod, "discover_live_sessions", lambda **kw: list(sessions)
+        )
+    return _install
+
+
+def _discovered_agents(payload: str) -> list[str]:
+    return [r["agent"] for r in json.loads(payload)["discovered_sessions"]]
+
+
+@pytest.mark.parametrize(
+    "provider,expected",
+    [
+        (None, ["claude", "codex", "opencode"]),
+        ("claude", ["claude"]),
+        ("codex", ["codex"]),
+        ("opencode", ["opencode"]),
+    ],
+)
+def test_discovered_rows_honor_provider_filter(
+    tmp_path, monkeypatch, _patch_claude_agents_json, _patch_discovery, provider, expected
+):
+    """A discovered row must be filtered by its OWN harness.
+
+    The lane used to be gated on `provider in (None, "claude")`, so
+    `--provider claude` listed every discovered codex/opencode session and
+    `--provider codex` listed none of them.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _patch_claude_agents_json([])
+    write_registry([], path=tmp_path / "registry.json")
+    _patch_discovery(
+        [
+            _Discovered("claude", "aaaa1111"),
+            _Discovered("codex", "bbbb2222"),
+            _Discovered("opencode", "cccc3333"),
+        ]
+    )
+    result = list_agents(provider=provider, json_out=True)
+    assert _discovered_agents(result.output) == expected

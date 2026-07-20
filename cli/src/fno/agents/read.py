@@ -146,7 +146,7 @@ def list_agents(
     # never silently. Excludes sessions already in the fno registry so the
     # lane means "live but un-adopted" (no double-listing).
     discovered_rows: list[dict] = []
-    if discover and provider in (None, "claude"):
+    if discover:
         try:
             from fno.agents import discover as discover_mod
 
@@ -164,6 +164,12 @@ def list_agents(
                 exclude_session_ids=registered_session_ids,
             )
             for sess in sessions:
+                # Filter by the row's own harness rather than gating the whole
+                # lane on it. The old gate ran discovery only for claude, so
+                # `--provider claude` listed every discovered codex/opencode
+                # session while `--provider codex` listed none of them.
+                if provider is not None and sess.agent != provider:
+                    continue
                 if resolved_cwd is not None:
                     # An empty cwd must NOT resolve to the process cwd and then
                     # spuriously match a --cwd filter (gemini review); drop it.

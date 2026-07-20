@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
 from pathlib import Path
 
 from fno.agents.peek import (
@@ -303,3 +305,392 @@ def test_peek_status_absent_falls_through_to_transcript(tmp_path):
     rc = peek("w", stdout=out, stderr=err, resolve=lambda h: (sess, []), projects_root=tmp_path, events_path=events)
     assert rc == 0
     assert "user: via transcript" in out.getvalue()
+
+
+# --------------------------------------------------------------------------
+# peek_reader — US6 opencode arm
+# --------------------------------------------------------------------------
+
+
+def _opencode_message(
+    storage: Path,
+    session_id: str,
+    *,
+    msg_id: str,
+    role: str,
+    created: int,
+    parts: list[dict] | None,
+) -> None:
+    """Write one message + its parts into an opencode storage tree.
+
+    Mirrors the real 1.0.223 layout: the message JSON carries NO text (only
+    role + ``time.created``); the text lives in ``part/<msg_id>/``.
+    """
+    mdir = storage / "message" / session_id
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / f"{msg_id}.json").write_text(
+        json.dumps({"id": msg_id, "role": role, "time": {"created": created}}),
+        encoding="utf-8",
+    )
+    if parts is None:
+        return
+    pdir = storage / "part" / msg_id
+    pdir.mkdir(parents=True, exist_ok=True)
+    for i, p in enumerate(parts):
+        (pdir / f"prt_{i:03d}.json").write_text(json.dumps(p), encoding="utf-8")
+
+
+def test_peek_reader_opencode_orders_by_created_and_joins_parts(tmp_path):
+    """AC-HP: messages render in time.created order with their parts joined,
+    even though the filenames sort the other way."""
+    storage = tmp_path / "opencode"
+    sid = "ses_abc123"
+    # Filenames sort z, m, a; time.created orders them a, m, z.
+    _opencode_message(
+        storage, sid, msg_id="zzz", role="user", created=1,
+        parts=[{"type": "text", "text": "first"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="mmm", role="assistant", created=2,
+        parts=[{"type": "text", "text": "second"}, {"type": "text", "text": "half"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="aaa", role="user", created=3,
+        parts=[{"type": "text", "text": "third"}],
+    )
+    recs = recent_records("opencode", sid, "/tmp/proj", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [
+        ("user", "first"),
+        ("assistant", "second half"),
+        ("user", "third"),
+    ]
+
+
+def test_peek_reader_opencode_part_policy_matches_claude(tmp_path):
+    """reasoning/step bookkeeping is observe-noise; a tool part renders a marker,
+    matching _extract_text's policy for claude blocks."""
+    storage = tmp_path / "opencode"
+    sid = "ses_policy"
+    _opencode_message(
+        storage, sid, msg_id="m1", role="assistant", created=1,
+        parts=[
+            {"type": "step-start", "snapshot": "abc"},
+            {"type": "reasoning", "text": "internal musing"},
+            {"type": "text", "text": "here goes"},
+            {"type": "tool", "tool": "read"},
+            {"type": "step-finish"},
+        ],
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [
+        ("assistant", "here goes [tool_use: read]")
+    ]
+
+
+def test_peek_reader_opencode_tail_is_last_n_chronological(tmp_path):
+    """Tail parity with the jsonl arms: last N, still chronological."""
+    storage = tmp_path / "opencode"
+    sid = "ses_tail"
+    for i in range(5):
+        _opencode_message(
+            storage, sid, msg_id=f"m{i}", role="user", created=i,
+            parts=[{"type": "text", "text": f"turn{i}"}],
+        )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["turn3", "turn4"]
+
+
+def test_peek_reader_opencode_unknown_session_returns_empty(tmp_path):
+    """AC-ERR: an unknown ses_ id yields the same empty shape as the codex arm
+    (resolved-but-nothing-to-show), never a raise."""
+    storage = tmp_path / "opencode"
+    (storage / "message").mkdir(parents=True)
+    assert recent_records(
+        "opencode", "ses_nope", "/x", 10, opencode_storage_dir=storage
+    ) == []
+
+
+def test_peek_reader_opencode_empty_or_missing_parts_skipped(tmp_path):
+    """AC-EDGE: a message with no part dir, an all-noise part set, or a torn
+    part file yields no crash and no empty turn."""
+    storage = tmp_path / "opencode"
+    sid = "ses_empty"
+    _opencode_message(storage, sid, msg_id="nodir", role="user", created=1, parts=None)
+    _opencode_message(
+        storage, sid, msg_id="noise", role="assistant", created=2,
+        parts=[{"type": "reasoning", "text": "hidden"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="real", role="user", created=3,
+        parts=[{"type": "text", "text": "survives"}],
+    )
+    (storage / "part" / "real" / "torn.json").write_text("{nope", encoding="utf-8")
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [("user", "survives")]
+
+
+def test_peek_opencode_follow_reports_unsupported(tmp_path):
+    """--follow on opencode has no tailable file; say so rather than exiting
+    silently (the file's no-blank-exit-0 contract)."""
+    storage = tmp_path / "opencode"
+    sid = "ses_follow"
+    _opencode_message(
+        storage, sid, msg_id="m1", role="user", created=1,
+        parts=[{"type": "text", "text": "hi"}],
+    )
+    out, err = io.StringIO(), io.StringIO()
+    sess = _Session(agent="opencode", session_id=sid)
+    rc = peek(
+        "h", follow=True, stdout=out, stderr=err,
+        resolve=lambda h: (sess, []), opencode_storage_dir=storage,
+    )
+    assert rc == 0
+    assert "hi" in out.getvalue()
+    assert "--follow not supported for opencode" in err.getvalue()
+
+
+def test_peek_reader_opencode_missing_role_degrades_not_dropped(tmp_path):
+    """A message whose `role` has not landed yet still renders (as "?"),
+    matching the codex arm. Dropping it would hide the peer's latest word."""
+    storage = tmp_path / "opencode"
+    sid = "ses_norole"
+    mdir = storage / "message" / sid
+    mdir.mkdir(parents=True)
+    (mdir / "m1.json").write_text(
+        json.dumps({"id": "m1", "time": {"created": 1}}), encoding="utf-8"
+    )
+    pdir = storage / "part" / "m1"
+    pdir.mkdir(parents=True)
+    (pdir / "p.json").write_text(
+        json.dumps({"type": "text", "text": "mid-write"}), encoding="utf-8"
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [("?", "mid-write")]
+
+
+def test_peek_reader_opencode_missing_created_falls_back_to_mtime(tmp_path):
+    """A message with no time.created must not collapse to a shared sort key.
+
+    Filenames sort the reverse of true order here, so a constant fallback would
+    render the transcript backwards while still calling it chronological.
+    """
+    storage = tmp_path / "opencode"
+    sid = "ses_notime"
+    mdir = storage / "message" / sid
+    mdir.mkdir(parents=True)
+    for name, text, age in (("zzz", "older", 100.0), ("aaa", "newer", 10.0)):
+        (mdir / f"{name}.json").write_text(
+            json.dumps({"id": name, "role": "user"}), encoding="utf-8"
+        )
+        pdir = storage / "part" / name
+        pdir.mkdir(parents=True)
+        (pdir / "p.json").write_text(
+            json.dumps({"type": "text", "text": text}), encoding="utf-8"
+        )
+        mt = time.time() - age
+        os.utime(mdir / f"{name}.json", (mt, mt))
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["older", "newer"]
+
+
+def test_peek_reader_opencode_tail_skips_noise_to_fill_n(tmp_path):
+    """The bounded walk must still return N *renderable* turns, so noise-only
+    messages at the tail do not shrink the result."""
+    storage = tmp_path / "opencode"
+    sid = "ses_noisetail"
+    _opencode_message(
+        storage, sid, msg_id="m1", role="user", created=1,
+        parts=[{"type": "text", "text": "keep me"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="m2", role="assistant", created=2,
+        parts=[{"type": "reasoning", "text": "noise"}],
+    )
+    _opencode_message(
+        storage, sid, msg_id="m3", role="assistant", created=3,
+        parts=[{"type": "text", "text": "last"}],
+    )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["keep me", "last"]
+
+
+def test_peek_follow_unresolved_transcript_is_not_reported_unsupported(tmp_path):
+    """A claude transcript that fails to resolve is a resolution miss, not a
+    harness-capability limit; the two must not share a message."""
+    out, err = io.StringIO(), io.StringIO()
+    sess = _Session(agent="claude", session_id="nope-does-not-exist")
+    rc = peek(
+        "h", follow=True, stdout=out, stderr=err,
+        resolve=lambda h: (sess, []), projects_root=tmp_path / "empty",
+    )
+    assert rc == 0
+    assert "not supported" not in err.getvalue()
+    assert "could not resolve a transcript" in err.getvalue()
+
+
+def test_peek_reader_opencode_message_without_id_is_dropped(tmp_path):
+    """The counterpart to the role guard: `id` locates the parts, so a message
+    missing it must drop rather than build a path from None."""
+    storage = tmp_path / "opencode"
+    sid = "ses_noid"
+    mdir = storage / "message" / sid
+    mdir.mkdir(parents=True)
+    (mdir / "m1.json").write_text(
+        json.dumps({"role": "user", "time": {"created": 1}}), encoding="utf-8"
+    )
+    _opencode_message(
+        storage, sid, msg_id="m2", role="user", created=2,
+        parts=[{"type": "text", "text": "survives"}],
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["survives"]
+
+
+def test_peek_reader_opencode_torn_message_file_skipped(tmp_path):
+    """A torn message JSON is skipped like a torn jsonl line, not fatal."""
+    storage = tmp_path / "opencode"
+    sid = "ses_tornmsg"
+    _opencode_message(
+        storage, sid, msg_id="ok", role="user", created=1,
+        parts=[{"type": "text", "text": "intact"}],
+    )
+    (storage / "message" / sid / "torn.json").write_text("{nope", encoding="utf-8")
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["intact"]
+
+
+# --------------------------------------------------------------------------
+# peek_reader — opencode SQLite store (current opencode)
+# --------------------------------------------------------------------------
+
+
+def _opencode_db(storage: Path, session_id: str, turns) -> None:
+    """Build an opencode.db transcript. `turns` = [(msg_id, role, created, parts)].
+
+    Message and part payloads are the same JSON shapes the legacy files hold,
+    which is why the rendering policy is shared between the two readers.
+    """
+    import sqlite3
+
+    storage.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(storage.parent / "opencode.db")
+    con.execute("CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER)")
+    con.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+    con.execute("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+    for mid, role, created, parts in turns:
+        con.execute(
+            "INSERT INTO message VALUES (?,?,?,?)",
+            (mid, session_id, created, json.dumps({"id": mid, "role": role})),
+        )
+        for i, p in enumerate(parts):
+            con.execute(
+                "INSERT INTO part VALUES (?,?,?,?,?)",
+                (f"prt_{mid}_{i}", mid, session_id, i, json.dumps(p)),
+            )
+    con.commit()
+    con.close()
+
+
+def test_peek_reader_opencode_db_orders_and_joins(tmp_path):
+    """Ordering comes from the time_created column, not a filename or mtime."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_db"
+    _opencode_db(
+        storage,
+        sid,
+        [
+            ("zzz", "user", 1, [{"type": "text", "text": "first"}]),
+            ("mmm", "assistant", 2, [
+                {"type": "reasoning", "text": "hidden"},
+                {"type": "text", "text": "second"},
+                {"type": "tool", "tool": "bash"},
+            ]),
+            ("aaa", "user", 3, [{"type": "text", "text": "third"}]),
+        ],
+    )
+    recs = recent_records("opencode", sid, "/x", 10, opencode_storage_dir=storage)
+    assert [(r.role, r.text) for r in recs] == [
+        ("user", "first"),
+        ("assistant", "second [tool_use: bash]"),
+        ("user", "third"),
+    ]
+
+
+def test_peek_reader_opencode_db_tail_is_last_n(tmp_path):
+    """Tail parity: last N, still chronological."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_dbtail"
+    _opencode_db(
+        storage, sid,
+        [(f"m{i}", "user", i, [{"type": "text", "text": f"turn{i}"}]) for i in range(5)],
+    )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["turn3", "turn4"]
+
+
+def test_peek_reader_opencode_db_noise_only_turn_skipped(tmp_path):
+    """A turn whose parts are all observe-noise renders nothing, so the tail
+    still fills to N with real turns."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_dbnoise"
+    _opencode_db(
+        storage, sid,
+        [
+            ("m1", "user", 1, [{"type": "text", "text": "keep"}]),
+            ("m2", "assistant", 2, [{"type": "step-start"}, {"type": "reasoning", "text": "x"}]),
+            ("m3", "assistant", 3, [{"type": "text", "text": "last"}]),
+        ],
+    )
+    recs = recent_records("opencode", sid, "/x", 2, opencode_storage_dir=storage)
+    assert [r.text for r in recs] == ["keep", "last"]
+
+
+def test_peek_reader_opencode_db_unknown_session_empty(tmp_path):
+    """An unknown ses_ id yields the resolved-but-nothing-to-show shape."""
+    storage = tmp_path / "opencode" / "storage"
+    _opencode_db(storage, "ses_other", [("m1", "user", 1, [{"type": "text", "text": "hi"}])])
+    assert recent_records(
+        "opencode", "ses_nope", "/x", 10, opencode_storage_dir=storage
+    ) == []
+
+
+def test_peek_opencode_idle_db_session_does_not_serve_legacy_transcript(tmp_path):
+    """A session with no messages yet reads empty from the database. Falling
+    back would serve the legacy tree's stale transcript for that same id as if
+    it were current."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_both"
+    _opencode_message(
+        storage, sid, msg_id="old", role="user", created=1,
+        parts=[{"type": "text", "text": "six months stale"}],
+    )
+    _opencode_db(storage, "ses_other", [("m1", "user", 1, [{"type": "text", "text": "x"}])])
+    assert recent_records(
+        "opencode", sid, "/x", 10, opencode_storage_dir=storage
+    ) == []
+
+
+def test_peek_opencode_db_ties_render_deterministically(tmp_path):
+    """Identical millisecond timestamps occur in a real store, so ordering must
+    not be left to the query planner."""
+    storage = tmp_path / "opencode" / "storage"
+    sid = "ses_ties"
+    _opencode_db(
+        storage, sid,
+        [
+            ("m_a", "user", 5, [{"type": "text", "text": "a"}]),
+            ("m_b", "user", 5, [{"type": "text", "text": "b"}]),
+            ("m_c", "user", 5, [{"type": "text", "text": "c"}]),
+        ],
+    )
+    seen = {
+        tuple(
+            r.text
+            for r in recent_records(
+                "opencode", sid, "/x", 10, opencode_storage_dir=storage
+            )
+        )
+        for _ in range(5)
+    }
+    assert len(seen) == 1, f"tie ordering not deterministic: {seen}"
+    assert seen == {("a", "b", "c")}

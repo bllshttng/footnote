@@ -247,6 +247,238 @@ def _discover_from_codex(
     return rows
 
 
+OPENCODE_STORAGE_DIR_ENV = "FNO_OPENCODE_STORAGE_DIR"
+
+
+def default_opencode_storage_dir() -> Path:
+    """opencode's on-disk storage root on this host (mirror of the codex seam)."""
+    override = os.environ.get(OPENCODE_STORAGE_DIR_ENV)
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~")) / ".local" / "share" / "opencode" / "storage"
+
+
+def default_opencode_db_path(storage_dir: Optional[Path] = None) -> Path:
+    """opencode's SQLite store, the sibling of the legacy storage tree.
+
+    Current opencode (verified on 1.14.50) writes sessions, messages and parts
+    here; the ``storage/`` JSON tree is the legacy layout and stops being
+    written. Derived from the storage dir so one env override seams both.
+    """
+    return (storage_dir or default_opencode_storage_dir()).parent / "opencode.db"
+
+
+def opencode_connect(db_path: Path):
+    """A read-only connection to opencode's store, or None if unavailable.
+
+    Read-only URI mode is load-bearing, not decoration: a live opencode holds
+    this database open in WAL mode, and observing must not perturb the
+    observed. Callers that issue more than one query should share a single
+    connection so their reads come from one snapshot.
+    """
+    import sqlite3
+
+    if not db_path.exists():
+        return None
+    try:
+        return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+
+
+def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
+    """Run one read-only query, returning ``[]`` on any failure.
+
+    A missing file, a lock, or schema drift on a future opencode all degrade to
+    no rows rather than raising, matching the disk readers. Callers must not
+    read "no rows" as "no database" — see the dispatch in discover.
+    """
+    import sqlite3
+
+    con = opencode_connect(db_path)
+    if con is None:
+        return []
+    try:
+        return list(con.execute(sql, params))
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
+
+
+def _discover_from_opencode_db(
+    db_path: Path,
+    *,
+    recency_seconds: float,
+    exclude_session_ids: Iterable[str] = (),
+    now: Optional[float] = None,
+) -> list[dict]:
+    """Discover live opencode sessions from the SQLite store.
+
+    ``session.time_updated`` is an explicit activity timestamp opencode
+    maintains itself, so this needs none of the mtime inference the legacy tree
+    forced. Timestamps are milliseconds.
+    """
+    cutoff_ms = ((now if now is not None else time.time()) - recency_seconds) * 1000.0
+    exclude_sids = {s for s in (exclude_session_ids or ()) if s}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for sid, directory, _updated in opencode_query(
+        db_path,
+        "SELECT id, directory, time_updated FROM session "
+        "WHERE time_updated >= ? ORDER BY time_updated DESC, id DESC",
+        (cutoff_ms,),
+    ):
+        if not isinstance(sid, str) or not sid or sid in seen or sid in exclude_sids:
+            continue
+        seen.add(sid)
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": directory if isinstance(directory, str) else "",
+                "status": None,
+                "agent": "opencode",
+            }
+        )
+    return rows
+
+
+def _opencode_session_info(path: Path) -> Optional[tuple[str, str]]:
+    """``(session_id, cwd)`` from a session-info JSON, or None.
+
+    cwd is the info file's ``directory`` key (NOT ``cwd`` — verified against a
+    real session). Unreadable/malformed/non-dict files return None, never raise.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    sid = data.get("id")
+    if not isinstance(sid, str) or not sid:
+        return None
+    return sid, str(data.get("directory") or "")
+
+
+# How far past the recency window a session still gets the deeper liveness look
+# below. A single turn can stream for many minutes but not for hours, so this
+# bounds the extra scan to plausibly-active sessions instead of every session
+# in a store that accumulates thousands.
+_OPENCODE_LONG_TURN_SLACK_SECONDS = 6 * 3600
+
+
+def _opencode_activity_mtime(
+    info_path: Path, msg_root: Path, part_root: Path, deep_cutoff: float
+) -> Optional[float]:
+    """Newest activity timestamp for one session, or None if unreadable.
+
+    The cheap signals (session info + message dir) both stop moving once a turn
+    is underway: a directory's mtime tracks entries being created, not an
+    existing file being rewritten, and a streaming turn writes into
+    ``part/<msg_id>/`` whose parent is not the message dir. So a session in a
+    long tool turn would age out of discovery and become unaddressable while
+    still alive. For a session recent enough that a turn could still be running,
+    look at the newest message and its parts; everything older skips the scan.
+    """
+    try:
+        mt = info_path.stat().st_mtime
+    except OSError:
+        return None
+    mdir = msg_root / info_path.stem
+    try:
+        mt = max(mt, mdir.stat().st_mtime)
+    except OSError:
+        return mt  # no messages yet: the info mtime is all there is
+    if mt < deep_cutoff:
+        return mt
+    newest_mt, newest_name = 0.0, ""
+    try:
+        for entry in os.scandir(mdir):
+            try:
+                emt = entry.stat().st_mtime
+            except OSError:
+                continue  # vanished mid-scan
+            if emt > newest_mt:
+                newest_mt, newest_name = emt, entry.name
+    except OSError:
+        return mt
+    if not newest_name:
+        return mt
+    mt = max(mt, newest_mt)
+    try:
+        mt = max(mt, (part_root / Path(newest_name).stem).stat().st_mtime)
+    except OSError:
+        pass  # parts not written yet
+    return mt
+
+
+def _discover_from_opencode(
+    storage_dir: Path,
+    *,
+    recency_seconds: float,
+    exclude_session_ids: Iterable[str] = (),
+    now: Optional[float] = None,
+) -> list[dict]:
+    """Discover live opencode sessions from the storage tree.
+
+    opencode splits a session across three sibling trees rather than one
+    transcript file: ``session/<projectID>/<ses_id>.json`` (info, cwd under
+    ``directory``), ``message/<ses_id>/<msg_id>.json`` (one file per turn), and
+    ``part/<msg_id>/`` (that turn's text, which only peek needs). Verified
+    against a live 1.0.223 install; the nesting and the ``directory`` key are
+    both easy to guess wrong.
+
+    Liveness is mtime-only, like the codex lane: opencode publishes no live-PID
+    sidecar. ``_opencode_activity_mtime`` owns the signal, including why the two
+    cheap timestamps are not enough on their own.
+
+    Rows are shaped like the codex lane's so the shared dedup/alias pipeline
+    consumes them unchanged.
+
+    ponytail: full glob + two stats per session, on the same interactive
+    resolution path as the codex scan; the deeper per-message scan is bounded to
+    sessions recent enough to still be mid-turn. Prune by project dir if a heavy
+    opencode user's send drags.
+    """
+    cutoff = (now if now is not None else time.time()) - recency_seconds
+    deep_cutoff = cutoff - _OPENCODE_LONG_TURN_SLACK_SECONDS
+    exclude_sids = {s for s in (exclude_session_ids or ()) if s}
+    msg_root = storage_dir / "message"
+    part_root = storage_dir / "part"
+    rows: list[dict] = []
+    seen: set[str] = set()
+    dated: list[tuple[float, Path]] = []
+    try:
+        for path in (storage_dir / "session").glob("*/*.json"):
+            mt = _opencode_activity_mtime(path, msg_root, part_root, deep_cutoff)
+            if mt is not None and mt >= cutoff:
+                dated.append((mt, path))
+    except OSError:
+        return rows
+    for _mt, path in sorted(dated, key=lambda t: t[0], reverse=True):
+        info = _opencode_session_info(path)
+        if info is None:
+            continue
+        sid, cwd = info
+        if sid in seen or sid in exclude_sids:
+            continue
+        seen.add(sid)
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": 0,
+                "cwd": cwd,
+                "status": None,
+                "agent": "opencode",
+            }
+        )
+    return rows
+
+
 # Terminal AgentStatus values (mirrors registry.AgentStatus): a row in one of
 # these is dead, so it must not surface as a live discovery result.
 _DEAD_REGISTRY_STATUSES = frozenset({"orphaned", "failed", "exited", "permanent_dead"})
@@ -830,6 +1062,7 @@ def resolve_or_suggest(
     sessions_dir: Optional[Path] = None,
     projects_dir: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
+    opencode_storage_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     registry_path: Optional[Path] = None,
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
@@ -849,6 +1082,7 @@ def resolve_or_suggest(
         sessions_dir=sessions_dir,
         projects_dir=projects_dir,
         codex_sessions_dir=codex_sessions_dir,
+        opencode_storage_dir=opencode_storage_dir,
         name_map_path=name_map_path,
         registry_path=registry_path,
         project_resolver=project_resolver,
@@ -881,6 +1115,7 @@ def discover_live_sessions(
     sessions_dir: Optional[Path] = None,
     projects_dir: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
+    opencode_storage_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     registry_path: Optional[Path] = None,
     exclude_short_ids: Iterable[str] = (),
@@ -975,6 +1210,33 @@ def discover_live_sessions(
         exclude_session_ids=excluded_session_ids,
     )
     for r in codex_rows:
+        if r["short_id"] in exclude:
+            continue
+        candidates.append(r)
+
+    # opencode discovery. Unioned ALWAYS for the same reason as the codex lane,
+    # and zero-effect on a host with no opencode install. The SQLite store is
+    # where current opencode writes; the legacy JSON tree is consulted only
+    # when there is no database, so an old install still resolves.
+    opencode_store = opencode_storage_dir or default_opencode_storage_dir()
+    opencode_db = default_opencode_db_path(opencode_store)
+    # Branch on the database EXISTING, never on it returning no rows. A query
+    # can come back empty because nothing is live, because the store is locked,
+    # or because a future schema drifted — and falling back on any of those
+    # would resurrect the legacy tree's long-dead sessions as if they were live.
+    if opencode_db.exists():
+        opencode_rows = _discover_from_opencode_db(
+            opencode_db,
+            recency_seconds=_recency_seconds(),
+            exclude_session_ids=excluded_session_ids,
+        )
+    else:
+        opencode_rows = _discover_from_opencode(
+            opencode_store,
+            recency_seconds=_recency_seconds(),
+            exclude_session_ids=excluded_session_ids,
+        )
+    for r in opencode_rows:
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
