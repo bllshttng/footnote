@@ -106,7 +106,7 @@ fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option
     if e.get("type").and_then(|v| v.as_str()) == Some("roadmap") {
         return None;
     }
-    if e.get("completed_at").is_some_and(|v| !v.is_null()) {
+    if has_stamp(e, "completed_at") {
         return Some("Done");
     }
     let status = e.get("_status").and_then(|v| v.as_str()).unwrap_or("ready");
@@ -118,7 +118,7 @@ fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option
     }
     // Queued is orthogonal to `_status`: a node awaiting human ack is not active
     // work, so it must not inflate Now - but a claimed node stays in Now.
-    if e.get("queued_at").is_some_and(|v| !v.is_null()) {
+    if has_stamp(e, "queued_at") {
         return Some("Triage");
     }
     match e.get("priority").and_then(|v| v.as_str()).unwrap_or("p2") {
@@ -126,6 +126,17 @@ fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option
         "p3" => Some("Later"),
         _ => Some("Next"),
     }
+}
+
+/// Whether a timestamp field carries an actual stamp. The Python board tests
+/// these with bare truthiness (`if entry.get("completed_at")`), which is false
+/// for an empty string as well as for null and absent - so a null check alone
+/// would classify `""` as Done/Triage where the board would not, and the two
+/// boards would name different lanes for the same node.
+fn has_stamp(e: &serde_json::Value, field: &str) -> bool {
+    e.get(field)
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
 }
 
 /// Parent ids whose work is underway: an epic with a done or claimed child.
@@ -138,7 +149,7 @@ fn in_progress_epics(entries: &[serde_json::Value]) -> HashSet<&str> {
         let Some(parent) = e.get("parent").and_then(|v| v.as_str()) else {
             continue;
         };
-        let done = e.get("completed_at").is_some_and(|v| !v.is_null())
+        let done = has_stamp(e, "completed_at")
             || e.get("_status").and_then(|v| v.as_str()) == Some("claimed");
         if done {
             underway.insert(parent);
@@ -781,6 +792,37 @@ mod tests {
             "the claimed node moves lanes, count and all"
         );
         assert_eq!(hot.cards[0].state, CardState::InFlight);
+    }
+
+    #[test]
+    fn an_empty_timestamp_is_no_timestamp() {
+        // The Python board tests these fields with bare truthiness, so `""` is
+        // absent there. A null-only check here would send an empty-stamped node
+        // to Done/Triage while the board left it in its priority column - the two
+        // boards must never name different lanes for the same node.
+        let raw = graph(
+            r#"{"id":"x-a","slug":"a","priority":"p2","_status":"ready","completed_at":""},
+               {"id":"x-b","slug":"b","priority":"p2","_status":"ready","queued_at":""},
+               {"id":"x-kid","slug":"k","priority":"p2","_status":"ready","parent":"x-e","completed_at":""},
+               {"id":"x-e","slug":"e","type":"epic","priority":"p2","_status":"ready"}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let lane = |id: &str| cards.iter().find(|c| c.id == id).unwrap().lane.clone();
+        assert_eq!(
+            lane("x-a").as_deref(),
+            Some("Next"),
+            "empty completed_at is not Done"
+        );
+        assert_eq!(
+            lane("x-b").as_deref(),
+            Some("Next"),
+            "empty queued_at is not Triage"
+        );
+        assert_eq!(
+            lane("x-e").as_deref(),
+            Some("Next"),
+            "an empty-stamped child does not make its epic underway"
+        );
     }
 
     #[test]
