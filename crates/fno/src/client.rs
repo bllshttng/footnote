@@ -991,13 +991,18 @@ fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
         ],
     }
 }
+/// How many rows one clear-dead may remove. Each row costs the server a
+/// `fno agents rm` subprocess (`agent_action` spawns one per command, unbounded),
+/// so an unbounded fan-out would let a long-lived section stampede the daemon.
+/// ponytail: a flat cap, repeat to clear the rest; the upgrade is a section-scoped
+/// bulk verb server-side, which the single-process `ReapAgents` already models.
+const CLEAR_DEAD_MAX: usize = 25;
 
 /// (x-f300) The section-header context menu: the bulk counterpart to the row
-/// menu's single Remove. `dead` is the section's exited-row count at open, shown
-/// in the label so the operator sees the blast radius before committing; the set
-/// is re-folded at execute, so a row that died or was reaped in between changes
-/// what runs, never what it claims. Caller guarantees `dead > 0` - a section with
-/// nothing to clear gets a Notice instead of a menu holding one dead entry.
+/// menu's single Remove. `dead` is the count the label advertises AND the number
+/// the commit will run, so the two can never disagree. Caller guarantees
+/// `dead > 0` - a section with nothing to clear gets a Notice, not a menu whose
+/// only entry no-ops.
 fn build_section_menu(key: SectionKey, label: String, dead: usize, anchor: Anchor) -> RowMenu {
     let rows = vec![
         PopupRow::Header(label.clone()),
@@ -1799,12 +1804,21 @@ impl View {
                 true
             }
             Some(Pick::Section(key, label)) => {
+                // Cards have no exited state, so the work queue has no menu at
+                // all - a notice there would imply "none right now" about a
+                // section that can never have any.
+                if key == SectionKey::WorkQueue {
+                    return false;
+                }
                 // A section with nothing to clear would leave a one-entry menu
                 // whose only entry is a no-op; say so instead (the row menu's
                 // "no dead item ever renders" rule, applied to the whole menu).
+                // "nothing to clear" covers both an all-live section and a key
+                // `section_dead_rows` refused as ambiguous - it never claims
+                // there are no dead rows when the truth is we won't guess which.
                 let dead = self.section_dead_rows(&key).len();
                 if dead == 0 {
-                    self.set_notice(format!("no dead rows in {label}"));
+                    self.set_notice(format!("nothing to clear in {label}"));
                     return false;
                 }
                 self.clear_peek();
@@ -2561,7 +2575,13 @@ impl View {
     fn section_dead_rows(&self, key: &SectionKey) -> Vec<&AgentRow> {
         match key {
             SectionKey::Squad(_) | SectionKey::Mission(_) => {
-                let Some(s) = self.layout.squads.iter().find(|s| squad_matches(s, key)) else {
+                // Fail closed on an AMBIGUOUS key, exactly like the row menu's
+                // two-rows-one-name refusal. `SectionKey::Squad` carries the
+                // canonical cwd, and two squads may share an origin (identity is
+                // the id, not the path) - "first match wins" would clear the
+                // sibling workspace's rows while the prompt named this one.
+                let mut hits = self.layout.squads.iter().filter(|s| squad_matches(s, key));
+                let (Some(s), None) = (hits.next(), hits.next()) else {
                     return Vec::new();
                 };
                 self.layout
@@ -6144,19 +6164,32 @@ async fn confirm_keys(
             // and the honest set is whatever is dead NOW. An external row routes
             // by stable attach_id (x-7561); everything else removes by name, the
             // same split the single-row `x` verb makes.
-            ConfirmKind::ClearDead { key, .. } => view
-                .section_dead_rows(&key)
-                .into_iter()
-                .map(|a| match (a.external, a.attach_id.clone()) {
-                    (true, Some(attach_id)) => Command::RemoveExternal {
-                        attach_id,
-                        name: a.name.clone(),
-                    },
-                    _ => Command::RemoveAgent {
-                        name: a.name.clone(),
-                    },
-                })
-                .collect(),
+            ConfirmKind::ClearDead { key, .. } => {
+                let dead = view.section_dead_rows(&key);
+                let total = dead.len();
+                let picked: Vec<Command> = dead
+                    .into_iter()
+                    .take(CLEAR_DEAD_MAX)
+                    .map(|a| match (a.external, a.attach_id.clone()) {
+                        (true, Some(attach_id)) => Command::RemoveExternal {
+                            attach_id,
+                            name: a.name.clone(),
+                        },
+                        _ => Command::RemoveAgent {
+                            name: a.name.clone(),
+                        },
+                    })
+                    .collect();
+                // Say what the cap left behind - a silent truncation would read
+                // as "cleared everything" while rows stayed on screen.
+                if total > CLEAR_DEAD_MAX {
+                    let rest = total - CLEAR_DEAD_MAX;
+                    view.set_notice(format!(
+                        "clearing {CLEAR_DEAD_MAX}, {rest} left - repeat to continue"
+                    ));
+                }
+                picked
+            }
         };
         if cmds.is_empty() {
             view.set_notice("nothing left to clear".into());
@@ -6571,14 +6604,12 @@ async fn execute_row_menu_action(
     Ok(())
 }
 
-/// (x-f300) Arm the clear-dead confirm for a section. The dead set is re-folded
-/// HERE, not captured at menu-open: a row that exited or was reaped in between
-/// changes the blast radius, and the prompt names the count that will actually
-/// run. An emptied section says so instead of arming a confirm over nothing.
+/// (x-f300) Arm the clear-dead confirm for a section, over the dead set as it
+/// stands NOW rather than as the menu found it.
 fn clear_dead_confirm(view: &mut View, key: SectionKey, label: String) -> Result<(), String> {
-    let dead = view.section_dead_rows(&key).len();
+    let dead = view.section_dead_rows(&key).len().min(CLEAR_DEAD_MAX);
     if dead == 0 {
-        view.set_notice(format!("no dead rows in {label}"));
+        view.set_notice(format!("nothing to clear in {label}"));
         return Ok(());
     }
     // A confirm owns the bottom row; a too-short terminal refuses rather than
@@ -11327,15 +11358,18 @@ mod tests {
         assert!(!v.open_row_menu(hdr, Anchor::Center));
         assert!(v.row_menu.is_none());
         // A truly menu-less row (the dim subline) refuses with no notice at all.
+        // A FOREIGN cwd is what makes display_rows emit the Sub line, so the
+        // fixture has to opt in - `.expect` rather than `if let`, so a fixture
+        // that stops producing one fails loudly instead of skipping the check.
+        v.layout.agents[0].cwd_base = Some("elsewhere".into());
         let sub = v
             .display_rows()
             .iter()
-            .position(|r| matches!(r, DisplayRow::Sub(_)));
-        if let Some(sub) = sub {
-            v.notice = None;
-            assert!(!v.open_row_menu(sub, Anchor::Center));
-            assert!(v.notice.is_none(), "an inert row says nothing");
-        }
+            .position(|r| matches!(r, DisplayRow::Sub(_)))
+            .expect("a foreign-cwd agent renders a Sub row");
+        v.notice = None;
+        assert!(!v.open_row_menu(sub, Anchor::Center));
+        assert!(v.notice.is_none(), "an inert row says nothing");
     }
 
     /// The display index of the squad-name header row for `squad`.
@@ -11467,6 +11501,87 @@ mod tests {
         confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "nothing goes on the wire");
         assert!(v.notice.is_some(), "and the operator is told");
+    }
+
+    #[test]
+    fn clear_dead_refuses_a_section_key_two_squads_share() {
+        // Fail-closed: identity is the squad id, but SectionKey::Squad carries
+        // the canonical cwd, so two squads on one origin key alike. Guessing
+        // "first match" would clear the sibling workspace's rows under a prompt
+        // naming this one - the destructive twin of the row menu's ambiguity bug.
+        let mut v = view_with_agents(vec![]);
+        v.set_layout(two_squad_layout(1));
+        for s in v.layout.squads.iter_mut() {
+            s.canonical_cwd = "/shared".into();
+        }
+        // A dead row in EACH squad is what makes this bite: keyed off squad 2,
+        // a first-match-wins resolve would hand back squad 1's row.
+        let in_squad = |name: &str, squad: u64| {
+            let mut r = lifecycle_row(name, true, false);
+            r.squad = Some(squad);
+            r
+        };
+        v.layout.agents = vec![in_squad("dead-in-1", 1), in_squad("dead-in-2", 2)];
+        let key = squad_key(&v.layout, 2).expect("squad 2 has a key");
+        assert!(
+            v.section_dead_rows(&key).is_empty(),
+            "an ambiguous key resolves to no rows, never a guess"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dead_caps_the_fan_out_and_says_what_is_left() {
+        // Each row costs the server one `fno agents rm` subprocess, so the fan-out
+        // is capped - and the leftover is announced, never silently truncated.
+        let over = CLEAR_DEAD_MAX + 3;
+        let rows: Vec<AgentRow> = (0..over)
+            .map(|i| lifecycle_row(&format!("dead-{i}"), true, false))
+            .collect();
+        let mut v = view_with_agents(rows);
+        arm_clear_dead(&mut v, 1).await;
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(decode_cmds(buf).len(), CLEAR_DEAD_MAX, "the cap holds");
+        let notice = v
+            .notice
+            .as_ref()
+            .map(|(t, _)| t.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("3 left"),
+            "the remainder is surfaced: {notice}"
+        );
+    }
+
+    #[test]
+    fn work_queue_header_has_no_menu_and_stays_silent() {
+        // Cards have no exited state, so a notice there would imply "none right
+        // now" about a section that can never have any.
+        let mut v = view_with_agents(vec![]);
+        // The band only renders over a non-empty backlog, so the card is what
+        // makes this test non-vacuous - `.expect` keeps it that way.
+        v.layout.backlog = vec![BacklogCard {
+            id: "x-f300".into(),
+            slug: "a-card".into(),
+            priority: "p2".into(),
+            state: CardState::Ready,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+            project: None,
+            lane: None,
+            head: false,
+        }];
+        let hdr = v
+            .display_rows()
+            .iter()
+            .position(
+                |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::WorkQueue),
+            )
+            .expect("a backlog card renders the work-queue band");
+        v.notice = None;
+        assert!(!v.open_row_menu(hdr, Anchor::Center));
+        assert!(v.notice.is_none(), "the work queue says nothing");
     }
 
     #[tokio::test]
